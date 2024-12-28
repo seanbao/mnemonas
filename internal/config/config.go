@@ -17,6 +17,8 @@ type Config struct {
 	Storage   StorageConfig   `toml:"storage"`
 	DataPlane DataPlaneConfig `toml:"dataplane"`
 	WebDAV    WebDAVConfig    `toml:"webdav"`
+	Auth      AuthConfig      `toml:"auth"`
+	Share     ShareConfig     `toml:"share"`
 	Log       LogConfig       `toml:"log"`
 }
 
@@ -27,6 +29,17 @@ type ServerConfig struct {
 	ReadTimeout  time.Duration `toml:"read_timeout"`
 	WriteTimeout time.Duration `toml:"write_timeout"`
 	IdleTimeout  time.Duration `toml:"idle_timeout"`
+	// TLS configuration
+	TLS TLSConfig `toml:"tls"`
+}
+
+// TLSConfig holds TLS/HTTPS configuration
+type TLSConfig struct {
+	Enabled      bool   `toml:"enabled"`       // Enable HTTPS
+	CertFile     string `toml:"cert_file"`     // Path to certificate file
+	KeyFile      string `toml:"key_file"`      // Path to private key file
+	AutoGenerate bool   `toml:"auto_generate"` // Auto-generate self-signed cert if missing
+	CertDir      string `toml:"cert_dir"`      // Directory for generated certificates
 }
 
 // StorageConfig holds storage configuration
@@ -79,6 +92,22 @@ type WebDAVConfig struct {
 	Password string `toml:"password"`  // for basic auth
 }
 
+// AuthConfig holds authentication configuration
+type AuthConfig struct {
+	Enabled         bool          `toml:"enabled"`
+	JWTSecret       string        `toml:"jwt_secret"`        // Secret key for JWT signing
+	AccessTokenTTL  time.Duration `toml:"access_token_ttl"`  // Access token expiry (default 15m)
+	RefreshTokenTTL time.Duration `toml:"refresh_token_ttl"` // Refresh token expiry (default 7d)
+	UsersFile       string        `toml:"users_file"`        // Path to users.json
+}
+
+// ShareConfig holds file sharing configuration
+type ShareConfig struct {
+	Enabled   bool   `toml:"enabled"`    // Enable file sharing
+	StoreFile string `toml:"store_file"` // Path to shares.json
+	BaseURL   string `toml:"base_url"`   // Base URL for share links (optional)
+}
+
 // LogConfig holds logging configuration
 type LogConfig struct {
 	Level      string `toml:"level"`       // debug, info, warn, error
@@ -99,6 +128,11 @@ func Default() *Config {
 			ReadTimeout:  30 * time.Second,
 			WriteTimeout: 60 * time.Second,
 			IdleTimeout:  120 * time.Second,
+			TLS: TLSConfig{
+				Enabled:      false,
+				AutoGenerate: true, // Auto-generate self-signed cert for easy setup
+				CertDir:      filepath.Join(dataRoot, "certs"),
+			},
 		},
 		Storage: StorageConfig{
 			DataDir:        filepath.Join(dataRoot, "data"),
@@ -128,6 +162,16 @@ func Default() *Config {
 			Prefix:   "/dav",
 			ReadOnly: false,
 			AuthType: "none", // default to no auth for development
+		},
+		Auth: AuthConfig{
+			Enabled:         false, // disabled by default for easy development
+			AccessTokenTTL:  15 * time.Minute,
+			RefreshTokenTTL: 7 * 24 * time.Hour,
+			UsersFile:       filepath.Join(dataRoot, "users.json"),
+		},
+		Share: ShareConfig{
+			Enabled:   false, // disabled by default
+			StoreFile: filepath.Join(dataRoot, "shares.json"),
 		},
 		Log: LogConfig{
 			Level:      "info",

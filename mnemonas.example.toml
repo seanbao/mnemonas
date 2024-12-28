@@ -7,6 +7,13 @@ read_timeout = "30s"
 write_timeout = "60s"
 idle_timeout = "120s"
 
+[server.tls]
+enabled = false              # 启用 HTTPS
+cert_file = ""               # 证书文件路径（留空使用 cert_dir 下的 server.crt）
+key_file = ""                # 私钥文件路径（留空使用 cert_dir 下的 server.key）
+auto_generate = true         # 自动生成自签名证书（适合内网/开发环境）
+cert_dir = ""                # 证书存放目录（默认 ~/.mnemonas/certs）
+
 [storage]
 data_dir = "/var/lib/mnemonas/data"
 metadata_dir = "/var/lib/mnemonas/metadata"
@@ -35,6 +42,18 @@ read_only = false
 auth_type = "basic"          # none, basic
 username = "admin"           # Basic Auth 用户名
 password = "changeme"        # Basic Auth 密码（生产环境请修改）
+
+[auth]
+enabled = false              # 启用后所有 API 需要 JWT 认证
+jwt_secret = ""              # JWT 签名密钥（留空则自动生成）
+access_token_ttl = "15m"     # Access Token 有效期
+refresh_token_ttl = "168h"   # Refresh Token 有效期（7天）
+users_file = ""              # 用户数据文件路径（默认 ~/.mnemonas/users.json）
+
+[share]
+enabled = false              # 启用文件分享功能
+store_file = ""              # 分享数据文件路径（默认 ~/.mnemonas/shares.json）
+base_url = ""                # 分享链接基础 URL（可选，用于生成完整链接）
 
 [log]
 level = "info"               # debug, info, warn, error

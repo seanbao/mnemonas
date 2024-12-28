@@ -527,7 +527,7 @@ func TestAuthHandler(t *testing.T) {
 	t.Run("me endpoint", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
 		user, _ := store.GetByUsername("handleruser")
-		ctx := context.WithValue(req.Context(), userContextKey, user)
+		ctx := context.WithValue(req.Context(), ContextKeyUser, user)
 		req = req.WithContext(ctx)
 		rec := httptest.NewRecorder()
 		h.HandleMe(rec, req)
@@ -540,7 +540,7 @@ func TestAuthHandler(t *testing.T) {
 	t.Run("admin list users", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/v1/admin/users", nil)
 		admin, _ := store.GetByUsername("handleradmin")
-		ctx := context.WithValue(req.Context(), userContextKey, admin)
+		ctx := context.WithValue(req.Context(), ContextKeyUser, admin)
 		req = req.WithContext(ctx)
 		rec := httptest.NewRecorder()
 		h.HandleListUsers(rec, req)
@@ -562,7 +562,7 @@ func TestAuthHandler(t *testing.T) {
 		body := `{"username":"newuser","password":"newpass123","email":"new@test.com","role":"user"}`
 		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
 		admin, _ := store.GetByUsername("handleradmin")
-		ctx := context.WithValue(req.Context(), userContextKey, admin)
+		ctx := context.WithValue(req.Context(), ContextKeyUser, admin)
 		req = req.WithContext(ctx)
 		rec := httptest.NewRecorder()
 		h.HandleCreateUser(rec, req)
@@ -575,7 +575,7 @@ func TestAuthHandler(t *testing.T) {
 	t.Run("non-admin cannot list users", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/v1/admin/users", nil)
 		user, _ := store.GetByUsername("handleruser")
-		ctx := context.WithValue(req.Context(), userContextKey, user)
+		ctx := context.WithValue(req.Context(), ContextKeyUser, user)
 		req = req.WithContext(ctx)
 		rec := httptest.NewRecorder()
 		h.HandleListUsers(rec, req)
