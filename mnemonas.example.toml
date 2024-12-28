@@ -1,0 +1,43 @@
+# MnemoNAS 配置文件示例
+
+[server]
+host = "0.0.0.0"
+port = 8080
+read_timeout = "30s"
+write_timeout = "60s"
+idle_timeout = "120s"
+
+[storage]
+data_dir = "/var/lib/mnemonas/data"
+metadata_dir = "/var/lib/mnemonas/metadata"
+temp_dir = "/var/lib/mnemonas/tmp"
+
+[storage.retention]
+max_versions = 100           # 每个文件最多保留100个版本
+max_age = "8760h"            # 版本保留1年
+min_free_space = 10737418240 # 最少保留10GB空闲空间
+gc_interval = "24h"          # 每24小时运行GC
+
+[dataplane]
+grpc_address = "127.0.0.1:9090"
+timeout = "30s"
+max_retries = 3
+
+[dataplane.cdc]
+min_chunk_size = 262144      # 256KB
+avg_chunk_size = 1048576     # 1MB
+max_chunk_size = 4194304     # 4MB
+
+[webdav]
+enabled = true
+prefix = "/dav"
+read_only = false
+auth_type = "basic"          # none, basic
+username = "admin"           # Basic Auth 用户名
+password = "changeme"        # Basic Auth 密码（生产环境请修改）
+
+[log]
+level = "info"               # debug, info, warn, error
+format = "console"           # json, console
+output = "stdout"            # stdout, stderr, 或文件路径
+time_format = "RFC3339"

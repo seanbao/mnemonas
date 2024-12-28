@@ -1,0 +1,10 @@
+[2m2025-12-31T08:04:29.681529Z[0m [32m INFO[0m starting MnemoNAS DataPlane [3mversion[0m[2m=[0m"0.1.0" [3mhttp_addr[0m[2m=[0m127.0.0.1:9091 [3mgrpc_addr[0m[2m=[0m127.0.0.1:9090 [3mdata_dir[0m[2m=[0m/tmp/mnemonas/cas
+[2m2025-12-31T08:04:29.682644Z[0m [32m INFO[0m initializing CAS storage [3mroot[0m[2m=[0m/tmp/mnemonas/cas
+[2m2025-12-31T08:04:29.682738Z[0m [32m INFO[0m rebuilding CAS index...
+[2m2025-12-31T08:04:29.682865Z[0m [32m INFO[0m index rebuild complete [3mchunks[0m[2m=[0m0 [3msize[0m[2m=[0m0
+[2m2025-12-31T08:04:29.682885Z[0m [32m INFO[0m initializing CAS storage [3mroot[0m[2m=[0m/tmp/mnemonas/cas
+[2m2025-12-31T08:04:29.682900Z[0m [32m INFO[0m rebuilding CAS index...
+[2m2025-12-31T08:04:29.682921Z[0m [32m INFO[0m index rebuild complete [3mchunks[0m[2m=[0m0 [3msize[0m[2m=[0m0
+[2m2025-12-31T08:04:29.682929Z[0m [32m INFO[0m HTTP service ready [3maddress[0m[2m=[0m127.0.0.1:9091
+[2m2025-12-31T08:04:29.682952Z[0m [32m INFO[0m gRPC service starting [3maddress[0m[2m=[0m127.0.0.1:9090
+[2m2025-12-31T08:04:29.689504Z[0m [32m INFO[0m connection handling complete [3mclient[0m[2m=[0m127.0.0.1:39430

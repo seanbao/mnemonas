@@ -1,0 +1,54 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.55.2
+    hooks:
+      - id: golangci-lint
+        args: ['--timeout=5m']
+
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go fmt
+        entry: gofmt -w
+        language: system
+        types: [go]
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: go mod tidy
+        language: system
+        pass_filenames: false
+        files: go.mod
+
+      - id: rust-fmt
+        name: cargo fmt
+        entry: bash -c 'cd dataplane && cargo fmt -- --check'
+        language: system
+        pass_filenames: false
+        files: \.rs$
+
+      - id: rust-clippy
+        name: cargo clippy
+        entry: bash -c 'cd dataplane && cargo clippy -- -D warnings'
+        language: system
+        pass_filenames: false
+        files: \.rs$
+
+      - id: frontend-lint
+        name: frontend lint
+        entry: bash -c 'cd web && npm run lint'
+        language: system
+        pass_filenames: false
+        files: ^web/.*\.(ts|tsx|js|jsx)$
