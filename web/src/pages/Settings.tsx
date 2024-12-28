@@ -24,8 +24,10 @@ import {
   User,
   Folder,
   Zap,
+  Link2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ShareManager } from '@/components/share'
 
 // Settings section component
 function SettingsSection({ 
@@ -520,6 +522,18 @@ export function SettingsPage() {
                     </code>
                   </SettingRow>
                 </div>
+              </SettingsSection>
+            </div>
+          </Tab>
+
+          <Tab key="shares" title="分享管理">
+            <div className="space-y-6 mt-6">
+              <SettingsSection
+                title="分享链接管理"
+                description="管理所有已创建的分享链接"
+                icon={Link2}
+              >
+                <ShareManager />
               </SettingsSection>
             </div>
           </Tab>

@@ -18,6 +18,7 @@ import (
 
 	"github.com/seanbao/mnemonas/internal/api"
 	"github.com/seanbao/mnemonas/internal/config"
+	mnemonasTLS "github.com/seanbao/mnemonas/internal/tls"
 	"github.com/seanbao/mnemonas/internal/webdav"
 	"github.com/seanbao/mnemonas/internal/webdavcas"
 )
@@ -88,6 +89,15 @@ func main() {
 		MetadataRoot:    cfg.Storage.MetadataDir,
 		ThumbnailRoot:   cfg.Storage.ThumbnailDir,
 		MaintenanceRoot: cfg.Storage.MaintenanceDir,
+		// Auth configuration
+		AuthEnabled:    cfg.Auth.Enabled,
+		AuthUsersFile:  cfg.Auth.UsersFile,
+		AuthJWTSecret:  cfg.Auth.JWTSecret,
+		AuthAccessTTL:  cfg.Auth.AccessTokenTTL,
+		AuthRefreshTTL: cfg.Auth.RefreshTokenTTL,
+		// Share configuration
+		ShareEnabled:   cfg.Share.Enabled,
+		ShareStoreFile: cfg.Share.StoreFile,
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create API server")
@@ -128,6 +138,33 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
+	// Configure TLS if enabled
+	tlsManager := mnemonasTLS.NewManager(mnemonasTLS.Config{
+		Enabled:      cfg.Server.TLS.Enabled,
+		CertFile:     cfg.Server.TLS.CertFile,
+		KeyFile:      cfg.Server.TLS.KeyFile,
+		AutoGenerate: cfg.Server.TLS.AutoGenerate,
+		CertDir:      cfg.Server.TLS.CertDir,
+	})
+
+	if cfg.Server.TLS.Enabled {
+		tlsConfig, err := tlsManager.GetTLSConfig()
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to configure TLS")
+		}
+		server.TLSConfig = tlsConfig
+
+		// Log certificate info
+		if certInfo, err := tlsManager.GetCertificateInfo(); err == nil {
+			log.Info().
+				Bool("self_signed", certInfo.SelfSigned).
+				Time("expires", certInfo.NotAfter).
+				Strs("dns_names", certInfo.DNSNames).
+				Strs("ip_addresses", certInfo.IPAddresses).
+				Msg("TLS certificate loaded")
+		}
+	}
+
 	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -145,9 +182,16 @@ func main() {
 	}()
 
 	// Start server
-	log.Info().Str("address", cfg.Address()).Msg("server started")
-	if err := server.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatal().Err(err).Msg("server exited abnormally")
+	if cfg.Server.TLS.Enabled {
+		log.Info().Str("address", cfg.Address()).Msg("server started (HTTPS)")
+		if err := server.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("server exited abnormally")
+		}
+	} else {
+		log.Info().Str("address", cfg.Address()).Msg("server started (HTTP)")
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("server exited abnormally")
+		}
 	}
 
 	log.Info().Msg("server stopped")
