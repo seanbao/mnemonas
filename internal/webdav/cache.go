@@ -1,0 +1,207 @@
+// Package webdav provides WebDAV protocol HTTP handler
+package webdav
+
+import (
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/seanbao/mnemonas/internal/webdavcas"
+)
+
+// PropfindCache caches PROPFIND results for large directories
+type PropfindCache struct {
+	mu      sync.RWMutex
+	entries map[string]*cacheEntry
+	ttl     time.Duration
+	maxSize int
+}
+
+type cacheEntry struct {
+	responses []propfindResponse
+	cachedAt  time.Time
+}
+
+// NewPropfindCache creates a new PROPFIND cache
+func NewPropfindCache(ttl time.Duration, maxSize int) *PropfindCache {
+	if ttl == 0 {
+		ttl = 30 * time.Second // Default 30 seconds
+	}
+	if maxSize == 0 {
+		maxSize = 1000 // Default 1000 entries
+	}
+	return &PropfindCache{
+		entries: make(map[string]*cacheEntry),
+		ttl:     ttl,
+		maxSize: maxSize,
+	}
+}
+
+// cacheKey generates a cache key from path and depth
+func cacheKey(path, depth string) string {
+	return path + "|" + depth
+}
+
+// Get retrieves cached PROPFIND responses
+func (c *PropfindCache) Get(path, depth string) ([]propfindResponse, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	key := cacheKey(path, depth)
+	entry, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+
+	// Check if expired
+	if time.Since(entry.cachedAt) > c.ttl {
+		return nil, false
+	}
+
+	return entry.responses, true
+}
+
+// Set stores PROPFIND responses in cache
+func (c *PropfindCache) Set(path, depth string, responses []propfindResponse) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Evict oldest entries if cache is full
+	if len(c.entries) >= c.maxSize {
+		c.evictOldest()
+	}
+
+	key := cacheKey(path, depth)
+	c.entries[key] = &cacheEntry{
+		responses: responses,
+		cachedAt:  time.Now(),
+	}
+}
+
+// Invalidate removes a cached entry
+func (c *PropfindCache) Invalidate(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Invalidate all entries that might be affected by this path change
+	// This includes the path itself and its parent directories
+	for key := range c.entries {
+		// Simple prefix match - could be more precise
+		if len(key) >= len(path) && key[:len(path)] == path {
+			delete(c.entries, key)
+		}
+	}
+}
+
+// InvalidateAll clears the entire cache
+func (c *PropfindCache) InvalidateAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]*cacheEntry)
+}
+
+// evictOldest removes the oldest 10% of entries
+func (c *PropfindCache) evictOldest() {
+	if len(c.entries) == 0 {
+		return
+	}
+
+	// Find and remove oldest entries
+	toRemove := len(c.entries) / 10
+	if toRemove < 1 {
+		toRemove = 1
+	}
+
+	type kv struct {
+		key      string
+		cachedAt time.Time
+	}
+
+	var oldest []kv
+	for k, v := range c.entries {
+		oldest = append(oldest, kv{k, v.cachedAt})
+	}
+
+	// M2 fix: Use sort.Slice instead of bubble sort for O(n log n)
+	sort.Slice(oldest, func(i, j int) bool {
+		return oldest[i].cachedAt.Before(oldest[j].cachedAt)
+	})
+
+	// Remove oldest entries
+	for i := 0; i < toRemove && i < len(oldest); i++ {
+		delete(c.entries, oldest[i].key)
+	}
+}
+
+// Stats returns cache statistics
+func (c *PropfindCache) Stats() (size int, expired int) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	now := time.Now()
+	for _, entry := range c.entries {
+		if now.Sub(entry.cachedAt) > c.ttl {
+			expired++
+		}
+	}
+	return len(c.entries), expired
+}
+
+// BuildPropfindResponses builds PROPFIND responses from file info
+// Helper function for caching
+func BuildPropfindResponses(prefix, filePath string, info *webdavcas.FileInfo, children []*webdavcas.FileInfo, depth string) []propfindResponse {
+	var responses []propfindResponse
+
+	// Add current resource
+	responses = append(responses, buildPropResponse(prefix, filePath, info))
+
+	// If directory and depth is not 0, add children
+	if info.IsDir && depth != "0" {
+		for _, child := range children {
+			responses = append(responses, buildPropResponse(prefix, child.Path, child))
+		}
+	}
+
+	return responses
+}
+
+func buildPropResponse(prefix, filePath string, info *webdavcas.FileInfo) propfindResponse {
+	href := filePath
+	if prefix != "" {
+		href = prefix + filePath
+	}
+	if info.IsDir && len(href) > 0 && href[len(href)-1] != '/' {
+		href += "/"
+	}
+
+	props := propstat{
+		Status: "HTTP/1.1 200 OK",
+		Prop: prop{
+			DisplayName:     baseName(filePath),
+			GetLastModified: info.ModTime.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"),
+		},
+	}
+
+	if info.IsDir {
+		props.Prop.ResourceType = &resourceType{Collection: &struct{}{}}
+	} else {
+		props.Prop.GetContentLength = info.Size
+		if info.ContentHash != "" {
+			props.Prop.GetETag = `"` + info.ContentHash + `"`
+		}
+	}
+
+	return propfindResponse{
+		Href:     href,
+		Propstat: props,
+	}
+}
+
+func baseName(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			return path[i+1:]
+		}
+	}
+	return path
+}

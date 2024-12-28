@@ -1,0 +1,366 @@
+//! gRPC service implementation
+
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Instant;
+
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
+use tonic::{Request, Response, Status, Streaming};
+use tracing::{info, instrument};
+
+use crate::cas::{CasStore, CasConfig};
+use crate::cdc::{Chunker, ChunkerConfig, FileManifest};
+
+// Include generated protobuf code
+pub mod proto {
+    include!("proto/mnemonas.dataplane.v1.rs");
+}
+
+use proto::data_plane_server::{DataPlane, DataPlaneServer};
+use proto::*;
+
+/// DataPlane service implementation
+pub struct DataPlaneService {
+    cas: Arc<CasStore>,
+    chunker: Arc<Chunker>,
+    start_time: Instant,
+}
+
+impl DataPlaneService {
+    /// Create a new DataPlane service
+    pub async fn new(cas_config: CasConfig, chunker_config: ChunkerConfig) -> anyhow::Result<Self> {
+        let cas = CasStore::new(cas_config).await?;
+        let chunker = Chunker::new(chunker_config);
+        
+        Ok(Self {
+            cas: Arc::new(cas),
+            chunker: Arc::new(chunker),
+            start_time: Instant::now(),
+        })
+    }
+    
+    /// Get gRPC server
+    pub fn into_server(self) -> DataPlaneServer<Self> {
+        DataPlaneServer::new(self)
+    }
+}
+
+#[tonic::async_trait]
+impl DataPlane for DataPlaneService {
+    /// Store data chunk
+    #[instrument(skip(self, request))]
+    async fn put_chunk(
+        &self,
+        request: Request<PutChunkRequest>,
+    ) -> Result<Response<PutChunkResponse>, Status> {
+        let req = request.into_inner();
+        let data = &req.data;
+        
+        // If expected hash provided, verify first
+        if let Some(expected) = &req.expected_hash {
+            let actual = crate::cas::compute_hash(data);
+            if &actual != expected {
+                return Err(Status::invalid_argument(format!(
+                    "Hash mismatch: expected={}, actual={}",
+                    expected, actual
+                )));
+            }
+        }
+        
+        // Check if deduplication will happen
+        let hash = crate::cas::compute_hash(data);
+        let deduplicated = self.cas.has(&hash);
+        
+        // Store
+        let hash = self.cas.put(data).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        
+        Ok(Response::new(PutChunkResponse {
+            hash,
+            size: data.len() as u64,
+            deduplicated,
+        }))
+    }
+    
+    /// Get data chunk
+    #[instrument(skip(self))]
+    async fn get_chunk(
+        &self,
+        request: Request<GetChunkRequest>,
+    ) -> Result<Response<GetChunkResponse>, Status> {
+        let hash = &request.into_inner().hash;
+        
+        let data = self.cas.get(hash).await
+            .map_err(|e| match e {
+                crate::cas::CasError::NotFound(_) => Status::not_found("Object not found"),
+                _ => Status::internal(e.to_string()),
+            })?;
+        
+        Ok(Response::new(GetChunkResponse { data }))
+    }
+    
+    /// Check if data chunk exists
+    async fn has_chunk(
+        &self,
+        request: Request<HasChunkRequest>,
+    ) -> Result<Response<HasChunkResponse>, Status> {
+        let hash = &request.into_inner().hash;
+        let exists = self.cas.has(hash);
+        let size = self.cas.size(hash);
+        
+        Ok(Response::new(HasChunkResponse { exists, size }))
+    }
+    
+    /// Delete data chunk
+    #[instrument(skip(self))]
+    async fn delete_chunk(
+        &self,
+        request: Request<DeleteChunkRequest>,
+    ) -> Result<Response<DeleteChunkResponse>, Status> {
+        let hash = &request.into_inner().hash;
+        
+        let deleted = self.cas.delete(hash).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        
+        Ok(Response::new(DeleteChunkResponse { deleted }))
+    }
+    
+    /// Store file (streaming, CDC chunking)
+    #[instrument(skip(self, request))]
+    async fn put_file(
+        &self,
+        request: Request<Streaming<PutFileRequest>>,
+    ) -> Result<Response<PutFileResponse>, Status> {
+        let mut stream = request.into_inner();
+        
+        // Maximum file size limit (10GB) - C2 fix
+        const MAX_FILE_SIZE: usize = 10 * 1024 * 1024 * 1024;
+        
+        // Collect all data with size limit
+        let mut file_data = Vec::new();
+        let mut metadata: Option<FileMetadata> = None;
+        
+        while let Some(req) = stream.next().await {
+            let req = req?;
+            match req.payload {
+                Some(put_file_request::Payload::Metadata(m)) => {
+                    metadata = Some(m);
+                }
+                Some(put_file_request::Payload::Chunk(chunk)) => {
+                    // Check accumulated size against limit
+                    if file_data.len() + chunk.len() > MAX_FILE_SIZE {
+                        return Err(Status::resource_exhausted(format!(
+                            "File too large (max: {} bytes)",
+                            MAX_FILE_SIZE
+                        )));
+                    }
+                    file_data.extend_from_slice(&chunk);
+                }
+                None => {}
+            }
+        }
+        
+        // Log metadata if provided
+        if let Some(ref m) = metadata {
+            info!(path = %m.path, actual_size = file_data.len(), "processing file upload");
+        }
+        
+        if file_data.is_empty() {
+            return Err(Status::invalid_argument("No data provided"));
+        }
+        
+        // CDC chunking
+        let chunks = self.chunker.chunk(&file_data);
+        
+        // Store each chunk
+        let mut chunk_hashes = Vec::new();
+        let mut unique_size = 0u64;
+        
+        for chunk in &chunks {
+            let deduplicated = self.cas.has(&chunk.hash);
+            
+            self.cas.put(&chunk.data).await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            
+            chunk_hashes.push(chunk.hash.clone());
+            
+            if !deduplicated {
+                unique_size += chunk.length as u64;
+            }
+        }
+        
+        // Create and store manifest
+        let manifest = FileManifest::from_chunks(&chunks);
+        let manifest_json = manifest.to_json()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        
+        let manifest_hash = self.cas.put(&manifest_json).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        
+        let dedup_ratio = manifest.dedup_ratio(unique_size);
+        
+        info!(
+            manifest_hash = %manifest_hash,
+            total_size = manifest.size,
+            unique_size,
+            chunk_count = chunks.len(),
+            dedup_ratio = format!("{:.1}%", dedup_ratio * 100.0),
+            "file storage complete"
+        );
+        
+        Ok(Response::new(PutFileResponse {
+            manifest_hash,
+            chunk_hashes,
+            total_size: manifest.size,
+            chunk_count: chunks.len() as u32,
+            dedup_ratio,
+        }))
+    }
+    
+    /// Stream output type
+    type GetFileStream = Pin<Box<dyn Stream<Item = Result<GetFileResponse, Status>> + Send>>;
+    
+    /// Get file (streaming)
+    #[instrument(skip(self))]
+    async fn get_file(
+        &self,
+        request: Request<GetFileRequest>,
+    ) -> Result<Response<Self::GetFileStream>, Status> {
+        let manifest_hash = request.into_inner().manifest_hash;
+        
+        // Get manifest
+        let manifest_data = self.cas.get(&manifest_hash).await
+            .map_err(|e| match e {
+                crate::cas::CasError::NotFound(_) => Status::not_found("File not found"),
+                _ => Status::internal(e.to_string()),
+            })?;
+        
+        let manifest = FileManifest::from_json(&manifest_data)
+            .map_err(|e| Status::internal(format!("Failed to parse manifest: {}", e)))?;
+        
+        // Create streaming response
+        let (tx, rx) = mpsc::channel(4);
+        let cas = Arc::clone(&self.cas);
+        
+        tokio::spawn(async move {
+            for chunk_ref in manifest.chunks {
+                match cas.get(&chunk_ref.hash).await {
+                    Ok(data) => {
+                        if tx.send(Ok(GetFileResponse { data })).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                        break;
+                    }
+                }
+            }
+        });
+        
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+    
+    /// Health check
+    async fn health(
+        &self,
+        _request: Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        Ok(Response::new(HealthResponse {
+            healthy: true,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_secs: self.start_time.elapsed().as_secs(),
+        }))
+    }
+    
+    /// Get statistics
+    async fn stats(
+        &self,
+        _request: Request<StatsRequest>,
+    ) -> Result<Response<StatsResponse>, Status> {
+        let (total_chunks, total_size, hits, misses) = self.cas.stats();
+        
+        // Simple estimate of dedup ratio
+        let dedup_ratio = if hits + misses > 0 {
+            hits as f64 / (hits + misses) as f64
+        } else {
+            0.0
+        };
+        
+        Ok(Response::new(StatsResponse {
+            total_chunks,
+            total_size,
+            unique_size: total_size, // Simplified: actual implementation needs reference counting
+            dedup_ratio,
+        }))
+    }
+    
+    /// Run scrub to verify data integrity
+    #[instrument(skip(self))]
+    async fn scrub(
+        &self,
+        request: Request<ScrubRequest>,
+    ) -> Result<Response<ScrubResponse>, Status> {
+        let req = request.into_inner();
+        
+        // If specific hashes provided, scrub only those
+        let hashes = if req.hashes.is_empty() {
+            None
+        } else {
+            Some(req.hashes)
+        };
+        
+        let summary = self.cas.scrub(hashes.as_deref()).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        
+        // Convert errors to proto format
+        let errors: Vec<ScrubError> = summary.errors.into_iter().map(|(hash, error_type, message)| {
+            ScrubError {
+                hash,
+                error_type,
+                message,
+            }
+        }).collect();
+        
+        info!(
+            total = summary.total_objects,
+            valid = summary.valid_objects,
+            corrupted = summary.corrupted_objects,
+            missing = summary.missing_objects,
+            duration_ms = summary.duration_ms,
+            "scrub complete"
+        );
+        
+        Ok(Response::new(ScrubResponse {
+            total_objects: summary.total_objects,
+            valid_objects: summary.valid_objects,
+            corrupted_objects: summary.corrupted_objects,
+            missing_objects: summary.missing_objects,
+            total_size: summary.total_size,
+            duration_ms: summary.duration_ms,
+            errors,
+        }))
+    }
+    
+    /// List all objects (for GC)
+    async fn list_objects(
+        &self,
+        request: Request<ListObjectsRequest>,
+    ) -> Result<Response<ListObjectsResponse>, Status> {
+        let req = request.into_inner();
+        let limit = req.limit.unwrap_or(1000) as usize;
+        let cursor = req.cursor.as_deref();
+        
+        let (objects, next_cursor) = self.cas.list_objects(cursor, limit);
+        
+        let objects: Vec<ObjectInfo> = objects.into_iter().map(|(hash, size, created_at)| {
+            ObjectInfo { hash, size, created_at_unix: created_at }
+        }).collect();
+        
+        Ok(Response::new(ListObjectsResponse {
+            objects,
+            next_cursor,
+        }))
+    }
+}

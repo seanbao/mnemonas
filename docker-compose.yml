@@ -1,0 +1,20 @@
+services:
+  mnemonas:
+    build: .
+    ports:
+      - "8080:8080"    # WebDAV + API
+    volumes:
+      - mnemonas-data:/var/lib/mnemonas
+      - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mnemonas-data:
