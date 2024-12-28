@@ -476,6 +476,73 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// HandleToggleUserStatus handles PUT /api/v1/admin/users/{id}/status
+func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request, userID string) {
+	if r.Method != http.MethodPut {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "METHOD_NOT_ALLOWED")
+		return
+	}
+
+	if !IsAdmin(r.Context()) {
+		writeError(w, http.StatusForbidden, "admin access required", "FORBIDDEN")
+		return
+	}
+
+	var req struct {
+		Disabled bool `json:"disabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return
+	}
+
+	user, err := h.userStore.GetByID(userID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
+		return
+	}
+
+	// Prevent disabling self
+	currentUser := GetUserFromContext(r.Context())
+	if currentUser != nil && currentUser.ID == userID && req.Disabled {
+		writeError(w, http.StatusBadRequest, "cannot disable your own account", "SELF_DISABLE")
+		return
+	}
+
+	// Prevent disabling last admin
+	if user.Role == RoleAdmin && req.Disabled {
+		// Count active admins
+		activeAdmins := 0
+		for _, u := range h.userStore.List() {
+			if u.Role == RoleAdmin && !u.Disabled {
+				activeAdmins++
+			}
+		}
+		if activeAdmins <= 1 {
+			writeError(w, http.StatusBadRequest, "cannot disable last admin user", "LAST_ADMIN")
+			return
+		}
+	}
+
+	user.Disabled = req.Disabled
+	if err := h.userStore.Update(user); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update user status", "UPDATE_ERROR")
+		return
+	}
+
+	// If disabling, revoke all tokens
+	if req.Disabled {
+		h.tokenManager.RevokeByUser(userID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"disabled": req.Disabled,
+		"message":  "user status updated successfully",
+	})
+}
+
 func writeError(w http.ResponseWriter, status int, message, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

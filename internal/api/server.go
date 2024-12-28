@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/seanbao/mnemonas/internal/activity"
 	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
@@ -44,6 +45,9 @@ type Server struct {
 	// Share components
 	shareStore   *share.ShareStore
 	shareHandler *share.Handler
+	// Config
+	config     *config.Config
+	configPath string
 }
 
 // ServerConfig holds server configuration
@@ -63,6 +67,9 @@ type ServerConfig struct {
 	// Share configuration
 	ShareEnabled   bool
 	ShareStoreFile string
+	// Config (for settings API)
+	Config     *config.Config
+	ConfigPath string
 }
 
 // NewServer creates a new API server
@@ -184,6 +191,12 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		logger.Info().Msg("File sharing enabled")
 	}
 
+	// Store config for settings API
+	if cfg != nil && cfg.Config != nil {
+		s.config = cfg.Config
+		s.configPath = cfg.ConfigPath
+	}
+
 	s.setupRoutes()
 	return s, nil
 }
@@ -231,6 +244,9 @@ func (s *Server) setupRoutes() {
 				})
 				r.Post("/{id}/reset-password", func(w http.ResponseWriter, req *http.Request) {
 					s.authHandler.HandleResetUserPassword(w, req, chi.URLParam(req, "id"))
+				})
+				r.Put("/{id}/status", func(w http.ResponseWriter, req *http.Request) {
+					s.authHandler.HandleToggleUserStatus(w, req, chi.URLParam(req, "id"))
 				})
 			})
 		}
@@ -283,6 +299,15 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListActivity)
 			r.Get("/stats", s.handleActivityStats)
 			r.Delete("/", s.handleClearActivity) // Admin only in production
+		})
+
+		// Settings (admin only when auth enabled)
+		r.Route("/settings", func(r chi.Router) {
+			if s.authEnabled {
+				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
+			}
+			r.Get("/", s.handleGetSettings)
+			r.Put("/", s.handleUpdateSettings)
 		})
 
 		// Maintenance operations (admin only when auth enabled)
@@ -1535,6 +1560,199 @@ func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request
 
 	// Call the actual logout handler
 	s.authHandler.HandleLogout(w, r)
+}
+
+// SettingsResponse represents the settings response
+type SettingsResponse struct {
+	Success bool                   `json:"success"`
+	Data    map[string]interface{} `json:"data"`
+}
+
+// handleGetSettings returns current settings
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "settings not available",
+		})
+		return
+	}
+
+	settings := map[string]interface{}{
+		"server": map[string]interface{}{
+			"host": s.config.Server.Host,
+			"port": s.config.Server.Port,
+		},
+		"storage": map[string]interface{}{
+			"data_dir":     s.config.Storage.DataDir,
+			"metadata_dir": s.config.Storage.MetadataDir,
+			"temp_dir":     s.config.Storage.TempDir,
+		},
+		"retention": map[string]interface{}{
+			"max_versions":   s.config.Storage.Retention.MaxVersions,
+			"max_age":        s.config.Storage.Retention.MaxAge.String(),
+			"min_free_space": s.config.Storage.Retention.MinFreeSpace,
+			"gc_interval":    s.config.Storage.Retention.GCInterval.String(),
+		},
+		"webdav": map[string]interface{}{
+			"enabled":   s.config.WebDAV.Enabled,
+			"prefix":    s.config.WebDAV.Prefix,
+			"read_only": s.config.WebDAV.ReadOnly,
+			"auth_type": s.config.WebDAV.AuthType,
+			"username":  s.config.WebDAV.Username,
+		},
+		"dataplane": map[string]interface{}{
+			"grpc_address": s.config.DataPlane.GRPCAddress,
+			"timeout":      s.config.DataPlane.Timeout.String(),
+			"max_retries":  s.config.DataPlane.MaxRetries,
+		},
+		"cdc": map[string]interface{}{
+			"min_chunk_size": s.config.DataPlane.CDC.MinChunkSize,
+			"avg_chunk_size": s.config.DataPlane.CDC.AvgChunkSize,
+			"max_chunk_size": s.config.DataPlane.CDC.MaxChunkSize,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(SettingsResponse{
+		Success: true,
+		Data:    settings,
+	})
+}
+
+// UpdateSettingsRequest represents settings update request
+type UpdateSettingsRequest struct {
+	Server    *ServerSettingsUpdate    `json:"server,omitempty"`
+	Retention *RetentionSettingsUpdate `json:"retention,omitempty"`
+	WebDAV    *WebDAVSettingsUpdate    `json:"webdav,omitempty"`
+}
+
+type ServerSettingsUpdate struct {
+	Host *string `json:"host,omitempty"`
+	Port *int    `json:"port,omitempty"`
+}
+
+type RetentionSettingsUpdate struct {
+	MaxVersions  *int    `json:"max_versions,omitempty"`
+	MaxAge       *string `json:"max_age,omitempty"`
+	MinFreeSpace *uint64 `json:"min_free_space,omitempty"`
+	GCInterval   *string `json:"gc_interval,omitempty"`
+}
+
+type WebDAVSettingsUpdate struct {
+	Enabled  *bool   `json:"enabled,omitempty"`
+	Prefix   *string `json:"prefix,omitempty"`
+	ReadOnly *bool   `json:"read_only,omitempty"`
+	AuthType *string `json:"auth_type,omitempty"`
+	Username *string `json:"username,omitempty"`
+	Password *string `json:"password,omitempty"`
+}
+
+// handleUpdateSettings updates settings
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil || s.configPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "settings not available or no config file path",
+		})
+		return
+	}
+
+	var req UpdateSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "invalid request body",
+		})
+		return
+	}
+
+	// Apply updates
+	if req.Server != nil {
+		if req.Server.Host != nil {
+			s.config.Server.Host = *req.Server.Host
+		}
+		if req.Server.Port != nil {
+			s.config.Server.Port = *req.Server.Port
+		}
+	}
+
+	if req.Retention != nil {
+		if req.Retention.MaxVersions != nil {
+			s.config.Storage.Retention.MaxVersions = *req.Retention.MaxVersions
+		}
+		if req.Retention.MaxAge != nil {
+			if d, err := time.ParseDuration(*req.Retention.MaxAge); err == nil {
+				s.config.Storage.Retention.MaxAge = d
+			}
+		}
+		if req.Retention.MinFreeSpace != nil {
+			s.config.Storage.Retention.MinFreeSpace = *req.Retention.MinFreeSpace
+		}
+		if req.Retention.GCInterval != nil {
+			if d, err := time.ParseDuration(*req.Retention.GCInterval); err == nil {
+				s.config.Storage.Retention.GCInterval = d
+			}
+		}
+	}
+
+	if req.WebDAV != nil {
+		if req.WebDAV.Enabled != nil {
+			s.config.WebDAV.Enabled = *req.WebDAV.Enabled
+		}
+		if req.WebDAV.Prefix != nil {
+			s.config.WebDAV.Prefix = *req.WebDAV.Prefix
+		}
+		if req.WebDAV.ReadOnly != nil {
+			s.config.WebDAV.ReadOnly = *req.WebDAV.ReadOnly
+		}
+		if req.WebDAV.AuthType != nil {
+			s.config.WebDAV.AuthType = *req.WebDAV.AuthType
+		}
+		if req.WebDAV.Username != nil {
+			s.config.WebDAV.Username = *req.WebDAV.Username
+		}
+		if req.WebDAV.Password != nil {
+			s.config.WebDAV.Password = *req.WebDAV.Password
+		}
+	}
+
+	// Validate config
+	if err := s.config.Validate(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "invalid configuration: " + err.Error(),
+		})
+		return
+	}
+
+	// Save to file
+	if err := s.config.Save(s.configPath); err != nil {
+		s.logger.Error().Err(err).Msg("failed to save config")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "failed to save settings",
+		})
+		return
+	}
+
+	s.logger.Info().Msg("settings updated and saved")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "settings updated, some changes may require restart",
+	})
 }
 
 // responseRecorder wraps http.ResponseWriter to capture status code

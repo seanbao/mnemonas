@@ -11,7 +11,7 @@ vi.mock('@heroui/react', () => ({
   CardBody: ({ children, className }: { children: React.ReactNode; className?: string }) => (
     <div className={className}>{children}</div>
   ),
-  Button: ({ children, onPress, type }: { children: React.ReactNode; onPress?: () => void; type?: string }) => (
+  Button: ({ children, onPress, type }: { children: React.ReactNode; onPress?: () => void; type?: 'button' | 'submit' | 'reset' }) => (
     <button onClick={onPress} type={type}>{children}</button>
   ),
   Input: ({ label, placeholder, value, onValueChange, type }: { 

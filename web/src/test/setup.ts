@@ -1,6 +1,13 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterEach, vi, beforeAll } from 'vitest'
+import { afterEach, vi } from 'vitest'
+
+// Allow global in Node environment (used by Vitest)
+declare const global: typeof globalThis & {
+  ResizeObserver: typeof ResizeObserver
+  IntersectionObserver: typeof IntersectionObserver
+  URL: typeof URL
+}
 
 // Cleanup after each test
 afterEach(() => {
@@ -36,7 +43,8 @@ vi.mock('@heroui/react', async () => {
       return React.createElement('div', { 'data-testid': 'table-body', role: 'rowgroup' },
         items.map((item, index) => React.createElement(React.Fragment, { key: index }, children(item))))
     }
-    return React.createElement('div', { 'data-testid': 'table-body', role: 'rowgroup' }, children)
+    const childrenNode = typeof children === 'function' ? null : children
+    return React.createElement('div', { 'data-testid': 'table-body', role: 'rowgroup' }, childrenNode)
   }
   
   const MockTableRow = ({ children, className }: { children: React.ReactNode; className?: string }) => 
