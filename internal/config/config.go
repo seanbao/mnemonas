@@ -49,6 +49,7 @@ type StorageConfig struct {
 	TempDir        string `toml:"temp_dir"`
 	ThumbnailDir   string `toml:"thumbnail_dir"`
 	MaintenanceDir string `toml:"maintenance_dir"`
+	ActivityDir    string `toml:"activity_dir"`
 	// Version retention policy
 	Retention RetentionConfig `toml:"retention"`
 }
@@ -140,6 +141,7 @@ func Default() *Config {
 			TempDir:        filepath.Join(dataRoot, "tmp"),
 			ThumbnailDir:   filepath.Join(dataRoot, "thumbnails"),
 			MaintenanceDir: filepath.Join(dataRoot, "maintenance"),
+			ActivityDir:    filepath.Join(dataRoot, "activity"),
 			Retention: RetentionConfig{
 				MaxVersions:  100,
 				MaxAge:       365 * 24 * time.Hour,    // 1 year
@@ -260,6 +262,7 @@ func (c *Config) EnsureDirs() error {
 		c.Storage.TempDir,
 		c.Storage.ThumbnailDir,
 		c.Storage.MaintenanceDir,
+		c.Storage.ActivityDir,
 	}
 
 	for _, dir := range dirs {

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useRef, useState, useEffect } from 'react'
+import { useMemo, useCallback, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { 
@@ -546,7 +546,6 @@ export function FilesPage() {
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   
   // Drag and drop state
   const [isDragging, setIsDragging] = useState(false)

@@ -1,0 +1,62 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+nasd
+dataplane/bin/
+
+# Build artifacts
+build/
+dist/
+*.o
+*.a
+
+# Go
+*.test
+__debug_bin*
+go.work
+
+# Rust
+dataplane/target/
+
+# Node.js
+web/node_modules/
+web/dist/
+web/coverage/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Config (may contain secrets)
+mnemonas.toml
+!mnemonas.example.toml
+
+# Data directories (local dev)
+data/
+.mnemonas/
+
+# Test artifacts
+*.prof
+*.out
+coverage.txt
+
+# Temporary files
+*.tmp
+*.temp
+.cache/

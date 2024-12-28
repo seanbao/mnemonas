@@ -39,11 +39,13 @@ export interface UserResponse {
   user: User
 }
 
+const API_BASE = '/api/v1/admin/users'
+
 /**
  * List all users (admin only)
  */
 export async function listUsers(): Promise<ListUsersResponse> {
-  const response = await fetch('/api/v1/users/', {
+  const response = await fetch(`${API_BASE}/`, {
     credentials: 'include',
   })
   
@@ -59,7 +61,7 @@ export async function listUsers(): Promise<ListUsersResponse> {
  * Create a new user (admin only)
  */
 export async function createUser(data: CreateUserRequest): Promise<UserResponse> {
-  const response = await fetch('/api/v1/users/', {
+  const response = await fetch(`${API_BASE}/`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -80,7 +82,7 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
  * Delete a user (admin only)
  */
 export async function deleteUser(userId: string): Promise<{ success: boolean }> {
-  const response = await fetch(`/api/v1/users/${userId}`, {
+  const response = await fetch(`${API_BASE}/${userId}`, {
     method: 'DELETE',
     credentials: 'include',
   })
@@ -100,7 +102,7 @@ export async function resetUserPassword(
   userId: string,
   data: ResetPasswordRequest
 ): Promise<{ success: boolean }> {
-  const response = await fetch(`/api/v1/users/${userId}/reset-password`, {
+  const response = await fetch(`${API_BASE}/${userId}/reset-password`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -124,7 +126,7 @@ export async function toggleUserStatus(
   userId: string,
   disabled: boolean
 ): Promise<{ success: boolean }> {
-  const response = await fetch(`/api/v1/users/${userId}/status`, {
+  const response = await fetch(`${API_BASE}/${userId}/status`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',

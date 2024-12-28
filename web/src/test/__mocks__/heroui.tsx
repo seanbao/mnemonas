@@ -6,7 +6,6 @@
  * preserving the component structure for proper testing.
  */
 import * as React from 'react'
-import { vi } from 'vitest'
 
 // Re-export everything from actual HeroUI
 export * from '@heroui/react'
@@ -78,7 +77,9 @@ export function TableBody<T>({ children, items, emptyContent, isLoading, loading
     )
   }
   
-  return <div data-testid="table-body" role="rowgroup">{children}</div>
+  // When children is not a function, it's ReactNode
+  const childrenNode = typeof children === 'function' ? null : children
+  return <div data-testid="table-body" role="rowgroup">{childrenNode}</div>
 }
 
 interface TableRowProps {

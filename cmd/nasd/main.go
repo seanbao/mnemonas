@@ -46,7 +46,7 @@ func main() {
 	initLogger()
 
 	// Load configuration
-	cfg, err := loadConfig(*configPath)
+	cfg, path, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load config")
 	}
@@ -89,6 +89,7 @@ func main() {
 		MetadataRoot:    cfg.Storage.MetadataDir,
 		ThumbnailRoot:   cfg.Storage.ThumbnailDir,
 		MaintenanceRoot: cfg.Storage.MaintenanceDir,
+		ActivityRoot:    cfg.Storage.ActivityDir,
 		// Auth configuration
 		AuthEnabled:    cfg.Auth.Enabled,
 		AuthUsersFile:  cfg.Auth.UsersFile,
@@ -98,6 +99,9 @@ func main() {
 		// Share configuration
 		ShareEnabled:   cfg.Share.Enabled,
 		ShareStoreFile: cfg.Share.StoreFile,
+		// Config for settings API
+		Config:     cfg,
+		ConfigPath: path,
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create API server")
@@ -209,7 +213,7 @@ func initLogger() {
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 }
 
-func loadConfig(path string) (*config.Config, error) {
+func loadConfig(path string) (*config.Config, string, error) {
 	if path == "" {
 		// Try default paths
 		home, _ := os.UserHomeDir()
@@ -229,9 +233,10 @@ func loadConfig(path string) (*config.Config, error) {
 
 	if path != "" {
 		log.Info().Str("path", path).Msg("loading config file")
-		return config.Load(path)
+		cfg, err := config.Load(path)
+		return cfg, path, err
 	}
 
 	log.Info().Msg("using default config")
-	return config.Default(), nil
+	return config.Default(), "", nil
 }

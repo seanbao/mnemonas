@@ -53,11 +53,13 @@ export function LoginPage() {
       return
     }
 
-    const success = await login(username, password)
-    if (success) {
+    try {
+      await login(username, password)
       addToast({ title: '登录成功', color: 'success' })
       const from = (location.state as { from?: string })?.from || '/'
       navigate(from, { replace: true })
+    } catch {
+      // Error is handled by auth store and shown via error useEffect
     }
   }
 

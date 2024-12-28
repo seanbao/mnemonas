@@ -22,13 +22,10 @@ vi.mock('@/lib/useBatchOperation', () => ({
 
 import { listTrash, restoreFromTrash, deleteFromTrash, emptyTrash } from '@/api/files'
 
-const mockListTrash = listTrash as ReturnType<typeof vi.fn>
-const mockRestoreFromTrash = restoreFromTrash as ReturnType<typeof vi.fn>
-const mockDeleteFromTrash = deleteFromTrash as ReturnType<typeof vi.fn>
-const mockEmptyTrash = emptyTrash as ReturnType<typeof vi.fn>
-
-// Setup userEvent without clipboard mocking
-const setupUser = () => userEvent.setup({ writeToClipboard: false })
+const mockListTrash = vi.mocked(listTrash)
+const mockRestoreFromTrash = vi.mocked(restoreFromTrash)
+const mockDeleteFromTrash = vi.mocked(deleteFromTrash)
+const mockEmptyTrash = vi.mocked(emptyTrash)
 
 describe('TrashPage', () => {
   beforeEach(() => {

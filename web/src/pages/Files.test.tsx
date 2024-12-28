@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@/test/utils'
+import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { FilesPage } from './Files'
 
@@ -42,10 +42,10 @@ vi.mock('@/stores/files', () => ({
 
 import { listFiles, createDirectory, deleteFile, moveFile } from '@/api/files'
 
-const mockListFiles = listFiles as ReturnType<typeof vi.fn>
-const mockCreateDirectory = createDirectory as ReturnType<typeof vi.fn>
-const mockDeleteFile = deleteFile as ReturnType<typeof vi.fn>
-const mockMoveFile = moveFile as ReturnType<typeof vi.fn>
+const mockListFiles = vi.mocked(listFiles)
+const mockCreateDirectory = vi.mocked(createDirectory)
+const mockDeleteFile = vi.mocked(deleteFile)
+const mockMoveFile = vi.mocked(moveFile)
 
 describe('FilesPage', () => {
   beforeEach(() => {

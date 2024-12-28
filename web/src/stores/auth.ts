@@ -25,7 +25,7 @@ interface AuthState {
   setAuthEnabled: (enabled: boolean) => void
 }
 
-export const useAuthStore = create<AuthState>((set, get) => ({
+export const useAuthStore = create<AuthState>((set) => ({
   user: null,
   isAuthenticated: false,
   isLoading: true,

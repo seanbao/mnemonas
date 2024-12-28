@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Avatar, Dropdown, DropdownTrigger, DropdownMenu, DropdownItem, addToast } from '@heroui/react'
 import { Search, Bell, Menu, ChevronRight } from 'lucide-react'
-import { useAuthStore, useUser, useIsAuthenticated } from '@/stores/auth'
+import { useAuthStore, useUser } from '@/stores/auth'
 
 interface HeaderProps {
   onMenuClick?: () => void
@@ -11,7 +11,6 @@ interface HeaderProps {
 export function Header({ onMenuClick }: HeaderProps) {
   const navigate = useNavigate()
   const user = useUser()
-  const isAuthenticated = useIsAuthenticated()
   const logout = useAuthStore((state) => state.logout)
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -129,11 +128,9 @@ export function Header({ onMenuClick }: HeaderProps) {
             </DropdownItem>
             <DropdownItem key="settings">设置</DropdownItem>
             <DropdownItem key="help">帮助文档</DropdownItem>
-            {isAuthenticated && (
-              <DropdownItem key="logout" className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10">
-                退出登录
-              </DropdownItem>
-            )}
+            <DropdownItem key="logout" className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10">
+              退出登录
+            </DropdownItem>
           </DropdownMenu>
         </Dropdown>
       </div>
