@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MnemoNAS - 记忆女神主题设计</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      /* ========================================
+         记忆女神 Mnemosyne 配色方案
+         灵感：月光、星空、紫罗兰、永恒
+      ======================================== */
+      
+      /* 背景 - 深邃星空 */
+      --bg-void: #0c0a14;          /* 最深的虚空 */
+      --bg-primary: #100e1a;       /* 主背景 - 夜空 */
+      --bg-secondary: #16132a;     /* 次级背景 - 深紫夜空 */
+      --bg-card: #1c1835;          /* 卡片背景 */
+      --bg-hover: #241f42;         /* 悬停背景 */
+      
+      /* 主色 - 记忆之紫 */
+      --accent-primary: #a78bfa;   /* 紫罗兰 - 主强调色 */
+      --accent-light: #c4b5fd;     /* 淡紫 */
+      --accent-dark: #7c3aed;      /* 深紫 */
+      
+      /* 辅助色 - 月光与星辰 */
+      --moonlight: #e2e8f0;        /* 月光银 */
+      --starlight: #fcd34d;        /* 星光金 */
+      --aurora: #22d3ee;           /* 极光青 */
+      --rose: #f472b6;             /* 缪斯玫瑰 */
+      
+      /* 文字 */
+      --text-primary: #f1f5f9;     /* 主文字 - 月光白 */
+      --text-secondary: #94a3b8;   /* 次级文字 */
+      --text-muted: #64748b;       /* 弱化文字 */
+      
+      /* 边框 */
+      --border: rgba(167, 139, 250, 0.1);
+      --border-hover: rgba(167, 139, 250, 0.2);
+      
+      /* 特殊效果 */
+      --glow-purple: rgba(167, 139, 250, 0.4);
+      --glow-gold: rgba(252, 211, 77, 0.3);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ========== 布局 ========== */
+    .app {
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ========== 侧边栏 ========== */
+    .sidebar {
+      width: 260px;
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 星光装饰 */
+    .sidebar::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 300px;
+      background: 
+        radial-gradient(ellipse at 30% 20%, rgba(167, 139, 250, 0.15) 0%, transparent 50%),
+        radial-gradient(ellipse at 70% 60%, rgba(252, 211, 77, 0.08) 0%, transparent 40%);
+      pointer-events: none;
+    }
+
+    /* 星星点点效果 */
+    .stars {
+      position: absolute;
+      inset: 0;
+      background-image: 
+        radial-gradient(2px 2px at 20px 30px, rgba(255,255,255,0.3), transparent),
+        radial-gradient(2px 2px at 40px 70px, rgba(255,255,255,0.2), transparent),
+        radial-gradient(1px 1px at 90px 40px, rgba(255,255,255,0.4), transparent),
+        radial-gradient(2px 2px at 130px 80px, rgba(255,255,255,0.2), transparent),
+        radial-gradient(1px 1px at 160px 120px, rgba(255,255,255,0.3), transparent);
+      pointer-events: none;
+      opacity: 0.6;
+    }
+
+    .logo {
+      padding: 24px 20px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Logo 图标 - 记忆女神风格 */
+    .logo-icon {
+      width: 42px;
+      height: 42px;
+      background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-dark) 100%);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      box-shadow: 
+        0 4px 16px var(--glow-purple),
+        inset 0 1px 1px rgba(255,255,255,0.2);
+      position: relative;
+    }
+
+    /* Logo 光环效果 */
+    .logo-icon::before {
+      content: '';
+      position: absolute;
+      inset: -3px;
+      border-radius: 15px;
+      background: linear-gradient(135deg, var(--starlight), var(--accent-primary), var(--aurora));
+      opacity: 0.3;
+      z-index: -1;
+      filter: blur(4px);
+    }
+
+    .logo-text {
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+
+    .logo-text .highlight {
+      background: linear-gradient(135deg, var(--accent-light) 0%, var(--moonlight) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .logo-subtitle {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    .nav {
+      flex: 1;
+      padding: 20px 12px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .nav-section {
+      margin-bottom: 28px;
+    }
+
+    .nav-section-title {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      padding: 0 14px;
+      margin-bottom: 10px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 14px;
+      border-radius: 10px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      position: relative;
+    }
+
+    .nav-item:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .nav-item.active {
+      background: linear-gradient(135deg, rgba(167, 139, 250, 0.15) 0%, rgba(124, 58, 237, 0.1) 100%);
+      color: var(--accent-light);
+    }
+
+    .nav-item.active::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 3px;
+      height: 24px;
+      background: linear-gradient(180deg, var(--accent-light) 0%, var(--accent-primary) 100%);
+      border-radius: 0 2px 2px 0;
+      box-shadow: 0 0 8px var(--glow-purple);
+    }
+
+    .nav-icon {
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+
+    .nav-badge {
+      margin-left: auto;
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, var(--rose) 0%, var(--accent-primary) 100%);
+      color: white;
+      font-weight: 600;
+      box-shadow: 0 2px 8px rgba(244, 114, 182, 0.3);
+    }
+
+    /* ========== 主内容区 ========== */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* 主区域背景装饰 */
+    .main::before {
+      content: '';
+      position: absolute;
+      top: -30%;
+      right: -10%;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(167, 139, 250, 0.04) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    .main::after {
+      content: '';
+      position: absolute;
+      bottom: -20%;
+      left: 20%;
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, rgba(252, 211, 77, 0.03) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    /* 顶部栏 */
+    .header {
+      height: 60px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+      background: rgba(16, 14, 26, 0.8);
+      backdrop-filter: blur(12px);
+      position: relative;
+      z-index: 10;
+    }
+
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .breadcrumb-item {
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: color 0.15s ease;
+    }
+
+    .breadcrumb-item:hover {
+      color: var(--accent-light);
+    }
+
+    .breadcrumb-item.current {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .breadcrumb-sep {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .search-box {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      width: 260px;
+      transition: all 0.2s ease;
+    }
+
+    .search-box:focus-within {
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.1);
+    }
+
+    .search-box input {
+      flex: 1;
+      background: none;
+      border: none;
+      outline: none;
+      color: var(--text-primary);
+      font-size: 13px;
+    }
+
+    .search-box input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .search-icon {
+      color: var(--text-muted);
+    }
+
+    .search-kbd {
+      font-size: 10px;
+      padding: 3px 6px;
+      background: var(--bg-hover);
+      border-radius: 4px;
+      color: var(--text-muted);
+      font-family: inherit;
+    }
+
+    .icon-btn {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+      font-size: 16px;
+    }
+
+    .icon-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--border-hover);
+    }
+
+    /* 内容区 */
+    .content-wrapper {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .content {
+      flex: 1;
+      overflow: auto;
+      padding: 28px;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* 工具栏 */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--border-hover);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-dark) 100%);
+      border: none;
+      color: white;
+      box-shadow: 0 4px 12px var(--glow-purple);
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px var(--glow-purple);
+      color: white;
+    }
+
+    .view-toggle {
+      display: flex;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .view-toggle button {
+      padding: 9px 14px;
+      border: none;
+      background: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-size: 14px;
+    }
+
+    .view-toggle button:hover {
+      color: var(--text-secondary);
+    }
+
+    .view-toggle button.active {
+      background: var(--accent-primary);
+      color: white;
+    }
+
+    /* ========== 文件列表 ========== */
+    .file-list {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    .file-header {
+      display: grid;
+      grid-template-columns: 44px 1fr 100px 150px 120px;
+      gap: 16px;
+      padding: 14px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .file-row {
+      display: grid;
+      grid-template-columns: 44px 1fr 100px 150px 120px;
+      gap: 16px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      align-items: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .file-row:last-child {
+      border-bottom: none;
+    }
+
+    .file-row:hover {
+      background: var(--bg-hover);
+    }
+
+    .file-row.selected {
+      background: rgba(167, 139, 250, 0.1);
+    }
+
+    .file-checkbox {
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--border-hover);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .file-row:hover .file-checkbox {
+      border-color: var(--accent-primary);
+    }
+
+    .file-row.selected .file-checkbox {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+    }
+
+    .file-row.selected .file-checkbox::after {
+      content: '✓';
+      color: white;
+      font-size: 12px;
+      font-weight: bold;
+    }
+
+    .file-name {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .file-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      position: relative;
+    }
+
+    .file-icon.folder {
+      background: linear-gradient(135deg, var(--starlight) 0%, #b45309 100%);
+      box-shadow: 0 4px 12px rgba(252, 211, 77, 0.25);
+    }
+
+    .file-icon.image {
+      background: linear-gradient(135deg, var(--rose) 0%, #be185d 100%);
+      box-shadow: 0 4px 12px rgba(244, 114, 182, 0.25);
+    }
+
+    .file-icon.document {
+      background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-dark) 100%);
+      box-shadow: 0 4px 12px var(--glow-purple);
+    }
+
+    .file-icon.code {
+      background: linear-gradient(135deg, var(--aurora) 0%, #0891b2 100%);
+      box-shadow: 0 4px 12px rgba(34, 211, 238, 0.25);
+    }
+
+    .file-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .file-title {
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+
+    .file-size, .file-date {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    /* ========== 版本指示器 - 记忆流动效果 ========== */
+    .version-cell {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .memory-stream {
+      position: relative;
+      width: 50px;
+      height: 6px;
+      background: var(--bg-void);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .memory-stream::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      height: 100%;
+      background: linear-gradient(90deg, 
+        var(--starlight) 0%, 
+        var(--accent-primary) 50%, 
+        var(--aurora) 100%
+      );
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
+    .memory-stream.v1::before { width: 33%; }
+    .memory-stream.v2::before { width: 66%; }
+    .memory-stream.v3::before { width: 100%; }
+
+    .version-count {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--starlight);
+      background: rgba(252, 211, 77, 0.15);
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+
+    /* ========== 预览面板 ========== */
+    .preview-panel {
+      width: 300px;
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 面板装饰 */
+    .preview-panel::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 200px;
+      height: 200px;
+      background: radial-gradient(circle, rgba(167, 139, 250, 0.1) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    .preview-header {
+      text-align: center;
+      position: relative;
+      z-index: 1;
+    }
+
+    .preview-icon {
+      width: 88px;
+      height: 88px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, var(--rose) 0%, #be185d 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      margin: 0 auto 16px;
+      box-shadow: 
+        0 12px 32px rgba(244, 114, 182, 0.35),
+        inset 0 1px 1px rgba(255,255,255,0.2);
+      position: relative;
+    }
+
+    /* 图标光环 */
+    .preview-icon::before {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 24px;
+      background: linear-gradient(135deg, var(--starlight), var(--accent-primary));
+      opacity: 0.2;
+      z-index: -1;
+      filter: blur(8px);
+      animation: pulse-glow 3s ease-in-out infinite;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% { opacity: 0.2; transform: scale(1); }
+      50% { opacity: 0.35; transform: scale(1.05); }
+    }
+
+    .preview-title {
+      font-weight: 600;
+      font-size: 16px;
+      margin-bottom: 4px;
+    }
+
+    .preview-subtitle {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .preview-section {
+      background: var(--bg-card);
+      border-radius: 12px;
+      padding: 16px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .preview-section-title {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+
+    .preview-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .preview-stat {
+      text-align: center;
+    }
+
+    .preview-stat-value {
+      font-size: 20px;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--accent-light) 0%, var(--moonlight) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .preview-stat-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* ========== 版本时间线 - 记忆女神风格 ========== */
+    .memory-timeline {
+      position: relative;
+      padding-left: 24px;
+    }
+
+    /* 时间线渐变轴 */
+    .memory-timeline::before {
+      content: '';
+      position: absolute;
+      left: 7px;
+      top: 4px;
+      bottom: 4px;
+      width: 2px;
+      background: linear-gradient(180deg, 
+        var(--starlight) 0%, 
+        var(--accent-primary) 40%, 
+        var(--aurora) 100%
+      );
+      border-radius: 1px;
+      box-shadow: 0 0 8px var(--glow-purple);
+    }
+
+    .memory-item {
+      position: relative;
+      padding-bottom: 20px;
+    }
+
+    .memory-item:last-child {
+      padding-bottom: 0;
+    }
+
+    /* 时间线节点 - 星星样式 */
+    .memory-node {
+      position: absolute;
+      left: -21px;
+      top: 0;
+      width: 14px;
+      height: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .memory-node::before {
+      content: '';
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--bg-card);
+      border: 2px solid var(--starlight);
+      box-shadow: 0 0 8px var(--glow-gold);
+    }
+
+    .memory-item:nth-child(2) .memory-node::before {
+      border-color: var(--accent-primary);
+      box-shadow: 0 0 8px var(--glow-purple);
+    }
+
+    .memory-item:nth-child(3) .memory-node::before {
+      border-color: var(--aurora);
+      box-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
+    }
+
+    .memory-label {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .memory-time {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+
+    .memory-badge {
+      display: inline-block;
+      font-size: 9px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: linear-gradient(135deg, var(--starlight) 0%, #b45309 100%);
+      color: #1a1a1a;
+      font-weight: 600;
+      margin-left: 8px;
+      box-shadow: 0 2px 6px var(--glow-gold);
+    }
+
+    /* ========== 状态栏 ========== */
+    .status-bar {
+      height: 32px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      font-size: 11px;
+      color: var(--text-muted);
+      position: relative;
+      z-index: 10;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    /* ========== 设计说明 ========== */
+    .design-notes {
+      position: fixed;
+      bottom: 48px;
+      right: 20px;
+      width: 340px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+      z-index: 100;
+    }
+
+    .design-notes h3 {
+      font-size: 15px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .design-notes h3 span {
+      background: linear-gradient(135deg, var(--starlight) 0%, var(--accent-primary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .design-notes ul {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 2;
+      padding-left: 18px;
+    }
+
+    .design-notes li strong {
+      color: var(--accent-light);
+    }
+
+    .color-palette {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .color-swatch {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      position: relative;
+    }
+
+    .color-swatch::after {
+      content: attr(data-label);
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 9px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      margin-top: 4px;
+    }
+
+    .toggle-notes {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 101;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+      <div class="stars"></div>
+      
+      <div class="logo">
+        <div class="logo-icon">🏛️</div>
+        <div>
+          <div class="logo-text"><span class="highlight">Mnemo</span>NAS</div>
+          <div class="logo-subtitle">Memory Palace</div>
+        </div>
+      </div>
+      
+      <nav class="nav">
+        <div class="nav-section">
+          <div class="nav-section-title">浏览</div>
+          <div class="nav-item active">
+            <span class="nav-icon">📁</span>
+            <span>文件</span>
+          </div>
+          <div class="nav-item">
+            <span class="nav-icon">🖼️</span>
+            <span>相册</span>
+          </div>
+          <div class="nav-item">
+            <span class="nav-icon">⏳</span>
+            <span>时光回溯</span>
+            <span class="nav-badge">核心</span>
+          </div>
+        </div>
+        
+        <div class="nav-section">
+          <div class="nav-section-title">管理</div>
+          <div class="nav-item">
+            <span class="nav-icon">🗑️</span>
+            <span>回收站</span>
+          </div>
+          <div class="nav-item">
+            <span class="nav-icon">💎</span>
+            <span>存储</span>
+          </div>
+          <div class="nav-item">
+            <span class="nav-icon">🛡️</span>
+            <span>守护</span>
+          </div>
+        </div>
+        
+        <div class="nav-section">
+          <div class="nav-section-title">系统</div>
+          <div class="nav-item">
+            <span class="nav-icon">💜</span>
+            <span>健康</span>
+          </div>
+          <div class="nav-item">
+            <span class="nav-icon">⚙️</span>
+            <span>设置</span>
+          </div>
+        </div>
+      </nav>
+    </aside>
+
+    <!-- 主内容 -->
+    <main class="main">
+      <!-- 顶部栏 -->
+      <header class="header">
+        <div class="breadcrumb">
+          <span class="breadcrumb-item">记忆宫殿</span>
+          <span class="breadcrumb-sep">›</span>
+          <span class="breadcrumb-item">照片</span>
+          <span class="breadcrumb-sep">›</span>
+          <span class="breadcrumb-item current">2025</span>
+        </div>
+        
+        <div class="header-actions">
+          <div class="search-box">
+            <span class="search-icon">🔍</span>
+            <input type="text" placeholder="搜索记忆...">
+            <span class="search-kbd">⌘K</span>
+          </div>
+          <button class="icon-btn">🔔</button>
+          <button class="icon-btn">👤</button>
+        </div>
+      </header>
+
+      <div class="content-wrapper">
+        <div class="content">
+          <!-- 工具栏 -->
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <button class="btn btn-primary">
+                <span>✨</span>
+                <span>保存记忆</span>
+              </button>
+              <button class="btn">
+                <span>📁</span>
+                <span>新建空间</span>
+              </button>
+            </div>
+            
+            <div class="view-toggle">
+              <button class="active">☰</button>
+              <button>⊞</button>
+            </div>
+          </div>
+
+          <!-- 文件列表 -->
+          <div class="file-list">
+            <div class="file-header">
+              <div></div>
+              <div>名称</div>
+              <div>大小</div>
+              <div>最后记忆</div>
+              <div>时光印记</div>
+            </div>
+            
+            <div class="file-row">
+              <div class="file-checkbox"></div>
+              <div class="file-name">
+                <div class="file-icon folder">📁</div>
+                <div class="file-info">
+                  <div class="file-title">家庭相册</div>
+                  <div class="file-meta">23 份记忆</div>
+                </div>
+              </div>
+              <div class="file-size">—</div>
+              <div class="file-date">2025-12-30</div>
+              <div class="version-cell">—</div>
+            </div>
+            
+            <div class="file-row selected">
+              <div class="file-checkbox"></div>
+              <div class="file-name">
+                <div class="file-icon image">🖼️</div>
+                <div class="file-info">
+                  <div class="file-title">旅行回忆_001.jpg</div>
+                  <div class="file-meta">JPEG · 4032×3024</div>
+                </div>
+              </div>
+              <div class="file-size">3.2 MB</div>
+              <div class="file-date">2025-12-28</div>
+              <div class="version-cell">
+                <div class="memory-stream v3"></div>
+                <span class="version-count">3</span>
+              </div>
+            </div>
+            
+            <div class="file-row">
+              <div class="file-checkbox"></div>
+              <div class="file-name">
+                <div class="file-icon document">📄</div>
+                <div class="file-info">
+                  <div class="file-title">年终感悟.docx</div>
+                  <div class="file-meta">Word 文档</div>
+                </div>
+              </div>
+              <div class="file-size">156 KB</div>
+              <div class="file-date">2025-12-25</div>
+              <div class="version-cell">
+                <div class="memory-stream v2"></div>
+                <span class="version-count">2</span>
+              </div>
+            </div>
+            
+            <div class="file-row">
+              <div class="file-checkbox"></div>
+              <div class="file-name">
+                <div class="file-icon code">💻</div>
+                <div class="file-info">
+                  <div class="file-title">config.yaml</div>
+                  <div class="file-meta">配置文件</div>
+                </div>
+              </div>
+              <div class="file-size">2.4 KB</div>
+              <div class="file-date">2025-12-20</div>
+              <div class="version-cell">
+                <div class="memory-stream v1"></div>
+                <span class="version-count">1</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 预览面板 -->
+        <aside class="preview-panel">
+          <div class="preview-header">
+            <div class="preview-icon">🖼️</div>
+            <div class="preview-title">旅行回忆_001.jpg</div>
+            <div class="preview-subtitle">一段珍贵的记忆</div>
+          </div>
+          
+          <div class="preview-section">
+            <div class="preview-section-title">记忆详情</div>
+            <div class="preview-stats">
+              <div class="preview-stat">
+                <div class="preview-stat-value">3.2 MB</div>
+                <div class="preview-stat-label">大小</div>
+              </div>
+              <div class="preview-stat">
+                <div class="preview-stat-value">4032×3024</div>
+                <div class="preview-stat-label">分辨率</div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="preview-section">
+            <div class="preview-section-title">时光回溯</div>
+            <div class="memory-timeline">
+              <div class="memory-item">
+                <div class="memory-node"></div>
+                <div class="memory-label">现在 <span class="memory-badge">当前</span></div>
+                <div class="memory-time">今天 14:32 修改</div>
+              </div>
+              <div class="memory-item">
+                <div class="memory-node"></div>
+                <div class="memory-label">昨日记忆</div>
+                <div class="memory-time">昨天 09:15 保存</div>
+              </div>
+              <div class="memory-item">
+                <div class="memory-node"></div>
+                <div class="memory-label">最初记忆</div>
+                <div class="memory-time">3 天前 创建</div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <!-- 状态栏 -->
+      <div class="status-bar">
+        <div class="status-item">
+          <span class="status-dot"></span>
+          <span>记忆守护中</span>
+        </div>
+        <div class="status-item">
+          <span>已守护: 12.8 GB</span>
+          <span>·</span>
+          <span>去重率: 23.5%</span>
+          <span>·</span>
+          <span>5 份记忆</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 设计说明 -->
+  <div class="design-notes" id="notes">
+    <h3>🏛️ <span>记忆女神 Mnemosyne 配色</span></h3>
+    <ul>
+      <li><strong>星空紫 (#a78bfa)</strong> — 智慧与神圣，主强调色</li>
+      <li><strong>月光银 (#e2e8f0)</strong> — 记忆的纯净光芒</li>
+      <li><strong>星光金 (#fcd34d)</strong> — 珍贵时刻的闪耀</li>
+      <li><strong>极光青 (#22d3ee)</strong> — 时间的流动感</li>
+      <li><strong>缪斯玫瑰 (#f472b6)</strong> — 艺术与情感</li>
+    </ul>
+    
+    <div class="color-palette">
+      <div class="color-swatch" style="background: linear-gradient(135deg, #a78bfa, #7c3aed)" data-label="主色"></div>
+      <div class="color-swatch" style="background: #fcd34d" data-label="金"></div>
+      <div class="color-swatch" style="background: #f472b6" data-label="玫瑰"></div>
+      <div class="color-swatch" style="background: #22d3ee" data-label="青"></div>
+      <div class="color-swatch" style="background: #e2e8f0" data-label="月光"></div>
+    </div>
+  </div>
+  
+  <button class="icon-btn toggle-notes" onclick="document.getElementById('notes').style.display = document.getElementById('notes').style.display === 'none' ? 'block' : 'none'">
+    💡
+  </button>
+</body>
+</html>

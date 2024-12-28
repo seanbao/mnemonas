@@ -1,0 +1,494 @@
+import { useCallback, useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  Button,
+  Checkbox,
+  Skeleton,
+  Modal,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  useDisclosure,
+  addToast,
+  Chip
+} from '@heroui/react'
+import {
+  Trash2,
+  RotateCcw,
+  Folder,
+  File,
+  Image,
+  Video,
+  Music,
+  FileText,
+  FileCode,
+  Archive,
+  AlertTriangle,
+  Clock
+} from 'lucide-react'
+import {
+  listTrash,
+  restoreFromTrash,
+  deleteFromTrash,
+  emptyTrash,
+  type TrashItem
+} from '@/api/files'
+import { formatBytes, cn, getFileIcon } from '@/lib/utils'
+import { useBatchOperation } from '@/lib/useBatchOperation'
+
+// File icon component
+function FileIcon({ name, isDir, size = 20 }: { name: string; isDir: boolean; size?: number }) {
+  const iconType = getFileIcon(name, isDir)
+
+  const icons: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
+    folder: Folder,
+    file: File,
+    image: Image,
+    video: Video,
+    audio: Music,
+    document: FileText,
+    code: FileCode,
+    archive: Archive,
+  }
+
+  const Icon = icons[iconType] || File
+  const gradients: Record<string, string> = {
+    folder: 'from-amber-400 to-orange-500',
+    image: 'from-pink-400 to-rose-500',
+    video: 'from-violet-400 to-purple-500',
+    audio: 'from-emerald-400 to-green-500',
+    document: 'from-red-400 to-rose-500',
+    code: 'from-blue-400 to-cyan-500',
+    archive: 'from-orange-400 to-amber-500',
+  }
+
+  const gradient = gradients[iconType]
+
+  if (gradient) {
+    return (
+      <div className={cn(
+        "flex items-center justify-center rounded-lg bg-gradient-to-br opacity-60",
+        gradient,
+        size > 24 ? "p-2" : "p-1"
+      )}>
+        <Icon size={size * 0.7} className="text-white" />
+      </div>
+    )
+  }
+
+  return <Icon size={size} className="text-default-400 opacity-60" />
+}
+
+// Format relative time
+function formatRelativeTime(dateStr: string): string {
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+
+  if (diffDays === 0) {
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
+    if (diffHours === 0) {
+      const diffMinutes = Math.floor(diffMs / (1000 * 60))
+      return diffMinutes <= 1 ? '刚刚' : `${diffMinutes} 分钟前`
+    }
+    return `${diffHours} 小时前`
+  } else if (diffDays === 1) {
+    return '昨天'
+  } else if (diffDays < 7) {
+    return `${diffDays} 天前`
+  } else if (diffDays < 30) {
+    return `${Math.floor(diffDays / 7)} 周前`
+  } else {
+    return date.toLocaleDateString('zh-CN')
+  }
+}
+
+// Calculate days until auto-delete (30 days retention)
+function daysUntilDelete(deletedAt: string): number {
+  const deleted = new Date(deletedAt)
+  const autoDelete = new Date(deleted.getTime() + 30 * 24 * 60 * 60 * 1000)
+  const now = new Date()
+  return Math.max(0, Math.ceil((autoDelete.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
+}
+
+// Trash item row
+function TrashRow({
+  item,
+  isSelected,
+  onSelect,
+  onRestore,
+  onDelete
+}: {
+  item: TrashItem
+  isSelected: boolean
+  onSelect: () => void
+  onRestore: () => void
+  onDelete: () => void
+}) {
+  const daysLeft = daysUntilDelete(item.deletedAt)
+  
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-4 px-4 py-3 transition-all duration-200 border-b border-divider",
+        "hover:bg-content2",
+        isSelected && "bg-primary-500/10 border-l-2 border-l-primary-500"
+      )}
+    >
+      <Checkbox
+        isSelected={isSelected}
+        onValueChange={onSelect}
+      />
+      <FileIcon name={item.name} isDir={item.isDir} size={32} />
+      <div className="flex-1 min-w-0">
+        <p className="truncate font-medium text-default-600">{item.name}</p>
+        <p className="text-xs text-default-400 truncate">{item.originalPath}</p>
+      </div>
+      <div className="w-24 text-right text-sm text-default-500">
+        {item.isDir ? '-' : formatBytes(item.size)}
+      </div>
+      <div className="w-32 text-right">
+        <div className="text-sm text-default-500 flex items-center justify-end gap-1">
+          <Clock size={12} />
+          {formatRelativeTime(item.deletedAt)}
+        </div>
+        {daysLeft <= 7 && (
+          <Chip size="sm" color="warning" variant="flat" className="mt-1">
+            {daysLeft} 天后自动删除
+          </Chip>
+        )}
+      </div>
+      <div className="flex items-center gap-1">
+        <Button
+          isIconOnly
+          size="sm"
+          variant="light"
+          color="success"
+          onPress={onRestore}
+          title="恢复"
+        >
+          <RotateCcw size={16} />
+        </Button>
+        <Button
+          isIconOnly
+          size="sm"
+          variant="light"
+          color="danger"
+          onPress={onDelete}
+          title="永久删除"
+        >
+          <Trash2 size={16} />
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+export function TrashPage() {
+  const queryClient = useQueryClient()
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
+  const [actionItem, setActionItem] = useState<TrashItem | null>(null)
+
+  const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
+  const { isOpen: isEmptyOpen, onOpen: onEmptyOpen, onClose: onEmptyClose } = useDisclosure()
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['trash'],
+    queryFn: listTrash,
+  })
+
+  // Mutations
+  const restoreMutation = useMutation({
+    mutationFn: (id: string) => restoreFromTrash(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: ['files'] })
+      addToast({ title: '恢复成功', color: 'success' })
+    },
+    onError: (error) => {
+      addToast({ title: '恢复失败', description: error.message, color: 'danger' })
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteFromTrash(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      addToast({ title: '已永久删除', color: 'success' })
+      onDeleteClose()
+      setActionItem(null)
+    },
+    onError: (error) => {
+      addToast({ title: '删除失败', description: error.message, color: 'danger' })
+    },
+  })
+
+  const emptyMutation = useMutation({
+    mutationFn: emptyTrash,
+    onSuccess: (count) => {
+      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      addToast({ title: `已清空回收站，删除 ${count} 项`, color: 'success' })
+      onEmptyClose()
+    },
+    onError: (error) => {
+      addToast({ title: '清空失败', description: error.message, color: 'danger' })
+    },
+  })
+
+  const handleSelectAll = useCallback(() => {
+    if (!data?.items) return
+    if (selectedItems.size === data.items.length) {
+      setSelectedItems(new Set())
+    } else {
+      setSelectedItems(new Set(data.items.map(item => item.id)))
+    }
+  }, [data, selectedItems.size])
+
+  // Batch restore using custom hook
+  const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation({
+    operation: restoreFromTrash,
+    messages: {
+      success: '{count} 项恢复成功',
+      failure: '{count} 项恢复失败',
+      partial: '{succeeded} 项恢复成功，{failed} 项失败',
+    },
+    onComplete: () => {
+      setSelectedItems(new Set())
+      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: ['files'] })
+    },
+  })
+
+  const handleBatchRestore = useCallback(async () => {
+    const ids = Array.from(selectedItems)
+    if (ids.length === 0) return
+    await executeBatchRestore(ids)
+  }, [selectedItems, executeBatchRestore])
+
+  // Batch delete using custom hook
+  const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation({
+    operation: deleteFromTrash,
+    messages: {
+      success: '{count} 项已永久删除',
+      failure: '{count} 项永久删除失败',
+      partial: '{succeeded} 项永久删除成功，{failed} 项失败',
+    },
+    onComplete: () => {
+      setSelectedItems(new Set())
+      queryClient.invalidateQueries({ queryKey: ['trash'] })
+    },
+  })
+
+  const handleBatchDelete = useCallback(async () => {
+    const ids = Array.from(selectedItems)
+    if (ids.length === 0) return
+    await executeBatchDelete(ids)
+  }, [selectedItems, executeBatchDelete])
+
+  const handleDeleteClick = useCallback((item: TrashItem) => {
+    setActionItem(item)
+    onDeleteOpen()
+  }, [onDeleteOpen])
+
+  const handleConfirmDelete = useCallback(() => {
+    if (actionItem) {
+      deleteMutation.mutate(actionItem.id)
+    }
+  }, [actionItem, deleteMutation])
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <Skeleton className="w-48 h-8 rounded-lg" />
+          <Skeleton className="w-32 h-8 rounded-lg" />
+        </div>
+        <div className="space-y-2">
+          {[1, 2, 3, 4, 5].map((i) => (
+            <Skeleton key={i} className="w-full h-14 rounded-lg" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const items = data?.items ?? []
+  const totalSize = data?.totalSize ?? 0
+  const itemCount = data?.count ?? 0
+
+  return (
+    <div className="h-full flex flex-col space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-500/20 to-orange-500/20 flex items-center justify-center">
+            <Trash2 size={24} className="text-red-500" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold">回收站</h1>
+            <p className="text-sm text-default-500">
+              {itemCount} 项 · {formatBytes(totalSize)} · 30 天后自动清理
+            </p>
+          </div>
+        </div>
+
+        {itemCount > 0 && (
+          <Button
+            color="danger"
+            variant="flat"
+            startContent={<Trash2 size={16} />}
+            onPress={onEmptyOpen}
+          >
+            清空回收站
+          </Button>
+        )}
+      </div>
+
+      {/* Selection bar */}
+      {selectedItems.size > 0 && (
+        <div className="flex items-center gap-4 px-4 py-3 bg-primary/10 backdrop-blur-sm rounded-xl border border-primary/20">
+          <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+            <span className="text-sm font-bold text-primary">{selectedItems.size}</span>
+          </div>
+          <span className="text-sm font-medium">已选择 {selectedItems.size} 项</span>
+          <div className="flex-1" />
+          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())}>
+            取消选择
+          </Button>
+          <Button
+            size="sm"
+            variant="flat"
+            color="success"
+            startContent={<RotateCcw size={14} />}
+            onPress={handleBatchRestore}
+            isLoading={isBatchRestoring}
+          >
+            恢复
+          </Button>
+          <Button
+            size="sm"
+            variant="flat"
+            color="danger"
+            startContent={<Trash2 size={14} />}
+            onPress={handleBatchDelete}
+            isLoading={isBatchDeleting}
+          >
+            永久删除
+          </Button>
+        </div>
+      )}
+
+      {/* List header */}
+      {items.length > 0 && (
+        <div className="flex items-center gap-4 px-4 py-3 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
+          <Checkbox
+            isSelected={selectedItems.size === items.length && items.length > 0}
+            isIndeterminate={selectedItems.size > 0 && selectedItems.size < items.length}
+            onValueChange={handleSelectAll}
+            classNames={{
+              wrapper: "before:border-divider",
+            }}
+          />
+          <div className="w-8" />
+          <div className="flex-1">名称</div>
+          <div className="w-24 text-right">大小</div>
+          <div className="w-32 text-right">删除时间</div>
+          <div className="w-20" />
+        </div>
+      )}
+
+      {/* Item list */}
+      <div className="flex-1 overflow-auto glass-card rounded-xl">
+        {items.length > 0 ? (
+          items.map(item => (
+            <TrashRow
+              key={item.id}
+              item={item}
+              isSelected={selectedItems.has(item.id)}
+              onSelect={() => {
+                const newSet = new Set(selectedItems)
+                if (newSet.has(item.id)) {
+                  newSet.delete(item.id)
+                } else {
+                  newSet.add(item.id)
+                }
+                setSelectedItems(newSet)
+              }}
+              onRestore={() => restoreMutation.mutate(item.id)}
+              onDelete={() => handleDeleteClick(item)}
+            />
+          ))
+        ) : (
+          <div className="flex flex-col items-center justify-center h-64 text-default-500">
+            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-default-100 to-default-200 flex items-center justify-center mb-4">
+              <Trash2 size={40} className="text-default-400" />
+            </div>
+            <p className="text-lg font-medium text-default-600 mb-1">回收站是空的</p>
+            <p className="text-sm text-default-400">删除的文件将在这里保留 30 天</p>
+          </div>
+        )}
+      </div>
+
+      {/* Delete Confirmation Modal */}
+      <Modal isOpen={isDeleteOpen} onClose={onDeleteClose}>
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-2">
+            <AlertTriangle size={20} className="text-danger" />
+            永久删除
+          </ModalHeader>
+          <ModalBody>
+            <p>确定要永久删除 <strong>{actionItem?.name}</strong> 吗？</p>
+            <p className="text-sm text-danger mt-2">
+              此操作无法撤销，文件将被彻底删除。
+            </p>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={onDeleteClose}>
+              取消
+            </Button>
+            <Button
+              color="danger"
+              onPress={handleConfirmDelete}
+              isLoading={deleteMutation.isPending}
+            >
+              永久删除
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Empty Trash Confirmation Modal */}
+      <Modal isOpen={isEmptyOpen} onClose={onEmptyClose}>
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-2">
+            <AlertTriangle size={20} className="text-danger" />
+            清空回收站
+          </ModalHeader>
+          <ModalBody>
+            <p>确定要清空回收站吗？</p>
+            <p className="text-sm text-default-500 mt-2">
+              将永久删除 {itemCount} 项，共 {formatBytes(totalSize)}。
+            </p>
+            <p className="text-sm text-danger mt-2">
+              此操作无法撤销，所有文件将被彻底删除。
+            </p>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={onEmptyClose}>
+              取消
+            </Button>
+            <Button
+              color="danger"
+              onPress={() => emptyMutation.mutate()}
+              isLoading={emptyMutation.isPending}
+            >
+              清空回收站
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+    </div>
+  )
+}

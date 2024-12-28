@@ -1,0 +1,26 @@
+
+> web@0.0.0 dev
+> vite
+
+
+  VITE v7.3.0  ready in 225 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+4:06:04 PM [vite] (client) hmr update /src/index.css
+4:06:30 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Sidebar.tsx
+4:06:41 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Header.tsx
+4:07:08 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
+4:07:17 PM [vite] (client) hmr update /src/index.css, /src/components/layout/AppLayout.tsx
+4:07:53 PM [vite] (client) hmr update /src/index.css, /src/pages/Dashboard.tsx
+4:09:19 PM [vite] (client) hmr update /src/index.css
+4:09:19 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Sidebar.tsx
+4:09:19 PM [vite] (client) hmr update /src/index.css, /src/components/layout/AppLayout.tsx
+4:09:19 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Header.tsx
+4:09:19 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
+4:09:19 PM [vite] (client) hmr update /src/index.css, /src/pages/Dashboard.tsx
+4:23:12 PM [vite] (client) hmr update /src/index.css
+4:23:47 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Sidebar.tsx
+4:24:01 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Header.tsx
+4:24:16 PM [vite] (client) hmr update /src/index.css, /src/components/layout/AppLayout.tsx
+4:25:27 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
