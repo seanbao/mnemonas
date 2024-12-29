@@ -50,6 +50,7 @@ import { ShareDialog } from '@/components/share'
 import { useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { listFiles, deleteFile, createDirectory, uploadFile, moveFile } from '@/api/files'
+import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { formatBytes, formatDate, cn, getFileIcon } from '@/lib/utils'
 
 // File icon component
@@ -148,21 +149,25 @@ function Breadcrumbs({
 function FileRow({ 
   file, 
   isSelected, 
+  isFavorited,
   onSelect, 
   onOpen,
   onRename,
   onDelete,
   onViewVersions,
   onShare,
+  onToggleFavorite,
 }: { 
   file: FileItem
   isSelected: boolean
+  isFavorited: boolean
   onSelect: () => void
   onOpen: () => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
   onShare: () => void
+  onToggleFavorite: () => void
 }) {
   const handleDownload = useCallback(() => {
     // Construct download URL
@@ -282,6 +287,13 @@ function FileRow({
             </DropdownSection>
             <DropdownSection title="分享">
               <DropdownItem 
+                key="favorite" 
+                startContent={<Star size={16} className={isFavorited ? "fill-starlight text-starlight" : ""} />}
+                onPress={onToggleFavorite}
+              >
+                {isFavorited ? '取消收藏' : '添加收藏'}
+              </DropdownItem>
+              <DropdownItem 
                 key="share" 
                 startContent={<Link2 size={16} />}
                 onPress={onShare}
@@ -372,21 +384,25 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
 function FileCard({
   file,
   isSelected,
+  isFavorited,
   onSelect,
   onOpen,
   onRename,
   onDelete,
   onViewVersions,
   onShare,
+  onToggleFavorite,
 }: {
   file: FileItem
   isSelected: boolean
+  isFavorited: boolean
   onSelect: () => void
   onOpen: () => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
   onShare: () => void
+  onToggleFavorite: () => void
 }) {
   const handleDownload = useCallback(() => {
     const downloadUrl = `/api/v1/files${file.path}?download=true`
@@ -479,6 +495,13 @@ function FileCard({
               </DropdownItem>
             </DropdownSection>
             <DropdownSection title="分享" showDivider>
+              <DropdownItem 
+                key="favorite" 
+                startContent={<Star size={16} className={isFavorited ? "fill-starlight text-starlight" : ""} />}
+                onPress={onToggleFavorite}
+              >
+                {isFavorited ? '取消收藏' : '添加收藏'}
+              </DropdownItem>
               <DropdownItem 
                 key="share" 
                 startContent={<Link2 size={16} />}
@@ -628,6 +651,31 @@ export function FilesPage() {
       return sortOrder === 'asc' ? comparison : -comparison
     })
   }, [data?.files, sortBy, sortOrder])
+
+  // Favorites query
+  const filePaths = useMemo(() => sortedFiles.map(f => f.path), [sortedFiles])
+  const { data: favoritesData } = useQuery({
+    queryKey: ['favorites-check', filePaths],
+    queryFn: () => checkFavorites(filePaths),
+    enabled: filePaths.length > 0,
+    staleTime: 30000, // Cache for 30 seconds
+  })
+
+  const favoriteMutation = useMutation({
+    mutationFn: ({ path, isFavorited }: { path: string; isFavorited: boolean }) => 
+      toggleFavorite(path, isFavorited),
+    onSuccess: (newStatus) => {
+      queryClient.invalidateQueries({ queryKey: ['favorites-check'] })
+      queryClient.invalidateQueries({ queryKey: ['favorites'] })
+      addToast({ 
+        title: newStatus ? '已添加收藏' : '已取消收藏', 
+        color: 'success' 
+      })
+    },
+    onError: (error) => {
+      addToast({ title: '操作失败', description: error.message, color: 'danger' })
+    },
+  })
 
   const virtualizer = useVirtualizer({
     count: sortedFiles.length,
@@ -1015,12 +1063,17 @@ export function FilesPage() {
                       <FileRow
                         file={file}
                         isSelected={selectedFiles.has(file.path)}
+                        isFavorited={favoritesData?.[file.path] ?? false}
                         onSelect={() => toggleFileSelection(file.path)}
                         onOpen={() => handleFileOpen(file)}
                         onRename={() => handleOpenRenameModal(file)}
                         onDelete={() => handleOpenDeleteModal(file)}
                         onViewVersions={() => handleViewVersions(file)}
                         onShare={() => handleOpenShareModal(file)}
+                        onToggleFavorite={() => favoriteMutation.mutate({ 
+                          path: file.path, 
+                          isFavorited: favoritesData?.[file.path] ?? false 
+                        })}
                       />
                     </div>
                   )
@@ -1056,12 +1109,17 @@ export function FilesPage() {
                     key={file.path}
                     file={file}
                     isSelected={selectedFiles.has(file.path)}
+                    isFavorited={favoritesData?.[file.path] ?? false}
                     onSelect={() => toggleFileSelection(file.path)}
                     onOpen={() => handleFileOpen(file)}
                     onRename={() => handleOpenRenameModal(file)}
                     onDelete={() => handleOpenDeleteModal(file)}
                     onViewVersions={() => handleViewVersions(file)}
                     onShare={() => handleOpenShareModal(file)}
+                    onToggleFavorite={() => favoriteMutation.mutate({ 
+                      path: file.path, 
+                      isFavorited: favoritesData?.[file.path] ?? false 
+                    })}
                   />
                 ))}
               </div>
