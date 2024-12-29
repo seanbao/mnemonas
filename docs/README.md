@@ -11,6 +11,7 @@
 | [README](../README.md) | 项目介绍与快速开始 |
 | [Docker 部署指南](docker-deployment.md) | 使用 Docker 部署 MnemoNAS |
 | [挂载指南](mounting-guide.md) | 各平台 WebDAV 挂载教程 |
+| [反向代理配置](reverse-proxy-setup.md) | HTTPS 外网访问配置（Caddy/Nginx/Traefik） |
 
 ### 用户指南
 
