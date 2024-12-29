@@ -99,6 +99,8 @@ func main() {
 		// Share configuration
 		ShareEnabled:   cfg.Share.Enabled,
 		ShareStoreFile: cfg.Share.StoreFile,
+		// Favorites configuration
+		FavoritesStoreFile: cfg.Favorites.StoreFile,
 		// Config for settings API
 		Config:     cfg,
 		ConfigPath: path,

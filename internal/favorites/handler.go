@@ -1,0 +1,197 @@
+package favorites
+
+import (
+	"encoding/json"
+	"net/http"
+	"path"
+	"strings"
+
+	"github.com/rs/zerolog"
+)
+
+// Handler handles favorites HTTP requests
+type Handler struct {
+	store  *Store
+	logger zerolog.Logger
+}
+
+// NewHandler creates a new favorites handler
+func NewHandler(store *Store, logger zerolog.Logger) *Handler {
+	return &Handler{
+		store:  store,
+		logger: logger,
+	}
+}
+
+// getUserID extracts user ID from request context
+// This should be set by auth middleware
+func getUserID(r *http.Request) string {
+	if userID := r.Context().Value("user_id"); userID != nil {
+		return userID.(string)
+	}
+	// Fallback for when auth is disabled
+	return "anonymous"
+}
+
+// ListFavorites handles GET /api/v1/favorites
+func (h *Handler) ListFavorites(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	favorites := h.store.List(userID)
+
+	h.json(w, http.StatusOK, map[string]any{
+		"favorites": favorites,
+		"count":     len(favorites),
+	})
+}
+
+// AddFavorite handles POST /api/v1/favorites
+func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	var req struct {
+		Path string `json:"path"`
+		Note string `json:"note"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate path
+	cleanPath := path.Clean("/" + req.Path)
+	if cleanPath == "" {
+		h.error(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	fav, err := h.store.Add(userID, cleanPath, req.Note)
+	if err != nil {
+		if err == ErrAlreadyFavorited {
+			h.error(w, http.StatusConflict, "already favorited")
+			return
+		}
+		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to add favorite")
+		h.error(w, http.StatusInternalServerError, "failed to add favorite")
+		return
+	}
+
+	h.json(w, http.StatusCreated, fav)
+}
+
+// RemoveFavorite handles DELETE /api/v1/favorites/*
+func (h *Handler) RemoveFavorite(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	// Extract path from URL
+	favPath := strings.TrimPrefix(r.URL.Path, "/api/v1/favorites")
+	if favPath == "" || favPath == "/" {
+		h.error(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	cleanPath := path.Clean(favPath)
+
+	if err := h.store.Remove(userID, cleanPath); err != nil {
+		if err == ErrFavoriteNotFound {
+			h.error(w, http.StatusNotFound, "favorite not found")
+			return
+		}
+		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to remove favorite")
+		h.error(w, http.StatusInternalServerError, "failed to remove favorite")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// CheckFavorite handles GET /api/v1/favorites/check?path=...
+func (h *Handler) CheckFavorite(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	checkPath := r.URL.Query().Get("path")
+
+	if checkPath == "" {
+		h.error(w, http.StatusBadRequest, "path query parameter is required")
+		return
+	}
+
+	cleanPath := path.Clean("/" + checkPath)
+	isFavorite := h.store.IsFavorite(userID, cleanPath)
+
+	h.json(w, http.StatusOK, map[string]any{
+		"path":        cleanPath,
+		"is_favorite": isFavorite,
+	})
+}
+
+// CheckFavorites handles POST /api/v1/favorites/check-batch
+// Body: {"paths": ["/path1", "/path2"]}
+func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Clean paths
+	cleanPaths := make([]string, len(req.Paths))
+	for i, p := range req.Paths {
+		cleanPaths[i] = path.Clean("/" + p)
+	}
+
+	result := h.store.CheckPaths(userID, cleanPaths)
+
+	h.json(w, http.StatusOK, map[string]any{
+		"favorites": result,
+	})
+}
+
+// UpdateNote handles PATCH /api/v1/favorites/*
+func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+
+	// Extract path from URL
+	favPath := strings.TrimPrefix(r.URL.Path, "/api/v1/favorites")
+	if favPath == "" || favPath == "/" {
+		h.error(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	cleanPath := path.Clean(favPath)
+
+	var req struct {
+		Note string `json:"note"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := h.store.UpdateNote(userID, cleanPath, req.Note); err != nil {
+		if err == ErrFavoriteNotFound {
+			h.error(w, http.StatusNotFound, "favorite not found")
+			return
+		}
+		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to update note")
+		h.error(w, http.StatusInternalServerError, "failed to update note")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) json(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+func (h *Handler) error(w http.ResponseWriter, status int, message string) {
+	h.json(w, status, map[string]string{"error": message})
+}

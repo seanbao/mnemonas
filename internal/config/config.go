@@ -19,6 +19,7 @@ type Config struct {
 	WebDAV    WebDAVConfig    `toml:"webdav"`
 	Auth      AuthConfig      `toml:"auth"`
 	Share     ShareConfig     `toml:"share"`
+	Favorites FavoritesConfig `toml:"favorites"`
 	Log       LogConfig       `toml:"log"`
 }
 
@@ -109,6 +110,12 @@ type ShareConfig struct {
 	BaseURL   string `toml:"base_url"`   // Base URL for share links (optional)
 }
 
+// FavoritesConfig holds favorites configuration
+type FavoritesConfig struct {
+	Enabled   bool   `toml:"enabled"`    // Enable favorites feature
+	StoreFile string `toml:"store_file"` // Path to favorites.json
+}
+
 // LogConfig holds logging configuration
 type LogConfig struct {
 	Level      string `toml:"level"`       // debug, info, warn, error
@@ -174,6 +181,10 @@ func Default() *Config {
 		Share: ShareConfig{
 			Enabled:   false, // disabled by default
 			StoreFile: filepath.Join(dataRoot, "shares.json"),
+		},
+		Favorites: FavoritesConfig{
+			Enabled:   true, // enabled by default
+			StoreFile: filepath.Join(dataRoot, "favorites.json"),
 		},
 		Log: LogConfig{
 			Level:      "info",
