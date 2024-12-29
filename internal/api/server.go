@@ -15,9 +15,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
+	"github.com/seanbao/mnemonas/internal/activity"
+	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
+	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
 	"github.com/seanbao/mnemonas/internal/webdavcas"
 )
@@ -30,7 +34,20 @@ type Server struct {
 	fs          *webdavcas.FileSystem
 	thumbnail   *thumbnail.Service
 	maintenance *maintenance.HistoryStore
+	activity    *activity.Store
 	startTime   time.Time
+	// Auth components
+	userStore    *auth.UserStore
+	tokenManager *auth.TokenManager
+	authHandler  *auth.Handler
+	authMw       *auth.Middleware
+	authEnabled  bool
+	// Share components
+	shareStore   *share.ShareStore
+	shareHandler *share.Handler
+	// Config
+	config     *config.Config
+	configPath string
 }
 
 // ServerConfig holds server configuration
@@ -40,6 +57,19 @@ type ServerConfig struct {
 	MetadataRoot    string
 	ThumbnailRoot   string
 	MaintenanceRoot string
+	ActivityRoot    string
+	// Auth configuration
+	AuthEnabled    bool
+	AuthUsersFile  string
+	AuthJWTSecret  string
+	AuthAccessTTL  time.Duration
+	AuthRefreshTTL time.Duration
+	// Share configuration
+	ShareEnabled   bool
+	ShareStoreFile string
+	// Config (for settings API)
+	Config     *config.Config
+	ConfigPath string
 }
 
 // NewServer creates a new API server
@@ -105,16 +135,133 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		}
 	}
 
+	// Initialize activity log store
+	if cfg != nil && cfg.ActivityRoot != "" {
+		actStore, err := activity.NewStore(cfg.ActivityRoot)
+		if err != nil {
+			logger.Warn().Err(err).Msg("Failed to initialize activity store")
+		} else {
+			s.activity = actStore
+			logger.Info().Str("path", cfg.ActivityRoot).Msg("Activity store initialized")
+		}
+	}
+
+	// Initialize auth if enabled
+	if cfg != nil && cfg.AuthEnabled {
+		s.authEnabled = true
+
+		// Initialize user store
+		userStore, err := auth.NewUserStore(cfg.AuthUsersFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize user store: %w", err)
+		}
+		s.userStore = userStore
+
+		// Initialize token manager
+		accessTTL := cfg.AuthAccessTTL
+		if accessTTL == 0 {
+			accessTTL = 15 * time.Minute
+		}
+		refreshTTL := cfg.AuthRefreshTTL
+		if refreshTTL == 0 {
+			refreshTTL = 7 * 24 * time.Hour
+		}
+		s.tokenManager = auth.NewTokenManager(cfg.AuthJWTSecret, accessTTL, refreshTTL)
+
+		// Initialize auth handler and middleware
+		s.authHandler = auth.NewHandler(s.userStore, s.tokenManager)
+		s.authMw = auth.NewMiddleware(s.userStore, s.tokenManager)
+
+		logger.Info().Msg("Authentication enabled")
+	}
+
+	// Initialize share if enabled
+	if cfg != nil && cfg.ShareEnabled && cfg.ShareStoreFile != "" {
+		shareStore, err := share.NewShareStore(cfg.ShareStoreFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize share store: %w", err)
+		}
+		s.shareStore = shareStore
+		// Pass filesystem adapter to share handler
+		var fsAdapter share.FileOpener
+		if s.fs != nil {
+			fsAdapter = &fileSystemAdapter{fs: s.fs}
+		}
+		s.shareHandler = share.NewHandler(shareStore, fsAdapter)
+		logger.Info().Msg("File sharing enabled")
+	}
+
+	// Store config for settings API
+	if cfg != nil && cfg.Config != nil {
+		s.config = cfg.Config
+		s.configPath = cfg.ConfigPath
+	}
+
 	s.setupRoutes()
 	return s, nil
 }
 
 func (s *Server) setupRoutes() {
+	// Public endpoints (no auth required)
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/api/v1/version", s.handleVersion)
 
-	// API v1
+	// Auth endpoints (public)
+	if s.authEnabled {
+		s.router.Route("/api/v1/auth", func(r chi.Router) {
+			r.Post("/login", s.handleLoginWithActivity)
+			r.Post("/refresh", s.authHandler.HandleRefresh)
+		})
+	}
+
+	// Public share access (no auth required)
+	if s.shareHandler != nil {
+		s.router.Route("/s", func(r chi.Router) {
+			s.shareHandler.PublicRoutes(r)
+		})
+	}
+
+	// API v1 - protected routes
 	s.router.Route("/api/v1", func(r chi.Router) {
+		// Apply auth middleware if enabled
+		if s.authEnabled {
+			r.Use(s.authMw.RequireAuth)
+		}
+
+		// Auth endpoints (require auth)
+		if s.authEnabled {
+			r.Post("/auth/logout", s.handleLogoutWithActivity)
+			r.Get("/auth/me", s.authHandler.HandleMe)
+			r.Post("/auth/password", s.authHandler.HandleChangePassword)
+
+			// Admin user management
+			r.Route("/admin/users", func(r chi.Router) {
+				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
+				r.Get("/", s.authHandler.HandleListUsers)
+				r.Post("/", s.authHandler.HandleCreateUser)
+				r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
+					s.authHandler.HandleDeleteUser(w, req, chi.URLParam(req, "id"))
+				})
+				r.Post("/{id}/reset-password", func(w http.ResponseWriter, req *http.Request) {
+					s.authHandler.HandleResetUserPassword(w, req, chi.URLParam(req, "id"))
+				})
+				r.Put("/{id}/status", func(w http.ResponseWriter, req *http.Request) {
+					s.authHandler.HandleToggleUserStatus(w, req, chi.URLParam(req, "id"))
+				})
+			})
+		}
+
+		// Share endpoints (require auth)
+		if s.shareHandler != nil {
+			r.Route("/shares", func(r chi.Router) {
+				r.Get("/", s.shareHandler.ListShares)
+				r.Post("/", s.handleCreateShareWithActivity)
+				r.Get("/{id}", s.shareHandler.GetShare)
+				r.Put("/{id}", s.shareHandler.UpdateShare)
+				r.Delete("/{id}", s.handleDeleteShareWithActivity)
+			})
+		}
+
 		// File operations
 		r.Route("/files", func(r chi.Router) {
 			r.Get("/*", s.handleListFiles)
@@ -144,7 +291,37 @@ func (s *Server) setupRoutes() {
 		r.Get("/stats", s.handleStats)
 		r.Get("/diagnostics", s.handleDiagnostics)
 
-		// Maintenance operations
+		// Search
+		r.Get("/search", s.handleSearch)
+
+		// Activity log
+		r.Route("/activity", func(r chi.Router) {
+			r.Get("/", s.handleListActivity)
+			r.Get("/stats", s.handleActivityStats)
+			r.Delete("/", s.handleClearActivity) // Admin only in production
+		})
+
+		// Settings (admin only when auth enabled)
+		r.Route("/settings", func(r chi.Router) {
+			if s.authEnabled {
+				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
+			}
+			r.Get("/", s.handleGetSettings)
+			r.Put("/", s.handleUpdateSettings)
+		})
+
+		// Maintenance operations (admin only when auth enabled)
+		r.Route("/maintenance", func(r chi.Router) {
+			if s.authEnabled {
+				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
+			}
+			r.Get("/scrub", s.handleGetScrubResult)
+			r.Post("/scrub", s.handleScrub)
+			r.Get("/objects", s.handleListObjects)
+			r.Post("/gc", s.handleGC)
+		})
+
+		// Keep old routes for backward compatibility
 		r.Get("/scrub", s.handleGetScrubResult)
 		r.Post("/scrub", s.handleScrub)
 		r.Get("/objects", s.handleListObjects)
@@ -298,6 +475,9 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log activity
+	s.LogActivity(r, activity.ActionUpload, filePath, nil)
+
 	NewAPIResponse(map[string]any{
 		"path": filePath,
 	}).WithMessage("file uploaded successfully").Write(w, http.StatusCreated)
@@ -327,6 +507,9 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		InternalError(w, err.Error())
 		return
 	}
+
+	// Log activity
+	s.LogActivity(r, activity.ActionDelete, filePath, nil)
 
 	NewAPIResponse(map[string]any{
 		"path": filePath,
@@ -408,10 +591,68 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log activity
+	s.LogActivity(r, activity.ActionRestore, filePath, map[string]string{"hash": hash})
+
 	NewAPIResponse(map[string]any{
 		"path":     filePath,
 		"restored": hash,
 	}).WithMessage("version restored successfully").Write(w, http.StatusOK)
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		BadRequest(w, "query parameter 'q' is required")
+		return
+	}
+
+	// Limit query length to prevent abuse
+	if len(query) > 100 {
+		BadRequest(w, "query too long (max 100 characters)")
+		return
+	}
+
+	if s.fs == nil {
+		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+
+	// Get optional limit parameter (default 50)
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	results, err := s.fs.Search(r.Context(), query, limit)
+	if err != nil {
+		InternalError(w, err.Error())
+		return
+	}
+
+	// Convert to API response format
+	items := make([]map[string]any, 0, len(results))
+	for _, r := range results {
+		item := map[string]any{
+			"name":     r.Name,
+			"path":     r.Path,
+			"is_dir":   r.IsDir,
+			"size":     r.Size,
+			"mod_time": r.ModTime.Format(time.RFC3339),
+		}
+		if r.ContentHash != "" {
+			item["hash"] = r.ContentHash
+		}
+		items = append(items, item)
+	}
+
+	NewAPIResponse(map[string]any{
+		"query":   query,
+		"results": items,
+		"count":   len(items),
+	}).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -913,6 +1154,15 @@ func parseUint32(s string) (uint32, error) {
 	return uint32(v), err
 }
 
+// fileSystemAdapter wraps FileSystem to implement share.FileOpener
+type fileSystemAdapter struct {
+	fs *webdavcas.FileSystem
+}
+
+func (a *fileSystemAdapter) OpenFile(ctx context.Context, filePath string) (share.FileReader, error) {
+	return a.fs.OpenFile(ctx, filePath)
+}
+
 // zerologMiddleware is a request logging middleware using zerolog
 func zerologMiddleware(logger zerolog.Logger) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -1048,6 +1298,9 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Log activity
+	s.LogActivity(r, activity.ActionTrashRestore, id, nil)
+
 	NewAPIResponse(map[string]any{
 		"id":       id,
 		"restored": true,
@@ -1071,6 +1324,9 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log activity
+	s.LogActivity(r, activity.ActionTrashDelete, id, nil)
+
 	NewAPIResponse(map[string]any{
 		"id":      id,
 		"deleted": true,
@@ -1088,6 +1344,9 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		InternalError(w, err.Error())
 		return
 	}
+
+	// Log activity
+	s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(count)})
 
 	NewAPIResponse(map[string]any{
 		"deleted_count": count,
@@ -1157,4 +1416,394 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 24 hours
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
+}
+
+// handleListActivity returns recent activity log entries
+func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
+	if s.activity == nil {
+		NewAPIResponse(map[string]any{
+			"items": []any{},
+			"total": 0,
+		}).Write(w, http.StatusOK)
+		return
+	}
+
+	// Parse query parameters
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+	actionFilter := r.URL.Query().Get("action")
+	userFilter := r.URL.Query().Get("user")
+
+	limit := 50
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 500 {
+			limit = l
+		}
+	}
+
+	offset := 0
+	if offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	entries, total := s.activity.List(limit, offset, activity.ActionType(actionFilter), userFilter)
+
+	NewAPIResponse(map[string]any{
+		"items":  entries,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	}).Write(w, http.StatusOK)
+}
+
+// handleActivityStats returns activity statistics
+func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
+	if s.activity == nil {
+		NewAPIResponse(map[string]any{
+			"total":     0,
+			"today":     0,
+			"by_action": map[string]int{},
+			"by_user":   map[string]int{},
+		}).Write(w, http.StatusOK)
+		return
+	}
+
+	stats := s.activity.Statistics()
+	NewAPIResponse(stats).Write(w, http.StatusOK)
+}
+
+// handleClearActivity clears all activity log entries
+func (s *Server) handleClearActivity(w http.ResponseWriter, r *http.Request) {
+	if s.activity == nil {
+		NewAPIResponse(map[string]any{
+			"message": "Activity log not configured",
+		}).Write(w, http.StatusOK)
+		return
+	}
+
+	if err := s.activity.Clear(); err != nil {
+		InternalError(w, "failed to clear activity log: "+err.Error())
+		return
+	}
+
+	NewAPIResponse(map[string]any{
+		"message": "Activity log cleared",
+	}).Write(w, http.StatusOK)
+}
+
+// LogActivity is a helper to log user activity
+func (s *Server) LogActivity(r *http.Request, action activity.ActionType, path string, details map[string]string) {
+	if s.activity == nil {
+		return
+	}
+
+	user := "anonymous"
+	if s.authEnabled {
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
+			user = claims.Username
+		}
+	}
+
+	ip := r.RemoteAddr
+	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+		ip = realIP
+	}
+
+	if err := s.activity.Log(action, path, user, ip, details); err != nil {
+		s.logger.Warn().Err(err).Msg("Failed to log activity")
+	}
+}
+
+// handleLoginWithActivity wraps auth login to log activity
+func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request) {
+	// Create a response recorder to capture the response
+	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+
+	// Call the actual login handler
+	s.authHandler.HandleLogin(rec, r)
+
+	// If login was successful (status 200), log the activity
+	if rec.statusCode == http.StatusOK && s.activity != nil {
+		// Try to extract username from request (best effort)
+		user := "unknown"
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
+			user = claims.Username
+		}
+
+		ip := r.RemoteAddr
+		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+			ip = realIP
+		}
+
+		s.activity.Log(activity.ActionLogin, "", user, ip, nil)
+	}
+}
+
+// handleLogoutWithActivity wraps auth logout to log activity
+func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request) {
+	// Log activity before logout (while we still have the user context)
+	if s.activity != nil {
+		user := "unknown"
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
+			user = claims.Username
+		}
+
+		ip := r.RemoteAddr
+		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+			ip = realIP
+		}
+
+		s.activity.Log(activity.ActionLogout, "", user, ip, nil)
+	}
+
+	// Call the actual logout handler
+	s.authHandler.HandleLogout(w, r)
+}
+
+// SettingsResponse represents the settings response
+type SettingsResponse struct {
+	Success bool                   `json:"success"`
+	Data    map[string]interface{} `json:"data"`
+}
+
+// handleGetSettings returns current settings
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "settings not available",
+		})
+		return
+	}
+
+	settings := map[string]interface{}{
+		"server": map[string]interface{}{
+			"host": s.config.Server.Host,
+			"port": s.config.Server.Port,
+		},
+		"storage": map[string]interface{}{
+			"data_dir":     s.config.Storage.DataDir,
+			"metadata_dir": s.config.Storage.MetadataDir,
+			"temp_dir":     s.config.Storage.TempDir,
+		},
+		"retention": map[string]interface{}{
+			"max_versions":   s.config.Storage.Retention.MaxVersions,
+			"max_age":        s.config.Storage.Retention.MaxAge.String(),
+			"min_free_space": s.config.Storage.Retention.MinFreeSpace,
+			"gc_interval":    s.config.Storage.Retention.GCInterval.String(),
+		},
+		"webdav": map[string]interface{}{
+			"enabled":   s.config.WebDAV.Enabled,
+			"prefix":    s.config.WebDAV.Prefix,
+			"read_only": s.config.WebDAV.ReadOnly,
+			"auth_type": s.config.WebDAV.AuthType,
+			"username":  s.config.WebDAV.Username,
+		},
+		"dataplane": map[string]interface{}{
+			"grpc_address": s.config.DataPlane.GRPCAddress,
+			"timeout":      s.config.DataPlane.Timeout.String(),
+			"max_retries":  s.config.DataPlane.MaxRetries,
+		},
+		"cdc": map[string]interface{}{
+			"min_chunk_size": s.config.DataPlane.CDC.MinChunkSize,
+			"avg_chunk_size": s.config.DataPlane.CDC.AvgChunkSize,
+			"max_chunk_size": s.config.DataPlane.CDC.MaxChunkSize,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(SettingsResponse{
+		Success: true,
+		Data:    settings,
+	})
+}
+
+// UpdateSettingsRequest represents settings update request
+type UpdateSettingsRequest struct {
+	Server    *ServerSettingsUpdate    `json:"server,omitempty"`
+	Retention *RetentionSettingsUpdate `json:"retention,omitempty"`
+	WebDAV    *WebDAVSettingsUpdate    `json:"webdav,omitempty"`
+}
+
+type ServerSettingsUpdate struct {
+	Host *string `json:"host,omitempty"`
+	Port *int    `json:"port,omitempty"`
+}
+
+type RetentionSettingsUpdate struct {
+	MaxVersions  *int    `json:"max_versions,omitempty"`
+	MaxAge       *string `json:"max_age,omitempty"`
+	MinFreeSpace *uint64 `json:"min_free_space,omitempty"`
+	GCInterval   *string `json:"gc_interval,omitempty"`
+}
+
+type WebDAVSettingsUpdate struct {
+	Enabled  *bool   `json:"enabled,omitempty"`
+	Prefix   *string `json:"prefix,omitempty"`
+	ReadOnly *bool   `json:"read_only,omitempty"`
+	AuthType *string `json:"auth_type,omitempty"`
+	Username *string `json:"username,omitempty"`
+	Password *string `json:"password,omitempty"`
+}
+
+// handleUpdateSettings updates settings
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil || s.configPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "settings not available or no config file path",
+		})
+		return
+	}
+
+	var req UpdateSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "invalid request body",
+		})
+		return
+	}
+
+	// Apply updates
+	if req.Server != nil {
+		if req.Server.Host != nil {
+			s.config.Server.Host = *req.Server.Host
+		}
+		if req.Server.Port != nil {
+			s.config.Server.Port = *req.Server.Port
+		}
+	}
+
+	if req.Retention != nil {
+		if req.Retention.MaxVersions != nil {
+			s.config.Storage.Retention.MaxVersions = *req.Retention.MaxVersions
+		}
+		if req.Retention.MaxAge != nil {
+			if d, err := time.ParseDuration(*req.Retention.MaxAge); err == nil {
+				s.config.Storage.Retention.MaxAge = d
+			}
+		}
+		if req.Retention.MinFreeSpace != nil {
+			s.config.Storage.Retention.MinFreeSpace = *req.Retention.MinFreeSpace
+		}
+		if req.Retention.GCInterval != nil {
+			if d, err := time.ParseDuration(*req.Retention.GCInterval); err == nil {
+				s.config.Storage.Retention.GCInterval = d
+			}
+		}
+	}
+
+	if req.WebDAV != nil {
+		if req.WebDAV.Enabled != nil {
+			s.config.WebDAV.Enabled = *req.WebDAV.Enabled
+		}
+		if req.WebDAV.Prefix != nil {
+			s.config.WebDAV.Prefix = *req.WebDAV.Prefix
+		}
+		if req.WebDAV.ReadOnly != nil {
+			s.config.WebDAV.ReadOnly = *req.WebDAV.ReadOnly
+		}
+		if req.WebDAV.AuthType != nil {
+			s.config.WebDAV.AuthType = *req.WebDAV.AuthType
+		}
+		if req.WebDAV.Username != nil {
+			s.config.WebDAV.Username = *req.WebDAV.Username
+		}
+		if req.WebDAV.Password != nil {
+			s.config.WebDAV.Password = *req.WebDAV.Password
+		}
+	}
+
+	// Validate config
+	if err := s.config.Validate(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "invalid configuration: " + err.Error(),
+		})
+		return
+	}
+
+	// Save to file
+	if err := s.config.Save(s.configPath); err != nil {
+		s.logger.Error().Err(err).Msg("failed to save config")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "failed to save settings",
+		})
+		return
+	}
+
+	s.logger.Info().Msg("settings updated and saved")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "settings updated, some changes may require restart",
+	})
+}
+
+// responseRecorder wraps http.ResponseWriter to capture status code
+type responseRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (r *responseRecorder) WriteHeader(code int) {
+	r.statusCode = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// handleCreateShareWithActivity wraps share creation to log activity
+func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Request) {
+	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+	s.shareHandler.CreateShare(rec, r)
+
+	// If share was created (status 201), log the activity
+	if rec.statusCode == http.StatusCreated && s.activity != nil {
+		user := "unknown"
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
+			user = claims.Username
+		}
+
+		ip := r.RemoteAddr
+		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+			ip = realIP
+		}
+
+		s.activity.Log(activity.ActionShare, "", user, ip, nil)
+	}
+}
+
+// handleDeleteShareWithActivity wraps share deletion to log activity
+func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Request) {
+	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+	s.shareHandler.DeleteShare(rec, r)
+
+	// If share was deleted (status 204), log the activity
+	if rec.statusCode == http.StatusNoContent && s.activity != nil {
+		user := "unknown"
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
+			user = claims.Username
+		}
+
+		ip := r.RemoteAddr
+		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+			ip = realIP
+		}
+
+		s.activity.Log(activity.ActionUnshare, "", user, ip, nil)
+	}
 }

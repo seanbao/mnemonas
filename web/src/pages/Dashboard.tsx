@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Card, CardBody, Skeleton } from '@heroui/react'
+import { Card, CardBody, Skeleton, Button } from '@heroui/react'
 import { 
   HardDrive, 
   FileBox, 
@@ -7,10 +7,21 @@ import {
   Clock,
   CheckCircle2,
   AlertCircle,
-  ArrowRight
+  ArrowRight,
+  Upload,
+  Download,
+  Trash2,
+  Edit3,
+  Share2,
+  LogIn,
+  LogOut,
+  FolderPlus,
+  RotateCcw,
+  Move,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { getHealth, getStorageStats } from '@/api/files'
+import { listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn } from '@/lib/utils'
 
 interface StatCardProps {
@@ -67,6 +78,81 @@ function QuickAction({ icon: Icon, label, description, onClick, iconBg }: QuickA
   )
 }
 
+// Get icon for action type
+function ActionIcon({ action }: { action: ActionType }) {
+  const icons: Record<ActionType, React.ComponentType<{ size?: number; className?: string }>> = {
+    upload: Upload,
+    download: Download,
+    delete: Trash2,
+    rename: Edit3,
+    move: Move,
+    copy: FileBox,
+    create: FolderPlus,
+    restore: RotateCcw,
+    share: Share2,
+    unshare: Share2,
+    login: LogIn,
+    logout: LogOut,
+    trash_restore: RotateCcw,
+    trash_delete: Trash2,
+    trash_empty: Trash2,
+  }
+  const Icon = icons[action] || Activity
+  return <Icon size={14} />
+}
+
+// Format relative time
+function formatRelativeTime(dateStr: string): string {
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffSeconds = Math.floor(diffMs / 1000)
+  const diffMinutes = Math.floor(diffSeconds / 60)
+  const diffHours = Math.floor(diffMinutes / 60)
+  const diffDays = Math.floor(diffHours / 24)
+
+  if (diffSeconds < 60) return '刚刚'
+  if (diffMinutes < 60) return `${diffMinutes} 分钟前`
+  if (diffHours < 24) return `${diffHours} 小时前`
+  if (diffDays === 1) return '昨天'
+  if (diffDays < 7) return `${diffDays} 天前`
+  return date.toLocaleDateString('zh-CN')
+}
+
+// Recent activity item
+function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
+  const colorMap: Record<string, string> = {
+    upload: 'text-emerald-500',
+    download: 'text-blue-500',
+    delete: 'text-red-500',
+    rename: 'text-amber-500',
+    move: 'text-amber-500',
+    create: 'text-emerald-500',
+    restore: 'text-emerald-500',
+    share: 'text-violet-500',
+    login: 'text-emerald-500',
+    logout: 'text-zinc-500',
+    trash_restore: 'text-emerald-500',
+    trash_delete: 'text-red-500',
+    trash_empty: 'text-red-500',
+  }
+
+  return (
+    <div className="flex items-center gap-3 py-2.5 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
+      <div className={cn("w-7 h-7 rounded-full flex items-center justify-center bg-zinc-100 dark:bg-zinc-800", colorMap[entry.action])}>
+        <ActionIcon action={entry.action} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium truncate">{getActionLabel(entry.action)}</p>
+        {entry.path && (
+          <p className="text-xs text-zinc-400 truncate">{entry.path}</p>
+        )}
+      </div>
+      <span className="text-xs text-zinc-400 whitespace-nowrap">{formatRelativeTime(entry.timestamp)}</span>
+    </div>
+  )
+}
+
 export function DashboardPage() {
   const navigate = useNavigate()
   
@@ -79,6 +165,12 @@ export function DashboardPage() {
   const { data: stats, isLoading: statsLoading } = useQuery({
     queryKey: ['stats'],
     queryFn: getStorageStats,
+    refetchInterval: 30000,
+  })
+
+  const { data: recentActivity } = useQuery({
+    queryKey: ['recent-activity'],
+    queryFn: () => listActivity({ limit: 5 }),
     refetchInterval: 30000,
   })
 
@@ -226,6 +318,37 @@ export function DashboardPage() {
           />
         </div>
       </div>
+
+      {/* Recent Activity */}
+      <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+        <CardBody className="p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-medium">最近活动</h2>
+            <Button
+              size="sm"
+              variant="light"
+              className="text-violet-600 dark:text-violet-400"
+              onPress={() => navigate('/activity')}
+            >
+              查看全部
+              <ArrowRight size={14} />
+            </Button>
+          </div>
+          
+          {recentActivity?.items && recentActivity.items.length > 0 ? (
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {recentActivity.items.map((entry) => (
+                <RecentActivityItem key={entry.id} entry={entry} />
+              ))}
+            </div>
+          ) : (
+            <div className="py-8 text-center text-zinc-400">
+              <Activity size={24} className="mx-auto mb-2 opacity-50" />
+              <p className="text-sm">暂无活动记录</p>
+            </div>
+          )}
+        </CardBody>
+      </Card>
     </div>
   )
 }

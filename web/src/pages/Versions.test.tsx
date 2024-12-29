@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@/test/utils'
+import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { VersionsPage } from './Versions'
 
@@ -12,8 +12,8 @@ vi.mock('@/api/files', () => ({
 
 import { getVersions, restoreVersion } from '@/api/files'
 
-const mockGetVersions = getVersions as ReturnType<typeof vi.fn>
-const mockRestoreVersion = restoreVersion as ReturnType<typeof vi.fn>
+const mockGetVersions = vi.mocked(getVersions)
+const mockRestoreVersion = vi.mocked(restoreVersion)
 
 describe('VersionsPage', () => {
   beforeEach(() => {
@@ -157,8 +157,8 @@ describe('VersionsPage', () => {
       // Test that restore function exists and is mockable
       expect(mockRestoreVersion).toBeDefined()
       
-      await mockRestoreVersion('/test.txt', 2)
-      expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 2)
+      await mockRestoreVersion('/test.txt', 'hash2')
+      expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 'hash2')
     })
 
     it('shows restore button for non-current versions', async () => {

@@ -296,6 +296,53 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 	return fs.metadata.Delete(name)
 }
 
+// === Search Operations ===
+
+// SearchResult represents a search result item
+type SearchResult struct {
+	Path        string    `json:"path"`
+	Name        string    `json:"name"`
+	IsDir       bool      `json:"is_dir"`
+	Size        int64     `json:"size"`
+	ModTime     time.Time `json:"mod_time"`
+	ContentHash string    `json:"hash,omitempty"`
+}
+
+// Search searches for files matching the query (case-insensitive substring match)
+func (fs *FileSystem) Search(ctx context.Context, query string, limit int) ([]*SearchResult, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if query == "" {
+		return nil, errors.New("search query cannot be empty")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	query = strings.ToLower(query)
+	results := make([]*SearchResult, 0)
+
+	// Search through all metadata files
+	allFiles, err := fs.metadata.SearchAll(query, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, info := range allFiles {
+		results = append(results, &SearchResult{
+			Path:        info.Path,
+			Name:        path.Base(info.Path),
+			IsDir:       info.IsDir,
+			Size:        info.Size,
+			ModTime:     info.ModTime,
+			ContentHash: info.ContentHash,
+		})
+	}
+
+	return results, nil
+}
+
 // === Trash Operations ===
 
 // ListTrash returns all items in the trash
@@ -726,6 +773,50 @@ func (m *MetadataStore) List(dir string) ([]*FileInfo, error) {
 		parent := path.Dir(info.Path)
 		if parent == dir || (dir == "/" && parent == ".") {
 			results = append(results, &info)
+		}
+	}
+
+	return results, nil
+}
+
+// SearchAll searches all files matching the query (case-insensitive)
+func (m *MetadataStore) SearchAll(query string, limit int) ([]*FileInfo, error) {
+	var results []*FileInfo
+
+	entries, err := os.ReadDir(m.root)
+	if err != nil {
+		return nil, err
+	}
+
+	query = strings.ToLower(query)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if !hasExtension(name, ".json") {
+			continue
+		}
+
+		data, err := os.ReadFile(path.Join(m.root, name))
+		if err != nil {
+			continue
+		}
+
+		var info FileInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			continue
+		}
+
+		// Check if filename matches query (case-insensitive substring)
+		fileName := strings.ToLower(path.Base(info.Path))
+		if strings.Contains(fileName, query) {
+			results = append(results, &info)
+			if len(results) >= limit {
+				break
+			}
 		}
 	}
 
