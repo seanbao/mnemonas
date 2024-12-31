@@ -55,6 +55,21 @@ enabled = false              # 启用文件分享功能
 store_file = ""              # 分享数据文件路径（默认 ~/.mnemonas/shares.json）
 base_url = ""                # 分享链接基础 URL（可选，用于生成完整链接）
 
+[favorites]
+enabled = true               # 启用收藏功能
+store_file = ""              # 收藏数据文件路径（默认 ~/.mnemonas/favorites.json）
+
+[alerts]
+enabled = false              # 启用存储空间告警
+check_interval = "1h"        # 检查间隔
+threshold_pct = 90.0         # 使用率达到此百分比时发送警告
+critical_pct = 95.0          # 使用率达到此百分比时发送严重告警
+min_free_bytes = 10737418240 # 剩余空间低于此值时告警（10GB）
+cooldown_period = "4h"       # 同级别告警冷却时间
+webhook_url = ""             # Webhook URL（如企业微信机器人、Slack 等）
+webhook_method = "POST"      # HTTP 方法
+# webhook_headers = ["Authorization:Bearer xxx"]  # 自定义请求头
+
 [log]
 level = "info"               # debug, info, warn, error
 format = "console"           # json, console
