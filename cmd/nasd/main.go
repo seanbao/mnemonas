@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/api"
 	"github.com/seanbao/mnemonas/internal/config"
 	mnemonasTLS "github.com/seanbao/mnemonas/internal/tls"
@@ -135,6 +136,29 @@ func main() {
 		log.Info().Str("prefix", cfg.WebDAV.Prefix).Str("auth", cfg.WebDAV.AuthType).Msg("WebDAV enabled")
 	}
 
+	// Initialize storage alerts monitor
+	var alertMonitor *alerts.Monitor
+	if cfg.Alerts.Enabled {
+		alertsCfg := alerts.Config{
+			Enabled:        cfg.Alerts.Enabled,
+			CheckInterval:  cfg.Alerts.CheckInterval,
+			ThresholdPct:   cfg.Alerts.ThresholdPct,
+			CriticalPct:    cfg.Alerts.CriticalPct,
+			MinFreeBytes:   cfg.Alerts.MinFreeBytes,
+			CooldownPeriod: cfg.Alerts.CooldownPeriod,
+			WebhookURL:     cfg.Alerts.WebhookURL,
+			WebhookMethod:  cfg.Alerts.WebhookMethod,
+			WebhookHeaders: cfg.Alerts.WebhookHeaders,
+		}
+		alertMonitor = alerts.NewMonitor(alertsCfg, cfg.Storage.DataDir, log.Logger)
+		alertMonitor.Start(ctx)
+		log.Info().
+			Float64("threshold_pct", cfg.Alerts.ThresholdPct).
+			Float64("critical_pct", cfg.Alerts.CriticalPct).
+			Dur("interval", cfg.Alerts.CheckInterval).
+			Msg("storage alerts enabled")
+	}
+
 	// Create HTTP server
 	server := &http.Server{
 		Addr:         cfg.Address(),
@@ -178,6 +202,11 @@ func main() {
 		<-sigCh
 
 		log.Info().Msg("shutting down server...")
+
+		// Stop storage alerts monitor
+		if alertMonitor != nil {
+			alertMonitor.Stop()
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
