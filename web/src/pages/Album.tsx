@@ -119,7 +119,7 @@ function ImageThumbnail({
     <div 
       className={cn(
         "relative rounded-lg overflow-hidden cursor-pointer group",
-        "bg-content2 border border-divider hover:border-primary-500/30",
+        "bg-bg-secondary border border-divider hover:border-accent-primary/30",
         "transition-all",
         heightClass
       )}
@@ -142,7 +142,7 @@ function ImageThumbnail({
       />
       
       {error && (
-        <div className="absolute inset-0 flex items-center justify-center text-default-400">
+        <div className="absolute inset-0 flex items-center justify-center text-text-muted">
           <ImageIcon size={32} />
         </div>
       )}
@@ -183,6 +183,7 @@ function ImagePreview({
   const currentImage = images[currentIndex]
   
   const handlePrev = useCallback(() => {
+    if (images.length === 0) return
     onNavigate((currentIndex - 1 + images.length) % images.length)
     setZoom(1)
     setRotation(0)
@@ -190,6 +191,7 @@ function ImagePreview({
   }, [currentIndex, images.length, onNavigate])
   
   const handleNext = useCallback(() => {
+    if (images.length === 0) return
     onNavigate((currentIndex + 1) % images.length)
     setZoom(1)
     setRotation(0)
@@ -206,7 +208,7 @@ function ImagePreview({
     ]
 
     preloadIndexes.forEach(idx => {
-      if (idx !== currentIndex) {
+      if (idx !== currentIndex && images[idx]) {
         const img = new Image()
         img.src = getDownloadUrl(images[idx].path)
       }
@@ -473,81 +475,85 @@ export function AlbumPage() {
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center">
-            <ImageIcon size={20} className="text-white" />
+      <div className="h-full overflow-auto custom-scrollbar p-7">
+        <div className="space-y-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center">
+              <ImageIcon size={20} className="text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold">相册</h1>
+              <p className="text-text-muted text-sm">正在加载...</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-xl font-semibold">相册</h1>
-            <p className="text-default-500 text-sm">正在加载...</p>
+          <div className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-3 space-y-3">
+            {Array.from({ length: 12 }).map((_, i) => (
+              <div 
+                key={i} 
+                className={cn(
+                  "w-full rounded-lg skeleton-shimmer",
+                  ['h-48', 'h-56', 'h-64', 'h-72'][i % 4]
+                )} 
+              />
+            ))}
           </div>
-        </div>
-        <div className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-3 space-y-3">
-          {Array.from({ length: 12 }).map((_, i) => (
-            <div 
-              key={i} 
-              className={cn(
-                "w-full rounded-lg skeleton-shimmer",
-                ['h-48', 'h-56', 'h-64', 'h-72'][i % 4]
-              )} 
-            />
-          ))}
         </div>
       </div>
     )
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center">
-            <ImageIcon size={20} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold">相册</h1>
-            {images && (
-              <p className="text-default-500 text-sm">共 {images.length} 张图片</p>
-            )}
+    <div className="h-full overflow-auto custom-scrollbar p-7">
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center">
+              <ImageIcon size={20} className="text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold">相册</h1>
+              {images && (
+                <p className="text-text-muted text-sm">共 {images.length} 张图片</p>
+              )}
+            </div>
           </div>
         </div>
+
+        {images && images.length > 0 ? (
+          <>
+            {/* Masonry grid */}
+            <div className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-3 space-y-3">
+              {images.map((image, index) => (
+                <ImageThumbnail
+                  key={image.path}
+                  file={image}
+                  index={index}
+                  onClick={() => handleOpenPreview(index)}
+                />
+              ))}
+            </div>
+
+            {/* Preview modal */}
+            <ImagePreview
+              images={images}
+              currentIndex={previewIndex ?? 0}
+              isOpen={previewIndex !== null}
+              onClose={handleClosePreview}
+              onNavigate={setPreviewIndex}
+            />
+          </>
+        ) : (
+          <div className="rounded-xl bg-bg-card border border-divider p-12 flex flex-col items-center justify-center">
+            <div className="w-16 h-16 rounded-xl bg-bg-secondary flex items-center justify-center mb-4">
+              <ImageIcon size={32} className="text-text-muted" />
+            </div>
+            <h2 className="font-medium mb-1">暂无图片</h2>
+            <p className="text-text-muted text-sm text-center max-w-md">
+              上传图片到 NAS 后，这里将自动展示
+            </p>
+          </div>
+        )}
       </div>
-
-      {images && images.length > 0 ? (
-        <>
-          {/* Masonry grid */}
-          <div className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-3 space-y-3">
-            {images.map((image, index) => (
-              <ImageThumbnail
-                key={image.path}
-                file={image}
-                index={index}
-                onClick={() => handleOpenPreview(index)}
-              />
-            ))}
-          </div>
-
-          {/* Preview modal */}
-          <ImagePreview
-            images={images}
-            currentIndex={previewIndex ?? 0}
-            isOpen={previewIndex !== null}
-            onClose={handleClosePreview}
-            onNavigate={setPreviewIndex}
-          />
-        </>
-      ) : (
-        <div className="rounded-xl bg-content1 border border-divider p-12 flex flex-col items-center justify-center">
-          <div className="w-16 h-16 rounded-xl bg-content2 flex items-center justify-center mb-4">
-            <ImageIcon size={32} className="text-default-400" />
-          </div>
-          <h2 className="font-medium mb-1">暂无图片</h2>
-          <p className="text-default-500 text-sm text-center max-w-md">
-            上传图片到 NAS 后，这里将自动展示
-          </p>
-        </div>
-      )}
     </div>
   )
 }
