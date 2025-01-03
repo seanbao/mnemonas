@@ -1,6 +1,7 @@
 import { authFetch } from './auth'
 
 const API_BASE = '/api/v1'
+let batchCheckSupported: boolean | null = null
 
 export interface Favorite {
   path: string
@@ -116,6 +117,9 @@ export async function checkFavorite(path: string): Promise<boolean> {
  * Check multiple paths at once
  */
 export async function checkFavorites(paths: string[]): Promise<Record<string, boolean>> {
+  if (batchCheckSupported === false) {
+    return Object.fromEntries(paths.map(p => [p, false]))
+  }
   const response = await authFetch(`${API_BASE}/favorites/check-batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -123,10 +127,13 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
   })
   
   if (!response.ok) {
+    if (response.status === 404) {
+      batchCheckSupported = false
+    }
     // Return all false on error
     return Object.fromEntries(paths.map(p => [p, false]))
   }
-  
+  batchCheckSupported = true
   const data: CheckPathsResponse = await response.json()
   return data.favorites
 }

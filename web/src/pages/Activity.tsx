@@ -191,6 +191,7 @@ export function ActivityPage() {
             placeholder="筛选操作"
             size="sm"
             className="w-40"
+            aria-label="筛选操作类型"
             selectedKeys={actionFilter ? [actionFilter] : []}
             onSelectionChange={(keys) => {
               const selected = Array.from(keys)[0] as ActionType | undefined

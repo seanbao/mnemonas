@@ -296,7 +296,8 @@ export async function uploadFile(
 }
 
 // Download file URL
-export function getDownloadUrl(path: string): string {
+export function getDownloadUrl(path?: string): string {
+  if (!path) return ''
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   return `/dav${encodedPath}`
@@ -305,7 +306,8 @@ export function getDownloadUrl(path: string): string {
 // Thumbnail URL
 export type ThumbnailSize = 'small' | 'medium' | 'large'
 
-export function getThumbnailUrl(path: string, size: ThumbnailSize = 'medium'): string {
+export function getThumbnailUrl(path?: string, size: ThumbnailSize = 'medium'): string {
+  if (!path) return ''
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   return `${API_BASE}/thumbnails${encodedPath}?size=${size}`

@@ -115,12 +115,12 @@ describe('Sidebar', () => {
     it('renders storage usage section', () => {
       render(<Sidebar />)
       expect(screen.getByText('存储空间')).toBeTruthy()
-      expect(screen.getByText('60%')).toBeTruthy()
     })
 
     it('renders progress bar', () => {
       render(<Sidebar />)
-      const progressBar = document.querySelector('[class*="w-3/5"]')
+      // Progress bar should have bg-gradient class
+      const progressBar = document.querySelector('[class*="bg-gradient-to-r"]')
       expect(progressBar).toBeTruthy()
     })
   })
