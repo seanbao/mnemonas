@@ -1,4 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { 
   Folder, 
   Image, 
@@ -12,7 +13,8 @@ import {
   Users,
   FileText,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, formatBytes } from '@/lib/utils'
+import { getStorageStats } from '@/api/files'
 
 interface NavItem {
   icon: React.ComponentType<{ size?: number; className?: string }>
@@ -61,6 +63,19 @@ interface SidebarProps {
 
 export function Sidebar({ collapsed = false }: SidebarProps) {
   const location = useLocation()
+  
+  // Fetch storage stats for the sidebar indicator
+  const { data: storageStats } = useQuery({
+    queryKey: ['storage-stats-sidebar'],
+    queryFn: getStorageStats,
+    staleTime: 1000 * 60 * 5, // Cache for 5 minutes
+    refetchInterval: 1000 * 60 * 5, // Refresh every 5 minutes
+  })
+
+  // Calculate storage usage percentage (assume 1TB total for now, or use dedup ratio as indicator)
+  const totalCapacity = 1024 * 1024 * 1024 * 1024 // 1TB in bytes
+  const usedBytes = storageStats?.totalSize ?? 0
+  const usagePercent = Math.min(100, Math.round((usedBytes / totalCapacity) * 100))
 
   return (
     <aside 
@@ -146,16 +161,26 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         ))}
       </nav>
 
-      {/* Storage Status (Simplified for now) */}
+      {/* Storage Status */}
       {!collapsed && (
         <div className="p-5 border-t border-divider bg-bg-secondary/50 relative z-10">
           <div className="flex items-center justify-between text-xs mb-2">
             <span className="text-text-muted">存储空间</span>
-            <span className="text-accent-light font-medium">60%</span>
+            <span className="text-accent-light font-medium">
+              {storageStats ? formatBytes(usedBytes) : '--'}
+            </span>
           </div>
           <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
-            <div className="h-full w-3/5 bg-gradient-to-r from-accent-primary to-aurora rounded-full shadow-[0_0_8px_rgba(167,139,250,0.4)]" />
+            <div 
+              className="h-full bg-gradient-to-r from-accent-primary to-aurora rounded-full shadow-[0_0_8px_rgba(167,139,250,0.4)] transition-all duration-500" 
+              style={{ width: `${Math.max(5, usagePercent)}%` }}
+            />
           </div>
+          {storageStats && storageStats.dedupRatio > 1 && (
+            <div className="mt-1.5 text-[10px] text-text-muted">
+              去重率 {((1 - 1 / storageStats.dedupRatio) * 100).toFixed(1)}%
+            </div>
+          )}
         </div>
       )}
     </aside>

@@ -208,9 +208,10 @@ function ImagePreview({
     ]
 
     preloadIndexes.forEach(idx => {
-      if (idx !== currentIndex && images[idx]) {
+      const target = images[idx]
+      if (idx !== currentIndex && target?.path) {
         const img = new Image()
-        img.src = getDownloadUrl(images[idx].path)
+        img.src = getDownloadUrl(target.path)
       }
     })
   }, [currentIndex, images, isOpen])
@@ -282,7 +283,7 @@ function ImagePreview({
     setTouchStart(null)
   }
 
-  if (!currentImage) return null
+  if (!currentImage || !currentImage.path) return null
 
   return (
     <Modal 
@@ -338,6 +339,7 @@ function ImagePreview({
           )}
           
           {/* Image */}
+          {currentImage && (
           <div className="relative max-w-[90vw] max-h-[90vh] overflow-hidden">
             <img
               src={getDownloadUrl(currentImage.path)}
@@ -353,12 +355,13 @@ function ImagePreview({
               onError={() => setLoading(false)}
             />
           </div>
+          )}
           
           {/* Bottom toolbar */}
           <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4">
             <div className="flex items-center justify-between max-w-4xl mx-auto">
               <div className="text-white">
-                <p className="font-medium truncate max-w-md">{currentImage.name}</p>
+                <p className="font-medium truncate max-w-md">{currentImage?.name}</p>
                 <p className="text-sm text-white/60">
                   {currentIndex + 1} / {images.length}
                 </p>
@@ -406,7 +409,7 @@ function ImagePreview({
                   size="sm"
                   variant="light"
                   className="text-white"
-                  onPress={() => window.open(getDownloadUrl(currentImage.path), '_blank')}
+                  onPress={() => currentImage && window.open(getDownloadUrl(currentImage.path), '_blank')}
                 >
                   <Download size={18} />
                 </Button>
@@ -419,19 +422,19 @@ function ImagePreview({
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div>
                     <span className="text-white/60">文件名</span>
-                    <p className="truncate">{currentImage.name}</p>
+                    <p className="truncate">{currentImage?.name}</p>
                   </div>
                   <div>
                     <span className="text-white/60">大小</span>
-                    <p>{formatBytes(currentImage.size)}</p>
+                    <p>{formatBytes(currentImage?.size ?? 0)}</p>
                   </div>
                   <div>
                     <span className="text-white/60">修改时间</span>
-                    <p>{formatDate(currentImage.modTime)}</p>
+                    <p>{formatDate(currentImage?.modTime ?? '')}</p>
                   </div>
                   <div>
                     <span className="text-white/60">路径</span>
-                    <p className="truncate">{currentImage.path}</p>
+                    <p className="truncate">{currentImage?.path}</p>
                   </div>
                 </div>
               </div>
@@ -533,14 +536,16 @@ export function AlbumPage() {
               ))}
             </div>
 
-            {/* Preview modal */}
-            <ImagePreview
-              images={images}
-              currentIndex={previewIndex ?? 0}
-              isOpen={previewIndex !== null}
-              onClose={handleClosePreview}
-              onNavigate={setPreviewIndex}
-            />
+            {/* Preview modal - only render when images exist */}
+            {images.length > 0 && (
+              <ImagePreview
+                images={images}
+                currentIndex={previewIndex ?? 0}
+                isOpen={previewIndex !== null}
+                onClose={handleClosePreview}
+                onNavigate={setPreviewIndex}
+              />
+            )}
           </>
         ) : (
           <div className="rounded-xl bg-bg-card border border-divider p-12 flex flex-col items-center justify-center">

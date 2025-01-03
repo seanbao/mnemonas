@@ -1048,9 +1048,10 @@ export function FilesPage() {
               <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
                 {virtualizer.getVirtualItems().map((virtualItem) => {
                   const file = sortedFiles[virtualItem.index]
+                  if (!file) return null
                   return (
                     <div
-                      key={file.path}
+                      key={virtualItem.key}
                       style={{
                         position: 'absolute',
                         top: 0,
