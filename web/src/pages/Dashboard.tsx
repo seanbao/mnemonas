@@ -34,17 +34,17 @@ interface StatCardProps {
 
 function StatCard({ title, value, icon: Icon, description, iconBg }: StatCardProps) {
   return (
-    <div className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-5 card-hover">
+    <div className="rounded-xl bg-bg-card border border-divider p-5 card-hover">
       <div className="flex items-start justify-between mb-4">
         <div className={cn("p-2.5 rounded-lg", iconBg)}>
           <Icon size={20} className="text-white" />
         </div>
       </div>
       
-      <p className="text-sm text-zinc-500 mb-1">{title}</p>
-      <p className="text-2xl font-semibold tracking-tight">{value}</p>
+      <p className="text-sm text-text-muted mb-1">{title}</p>
+      <p className="text-2xl font-semibold tracking-tight text-text-primary">{value}</p>
       {description && (
-        <p className="text-xs text-zinc-400 mt-1">{description}</p>
+        <p className="text-xs text-text-muted mt-1">{description}</p>
       )}
     </div>
   )
@@ -61,16 +61,16 @@ interface QuickActionProps {
 function QuickAction({ icon: Icon, label, description, onClick, iconBg }: QuickActionProps) {
   return (
     <button 
-      className="group p-4 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-left transition-all hover:border-violet-300 dark:hover:border-violet-500/50 card-hover"
+      className="group p-4 rounded-xl bg-bg-card border border-divider text-left transition-all hover:border-accent-primary/50 card-hover"
       onClick={onClick}
     >
       <div className={cn("w-10 h-10 rounded-lg flex items-center justify-center mb-3", iconBg)}>
         <Icon size={20} className="text-white" />
       </div>
-      <h3 className="font-medium text-foreground mb-0.5">{label}</h3>
-      <p className="text-sm text-zinc-500">{description}</p>
+      <h3 className="font-medium text-text-primary mb-0.5">{label}</h3>
+      <p className="text-sm text-text-muted">{description}</p>
       
-      <div className="flex items-center gap-1 mt-3 text-sm text-violet-600 dark:text-violet-400 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="flex items-center gap-1 mt-3 text-sm text-accent-light opacity-0 group-hover:opacity-100 transition-opacity">
         <span>进入</span>
         <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
       </div>
@@ -138,17 +138,17 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
   }
 
   return (
-    <div className="flex items-center gap-3 py-2.5 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
-      <div className={cn("w-7 h-7 rounded-full flex items-center justify-center bg-zinc-100 dark:bg-zinc-800", colorMap[entry.action])}>
+    <div className="flex items-center gap-3 py-2.5 border-b border-divider last:border-0">
+      <div className={cn("w-7 h-7 rounded-full flex items-center justify-center bg-bg-secondary", colorMap[entry.action])}>
         <ActionIcon action={entry.action} />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium truncate">{getActionLabel(entry.action)}</p>
+        <p className="text-sm font-medium text-text-primary truncate">{getActionLabel(entry.action)}</p>
         {entry.path && (
-          <p className="text-xs text-zinc-400 truncate">{entry.path}</p>
+          <p className="text-xs text-text-muted truncate">{entry.path}</p>
         )}
       </div>
-      <span className="text-xs text-zinc-400 whitespace-nowrap">{formatRelativeTime(entry.timestamp)}</span>
+      <span className="text-xs text-text-muted whitespace-nowrap">{formatRelativeTime(entry.timestamp)}</span>
     </div>
   )
 }
@@ -185,7 +185,7 @@ export function DashboardPage() {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-5">
+            <div key={i} className="rounded-xl bg-bg-card border border-divider p-5">
               <Skeleton className="w-10 h-10 rounded-lg mb-4" />
               <Skeleton className="w-20 h-4 rounded mb-2" />
               <Skeleton className="w-32 h-7 rounded" />
@@ -203,8 +203,8 @@ export function DashboardPage() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">仪表盘</h1>
-          <p className="text-zinc-500 mt-0.5 text-sm">系统概览</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-text-primary">仪表盘</h1>
+          <p className="text-text-muted mt-0.5 text-sm">系统概览</p>
         </div>
         <div className={cn(
           "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm",
@@ -248,19 +248,19 @@ export function DashboardPage() {
       </div>
 
       {/* Storage Overview */}
-      <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+      <Card className="bg-bg-card border-divider">
         <CardBody className="p-5">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="font-medium">存储概览</h2>
-            <span className="text-xs text-zinc-400">实时</span>
+            <h2 className="font-medium text-text-primary">存储概览</h2>
+            <span className="text-xs text-text-muted">实时</span>
           </div>
           
           <div className="space-y-2 mb-5">
             <div className="flex justify-between text-sm">
-              <span className="text-zinc-500">已用空间</span>
+              <span className="text-text-secondary">已用空间</span>
               <span>{formatBytes(stats?.totalSize || 0)}</span>
             </div>
-            <div className="h-2 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+            <div className="h-2 rounded-full bg-bg-secondary overflow-hidden">
               <div 
                 className="h-full rounded-full bg-gradient-to-r from-violet-500 to-purple-500"
                 style={{ width: '30%' }}
@@ -275,9 +275,9 @@ export function DashboardPage() {
               { label: '去重率', value: `${((stats?.dedupRatio || 1) * 100).toFixed(1)}%` },
               { label: '版本', value: health?.version || '-' },
             ].map((item, i) => (
-              <div key={i} className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-center">
-                <p className="text-lg font-medium">{item.value}</p>
-                <p className="text-xs text-zinc-500">{item.label}</p>
+              <div key={i} className="p-3 rounded-lg bg-bg-secondary text-center">
+                <p className="text-lg font-medium text-text-primary">{item.value}</p>
+                <p className="text-xs text-text-muted">{item.label}</p>
               </div>
             ))}
           </div>
@@ -320,14 +320,14 @@ export function DashboardPage() {
       </div>
 
       {/* Recent Activity */}
-      <Card className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
+      <Card className="bg-bg-card border-divider">
         <CardBody className="p-5">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="font-medium">最近活动</h2>
+            <h2 className="font-medium text-text-primary">最近活动</h2>
             <Button
               size="sm"
               variant="light"
-              className="text-violet-600 dark:text-violet-400"
+              className="text-accent-light"
               onPress={() => navigate('/activity')}
             >
               查看全部
@@ -336,13 +336,13 @@ export function DashboardPage() {
           </div>
           
           {recentActivity?.items && recentActivity.items.length > 0 ? (
-            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+            <div className="divide-y divide-divider">
               {recentActivity.items.map((entry) => (
                 <RecentActivityItem key={entry.id} entry={entry} />
               ))}
             </div>
           ) : (
-            <div className="py-8 text-center text-zinc-400">
+            <div className="py-8 text-center text-text-muted">
               <Activity size={24} className="mx-auto mb-2 opacity-50" />
               <p className="text-sm">暂无活动记录</p>
             </div>

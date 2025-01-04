@@ -179,8 +179,10 @@ describe('cn (classnames)', () => {
   })
 
   it('handles conditional classes', () => {
-    expect(cn('foo', false && 'bar', 'baz')).toBe('foo baz')
-    expect(cn('foo', true && 'bar', 'baz')).toBe('foo bar baz')
+    const condition = false
+    expect(cn('foo', condition && 'bar', 'baz')).toBe('foo baz')
+    const trueCondition = true
+    expect(cn('foo', trueCondition && 'bar', 'baz')).toBe('foo bar baz')
   })
 
   it('handles undefined and null', () => {
