@@ -18,16 +18,16 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
   // Show loading spinner while checking auth state
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-bg-primary flex items-center justify-center">
+      <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
           <Spinner size="lg" color="secondary" />
-          <p className="text-text-muted mt-4">加载中...</p>
+          <p className="text-default-500 mt-4">加载中...</p>
         </div>
       </div>
     )
   }
 
-  // If auth is disabled, allow access
+  // If auth is explicitly disabled on server, allow access
   if (!authEnabled) {
     return <>{children}</>
   }

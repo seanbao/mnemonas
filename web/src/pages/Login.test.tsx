@@ -58,7 +58,7 @@ describe('LoginPage', () => {
       renderLogin()
       
       expect(screen.getByText('MnemoNAS')).toBeInTheDocument()
-      expect(screen.getByText('登录以访问您的文件')).toBeInTheDocument()
+      expect(screen.getByText('登录以访问存储空间')).toBeInTheDocument()
       expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
       expect(screen.getByLabelText(/密码/i)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /登录/i })).toBeInTheDocument()
@@ -67,7 +67,7 @@ describe('LoginPage', () => {
     it('renders help text for first-time users', () => {
       renderLogin()
       
-      expect(screen.getByText(/首次运行时，默认管理员账号为/i)).toBeInTheDocument()
+      expect(screen.getByText(/首次运行时默认管理员账号为/i)).toBeInTheDocument()
       expect(screen.getByText(/初始密码请查看服务器启动日志/i)).toBeInTheDocument()
     })
 

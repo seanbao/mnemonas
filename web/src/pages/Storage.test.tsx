@@ -159,35 +159,35 @@ describe('StoragePage', () => {
       })
     })
 
-    it('renders scrub button', async () => {
+    it('renders scrub button (coming soon)', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('开始巡检')).toBeTruthy()
+        expect(screen.getByText('开始巡检（即将推出）')).toBeTruthy()
       })
     })
 
-    it('renders GC button', async () => {
+    it('renders GC button (coming soon)', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('开始清理')).toBeTruthy()
+        expect(screen.getByText('开始清理（即将推出）')).toBeTruthy()
       })
     })
 
-    it('shows last run time for scrub', async () => {
+    it('shows development status for scrub', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText(/上次巡检/)).toBeTruthy()
+        expect(screen.getAllByText('功能开发中').length).toBeGreaterThan(0)
       })
     })
 
-    it('shows last run time for GC', async () => {
+    it('shows coming soon status for features', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText(/上次清理/)).toBeTruthy()
+        expect(screen.getAllByText('即将推出').length).toBeGreaterThan(0)
       })
     })
   })

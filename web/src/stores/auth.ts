@@ -14,8 +14,8 @@ interface AuthState {
   isLoading: boolean
   error: string | null
   
-  // Check if auth is enabled on the server
-  authEnabled: boolean | null
+  // Whether auth is enabled on the server (default: true for security)
+  authEnabled: boolean
   
   // Actions
   initialize: () => Promise<void>
@@ -30,7 +30,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
   isLoading: true,
   error: null,
-  authEnabled: null,
+  // Default to true for security - auth is required unless explicitly disabled by server
+  authEnabled: true,
   
   initialize: async () => {
     set({ isLoading: true, error: null })

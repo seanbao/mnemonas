@@ -18,6 +18,13 @@
     "test:ui": "vitest --ui",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:update": "playwright test --update-snapshots",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "test:visual": "storycap --serverCmd 'npm run storybook -- --ci' http://localhost:6006 && reg-cli __screenshots__ __screenshots__/expected __screenshots__/diff -R report.html",
+    "test:visual:update": "storycap --serverCmd 'npm run storybook -- --ci' http://localhost:6006 && cp -r __screenshots__/*.png __screenshots__/expected/",
     "prepare": "husky"
   },
   "dependencies": {
@@ -41,6 +48,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.58.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

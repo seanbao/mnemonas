@@ -1,5 +1,7 @@
 // Activity log API client
 
+import { authFetch } from './auth'
+
 const API_BASE = '/api/v1'
 
 // API error class
@@ -96,7 +98,7 @@ export async function listActivity(options?: {
   const queryString = params.toString()
   const url = queryString ? `${API_BASE}/activity/?${queryString}` : `${API_BASE}/activity/`
 
-  const response = await fetch(url)
+  const response = await authFetch(url)
   const result = await handleResponse<ApiResponseWrapper<{
     items: ActivityEntry[]
     total: number
@@ -114,14 +116,14 @@ export async function listActivity(options?: {
 
 // Get activity statistics
 export async function getActivityStats(): Promise<ActivityStats> {
-  const response = await fetch(`${API_BASE}/activity/stats`)
+  const response = await authFetch(`${API_BASE}/activity/stats`)
   const result = await handleResponse<ApiResponseWrapper<ActivityStats>>(response, '获取活动统计失败')
   return result.data
 }
 
 // Clear activity log (admin only)
 export async function clearActivity(): Promise<void> {
-  const response = await fetch(`${API_BASE}/activity/`, {
+  const response = await authFetch(`${API_BASE}/activity/`, {
     method: 'DELETE',
   })
   if (!response.ok) {

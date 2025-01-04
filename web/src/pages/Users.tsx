@@ -38,6 +38,9 @@ import {
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, type User } from '@/api/users'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
+import { PageHeader } from '@/components/ui/PageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { StatCard } from '@/components/ui/StatCard'
 
 // Role badge component
 function RoleBadge({ role }: { role: string }) {
@@ -72,23 +75,23 @@ function UserCard({
   isCurrentUser: boolean
 }) {
   return (
-    <Card className="bg-bg-card border border-divider shadow-sm">
+    <Card className="bg-content1 border border-divider shadow-[var(--shadow-soft)]">
       <CardBody className="p-4">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">
             <div className={cn(
               "w-10 h-10 rounded-xl flex items-center justify-center",
               user.role === 'admin' 
-                ? "bg-gradient-to-br from-rose-500 to-rose-600" 
-                : "bg-gradient-to-br from-accent-primary to-accent-dark"
+                ? "bg-rose/15 text-rose" 
+                : "bg-accent-primary/15 text-accent-primary"
             )}>
-              <span className="text-white font-semibold text-lg">
+              <span className="font-semibold text-lg text-current">
                 {user.username.charAt(0).toUpperCase()}
               </span>
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-medium text-text-primary">{user.username}</span>
+                <span className="font-medium text-foreground">{user.username}</span>
                 {isCurrentUser && (
                   <Chip size="sm" variant="flat" color="success">当前用户</Chip>
                 )}
@@ -108,14 +111,14 @@ function UserCard({
                 isIconOnly
                 variant="light"
                 size="sm"
-                className="text-text-muted"
+                className="text-default-500"
               >
                 <MoreVertical size={16} />
               </Button>
             </DropdownTrigger>
             <DropdownMenu
               aria-label="用户操作"
-              classNames={{ base: "bg-bg-card border border-divider shadow-xl" }}
+              classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
             >
               <DropdownSection title="操作">
                 <DropdownItem
@@ -143,22 +146,22 @@ function UserCard({
 
         <div className="mt-4 space-y-2 text-sm">
           {user.email && (
-            <div className="flex items-center gap-2 text-text-muted">
+            <div className="flex items-center gap-2 text-default-500">
               <Mail size={14} />
               <span>{user.email}</span>
             </div>
           )}
-          <div className="flex items-center gap-2 text-text-muted">
+          <div className="flex items-center gap-2 text-default-500">
             <Calendar size={14} />
             <span>创建于 {formatDate(user.created_at)}</span>
           </div>
           {user.last_login_at && (
-            <div className="flex items-center gap-2 text-text-muted">
+            <div className="flex items-center gap-2 text-default-500">
               <RefreshCw size={14} />
               <span>最后登录 {formatDate(user.last_login_at)}</span>
             </div>
           )}
-          <div className="flex items-center gap-2 text-text-muted">
+          <div className="flex items-center gap-2 text-default-500">
             <HardDrive size={14} />
             <span>
               已用 {formatBytes(user.used_bytes)}
@@ -274,101 +277,68 @@ export function UsersPage() {
   return (
     <div className="h-full flex flex-col p-6">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-primary to-accent-dark flex items-center justify-center shadow-sm">
-            <UsersIcon size={20} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold text-text-primary">用户管理</h1>
-            <p className="text-sm text-text-muted">
-              管理系统用户、权限和配额
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="light"
-            startContent={<RefreshCw size={16} />}
-            onPress={() => refetch()}
-            isLoading={isLoading}
-            className="text-text-secondary"
-          >
-            刷新
-          </Button>
-          <Button
-            className="bg-accent-primary text-white"
-            startContent={<UserPlus size={16} />}
-            onPress={onCreateOpen}
-          >
-            添加用户
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title="用户管理"
+        subtitle="管理系统用户、权限和配额"
+        icon={UsersIcon}
+        actions={
+          <>
+            <Button
+              variant="light"
+              startContent={<RefreshCw size={16} />}
+              onPress={() => refetch()}
+              isLoading={isLoading}
+              className="text-default-600"
+            >
+              刷新
+            </Button>
+            <Button
+              className="bg-accent-primary text-white"
+              startContent={<UserPlus size={16} />}
+              onPress={onCreateOpen}
+            >
+              添加用户
+            </Button>
+          </>
+        }
+        className="mb-6"
+      />
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
-        <Card className="bg-bg-card border border-divider shadow-sm">
-          <CardBody className="py-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-accent-primary/20 flex items-center justify-center">
-                <UsersIcon size={20} className="text-accent-primary" />
-              </div>
-              <div>
-                <div className="text-2xl font-bold text-text-primary">
-                  {data?.total || 0}
-                </div>
-                <div className="text-xs text-text-muted">总用户数</div>
-              </div>
-            </div>
-          </CardBody>
-        </Card>
-        <Card className="bg-bg-card border border-divider shadow-sm">
-          <CardBody className="py-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-rose-500/20 flex items-center justify-center">
-                <Shield size={20} className="text-rose-500" />
-              </div>
-              <div>
-                <div className="text-2xl font-bold text-text-primary">
-                  {data?.users?.filter(u => u.role === 'admin').length || 0}
-                </div>
-                <div className="text-xs text-text-muted">管理员</div>
-              </div>
-            </div>
-          </CardBody>
-        </Card>
-        <Card className="bg-bg-card border border-divider shadow-sm">
-          <CardBody className="py-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
-                <UserIcon size={20} className="text-emerald-500" />
-              </div>
-              <div>
-                <div className="text-2xl font-bold text-text-primary">
-                  {data?.users?.filter(u => !u.disabled).length || 0}
-                </div>
-                <div className="text-xs text-text-muted">活跃用户</div>
-              </div>
-            </div>
-          </CardBody>
-        </Card>
+        <StatCard
+          title="总用户数"
+          value={data?.total || 0}
+          icon={UsersIcon}
+          tone="primary"
+        />
+        <StatCard
+          title="管理员"
+          value={data?.users?.filter(u => u.role === 'admin').length || 0}
+          icon={Shield}
+          tone="danger"
+        />
+        <StatCard
+          title="活跃用户"
+          value={data?.users?.filter(u => !u.disabled).length || 0}
+          icon={UserIcon}
+          tone="success"
+        />
       </div>
 
       {/* User List */}
-      <Card className="flex-1 bg-bg-card border border-divider shadow-sm overflow-hidden">
+      <Card className="flex-1 bg-content1 border border-divider shadow-sm overflow-hidden">
         <CardHeader className="border-b border-divider">
-          <h2 className="font-semibold text-text-primary">用户列表</h2>
+          <h2 className="font-semibold text-foreground">用户列表</h2>
         </CardHeader>
         <CardBody className="overflow-auto custom-scrollbar">
           {isLoading ? (
             <div className="flex items-center justify-center h-40">
-              <div className="text-text-muted">加载中...</div>
+              <div className="text-default-500">加载中...</div>
             </div>
           ) : !data?.users?.length ? (
-            <div className="flex flex-col items-center justify-center h-40 text-text-muted">
-              <UsersIcon size={32} className="mb-2 opacity-50" />
-              <p>暂无用户</p>
+            <div className="flex items-center justify-center h-40">
+              <EmptyState icon={UsersIcon} title="暂无用户" />
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-1">
@@ -393,10 +363,10 @@ export function UsersPage() {
           onCreateClose()
           resetCreateForm()
         }}
-        classNames={{ base: "bg-bg-card border border-divider" }}
+        classNames={{ base: "bg-content1 border border-divider" }}
       >
         <ModalContent>
-          <ModalHeader className="text-text-primary">添加用户</ModalHeader>
+          <ModalHeader className="text-foreground">添加用户</ModalHeader>
           <ModalBody className="space-y-4">
             <Input
               label="用户名"
@@ -405,7 +375,7 @@ export function UsersPage() {
               onValueChange={setNewUsername}
               autoFocus
               classNames={{
-                inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
+                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
               }}
             />
             <Input
@@ -415,7 +385,7 @@ export function UsersPage() {
               value={newPassword}
               onValueChange={setNewPassword}
               classNames={{
-                inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
+                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
               }}
             />
             <Input
@@ -425,7 +395,7 @@ export function UsersPage() {
               value={newEmail}
               onValueChange={setNewEmail}
               classNames={{
-                inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
+                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
               }}
             />
             <Select
@@ -436,7 +406,7 @@ export function UsersPage() {
                 if (value) setNewRole(value)
               }}
               classNames={{
-                trigger: "bg-bg-secondary border-divider data-[hover=true]:border-accent-primary",
+                trigger: "bg-content2 border-divider data-[hover=true]:border-accent-primary",
               }}
             >
               <SelectItem key="admin" startContent={<Shield size={16} />}>
@@ -457,7 +427,7 @@ export function UsersPage() {
                 onCreateClose()
                 resetCreateForm()
               }}
-              className="text-text-secondary"
+              className="text-default-600"
             >
               取消
             </Button>
@@ -480,15 +450,15 @@ export function UsersPage() {
           onDeleteClose()
           setActionUser(null)
         }}
-        classNames={{ base: "bg-bg-card border border-divider" }}
+        classNames={{ base: "bg-content1 border border-divider" }}
       >
         <ModalContent>
-          <ModalHeader className="text-text-primary">确认删除</ModalHeader>
+          <ModalHeader className="text-foreground">确认删除</ModalHeader>
           <ModalBody>
-            <p className="text-text-secondary">
-              确定要删除用户 <strong className="text-text-primary">{actionUser?.username}</strong> 吗？
+            <p className="text-default-600">
+              确定要删除用户 <strong className="text-foreground">{actionUser?.username}</strong> 吗？
             </p>
-            <p className="text-xs text-text-muted mt-2">
+            <p className="text-xs text-default-500 mt-2">
               此操作不可逆，该用户的所有数据将被保留但无法访问。
             </p>
           </ModalBody>
@@ -499,7 +469,7 @@ export function UsersPage() {
                 onDeleteClose()
                 setActionUser(null)
               }}
-              className="text-text-secondary"
+              className="text-default-600"
             >
               取消
             </Button>
@@ -522,13 +492,13 @@ export function UsersPage() {
           setActionUser(null)
           setResetPassword('')
         }}
-        classNames={{ base: "bg-bg-card border border-divider" }}
+        classNames={{ base: "bg-content1 border border-divider" }}
       >
         <ModalContent>
-          <ModalHeader className="text-text-primary">重置密码</ModalHeader>
+          <ModalHeader className="text-foreground">重置密码</ModalHeader>
           <ModalBody>
-            <p className="text-text-secondary mb-4">
-              为用户 <strong className="text-text-primary">{actionUser?.username}</strong> 设置新密码
+            <p className="text-default-600 mb-4">
+              为用户 <strong className="text-foreground">{actionUser?.username}</strong> 设置新密码
             </p>
             <Input
               label="新密码"
@@ -538,7 +508,7 @@ export function UsersPage() {
               onValueChange={setResetPassword}
               autoFocus
               classNames={{
-                inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
+                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
               }}
             />
           </ModalBody>
@@ -550,7 +520,7 @@ export function UsersPage() {
                 setActionUser(null)
                 setResetPassword('')
               }}
-              className="text-text-secondary"
+              className="text-default-600"
             >
               取消
             </Button>

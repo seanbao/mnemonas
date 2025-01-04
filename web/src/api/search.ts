@@ -3,6 +3,8 @@
  * Global file search functionality
  */
 
+import { authFetch } from './auth'
+
 export interface SearchResult {
   name: string
   path: string
@@ -30,9 +32,7 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
     params.set('limit', String(limit))
   }
   
-  const response = await fetch(`/api/v1/search?${params}`, {
-    credentials: 'include',
-  })
+  const response = await authFetch(`/api/v1/search?${params}`)
   
   if (!response.ok) {
     const error = await response.json()

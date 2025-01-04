@@ -5,24 +5,23 @@ import {
   Server, 
   HardDrive, 
   Cpu, 
-  Clock, 
   Database,
   Trash2,
   RefreshCw,
   CheckCircle,
   XCircle,
-  AlertCircle
+  AlertCircle,
+  Clock,
 } from 'lucide-react'
 import { getDiagnostics, getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
-
-// Status indicator component
+import { PageHeader } from '@/components/ui/PageHeader'
+import { StatCard } from '@/components/ui/StatCard'
 function StatusIndicator({ 
   status, 
   label 
 }: { 
   status: boolean | 'warning' | 'unknown'
-  label: string 
 }) {
   const getColor = () => {
     if (status === true) return 'success'
@@ -47,44 +46,6 @@ function StatusIndicator({
     >
       {label}
     </Chip>
-  )
-}
-
-// Stat card component
-function StatCard({ 
-  icon: Icon, 
-  title, 
-  value, 
-  subtitle,
-  color = 'primary'
-}: { 
-  icon: React.ElementType
-  title: string
-  value: string | number
-  subtitle?: string
-  color?: 'primary' | 'secondary' | 'success' | 'warning' | 'danger'
-}) {
-  const colorClasses = {
-    primary: 'from-blue-500 to-cyan-500',
-    secondary: 'from-violet-500 to-purple-500',
-    success: 'from-emerald-500 to-teal-500',
-    warning: 'from-amber-500 to-orange-500',
-    danger: 'from-red-500 to-rose-500',
-  }
-
-  return (
-    <Card className="bg-content1 border-divider">
-      <CardBody className="flex flex-row items-center gap-3 p-4">
-        <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${colorClasses[color]} flex items-center justify-center`}>
-          <Icon size={20} className="text-white" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-xs text-default-500 uppercase tracking-wide">{title}</p>
-          <p className="text-lg font-semibold truncate">{value}</p>
-          {subtitle && <p className="text-xs text-default-500">{subtitle}</p>}
-        </div>
-      </CardBody>
-    </Card>
   )
 }
 
@@ -124,34 +85,31 @@ export function HealthPage() {
     : '0'
 
   return (
-    <div className="space-y-6">
+    <div className="h-full overflow-auto custom-scrollbar">
+      <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-500 flex items-center justify-center">
-            <Activity size={20} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold">系统健康</h1>
-            <p className="text-default-500 text-sm">监控系统状态和性能指标</p>
-          </div>
-        </div>
-        <Button
-          color="primary"
-          variant="flat"
-          startContent={<RefreshCw size={16} />}
-          onPress={() => refetchDiag()}
-          isLoading={isLoading}
-        >
-          刷新
-        </Button>
-      </div>
+      <PageHeader
+        title="系统健康"
+        subtitle="监控系统状态和性能指标"
+        icon={Activity}
+        actions={
+          <Button
+            color="primary"
+            variant="flat"
+            startContent={<RefreshCw size={16} />}
+            onPress={() => refetchDiag()}
+            isLoading={isLoading}
+          >
+            刷新
+          </Button>
+        }
+      />
 
       {/* System Status */}
-      <Card className="bg-content1 border-divider">
+        <Card className="bg-content1 border-divider shadow-[var(--shadow-soft)]">
         <CardHeader className="pb-2">
           <div className="flex items-center gap-2">
-            <Server size={18} className="text-primary-500" />
+            <Server size={18} className="text-accent-primary" />
             <span className="font-medium">系统状态</span>
           </div>
         </CardHeader>
@@ -186,35 +144,35 @@ export function HealthPage() {
           icon={Clock}
           title="运行时间"
           value={diagnostics?.uptimeSecs ? formatUptime(diagnostics.uptimeSecs) : '--'}
-          color="primary"
+          tone="primary"
         />
         <StatCard
           icon={Cpu}
           title="内存使用"
           value={diagnostics?.memory ? `${diagnostics.memory.allocMb} MB` : '--'}
           subtitle={diagnostics?.memory ? `系统: ${diagnostics.memory.sysMb} MB` : undefined}
-          color="secondary"
+          tone="secondary"
         />
         <StatCard
           icon={Database}
           title="存储对象"
           value={stats?.totalObjects ?? '--'}
           subtitle={stats?.totalSize ? formatBytes(stats.totalSize) : undefined}
-          color="success"
+          tone="success"
         />
         <StatCard
           icon={HardDrive}
           title="去重率"
           value={stats?.dedupRatio ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--'}
           subtitle={dedupSavings !== '0' ? `节省 ${dedupSavings}%` : undefined}
-          color="warning"
+          tone="warning"
         />
       </div>
 
       {/* Storage Details */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Storage Card */}
-        <Card className="bg-content1 border-divider">
+        <Card className="bg-content1 border-divider shadow-[var(--shadow-soft)]">
           <CardHeader className="pb-2">
             <div className="flex items-center gap-2">
               <HardDrive size={18} className="text-primary-500" />
@@ -240,11 +198,11 @@ export function HealthPage() {
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>
                 <p className="text-default-500">对象数量</p>
-                <p className="font-semibold text-lg">{stats?.totalObjects ?? '--'}</p>
+                <p className="font-semibold text-2xl">{stats?.totalObjects ?? '--'}</p>
               </div>
               <div>
                 <p className="text-default-500">去重比例</p>
-                <p className="font-semibold text-lg">
+                <p className="font-semibold text-2xl">
                   {stats?.dedupRatio ? `${(stats.dedupRatio * 100).toFixed(2)}%` : '--'}
                 </p>
               </div>
@@ -253,7 +211,7 @@ export function HealthPage() {
         </Card>
 
         {/* Trash Card */}
-        <Card className="bg-content1 border-divider">
+        <Card className="bg-content1 border-divider shadow-[var(--shadow-soft)]">
           <CardHeader className="pb-2">
             <div className="flex items-center gap-2">
               <Trash2 size={18} className="text-warning" />
@@ -264,13 +222,13 @@ export function HealthPage() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <p className="text-default-500 text-sm">待删除文件</p>
-                <p className="font-semibold text-xl">
+                <p className="font-semibold text-2xl">
                   {diagnostics?.filesystem?.trashItems ?? '--'}
                 </p>
               </div>
               <div>
                 <p className="text-default-500 text-sm">占用空间</p>
-                <p className="font-semibold text-xl">
+                <p className="font-semibold text-2xl">
                   {diagnostics?.filesystem?.trashSize 
                     ? formatBytes(diagnostics.filesystem.trashSize) 
                     : '--'}
@@ -286,7 +244,7 @@ export function HealthPage() {
       </div>
 
       {/* Memory & Performance */}
-      <Card className="bg-content1 border-divider">
+      <Card className="bg-content1 border-divider shadow-[var(--shadow-soft)]">
         <CardHeader className="pb-2">
           <div className="flex items-center gap-2">
             <Cpu size={18} className="text-violet-500" />
@@ -297,25 +255,25 @@ export function HealthPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div>
               <p className="text-default-400 text-sm">当前分配</p>
-              <p className="font-semibold text-lg">
+              <p className="font-semibold text-2xl">
                 {diagnostics?.memory?.allocMb ?? '--'} MB
               </p>
             </div>
             <div>
               <p className="text-default-400 text-sm">累计分配</p>
-              <p className="font-semibold text-lg">
+              <p className="font-semibold text-2xl">
                 {diagnostics?.memory?.totalAllocMb ?? '--'} MB
               </p>
             </div>
             <div>
               <p className="text-default-400 text-sm">系统内存</p>
-              <p className="font-semibold text-lg">
+              <p className="font-semibold text-2xl">
                 {diagnostics?.memory?.sysMb ?? '--'} MB
               </p>
             </div>
             <div>
               <p className="text-default-400 text-sm">GC 次数</p>
-              <p className="font-semibold text-lg">
+              <p className="font-semibold text-2xl">
                 {diagnostics?.memory?.numGc ?? '--'}
               </p>
             </div>
@@ -326,7 +284,7 @@ export function HealthPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div>
               <p className="text-default-400 text-sm">Goroutines</p>
-              <p className="font-semibold text-lg">
+              <p className="font-semibold text-2xl">
                 {diagnostics?.goroutines ?? '--'}
               </p>
             </div>
@@ -334,19 +292,19 @@ export function HealthPage() {
               <>
                 <div>
                   <p className="text-default-400 text-sm">数据面状态</p>
-                  <p className="font-semibold text-lg">
+                  <p className="font-semibold text-2xl">
                     {diagnostics.dataplane.healthy ? '健康' : '异常'}
                   </p>
                 </div>
                 <div>
                   <p className="text-default-400 text-sm">数据面版本</p>
-                  <p className="font-semibold text-lg">
+                  <p className="font-semibold text-2xl">
                     {diagnostics.dataplane.version || '--'}
                   </p>
                 </div>
                 <div>
                   <p className="text-default-400 text-sm">数据面运行</p>
-                  <p className="font-semibold text-lg">
+                  <p className="font-semibold text-2xl">
                     {diagnostics.dataplane.uptimeSec 
                       ? formatUptime(diagnostics.dataplane.uptimeSec) 
                       : '--'}
@@ -357,6 +315,7 @@ export function HealthPage() {
           </div>
         </CardBody>
       </Card>
+      </div>
     </div>
   )
 }
