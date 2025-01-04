@@ -27,7 +27,7 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     )
   }
 
-  // If auth is disabled, allow access
+  // If auth is explicitly disabled on server, allow access
   if (!authEnabled) {
     return <>{children}</>
   }
