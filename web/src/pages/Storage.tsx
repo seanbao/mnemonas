@@ -58,7 +58,8 @@ function MaintenanceCard({
   estimate,
   buttonText,
   buttonColor,
-  onPress
+  onPress,
+  isDisabled = false,
 }: {
   title: string
   description: string
@@ -69,6 +70,7 @@ function MaintenanceCard({
   buttonText: string
   buttonColor: 'success' | 'warning' | 'danger'
   onPress: () => void
+  isDisabled?: boolean
 }) {
   return (
     <div className="rounded-xl bg-content1 border border-divider p-5 card-hover">
@@ -98,6 +100,7 @@ function MaintenanceCard({
         variant="flat" 
         className="w-full"
         onPress={onPress}
+        isDisabled={isDisabled}
       >
         {buttonText}
       </Button>
@@ -136,7 +139,9 @@ export function StoragePage() {
     )
   }
 
-  const usedPercent = Math.min(((stats?.totalSize || 0) / (10 * 1024 * 1024 * 1024)) * 100, 100) // Assume 10GB capacity for demo
+  // TODO: Get actual capacity from API when available
+  const totalCapacity = stats?.totalCapacity || 10 * 1024 * 1024 * 1024 // Default 10GB if not provided
+  const usedPercent = Math.min(((stats?.totalSize || 0) / totalCapacity) * 100, 100)
 
   return (
     <div className="space-y-6">
@@ -181,7 +186,7 @@ export function StoragePage() {
           </div>
           <div className="flex justify-between text-sm text-default-500">
             <span>0 GB</span>
-            <span>10 GB</span>
+            <span>{formatBytes(totalCapacity)}</span>
           </div>
         </div>
       </div>
@@ -222,11 +227,12 @@ export function StoragePage() {
           description="验证所有数据完整性"
           icon={Activity}
           gradient="from-emerald-500 to-green-500"
-          lastRun="上次巡检: 2 小时前"
-          estimate="预计耗时: 约 5 分钟"
-          buttonText="开始巡检"
+          lastRun="功能开发中"
+          estimate="即将推出"
+          buttonText="开始巡检（即将推出）"
           buttonColor="success"
           onPress={() => {}}
+          isDisabled
         />
         
         <MaintenanceCard
@@ -234,11 +240,12 @@ export function StoragePage() {
           description="清理无引用的数据块"
           icon={Trash2}
           gradient="from-amber-500 to-orange-500"
-          lastRun="上次清理: 1 天前"
-          estimate="可回收: 约 128 MB"
-          buttonText="开始清理"
+          lastRun="功能开发中"
+          estimate="即将推出"
+          buttonText="开始清理（即将推出）"
           buttonColor="warning"
           onPress={() => {}}
+          isDisabled
         />
       </div>
     </div>
