@@ -13,6 +13,8 @@ import {
   RefreshCw,
   FileWarning
 } from 'lucide-react'
+import { PageHeader } from '@/components/ui/PageHeader'
+import { StatCard } from '@/components/ui/StatCard'
 import { getScrubResult, runScrub, downloadDiagnosticsExport, type ScrubResult, type ScrubError } from '@/api/files'
 import { formatBytes, formatDuration } from '@/lib/utils'
 
@@ -45,34 +47,30 @@ function ResultSummary({ result }: { result: ScrubResult }) {
   
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
-      <Card className="glass-card">
-        <CardBody className="p-3 text-center">
-          <div className="text-2xl font-bold text-primary">{result.total_objects || 0}</div>
-          <div className="text-xs text-default-500">总对象数</div>
-        </CardBody>
-      </Card>
-      <Card className="glass-card">
-        <CardBody className="p-3 text-center">
-          <div className="text-2xl font-bold text-success">{result.valid_objects || 0}</div>
-          <div className="text-xs text-default-500">有效对象</div>
-        </CardBody>
-      </Card>
-      <Card className="glass-card">
-        <CardBody className={`p-3 text-center ${hasErrors ? 'bg-danger/10' : ''}`}>
-          <div className={`text-2xl font-bold ${(result.corrupted_objects || 0) > 0 ? 'text-danger' : 'text-default-400'}`}>
-            {result.corrupted_objects || 0}
-          </div>
-          <div className="text-xs text-default-500">损坏对象</div>
-        </CardBody>
-      </Card>
-      <Card className="glass-card">
-        <CardBody className={`p-3 text-center ${(result.missing_objects || 0) > 0 ? 'bg-warning/10' : ''}`}>
-          <div className={`text-2xl font-bold ${(result.missing_objects || 0) > 0 ? 'text-warning' : 'text-default-400'}`}>
-            {result.missing_objects || 0}
-          </div>
-          <div className="text-xs text-default-500">缺失对象</div>
-        </CardBody>
-      </Card>
+      <StatCard
+        title="总对象数"
+        value={result.total_objects || 0}
+        icon={Database}
+        tone="primary"
+      />
+      <StatCard
+        title="有效对象"
+        value={result.valid_objects || 0}
+        icon={CheckCircle}
+        tone="success"
+      />
+      <StatCard
+        title="损坏对象"
+        value={result.corrupted_objects || 0}
+        icon={AlertCircle}
+        tone={(result.corrupted_objects || 0) > 0 ? 'danger' : 'default'}
+      />
+      <StatCard
+        title="缺失对象"
+        value={result.missing_objects || 0}
+        icon={XCircle}
+        tone={(result.missing_objects || 0) > 0 ? 'warning' : 'default'}
+      />
     </div>
   )
 }
@@ -154,29 +152,31 @@ export default function Maintenance() {
   const isRunning = scrubResult?.status === 'running'
   
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">系统维护</h1>
-          <p className="text-default-500 text-sm mt-1">数据校验与诊断工具</p>
-        </div>
-        <Button
-          color="secondary"
-          variant="flat"
-          startContent={<Download size={18} />}
-          isLoading={isExporting}
-          onPress={handleExport}
-        >
-          导出诊断信息
-        </Button>
-      </div>
+    <div className="h-full overflow-auto custom-scrollbar">
+      <div className="p-6 space-y-6">
+      <PageHeader
+        title="系统维护"
+        subtitle="数据校验与诊断工具"
+        icon={ShieldCheck}
+        actions={
+          <Button
+            color="secondary"
+            variant="flat"
+            startContent={<Download size={18} />}
+            isLoading={isExporting}
+            onPress={handleExport}
+          >
+            导出诊断信息
+          </Button>
+        }
+      />
       
       {/* Scrub Card */}
       <Card className="glass-card">
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center">
-              <ShieldCheck size={20} className="text-primary" />
+            <div className="w-10 h-10 rounded-xl bg-accent-primary/15 flex items-center justify-center">
+              <ShieldCheck size={20} className="text-accent-primary" />
             </div>
             <div>
               <h3 className="font-semibold">数据完整性校验</h3>
@@ -280,6 +280,7 @@ export default function Maintenance() {
           </ul>
         </CardBody>
       </Card>
+      </div>
     </div>
   )
 }

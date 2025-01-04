@@ -19,6 +19,8 @@ import {
 } from 'lucide-react'
 import { listFiles, getDownloadUrl, getThumbnailUrl, type FileItem } from '@/api/files'
 import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
+import { PageHeader } from '@/components/ui/PageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
 
 // Constants for recursive image fetching
 const MAX_DEPTH = 5 // Maximum directory depth to traverse
@@ -119,7 +121,7 @@ function ImageThumbnail({
     <div 
       className={cn(
         "relative rounded-lg overflow-hidden cursor-pointer group",
-        "bg-bg-secondary border border-divider hover:border-accent-primary/30",
+        "bg-content2 border border-divider hover:border-accent-primary/30",
         "transition-all",
         heightClass
       )}
@@ -142,7 +144,7 @@ function ImageThumbnail({
       />
       
       {error && (
-        <div className="absolute inset-0 flex items-center justify-center text-text-muted">
+        <div className="absolute inset-0 flex items-center justify-center text-default-500">
           <ImageIcon size={32} />
         </div>
       )}
@@ -480,15 +482,11 @@ export function AlbumPage() {
     return (
       <div className="h-full overflow-auto custom-scrollbar p-7">
         <div className="space-y-6">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center">
-              <ImageIcon size={20} className="text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold">相册</h1>
-              <p className="text-text-muted text-sm">正在加载...</p>
-            </div>
-          </div>
+          <PageHeader
+            title="相册"
+            subtitle="正在加载..."
+            icon={ImageIcon}
+          />
           <div className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-3 space-y-3">
             {Array.from({ length: 12 }).map((_, i) => (
               <div 
@@ -508,19 +506,11 @@ export function AlbumPage() {
   return (
     <div className="h-full overflow-auto custom-scrollbar p-7">
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-pink-500 to-rose-500 flex items-center justify-center">
-              <ImageIcon size={20} className="text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold">相册</h1>
-              {images && (
-                <p className="text-text-muted text-sm">共 {images.length} 张图片</p>
-              )}
-            </div>
-          </div>
-        </div>
+        <PageHeader
+          title="相册"
+          subtitle={images ? `共 ${images.length} 张图片` : undefined}
+          icon={ImageIcon}
+        />
 
         {images && images.length > 0 ? (
           <>
@@ -548,15 +538,11 @@ export function AlbumPage() {
             )}
           </>
         ) : (
-          <div className="rounded-xl bg-bg-card border border-divider p-12 flex flex-col items-center justify-center">
-            <div className="w-16 h-16 rounded-xl bg-bg-secondary flex items-center justify-center mb-4">
-              <ImageIcon size={32} className="text-text-muted" />
-            </div>
-            <h2 className="font-medium mb-1">暂无图片</h2>
-            <p className="text-text-muted text-sm text-center max-w-md">
-              上传图片到 NAS 后，这里将自动展示
-            </p>
-          </div>
+          <EmptyState
+            icon={ImageIcon}
+            title="暂无图片"
+            description="上传图片到 NAS 后，这里将自动展示"
+          />
         )}
       </div>
     </div>

@@ -16,14 +16,6 @@ import {
 import {
   Trash2,
   RotateCcw,
-  Folder,
-  File,
-  Image,
-  Video,
-  Music,
-  FileText,
-  FileCode,
-  Archive,
   AlertTriangle,
   Clock
 } from 'lucide-react'
@@ -34,76 +26,11 @@ import {
   emptyTrash,
   type TrashItem
 } from '@/api/files'
-import { formatBytes, cn, getFileIcon } from '@/lib/utils'
+import { FileIcon } from '@/components/ui/FileIcon'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation } from '@/lib/useBatchOperation'
-
-// File icon component
-function FileIcon({ name, isDir, size = 20 }: { name: string; isDir: boolean; size?: number }) {
-  const iconType = getFileIcon(name, isDir)
-
-  const icons: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
-    folder: Folder,
-    file: File,
-    image: Image,
-    video: Video,
-    audio: Music,
-    document: FileText,
-    code: FileCode,
-    archive: Archive,
-  }
-
-  const Icon = icons[iconType] || File
-  const gradients: Record<string, string> = {
-    folder: 'from-amber-400 to-orange-500',
-    image: 'from-pink-400 to-rose-500',
-    video: 'from-violet-400 to-purple-500',
-    audio: 'from-emerald-400 to-green-500',
-    document: 'from-red-400 to-rose-500',
-    code: 'from-blue-400 to-cyan-500',
-    archive: 'from-orange-400 to-amber-500',
-  }
-
-  const gradient = gradients[iconType]
-
-  if (gradient) {
-    return (
-      <div className={cn(
-        "flex items-center justify-center rounded-lg bg-gradient-to-br opacity-60",
-        gradient,
-        size > 24 ? "p-2" : "p-1"
-      )}>
-        <Icon size={size * 0.7} className="text-white" />
-      </div>
-    )
-  }
-
-  return <Icon size={size} className="text-default-400 opacity-60" />
-}
-
-// Format relative time
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diffMs = now.getTime() - date.getTime()
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
-
-  if (diffDays === 0) {
-    const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
-    if (diffHours === 0) {
-      const diffMinutes = Math.floor(diffMs / (1000 * 60))
-      return diffMinutes <= 1 ? '刚刚' : `${diffMinutes} 分钟前`
-    }
-    return `${diffHours} 小时前`
-  } else if (diffDays === 1) {
-    return '昨天'
-  } else if (diffDays < 7) {
-    return `${diffDays} 天前`
-  } else if (diffDays < 30) {
-    return `${Math.floor(diffDays / 7)} 周前`
-  } else {
-    return date.toLocaleDateString('zh-CN')
-  }
-}
+import { PageHeader } from '@/components/ui/PageHeader'
 
 // Calculate days until auto-delete (30 days retention)
 function daysUntilDelete(deletedAt: string): number {
@@ -132,19 +59,20 @@ function TrashRow({
   return (
     <div
       className={cn(
-        "flex items-center gap-4 px-4 py-3 transition-all duration-200 border-b border-divider",
-        "hover:bg-content2",
-        isSelected && "bg-primary-500/10 border-l-2 border-l-primary-500"
+        "flex items-center gap-4 px-4 py-3 transition-all duration-200 border-b border-divider hover:bg-content2/50",
+        isSelected && "bg-accent-primary/10"
       )}
     >
       <Checkbox
         isSelected={isSelected}
         onValueChange={onSelect}
       />
-      <FileIcon name={item.name} isDir={item.isDir} size={32} />
+      <div className="w-8 flex items-center justify-center">
+        <FileIcon name={item.name} isDir={item.isDir} size={24} variant="bare" />
+      </div>
       <div className="flex-1 min-w-0">
-        <p className="truncate font-medium text-default-600">{item.name}</p>
-        <p className="text-xs text-default-400 truncate">{item.originalPath}</p>
+        <p className="truncate font-medium text-foreground">{item.name}</p>
+        <p className="text-xs text-default-500 truncate">{item.originalPath}</p>
       </div>
       <div className="w-24 text-right text-sm text-default-500">
         {item.isDir ? '-' : formatBytes(item.size)}
@@ -155,12 +83,12 @@ function TrashRow({
           {formatRelativeTime(item.deletedAt)}
         </div>
         {daysLeft <= 7 && (
-          <Chip size="sm" color="warning" variant="flat" className="mt-1">
+          <Chip size="sm" variant="flat" color="warning" className="mt-1">
             {daysLeft} 天后自动删除
           </Chip>
         )}
       </div>
-      <div className="flex items-center gap-1">
+      <div className="w-20 flex items-center justify-end gap-1">
         <Button
           isIconOnly
           size="sm"
@@ -319,38 +247,31 @@ export function TrashPage() {
   const itemCount = data?.count ?? 0
 
   return (
-    <div className="h-full flex flex-col space-y-4">
+    <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-500/20 to-orange-500/20 flex items-center justify-center">
-            <Trash2 size={24} className="text-red-500" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold">回收站</h1>
-            <p className="text-sm text-default-500">
-              {itemCount} 项 · {formatBytes(totalSize)} · 30 天后自动清理
-            </p>
-          </div>
-        </div>
-
-        {itemCount > 0 && (
-          <Button
-            color="danger"
-            variant="flat"
-            startContent={<Trash2 size={16} />}
-            onPress={onEmptyOpen}
-          >
-            清空回收站
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="回收站"
+        subtitle={`${itemCount} 项 · ${formatBytes(totalSize)} · 30 天后自动清理`}
+        icon={Trash2}
+        actions={
+          itemCount > 0 ? (
+            <Button
+              color="danger"
+              variant="flat"
+              startContent={<Trash2 size={16} />}
+              onPress={onEmptyOpen}
+            >
+              清空回收站
+            </Button>
+          ) : null
+        }
+      />
 
       {/* Selection bar */}
       {selectedItems.size > 0 && (
-        <div className="flex items-center gap-4 px-4 py-3 bg-primary/10 backdrop-blur-sm rounded-xl border border-primary/20">
-          <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-            <span className="text-sm font-bold text-primary">{selectedItems.size}</span>
+        <div className="flex items-center gap-4 px-4 py-2.5 bg-accent-primary/10 backdrop-blur-sm rounded-xl border border-divider shadow-[var(--shadow-soft)]">
+          <div className="w-8 h-8 rounded-full bg-accent-primary/15 flex items-center justify-center">
+            <span className="text-sm font-bold text-accent-primary">{selectedItems.size}</span>
           </div>
           <span className="text-sm font-medium">已选择 {selectedItems.size} 项</span>
           <div className="flex-1" />
@@ -382,7 +303,7 @@ export function TrashPage() {
 
       {/* List header */}
       {items.length > 0 && (
-        <div className="flex items-center gap-4 px-4 py-3 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
+        <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
           <Checkbox
             isSelected={selectedItems.size === items.length && items.length > 0}
             isIndeterminate={selectedItems.size > 0 && selectedItems.size < items.length}
@@ -421,12 +342,12 @@ export function TrashPage() {
             />
           ))
         ) : (
-          <div className="flex flex-col items-center justify-center h-64 text-default-500">
-            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-default-100 to-default-200 flex items-center justify-center mb-4">
-              <Trash2 size={40} className="text-default-400" />
-            </div>
-            <p className="text-lg font-medium text-default-600 mb-1">回收站是空的</p>
-            <p className="text-sm text-default-400">删除的文件将在这里保留 30 天</p>
+          <div className="flex items-center justify-center h-64">
+            <EmptyState
+              icon={Trash2}
+              title="回收站是空的"
+              description="删除的文件将在这里保留 30 天"
+            />
           </div>
         )}
       </div>

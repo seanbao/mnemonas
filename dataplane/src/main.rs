@@ -2,6 +2,7 @@
 //! 
 //! Provides HTTP API and gRPC API for CAS storage operations
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -53,12 +54,15 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     
     // Initialize logging
+    // Disable ANSI colors when not writing to a terminal (e.g., redirected to file)
+    let use_ansi = std::io::stderr().is_terminal();
     FmtSubscriber::builder()
         .with_max_level(args.log_level)
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)
         .with_line_number(false)
+        .with_ansi(use_ansi)
         .init();
     
     info!(

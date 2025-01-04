@@ -1,0 +1,52 @@
+import type { ElementType, ReactNode } from 'react'
+import { Card, CardBody } from '@heroui/react'
+import { cn } from '@/lib/utils'
+
+type StatTone = 'default' | 'primary' | 'secondary' | 'success' | 'warning' | 'danger'
+
+interface StatCardProps {
+  title: string
+  value: string | number
+  subtitle?: string
+  icon?: ElementType
+  tone?: StatTone
+  action?: ReactNode
+  className?: string
+}
+
+export function StatCard({
+  title,
+  value,
+  subtitle,
+  icon: Icon,
+  tone = 'default',
+  action,
+  className,
+}: StatCardProps) {
+  const toneClasses: Record<StatTone, string> = {
+    default: 'bg-content2 text-foreground',
+    primary: 'bg-primary/10 text-primary',
+    secondary: 'bg-secondary/10 text-secondary',
+    success: 'bg-success/10 text-success',
+    warning: 'bg-warning/10 text-warning',
+    danger: 'bg-danger/10 text-danger',
+  }
+
+  return (
+    <Card className={cn("card-meridian", className)}>
+      <CardBody className="flex items-center gap-3 p-4">
+        {Icon && (
+          <div className={cn("w-10 h-10 rounded-lg flex items-center justify-center glass", toneClasses[tone])}>
+            <Icon size={20} className="text-current" />
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <p className="text-xs text-default-500 uppercase tracking-wide">{title}</p>
+          <p className="text-2xl font-semibold text-foreground truncate">{value}</p>
+          {subtitle && <p className="text-xs text-default-500">{subtitle}</p>}
+        </div>
+        {action && <div className="shrink-0">{action}</div>}
+      </CardBody>
+    </Card>
+  )
+}

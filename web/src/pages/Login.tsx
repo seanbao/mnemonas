@@ -64,22 +64,22 @@ export function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-bg-primary flex items-center justify-center p-4">
+    <div className="min-h-screen relative flex items-center justify-center p-4 bg-background overflow-hidden app-shell">
       {/* Background decoration */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-accent-primary/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-1/4 right-1/4 w-80 h-80 bg-accent-dark/10 rounded-full blur-3xl" />
+      <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+        <div className="absolute -top-[20%] -left-[10%] w-[50%] h-[50%] rounded-full bg-primary/5 blur-[120px]" />
+        <div className="absolute -bottom-[20%] -right-[10%] w-[50%] h-[50%] rounded-full bg-secondary/5 blur-[120px]" />
       </div>
 
-      <Card className="w-full max-w-md bg-bg-card border border-divider shadow-xl relative">
+      <Card className="w-full max-w-md card-meridian backdrop-blur-xl border border-divider/60 shadow-2xl relative z-10">
         <CardBody className="p-8">
           {/* Logo and title */}
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-accent-primary to-accent-dark flex items-center justify-center shadow-lg mb-4">
+          <div className="text-center mb-10">
+            <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center shadow-lg mb-6 transform transition-transform hover:scale-105 duration-500 logo-glow">
               <HardDrive size={32} className="text-white" />
             </div>
-            <h1 className="text-2xl font-bold text-text-primary">MnemoNAS</h1>
-            <p className="text-sm text-text-muted mt-1">登录以访问您的文件</p>
+            <h1 className="text-2xl font-bold text-gradient-meridian">MnemoNAS</h1>
+            <p className="text-default-500 text-sm mt-2">您的私有云存储空间</p>
           </div>
 
           {/* Login form */}
@@ -91,10 +91,15 @@ export function LoginPage() {
               onValueChange={setUsername}
               isDisabled={isLoading}
               autoComplete="username"
-              startContent={<User size={16} className="text-text-muted" />}
-              classNames={{ 
-                inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                label: "text-text-secondary",
+              variant="bordered"
+              radius="lg"
+              startContent={<User size={18} className="text-default-400 shrink-0" />}
+              classNames={{
+                base: "gap-1",
+                inputWrapper: "input-shell bg-content2/80 border-divider/70 hover:bg-content2 transition-colors gap-2 px-3",
+                innerWrapper: "gap-2",
+                input: "pl-0",
+                label: "text-default-500",
               }}
             />
             
@@ -106,17 +111,24 @@ export function LoginPage() {
               onValueChange={setPassword}
               isDisabled={isLoading}
               autoComplete="current-password"
-              startContent={<Lock size={16} className="text-text-muted" />}
-              classNames={{ 
-                inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                label: "text-text-secondary",
+              variant="bordered"
+              radius="lg"
+              startContent={<Lock size={18} className="text-default-400 shrink-0" />}
+              classNames={{
+                base: "gap-1",
+                inputWrapper: "input-shell bg-content2/80 border-divider/70 hover:bg-content2 transition-colors gap-2 px-3",
+                innerWrapper: "gap-2",
+                input: "pl-0",
+                label: "text-default-500",
               }}
             />
 
             <Button
               type="submit"
-              className="w-full bg-gradient-to-br from-accent-primary to-accent-dark text-white shadow-[0_4px_12px_rgba(167,139,250,0.4)]"
+              color="primary"
+              className="w-full font-medium shadow-lg shadow-primary/20"
               size="lg"
+              radius="lg"
               isLoading={isLoading}
               startContent={!isLoading && <LogIn size={18} />}
             >
@@ -125,9 +137,9 @@ export function LoginPage() {
           </form>
 
           {/* Hints */}
-          <div className="mt-8 pt-6 border-t border-divider">
-            <div className="text-xs text-text-muted text-center space-y-1">
-              <p>首次运行时，默认管理员账号为 <code className="text-accent-primary">admin</code></p>
+          <div className="mt-8 pt-6 border-t border-divider/50">
+            <div className="bg-default-100/50 rounded-lg p-3 text-xs text-default-500 text-center space-y-1">
+              <p>首次运行时默认管理员账号为 <span className="font-mono text-primary">admin</span></p>
               <p>初始密码请查看服务器启动日志</p>
             </div>
           </div>

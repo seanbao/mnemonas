@@ -21,8 +21,25 @@ vi.mock('@heroui/react', async () => {
   const React = await import('react')
   
   // Mock Table components that have jsdom issues
-  const MockTable = ({ children, ...props }: { children: React.ReactNode; 'aria-label'?: string }) => 
-    React.createElement('div', { 'data-testid': 'heroui-table', role: 'table', ...props }, children)
+  const MockTable = ({
+    children,
+    'aria-label': ariaLabel,
+    // Strip HeroUI-only props to avoid React warnings
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    removeWrapper: _removeWrapper,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    classNames: _classNames,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    isStriped: _isStriped,
+    ...props
+  }: { 
+    children: React.ReactNode
+    'aria-label'?: string
+    removeWrapper?: boolean
+    classNames?: Record<string, string>
+    isStriped?: boolean
+  }) => 
+    React.createElement('div', { 'data-testid': 'heroui-table', role: 'table', 'aria-label': ariaLabel, ...props }, children)
   
   const MockTableHeader = ({ children }: { children: React.ReactNode }) => 
     React.createElement('div', { 'data-testid': 'table-header', role: 'rowgroup' },
