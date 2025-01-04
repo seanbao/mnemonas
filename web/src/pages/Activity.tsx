@@ -2,7 +2,6 @@ import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Button,
-  Skeleton,
   Chip,
   Select,
   SelectItem,
@@ -139,15 +138,10 @@ export function ActivityPage() {
 
   if (isLoading) {
     return (
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <Skeleton className="w-48 h-8 rounded-lg" />
-          <Skeleton className="w-32 h-8 rounded-lg" />
-        </div>
-        <div className="space-y-2">
-          {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
-            <Skeleton key={i} className="w-full h-14 rounded-lg" />
-          ))}
+      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+        <div className="text-center">
+          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-default-500">加载活动日志...</p>
         </div>
       </div>
     )
@@ -216,7 +210,7 @@ export function ActivityPage() {
       )}
 
       {/* Activity list */}
-      <div className="flex-1 overflow-auto glass-card rounded-xl shadow-[var(--shadow-soft)]">
+      <div className="flex-1 overflow-auto card-meridian rounded-xl">
         {entries.length > 0 ? (
           entries.map((entry) => (
             <ActivityRow key={entry.id} entry={entry} />

@@ -7,7 +7,6 @@ import {
   CardHeader,
   Input,
   Button,
-  Spinner,
 } from '@heroui/react'
 import {
   Search as SearchIcon,
@@ -135,8 +134,8 @@ export function SearchPage() {
       </div>
 
       {/* Results */}
-      <Card className="flex-1 bg-content1 border border-divider shadow-[var(--shadow-soft)] overflow-hidden">
-        <CardHeader className="border-b border-divider bg-content2/60">
+      <Card className="flex-1 card-meridian overflow-hidden">
+        <CardHeader className="border-b border-divider bg-content2/30">
           <div className="flex items-center justify-between w-full">
             <h2 className="font-semibold text-foreground">搜索结果</h2>
             {data && (
@@ -149,7 +148,10 @@ export function SearchPage() {
         <CardBody className="p-0 overflow-auto custom-scrollbar">
           {isLoading ? (
             <div className="flex items-center justify-center h-40">
-              <Spinner size="lg" color="secondary" />
+              <div className="text-center">
+                <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                <p className="text-default-500">搜索中...</p>
+              </div>
             </div>
           ) : error ? (
             <div className="flex flex-col items-center justify-center h-40 text-rose-500">
