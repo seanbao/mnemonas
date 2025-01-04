@@ -158,22 +158,21 @@ func TestConfig_EnsureDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	cfg := Default()
-	cfg.Storage.DataDir = filepath.Join(tmpDir, "data")
-	cfg.Storage.MetadataDir = filepath.Join(tmpDir, "meta")
-	cfg.Storage.TempDir = filepath.Join(tmpDir, "tmp")
-	cfg.Storage.ThumbnailDir = filepath.Join(tmpDir, "thumb")
-	cfg.Storage.MaintenanceDir = filepath.Join(tmpDir, "maint")
+	// Set the storage root to use the temp directory
+	cfg.Storage.Root = tmpDir
 
 	if err := cfg.EnsureDirs(); err != nil {
 		t.Fatalf("EnsureDirs() error: %v", err)
 	}
 
+	// Check new directory structure
 	dirs := []string{
-		cfg.Storage.DataDir,
-		cfg.Storage.MetadataDir,
-		cfg.Storage.TempDir,
-		cfg.Storage.ThumbnailDir,
-		cfg.Storage.MaintenanceDir,
+		filepath.Join(tmpDir, "files"),
+		filepath.Join(tmpDir, ".mnemonas"),
+		filepath.Join(tmpDir, ".mnemonas", "objects"),
+		filepath.Join(tmpDir, ".mnemonas", "trash"),
+		filepath.Join(tmpDir, ".mnemonas", "thumbnails"),
+		filepath.Join(tmpDir, ".mnemonas", "maintenance"),
 	}
 
 	for _, dir := range dirs {
@@ -226,8 +225,8 @@ func TestConfig_TimeoutValues(t *testing.T) {
 func TestConfig_RetentionDefaults(t *testing.T) {
 	cfg := Default()
 
-	if cfg.Storage.Retention.MaxVersions != 100 {
-		t.Errorf("MaxVersions = %d, want 100", cfg.Storage.Retention.MaxVersions)
+	if cfg.Storage.Retention.MaxVersions != 50 {
+		t.Errorf("MaxVersions = %d, want 50", cfg.Storage.Retention.MaxVersions)
 	}
 
 	if cfg.Storage.Retention.MinFreeSpace != 10*1024*1024*1024 {
