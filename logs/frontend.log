@@ -3,41 +3,7 @@
 > vite
 
 
-  VITE v7.3.0  ready in 207 ms
+  VITE v7.3.0  ready in 153 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
-2:07:03 PM [vite] (client) hmr update /src/index.css
-2:07:16 PM [vite] (client) hmr update /src/index.css
-2:07:46 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
-2:07:57 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
-2:08:36 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
-2:08:49 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
-4:10:47 PM [vite] http proxy error: /api/v1/stats
-Error: connect ECONNREFUSED 127.0.0.1:8080
-    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-4:10:47 PM [vite] http proxy error: /api/v1/files/
-Error: connect ECONNREFUSED 127.0.0.1:8080
-    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-3:05:50 PM [vite] (client) hmr update /src/index.css
-3:05:55 PM [vite] (client) hmr update /src/index.css, /src/components/layout/AppLayout.tsx
-3:06:04 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Header.tsx
-3:06:13 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Sidebar.tsx
-3:06:18 PM [vite] (client) hmr update /src/index.css, /src/components/ui/PageHeader.tsx
-3:06:24 PM [vite] (client) hmr update /src/index.css, /src/components/ui/StatCard.tsx
-3:06:29 PM [vite] (client) hmr update /src/index.css, /src/components/ui/EmptyState.tsx
-3:06:34 PM [vite] (client) hmr update /src/index.css, /src/components/ui/FileIcon.tsx
-3:07:06 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
-3:07:17 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
-3:07:26 PM [vite] (client) hmr update /src/index.css, /src/pages/ShareAccess.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/pages/ShareAccess.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/components/layout/AppLayout.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/pages/Files.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Header.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/components/layout/Sidebar.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/components/ui/PageHeader.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/components/ui/StatCard.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/components/ui/EmptyState.tsx
-3:08:50 PM [vite] (client) hmr update /src/index.css, /src/components/ui/FileIcon.tsx
