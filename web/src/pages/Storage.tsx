@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Button, Skeleton } from '@heroui/react'
+import { Button, Skeleton, Chip } from '@heroui/react'
 import { 
   HardDrive, 
   Activity, 
@@ -13,47 +13,15 @@ import {
 } from 'lucide-react'
 import { getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
-
-// Stat card for storage metrics
-function StorageStatCard({ 
-  label, 
-  value, 
-  icon: Icon, 
-  gradient,
-  subValue 
-}: { 
-  label: string
-  value: string | number
-  icon: React.ElementType
-  gradient: string
-  subValue?: string
-}) {
-  return (
-    <div className="rounded-xl bg-content1 border border-divider p-4 card-hover">
-      <div className="flex items-start justify-between">
-        <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${gradient} flex items-center justify-center`}>
-          <Icon size={20} className="text-white" />
-        </div>
-        {subValue && (
-          <span className="text-xs text-success bg-success/10 px-2 py-1 rounded-full">
-            {subValue}
-          </span>
-        )}
-      </div>
-      <div className="mt-3">
-        <p className="text-xl font-semibold">{value}</p>
-        <p className="text-sm text-default-500">{label}</p>
-      </div>
-    </div>
-  )
-}
+import { PageHeader } from '@/components/ui/PageHeader'
+import { StatCard } from '@/components/ui/StatCard'
 
 // Action card for maintenance operations
 function MaintenanceCard({
   title,
   description,
   icon: Icon,
-  gradient,
+  iconClass,
   lastRun,
   estimate,
   buttonText,
@@ -64,7 +32,7 @@ function MaintenanceCard({
   title: string
   description: string
   icon: React.ElementType
-  gradient: string
+  iconClass: string
   lastRun: string
   estimate: string
   buttonText: string
@@ -73,10 +41,10 @@ function MaintenanceCard({
   isDisabled?: boolean
 }) {
   return (
-    <div className="rounded-xl bg-content1 border border-divider p-5 card-hover">
+    <div className="rounded-xl bg-content1 border border-divider p-5 card-hover shadow-[var(--shadow-soft)]">
       <div className="flex items-center gap-3 mb-4">
-        <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${gradient} flex items-center justify-center`}>
-          <Icon size={20} className="text-white" />
+        <div className={`w-10 h-10 rounded-lg ${iconClass} flex items-center justify-center`}>
+          <Icon size={20} className="text-current" />
         </div>
         <div>
           <h3 className="font-medium">{title}</h3>
@@ -118,7 +86,7 @@ export function StoragePage() {
     return (
       <div className="space-y-6">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
+          <div className="w-10 h-10 rounded-lg bg-accent-primary flex items-center justify-center">
             <HardDrive size={20} className="text-white" />
           </div>
           <div>
@@ -144,32 +112,29 @@ export function StoragePage() {
   const usedPercent = Math.min(((stats?.totalSize || 0) / totalCapacity) * 100, 100)
 
   return (
-    <div className="space-y-6">
+    <div className="h-full overflow-auto custom-scrollbar">
+      <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
-            <HardDrive size={20} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold">存储管理</h1>
-            <p className="text-default-500 text-sm">CAS 内容寻址存储系统</p>
-          </div>
-        </div>
-        <Button 
-          variant="flat" 
-          startContent={<RefreshCw size={16} />}
-          onPress={() => refetch()}
-        >
-          刷新
-        </Button>
-      </div>
+      <PageHeader
+        title="存储管理"
+        subtitle="CAS 内容寻址存储系统"
+        icon={HardDrive}
+        actions={
+          <Button 
+            variant="flat" 
+            startContent={<RefreshCw size={16} />}
+            onPress={() => refetch()}
+          >
+            刷新
+          </Button>
+        }
+      />
 
       {/* Storage Overview Card */}
-      <div className="rounded-xl bg-content1 border border-divider p-5">
+      <div className="rounded-xl bg-content1 border border-divider p-5 shadow-[var(--shadow-soft)]">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <Database size={18} className="text-primary-500" />
+            <Database size={18} className="text-accent-primary" />
             <span className="font-medium">存储空间使用情况</span>
           </div>
           <span className="text-sm text-default-500">
@@ -180,7 +145,7 @@ export function StoragePage() {
         <div className="space-y-2">
           <div className="h-2 rounded-full bg-content2 overflow-hidden">
             <div 
-              className="h-full bg-gradient-to-r from-primary-500 to-violet-500 rounded-full"
+              className="h-full bg-accent-primary rounded-full"
               style={{ width: `${usedPercent}%` }}
             />
           </div>
@@ -193,30 +158,34 @@ export function StoragePage() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StorageStatCard
-          label="对象总数"
+        <StatCard
+          title="对象总数"
           value={stats?.totalObjects?.toLocaleString() || 0}
           icon={Database}
-          gradient="from-blue-500 to-cyan-500"
+          tone="primary"
         />
-        <StorageStatCard
-          label="存储大小"
+        <StatCard
+          title="存储大小"
           value={formatBytes(stats?.totalSize || 0)}
           icon={HardDrive}
-          gradient="from-violet-500 to-purple-500"
+          tone="primary"
         />
-        <StorageStatCard
-          label="去重率"
+        <StatCard
+          title="去重率"
           value={`${((stats?.dedupRatio || 0) * 100).toFixed(1)}%`}
           icon={Sparkles}
-          gradient="from-emerald-500 to-green-500"
-          subValue="高效"
+          tone="success"
+          action={
+            <Chip size="sm" color="success" variant="flat">
+              高效
+            </Chip>
+          }
         />
-        <StorageStatCard
-          label="节省空间"
+        <StatCard
+          title="节省空间"
           value={formatBytes((stats?.totalSize || 0) * (stats?.dedupRatio || 0))}
           icon={TrendingUp}
-          gradient="from-amber-500 to-orange-500"
+          tone="secondary"
         />
       </div>
 
@@ -226,7 +195,7 @@ export function StoragePage() {
           title="数据巡检 (Scrub)"
           description="验证所有数据完整性"
           icon={Activity}
-          gradient="from-emerald-500 to-green-500"
+          iconClass="bg-accent-primary/15 text-accent-primary"
           lastRun="功能开发中"
           estimate="即将推出"
           buttonText="开始巡检（即将推出）"
@@ -239,7 +208,7 @@ export function StoragePage() {
           title="垃圾回收 (GC)"
           description="清理无引用的数据块"
           icon={Trash2}
-          gradient="from-amber-500 to-orange-500"
+          iconClass="bg-warning/15 text-warning"
           lastRun="功能开发中"
           estimate="即将推出"
           buttonText="开始清理（即将推出）"
@@ -247,6 +216,7 @@ export function StoragePage() {
           onPress={() => {}}
           isDisabled
         />
+      </div>
       </div>
     </div>
   )

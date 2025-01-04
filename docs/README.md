@@ -30,6 +30,7 @@
 | [架构设计](architecture.md) | 系统架构与技术选型 |
 | [设计决策](design-decisions.md) | 技术选型理由与竞争力目标 |
 | [开发指南](development.md) | 本地开发环境搭建 |
+| [测试策略](testing-strategy.md) | 多层测试方案：单元/集成/E2E/AI 辅助 |
 | [API 参考](api-reference.md) | REST API 端点与请求/响应格式 |
 | [扩展点设计](extension-points.md) | 阶段 2 接口草案（S3/插件/Runner） |
 

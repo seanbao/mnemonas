@@ -22,7 +22,7 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <HeroUIProvider>
-        <ToastProvider />
+        <ToastProvider placement="top-center" />
         <App />
       </HeroUIProvider>
     </QueryClientProvider>

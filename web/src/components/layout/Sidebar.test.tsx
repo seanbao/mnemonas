@@ -6,7 +6,7 @@ describe('Sidebar', () => {
   describe('rendering', () => {
     it('renders logo', () => {
       render(<Sidebar />)
-      expect(screen.getByText('NAS')).toBeTruthy()
+      expect(screen.getByText('MnemoNAS')).toBeTruthy()
       expect(screen.getByText('Memory Palace')).toBeTruthy()
     })
 
@@ -119,8 +119,8 @@ describe('Sidebar', () => {
 
     it('renders progress bar', () => {
       render(<Sidebar />)
-      // Progress bar should have bg-gradient class
-      const progressBar = document.querySelector('[class*="bg-gradient-to-r"]')
+      const storageSection = screen.getByText('存储空间').closest('div')?.parentElement
+      const progressBar = storageSection?.querySelector('div.bg-accent-primary')
       expect(progressBar).toBeTruthy()
     })
   })

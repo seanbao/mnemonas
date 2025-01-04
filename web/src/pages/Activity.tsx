@@ -33,26 +33,11 @@ import {
   type ActionType,
   type ActivityEntry,
 } from '@/api/activity'
-import { cn } from '@/lib/utils'
+import { cn, formatRelativeTime } from '@/lib/utils'
+import { PageHeader } from '@/components/ui/PageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
 
 // Format relative time
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diffMs = now.getTime() - date.getTime()
-  const diffSeconds = Math.floor(diffMs / 1000)
-  const diffMinutes = Math.floor(diffSeconds / 60)
-  const diffHours = Math.floor(diffMinutes / 60)
-  const diffDays = Math.floor(diffHours / 24)
-
-  if (diffSeconds < 60) return '刚刚'
-  if (diffMinutes < 60) return `${diffMinutes} 分钟前`
-  if (diffHours < 24) return `${diffHours} 小时前`
-  if (diffDays === 1) return '昨天'
-  if (diffDays < 7) return `${diffDays} 天前`
-  return date.toLocaleDateString('zh-CN')
-}
-
 // Get icon for action type
 function ActionIcon({ action }: { action: ActionType }) {
   const icons: Record<ActionType, React.ComponentType<{ size?: number; className?: string }>> = {
@@ -82,7 +67,7 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
   const color = getActionColor(entry.action)
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3 border-b border-divider hover:bg-content2 transition-colors">
+    <div className="flex items-center gap-4 px-4 py-2.5 border-b border-divider table-row">
       <div className={cn(
         "w-8 h-8 rounded-lg flex items-center justify-center",
         color === 'success' && "bg-success/20 text-success",
@@ -171,53 +156,46 @@ export function ActivityPage() {
   const entries = data?.items ?? []
 
   return (
-    <div className="h-full flex flex-col space-y-4">
+    <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500/20 to-cyan-500/20 flex items-center justify-center">
-            <Activity size={24} className="text-blue-500" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold">活动日志</h1>
-            <p className="text-sm text-default-500">
-              共 {data?.total ?? 0} 条记录
-            </p>
-          </div>
-        </div>
+      <PageHeader
+        title="活动日志"
+        subtitle={`共 ${data?.total ?? 0} 条记录`}
+        icon={Activity}
+        actions={
+          <>
+            <Select
+              placeholder="筛选操作"
+              size="sm"
+              className="w-40"
+              aria-label="筛选操作类型"
+              selectedKeys={actionFilter ? [actionFilter] : []}
+              onSelectionChange={(keys) => {
+                const selected = Array.from(keys)[0] as ActionType | undefined
+                setActionFilter(selected || '')
+                setPage(1)
+              }}
+              startContent={<Filter size={14} />}
+            >
+              {ALL_ACTIONS.map((action) => (
+                <SelectItem key={action}>
+                  {getActionLabel(action)}
+                </SelectItem>
+              ))}
+            </Select>
 
-        <div className="flex items-center gap-3">
-          <Select
-            placeholder="筛选操作"
-            size="sm"
-            className="w-40"
-            aria-label="筛选操作类型"
-            selectedKeys={actionFilter ? [actionFilter] : []}
-            onSelectionChange={(keys) => {
-              const selected = Array.from(keys)[0] as ActionType | undefined
-              setActionFilter(selected || '')
-              setPage(1)
-            }}
-            startContent={<Filter size={14} />}
-          >
-            {ALL_ACTIONS.map((action) => (
-              <SelectItem key={action}>
-                {getActionLabel(action)}
-              </SelectItem>
-            ))}
-          </Select>
-
-          <Button
-            variant="flat"
-            size="sm"
-            startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
-            onPress={() => refetch()}
-            isLoading={isRefetching}
-          >
-            刷新
-          </Button>
-        </div>
-      </div>
+            <Button
+              variant="flat"
+              size="sm"
+              startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
+              onPress={() => refetch()}
+              isLoading={isRefetching}
+            >
+              刷新
+            </Button>
+          </>
+        }
+      />
 
       {/* Filter chips */}
       {actionFilter && (
@@ -238,18 +216,18 @@ export function ActivityPage() {
       )}
 
       {/* Activity list */}
-      <div className="flex-1 overflow-auto glass-card rounded-xl">
+      <div className="flex-1 overflow-auto glass-card rounded-xl shadow-[var(--shadow-soft)]">
         {entries.length > 0 ? (
           entries.map((entry) => (
             <ActivityRow key={entry.id} entry={entry} />
           ))
         ) : (
-          <div className="flex flex-col items-center justify-center h-64 text-default-500">
-            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-default-100 to-default-200 flex items-center justify-center mb-4">
-              <Activity size={40} className="text-default-400" />
-            </div>
-            <p className="text-lg font-medium text-default-600 mb-1">暂无活动记录</p>
-            <p className="text-sm text-default-400">文件操作将在这里显示</p>
+          <div className="flex items-center justify-center h-64">
+            <EmptyState
+              icon={Activity}
+              title="暂无活动记录"
+              description="文件操作将在这里显示"
+            />
           </div>
         )}
       </div>

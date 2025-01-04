@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -57,11 +59,38 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to create directories")
 	}
 
+	// Load or create secrets (for JWT, etc.)
+	homeDir, _ := os.UserHomeDir()
+	dataRoot := filepath.Join(homeDir, ".mnemonas")
+	secrets, err := config.LoadOrCreateSecrets(dataRoot)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to load secrets")
+	}
+
+	// Use secrets for JWT if not configured
+	if cfg.Auth.JWTSecret == "" {
+		cfg.Auth.JWTSecret = secrets.JWTSecret
+	}
+
 	log.Info().
 		Str("version", version).
 		Str("data_dir", cfg.Storage.DataDir).
 		Str("address", cfg.Address()).
 		Msg("starting MnemoNAS")
+
+	// Security warnings
+	if !cfg.Auth.Enabled {
+		log.Warn().Msg("⚠️  Authentication is DISABLED - anyone can access your files!")
+		log.Warn().Msg("   Set [auth].enabled = true in config to enable authentication")
+	}
+	if cfg.WebDAV.Enabled && cfg.WebDAV.AuthType == "none" {
+		log.Warn().Msg("⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!")
+		log.Warn().Msg("   Set [webdav].auth_type = \"basic\" to enable WebDAV authentication")
+	}
+	if !cfg.Server.TLS.Enabled {
+		log.Warn().Msg("⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!")
+		log.Warn().Msg("   Set [server.tls].enabled = true for secure connections")
+	}
 
 	// Create filesystem
 	fs, err := webdavcas.NewFileSystem(cfg.Storage.DataDir, cfg.Storage.MetadataDir)
@@ -233,11 +262,13 @@ func main() {
 }
 
 func initLogger() {
-	// Use colored console output (development friendly)
+	// Use colored console output only when writing to a terminal
+	noColor := !isatty.IsTerminal(os.Stderr.Fd()) && !isatty.IsCygwinTerminal(os.Stderr.Fd())
 	log.Logger = zerolog.New(
 		zerolog.ConsoleWriter{
 			Out:        os.Stderr,
 			TimeFormat: "15:04:05",
+			NoColor:    noColor,
 		},
 	).With().Timestamp().Caller().Logger()
 

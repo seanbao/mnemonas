@@ -139,7 +139,7 @@ export function ShareDialog({
       onClose={handleClose}
       size="lg"
       classNames={{
-        base: "bg-bg-card border border-divider",
+        base: "bg-content1 border border-divider",
         header: "border-b border-divider",
         footer: "border-t border-divider",
       }}
@@ -152,9 +152,9 @@ export function ShareDialog({
         
         <ModalBody className="py-6">
           {/* File info */}
-          <div className="p-3 bg-bg-secondary rounded-lg border border-divider mb-4">
-            <div className="text-sm text-text-muted">分享路径</div>
-            <div className="font-medium text-text-primary truncate">{filePath}</div>
+          <div className="p-3 bg-content2 rounded-lg border border-divider mb-4">
+            <div className="text-sm text-default-500">分享路径</div>
+            <div className="font-medium text-foreground truncate">{filePath}</div>
           </div>
 
           {createdShare ? (
@@ -169,8 +169,8 @@ export function ShareDialog({
                 symbol="" 
                 variant="bordered"
                 classNames={{
-                  base: "w-full bg-bg-secondary border-divider",
-                  pre: "text-text-primary",
+                  base: "w-full bg-content2 border-divider",
+                  pre: "text-foreground",
                 }}
               >
                 {shareUrl}
@@ -201,7 +201,7 @@ export function ShareDialog({
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Lock size={16} className="text-text-muted" />
+                    <Lock size={16} className="text-default-500" />
                     <span className="text-sm font-medium">密码保护</span>
                   </div>
                   <Switch
@@ -217,7 +217,7 @@ export function ShareDialog({
                     value={password}
                     onValueChange={setPassword}
                     classNames={{
-                      inputWrapper: "bg-bg-secondary border-divider",
+                      inputWrapper: "bg-content2 border-divider",
                     }}
                   />
                 )}
@@ -226,14 +226,14 @@ export function ShareDialog({
               {/* Expiration */}
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Clock size={16} className="text-text-muted" />
+                  <Clock size={16} className="text-default-500" />
                   <span className="text-sm font-medium">有效期</span>
                 </div>
                 <Select
                   selectedKeys={[expiresIn]}
                   onSelectionChange={(keys) => setExpiresIn([...keys][0] as string || '')}
                   classNames={{
-                    trigger: "bg-bg-secondary border-divider",
+                    trigger: "bg-content2 border-divider",
                   }}
                 >
                   {EXPIRATION_OPTIONS.map((opt) => (
@@ -245,14 +245,14 @@ export function ShareDialog({
               {/* Permission */}
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Eye size={16} className="text-text-muted" />
+                  <Eye size={16} className="text-default-500" />
                   <span className="text-sm font-medium">权限</span>
                 </div>
                 <Select
                   selectedKeys={[permission]}
                   onSelectionChange={(keys) => setPermission([...keys][0] as 'read' | 'read_write' || 'read')}
                   classNames={{
-                    trigger: "bg-bg-secondary border-divider",
+                    trigger: "bg-content2 border-divider",
                   }}
                 >
                   {PERMISSION_OPTIONS.map((opt) => (
@@ -266,7 +266,7 @@ export function ShareDialog({
               {/* Max access count */}
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Users size={16} className="text-text-muted" />
+                  <Users size={16} className="text-default-500" />
                   <span className="text-sm font-medium">访问次数限制</span>
                 </div>
                 <Input
@@ -276,20 +276,20 @@ export function ShareDialog({
                   value={maxAccess}
                   onValueChange={setMaxAccess}
                   classNames={{
-                    inputWrapper: "bg-bg-secondary border-divider",
+                    inputWrapper: "bg-content2 border-divider",
                   }}
                 />
               </div>
 
               {/* Description */}
               <div className="space-y-3">
-                <span className="text-sm font-medium text-text-secondary">备注（可选）</span>
+                <span className="text-sm font-medium text-default-600">备注（可选）</span>
                 <Input
                   placeholder="添加备注信息"
                   value={description}
                   onValueChange={setDescription}
                   classNames={{
-                    inputWrapper: "bg-bg-secondary border-divider",
+                    inputWrapper: "bg-content2 border-divider",
                   }}
                 />
               </div>

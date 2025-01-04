@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -154,15 +155,36 @@ func (s *UserStore) createDefaultAdmin() error {
 		return err
 	}
 
-	fmt.Printf("\n")
-	fmt.Printf("╔══════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  Default admin account created                           ║\n")
-	fmt.Printf("║  Username: admin                                         ║\n")
-	fmt.Printf("║  Password: %-45s ║\n", password)
-	fmt.Printf("║                                                          ║\n")
-	fmt.Printf("║  Please change this password after first login!          ║\n")
-	fmt.Printf("╚══════════════════════════════════════════════════════════╝\n")
-	fmt.Printf("\n")
+	// Write password to a secure file for user to retrieve
+	passwordFile := filepath.Join(filepath.Dir(s.filePath), "initial-password.txt")
+	passwordContent := fmt.Sprintf(`MnemoNAS Initial Admin Password
+================================
+Username: admin
+Password: %s
+
+Please change this password after first login!
+This file will be automatically deleted after you login.
+`, password)
+
+	if err := os.WriteFile(passwordFile, []byte(passwordContent), 0600); err != nil {
+		return fmt.Errorf("failed to write initial password file: %w", err)
+	}
+
+	// Also print to terminal if running interactively (for convenience)
+	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+		fmt.Printf("\n")
+		fmt.Printf("╔══════════════════════════════════════════════════════════╗\n")
+		fmt.Printf("║  Default admin account created                           ║\n")
+		fmt.Printf("║  Username: admin                                         ║\n")
+		fmt.Printf("║  Password: %-45s ║\n", password)
+		fmt.Printf("║                                                          ║\n")
+		fmt.Printf("║  Please change this password after first login!          ║\n")
+		fmt.Printf("╚══════════════════════════════════════════════════════════╝\n")
+		fmt.Printf("\n")
+	} else {
+		// When not interactive, just log the file location
+		fmt.Printf("Initial admin password saved to: %s\n", passwordFile)
+	}
 
 	return nil
 }
@@ -211,6 +233,10 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 	user.LastLoginAt = &now
 	s.save()
 	s.mu.Unlock()
+
+	// Remove initial password file after successful login (if exists)
+	passwordFile := filepath.Join(filepath.Dir(s.filePath), "initial-password.txt")
+	os.Remove(passwordFile) // Ignore error - file may not exist
 
 	return user, nil
 }

@@ -108,7 +108,9 @@ describe('API: files', () => {
       const result = await listFiles('/')
       expect(result.files).toHaveLength(1)
       expect(result.path).toBe('/')
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/')
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/', {
+        headers: {},
+      })
     })
 
     it('handles path normalization', async () => {
@@ -124,7 +126,9 @@ describe('API: files', () => {
       })
 
       await listFiles('documents')
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/documents')
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/documents', {
+        headers: {},
+      })
     })
 
     it('throws ApiError on failure', async () => {
@@ -172,6 +176,7 @@ describe('API: files', () => {
       await expect(deleteFile('/test.txt')).resolves.toBeUndefined()
       expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/test.txt', {
         method: 'DELETE',
+        headers: {},
       })
     })
 
@@ -238,6 +243,7 @@ describe('API: files', () => {
       await expect(createDirectory('/new-folder')).resolves.toBeUndefined()
       expect(mockFetch).toHaveBeenCalledWith('/dav/new-folder', {
         method: 'MKCOL',
+        headers: {},
       })
     })
   })
@@ -267,7 +273,7 @@ describe('API: files', () => {
       await expect(restoreVersion('/test.txt', 'abc123')).resolves.toBeUndefined()
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/v1/versions/abc123/restore?path=%2Ftest.txt',
-        { method: 'POST' }
+        { method: 'POST', headers: {} }
       )
     })
   })
@@ -315,6 +321,7 @@ describe('API: files', () => {
         await expect(restoreFromTrash('item1')).resolves.toBeUndefined()
         expect(mockFetch).toHaveBeenCalledWith('/api/v1/trash/item1/restore', {
           method: 'POST',
+          headers: {},
         })
       })
 
@@ -326,7 +333,7 @@ describe('API: files', () => {
         await restoreFromTrash('item1', '/new-location/file.txt')
         expect(mockFetch).toHaveBeenCalledWith(
           '/api/v1/trash/item1/restore?path=%2Fnew-location%2Ffile.txt',
-          { method: 'POST' }
+          { method: 'POST', headers: {} }
         )
       })
     })
@@ -340,6 +347,7 @@ describe('API: files', () => {
         await expect(deleteFromTrash('item1')).resolves.toBeUndefined()
         expect(mockFetch).toHaveBeenCalledWith('/api/v1/trash/item1', {
           method: 'DELETE',
+          headers: {},
         })
       })
     })
@@ -453,7 +461,7 @@ describe('API: files', () => {
       })
 
       await expect(scrubData()).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/scrub', { method: 'POST' })
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/scrub', { method: 'POST', headers: {} })
     })
 
     it('throws ApiError on failure', async () => {
@@ -474,7 +482,7 @@ describe('API: files', () => {
       })
 
       await expect(runGC(true)).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/gc?dry_run=true', { method: 'POST' })
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/gc?dry_run=true', { method: 'POST', headers: {} })
     })
 
     it('runs garbage collection without dry run', async () => {
@@ -483,7 +491,7 @@ describe('API: files', () => {
       })
 
       await expect(runGC(false)).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/gc?dry_run=false', { method: 'POST' })
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/gc?dry_run=false', { method: 'POST', headers: {} })
     })
   })
 

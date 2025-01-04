@@ -47,53 +47,13 @@ import {
   Link2,
 } from 'lucide-react'
 import { ShareDialog } from '@/components/share'
+import { FileIcon } from '@/components/ui/FileIcon'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { listFiles, deleteFile, createDirectory, uploadFile, moveFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
-import { formatBytes, formatDate, cn, getFileIcon } from '@/lib/utils'
-
-// File icon component
-function FileIcon({ name, isDir, size = 20 }: { name: string; isDir: boolean; size?: number }) {
-  const iconType = getFileIcon(name, isDir)
-  
-  const icons: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
-    folder: Folder,
-    file: File,
-    image: Image,
-    video: Video,
-    audio: Music,
-    document: FileText,
-    code: FileCode,
-    archive: Archive,
-  }
-  
-  const Icon = icons[iconType] || File
-  
-  // Mnemosyne Icon Styles
-  const styles: Record<string, string> = {
-    folder: 'bg-gradient-to-br from-starlight to-amber-600 shadow-[0_4px_12px_rgba(252,211,77,0.25)]',
-    image: 'bg-gradient-to-br from-rose to-pink-700 shadow-[0_4px_12px_rgba(244,114,182,0.25)]',
-    video: 'bg-gradient-to-br from-accent-primary to-accent-dark shadow-[0_4px_12px_rgba(167,139,250,0.4)]',
-    audio: 'bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-[0_4px_12px_rgba(52,211,153,0.25)]',
-    document: 'bg-gradient-to-br from-accent-primary to-accent-dark shadow-[0_4px_12px_rgba(167,139,250,0.4)]',
-    code: 'bg-gradient-to-br from-aurora to-cyan-600 shadow-[0_4px_12px_rgba(34,211,238,0.25)]',
-    archive: 'bg-gradient-to-br from-orange-400 to-orange-600 shadow-[0_4px_12px_rgba(251,146,60,0.25)]',
-    file: 'bg-gradient-to-br from-text-muted to-text-secondary shadow-sm'
-  }
-  
-  const style = styles[iconType] || styles.file
-  
-  return (
-    <div className={cn(
-      "flex items-center justify-center rounded-[10px]",
-      style,
-      size > 24 ? "w-9 h-9" : "w-6 h-6"
-    )}>
-      <Icon size={size * 0.5} className="text-white" />
-    </div>
-  )
-}
+import { formatBytes, formatDate, cn } from '@/lib/utils'
 
 // Breadcrumb navigation component
 function Breadcrumbs({ 
@@ -110,10 +70,10 @@ function Breadcrumbs({
       <button
         onClick={() => onNavigate('/')}
         className={cn(
-          "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all",
-          path === '/' 
-            ? "bg-accent-primary/15 text-accent-primary font-medium" 
-            : "text-text-muted hover:text-text-primary hover:bg-bg-hover"
+          "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
+          segments.length === 0
+            ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
+            : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
         )}
       >
         <Home size={14} />
@@ -126,14 +86,14 @@ function Breadcrumbs({
         
         return (
           <div key={segmentPath} className="flex items-center gap-1">
-            <ChevronRight size={14} className="text-text-muted" />
+            <ChevronRight size={14} className="text-default-500" />
             <button
               onClick={() => onNavigate(segmentPath)}
               className={cn(
-                "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate",
+                "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
                 isLast 
-                  ? "bg-accent-primary/15 text-accent-primary font-medium" 
-                  : "text-text-muted hover:text-text-primary hover:bg-bg-hover"
+                  ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
+                  : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
               )}
             >
               {segment}
@@ -188,8 +148,8 @@ function FileRow({
   return (
     <div 
       className={cn(
-        "group grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3.5 cursor-pointer transition-all duration-150 border-b border-divider items-center",
-        "hover:bg-bg-hover",
+        "group grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3 cursor-pointer transition-all duration-150 border-b border-divider items-center",
+        "hover:bg-content2/60",
         isSelected && "bg-accent-primary/10"
       )}
       onClick={onOpen}
@@ -204,7 +164,7 @@ function FileRow({
             "w-5 h-5 border-2 rounded-md flex items-center justify-center transition-all duration-150",
             isSelected 
               ? "bg-accent-primary border-accent-primary" 
-              : "border-text-muted group-hover:border-accent-primary"
+              : "border-default-400 group-hover:border-accent-primary"
           )}
           onClick={onSelect}
         >
@@ -213,29 +173,29 @@ function FileRow({
       </div>
       
       <div className="flex items-center gap-3.5 min-w-0">
-        <FileIcon name={file.name} isDir={file.isDir} size={36} />
+        <FileIcon name={file.name} isDir={file.isDir} size={36} variant="tile" />
         <div className="min-w-0">
-          <div className="font-medium text-text-primary truncate text-[13px]">{file.name}</div>
-          <div className="text-xs text-text-muted mt-0.5 truncate">
+          <div className="font-medium text-foreground truncate text-[13px]">{file.name}</div>
+          <div className="text-xs text-default-500 mt-0.5 truncate">
             {file.isDir ? '文件夹' : file.name.split('.').pop()?.toUpperCase() || 'FILE'}
           </div>
         </div>
       </div>
       
-      <div className="text-sm text-text-secondary">
+      <div className="text-sm text-default-600">
         {file.isDir ? '—' : formatBytes(file.size)}
       </div>
       
-      <div className="text-sm text-text-secondary">
+      <div className="text-sm text-default-600">
         {formatDate(file.modTime)}
       </div>
       
       <div className="flex items-center gap-2.5">
         {/* Version Indicator - Memory Stream */}
-        <div className="relative w-12 h-1.5 bg-bg-void rounded-full overflow-hidden">
-          <div className="absolute left-0 top-0 h-full bg-gradient-to-r from-starlight via-accent-primary to-aurora w-1/3 rounded-full" />
+        <div className="relative w-12 h-1.5 bg-content2 rounded-full overflow-hidden">
+          <div className="absolute left-0 top-0 h-full bg-accent-primary/60 w-1/3 rounded-full" />
         </div>
-        <span className="text-[10px] font-semibold text-starlight bg-starlight/15 px-2 py-0.5 rounded-md">
+        <span className="text-[10px] font-semibold text-accent-primary bg-accent-primary/15 px-2 py-0.5 rounded-md">
           1
         </span>
       </div>
@@ -244,13 +204,13 @@ function FileRow({
       <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
         <Dropdown placement="bottom-end">
           <DropdownTrigger>
-            <button className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-bg-secondary">
-              <MoreVertical size={16} className="text-text-muted" />
+            <button className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-content2">
+              <MoreVertical size={16} className="text-default-500" />
             </button>
           </DropdownTrigger>
           <DropdownMenu 
             aria-label="文件操作"
-            classNames={{ base: "bg-bg-card border border-divider shadow-xl" }}
+            classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
           >
             <DropdownSection title="操作" showDivider>
               {file.isDir ? (
@@ -288,7 +248,7 @@ function FileRow({
             <DropdownSection title="分享">
               <DropdownItem 
                 key="favorite" 
-                startContent={<Star size={16} className={isFavorited ? "fill-starlight text-starlight" : ""} />}
+                startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
                 onPress={onToggleFavorite}
               >
                 {isFavorited ? '取消收藏' : '添加收藏'}
@@ -330,49 +290,45 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
   if (!file) return null
 
   return (
-    <aside className="w-[300px] bg-bg-secondary border-l border-divider p-6 flex flex-col gap-6 relative overflow-hidden shrink-0">
-      {/* Background Decoration */}
-      <div className="absolute top-0 right-0 w-[200px] h-[200px] bg-radial-gradient from-accent-primary/10 to-transparent pointer-events-none" />
-      
+    <aside className="w-[300px] bg-content2 border-l border-divider p-6 flex flex-col gap-6 relative overflow-hidden shrink-0">
       <div className="text-center relative z-10">
-        <div className="w-[88px] h-[88px] mx-auto mb-4 rounded-[20px] bg-gradient-to-br from-rose to-pink-700 flex items-center justify-center shadow-[0_12px_32px_rgba(244,114,182,0.35)] relative">
-          <div className="absolute inset-[-4px] rounded-[24px] bg-gradient-to-br from-starlight to-accent-primary opacity-20 blur-md animate-pulse" />
-          <FileIcon name={file.name} isDir={file.isDir} size={88} />
+        <div className="w-[88px] h-[88px] mx-auto mb-4 rounded-[20px] bg-content1 flex items-center justify-center border border-divider">
+          <FileIcon name={file.name} isDir={file.isDir} size={88} variant="tile" />
         </div>
-        <h3 className="font-semibold text-base text-text-primary mb-1 truncate px-2">{file.name}</h3>
-        <p className="text-[13px] text-text-secondary">一段珍贵的记忆</p>
+        <h3 className="font-semibold text-base text-foreground mb-1 truncate px-2">{file.name}</h3>
+        <p className="text-[13px] text-default-600">一段珍贵的记忆</p>
       </div>
 
-      <div className="bg-bg-card rounded-xl p-4 relative z-10 border border-divider">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-text-muted mb-3.5">记忆详情</div>
+      <div className="bg-content1 rounded-xl p-4 relative z-10 border border-divider">
+        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">记忆详情</div>
         <div className="grid grid-cols-2 gap-4">
           <div className="text-center">
-            <div className="text-lg font-semibold bg-gradient-to-br from-accent-light to-moonlight bg-clip-text text-transparent">
+            <div className="text-lg font-semibold text-foreground">
               {file.isDir ? '-' : formatBytes(file.size)}
             </div>
-            <div className="text-[11px] text-text-muted mt-1">大小</div>
+            <div className="text-[11px] text-default-500 mt-1">大小</div>
           </div>
           <div className="text-center">
-            <div className="text-lg font-semibold bg-gradient-to-br from-accent-light to-moonlight bg-clip-text text-transparent">
+            <div className="text-lg font-semibold text-foreground">
               {file.name.split('.').pop()?.toUpperCase() || '-'}
             </div>
-            <div className="text-[11px] text-text-muted mt-1">类型</div>
+            <div className="text-[11px] text-default-500 mt-1">类型</div>
           </div>
         </div>
       </div>
 
       <div className="flex-1 relative z-10">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-text-muted mb-3.5">时光回溯</div>
-        <div className="relative pl-6 border-l-2 border-l-transparent before:absolute before:left-[7px] before:top-1 before:bottom-1 before:w-0.5 before:bg-gradient-to-b before:from-starlight before:via-accent-primary before:to-aurora before:rounded-full">
+        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">时光回溯</div>
+        <div className="relative pl-6 border-l border-divider">
           <div className="relative pb-5 last:pb-0">
-            <div className="absolute -left-[21px] top-0 w-3.5 h-3.5 rounded-full bg-bg-card border-2 border-starlight shadow-[0_0_8px_rgba(252,211,77,0.5)]" />
-            <div className="text-[13px] font-medium text-text-primary">现在 <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded bg-gradient-to-br from-starlight to-amber-600 text-black font-bold shadow-[0_2px_6px_rgba(252,211,77,0.4)]">当前</span></div>
-            <div className="text-[11px] text-text-muted mt-1">{formatDate(file.modTime)} 修改</div>
+            <div className="absolute -left-[20px] top-0 w-3 h-3 rounded-full bg-content1 border border-divider" />
+            <div className="text-[13px] font-medium text-foreground">现在 <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded bg-accent-primary/15 text-accent-primary font-medium">当前</span></div>
+            <div className="text-[11px] text-default-500 mt-1">{formatDate(file.modTime)} 修改</div>
           </div>
           <div className="relative pb-5 last:pb-0">
-            <div className="absolute -left-[21px] top-0 w-3.5 h-3.5 rounded-full bg-bg-card border-2 border-accent-primary shadow-[0_0_8px_rgba(167,139,250,0.5)]" />
-            <div className="text-[13px] font-medium text-text-primary">昨日记忆</div>
-            <div className="text-[11px] text-text-muted mt-1">昨天 09:15 保存</div>
+            <div className="absolute -left-[20px] top-0 w-3 h-3 rounded-full bg-content1 border border-divider" />
+            <div className="text-[13px] font-medium text-foreground">昨日记忆</div>
+            <div className="text-[11px] text-default-500 mt-1">昨天 09:15 保存</div>
           </div>
         </div>
       </div>
@@ -422,8 +378,8 @@ function FileCard({
   return (
     <div
       className={cn(
-        "group relative bg-bg-card border border-divider rounded-xl p-4 cursor-pointer transition-all duration-200",
-        "hover:border-accent-primary/50 hover:shadow-[0_4px_20px_rgba(167,139,250,0.15)]",
+        "group relative bg-content1 border border-divider rounded-xl p-4 cursor-pointer transition-all duration-200",
+        "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
         isSelected && "border-accent-primary bg-accent-primary/5"
       )}
       onClick={onOpen}
@@ -435,10 +391,10 @@ function FileCard({
       >
         <div
           className={cn(
-            "w-5 h-5 border-2 rounded-md flex items-center justify-center transition-all duration-150 bg-bg-card/80 backdrop-blur-sm",
+            "w-5 h-5 border-2 rounded-md flex items-center justify-center transition-all duration-150 bg-content1/80 backdrop-blur-sm",
             isSelected
               ? "bg-accent-primary border-accent-primary"
-              : "border-text-muted opacity-0 group-hover:opacity-100"
+              : "border-default-400 opacity-0 group-hover:opacity-100"
           )}
           onClick={onSelect}
         >
@@ -453,13 +409,13 @@ function FileCard({
       >
         <Dropdown placement="bottom-end">
           <DropdownTrigger>
-            <button className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity bg-bg-card/80 backdrop-blur-sm hover:bg-bg-secondary">
-              <MoreVertical size={14} className="text-text-muted" />
+            <button className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity bg-content1/80 backdrop-blur-sm hover:bg-content2">
+              <MoreVertical size={14} className="text-default-500" />
             </button>
           </DropdownTrigger>
           <DropdownMenu 
             aria-label="文件操作"
-            classNames={{ base: "bg-bg-card border border-divider shadow-xl" }}
+            classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
           >
             <DropdownSection title="操作" showDivider>
               {file.isDir ? (
@@ -497,7 +453,7 @@ function FileCard({
             <DropdownSection title="分享" showDivider>
               <DropdownItem 
                 key="favorite" 
-                startContent={<Star size={16} className={isFavorited ? "fill-starlight text-starlight" : ""} />}
+                startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
                 onPress={onToggleFavorite}
               >
                 {isFavorited ? '取消收藏' : '添加收藏'}
@@ -537,14 +493,14 @@ function FileCard({
       {/* Icon */}
       <div className="flex justify-center py-6">
         <div className="w-16 h-16 rounded-2xl flex items-center justify-center">
-          <FileIcon name={file.name} isDir={file.isDir} size={64} />
+          <FileIcon name={file.name} isDir={file.isDir} size={64} variant="tile" />
         </div>
       </div>
 
       {/* File info */}
       <div className="text-center">
-        <div className="font-medium text-text-primary truncate text-sm mb-1">{file.name}</div>
-        <div className="text-xs text-text-muted">
+        <div className="font-medium text-foreground truncate text-sm mb-1">{file.name}</div>
+        <div className="text-xs text-default-500">
           {file.isDir ? '文件夹' : formatBytes(file.size)}
         </div>
       </div>
@@ -878,7 +834,7 @@ export function FilesPage() {
   }, [selectedFiles, sortedFiles])
 
   if (isLoading) {
-    return <div className="p-6 text-text-muted">Loading memories...</div>
+    return <div className="p-6 text-default-500">Loading memories...</div>
   }
 
   const hasSelection = selectedFiles.size > 0
@@ -893,29 +849,29 @@ export function FilesPage() {
     >
       {/* Drag overlay */}
       {isDragging && (
-        <div className="absolute inset-0 z-50 bg-bg-card/95 backdrop-blur-sm flex items-center justify-center border-2 border-dashed border-accent-primary rounded-xl m-4">
+        <div className="absolute inset-0 z-50 bg-content1/95 backdrop-blur-sm flex items-center justify-center border-2 border-dashed border-accent-primary rounded-xl m-4">
           <div className="text-center">
-            <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-accent-primary to-accent-dark flex items-center justify-center shadow-lg">
-              <Upload size={40} className="text-white" />
+            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-accent-primary flex items-center justify-center shadow-[var(--shadow-soft)]">
+              <Upload size={32} className="text-white" />
             </div>
-            <h3 className="text-xl font-semibold text-text-primary mb-2">释放以上传</h3>
-            <p className="text-text-muted">文件将上传到当前目录</p>
+            <h3 className="text-xl font-semibold text-foreground mb-2">释放以上传</h3>
+            <p className="text-default-500">文件将上传到当前目录</p>
           </div>
         </div>
       )}
 
       {/* Upload queue panel */}
       {uploadQueue.length > 0 && (
-        <div className="absolute bottom-4 right-4 z-40 w-80 bg-bg-card border border-divider rounded-xl shadow-xl overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 bg-bg-secondary border-b border-divider">
+        <div className="absolute bottom-4 right-4 z-40 w-80 bg-content1 border border-divider rounded-xl shadow-lg overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2.5 bg-content2 border-b border-divider">
             <span className="font-medium text-sm">
               {isUploading ? '上传中...' : '上传完成'}
             </span>
             <button 
               onClick={() => setUploadQueue([])}
-              className="p-1 hover:bg-bg-hover rounded"
+              className="p-1 hover:bg-content2 rounded"
             >
-              <X size={14} className="text-text-muted" />
+              <X size={14} className="text-default-500" />
             </button>
           </div>
           <div className="max-h-60 overflow-y-auto">
@@ -935,7 +891,7 @@ export function FilesPage() {
                     value={item.progress} 
                     classNames={{ 
                       base: "h-1",
-                      indicator: "bg-gradient-to-r from-accent-primary to-accent-dark"
+                      indicator: "bg-accent-primary"
                     }} 
                   />
                 )}
@@ -961,7 +917,7 @@ export function FilesPage() {
               <>
                 <Button 
                   variant="bordered" 
-                  className="border-divider bg-bg-card text-text-secondary hover:bg-bg-hover"
+                  className="btn-secondary btn-sm"
                   startContent={<X size={16} />}
                   onPress={clearSelection}
                 >
@@ -969,7 +925,7 @@ export function FilesPage() {
                 </Button>
                 <Button 
                   variant="bordered" 
-                  className="border-divider bg-bg-card text-text-secondary hover:bg-bg-hover"
+                  className="btn-secondary btn-sm"
                   startContent={<Download size={16} />}
                   onPress={handleBatchDownload}
                 >
@@ -987,7 +943,7 @@ export function FilesPage() {
             ) : (
               <>
                 <Button 
-                  className="bg-gradient-to-br from-accent-primary to-accent-dark text-white shadow-[0_4px_12px_rgba(167,139,250,0.4)] border-none font-medium"
+                  className="btn-primary btn-md border-none font-medium"
                   startContent={<Star size={16} className="fill-current" />}
                   onPress={() => fileInputRef.current?.click()}
                   isLoading={isUploading}
@@ -996,7 +952,7 @@ export function FilesPage() {
                 </Button>
                 <Button 
                   variant="bordered" 
-                  className="border-divider bg-bg-card text-text-secondary hover:bg-bg-hover hover:text-text-primary hover:border-divider/50"
+                  className="btn-secondary btn-md"
                   startContent={<FolderPlus size={16} />}
                   onPress={onNewFolderOpen}
                 >
@@ -1006,15 +962,15 @@ export function FilesPage() {
             )}
           </div>
           
-          <div className="flex bg-bg-card border border-divider rounded-[10px] p-0.5">
+          <div className="flex bg-content1 border border-divider rounded-[10px] p-0.5 shadow-[var(--shadow-soft)]">
             <button 
-              className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-text-muted hover:text-text-secondary")}
+              className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
               onClick={() => setViewMode('list')}
             >
               <List size={16} />
             </button>
             <button 
-              className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-text-muted hover:text-text-secondary")}
+              className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
               onClick={() => setViewMode('grid')}
             >
               <Grid size={16} />
@@ -1024,21 +980,21 @@ export function FilesPage() {
 
         {/* File List / Grid */}
         {viewMode === 'list' ? (
-          <div className="flex-1 bg-bg-card border border-divider rounded-[14px] overflow-hidden flex flex-col shadow-sm">
+          <div className="flex-1 surface-card overflow-hidden flex flex-col">
             {/* Header */}
-            <div className="grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3.5 bg-bg-secondary border-b border-divider text-[11px] font-semibold text-text-muted uppercase tracking-wider">
+            <div className="grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3 table-head text-[11px] font-semibold">
               <div className="flex items-center justify-center">
                 <div 
                   className={cn(
                     "w-5 h-5 border-2 rounded-md cursor-pointer transition-colors",
-                    selectedFiles.size === sortedFiles.length && sortedFiles.length > 0 ? "bg-accent-primary border-accent-primary" : "border-text-muted hover:border-accent-primary"
+                    selectedFiles.size === sortedFiles.length && sortedFiles.length > 0 ? "bg-accent-primary border-accent-primary" : "border-default-400 hover:border-accent-primary"
                   )}
                   onClick={handleSelectAll}
                 />
               </div>
               <div>名称</div>
               <div>大小</div>
-              <div>最后记忆</div>
+              <div>修改时间</div>
               <div>时光印记</div>
               <div></div>
             </div>
@@ -1082,12 +1038,13 @@ export function FilesPage() {
               </div>
               
               {sortedFiles.length === 0 && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-text-muted">
-                  <div className="w-16 h-16 rounded-2xl bg-bg-secondary flex items-center justify-center mb-4 shadow-inner">
-                    <Folder size={32} className="text-text-muted/50" />
-                  </div>
-                  <p className="text-sm">这里空空如也</p>
-                  <p className="text-xs mt-1">点击「保存记忆」上传文件</p>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <EmptyState
+                    icon={Folder}
+                    title="这里空空如也"
+                    description="点击「保存记忆」上传文件"
+                    className="max-w-md"
+                  />
                 </div>
               )}
             </div>
@@ -1096,12 +1053,13 @@ export function FilesPage() {
           /* Grid View */
           <div className="flex-1 overflow-auto custom-scrollbar">
             {sortedFiles.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-text-muted">
-                <div className="w-16 h-16 rounded-2xl bg-bg-secondary flex items-center justify-center mb-4 shadow-inner">
-                  <Folder size={32} className="text-text-muted/50" />
-                </div>
-                <p className="text-sm">这里空空如也</p>
-                <p className="text-xs mt-1">点击「保存记忆」上传文件</p>
+              <div className="h-full flex items-center justify-center">
+                <EmptyState
+                  icon={Folder}
+                  title="这里空空如也"
+                  description="点击「保存记忆」上传文件"
+                  className="max-w-md"
+                />
               </div>
             ) : (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
@@ -1133,69 +1091,138 @@ export function FilesPage() {
       {activeFile && <PreviewPanel file={activeFile} />}
 
       {/* Modals */}
-      <Modal isOpen={isNewFolderOpen} onClose={onNewFolderClose} classNames={{ base: "bg-bg-card border border-divider" }}>
+      <Modal
+        isOpen={isNewFolderOpen}
+        onClose={onNewFolderClose}
+        size="sm"
+        classNames={{
+          base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden",
+          closeButton: "text-default-500 hover:text-foreground",
+        }}
+      >
         <ModalContent>
-          <ModalHeader className="text-text-primary">新建文件夹</ModalHeader>
-          <ModalBody>
-            <Input
-              label="文件夹名称"
-              placeholder="请输入文件夹名称"
-              value={newFolderName}
-              onValueChange={setNewFolderName}
-              autoFocus
-              classNames={{ inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary" }}
-            />
+          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl glass text-accent-primary flex items-center justify-center">
+                <FolderPlus size={18} />
+              </div>
+              <div>
+                <div className="text-base font-semibold">新建文件夹</div>
+                <div className="text-xs text-default-500 mt-1">创建一个新的空间用于整理文件</div>
+              </div>
+            </div>
+          </ModalHeader>
+          <ModalBody className="pt-3 gap-4">
+              <Input
+                label="文件夹名称"
+                placeholder="请输入文件夹名称"
+                value={newFolderName}
+                onValueChange={setNewFolderName}
+                autoFocus
+                radius="lg"
+                classNames={{
+                  base: "gap-1",
+                  inputWrapper: "input-shell bg-content2/80 border-divider/80 hover:bg-content2 focus-within:!border-accent-primary shadow-[var(--shadow-soft)]",
+                  label: "text-default-500",
+                }}
+              />
+              <div className="flex items-center justify-between text-xs text-default-500">
+                <span>支持中文与英文名称</span>
+                <span className="text-default-400">建议 2-24 个字符</span>
+              </div>
           </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={onNewFolderClose} className="text-text-secondary">取消</Button>
-            <Button className="bg-accent-primary text-white" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()}>创建</Button>
+          <ModalFooter className="pt-1">
+              <Button variant="light" onPress={onNewFolderClose} className="text-default-600">取消</Button>
+            <Button className="bg-accent-primary text-white shadow-[var(--shadow-soft)]" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()}>创建</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
 
-      <Modal isOpen={isRenameOpen} onClose={onRenameClose} classNames={{ base: "bg-bg-card border border-divider" }}>
+      <Modal
+        isOpen={isRenameOpen}
+        onClose={onRenameClose}
+        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+      >
         <ModalContent>
-          <ModalHeader className="text-text-primary">重命名</ModalHeader>
+          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl glass text-accent-primary flex items-center justify-center">
+                <Pencil size={18} />
+              </div>
+              <div>
+                <div className="text-base font-semibold">重命名</div>
+                <div className="text-xs text-default-500 mt-1">为项目设置新的名称</div>
+              </div>
+            </div>
+          </ModalHeader>
           <ModalBody>
-            <Input
-              label="新名称"
-              placeholder="请输入新名称"
-              value={renameValue}
-              onValueChange={setRenameValue}
-              autoFocus
-              classNames={{ inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary" }}
-            />
+              <Input
+                label="新名称"
+                placeholder="请输入新名称"
+                value={renameValue}
+                onValueChange={setRenameValue}
+                autoFocus
+                classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+              />
           </ModalBody>
           <ModalFooter>
-            <Button variant="light" onPress={onRenameClose} className="text-text-secondary">取消</Button>
+              <Button variant="light" onPress={onRenameClose} className="text-default-600">取消</Button>
             <Button className="bg-accent-primary text-white" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name}>确定</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
 
-      <Modal isOpen={isDeleteOpen} onClose={onDeleteClose} classNames={{ base: "bg-bg-card border border-divider" }}>
+      <Modal
+        isOpen={isDeleteOpen}
+        onClose={onDeleteClose}
+        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+      >
         <ModalContent>
-          <ModalHeader className="text-text-primary">确认删除</ModalHeader>
+          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl glass text-danger flex items-center justify-center">
+                <AlertCircle size={18} />
+              </div>
+              <div>
+                <div className="text-base font-semibold">确认删除</div>
+                <div className="text-xs text-default-500 mt-1">文件将被移入回收站</div>
+              </div>
+            </div>
+          </ModalHeader>
           <ModalBody>
-            <p className="text-text-secondary">确定要删除 <strong className="text-text-primary">{actionFile?.name}</strong> 吗？</p>
-            <p className="text-xs text-text-muted mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
+              <p className="text-default-600">确定要删除 <strong className="text-foreground">{actionFile?.name}</strong> 吗？</p>
+              <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
           <ModalFooter>
-            <Button variant="light" onPress={onDeleteClose} className="text-text-secondary">取消</Button>
+              <Button variant="light" onPress={onDeleteClose} className="text-default-600">取消</Button>
             <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending}>删除</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
 
-      <Modal isOpen={isBatchDeleteOpen} onClose={onBatchDeleteClose} classNames={{ base: "bg-bg-card border border-divider" }}>
+      <Modal
+        isOpen={isBatchDeleteOpen}
+        onClose={onBatchDeleteClose}
+        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+      >
         <ModalContent>
-          <ModalHeader className="text-text-primary">批量删除</ModalHeader>
+          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl glass text-danger flex items-center justify-center">
+                <Trash2 size={18} />
+              </div>
+              <div>
+                <div className="text-base font-semibold">批量删除</div>
+                <div className="text-xs text-default-500 mt-1">选中文件将被移入回收站</div>
+              </div>
+            </div>
+          </ModalHeader>
           <ModalBody>
-            <p className="text-text-secondary">确定要删除选中的 <strong className="text-text-primary">{selectedFiles.size}</strong> 个文件吗？</p>
-            <p className="text-xs text-text-muted mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
+              <p className="text-default-600">确定要删除选中的 <strong className="text-foreground">{selectedFiles.size}</strong> 个文件吗？</p>
+              <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
           <ModalFooter>
-            <Button variant="light" onPress={onBatchDeleteClose} className="text-text-secondary">取消</Button>
+              <Button variant="light" onPress={onBatchDeleteClose} className="text-default-600">取消</Button>
             <Button color="danger" onPress={handleBatchDelete}>删除全部</Button>
           </ModalFooter>
         </ModalContent>

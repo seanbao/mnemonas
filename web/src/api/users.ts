@@ -3,6 +3,8 @@
  * Admin-only endpoints for managing users
  */
 
+import { authFetch } from './auth'
+
 export interface User {
   id: string
   username: string
@@ -45,9 +47,7 @@ const API_BASE = '/api/v1/admin/users'
  * List all users (admin only)
  */
 export async function listUsers(): Promise<ListUsersResponse> {
-  const response = await fetch(`${API_BASE}/`, {
-    credentials: 'include',
-  })
+  const response = await authFetch(`${API_BASE}/`)
   
   if (!response.ok) {
     const error = await response.json()
@@ -61,12 +61,11 @@ export async function listUsers(): Promise<ListUsersResponse> {
  * Create a new user (admin only)
  */
 export async function createUser(data: CreateUserRequest): Promise<UserResponse> {
-  const response = await fetch(`${API_BASE}/`, {
+  const response = await authFetch(`${API_BASE}/`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    credentials: 'include',
     body: JSON.stringify(data),
   })
   
@@ -82,9 +81,8 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
  * Delete a user (admin only)
  */
 export async function deleteUser(userId: string): Promise<{ success: boolean }> {
-  const response = await fetch(`${API_BASE}/${userId}`, {
+  const response = await authFetch(`${API_BASE}/${userId}`, {
     method: 'DELETE',
-    credentials: 'include',
   })
   
   if (!response.ok) {
@@ -102,12 +100,11 @@ export async function resetUserPassword(
   userId: string,
   data: ResetPasswordRequest
 ): Promise<{ success: boolean }> {
-  const response = await fetch(`${API_BASE}/${userId}/reset-password`, {
+  const response = await authFetch(`${API_BASE}/${userId}/reset-password`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    credentials: 'include',
     body: JSON.stringify(data),
   })
   
@@ -126,12 +123,11 @@ export async function toggleUserStatus(
   userId: string,
   disabled: boolean
 ): Promise<{ success: boolean }> {
-  const response = await fetch(`${API_BASE}/${userId}/status`, {
+  const response = await authFetch(`${API_BASE}/${userId}/status`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
     },
-    credentials: 'include',
     body: JSON.stringify({ disabled }),
   })
   

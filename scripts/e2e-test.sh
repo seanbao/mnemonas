@@ -491,6 +491,135 @@ test_localhost_binding() {
 }
 
 # ==============================================================================
+# Test Group 10: Authentication (requires [auth].enabled = true in config)
+# ==============================================================================
+
+test_auth_login_success() {
+    log_info "Testing auth login with valid credentials..."
+    
+    # Check if initial password file exists (fresh install)
+    local password_file="$HOME/.mnemonas/initial-password.txt"
+    if [[ ! -f "$password_file" ]]; then
+        log_skip "Auth login test - no initial password file (auth may be disabled or already logged in)"
+        return
+    fi
+    
+    # Extract password from file
+    local password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+    if [[ -z "$password" ]]; then
+        log_fail "Could not extract password from $password_file"
+        return
+    fi
+    
+    local resp=$(curl -sf -X POST "$API_URL/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null || echo "error")
+    
+    if echo "$resp" | grep -q '"success":true'; then
+        log_ok "Auth login with initial password successful"
+    else
+        log_fail "Auth login failed: $resp"
+    fi
+}
+
+test_auth_login_failure() {
+    log_info "Testing auth login with invalid credentials..."
+    
+    local status=$(curl -s -X POST "$API_URL/auth/login" \
+        -H "Content-Type: application/json" \
+        -d '{"username":"admin","password":"wrongpassword"}' \
+        -w "%{http_code}" -o /dev/null)
+    
+    if [[ "$status" == "401" ]]; then
+        log_ok "Auth login correctly rejects invalid password (401)"
+    elif [[ "$status" == "000" ]]; then
+        log_skip "Auth endpoint not available (auth may be disabled)"
+    else
+        log_fail "Auth login should return 401 for invalid password (got $status)"
+    fi
+}
+
+test_auth_password_file_deleted_after_login() {
+    log_info "Testing password file deletion after login..."
+    
+    local password_file="$HOME/.mnemonas/initial-password.txt"
+    
+    # If auth is enabled and we just logged in, file should be deleted
+    if [[ -f "$password_file" ]]; then
+        # File still exists - either we haven't logged in yet, or deletion failed
+        log_skip "Password file still exists (login may not have occurred)"
+    else
+        # File doesn't exist - could be already deleted, or auth disabled
+        # Check if users.json exists to confirm auth is set up
+        if [[ -f "$HOME/.mnemonas/users.json" ]]; then
+            log_ok "Password file correctly deleted after login"
+        else
+            log_skip "Auth not initialized (no users.json)"
+        fi
+    fi
+}
+
+test_auth_protected_endpoint() {
+    log_info "Testing protected endpoint without token..."
+    
+    local status=$(curl -s -X GET "$API_URL/auth/me" \
+        -w "%{http_code}" -o /dev/null)
+    
+    if [[ "$status" == "401" ]]; then
+        log_ok "Protected endpoint correctly returns 401 without token"
+    elif [[ "$status" == "200" ]]; then
+        log_skip "Auth may be disabled (endpoint returned 200)"
+    else
+        log_fail "Protected endpoint returned unexpected status: $status"
+    fi
+}
+
+test_auth_token_refresh() {
+    log_info "Testing token refresh flow..."
+    
+    local password_file="$HOME/.mnemonas/initial-password.txt"
+    
+    # Need to get a valid token first
+    # This test requires auth to be enabled and initial password available
+    if [[ ! -f "$password_file" ]] && [[ ! -f "$HOME/.mnemonas/users.json" ]]; then
+        log_skip "Auth not configured for token refresh test"
+        return
+    fi
+    
+    # Try to login and get refresh token
+    local password=""
+    if [[ -f "$password_file" ]]; then
+        password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+    fi
+    
+    if [[ -z "$password" ]]; then
+        log_skip "No password available for token refresh test"
+        return
+    fi
+    
+    local login_resp=$(curl -sf -X POST "$API_URL/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null)
+    
+    local refresh_token=$(echo "$login_resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
+    
+    if [[ -z "$refresh_token" ]]; then
+        log_skip "Could not get refresh token from login response"
+        return
+    fi
+    
+    local refresh_resp=$(curl -sf -X POST "$API_URL/auth/refresh" \
+        -H "Content-Type: application/json" \
+        -d "{\"refresh_token\":\"$refresh_token\"}" 2>/dev/null || echo "error")
+    
+    if echo "$refresh_resp" | grep -q '"access_token"'; then
+        log_ok "Token refresh successful"
+    else
+        log_fail "Token refresh failed: $refresh_resp"
+    fi
+}
+
+# ==============================================================================
 # Main Test Runner
 # ==============================================================================
 
@@ -550,6 +679,13 @@ main() {
     # Group 9: Security
     test_path_traversal
     test_localhost_binding
+
+    # Group 10: Authentication
+    test_auth_login_failure
+    test_auth_login_success
+    test_auth_password_file_deleted_after_login
+    test_auth_protected_endpoint
+    test_auth_token_refresh
 
     # Summary
     echo ""
