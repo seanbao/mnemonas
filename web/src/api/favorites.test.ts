@@ -1,0 +1,349 @@
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest'
+import {
+  listFavorites,
+  addFavorite,
+  removeFavorite,
+  checkFavorite,
+  checkFavorites,
+  updateFavoriteNote,
+  toggleFavorite,
+  FavoritesError,
+} from './favorites'
+
+// Mock authFetch
+vi.mock('./auth', () => ({
+  authFetch: vi.fn(),
+}))
+
+import { authFetch } from './auth'
+
+const mockAuthFetch = authFetch as Mock
+
+describe('Favorites API', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  describe('listFavorites', () => {
+    it('returns favorites array on success', async () => {
+      const mockFavorites = [
+        { path: '/file1.txt', user_id: 'user1', created_at: '2024-01-01' },
+        { path: '/file2.txt', user_id: 'user1', created_at: '2024-01-02' },
+      ]
+
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ favorites: mockFavorites, count: 2 }),
+      })
+
+      const result = await listFavorites()
+
+      expect(result).toEqual(mockFavorites)
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites')
+    })
+
+    it('returns empty array when no favorites', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ favorites: [], count: 0 }),
+      })
+
+      const result = await listFavorites()
+
+      expect(result).toEqual([])
+    })
+
+    it('throws FavoritesError on failure', async () => {
+      mockAuthFetch.mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ error: '服务器错误' }),
+      })
+
+      await expect(listFavorites()).rejects.toThrow(FavoritesError)
+    })
+
+    it('uses default message when error parsing fails', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.reject(new Error('parse error')),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: '获取收藏列表失败',
+      })
+    })
+  })
+
+  describe('addFavorite', () => {
+    it('adds favorite successfully', async () => {
+      const mockFavorite = {
+        path: '/file.txt',
+        user_id: 'user1',
+        created_at: '2024-01-01',
+      }
+
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockFavorite),
+      })
+
+      const result = await addFavorite('/file.txt')
+
+      expect(result).toEqual(mockFavorite)
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/file.txt', note: '' }),
+      })
+    })
+
+    it('adds favorite with note', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({}),
+      })
+
+      await addFavorite('/file.txt', '重要文件')
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/file.txt', note: '重要文件' }),
+      })
+    })
+
+    it('normalizes path before adding', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({}),
+      })
+
+      await addFavorite('file.txt') // Without leading slash
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/file.txt', note: '' }),
+      })
+    })
+
+    it('throws error with conflict message on 409', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: () => Promise.resolve({}),
+      })
+
+      await expect(addFavorite('/file.txt')).rejects.toMatchObject({
+        message: '已经收藏过了',
+        status: 409,
+      })
+    })
+
+    it('throws FavoritesError on other errors', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ error: '服务器错误' }),
+      })
+
+      await expect(addFavorite('/file.txt')).rejects.toThrow(FavoritesError)
+    })
+  })
+
+  describe('removeFavorite', () => {
+    it('removes favorite successfully', async () => {
+      mockAuthFetch.mockResolvedValueOnce({ ok: true })
+
+      await removeFavorite('/file.txt')
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
+        method: 'DELETE',
+      })
+    })
+
+    it('encodes path correctly', async () => {
+      mockAuthFetch.mockResolvedValueOnce({ ok: true })
+
+      await removeFavorite('/documents/my file.txt')
+
+      expect(mockAuthFetch).toHaveBeenCalledWith(
+        '/api/v1/favorites/documents/my%20file.txt',
+        { method: 'DELETE' }
+      )
+    })
+
+    it('throws FavoritesError on failure', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ error: '收藏不存在' }),
+      })
+
+      await expect(removeFavorite('/file.txt')).rejects.toThrow(FavoritesError)
+    })
+  })
+
+  describe('checkFavorite', () => {
+    it('returns true when favorited', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ is_favorite: true }),
+      })
+
+      const result = await checkFavorite('/file.txt')
+
+      expect(result).toBe(true)
+      expect(mockAuthFetch).toHaveBeenCalledWith(
+        '/api/v1/favorites/check?path=%2Ffile.txt'
+      )
+    })
+
+    it('returns false when not favorited', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ is_favorite: false }),
+      })
+
+      const result = await checkFavorite('/file.txt')
+
+      expect(result).toBe(false)
+    })
+
+    it('returns false on error', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+      })
+
+      const result = await checkFavorite('/file.txt')
+
+      expect(result).toBe(false)
+    })
+  })
+
+  describe('checkFavorites', () => {
+    it('checks multiple paths at once', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            favorites: {
+              '/file1.txt': true,
+              '/file2.txt': false,
+            },
+          }),
+      })
+
+      const result = await checkFavorites(['/file1.txt', '/file2.txt'])
+
+      expect(result).toEqual({
+        '/file1.txt': true,
+        '/file2.txt': false,
+      })
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/check-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: ['/file1.txt', '/file2.txt'] }),
+      })
+    })
+
+    it('returns all false on error', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+      })
+
+      const result = await checkFavorites(['/file1.txt', '/file2.txt'])
+
+      expect(result).toEqual({
+        '/file1.txt': false,
+        '/file2.txt': false,
+      })
+    })
+  })
+
+  describe('updateFavoriteNote', () => {
+    it('updates note successfully', async () => {
+      mockAuthFetch.mockResolvedValueOnce({ ok: true })
+
+      await updateFavoriteNote('/file.txt', '新备注')
+
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: '新备注' }),
+      })
+    })
+
+    it('throws FavoritesError on failure', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ error: '收藏不存在' }),
+      })
+
+      await expect(updateFavoriteNote('/file.txt', 'note')).rejects.toThrow(
+        FavoritesError
+      )
+    })
+  })
+
+  describe('toggleFavorite', () => {
+    it('removes favorite when currently favorited', async () => {
+      mockAuthFetch.mockResolvedValueOnce({ ok: true })
+
+      const result = await toggleFavorite('/file.txt', true)
+
+      expect(result).toBe(false)
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
+        method: 'DELETE',
+      })
+    })
+
+    it('adds favorite when not currently favorited', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({}),
+      })
+
+      const result = await toggleFavorite('/file.txt', false)
+
+      expect(result).toBe(true)
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '/file.txt', note: '' }),
+      })
+    })
+  })
+
+  describe('FavoritesError', () => {
+    it('has correct name', () => {
+      const error = new FavoritesError('test', 404)
+      expect(error.name).toBe('FavoritesError')
+    })
+
+    it('isNotFound returns true for 404', () => {
+      const error = new FavoritesError('not found', 404)
+      expect(error.isNotFound).toBe(true)
+    })
+
+    it('isNotFound returns false for other status', () => {
+      const error = new FavoritesError('error', 500)
+      expect(error.isNotFound).toBe(false)
+    })
+
+    it('isConflict returns true for 409', () => {
+      const error = new FavoritesError('conflict', 409)
+      expect(error.isConflict).toBe(true)
+    })
+
+    it('isConflict returns false for other status', () => {
+      const error = new FavoritesError('error', 500)
+      expect(error.isConflict).toBe(false)
+    })
+  })
+})

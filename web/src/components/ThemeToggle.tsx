@@ -20,7 +20,7 @@ export function ThemeToggle() {
       variant="light"
       aria-label="Toggle theme"
       onPress={cycleTheme}
-      className="text-default-500 hover:text-default-900"
+      className="text-default-500 hover:text-default-900 rounded-xl"
     >
       <Icon size={20} />
     </Button>

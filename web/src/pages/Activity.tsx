@@ -179,7 +179,7 @@ export function ActivityPage() {
             </Select>
 
             <Button
-              variant="flat"
+              className="btn-secondary h-8 rounded-xl"
               size="sm"
               startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
               onPress={() => refetch()}

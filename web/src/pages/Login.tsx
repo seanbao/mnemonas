@@ -5,7 +5,6 @@ import {
   CardBody,
   Button,
   Input,
-  Checkbox,
   Divider,
   addToast,
 } from '@heroui/react'
@@ -198,20 +197,20 @@ export function LoginPage() {
                   <label className="flex items-center gap-2 cursor-pointer group">
                     <input
                       type="checkbox"
-                      className="w-4 h-4 rounded border-divider text-accent-primary focus:ring-accent-primary/20 transition-colors cursor-pointer"
+                      className="w-4 h-4 rounded-lg border-divider text-accent-primary focus:ring-accent-primary/20 transition-colors cursor-pointer"
                       checked={rememberMe}
                       onChange={(e) => setRememberMe(e.target.checked)}
                     />
                     <span className="text-sm text-default-600 group-hover:text-foreground transition-colors">记住登录状态</span>
                   </label>
-                  <Button variant="light" size="sm" className="text-accent-primary" isDisabled>
+                  <Button variant="light" size="sm" className="text-accent-primary rounded-xl" isDisabled>
                     忘记密码？
                   </Button>
                 </div>
 
                 <Button
                   type="submit"
-                  className="gradient-meridian w-full font-semibold text-white"
+                  className="w-full btn-primary rounded-xl"
                   size="lg"
                   isLoading={isLoading}
                   startContent={!isLoading && <LogIn className="h-4 w-4" />}

@@ -183,7 +183,8 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('去重率')).toBeTruthy()
-        expect(screen.getByText('35.0%')).toBeTruthy()
+        // Multiple elements may display 35.0%
+        expect(screen.getAllByText('35.0%').length).toBeGreaterThan(0)
       })
     })
   })

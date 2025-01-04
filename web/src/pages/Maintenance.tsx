@@ -43,8 +43,6 @@ function ResultSummary({ result }: { result: ScrubResult }) {
     return null
   }
   
-  const hasErrors = (result.corrupted_objects || 0) > 0 || (result.missing_objects || 0) > 0
-  
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
       <StatCard
@@ -160,8 +158,7 @@ export default function Maintenance() {
         icon={ShieldCheck}
         actions={
           <Button
-            color="secondary"
-            variant="flat"
+            className="btn-secondary rounded-xl"
             startContent={<Download size={18} />}
             isLoading={isExporting}
             onPress={handleExport}
@@ -186,7 +183,7 @@ export default function Maintenance() {
           <div className="flex items-center gap-2">
             {scrubResult && <StatusChip status={scrubResult.status} />}
             <Button
-              color="primary"
+              className="btn-primary shadow-md rounded-xl"
               startContent={isRunning ? <RefreshCw size={18} className="animate-spin" /> : <Play size={18} />}
               isLoading={scrubMutation.isPending}
               isDisabled={isRunning}

@@ -137,9 +137,12 @@ export function ShareDialog({
     <Modal 
       isOpen={isOpen} 
       onClose={handleClose}
+      placement="center"
       size="lg"
       classNames={{
-        base: "bg-content1 border border-divider",
+        base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+        backdrop: "bg-black/60 backdrop-blur-md",
+        closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         header: "border-b border-divider",
         footer: "border-t border-divider",
       }}
@@ -177,7 +180,7 @@ export function ShareDialog({
               </Snippet>
 
               <Button
-                className="w-full"
+                className="w-full rounded-xl"
                 color="primary"
                 startContent={<Copy size={16} />}
                 onPress={handleCopy}
@@ -299,12 +302,12 @@ export function ShareDialog({
 
         <ModalFooter>
           {createdShare ? (
-            <Button onPress={handleClose}>
+            <Button onPress={handleClose} className="rounded-xl">
               关闭
             </Button>
           ) : (
             <>
-              <Button variant="flat" onPress={handleClose}>
+              <Button variant="flat" onPress={handleClose} className="rounded-xl">
                 取消
               </Button>
               <Button 
@@ -312,6 +315,7 @@ export function ShareDialog({
                 onPress={handleCreate}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
+                className="rounded-xl"
               >
                 创建分享链接
               </Button>
