@@ -1,10 +1,10 @@
-2026-02-02T06:06:23.615713Z  INFO starting MnemoNAS DataPlane version="0.1.0" http_addr=127.0.0.1:9091 grpc_addr=127.0.0.1:9090 data_dir=/tmp/mnemonas/cas
-2026-02-02T06:06:23.615861Z  INFO initializing CAS storage root=/tmp/mnemonas/cas
-2026-02-02T06:06:23.615970Z  INFO rebuilding CAS index...
-2026-02-02T06:06:23.616011Z  INFO index rebuild complete chunks=0 size=0
-2026-02-02T06:06:23.616028Z  INFO initializing CAS storage root=/tmp/mnemonas/cas
-2026-02-02T06:06:23.616045Z  INFO rebuilding CAS index...
-2026-02-02T06:06:23.616065Z  INFO index rebuild complete chunks=0 size=0
-2026-02-02T06:06:23.616075Z  INFO HTTP service ready address=127.0.0.1:9091
-2026-02-02T06:06:23.616108Z  INFO gRPC service starting address=127.0.0.1:9090
-2026-02-02T06:06:23.617245Z  INFO connection handling complete client=127.0.0.1:34406
+2026-02-03T07:26:01.475421Z  INFO starting MnemoNAS DataPlane version="0.1.0" http_addr=127.0.0.1:9091 grpc_addr=127.0.0.1:9090 data_dir=/tmp/mnemonas/cas
+2026-02-03T07:26:01.475576Z  INFO initializing CAS storage root=/tmp/mnemonas/cas
+2026-02-03T07:26:01.475728Z  INFO rebuilding CAS index...
+2026-02-03T07:26:01.475793Z  INFO index rebuild complete chunks=0 size=0
+2026-02-03T07:26:01.475816Z  INFO initializing CAS storage root=/tmp/mnemonas/cas
+2026-02-03T07:26:01.475828Z  INFO rebuilding CAS index...
+2026-02-03T07:26:01.475850Z  INFO index rebuild complete chunks=0 size=0
+2026-02-03T07:26:01.475859Z  INFO HTTP service ready address=127.0.0.1:9091
+2026-02-03T07:26:01.475877Z  INFO gRPC service starting address=127.0.0.1:9090
+2026-02-03T07:26:01.479340Z  INFO connection handling complete client=127.0.0.1:56970

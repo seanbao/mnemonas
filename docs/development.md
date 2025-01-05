@@ -269,7 +269,50 @@ cd web && npm run build                             # 前端
 
 ## 本地开发
 
-### 启动所有服务
+### 一键启动（推荐）
+
+使用 `scripts/dev.sh` 脚本可以一键启动完整的开发环境：
+
+```bash
+# 启动所有组件（构建 + dataplane + nasd + 前端）
+./scripts/dev.sh
+
+# 仅启动后端
+./scripts/dev.sh --backend   # 或 -b
+
+# 仅启动前端
+./scripts/dev.sh --frontend  # 或 -f
+
+# 查看服务状态
+./scripts/dev.sh --status    # 或 -s
+
+# 停止所有组件
+./scripts/dev.sh --kill      # 或 -k
+```
+
+脚本特性：
+- **自动构建**：启动前自动构建 Go 和 Rust 组件
+- **端口检测**：避免重复启动，自动跳过已占用的端口
+- **健康检查**：等待服务就绪后再继续
+- **日志管理**：所有日志写入 `logs/` 目录
+- **PID 跟踪**：使用 `.pids/` 目录跟踪进程，支持干净停止
+- **Node.js 版本**：检测 nvm 并自动切换到 Node.js 22
+
+启动后的服务状态表：
+
+```
+┌─────────────┬────────┬──────────────────────────────────┐
+│ 组件        │ 状态   │ 地址                             │
+├─────────────┼────────┼──────────────────────────────────┤
+│ dataplane   │ ✅ 运行 │ HTTP:9091 gRPC:9090              │
+│ nasd        │ ✅ 运行 │ http://127.0.0.1:8080            │
+│ frontend    │ ✅ 运行 │ http://127.0.0.1:5173            │
+└─────────────┴────────┴──────────────────────────────────┘
+```
+
+### 分组件启动
+
+如果需要更细粒度的控制，可以分别启动各组件：
 
 **终端 1 - Rust 数据面**
 ```bash
@@ -325,8 +368,9 @@ cd web && npm run dev
 
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| Go 控制面 | 8080 | REST API + WebDAV |
-| Rust 数据面 | 9090 | HTTP 健康检查 + gRPC |
+| Go 控制面 (nasd) | 8080 | REST API + WebDAV |
+| Rust 数据面 HTTP | 9091 | 健康检查 + 统计信息 |
+| Rust 数据面 gRPC | 9090 | CAS 存储服务 |
 | 前端开发服务器 | 5173 | Vite dev server |
 
 ### 配置文件
@@ -419,9 +463,51 @@ curl -X PUT http://localhost:8080/dav/test.txt -d "Hello World"
 curl http://localhost:8080/dav/test.txt
 
 # 健康检查
-curl http://localhost:8080/health
-curl http://localhost:9090/health
+curl http://localhost:8080/health           # nasd
+curl http://localhost:9091/health           # dataplane HTTP
+curl http://localhost:9091/stats            # dataplane 统计
 ```
+
+### E2E 验收测试
+
+使用 `scripts/e2e-test.sh` 运行完整的端到端测试：
+
+```bash
+# 完整测试（包含大文件和崩溃恢复测试）
+./scripts/e2e-test.sh
+
+# 快速测试（跳过耗时测试）
+./scripts/e2e-test.sh --quick
+```
+
+测试覆盖：
+- 基础功能：健康检查、版本 API、WebDAV OPTIONS
+- 文件操作：PUT/GET/DELETE/MKCOL/COPY/MOVE
+- ETag 条件请求：If-None-Match/If-Match
+- 版本历史 API
+- 并发读写测试
+- 维护操作：Scrub/Metrics/Diagnostics
+- 安全测试：路径穿越防护
+- 认证测试：登录/继续/令牌刷新
+
+### 性能基准测试
+
+使用 `scripts/benchmark.sh` 测试 WebDAV PROPFIND 性能：
+
+```bash
+./scripts/benchmark.sh [base_url]
+
+# 默认测试 http://localhost:8080
+./scripts/benchmark.sh
+
+# 测试其他地址
+./scripts/benchmark.sh http://192.168.1.100:8080
+```
+
+测试内容：
+- 不同目录大小的 PROPFIND 响应时间（10/100/500/1000 文件）
+- 缓存效果测试（冷启动 vs 缓存后）
+- API 指标统计
 
 ---
 
@@ -549,6 +635,18 @@ export GOPROXY=https://goproxy.cn,direct
 ```bash
 rm -rf ~/.mnemonas
 # 重启服务会自动创建目录
+```
+
+### Q: 如何调整 dataplane 端口？
+
+dataplane 同时监听两个端口：
+- HTTP 端口（默认 9091）：健康检查和统计信息
+- gRPC 端口（默认 9090）：CAS 存储服务
+
+可通过命令行参数调整：
+
+```bash
+./bin/dataplane --listen 127.0.0.1:9091 --grpc 127.0.0.1:9090
 ```
 
 ---

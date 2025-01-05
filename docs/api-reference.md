@@ -6,7 +6,15 @@
 
 - **Base URL**: `http://localhost:8080` (默认)
 - **Content-Type**: `application/json` (除文件上传外)
-- **认证**: 当前版本暂不需要认证
+- **认证**: 支持 JWT Token 认证（可通过配置启用/禁用）
+
+### 认证方式
+
+当认证启用时，需要在请求头中携带 JWT Token：
+
+```
+Authorization: Bearer <access_token>
+```
 
 ## 通用响应格式
 
@@ -38,6 +46,109 @@
 | 404 | 资源不存在 |
 | 413 | 文件过大 |
 | 500 | 服务器内部错误 |
+
+---
+
+## 认证端点
+
+### 用户登录
+
+使用用户名和密码登录获取令牌。
+
+```
+POST /api/v1/auth/login
+```
+
+**请求体**:
+```json
+{
+  "username": "admin",
+  "password": "your_password"
+}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "access_token": "eyJ...",
+    "refresh_token": "eyJ...",
+    "expires_in": 900,
+    "user": {
+      "id": "user-123",
+      "username": "admin",
+      "role": "admin"
+    }
+  }
+}
+```
+
+### 刷新令牌
+
+使用 refresh_token 获取新的 access_token。
+
+```
+POST /api/v1/auth/refresh
+```
+
+**请求体**:
+```json
+{
+  "refresh_token": "eyJ..."
+}
+```
+
+### 获取当前用户信息
+
+```
+GET /api/v1/auth/me
+```
+
+**需要认证**: 是
+
+### 修改密码
+
+```
+POST /api/v1/auth/password
+```
+
+**需要认证**: 是
+
+**请求体**:
+```json
+{
+  "old_password": "current_password",
+  "new_password": "new_secure_password"
+}
+```
+
+### 用户管理（管理员）
+
+**列出用户**:
+```
+GET /api/v1/admin/users
+```
+
+**创建用户**:
+```
+POST /api/v1/admin/users
+```
+
+**删除用户**:
+```
+DELETE /api/v1/admin/users/{id}
+```
+
+**重置用户密码**:
+```
+POST /api/v1/admin/users/{id}/reset-password
+```
+
+**切换用户状态**:
+```
+PUT /api/v1/admin/users/{id}/status
+```
 
 ---
 
@@ -392,6 +503,250 @@ DELETE /api/v1/trash
 
 ---
 
+## 搜索
+
+### 文件搜索
+
+按文件名搜索文件。
+
+```
+GET /api/v1/search?q={query}
+```
+
+**查询参数**:
+- `q`: 搜索关键词（必填，最长 100 字符）
+- `limit`: 返回数量限制（默认 50，最大 100）
+
+**响应示例**:
+```json
+{
+  "data": {
+    "query": "report",
+    "results": [
+      {
+        "name": "report.pdf",
+        "path": "/documents/report.pdf",
+        "is_dir": false,
+        "size": 1048576,
+        "mod_time": "2024-01-15T10:00:00Z"
+      }
+    ],
+    "count": 1
+  }
+}
+```
+
+---
+
+## 分享链接
+
+### 创建分享
+
+创建文件或目录的分享链接。
+
+```
+POST /api/v1/shares
+```
+
+**请求体**:
+```json
+{
+  "path": "/documents/report.pdf",
+  "password": "optional_password",
+  "expires_at": "2024-02-15T00:00:00Z"
+}
+```
+
+**响应示例**:
+```json
+{
+  "data": {
+    "id": "share-abc123",
+    "path": "/documents/report.pdf",
+    "url": "http://localhost:8080/s/abc123",
+    "has_password": true,
+    "expires_at": "2024-02-15T00:00:00Z",
+    "created_at": "2024-01-15T10:00:00Z"
+  }
+}
+```
+
+### 列出分享
+
+```
+GET /api/v1/shares
+```
+
+### 获取分享详情
+
+```
+GET /api/v1/shares/{id}
+```
+
+### 更新分享
+
+```
+PUT /api/v1/shares/{id}
+```
+
+### 删除分享
+
+```
+DELETE /api/v1/shares/{id}
+```
+
+### 访问分享链接（公开）
+
+```
+GET /s/{share_id}
+```
+
+如果分享有密码保护，需要在查询参数中携带：
+
+```
+GET /s/{share_id}?password=xxx
+```
+
+---
+
+## 收藏夹
+
+### 列出收藏
+
+```
+GET /api/v1/favorites
+```
+
+### 添加收藏
+
+```
+POST /api/v1/favorites
+```
+
+**请求体**:
+```json
+{
+  "path": "/documents/important.pdf",
+  "note": "可选备注"
+}
+```
+
+### 检查是否已收藏
+
+```
+GET /api/v1/favorites/check?path=/documents/file.pdf
+```
+
+### 批量检查收藏状态
+
+```
+POST /api/v1/favorites/check-batch
+```
+
+**请求体**:
+```json
+{
+  "paths": ["/file1.txt", "/file2.pdf"]
+}
+```
+
+### 取消收藏
+
+```
+DELETE /api/v1/favorites/{path}
+```
+
+### 更新备注
+
+```
+PATCH /api/v1/favorites/{path}
+```
+
+---
+
+## 活动日志
+
+### 列出活动
+
+获取用户操作日志。
+
+```
+GET /api/v1/activity
+```
+
+**查询参数**:
+- `limit`: 返回数量（默认 50，最大 500）
+- `offset`: 分页偏移
+- `action`: 按操作类型过滤
+- `user`: 按用户过滤
+
+**响应示例**:
+```json
+{
+  "data": {
+    "items": [
+      {
+        "id": "act-123",
+        "action": "upload",
+        "path": "/documents/file.pdf",
+        "user": "admin",
+        "ip": "127.0.0.1",
+        "timestamp": "2024-01-15T10:00:00Z"
+      }
+    ],
+    "total": 100,
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+### 活动统计
+
+```
+GET /api/v1/activity/stats
+```
+
+### 清空活动日志（管理员）
+
+```
+DELETE /api/v1/activity
+```
+
+---
+
+## 设置管理
+
+### 获取设置
+
+```
+GET /api/v1/settings
+```
+
+**需要管理员权限**
+
+### 更新设置
+
+```
+PUT /api/v1/settings
+```
+
+**请求体**:
+```json
+{
+  "retention": {
+    "max_versions": 10,
+    "max_age": "720h"
+  },
+  "webdav": {
+    "enabled": true,
+    "read_only": false
+  }
+}
+```
+
+---
+
 ## 维护操作
 
 ### 获取数据校验结果
@@ -532,6 +887,14 @@ MnemoNAS 支持标准 WebDAV 协议，可用于文件管理器挂载。
 ---
 
 ## 版本变更记录
+
+### v0.4.0
+- 新增认证系统 API（登录/注册/用户管理）
+- 新增文件分享 API
+- 新增收藏夹 API
+- 新增活动日志 API
+- 新增设置管理 API
+- 新增文件搜索 API
 
 ### v0.3.0
 - 新增缩略图服务 API
