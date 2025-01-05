@@ -74,7 +74,7 @@ export function LoginPage() {
   return (
     <div className="flex min-h-screen">
       {/* Left side - Branding */}
-      <div className="gradient-meridian relative hidden overflow-hidden lg:flex lg:w-1/2">
+      <div className="gradient-meridian-hero relative hidden overflow-hidden lg:flex lg:w-1/2">
         {/* Subtle gradient overlay */}
         <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-black/10" />
 
@@ -118,7 +118,7 @@ export function LoginPage() {
             </div>
           </div>
 
-          <div className="absolute bottom-8 text-sm text-white/50">
+          <div className="absolute bottom-8 text-sm text-white/70">
             MnemoNAS v0.1.0 · 记忆宫殿，永不遗忘
           </div>
         </div>
@@ -144,56 +144,66 @@ export function LoginPage() {
               </div>
 
               <form onSubmit={handleSubmit} className="space-y-6">
-                <Input
-                  label="用户名"
-                  placeholder="请输入用户名"
-                  value={username}
-                  onValueChange={setUsername}
-                  isDisabled={isLoading}
-                  autoComplete="username"
-                  variant="bordered"
-                  size="lg"
-                  isRequired
-                  startContent={<User size={18} className="text-default-400 shrink-0" />}
-                  classNames={{
-                    inputWrapper: "border-divider hover:border-accent-primary/50",
-                  }}
-                />
+                <div>
+                  <label className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
+                  <Input
+                    placeholder="请输入用户名"
+                    value={username}
+                    onValueChange={setUsername}
+                    isDisabled={isLoading}
+                    autoComplete="username"
+                    variant="bordered"
+                    size="lg"
+                    isRequired
+                    startContent={<User size={18} className="text-default-400 shrink-0" />}
+                    classNames={{
+                      inputWrapper: "border-divider hover:border-accent-primary/50",
+                    }}
+                  />
+                </div>
                 
-                <Input
-                  label="密码"
-                  type={showPassword ? 'text' : 'password'}
-                  placeholder="请输入密码"
-                  value={password}
-                  onValueChange={setPassword}
-                  isDisabled={isLoading}
-                  autoComplete="current-password"
-                  variant="bordered"
-                  size="lg"
-                  isRequired
-                  startContent={<Lock size={18} className="text-default-400 shrink-0" />}
-                  endContent={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="focus:outline-none"
-                    >
-                      {showPassword ? (
-                        <EyeOff className="text-default-400 h-4 w-4" />
-                      ) : (
-                        <Eye className="text-default-400 h-4 w-4" />
-                      )}
-                    </button>
-                  }
-                  classNames={{
-                    inputWrapper: "border-divider hover:border-accent-primary/50",
-                  }}
-                />
+                <div>
+                  <label className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
+                  <Input
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="请输入密码"
+                    value={password}
+                    onValueChange={setPassword}
+                    isDisabled={isLoading}
+                    autoComplete="current-password"
+                    variant="bordered"
+                    size="lg"
+                    isRequired
+                    startContent={<Lock size={18} className="text-default-400 shrink-0" />}
+                    endContent={
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="focus:outline-none"
+                      >
+                        {showPassword ? (
+                          <EyeOff className="text-default-400 h-4 w-4" />
+                        ) : (
+                          <Eye className="text-default-400 h-4 w-4" />
+                        )}
+                      </button>
+                    }
+                    classNames={{
+                      inputWrapper: "border-divider hover:border-accent-primary/50",
+                    }}
+                  />
+                </div>
 
                 <div className="flex items-center justify-between">
-                  <Checkbox isSelected={rememberMe} onValueChange={setRememberMe} size="sm">
-                    记住登录状态
-                  </Checkbox>
+                  <label className="flex items-center gap-2 cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded border-divider text-accent-primary focus:ring-accent-primary/20 transition-colors cursor-pointer"
+                      checked={rememberMe}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                    />
+                    <span className="text-sm text-default-600 group-hover:text-foreground transition-colors">记住登录状态</span>
+                  </label>
                   <Button variant="light" size="sm" className="text-accent-primary" isDisabled>
                     忘记密码？
                   </Button>
