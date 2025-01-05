@@ -8,7 +8,6 @@ import {
   DropdownTrigger,
   DropdownMenu,
   DropdownItem,
-  Spinner,
   addToast,
   Modal,
   ModalContent,
@@ -116,7 +115,10 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Spinner size="lg" />
+        <div className="text-center">
+          <div className="w-10 h-10 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-default-500 text-sm">加载分享列表...</p>
+        </div>
       </div>
     )
   }
@@ -211,7 +213,7 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
   const isExpired = share.expires_at && new Date(share.expires_at) < new Date()
 
   return (
-    <Card className="bg-content1 border border-divider">
+    <Card className="card-meridian">
       <CardBody className="p-4">
         <div className="flex items-start gap-4">
           {/* Icon */}

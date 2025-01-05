@@ -7,7 +7,13 @@ export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   return (
-    <div className="flex h-screen bg-background overflow-hidden font-sans text-foreground app-shell ambient-backdrop">
+    <div className="flex h-screen bg-background overflow-hidden font-sans text-foreground">
+      {/* Ambient Background - 数据流动的视觉隐喻 */}
+      <div className="ambient-bg">
+        <div className="ambient-orb ambient-orb-1" />
+        <div className="ambient-orb ambient-orb-2" />
+        <div className="ambient-orb ambient-orb-3" />
+      </div>
       
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
@@ -27,11 +33,13 @@ export function AppLayout() {
       </div>
 
       {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden relative app-surface">
+      <div className="flex-1 flex flex-col overflow-hidden">
         <Header onMenuClick={() => setSidebarOpen(true)} />
         
-        <main className="flex-1 min-h-0 overflow-hidden relative z-10 flex flex-col">
-          <Outlet />
+        <main className="flex-1 overflow-auto">
+          <div className="mx-auto max-w-7xl">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

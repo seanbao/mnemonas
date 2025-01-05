@@ -75,7 +75,7 @@ function UserCard({
   isCurrentUser: boolean
 }) {
   return (
-    <Card className="bg-content1 border border-divider shadow-[var(--shadow-soft)]">
+    <Card className="card-meridian">
       <CardBody className="p-4">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">
@@ -327,14 +327,17 @@ export function UsersPage() {
       </div>
 
       {/* User List */}
-      <Card className="flex-1 bg-content1 border border-divider shadow-sm overflow-hidden">
+      <Card className="flex-1 card-meridian overflow-hidden">
         <CardHeader className="border-b border-divider">
           <h2 className="font-semibold text-foreground">用户列表</h2>
         </CardHeader>
         <CardBody className="overflow-auto custom-scrollbar">
           {isLoading ? (
             <div className="flex items-center justify-center h-40">
-              <div className="text-default-500">加载中...</div>
+              <div className="text-center">
+                <div className="w-10 h-10 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+                <p className="text-default-500 text-sm">加载用户列表...</p>
+              </div>
             </div>
           ) : !data?.users?.length ? (
             <div className="flex items-center justify-center h-40">

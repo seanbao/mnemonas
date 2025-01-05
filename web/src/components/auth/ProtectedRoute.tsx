@@ -1,5 +1,4 @@
 import { Navigate, useLocation } from 'react-router-dom'
-import { Spinner } from '@heroui/react'
 import { useAuthStore, useIsAuthenticated } from '@/stores/auth'
 
 interface ProtectedRouteProps {
@@ -20,8 +19,8 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
-          <Spinner size="lg" color="secondary" />
-          <p className="text-default-500 mt-4">加载中...</p>
+          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-default-500">加载中...</p>
         </div>
       </div>
     )
