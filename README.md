@@ -140,24 +140,78 @@ mnemonas/
 
 ### 环境要求
 
-- Go 1.22+
-- Rust 1.75+
-- Node.js 20+
+- Go 1.25+
+- Rust 1.92+
+- Node.js 22+ (最低 20.x)
 - Docker & Docker Compose
 - protoc 25+
 
-### 本地开发
+### 开发环境一键启动
+
+推荐使用 `scripts/dev.sh` 脚本快速启动开发环境：
 
 ```bash
+# 一键启动完整环境（后端 + 前端）
+./scripts/dev.sh
+
+# 或使用选项
+./scripts/dev.sh --backend   # 仅启动后端 (nasd + dataplane)
+./scripts/dev.sh --frontend  # 仅启动前端 (localhost:5173)
+./scripts/dev.sh --status    # 查看服务状态
+./scripts/dev.sh --kill      # 停止所有组件
+```
+
+脚本会自动：
+- 构建 Go 控制面和 Rust 数据面
+- 启动服务并检查端口状态
+- 将日志写入 `logs/` 目录
+- 检测 nvm 并切换 Node.js 版本
+
+### Makefile 命令
+
+```bash
+# 完整构建（proto → Go → Rust）
+make build
+
+# 开发模式构建（快速，debug 模式）
+make dev
+
+# 运行所有测试
+make test
+
+# 测试覆盖率
+make coverage
+
+# E2E 验收测试
+make e2e
+
+# 性能基准测试
+make bench
+
+# 代码检查
+make lint
+
+# 代码格式化
+make fmt
+
 # 安装依赖
 make deps
 
-# 启动开发环境
-make dev
+# 清理构建产物
+make clean
 
-# 运行测试
-make test
+# 查看所有命令
+make help
 ```
+
+### 端口说明
+
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| Go 控制面 (nasd) | 8080 | REST API + WebDAV |
+| Rust 数据面 HTTP | 9091 | 健康检查 + 统计 |
+| Rust 数据面 gRPC | 9090 | CAS 存储服务 |
+| 前端开发服务器 | 5173 | Vite dev server |
 
 详见 [开发指南](docs/development.md)。
 
@@ -165,6 +219,7 @@ make test
 
 | 文档 | 说明 |
 |------|------|
+| [开发指南](docs/development.md) | 本地开发环境搭建与调试 |
 | [Docker 部署](docs/docker-deployment.md) | 生产环境部署指南 |
 | [挂载指南](docs/mounting-guide.md) | 各平台 WebDAV 连接教程 |
 | [存储原理与最佳实践](docs/storage-internals.md) | CAS 原理、文件系统推荐、性能调优 |
@@ -172,6 +227,16 @@ make test
 | [FAQ](docs/faq.md) | 常见问题解答 |
 | [架构设计](docs/architecture.md) | 系统架构与技术选型 |
 | [安全指南](docs/security.md) | 认证与网络安全配置 |
+
+## 🔧 脚本工具
+
+| 脚本 | 说明 |
+|------|------|
+| [scripts/dev.sh](scripts/dev.sh) | 开发环境启动脚本 |
+| [scripts/e2e-test.sh](scripts/e2e-test.sh) | E2E 验收测试 |
+| [scripts/benchmark.sh](scripts/benchmark.sh) | 性能基准测试 |
+| [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | 故障注入测试 |
+| [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | 反向代理配置 |
 
 ## 📜 License
 
