@@ -156,20 +156,21 @@ export function ShareAccessPage() {
             </div>
 
             <form onSubmit={handlePasswordSubmit} className="space-y-4">
-              <Input
-                type="password"
-                label="访问密码"
-                placeholder="请输入密码"
-                value={password}
-                onValueChange={setPassword}
-                isDisabled={isVerifying}
-                variant="bordered"
-                radius="lg"
-                classNames={{
-                  inputWrapper: "bg-default-100/50 hover:bg-default-200/50 border-transparent focus-within:!border-primary transition-colors",
-                  label: "text-default-500",
-                }}
-              />
+              <div>
+                <label className="text-sm font-medium text-default-600 mb-1.5 block">访问密码</label>
+                <Input
+                  type="password"
+                  placeholder="请输入密码"
+                  value={password}
+                  onValueChange={setPassword}
+                  isDisabled={isVerifying}
+                  variant="bordered"
+                  radius="lg"
+                  classNames={{
+                    inputWrapper: "bg-default-100/50 hover:bg-default-200/50 border-transparent focus-within:!border-primary transition-colors",
+                  }}
+                />
+              </div>
               <Button
                 type="submit"
                 className="w-full font-medium shadow-lg shadow-primary/20"

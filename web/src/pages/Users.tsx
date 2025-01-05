@@ -371,57 +371,65 @@ export function UsersPage() {
         <ModalContent>
           <ModalHeader className="text-foreground">添加用户</ModalHeader>
           <ModalBody className="space-y-4">
-            <Input
-              label="用户名"
-              placeholder="请输入用户名"
-              value={newUsername}
-              onValueChange={setNewUsername}
-              autoFocus
-              classNames={{
-                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
-              }}
-            />
-            <Input
-              label="密码"
-              type="password"
-              placeholder="请输入密码（至少 8 位）"
-              value={newPassword}
-              onValueChange={setNewPassword}
-              classNames={{
-                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
-              }}
-            />
-            <Input
-              label="邮箱（可选）"
-              type="email"
-              placeholder="请输入邮箱"
-              value={newEmail}
-              onValueChange={setNewEmail}
-              classNames={{
-                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
-              }}
-            />
-            <Select
-              label="角色"
-              selectedKeys={[newRole]}
-              onSelectionChange={(keys) => {
-                const value = Array.from(keys)[0] as 'admin' | 'user' | 'guest'
-                if (value) setNewRole(value)
-              }}
-              classNames={{
-                trigger: "bg-content2 border-divider data-[hover=true]:border-accent-primary",
-              }}
-            >
-              <SelectItem key="admin" startContent={<Shield size={16} />}>
-                管理员
-              </SelectItem>
-              <SelectItem key="user" startContent={<UserIcon size={16} />}>
-                普通用户
-              </SelectItem>
-              <SelectItem key="guest" startContent={<UserX size={16} />}>
-                访客
-              </SelectItem>
-            </Select>
+            <div>
+              <label className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
+              <Input
+                placeholder="请输入用户名"
+                value={newUsername}
+                onValueChange={setNewUsername}
+                autoFocus
+                classNames={{
+                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                }}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
+              <Input
+                type="password"
+                placeholder="请输入密码（至少 8 位）"
+                value={newPassword}
+                onValueChange={setNewPassword}
+                classNames={{
+                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                }}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-default-600 mb-1.5 block">邮箱（可选）</label>
+              <Input
+                type="email"
+                placeholder="请输入邮箱"
+                value={newEmail}
+                onValueChange={setNewEmail}
+                classNames={{
+                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                }}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-default-600 mb-1.5 block">角色</label>
+              <Select
+                selectedKeys={[newRole]}
+                onSelectionChange={(keys) => {
+                  const value = Array.from(keys)[0] as 'admin' | 'user' | 'guest'
+                  if (value) setNewRole(value)
+                }}
+                classNames={{
+                  trigger: "bg-content2 border-divider data-[hover=true]:border-accent-primary",
+                }}
+              >
+                <SelectItem key="admin" startContent={<Shield size={16} />}>
+                  管理员
+                </SelectItem>
+                <SelectItem key="user" startContent={<UserIcon size={16} />}>
+                  普通用户
+                </SelectItem>
+                <SelectItem key="guest" startContent={<UserX size={16} />}>
+                  访客
+                </SelectItem>
+              </Select>
+            </div>
           </ModalBody>
           <ModalFooter>
             <Button
@@ -503,17 +511,19 @@ export function UsersPage() {
             <p className="text-default-600 mb-4">
               为用户 <strong className="text-foreground">{actionUser?.username}</strong> 设置新密码
             </p>
-            <Input
-              label="新密码"
-              type="password"
-              placeholder="请输入新密码（至少 8 位）"
-              value={resetPassword}
-              onValueChange={setResetPassword}
-              autoFocus
-              classNames={{
-                inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
-              }}
-            />
+            <div>
+              <label className="text-sm font-medium text-default-600 mb-1.5 block">新密码</label>
+              <Input
+                type="password"
+                placeholder="请输入新密码（至少 8 位）"
+                value={resetPassword}
+                onValueChange={setResetPassword}
+                autoFocus
+                classNames={{
+                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                }}
+              />
+            </div>
           </ModalBody>
           <ModalFooter>
             <Button

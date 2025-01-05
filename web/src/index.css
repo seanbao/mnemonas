@@ -239,7 +239,17 @@ body {
 }
 
 .gradient-meridian {
+  background: linear-gradient(135deg, #7c8cf8 0%, #5bd2e9 50%, #9d8cf8 100%);
+}
+
+/* Subtle gradient for cards and backgrounds */
+.gradient-meridian-subtle {
   background: linear-gradient(135deg, rgba(124, 140, 248, 0.2) 0%, rgba(91, 210, 233, 0.18) 50%, rgba(240, 210, 122, 0.14) 100%);
+}
+
+/* Strong gradient for hero sections */
+.gradient-meridian-hero {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 35%, #a78bfa 70%, #7dd3fc 100%);
 }
 
 .text-gradient-meridian {
@@ -385,25 +395,6 @@ body {
 label {
   text-decoration: none !important;
   text-decoration-line: none !important;
-}
-
-/* Fix Input startContent positioning */
-[data-slot="input-wrapper"] {
-  display: flex !important;
-  align-items: center !important;
-  gap: 0.5rem !important;
-}
-
-[data-slot="inner-wrapper"] {
-  display: flex !important;
-  align-items: center !important;
-  gap: 0.5rem !important;
-  width: 100% !important;
-}
-
-[data-slot="input"] {
-  flex: 1 !important;
-  min-width: 0 !important;
 }
 
 /* Logo Glow */
