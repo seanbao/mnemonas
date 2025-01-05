@@ -20,13 +20,6 @@ import {
 } from '@heroui/react'
 import { 
   Folder, 
-  File, 
-  Image, 
-  Video, 
-  Music,
-  FileText,
-  FileCode,
-  Archive,
   Grid,
   List,
   FolderPlus,
@@ -834,7 +827,14 @@ export function FilesPage() {
   }, [selectedFiles, sortedFiles])
 
   if (isLoading) {
-    return <div className="p-6 text-default-500">Loading memories...</div>
+    return (
+      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+        <div className="text-center">
+          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-default-500">加载记忆中...</p>
+        </div>
+      </div>
+    )
   }
 
   const hasSelection = selectedFiles.size > 0

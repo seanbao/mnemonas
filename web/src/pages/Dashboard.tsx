@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Card, CardBody, Skeleton, Button } from '@heroui/react'
+import { Card, CardBody, CardHeader, Skeleton, Button, Chip } from '@heroui/react'
 import { 
   HardDrive, 
   FileBox, 
@@ -18,37 +18,41 @@ import {
   FolderPlus,
   RotateCcw,
   Move,
+  TrendingUp,
+  Database,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { getHealth, getStorageStats } from '@/api/files'
 import { listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
-import { StatCard } from '@/components/ui/StatCard'
 
 interface QuickActionProps {
   icon: React.ComponentType<{ size?: number; className?: string }>
   label: string
   description: string
   onClick: () => void
-  iconBg: string
+  gradient: string
 }
 
-function QuickAction({ icon: Icon, label, description, onClick, iconBg }: QuickActionProps) {
+function QuickAction({ icon: Icon, label, description, onClick, gradient }: QuickActionProps) {
   return (
     <button 
-      className="group p-4 rounded-xl bg-content1 border border-divider text-left transition-all hover:border-accent-primary/50 card-hover shadow-[var(--shadow-soft)]"
+      className="group stat-card p-5 text-left transition-all hover:scale-[1.02]"
       onClick={onClick}
     >
-      <div className={cn("w-10 h-10 rounded-lg flex items-center justify-center mb-3", iconBg)}>
-        <Icon size={20} className="text-current" />
-      </div>
-      <h3 className="font-medium text-foreground mb-0.5">{label}</h3>
-      <p className="text-sm text-default-500">{description}</p>
-      
-      <div className="flex items-center gap-1 mt-3 text-sm text-accent-primary opacity-0 group-hover:opacity-100 transition-opacity">
-        <span>进入</span>
-        <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+      <div className={`absolute inset-0 bg-gradient-to-br ${gradient} rounded-2xl opacity-50`} />
+      <div className="relative">
+        <div className="gradient-meridian-subtle w-10 h-10 rounded-xl flex items-center justify-center mb-3">
+          <Icon size={20} className="text-accent-primary" />
+        </div>
+        <h3 className="font-medium text-foreground mb-0.5">{label}</h3>
+        <p className="text-sm text-default-500">{description}</p>
+        
+        <div className="flex items-center gap-1 mt-3 text-sm text-accent-primary opacity-0 group-hover:opacity-100 transition-opacity">
+          <span>进入</span>
+          <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+        </div>
       </div>
     </button>
   )
@@ -77,7 +81,6 @@ function ActionIcon({ action }: { action: ActionType }) {
   return <Icon size={14} />
 }
 
-// Format relative time
 // Recent activity item
 function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
   const colorMap: Record<string, string> = {
@@ -96,18 +99,38 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
     trash_empty: 'text-red-500',
   }
 
+  const statusMap: Record<string, 'success' | 'warning' | 'primary'> = {
+    upload: 'success',
+    download: 'primary',
+    delete: 'warning',
+    create: 'success',
+    share: 'primary',
+  }
+
   return (
-    <div className="flex items-center gap-3 py-2.5 border-b border-divider last:border-0">
-      <div className={cn("w-7 h-7 rounded-full flex items-center justify-center bg-content2", colorMap[entry.action])}>
-        <ActionIcon action={entry.action} />
+    <div className="bg-content2/30 hover:bg-content2/50 flex items-center justify-between rounded-xl p-3 transition-colors">
+      <div className="flex items-center gap-4">
+        <span className="data-value text-default-500 w-20 text-xs">
+          {formatRelativeTime(entry.timestamp)}
+        </span>
+        <div className={cn("w-2 h-2 rounded-full", colorMap[entry.action] ? 'status-online' : 'bg-primary')} />
+        <div className={cn("w-7 h-7 rounded-full flex items-center justify-center bg-content2", colorMap[entry.action])}>
+          <ActionIcon action={entry.action} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-foreground truncate">{getActionLabel(entry.action)}</p>
+          {entry.path && (
+            <p className="text-xs text-default-500 truncate">{entry.path}</p>
+          )}
+        </div>
       </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-foreground truncate">{getActionLabel(entry.action)}</p>
-        {entry.path && (
-          <p className="text-xs text-default-500 truncate">{entry.path}</p>
-        )}
-      </div>
-      <span className="text-xs text-default-500 whitespace-nowrap">{formatRelativeTime(entry.timestamp)}</span>
+      <Chip
+        size="sm"
+        color={statusMap[entry.action] || 'primary'}
+        variant="flat"
+      >
+        {entry.action}
+      </Chip>
     </div>
   )
 }
@@ -137,14 +160,14 @@ export function DashboardPage() {
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
+      <div className="p-6 lg:p-8 space-y-6">
         <div>
           <Skeleton className="w-48 h-8 rounded-lg mb-2" />
           <Skeleton className="w-64 h-4 rounded-lg" />
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="rounded-xl bg-content1 border border-divider p-5">
+            <div key={i} className="stat-card">
               <Skeleton className="w-10 h-10 rounded-lg mb-4" />
               <Skeleton className="w-20 h-4 rounded mb-2" />
               <Skeleton className="w-32 h-7 rounded" />
@@ -157,74 +180,112 @@ export function DashboardPage() {
 
   const isHealthy = health?.status === 'healthy'
 
-  return (
-    <div className="h-full overflow-auto custom-scrollbar">
-      <div className="p-6 space-y-6">
-      {/* Header */}
-      <PageHeader
-        title="仪表盘"
-        subtitle="系统概览"
-        actions={
-          <div
-            className={cn(
-              "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm",
-              isHealthy 
-                ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" 
-                : "bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400"
-            )}
-          >
-            {isHealthy ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
-            <span>{isHealthy ? '运行正常' : '异常'}</span>
-          </div>
-        }
-      />
+  const statsCards = [
+    {
+      title: '存储使用',
+      value: formatBytes(stats?.totalSize || 0),
+      icon: HardDrive,
+      trend: '实时监控中',
+      gradient: 'from-blue-500/20 to-violet-500/20',
+    },
+    {
+      title: '文件对象',
+      value: stats?.totalObjects?.toLocaleString() || '0',
+      icon: FileBox,
+      trend: '总计存储对象',
+      gradient: 'from-emerald-500/20 to-cyan-500/20',
+    },
+    {
+      title: '去重率',
+      value: `${((stats?.dedupRatio || 1) * 100).toFixed(1)}%`,
+      icon: Activity,
+      trend: '存储效率',
+      gradient: 'from-violet-500/20 to-fuchsia-500/20',
+    },
+    {
+      title: '运行时间',
+      value: health?.uptime || '-',
+      icon: Clock,
+      trend: '稳定运行',
+      gradient: 'from-amber-500/20 to-orange-500/20',
+    },
+  ]
 
-      {/* Stats Grid */}
+  return (
+    <div className="p-6 lg:p-8 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <PageHeader
+          title="系统概览"
+          subtitle="实时监控存储状态"
+        />
+        <div className="flex items-center gap-2 text-sm">
+          <div className={cn(
+            "flex items-center gap-2 px-3 py-1.5 rounded-full",
+            isHealthy 
+              ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" 
+              : "bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400"
+          )}>
+            {isHealthy ? (
+              <>
+                <div className="live-indicator scale-75" />
+                <span>运行正常</span>
+              </>
+            ) : (
+              <>
+                <AlertCircle size={14} />
+                <span>异常</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Stats Grid - Meridian Style */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
-          title="存储使用"
-          value={formatBytes(stats?.totalSize || 0)}
-          icon={HardDrive}
-          tone="primary"
-        />
-        <StatCard
-          title="文件对象"
-          value={stats?.totalObjects?.toLocaleString() || '0'}
-          icon={FileBox}
-          subtitle="总计存储对象"
-          tone="primary"
-        />
-        <StatCard
-          title="去重率"
-          value={`${((stats?.dedupRatio || 1) * 100).toFixed(1)}%`}
-          icon={Activity}
-          subtitle="存储效率"
-          tone="primary"
-        />
-        <StatCard
-          title="运行时间"
-          value={health?.uptime || '-'}
-          icon={Clock}
-          tone="primary"
-        />
+        {statsCards.map((stat) => (
+          <div key={stat.title} className="stat-card">
+            <div className={`absolute inset-0 bg-gradient-to-br ${stat.gradient} rounded-2xl opacity-50`} />
+            <div className="relative">
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-default-500 text-sm">{stat.title}</p>
+                  <div className="mt-1 flex items-baseline gap-1">
+                    <span className="data-value-large">{stat.value}</span>
+                  </div>
+                  <p className="text-default-500 mt-2 text-xs">{stat.trend}</p>
+                </div>
+                <div className="gradient-meridian-subtle rounded-xl p-2.5">
+                  <stat.icon className="text-accent-primary h-5 w-5" />
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Storage Overview */}
-      <Card className="bg-content1 border-divider shadow-[var(--shadow-soft)]">
-        <CardBody className="p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="font-medium text-foreground">存储概览</h2>
-            <span className="text-xs text-default-500">实时</span>
+      <Card className="card-meridian">
+        <CardHeader className="pb-0">
+          <div className="flex items-center gap-2">
+            <div className="gradient-meridian rounded-lg p-2">
+              <Database className="h-4 w-4 text-white" />
+            </div>
+            <div>
+              <span className="font-semibold">存储概览</span>
+              <p className="text-default-500 text-xs">实时数据</p>
+            </div>
           </div>
-          
+        </CardHeader>
+        <CardBody>
           <div className="space-y-2 mb-5">
             <div className="flex justify-between text-sm">
               <span className="text-default-600">已用空间</span>
-              <span>{formatBytes(stats?.totalSize || 0)}</span>
+              <span className="data-value">{formatBytes(stats?.totalSize || 0)}</span>
             </div>
             <div className="h-2 rounded-full bg-content2 overflow-hidden">
               <div 
-                className="h-full rounded-full bg-accent-primary"
+                className="h-full rounded-full bg-accent-primary flow-line"
                 style={{ width: '30%' }}
               />
             </div>
@@ -237,8 +298,8 @@ export function DashboardPage() {
               { label: '去重率', value: `${((stats?.dedupRatio || 1) * 100).toFixed(1)}%` },
               { label: '版本', value: health?.version || '-' },
             ].map((item, i) => (
-              <div key={i} className="p-3 rounded-lg bg-content2 text-center">
-                <p className="text-2xl font-medium text-foreground">{item.value}</p>
+              <div key={i} className="p-3 rounded-lg bg-content2/50 text-center">
+                <p className="text-2xl font-medium text-foreground data-value">{item.value}</p>
                 <p className="text-xs text-default-500">{item.label}</p>
               </div>
             ))}
@@ -249,43 +310,51 @@ export function DashboardPage() {
       {/* Quick Actions */}
       <div>
         <h2 className="font-medium mb-3">快速操作</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <QuickAction
             icon={FileBox}
             label="文件管理"
             description="浏览和管理文件"
             onClick={() => navigate('/files')}
-            iconBg="bg-accent-primary/15 text-accent-primary"
+            gradient="from-blue-500/20 to-violet-500/20"
           />
           <QuickAction
             icon={HardDrive}
             label="存储管理"
             description="查看存储状态"
             onClick={() => navigate('/storage')}
-            iconBg="bg-accent-primary/15 text-accent-primary"
+            gradient="from-emerald-500/20 to-cyan-500/20"
           />
           <QuickAction
             icon={Activity}
             label="系统健康"
             description="检查系统状态"
             onClick={() => navigate('/health')}
-            iconBg="bg-accent-primary/15 text-accent-primary"
+            gradient="from-violet-500/20 to-fuchsia-500/20"
           />
           <QuickAction
             icon={Clock}
             label="版本历史"
             description="查看文件版本"
             onClick={() => navigate('/versions')}
-            iconBg="bg-accent-primary/15 text-accent-primary"
+            gradient="from-amber-500/20 to-orange-500/20"
           />
         </div>
       </div>
 
       {/* Recent Activity */}
-      <Card className="bg-content1 border-divider shadow-[var(--shadow-soft)]">
-        <CardBody className="p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="font-medium text-foreground">最近活动</h2>
+      <Card className="card-meridian">
+        <CardHeader className="pb-0">
+          <div className="flex w-full items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="bg-accent-primary/10 rounded-lg p-2">
+                <TrendingUp className="text-accent-primary h-4 w-4" />
+              </div>
+              <div>
+                <span className="font-semibold">最近活动</span>
+                <p className="text-default-500 text-xs">系统活动记录</p>
+              </div>
+            </div>
             <Button
               size="sm"
               variant="light"
@@ -296,9 +365,10 @@ export function DashboardPage() {
               <ArrowRight size={14} />
             </Button>
           </div>
-          
+        </CardHeader>
+        <CardBody>
           {recentActivity?.items && recentActivity.items.length > 0 ? (
-            <div className="divide-y divide-divider">
+            <div className="space-y-2">
               {recentActivity.items.map((entry) => (
                 <RecentActivityItem key={entry.id} entry={entry} />
               ))}
@@ -311,7 +381,6 @@ export function DashboardPage() {
           )}
         </CardBody>
       </Card>
-      </div>
     </div>
   )
 }

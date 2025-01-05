@@ -1,23 +1,15 @@
-15:26:01 INF cmd/nasd/main.go:297 > loading config file path=/home/seanbao/.config/mnemonas/config.toml
-15:26:01 INF cmd/nasd/main.go:79 > starting MnemoNAS address=0.0.0.0:8080 data_dir=/home/seanbao/.mnemonas/data version=dev
-15:26:01 WRN cmd/nasd/main.go:87 > ⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!
-15:26:01 WRN cmd/nasd/main.go:88 >    Set [webdav].auth_type = "basic" to enable WebDAV authentication
-15:26:01 WRN cmd/nasd/main.go:91 > ⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!
-15:26:01 WRN cmd/nasd/main.go:92 >    Set [server.tls].enabled = true for secure connections
-15:26:01 INF internal/api/server.go:109 > Connected to data plane addr=127.0.0.1:9090
-15:26:01 INF internal/api/server.go:129 > Thumbnail service initialized cache=/home/seanbao/.mnemonas/thumbnails
-15:26:01 INF internal/api/server.go:140 > Maintenance history store initialized path=/home/seanbao/.mnemonas/maintenance
-15:26:01 INF internal/api/server.go:151 > Activity store initialized path=/home/seanbao/.mnemonas/activity
-15:26:01 INF internal/api/server.go:181 > Authentication enabled
-15:26:01 INF internal/api/server.go:208 > Favorites feature enabled
-15:26:01 INF cmd/nasd/main.go:165 > WebDAV enabled auth=none prefix=/dav
-15:26:01 INF cmd/nasd/main.go:255 > server started (HTTP) address=0.0.0.0:8080
-15:26:02 INF internal/api/server.go:1211 > request bytes=138 duration=1.080671 method=GET path=/health remote=127.0.0.1:49402 status=200
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.042131 method=GET path=/api/v1/auth/me remote=127.0.0.1:49418 status=404
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.038417 method=GET path=/api/v1/auth/me remote=127.0.0.1:49430 status=404
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.1053 method=GET path=/api/v1/auth/me remote=127.0.0.1:49446 status=404
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.068844 method=GET path=/api/v1/auth/me remote=127.0.0.1:49462 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.03708 method=GET path=/api/v1/auth/me remote=127.0.0.1:49474 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.019616 method=GET path=/api/v1/auth/me remote=127.0.0.1:49484 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.035395 method=GET path=/api/v1/auth/me remote=127.0.0.1:49490 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.021481 method=GET path=/api/v1/auth/me remote=127.0.0.1:49494 status=404
+15:46:26 INF cmd/nasd/main.go:297 > loading config file path=/home/seanbao/.config/mnemonas/config.toml
+15:46:26 INF cmd/nasd/main.go:79 > starting MnemoNAS address=0.0.0.0:8080 data_dir=/home/seanbao/.mnemonas/data version=dev
+15:46:26 WRN cmd/nasd/main.go:87 > ⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!
+15:46:26 WRN cmd/nasd/main.go:88 >    Set [webdav].auth_type = "basic" to enable WebDAV authentication
+15:46:26 WRN cmd/nasd/main.go:91 > ⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!
+15:46:26 WRN cmd/nasd/main.go:92 >    Set [server.tls].enabled = true for secure connections
+15:46:26 INF internal/api/server.go:109 > Connected to data plane addr=127.0.0.1:9090
+15:46:26 INF internal/api/server.go:129 > Thumbnail service initialized cache=/home/seanbao/.mnemonas/thumbnails
+15:46:26 INF internal/api/server.go:140 > Maintenance history store initialized path=/home/seanbao/.mnemonas/maintenance
+15:46:27 INF internal/api/server.go:151 > Activity store initialized path=/home/seanbao/.mnemonas/activity
+15:46:27 INF internal/api/server.go:181 > Authentication enabled
+15:46:27 INF internal/api/server.go:208 > Favorites feature enabled
+15:46:27 INF cmd/nasd/main.go:165 > WebDAV enabled auth=none prefix=/dav
+15:46:27 INF cmd/nasd/main.go:255 > server started (HTTP) address=0.0.0.0:8080
+15:46:27 INF internal/api/server.go:1211 > request bytes=138 duration=1.436891 method=GET path=/health remote=127.0.0.1:42614 status=200

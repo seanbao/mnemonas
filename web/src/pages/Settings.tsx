@@ -11,7 +11,6 @@ import {
   Tabs,
   Tab,
   addToast,
-  Spinner,
 } from '@heroui/react'
 import { 
   Server, 
@@ -46,9 +45,9 @@ function SettingsSection({
   children: React.ReactNode 
 }) {
   return (
-    <Card className="bg-content1 border border-divider shadow-[var(--shadow-soft)]">
+    <Card className="card-meridian">
       <CardHeader className="flex gap-4 pb-2">
-        <div className="w-10 h-10 rounded-xl bg-accent-primary flex items-center justify-center shadow-sm">
+        <div className="gradient-meridian rounded-xl p-2.5 shadow-sm">
           <Icon size={20} className="text-white" />
         </div>
         <div className="flex-1">
@@ -204,7 +203,10 @@ export function SettingsPage() {
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <Spinner size="lg" />
+        <div className="text-center">
+          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-default-500">加载设置...</p>
+        </div>
       </div>
     )
   }
