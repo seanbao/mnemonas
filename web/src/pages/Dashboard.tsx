@@ -161,18 +161,30 @@ export function DashboardPage() {
   if (isLoading) {
     return (
       <div className="p-6 lg:p-8 space-y-6">
-        <div>
-          <Skeleton className="w-48 h-8 rounded-lg mb-2" />
-          <Skeleton className="w-64 h-4 rounded-lg" />
+        <div className="flex items-center justify-between">
+          <div>
+            <Skeleton className="w-48 h-8 rounded-lg mb-2 bg-content3" />
+            <Skeleton className="w-64 h-4 rounded-lg bg-content2" />
+          </div>
+          <Skeleton className="w-24 h-8 rounded-full bg-content2" />
         </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="stat-card">
-              <Skeleton className="w-10 h-10 rounded-lg mb-4" />
-              <Skeleton className="w-20 h-4 rounded mb-2" />
-              <Skeleton className="w-32 h-7 rounded" />
+            <div key={i} className="stat-card border-transparent bg-content1/50">
+              <Skeleton className="w-10 h-10 rounded-lg mb-4 bg-content3" />
+              <div className="space-y-2">
+                <Skeleton className="w-20 h-4 rounded bg-content2" />
+                <Skeleton className="w-32 h-8 rounded bg-content3" />
+                <Skeleton className="w-24 h-3 rounded bg-content2" />
+              </div>
             </div>
           ))}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <Skeleton className="rounded-2xl h-64 w-full lg:col-span-2 bg-content1/50" />
+          <Skeleton className="rounded-2xl h-64 w-full bg-content1/50" />
         </div>
       </div>
     )

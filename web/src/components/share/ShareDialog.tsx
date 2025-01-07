@@ -137,9 +137,12 @@ export function ShareDialog({
     <Modal 
       isOpen={isOpen} 
       onClose={handleClose}
+      placement="center"
       size="lg"
       classNames={{
-        base: "bg-content1 border border-divider",
+        base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+        backdrop: "bg-black/60 backdrop-blur-md",
+        closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         header: "border-b border-divider",
         footer: "border-t border-divider",
       }}

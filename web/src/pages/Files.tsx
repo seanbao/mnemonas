@@ -289,11 +289,11 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
           <FileIcon name={file.name} isDir={file.isDir} size={88} variant="tile" />
         </div>
         <h3 className="font-semibold text-base text-foreground mb-1 truncate px-2">{file.name}</h3>
-        <p className="text-[13px] text-default-600">一段珍贵的记忆</p>
+        <p className="text-[13px] text-default-600">{file.isDir ? '文件夹' : file.name.split('.').pop()?.toUpperCase() || '文件'}</p>
       </div>
 
       <div className="bg-content1 rounded-xl p-4 relative z-10 border border-divider">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">记忆详情</div>
+        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">详情</div>
         <div className="grid grid-cols-2 gap-4">
           <div className="text-center">
             <div className="text-lg font-semibold text-foreground">
@@ -311,17 +311,12 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
       </div>
 
       <div className="flex-1 relative z-10">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">时光回溯</div>
+        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">时间线</div>
         <div className="relative pl-6 border-l border-divider">
           <div className="relative pb-5 last:pb-0">
             <div className="absolute -left-[20px] top-0 w-3 h-3 rounded-full bg-content1 border border-divider" />
-            <div className="text-[13px] font-medium text-foreground">现在 <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded bg-accent-primary/15 text-accent-primary font-medium">当前</span></div>
-            <div className="text-[11px] text-default-500 mt-1">{formatDate(file.modTime)} 修改</div>
-          </div>
-          <div className="relative pb-5 last:pb-0">
-            <div className="absolute -left-[20px] top-0 w-3 h-3 rounded-full bg-content1 border border-divider" />
-            <div className="text-[13px] font-medium text-foreground">昨日记忆</div>
-            <div className="text-[11px] text-default-500 mt-1">昨天 09:15 保存</div>
+            <div className="text-[13px] font-medium text-foreground">最后修改</div>
+            <div className="text-[11px] text-default-500 mt-1">{formatDate(file.modTime)}</div>
           </div>
         </div>
       </div>
@@ -1094,46 +1089,47 @@ export function FilesPage() {
       <Modal
         isOpen={isNewFolderOpen}
         onClose={onNewFolderClose}
-        size="sm"
+        placement="center"
+        size="md"
         classNames={{
-          base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden",
-          closeButton: "text-default-500 hover:text-foreground",
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-accent-primary flex items-center justify-center">
-                <FolderPlus size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">新建文件夹</div>
-                <div className="text-xs text-default-500 mt-1">创建一个新的空间用于整理文件</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+              <FolderPlus size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">新建文件夹</h3>
+              <p className="text-xs text-default-500 font-normal">创建一个新的空间用于整理文件</p>
             </div>
           </ModalHeader>
-          <ModalBody className="pt-3 gap-4">
-              <div>
-                <label className="text-sm font-medium text-default-600 mb-1.5 block">文件夹名称</label>
-                <Input
-                  placeholder="请输入文件夹名称"
-                  value={newFolderName}
-                  onValueChange={setNewFolderName}
-                  autoFocus
-                  radius="lg"
-                  classNames={{
-                    inputWrapper: "input-shell bg-content2/80 border-divider/80 hover:bg-content2 focus-within:!border-accent-primary shadow-[var(--shadow-soft)]",
-                  }}
-                />
-              </div>
-              <div className="flex items-center justify-between text-xs text-default-500">
-                <span>支持中文与英文名称</span>
+          <ModalBody className="px-6 py-4">
+            <div>
+              <Input
+                placeholder="请输入文件夹名称"
+                value={newFolderName}
+                onValueChange={setNewFolderName}
+                autoFocus
+                size="lg"
+                variant="bordered"
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+              <div className="flex items-center justify-between text-xs mt-2">
+                <span className="text-default-500">支持中文与英文名称</span>
                 <span className="text-default-400">建议 2-24 个字符</span>
               </div>
+            </div>
           </ModalBody>
-          <ModalFooter className="pt-1">
-              <Button variant="light" onPress={onNewFolderClose} className="text-default-600">取消</Button>
-            <Button className="bg-accent-primary text-white shadow-[var(--shadow-soft)]" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()}>创建</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onNewFolderClose} className="text-default-600">取消</Button>
+            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()}>创建</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1141,35 +1137,43 @@ export function FilesPage() {
       <Modal
         isOpen={isRenameOpen}
         onClose={onRenameClose}
-        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-accent-primary flex items-center justify-center">
-                <Pencil size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">重命名</div>
-                <div className="text-xs text-default-500 mt-1">为项目设置新的名称</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+              <Pencil size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">重命名</h3>
+              <p className="text-xs text-default-500 font-normal">为项目设置新的名称</p>
             </div>
           </ModalHeader>
-          <ModalBody>
-              <div>
-                <label className="text-sm font-medium text-default-600 mb-1.5 block">新名称</label>
-                <Input
-                  placeholder="请输入新名称"
-                  value={renameValue}
-                  onValueChange={setRenameValue}
-                  autoFocus
-                  classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
-                />
-              </div>
+          <ModalBody className="px-6 py-4">
+            <div>
+              <Input
+                placeholder="请输入新名称"
+                value={renameValue}
+                onValueChange={setRenameValue}
+                autoFocus
+                size="lg"
+                variant="bordered"
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+            </div>
           </ModalBody>
-          <ModalFooter>
-              <Button variant="light" onPress={onRenameClose} className="text-default-600">取消</Button>
-            <Button className="bg-accent-primary text-white" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name}>确定</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onRenameClose} className="text-default-600">取消</Button>
+            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name}>确定</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1177,26 +1181,30 @@ export function FilesPage() {
       <Modal
         isOpen={isDeleteOpen}
         onClose={onDeleteClose}
-        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-danger flex items-center justify-center">
-                <AlertCircle size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">确认删除</div>
-                <div className="text-xs text-default-500 mt-1">文件将被移入回收站</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <AlertCircle size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">确认删除</h3>
+              <p className="text-xs text-default-500 font-normal">文件将被移入回收站</p>
             </div>
           </ModalHeader>
-          <ModalBody>
-              <p className="text-default-600">确定要删除 <strong className="text-foreground">{actionFile?.name}</strong> 吗？</p>
-              <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
+          <ModalBody className="px-6 py-4">
+            <p className="text-default-600">确定要删除 <strong className="text-foreground">{actionFile?.name}</strong> 吗？</p>
+            <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
-          <ModalFooter>
-              <Button variant="light" onPress={onDeleteClose} className="text-default-600">取消</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onDeleteClose} className="text-default-600">取消</Button>
             <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending}>删除</Button>
           </ModalFooter>
         </ModalContent>
@@ -1205,26 +1213,30 @@ export function FilesPage() {
       <Modal
         isOpen={isBatchDeleteOpen}
         onClose={onBatchDeleteClose}
-        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-danger flex items-center justify-center">
-                <Trash2 size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">批量删除</div>
-                <div className="text-xs text-default-500 mt-1">选中文件将被移入回收站</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <Trash2 size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">批量删除</h3>
+              <p className="text-xs text-default-500 font-normal">选中文件将被移入回收站</p>
             </div>
           </ModalHeader>
-          <ModalBody>
-              <p className="text-default-600">确定要删除选中的 <strong className="text-foreground">{selectedFiles.size}</strong> 个文件吗？</p>
-              <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
+          <ModalBody className="px-6 py-4">
+            <p className="text-default-600">确定要删除选中的 <strong className="text-foreground">{selectedFiles.size}</strong> 个文件吗？</p>
+            <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
-          <ModalFooter>
-              <Button variant="light" onPress={onBatchDeleteClose} className="text-default-600">取消</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onBatchDeleteClose} className="text-default-600">取消</Button>
             <Button color="danger" onPress={handleBatchDelete}>删除全部</Button>
           </ModalFooter>
         </ModalContent>

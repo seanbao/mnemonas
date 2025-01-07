@@ -211,7 +211,7 @@ export function LoginPage() {
 
                 <Button
                   type="submit"
-                  className="gradient-meridian w-full font-semibold text-white"
+                  className="w-full btn-primary"
                   size="lg"
                   isLoading={isLoading}
                   startContent={!isLoading && <LogIn className="h-4 w-4" />}
