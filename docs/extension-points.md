@@ -61,7 +61,7 @@ type S3Backend struct {
 backend = "local"  # "local" | "s3" | "hybrid"
 
 [storage.local]
-data_dir = "/var/lib/mnemonas/data"
+data_dir = "~/.mnemonas/data"
 
 [storage.s3]
 endpoint = "s3.amazonaws.com"  # 或 MinIO/R2 端点

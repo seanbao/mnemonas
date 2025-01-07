@@ -12,14 +12,71 @@ import (
 
 // Secrets holds auto-generated secrets that persist across restarts
 type Secrets struct {
-	JWTSecret string `json:"jwt_secret"`
+	JWTSecret      string `json:"jwt_secret"`
+	WebDAVPassword string `json:"webdav_password,omitempty"` // Auto-generated if not configured
+	WebPassword    string `json:"web_password,omitempty"`    // Auto-generated initial admin password
+	SetupShown     bool   `json:"setup_shown,omitempty"`     // True if setup info has been shown to user
 }
 
 // SecretsFile is the default filename for secrets
 const SecretsFile = "secrets.json"
 
-// LoadOrCreateSecrets loads secrets from file, creating them if they don't exist
-func LoadOrCreateSecrets(dataDir string) (*Secrets, error) {
+// LoadSecrets loads secrets from file without creating new ones.
+// Returns nil if file does not exist.
+func LoadSecrets(dataDir string) (*Secrets, error) {
+	secretsPath := filepath.Join(dataDir, SecretsFile)
+	data, err := os.ReadFile(secretsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read secrets file: %w", err)
+	}
+
+	var secrets Secrets
+	if err := json.Unmarshal(data, &secrets); err != nil {
+		return nil, fmt.Errorf("failed to parse secrets file: %w", err)
+	}
+	return &secrets, nil
+}
+
+// SaveSecrets saves secrets to file
+func SaveSecrets(dataDir string, secrets *Secrets) error {
+	secretsPath := filepath.Join(dataDir, SecretsFile)
+
+	// Ensure directory exists
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(secrets, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to serialize secrets: %w", err)
+	}
+
+	if err := os.WriteFile(secretsPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write secrets file: %w", err)
+	}
+	return nil
+}
+
+// MarkSetupShown marks the setup as shown in secrets file
+func MarkSetupShown(dataDir string) error {
+	secrets, err := LoadSecrets(dataDir)
+	if err != nil {
+		return err
+	}
+	if secrets == nil {
+		return nil // No secrets file, nothing to mark
+	}
+
+	secrets.SetupShown = true
+	return SaveSecrets(dataDir, secrets)
+}
+
+// LoadOrCreateSecrets loads secrets from file, creating them if they don't exist.
+// Returns the secrets and a boolean indicating if they were newly created.
+func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
 
 	// Try to load existing secrets
@@ -27,36 +84,37 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, error) {
 	if err == nil {
 		var secrets Secrets
 		if err := json.Unmarshal(data, &secrets); err != nil {
-			return nil, fmt.Errorf("failed to parse secrets file: %w", err)
+			return nil, false, fmt.Errorf("failed to parse secrets file: %w", err)
 		}
-		return &secrets, nil
+		return &secrets, false, nil
 	}
 
 	if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to read secrets file: %w", err)
+		return nil, false, fmt.Errorf("failed to read secrets file: %w", err)
 	}
 
 	// Create new secrets
 	secrets := &Secrets{
-		JWTSecret: generateSecureKey(32),
+		JWTSecret:      generateSecureKey(32),
+		WebDAVPassword: generateReadablePassword(16),
 	}
 
 	// Ensure directory exists
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
+		return nil, false, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
 	// Save secrets with restricted permissions
 	secretsData, err := json.MarshalIndent(secrets, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize secrets: %w", err)
+		return nil, false, fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 
 	if err := os.WriteFile(secretsPath, secretsData, 0600); err != nil {
-		return nil, fmt.Errorf("failed to write secrets file: %w", err)
+		return nil, false, fmt.Errorf("failed to write secrets file: %w", err)
 	}
 
-	return secrets, nil
+	return secrets, true, nil
 }
 
 // generateSecureKey generates a cryptographically secure random key
@@ -66,4 +124,19 @@ func generateSecureKey(length int) string {
 		panic("failed to generate random key: " + err.Error())
 	}
 	return hex.EncodeToString(b)
+}
+
+// generateReadablePassword generates a human-readable random password
+// Uses a mix of lowercase, uppercase, and digits (no ambiguous characters)
+func generateReadablePassword(length int) string {
+	// Exclude ambiguous characters: 0, O, l, 1, I
+	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		panic("failed to generate random password: " + err.Error())
+	}
+	for i := range b {
+		b[i] = charset[int(b[i])%len(charset)]
+	}
+	return string(b)
 }

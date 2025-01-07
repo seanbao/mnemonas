@@ -11,6 +11,7 @@ import {
   Tabs,
   Tab,
   addToast,
+  Snippet,
 } from '@heroui/react'
 import { 
   Server, 
@@ -26,11 +27,16 @@ import {
   Folder,
   Zap,
   Link2,
+  Eye,
+  EyeOff,
+  Copy,
+  CheckCircle2,
+  Key,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
-import { getSettings, updateSettings, type UpdateSettingsRequest } from '@/api/settings'
+import { getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
 
 // Settings section component
 function SettingsSection({ 
@@ -91,6 +97,10 @@ export function SettingsPage() {
   const [selectedTab, setSelectedTab] = useState('general')
   const queryClient = useQueryClient()
   
+  // WebDAV credentials state
+  const [showWebDAVPassword, setShowWebDAVPassword] = useState(false)
+  const [copiedField, setCopiedField] = useState<string | null>(null)
+  
   // Helper function to format bytes
   const formatBytes = (bytes: number): string => {
     if (bytes >= 1024 * 1024 * 1024) {
@@ -108,6 +118,31 @@ export function SettingsPage() {
     queryKey: ['settings'],
     queryFn: getSettings,
   })
+
+  // Fetch WebDAV credentials
+  const { data: webdavCredentials } = useQuery({
+    queryKey: ['webdav-credentials'],
+    queryFn: getWebDAVCredentials,
+    enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
+  })
+
+  // Copy to clipboard helper
+  const handleCopy = async (field: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopiedField(field)
+      setTimeout(() => setCopiedField(null), 2000)
+    } catch {
+      const textarea = document.createElement('textarea')
+      textarea.value = value
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+      setCopiedField(field)
+      setTimeout(() => setCopiedField(null), 2000)
+    }
+  }
 
   // Local editable state
   const [settings, setSettings] = useState({
@@ -411,6 +446,131 @@ export function SettingsPage() {
 
           <Tab key="webdav" title="WebDAV">
             <div className="space-y-6 mt-6">
+              {/* WebDAV Credentials Card */}
+              {webdavCredentials?.enabled && webdavCredentials?.auth_type === 'basic' && (
+                <SettingsSection
+                  title="WebDAV 访问凭据"
+                  description="用于挂载网络驱动器的登录凭据"
+                  icon={Key}
+                >
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-xl bg-content2/50 border border-divider">
+                      <div className="space-y-4">
+                        {/* WebDAV URL */}
+                        <div className="space-y-1.5">
+                          <label className="text-xs text-default-500">WebDAV 地址</label>
+                          <div className="flex items-center gap-2">
+                            <Snippet
+                              symbol=""
+                              variant="flat"
+                              className="flex-1"
+                              classNames={{
+                                base: "bg-content1 border border-divider",
+                                pre: "font-mono text-sm",
+                              }}
+                              hideSymbol
+                              hideCopyButton
+                            >
+                              {`${window.location.origin}${webdavCredentials.url}`}
+                            </Snippet>
+                            <Button
+                              isIconOnly
+                              size="sm"
+                              variant="flat"
+                              onPress={() => handleCopy('url', `${window.location.origin}${webdavCredentials.url}`)}
+                            >
+                              {copiedField === 'url' ? (
+                                <CheckCircle2 size={16} className="text-success" />
+                              ) : (
+                                <Copy size={16} />
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                        
+                        {/* Username */}
+                        <div className="space-y-1.5">
+                          <label className="text-xs text-default-500">用户名</label>
+                          <div className="flex items-center gap-2">
+                            <Snippet
+                              symbol=""
+                              variant="flat"
+                              className="flex-1"
+                              classNames={{
+                                base: "bg-content1 border border-divider",
+                                pre: "font-mono",
+                              }}
+                              hideSymbol
+                              hideCopyButton
+                            >
+                              {webdavCredentials.username || 'admin'}
+                            </Snippet>
+                            <Button
+                              isIconOnly
+                              size="sm"
+                              variant="flat"
+                              onPress={() => handleCopy('username', webdavCredentials.username || 'admin')}
+                            >
+                              {copiedField === 'username' ? (
+                                <CheckCircle2 size={16} className="text-success" />
+                              ) : (
+                                <Copy size={16} />
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Password */}
+                        <div className="space-y-1.5">
+                          <label className="text-xs text-default-500">密码</label>
+                          <div className="flex items-center gap-2">
+                            <Snippet
+                              symbol=""
+                              variant="flat"
+                              className="flex-1"
+                              classNames={{
+                                base: "bg-content1 border border-divider",
+                                pre: "font-mono",
+                              }}
+                              hideSymbol
+                              hideCopyButton
+                            >
+                              {showWebDAVPassword ? (webdavCredentials.password || '未设置') : '••••••••••••••••'}
+                            </Snippet>
+                            <Button
+                              isIconOnly
+                              size="sm"
+                              variant="flat"
+                              onPress={() => setShowWebDAVPassword(!showWebDAVPassword)}
+                            >
+                              {showWebDAVPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                            </Button>
+                            <Button
+                              isIconOnly
+                              size="sm"
+                              variant="flat"
+                              onPress={() => handleCopy('password', webdavCredentials.password || '')}
+                              isDisabled={!webdavCredentials.password}
+                            >
+                              {copiedField === 'password' ? (
+                                <CheckCircle2 size={16} className="text-success" />
+                              ) : (
+                                <Copy size={16} />
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="text-xs text-default-400">
+                      使用以上凭据在文件管理器中挂载 WebDAV 网络驱动器。
+                      Windows: 映射网络驱动器 | macOS: 前往 → 连接服务器
+                    </div>
+                  </div>
+                </SettingsSection>
+              )}
+
               <SettingsSection
                 title="WebDAV 服务"
                 description="配置 WebDAV 协议接入"

@@ -7,6 +7,7 @@ import {
   getStoredUser,
   getStoredToken,
 } from '@/api/auth'
+import { getSetupStatus } from '@/api/setup'
 
 interface AuthState {
   user: User | null
@@ -35,6 +36,23 @@ export const useAuthStore = create<AuthState>((set) => ({
   
   initialize: async () => {
     set({ isLoading: true, error: null })
+    
+    // First, check if auth is enabled on the server
+    try {
+      const setupStatus = await getSetupStatus()
+      if (!setupStatus.auth_enabled) {
+        // Auth is disabled on server, skip login requirement
+        set({ 
+          authEnabled: false, 
+          isAuthenticated: true, // Treat as authenticated when auth is disabled
+          isLoading: false,
+          user: { id: 'guest', username: 'guest', role: 'admin' as const, email: '', homeDir: '/' }
+        })
+        return
+      }
+    } catch {
+      // If we can't get setup status, assume auth is enabled for security
+    }
     
     // Check if there's a stored token
     const token = getStoredToken()

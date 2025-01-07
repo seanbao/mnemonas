@@ -5,6 +5,7 @@
 #   -b, --backend: 仅启动后端 (nasd + dataplane)
 #   -f, --frontend: 仅启动前端
 #   -k, --kill: 停止所有组件
+#   -c, --creds: 显示 WebDAV 登录凭据
 
 set -e
 
@@ -124,9 +125,9 @@ build_project() {
     
     cd "$PROJECT_ROOT"
     
-    # 构建 Go 控制面
+    # 构建 Go 控制面 (需要 CGO 支持 SQLite)
     log_info "构建 nasd..."
-    go build -o bin/nasd ./cmd/nasd
+    CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd
     
     # 构建 Rust 数据面
     log_info "构建 dataplane..."
@@ -196,6 +197,20 @@ start_nasd() {
         log_info "  健康检查: curl http://127.0.0.1:8080/health"
         log_info "  WebDAV:   http://127.0.0.1:8080/dav/"
         log_info "  API:      http://127.0.0.1:8080/api/v1/"
+        
+        # 检查并显示自动生成的 WebDAV 密码
+        if grep -q "WebDAV credentials (auto-generated" "$LOG_DIR/nasd.log"; then
+            echo ""
+            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "${YELLOW}🔐 WebDAV 凭据 (自动生成，请保存!):${NC}"
+            local username=$(grep "Username username=" "$LOG_DIR/nasd.log" | tail -1 | sed 's/.*username=//')
+            local password=$(grep "Password password=" "$LOG_DIR/nasd.log" | tail -1 | sed 's/.*password=//')
+            echo -e "   用户名: ${GREEN}${username}${NC}"
+            echo -e "   密码:   ${GREEN}${password}${NC}"
+            echo -e "   存储于: ~/.mnemonas/secrets.json"
+            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo ""
+        fi
     else
         log_error "nasd 启动超时，请检查日志: $LOG_DIR/nasd.log"
         return 1
@@ -240,6 +255,27 @@ start_frontend() {
     fi
 }
 
+# 显示 WebDAV 凭据
+show_credentials() {
+    local secrets_file="$HOME/.mnemonas/secrets.json"
+    
+    if [ ! -f "$secrets_file" ]; then
+        log_error "凭据文件不存在: $secrets_file"
+        log_info "请先启动服务以生成凭据: ./scripts/dev.sh"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}🔐 WebDAV 凭据:${NC}"
+    local password=$(cat "$secrets_file" | grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
+    echo -e "   用户名: ${GREEN}admin${NC}"
+    echo -e "   密码:   ${GREEN}${password}${NC}"
+    echo -e "   存储于: $secrets_file"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
 # 显示状态
 show_status() {
     log_section "服务状态"
@@ -280,6 +316,9 @@ main() {
     case "${1:-all}" in
         -k|--kill|kill|stop)
             kill_all
+            ;;
+        -c|--creds|creds|credentials)
+            show_credentials
             ;;
         -b|--backend|backend)
             kill_all

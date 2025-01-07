@@ -13,6 +13,17 @@
 enabled = true
 auth_type = "basic"
 username = "admin"
+password = ""  # 留空则首次启动时自动生成
+```
+
+**自动生成密码**：
+- 首次启动时，如果 `password` 为空，系统会自动生成 16 位随机密码
+- 密码会显示在启动日志中，并保存到 `~/.mnemonas/secrets.json`
+- 后续启动会自动使用保存的密码
+
+**手动设置密码**（如需自定义）：
+```toml
+[webdav]
 password = "your-strong-password"  # 至少 16 字符，混合大小写、数字、符号
 ```
 
@@ -163,7 +174,7 @@ cloudflared tunnel run mnemonas
 
 ### 部署前检查
 
-- [ ] 已修改默认密码
+- [ ] 已记录首次启动时显示的自动生成密码（或已设置自定义密码）
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 如果 `host = "0.0.0.0"`，已配置防火墙
 - [ ] 生产环境使用 HTTPS

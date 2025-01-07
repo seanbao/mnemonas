@@ -63,7 +63,7 @@ func main() {
 	// Load or create secrets (for JWT, etc.)
 	homeDir, _ := os.UserHomeDir()
 	dataRoot := filepath.Join(homeDir, ".mnemonas")
-	secrets, err := config.LoadOrCreateSecrets(dataRoot)
+	secrets, isNewSecrets, err := config.LoadOrCreateSecrets(dataRoot)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load secrets")
 	}
@@ -73,6 +73,17 @@ func main() {
 		cfg.Auth.JWTSecret = secrets.JWTSecret
 	}
 
+	// Auto-generate WebDAV password if basic auth enabled but password not set
+	webdavPasswordGenerated := false
+	if cfg.WebDAV.Enabled && cfg.WebDAV.AuthType == "basic" && cfg.WebDAV.Password == "" {
+		cfg.WebDAV.Password = secrets.WebDAVPassword
+		webdavPasswordGenerated = true
+		// Also set default username if not configured
+		if cfg.WebDAV.Username == "" {
+			cfg.WebDAV.Username = "admin"
+		}
+	}
+
 	log.Info().
 		Str("version", version).
 		Str("storage_root", cfg.Storage.Root).
@@ -80,10 +91,6 @@ func main() {
 		Msg("starting MnemoNAS")
 
 	// Security warnings
-	if !cfg.Auth.Enabled {
-		log.Warn().Msg("⚠️  Authentication is DISABLED - anyone can access your files!")
-		log.Warn().Msg("   Set [auth].enabled = true in config to enable authentication")
-	}
 	if cfg.WebDAV.Enabled && cfg.WebDAV.AuthType == "none" {
 		log.Warn().Msg("⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!")
 		log.Warn().Msg("   Set [webdav].auth_type = \"basic\" to enable WebDAV authentication")
@@ -91,6 +98,18 @@ func main() {
 	if !cfg.Server.TLS.Enabled {
 		log.Warn().Msg("⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!")
 		log.Warn().Msg("   Set [server.tls].enabled = true for secure connections")
+	}
+
+	// Show auto-generated WebDAV credentials (only on first run or when password was empty)
+	if webdavPasswordGenerated && isNewSecrets {
+		log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		log.Info().Msg("🔐 WebDAV credentials (auto-generated, save these!):")
+		log.Info().Str("username", cfg.WebDAV.Username).Msg("   Username")
+		log.Info().Str("password", cfg.WebDAV.Password).Msg("   Password")
+		log.Info().Msgf("   Stored in: %s/secrets.json", dataRoot)
+		log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	} else if webdavPasswordGenerated {
+		log.Info().Msg("🔐 WebDAV using auto-generated password from secrets.json")
 	}
 
 	// Create background context for initialization
