@@ -160,8 +160,7 @@ export default function Maintenance() {
         icon={ShieldCheck}
         actions={
           <Button
-            color="secondary"
-            variant="flat"
+            className="btn-secondary"
             startContent={<Download size={18} />}
             isLoading={isExporting}
             onPress={handleExport}
@@ -186,7 +185,7 @@ export default function Maintenance() {
           <div className="flex items-center gap-2">
             {scrubResult && <StatusChip status={scrubResult.status} />}
             <Button
-              color="primary"
+              className="btn-primary shadow-md"
               startContent={isRunning ? <RefreshCw size={18} className="animate-spin" /> : <Play size={18} />}
               isLoading={scrubMutation.isPending}
               isDisabled={isRunning}

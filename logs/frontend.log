@@ -3,93 +3,26 @@
 > vite
 
 
-  VITE v7.3.0  ready in 159 ms
+  VITE v7.3.0  ready in 170 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
-4:24:54 PM [vite] (client) Pre-transform error: /home/seanbao/work/github/mnemonas/web/src/pages/Users.tsx: Expected corresponding JSX closing tag for <div>. (432:10)
-
-  430 |               </SelectItem>
-  431 |             </Select>
-> 432 |           </ModalBody>
-      |           ^
-  433 |           <ModalFooter>
-  434 |             <Button
-  435 |               variant="light"
-  Plugin: vite:react-babel
-  File: /home/seanbao/work/github/mnemonas/web/src/pages/Users.tsx:432:10
-  430 |                </SelectItem>
-  431 |              </Select>
-  432 |            </ModalBody>
-      |            ^
-  433 |            <ModalFooter>
-  434 |              <Button
-4:24:55 PM [vite] Internal server error: /home/seanbao/work/github/mnemonas/web/src/pages/Users.tsx: Expected corresponding JSX closing tag for <div>. (432:10)
-
-  430 |               </SelectItem>
-  431 |             </Select>
-> 432 |           </ModalBody>
-      |           ^
-  433 |           <ModalFooter>
-  434 |             <Button
-  435 |               variant="light"
-  Plugin: vite:react-babel
-  File: /home/seanbao/work/github/mnemonas/web/src/pages/Users.tsx:432:10
-  430 |                </SelectItem>
-  431 |              </Select>
-  432 |            </ModalBody>
-      |            ^
-  433 |            <ModalFooter>
-  434 |              <Button
-      at constructor (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:367:19)
-      at TypeScriptParserMixin.raise (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:6624:19)
-      at TypeScriptParserMixin.jsxParseElementAt (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4756:16)
-      at TypeScriptParserMixin.jsxParseElementAt (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4727:32)
-      at TypeScriptParserMixin.jsxParseElementAt (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4727:32)
-      at TypeScriptParserMixin.jsxParseElementAt (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4727:32)
-      at TypeScriptParserMixin.jsxParseElementAt (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4727:32)
-      at TypeScriptParserMixin.jsxParseElement (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4778:17)
-      at TypeScriptParserMixin.parseExprAtom (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4788:19)
-      at TypeScriptParserMixin.parseExprSubscripts (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11145:23)
-      at TypeScriptParserMixin.parseUpdate (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11130:21)
-      at TypeScriptParserMixin.parseMaybeUnary (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11110:23)
-      at TypeScriptParserMixin.parseMaybeUnary (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:9890:18)
-      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10963:61)
-      at TypeScriptParserMixin.parseExprOps (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10968:23)
-      at TypeScriptParserMixin.parseMaybeConditional (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10945:23)
-      at TypeScriptParserMixin.parseMaybeAssign (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10895:21)
-      at /home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:9828:39
-      at TypeScriptParserMixin.tryParse (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:6932:20)
-      at TypeScriptParserMixin.parseMaybeAssign (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:9828:18)
-      at /home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10864:39
-      at TypeScriptParserMixin.allowInAnd (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12500:12)
-      at TypeScriptParserMixin.parseMaybeAssignAllowIn (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10864:17)
-      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12567:17)
-      at TypeScriptParserMixin.parseParenAndDistinguishExpression (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11747:28)
-      at TypeScriptParserMixin.parseExprAtom (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11395:23)
-      at TypeScriptParserMixin.parseExprAtom (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:4793:20)
-      at TypeScriptParserMixin.parseExprSubscripts (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11145:23)
-      at TypeScriptParserMixin.parseUpdate (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11130:21)
-      at TypeScriptParserMixin.parseMaybeUnary (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:11110:23)
-      at TypeScriptParserMixin.parseMaybeUnary (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:9890:18)
-      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10963:61)
-      at TypeScriptParserMixin.parseExprOps (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10968:23)
-      at TypeScriptParserMixin.parseMaybeConditional (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10945:23)
-      at TypeScriptParserMixin.parseMaybeAssign (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10895:21)
-      at TypeScriptParserMixin.parseMaybeAssign (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:9839:20)
-      at TypeScriptParserMixin.parseExpressionBase (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10848:23)
-      at /home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10844:39
-      at TypeScriptParserMixin.allowInAnd (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12495:16)
-      at TypeScriptParserMixin.parseExpression (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:10844:17)
-      at TypeScriptParserMixin.parseReturnStatement (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:13218:28)
-      at TypeScriptParserMixin.parseStatementContent (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12874:21)
-      at TypeScriptParserMixin.parseStatementContent (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:9569:18)
-      at TypeScriptParserMixin.parseStatementLike (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12843:17)
-      at TypeScriptParserMixin.parseStatementListItem (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12823:17)
-      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:13392:61)
-      at TypeScriptParserMixin.parseBlockBody (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:13385:10)
-      at TypeScriptParserMixin.parseBlock (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:13373:10)
-      at TypeScriptParserMixin.parseFunctionBody (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12174:24)
-      at TypeScriptParserMixin.parseFunctionBodyAndFinish (/home/seanbao/work/github/mnemonas/web/node_modules/@babel/parser/lib/index.js:12160:10)
-4:25:27 PM [vite] (client) hmr update /src/index.css
-4:26:16 PM [vite] (client) hmr update /src/index.css, /src/pages/Users.tsx
+4:43:24 PM [vite] (client) hmr update /src/index.css
+4:43:40 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
+4:44:02 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
+4:44:14 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
+4:44:41 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
+4:45:31 PM [vite] (client) hmr update /src/index.css
+4:45:44 PM [vite] (client) hmr update /src/index.css, /src/pages/Maintenance.tsx
+4:45:54 PM [vite] (client) hmr update /src/index.css, /src/pages/Health.tsx
+4:46:06 PM [vite] (client) hmr update /src/index.css, /src/pages/Activity.tsx
+4:46:23 PM [vite] (client) hmr update /src/index.css
+4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
+4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
+4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Maintenance.tsx
+4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Health.tsx
+4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Activity.tsx
+4:49:19 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
+4:50:03 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
+4:52:53 PM [vite] (client) hmr update /src/index.css, /src/pages/Dashboard.tsx
+4:53:50 PM [vite] (client) hmr update /src/index.css, /src/pages/Dashboard.tsx
