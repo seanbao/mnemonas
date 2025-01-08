@@ -67,7 +67,7 @@ function MaintenanceCard({
         <Button 
           color={buttonColor} 
           variant="flat" 
-          className="w-full"
+          className="w-full rounded-xl"
           onPress={onPress}
           isDisabled={isDisabled}
         >
@@ -153,6 +153,7 @@ export function StoragePage() {
           variant="flat" 
           startContent={<RefreshCw size={16} />}
           onPress={() => refetch()}
+          className="rounded-xl"
         >
           刷新
         </Button>

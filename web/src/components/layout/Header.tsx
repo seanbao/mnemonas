@@ -99,11 +99,12 @@ export function Header({ onMenuClick }: HeaderProps) {
           onPress={handleRefresh}
           isLoading={isRefreshing}
           aria-label="刷新数据"
+          className="rounded-xl"
         >
           <RefreshCw size={18} className={isRefreshing ? 'animate-spin' : ''} />
         </Button>
 
-        <Button isIconOnly variant="light" size="sm" aria-label="通知">
+        <Button isIconOnly variant="light" size="sm" aria-label="通知" className="rounded-xl">
           <Bell size={18} />
         </Button>
 

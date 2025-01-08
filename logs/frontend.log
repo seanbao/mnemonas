@@ -3,26 +3,7 @@
 > vite
 
 
-  VITE v7.3.0  ready in 170 ms
+  VITE v7.3.0  ready in 161 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
-4:43:24 PM [vite] (client) hmr update /src/index.css
-4:43:40 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
-4:44:02 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
-4:44:14 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
-4:44:41 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
-4:45:31 PM [vite] (client) hmr update /src/index.css
-4:45:44 PM [vite] (client) hmr update /src/index.css, /src/pages/Maintenance.tsx
-4:45:54 PM [vite] (client) hmr update /src/index.css, /src/pages/Health.tsx
-4:46:06 PM [vite] (client) hmr update /src/index.css, /src/pages/Activity.tsx
-4:46:23 PM [vite] (client) hmr update /src/index.css
-4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
-4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Settings.tsx
-4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Maintenance.tsx
-4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Health.tsx
-4:46:23 PM [vite] (client) hmr update /src/index.css, /src/pages/Activity.tsx
-4:49:19 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
-4:50:03 PM [vite] (client) hmr update /src/index.css, /src/pages/Login.tsx
-4:52:53 PM [vite] (client) hmr update /src/index.css, /src/pages/Dashboard.tsx
-4:53:50 PM [vite] (client) hmr update /src/index.css, /src/pages/Dashboard.tsx

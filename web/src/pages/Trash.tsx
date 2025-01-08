@@ -95,6 +95,7 @@ function TrashRow({
           color="success"
           onPress={onRestore}
           title="恢复"
+          className="rounded-xl"
         >
           <RotateCcw size={16} />
         </Button>
@@ -105,6 +106,7 @@ function TrashRow({
           color="danger"
           onPress={onDelete}
           title="永久删除"
+          className="rounded-xl"
         >
           <Trash2 size={16} />
         </Button>
@@ -252,6 +254,7 @@ export function TrashPage() {
             <Button
               color="danger"
               variant="flat"
+              className="rounded-xl"
               startContent={<Trash2 size={16} />}
               onPress={onEmptyOpen}
             >
@@ -269,7 +272,7 @@ export function TrashPage() {
           </div>
           <span className="text-sm font-medium">已选择 {selectedItems.size} 项</span>
           <div className="flex-1" />
-          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())}>
+          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-xl">
             取消选择
           </Button>
           <Button
@@ -279,6 +282,7 @@ export function TrashPage() {
             startContent={<RotateCcw size={14} />}
             onPress={handleBatchRestore}
             isLoading={isBatchRestoring}
+            className="rounded-xl"
           >
             恢复
           </Button>
@@ -289,6 +293,7 @@ export function TrashPage() {
             startContent={<Trash2 size={14} />}
             onPress={handleBatchDelete}
             isLoading={isBatchDeleting}
+            className="rounded-xl"
           >
             永久删除
           </Button>
@@ -375,13 +380,14 @@ export function TrashPage() {
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onDeleteClose} className="text-default-600">
+            <Button variant="flat" onPress={onDeleteClose} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button
               color="danger"
               onPress={handleConfirmDelete}
               isLoading={deleteMutation.isPending}
+              className="rounded-xl"
             >
               永久删除
             </Button>
@@ -421,13 +427,14 @@ export function TrashPage() {
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onEmptyClose} className="text-default-600">
+            <Button variant="flat" onPress={onEmptyClose} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button
               color="danger"
               onPress={() => emptyMutation.mutate()}
               isLoading={emptyMutation.isPending}
+              className="rounded-xl"
             >
               清空回收站
             </Button>

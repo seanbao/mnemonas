@@ -146,6 +146,7 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
           variant="flat"
           size="sm"
           onPress={loadShares}
+          className="rounded-xl"
         >
           <RefreshCw size={16} />
         </Button>
@@ -199,13 +200,14 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
             )}
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={() => setDeleteTarget(null)} className="text-default-600">
+            <Button variant="flat" onPress={() => setDeleteTarget(null)} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button 
               color="danger" 
               onPress={handleDelete}
               isLoading={isDeleting}
+              className="rounded-xl"
             >
               删除
             </Button>
@@ -285,13 +287,14 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
               variant="flat"
               size="sm"
               onPress={onCopy}
+              className="rounded-xl"
             >
               <Copy size={16} />
             </Button>
             
             <Dropdown>
               <DropdownTrigger>
-                <Button isIconOnly variant="flat" size="sm">
+                <Button isIconOnly variant="flat" size="sm" className="rounded-xl">
                   <MoreVertical size={16} />
                 </Button>
               </DropdownTrigger>

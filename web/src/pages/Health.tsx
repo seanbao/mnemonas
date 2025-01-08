@@ -125,7 +125,7 @@ export function HealthPage() {
           icon={Activity}
         />
         <Button
-          className="btn-secondary"
+          className="btn-secondary rounded-xl"
           startContent={<RefreshCw size={16} />}
           onPress={() => refetchDiag()}
           isLoading={isLoading}
