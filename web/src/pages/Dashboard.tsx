@@ -38,7 +38,7 @@ interface QuickActionProps {
 function QuickAction({ icon: Icon, label, description, onClick, gradient }: QuickActionProps) {
   return (
     <button 
-      className="group stat-card p-5 text-left transition-all hover:scale-[1.02]"
+      className="group stat-card p-5 text-left transition-all hover:scale-[1.02] rounded-2xl"
       onClick={onClick}
     >
       <div className={`absolute inset-0 bg-gradient-to-br ${gradient} rounded-2xl opacity-50`} />
@@ -370,7 +370,7 @@ export function DashboardPage() {
             <Button
               size="sm"
               variant="light"
-              className="text-accent-primary"
+              className="text-accent-primary rounded-xl"
               onPress={() => navigate('/activity')}
             >
               查看全部

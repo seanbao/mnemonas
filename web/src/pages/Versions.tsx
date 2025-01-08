@@ -81,7 +81,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
             variant="light"
             onPress={onPreview}
             title="预览"
-            className="btn-secondary btn-sm"
+            className="btn-secondary btn-sm rounded-xl"
           >
             <Eye size={16} />
           </Button>
@@ -91,7 +91,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
             variant="light"
             onPress={onDownload}
             title="下载此版本"
-            className="btn-secondary btn-sm"
+            className="btn-secondary btn-sm rounded-xl"
           >
             <Download size={16} />
           </Button>
@@ -103,7 +103,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
               color="warning"
               onPress={onRestore}
               title="恢复到此版本"
-              className="btn-secondary btn-sm"
+              className="btn-secondary btn-sm rounded-xl"
             >
               <RotateCcw size={16} />
             </Button>
@@ -187,7 +187,7 @@ export function VersionsPage() {
             color="primary" 
             startContent={<Search size={16} />}
             onPress={handleSearch}
-            className="font-medium"
+            className="font-medium rounded-xl"
           >
             查询版本
           </Button>
@@ -320,13 +320,14 @@ export function VersionsPage() {
             </div>
           </ModalBody>
           <ModalFooter>
-            <Button variant="light" onPress={onClose}>
+            <Button variant="light" onPress={onClose} className="rounded-xl">
               取消
             </Button>
             <Button 
               color="warning" 
               onPress={confirmRestore}
               isLoading={restoreMutation.isPending}
+              className="rounded-xl"
             >
               确认恢复
             </Button>

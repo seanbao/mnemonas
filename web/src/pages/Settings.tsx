@@ -230,14 +230,14 @@ export function SettingsPage() {
             <>
               <Button
                 variant="bordered"
-                className="btn-secondary btn-md"
+                className="btn-secondary btn-md rounded-xl"
                 startContent={<RefreshCw size={16} />}
                 onPress={handleReset}
               >
                 重置
               </Button>
               <Button
-                className="btn-primary btn-md"
+                className="btn-primary btn-md rounded-xl"
                 startContent={<Save size={16} />}
                 isLoading={saveMutation.isPending}
                 onPress={handleSave}

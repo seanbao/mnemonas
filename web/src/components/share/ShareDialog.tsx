@@ -180,7 +180,7 @@ export function ShareDialog({
               </Snippet>
 
               <Button
-                className="w-full"
+                className="w-full rounded-xl"
                 color="primary"
                 startContent={<Copy size={16} />}
                 onPress={handleCopy}
@@ -302,12 +302,12 @@ export function ShareDialog({
 
         <ModalFooter>
           {createdShare ? (
-            <Button onPress={handleClose}>
+            <Button onPress={handleClose} className="rounded-xl">
               关闭
             </Button>
           ) : (
             <>
-              <Button variant="flat" onPress={handleClose}>
+              <Button variant="flat" onPress={handleClose} className="rounded-xl">
                 取消
               </Button>
               <Button 
@@ -315,6 +315,7 @@ export function ShareDialog({
                 onPress={handleCreate}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
+                className="rounded-xl"
               >
                 创建分享链接
               </Button>

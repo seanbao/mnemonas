@@ -111,7 +111,7 @@ function UserCard({
                 isIconOnly
                 variant="light"
                 size="sm"
-                className="text-default-500"
+                className="text-default-500 rounded-xl"
               >
                 <MoreVertical size={16} />
               </Button>
@@ -288,12 +288,12 @@ export function UsersPage() {
               startContent={<RefreshCw size={16} />}
               onPress={() => refetch()}
               isLoading={isLoading}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               刷新
             </Button>
             <Button
-              className="bg-accent-primary text-white"
+              className="bg-accent-primary text-white rounded-xl"
               startContent={<UserPlus size={16} />}
               onPress={onCreateOpen}
             >
@@ -466,7 +466,7 @@ export function UsersPage() {
                 onCreateClose()
                 resetCreateForm()
               }}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               取消
             </Button>
@@ -475,6 +475,7 @@ export function UsersPage() {
               onPress={handleCreate}
               isLoading={createMutation.isPending}
               isDisabled={!newUsername.trim() || !newPassword.trim() || newPassword.length < 8}
+              className="rounded-xl"
             >
               创建
             </Button>
@@ -522,7 +523,7 @@ export function UsersPage() {
                 onDeleteClose()
                 setActionUser(null)
               }}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               取消
             </Button>
@@ -530,6 +531,7 @@ export function UsersPage() {
               color="danger"
               onPress={handleDelete}
               isLoading={deleteMutation.isPending}
+              className="rounded-xl"
             >
               删除
             </Button>
@@ -590,7 +592,7 @@ export function UsersPage() {
                 setActionUser(null)
                 setResetPassword('')
               }}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               取消
             </Button>
@@ -599,6 +601,7 @@ export function UsersPage() {
               onPress={handleResetPassword}
               isLoading={resetPasswordMutation.isPending}
               isDisabled={!resetPassword.trim() || resetPassword.length < 8}
+              className="rounded-xl"
             >
               确认重置
             </Button>

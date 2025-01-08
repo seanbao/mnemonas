@@ -63,7 +63,7 @@ function Breadcrumbs({
       <button
         onClick={() => onNavigate('/')}
         className={cn(
-          "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
+          "flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl transition-all max-w-[180px] truncate border border-transparent",
           segments.length === 0
             ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
             : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
@@ -83,7 +83,7 @@ function Breadcrumbs({
             <button
               onClick={() => onNavigate(segmentPath)}
               className={cn(
-                "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
+                "px-2.5 py-1.5 rounded-xl transition-all max-w-[180px] truncate border border-transparent",
                 isLast 
                   ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
                   : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
@@ -103,8 +103,10 @@ function FileRow({
   file, 
   isSelected, 
   isFavorited,
+  isActive,
   onSelect, 
   onOpen,
+  onClick,
   onRename,
   onDelete,
   onViewVersions,
@@ -114,8 +116,10 @@ function FileRow({
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
+  isActive: boolean
   onSelect: () => void
   onOpen: () => void
+  onClick: () => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
@@ -143,9 +147,11 @@ function FileRow({
       className={cn(
         "group grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3 cursor-pointer transition-all duration-150 border-b border-divider items-center",
         "hover:bg-content2/60",
-        isSelected && "bg-accent-primary/10"
+        isSelected && "bg-accent-primary/10",
+        isActive && !isSelected && "bg-content2/40"
       )}
-      onClick={onOpen}
+      onClick={onClick}
+      onDoubleClick={onOpen}
       onContextMenu={(e) => {
         e.preventDefault()
         // Context menu is handled by the dropdown trigger
@@ -154,7 +160,7 @@ function FileRow({
       <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
         <div 
           className={cn(
-            "w-5 h-5 border-2 rounded-md flex items-center justify-center transition-all duration-150",
+            "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 cursor-pointer",
             isSelected 
               ? "bg-accent-primary border-accent-primary" 
               : "border-default-400 group-hover:border-accent-primary"
@@ -329,8 +335,10 @@ function FileCard({
   file,
   isSelected,
   isFavorited,
+  isActive,
   onSelect,
   onOpen,
+  onClick,
   onRename,
   onDelete,
   onViewVersions,
@@ -340,8 +348,10 @@ function FileCard({
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
+  isActive: boolean
   onSelect: () => void
   onOpen: () => void
+  onClick: () => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
@@ -368,9 +378,11 @@ function FileCard({
       className={cn(
         "group relative bg-content1 border border-divider rounded-xl p-4 cursor-pointer transition-all duration-200",
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
-        isSelected && "border-accent-primary bg-accent-primary/5"
+        isSelected && "border-accent-primary bg-accent-primary/5",
+        isActive && !isSelected && "border-accent-primary/30"
       )}
-      onClick={onOpen}
+      onClick={onClick}
+      onDoubleClick={onOpen}
     >
       {/* Selection checkbox */}
       <div 
@@ -379,7 +391,7 @@ function FileCard({
       >
         <div
           className={cn(
-            "w-5 h-5 border-2 rounded-md flex items-center justify-center transition-all duration-150 bg-content1/80 backdrop-blur-sm",
+            "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 bg-content1/80 backdrop-blur-sm cursor-pointer",
             isSelected
               ? "bg-accent-primary border-accent-primary"
               : "border-default-400 opacity-0 group-hover:opacity-100"
@@ -628,17 +640,30 @@ export function FilesPage() {
     overscan: 10,
   })
 
+  // Active file for preview panel (not selection)
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null)
+
+  // Handle single click - show preview panel without changing selection
+  const handleFileClick = useCallback((file: FileItem) => {
+    setActiveFilePath(file.path)
+  }, [])
+
+  // Handle double click - open folder or download file
   const handleFileOpen = useCallback((file: FileItem) => {
     if (file.isDir) {
       setCurrentPath(file.path)
+      setActiveFilePath(null)
     } else {
-      // Select for preview instead of opening immediately
-      if (!selectedFiles.has(file.path)) {
-        clearSelection()
-        toggleFileSelection(file.path)
-      }
+      // Download the file on double-click
+      const downloadUrl = `/api/v1/files${file.path}?download=true`
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      link.download = file.name
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
     }
-  }, [setCurrentPath, selectedFiles, clearSelection, toggleFileSelection])
+  }, [setCurrentPath])
 
   const handleSelectAll = useCallback(() => {
     if (selectedFiles.size === sortedFiles.length) {
@@ -814,12 +839,17 @@ export function FilesPage() {
     addToast({ title: `已开始下载 ${files.length} 个文件`, color: 'success' })
   }, [selectedFiles, sortedFiles])
 
-  // Determine active file for preview
+  // Determine active file for preview (prioritize activeFilePath, then single selection)
   const activeFile = useMemo(() => {
-    if (selectedFiles.size !== 1) return null
-    const path = Array.from(selectedFiles)[0]
-    return sortedFiles.find(f => f.path === path) || null
-  }, [selectedFiles, sortedFiles])
+    if (activeFilePath) {
+      return sortedFiles.find(f => f.path === activeFilePath) || null
+    }
+    if (selectedFiles.size === 1) {
+      const path = Array.from(selectedFiles)[0]
+      return sortedFiles.find(f => f.path === path) || null
+    }
+    return null
+  }, [activeFilePath, selectedFiles, sortedFiles])
 
   if (isLoading) {
     return (
@@ -912,7 +942,7 @@ export function FilesPage() {
               <>
                 <Button 
                   variant="bordered" 
-                  className="btn-secondary btn-sm"
+                  className="btn-secondary btn-sm rounded-xl"
                   startContent={<X size={16} />}
                   onPress={clearSelection}
                 >
@@ -920,7 +950,7 @@ export function FilesPage() {
                 </Button>
                 <Button 
                   variant="bordered" 
-                  className="btn-secondary btn-sm"
+                  className="btn-secondary btn-sm rounded-xl"
                   startContent={<Download size={16} />}
                   onPress={handleBatchDownload}
                 >
@@ -929,6 +959,7 @@ export function FilesPage() {
                 <Button 
                   color="danger"
                   variant="flat"
+                  className="rounded-xl"
                   startContent={<Trash2 size={16} />}
                   onPress={onBatchDeleteOpen}
                 >
@@ -938,7 +969,7 @@ export function FilesPage() {
             ) : (
               <>
                 <Button 
-                  className="btn-primary btn-md border-none font-medium"
+                  className="btn-primary btn-md border-none font-medium rounded-xl"
                   startContent={<Star size={16} className="fill-current" />}
                   onPress={() => fileInputRef.current?.click()}
                   isLoading={isUploading}
@@ -947,7 +978,7 @@ export function FilesPage() {
                 </Button>
                 <Button 
                   variant="bordered" 
-                  className="btn-secondary btn-md"
+                  className="btn-secondary btn-md rounded-xl"
                   startContent={<FolderPlus size={16} />}
                   onPress={onNewFolderOpen}
                 >
@@ -957,15 +988,15 @@ export function FilesPage() {
             )}
           </div>
           
-          <div className="flex bg-content1 border border-divider rounded-[10px] p-0.5 shadow-[var(--shadow-soft)]">
+          <div className="flex bg-content1 border border-divider rounded-xl p-0.5 shadow-[var(--shadow-soft)]">
             <button 
-              className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+              className={cn("p-2 rounded-[10px] transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
               onClick={() => setViewMode('list')}
             >
               <List size={16} />
             </button>
             <button 
-              className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+              className={cn("p-2 rounded-[10px] transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
               onClick={() => setViewMode('grid')}
             >
               <Grid size={16} />
@@ -981,7 +1012,7 @@ export function FilesPage() {
               <div className="flex items-center justify-center">
                 <div 
                   className={cn(
-                    "w-5 h-5 border-2 rounded-md cursor-pointer transition-colors",
+                    "w-5 h-5 border-2 rounded-lg cursor-pointer transition-colors",
                     selectedFiles.size === sortedFiles.length && sortedFiles.length > 0 ? "bg-accent-primary border-accent-primary" : "border-default-400 hover:border-accent-primary"
                   )}
                   onClick={handleSelectAll}
@@ -1016,8 +1047,10 @@ export function FilesPage() {
                         file={file}
                         isSelected={selectedFiles.has(file.path)}
                         isFavorited={favoritesData?.[file.path] ?? false}
+                        isActive={activeFilePath === file.path}
                         onSelect={() => toggleFileSelection(file.path)}
                         onOpen={() => handleFileOpen(file)}
+                        onClick={() => handleFileClick(file)}
                         onRename={() => handleOpenRenameModal(file)}
                         onDelete={() => handleOpenDeleteModal(file)}
                         onViewVersions={() => handleViewVersions(file)}
@@ -1064,8 +1097,10 @@ export function FilesPage() {
                     file={file}
                     isSelected={selectedFiles.has(file.path)}
                     isFavorited={favoritesData?.[file.path] ?? false}
+                    isActive={activeFilePath === file.path}
                     onSelect={() => toggleFileSelection(file.path)}
                     onOpen={() => handleFileOpen(file)}
+                    onClick={() => handleFileClick(file)}
                     onRename={() => handleOpenRenameModal(file)}
                     onDelete={() => handleOpenDeleteModal(file)}
                     onViewVersions={() => handleViewVersions(file)}
@@ -1128,8 +1163,8 @@ export function FilesPage() {
             </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onNewFolderClose} className="text-default-600">取消</Button>
-            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()}>创建</Button>
+            <Button variant="flat" onPress={onNewFolderClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()} className="rounded-xl">创建</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1172,8 +1207,8 @@ export function FilesPage() {
             </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onRenameClose} className="text-default-600">取消</Button>
-            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name}>确定</Button>
+            <Button variant="flat" onPress={onRenameClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name} className="rounded-xl">确定</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1204,8 +1239,8 @@ export function FilesPage() {
             <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onDeleteClose} className="text-default-600">取消</Button>
-            <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending}>删除</Button>
+            <Button variant="flat" onPress={onDeleteClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending} className="rounded-xl">删除</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1236,8 +1271,8 @@ export function FilesPage() {
             <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onBatchDeleteClose} className="text-default-600">取消</Button>
-            <Button color="danger" onPress={handleBatchDelete}>删除全部</Button>
+            <Button variant="flat" onPress={onBatchDeleteClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="danger" onPress={handleBatchDelete} className="rounded-xl">删除全部</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
