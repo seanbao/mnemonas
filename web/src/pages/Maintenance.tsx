@@ -43,8 +43,6 @@ function ResultSummary({ result }: { result: ScrubResult }) {
     return null
   }
   
-  const hasErrors = (result.corrupted_objects || 0) > 0 || (result.missing_objects || 0) > 0
-  
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
       <StatCard

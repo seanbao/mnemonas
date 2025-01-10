@@ -322,7 +322,7 @@ describe('UsersPage', () => {
     it('shows loading state initially', () => {
       vi.mocked(usersApi.listUsers).mockImplementation(() => new Promise(() => {}))
       renderUsersPage()
-      expect(screen.getByText('加载中...')).toBeInTheDocument()
+      expect(screen.getByText('加载用户列表...')).toBeInTheDocument()
     })
   })
 

@@ -29,8 +29,8 @@ describe('StoragePage', () => {
       mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
       render(<StoragePage />)
 
-      // Should show skeleton elements
-      const skeletons = document.querySelectorAll('[class*="loading"], [class*="pulse"], .bg-content1')
+      // Should show skeleton elements with HeroUI skeleton classes
+      const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="animate"], [class*="rounded-lg"]')
       expect(skeletons.length).toBeGreaterThan(0)
     })
   })

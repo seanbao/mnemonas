@@ -71,7 +71,8 @@ describe('ShareAccessPage', () => {
     
     renderWithRouter('abc123')
     
-    expect(screen.getByTestId('spinner')).toBeInTheDocument()
+    // Component uses custom CSS spinner, check for loading text
+    expect(screen.getByText('加载分享信息...')).toBeInTheDocument()
   })
 
   it('shows error when share not found', async () => {

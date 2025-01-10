@@ -336,6 +336,24 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
   }
 }
 
+// Copy file
+export async function copyFile(fromPath: string, toPath: string): Promise<void> {
+  const normalizedFrom = normalizePath(fromPath)
+  const normalizedTo = normalizePath(toPath)
+  const encodedFrom = encodePathForUrl(normalizedFrom)
+  const encodedTo = encodePathForUrl(normalizedTo)
+  
+  const response = await authFetch(`/dav${encodedFrom}`, {
+    method: 'COPY',
+    headers: {
+      'Destination': `/dav${encodedTo}`,
+    },
+  })
+  if (!response.ok) {
+    throw new ApiError('复制文件失败', response.status, response.statusText)
+  }
+}
+
 // Restore file to a specific version
 export async function restoreVersion(path: string, hash: string): Promise<void> {
   const normalizedPath = normalizePath(path)

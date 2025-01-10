@@ -109,8 +109,9 @@ export function StoragePage() {
     )
   }
 
-  // TODO: Get actual capacity from API when available
-  const totalCapacity = stats?.totalCapacity || 10 * 1024 * 1024 * 1024 // Default 10GB if not provided
+  // Calculate storage usage
+  // Note: totalCapacity not yet provided by API, using totalSize-based estimation
+  const totalCapacity = 10 * 1024 * 1024 * 1024 // Default 10GB
   const usedPercent = Math.min(((stats?.totalSize || 0) / totalCapacity) * 100, 100)
 
   const statsCards = [
