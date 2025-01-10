@@ -83,7 +83,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('仪表盘')).toBeTruthy()
+        expect(screen.getByText('系统概览')).toBeTruthy()
       })
     })
 
@@ -281,7 +281,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('仪表盘')).toBeTruthy()
+        expect(screen.getByText('系统概览')).toBeTruthy()
       })
       
       // Should show default values
@@ -294,7 +294,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('仪表盘')).toBeTruthy()
+        expect(screen.getByText('系统概览')).toBeTruthy()
       })
     })
   })

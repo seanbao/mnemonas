@@ -34,17 +34,25 @@ import {
   Copy,
   FolderOpen,
   Upload,
+  FolderUp,
   CheckCircle2,
   AlertCircle,
   X,
   Link2,
+  Move,
+  Files,
 } from 'lucide-react'
 import { ShareDialog } from '@/components/share'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { ContextMenu, ContextMenuSection, ContextMenuItem } from '@/components/ui/ContextMenu'
+import { MoveDialog } from '@/components/file'
+import { PreviewModal, type PreviewFile } from '@/components/preview'
 import { useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
-import { listFiles, deleteFile, createDirectory, uploadFile, moveFile } from '@/api/files'
+import { useClipboardStore } from '@/stores/clipboard'
+import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
+import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 
@@ -103,7 +111,6 @@ function FileRow({
   file, 
   isSelected, 
   isFavorited,
-  isActive,
   onSelect, 
   onOpen,
   onClick,
@@ -112,11 +119,11 @@ function FileRow({
   onViewVersions,
   onShare,
   onToggleFavorite,
+  onContextMenu,
 }: { 
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
-  isActive: boolean
   onSelect: () => void
   onOpen: () => void
   onClick: () => void
@@ -125,6 +132,7 @@ function FileRow({
   onViewVersions: () => void
   onShare: () => void
   onToggleFavorite: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
     // Construct download URL
@@ -147,15 +155,11 @@ function FileRow({
       className={cn(
         "group grid grid-cols-[44px_1fr_100px_150px_120px_40px] gap-4 px-5 py-3 cursor-pointer transition-all duration-150 border-b border-divider items-center",
         "hover:bg-content2/60",
-        isSelected && "bg-accent-primary/10",
-        isActive && !isSelected && "bg-content2/40"
+        isSelected && "bg-accent-primary/10"
       )}
       onClick={onClick}
       onDoubleClick={onOpen}
-      onContextMenu={(e) => {
-        e.preventDefault()
-        // Context menu is handled by the dropdown trigger
-      }}
+      onContextMenu={onContextMenu}
     >
       <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
         <div 
@@ -335,7 +339,6 @@ function FileCard({
   file,
   isSelected,
   isFavorited,
-  isActive,
   onSelect,
   onOpen,
   onClick,
@@ -344,11 +347,11 @@ function FileCard({
   onViewVersions,
   onShare,
   onToggleFavorite,
+  onContextMenu,
 }: {
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
-  isActive: boolean
   onSelect: () => void
   onOpen: () => void
   onClick: () => void
@@ -357,6 +360,7 @@ function FileCard({
   onViewVersions: () => void
   onShare: () => void
   onToggleFavorite: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
     const downloadUrl = `/api/v1/files${file.path}?download=true`
@@ -378,11 +382,11 @@ function FileCard({
       className={cn(
         "group relative bg-content1 border border-divider rounded-xl p-4 cursor-pointer transition-all duration-200",
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
-        isSelected && "border-accent-primary bg-accent-primary/5",
-        isActive && !isSelected && "border-accent-primary/30"
+        isSelected && "border-accent-primary bg-accent-primary/5"
       )}
       onClick={onClick}
       onDoubleClick={onOpen}
+      onContextMenu={onContextMenu}
     >
       {/* Selection checkbox */}
       <div 
@@ -511,8 +515,19 @@ function FileCard({
 export function FilesPage() {
   const parentRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  
+  // Context menu state
+  const contextMenu = useContextMenu()
+  const [contextMenuFile, setContextMenuFile] = useState<FileItem | null>(null)
+  
+  // Clipboard state
+  const clipboard = useClipboardStore()
+  
+  // Track focused file index for keyboard navigation
+  const [focusedIndex, setFocusedIndex] = useState<number>(-1)
   
   // Modal states
   const { isOpen: isNewFolderOpen, onOpen: onNewFolderOpen, onClose: onNewFolderClose } = useDisclosure()
@@ -521,6 +536,15 @@ export function FilesPage() {
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
   const { isOpen: isShareOpen, onOpen: onShareOpen, onClose: onShareClose } = useDisclosure()
   const [shareFile, setShareFile] = useState<FileItem | null>(null)
+  
+  // Move/Copy dialog state
+  const { isOpen: isMoveOpen, onOpen: onMoveOpen, onClose: onMoveClose } = useDisclosure()
+  const [moveMode, setMoveMode] = useState<'move' | 'copy'>('move')
+  const [moveFiles, setMoveFiles] = useState<FileItem[]>([])
+  
+  // Preview modal state
+  const { isOpen: isPreviewOpen, onOpen: onPreviewOpen, onClose: onPreviewClose } = useDisclosure()
+  const [previewFile, setPreviewFile] = useState<PreviewFile | null>(null)
   
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
@@ -531,7 +555,7 @@ export function FilesPage() {
   const dragCountRef = useRef(0)
   
   // Multi-file upload state
-  const [uploadQueue, setUploadQueue] = useState<{file: File, progress: number, status: 'pending' | 'uploading' | 'done' | 'error', error?: string}[]>([])
+  const [uploadQueue, setUploadQueue] = useState<{file: File, relativePath?: string, progress: number, status: 'pending' | 'uploading' | 'done' | 'error', error?: string}[]>([])
   const [isUploading, setIsUploading] = useState(false)
   
   const { 
@@ -643,18 +667,24 @@ export function FilesPage() {
   // Active file for preview panel (not selection)
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null)
 
-  // Handle single click - show preview panel without changing selection
+  // Handle single click - open folder directly, show preview for files
   const handleFileClick = useCallback((file: FileItem) => {
-    setActiveFilePath(file.path)
-  }, [])
-
-  // Handle double click - open folder or download file
-  const handleFileOpen = useCallback((file: FileItem) => {
     if (file.isDir) {
+      // Single click on folder -> enter it directly
       setCurrentPath(file.path)
       setActiveFilePath(null)
     } else {
-      // Download the file on double-click
+      // Single click on file -> show preview panel & open preview modal
+      setActiveFilePath(file.path)
+      setPreviewFile({ path: file.path, name: file.name })
+      onPreviewOpen()
+    }
+  }, [setCurrentPath, onPreviewOpen])
+
+  // Handle double click - download file (folders are handled by single click)
+  const handleFileOpen = useCallback((file: FileItem) => {
+    if (!file.isDir) {
+      // Double click on file -> download it
       const downloadUrl = `/api/v1/files${file.path}?download=true`
       const link = document.createElement('a')
       link.href = downloadUrl
@@ -663,7 +693,8 @@ export function FilesPage() {
       link.click()
       document.body.removeChild(link)
     }
-  }, [setCurrentPath])
+    // Double click on folder is ignored since single click already enters
+  }, [])
 
   const handleSelectAll = useCallback(() => {
     if (selectedFiles.size === sortedFiles.length) {
@@ -714,28 +745,121 @@ export function FilesPage() {
     onShareOpen()
   }, [onShareOpen])
 
-  // Enhanced upload handler with queue support
+  // Move/Copy handlers
+  const handleOpenMoveModal = useCallback((files: FileItem[]) => {
+    setMoveFiles(files)
+    setMoveMode('move')
+    onMoveOpen()
+  }, [onMoveOpen])
+
+  const handleOpenCopyModal = useCallback((files: FileItem[]) => {
+    setMoveFiles(files)
+    setMoveMode('copy')
+    onMoveOpen()
+  }, [onMoveOpen])
+
+  // Context menu handler
+  const handleContextMenu = useCallback((file: FileItem, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenuFile(file)
+    contextMenu.show(file.path, e.clientX, e.clientY)
+  }, [contextMenu])
+
+  // Context menu actions
+  const handleContextMenuDownload = useCallback(() => {
+    if (!contextMenuFile || contextMenuFile.isDir) return
+    const downloadUrl = `/api/v1/files${contextMenuFile.path}?download=true`
+    const link = document.createElement('a')
+    link.href = downloadUrl
+    link.download = contextMenuFile.name
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    contextMenu.hide()
+  }, [contextMenuFile, contextMenu])
+
+  const handleContextMenuCopyPath = useCallback(() => {
+    if (!contextMenuFile) return
+    navigator.clipboard.writeText(contextMenuFile.path)
+    addToast({ title: '路径已复制', color: 'success' })
+    contextMenu.hide()
+  }, [contextMenuFile, contextMenu])
+
+  // Track created directories to avoid duplicate MKCOL calls
+  const createdDirsRef = useRef<Set<string>>(new Set())
+
+  // Ensure a directory path exists (create parent directories recursively)
+  const ensureDirectoryExists = useCallback(async (dirPath: string) => {
+    if (dirPath === '/' || createdDirsRef.current.has(dirPath)) return
+    
+    // Get parent path
+    const parentPath = dirPath.substring(0, dirPath.lastIndexOf('/')) || '/'
+    
+    // Ensure parent exists first
+    await ensureDirectoryExists(parentPath)
+    
+    // Create this directory if not already created
+    if (!createdDirsRef.current.has(dirPath)) {
+      try {
+        await createDirectory(dirPath)
+        createdDirsRef.current.add(dirPath)
+      } catch {
+        // Directory might already exist, mark as created
+        createdDirsRef.current.add(dirPath)
+      }
+    }
+  }, [])
+
+  // Enhanced upload handler with queue support and folder support
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
     
     const fileArray = Array.from(files)
-    const queue = fileArray.map(file => ({
-      file,
-      progress: 0,
-      status: 'pending' as const,
-    }))
+    
+    // Check if this is a folder upload (files have webkitRelativePath)
+    const isFolderUpload = fileArray.some(f => (f as File & { webkitRelativePath?: string }).webkitRelativePath)
+    
+    // Reset created directories tracker
+    createdDirsRef.current.clear()
+    
+    const queue = fileArray.map(file => {
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      return {
+        file,
+        relativePath,
+        progress: 0,
+        status: 'pending' as const,
+      }
+    })
     
     setUploadQueue(queue)
     setIsUploading(true)
     
     for (let i = 0; i < fileArray.length; i++) {
       const file = fileArray[i]
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
+      
       setUploadQueue(prev => prev.map((item, j) => 
         j === i ? { ...item, status: 'uploading' as const } : item
       ))
       
       try {
-        await uploadFile(currentPath, file, (progress) => {
+        // For folder uploads, create parent directories first
+        if (relativePath && relativePath.includes('/')) {
+          const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
+          const targetDir = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
+          await ensureDirectoryExists(targetDir)
+        }
+        
+        // Calculate the target path for the file
+        let targetPath = currentPath
+        if (relativePath && relativePath.includes('/')) {
+          const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
+          targetPath = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
+        }
+        
+        await uploadFile(targetPath, file, (progress) => {
           setUploadQueue(prev => prev.map((item, j) => 
             j === i ? { ...item, progress } : item
           ))
@@ -753,11 +877,20 @@ export function FilesPage() {
     setIsUploading(false)
     queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
     
+    // Show summary toast for folder upload
+    if (isFolderUpload) {
+      addToast({ 
+        title: `文件夹上传完成`, 
+        description: `成功上传 ${fileArray.length} 个文件`,
+        color: 'success' 
+      })
+    }
+    
     // Auto-clear successful uploads after 3 seconds
     setTimeout(() => {
       setUploadQueue(prev => prev.filter(item => item.status === 'error'))
     }, 3000)
-  }, [currentPath, queryClient])
+  }, [currentPath, queryClient, ensureDirectoryExists])
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
@@ -839,6 +972,141 @@ export function FilesPage() {
     addToast({ title: `已开始下载 ${files.length} 个文件`, color: 'success' })
   }, [selectedFiles, sortedFiles])
 
+  // Keyboard shortcuts handlers
+  const handleKeyboardCopy = useCallback(() => {
+    if (selectedFiles.size === 0) return
+    clipboard.copy(Array.from(selectedFiles), currentPath)
+    addToast({ title: `已复制 ${selectedFiles.size} 个项目`, color: 'success' })
+  }, [selectedFiles, currentPath, clipboard])
+
+  const handleKeyboardCut = useCallback(() => {
+    if (selectedFiles.size === 0) return
+    clipboard.cut(Array.from(selectedFiles), currentPath)
+    addToast({ title: `已剪切 ${selectedFiles.size} 个项目`, color: 'success' })
+  }, [selectedFiles, currentPath, clipboard])
+
+  const handleKeyboardPaste = useCallback(async () => {
+    if (!clipboard.hasPaths()) return
+    
+    const { paths, operation, sourcePath } = clipboard
+    if (!operation || !sourcePath) return
+    
+    let successCount = 0
+    let errorCount = 0
+    
+    for (const path of paths) {
+      const fileName = path.split('/').pop() || ''
+      const destPath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`
+      
+      try {
+        if (operation === 'cut') {
+          await moveFile(path, destPath)
+        } else {
+          await copyFile(path, destPath)
+        }
+        successCount++
+      } catch {
+        errorCount++
+      }
+    }
+    
+    if (operation === 'cut') {
+      clipboard.clear()
+    }
+    
+    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+    if (sourcePath !== currentPath) {
+      queryClient.invalidateQueries({ queryKey: ['files', sourcePath] })
+    }
+    
+    if (errorCount === 0) {
+      addToast({ title: `成功${operation === 'cut' ? '移动' : '复制'} ${successCount} 个文件`, color: 'success' })
+    } else {
+      addToast({ title: `${successCount} 成功，${errorCount} 失败`, color: 'warning' })
+    }
+  }, [clipboard, currentPath, queryClient])
+
+  const handleKeyboardDelete = useCallback(() => {
+    if (selectedFiles.size === 0) return
+    onBatchDeleteOpen()
+  }, [selectedFiles.size, onBatchDeleteOpen])
+
+  const handleKeyboardRename = useCallback(() => {
+    if (selectedFiles.size !== 1) return
+    const path = Array.from(selectedFiles)[0]
+    const file = sortedFiles.find(f => f.path === path)
+    if (file) {
+      handleOpenRenameModal(file)
+    }
+  }, [selectedFiles, sortedFiles, handleOpenRenameModal])
+
+  const handleKeyboardEnter = useCallback(() => {
+    // If there's a focused file, open it
+    if (focusedIndex >= 0 && focusedIndex < sortedFiles.length) {
+      const file = sortedFiles[focusedIndex]
+      handleFileClick(file)
+      return
+    }
+    
+    // Otherwise, if single selection, open that file
+    if (selectedFiles.size === 1) {
+      const path = Array.from(selectedFiles)[0]
+      const file = sortedFiles.find(f => f.path === path)
+      if (file) {
+        handleFileClick(file)
+      }
+    }
+  }, [focusedIndex, sortedFiles, selectedFiles, handleFileClick])
+
+  const handleKeyboardArrowDown = useCallback(() => {
+    if (sortedFiles.length === 0) return
+    
+    const newIndex = focusedIndex < 0 ? 0 : Math.min(focusedIndex + 1, sortedFiles.length - 1)
+    setFocusedIndex(newIndex)
+    
+    // Update selection
+    const file = sortedFiles[newIndex]
+    if (file) {
+      clearSelection()
+      toggleFileSelection(file.path)
+    }
+  }, [focusedIndex, sortedFiles, clearSelection, toggleFileSelection])
+
+  const handleKeyboardArrowUp = useCallback(() => {
+    if (sortedFiles.length === 0) return
+    
+    const newIndex = focusedIndex <= 0 ? 0 : focusedIndex - 1
+    setFocusedIndex(newIndex)
+    
+    // Update selection
+    const file = sortedFiles[newIndex]
+    if (file) {
+      clearSelection()
+      toggleFileSelection(file.path)
+    }
+  }, [focusedIndex, sortedFiles, clearSelection, toggleFileSelection])
+
+  const handleKeyboardRefresh = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+    addToast({ title: '刷新成功', color: 'success' })
+  }, [queryClient, currentPath])
+
+  // Register keyboard shortcuts
+  useKeyboardShortcuts({
+    onDelete: handleKeyboardDelete,
+    onSelectAll: handleSelectAll,
+    onEscape: clearSelection,
+    onCopy: handleKeyboardCopy,
+    onCut: handleKeyboardCut,
+    onPaste: handleKeyboardPaste,
+    onRename: handleKeyboardRename,
+    onEnter: handleKeyboardEnter,
+    onArrowDown: handleKeyboardArrowDown,
+    onArrowUp: handleKeyboardArrowUp,
+    onRefresh: handleKeyboardRefresh,
+    onNewFolder: onNewFolderOpen,
+  })
+
   // Determine active file for preview (prioritize activeFilePath, then single selection)
   const activeFile = useMemo(() => {
     if (activeFilePath) {
@@ -850,6 +1118,13 @@ export function FilesPage() {
     }
     return null
   }, [activeFilePath, selectedFiles, sortedFiles])
+
+  // Previewable files for navigation in preview modal (non-directory files)
+  const previewFiles = useMemo<PreviewFile[]>(() => {
+    return sortedFiles
+      .filter(f => !f.isDir)
+      .map(f => ({ path: f.path, name: f.name }))
+  }, [sortedFiles])
 
   if (isLoading) {
     return (
@@ -908,7 +1183,9 @@ export function FilesPage() {
                   {(item.status === 'pending' || item.status === 'uploading') && (
                     <div className="w-3.5 h-3.5 border-2 border-accent-primary border-t-transparent rounded-full animate-spin" />
                   )}
-                  <span className="text-sm truncate flex-1">{item.file.name}</span>
+                  <span className="text-sm truncate flex-1" title={item.relativePath || item.file.name}>
+                    {item.relativePath || item.file.name}
+                  </span>
                 </div>
                 {item.status === 'uploading' && (
                   <Progress 
@@ -931,6 +1208,8 @@ export function FilesPage() {
 
       <div className="flex-1 flex flex-col min-w-0 p-7">
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
+        {/* @ts-expect-error - webkitdirectory is a non-standard attribute */}
+        <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
         
         {/* Breadcrumbs */}
         <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
@@ -975,6 +1254,16 @@ export function FilesPage() {
                   isLoading={isUploading}
                 >
                   {isUploading ? '上传中...' : '保存记忆'}
+                </Button>
+                <Button 
+                  variant="bordered" 
+                  className="btn-secondary btn-md rounded-xl"
+                  startContent={<FolderUp size={16} />}
+                  onPress={() => folderInputRef.current?.click()}
+                  isLoading={isUploading}
+                  isDisabled={isUploading}
+                >
+                  上传文件夹
                 </Button>
                 <Button 
                   variant="bordered" 
@@ -1047,7 +1336,6 @@ export function FilesPage() {
                         file={file}
                         isSelected={selectedFiles.has(file.path)}
                         isFavorited={favoritesData?.[file.path] ?? false}
-                        isActive={activeFilePath === file.path}
                         onSelect={() => toggleFileSelection(file.path)}
                         onOpen={() => handleFileOpen(file)}
                         onClick={() => handleFileClick(file)}
@@ -1059,6 +1347,7 @@ export function FilesPage() {
                           path: file.path, 
                           isFavorited: favoritesData?.[file.path] ?? false 
                         })}
+                        onContextMenu={(e) => handleContextMenu(file, e)}
                       />
                     </div>
                   )
@@ -1097,7 +1386,6 @@ export function FilesPage() {
                     file={file}
                     isSelected={selectedFiles.has(file.path)}
                     isFavorited={favoritesData?.[file.path] ?? false}
-                    isActive={activeFilePath === file.path}
                     onSelect={() => toggleFileSelection(file.path)}
                     onOpen={() => handleFileOpen(file)}
                     onClick={() => handleFileClick(file)}
@@ -1109,6 +1397,7 @@ export function FilesPage() {
                       path: file.path, 
                       isFavorited: favoritesData?.[file.path] ?? false 
                     })}
+                    onContextMenu={(e) => handleContextMenu(file, e)}
                   />
                 ))}
               </div>
@@ -1286,6 +1575,143 @@ export function FilesPage() {
         }}
         filePath={shareFile?.path || ''}
       />
+
+      {/* Move/Copy Dialog */}
+      <MoveDialog
+        isOpen={isMoveOpen}
+        onClose={() => {
+          onMoveClose()
+          setMoveFiles([])
+        }}
+        files={moveFiles}
+        currentPath={currentPath}
+        mode={moveMode}
+      />
+
+      {/* File Preview Modal */}
+      <PreviewModal
+        isOpen={isPreviewOpen}
+        onClose={() => {
+          onPreviewClose()
+          setPreviewFile(null)
+        }}
+        file={previewFile}
+        files={previewFiles}
+        onFileChange={(file) => {
+          setPreviewFile(file)
+          setActiveFilePath(file.path)
+        }}
+      />
+
+      {/* Context Menu */}
+      <ContextMenu
+        isOpen={contextMenu.state.isOpen}
+        position={contextMenu.state.position}
+        onClose={contextMenu.hide}
+      >
+        {contextMenuFile && (
+          <>
+            <ContextMenuSection title="操作" showDivider>
+              {contextMenuFile.isDir ? (
+                <ContextMenuItem
+                  icon={<FolderOpen size={16} />}
+                  onClick={() => {
+                    setCurrentPath(contextMenuFile.path)
+                    contextMenu.hide()
+                  }}
+                >
+                  打开文件夹
+                </ContextMenuItem>
+              ) : (
+                <ContextMenuItem
+                  icon={<Download size={16} />}
+                  onClick={handleContextMenuDownload}
+                >
+                  下载
+                </ContextMenuItem>
+              )}
+              <ContextMenuItem
+                icon={<Pencil size={16} />}
+                onClick={() => {
+                  handleOpenRenameModal(contextMenuFile)
+                  contextMenu.hide()
+                }}
+              >
+                重命名
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Move size={16} />}
+                onClick={() => {
+                  handleOpenMoveModal([contextMenuFile])
+                  contextMenu.hide()
+                }}
+              >
+                移动到...
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Files size={16} />}
+                onClick={() => {
+                  handleOpenCopyModal([contextMenuFile])
+                  contextMenu.hide()
+                }}
+              >
+                复制到...
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Copy size={16} />}
+                onClick={handleContextMenuCopyPath}
+              >
+                复制路径
+              </ContextMenuItem>
+            </ContextMenuSection>
+            <ContextMenuSection title="分享" showDivider>
+              <ContextMenuItem
+                icon={<Star size={16} className={favoritesData?.[contextMenuFile.path] ? "fill-accent-primary text-accent-primary" : ""} />}
+                onClick={() => {
+                  favoriteMutation.mutate({ 
+                    path: contextMenuFile.path, 
+                    isFavorited: favoritesData?.[contextMenuFile.path] ?? false 
+                  })
+                  contextMenu.hide()
+                }}
+              >
+                {favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏'}
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Link2 size={16} />}
+                onClick={() => {
+                  handleOpenShareModal(contextMenuFile)
+                  contextMenu.hide()
+                }}
+                disabled={contextMenuFile.isDir}
+              >
+                创建分享链接
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<History size={16} />}
+                onClick={() => {
+                  handleViewVersions(contextMenuFile)
+                  contextMenu.hide()
+                }}
+              >
+                查看版本历史
+              </ContextMenuItem>
+            </ContextMenuSection>
+            <ContextMenuSection>
+              <ContextMenuItem
+                icon={<Trash2 size={16} />}
+                danger
+                onClick={() => {
+                  handleOpenDeleteModal(contextMenuFile)
+                  contextMenu.hide()
+                }}
+              >
+                删除
+              </ContextMenuItem>
+            </ContextMenuSection>
+          </>
+        )}
+      </ContextMenu>
     </div>
   )
 }

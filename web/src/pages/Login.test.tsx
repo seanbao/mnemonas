@@ -57,8 +57,9 @@ describe('LoginPage', () => {
     it('renders login form', () => {
       renderLogin()
       
-      expect(screen.getByText('MnemoNAS')).toBeInTheDocument()
-      expect(screen.getByText('登录以访问存储空间')).toBeInTheDocument()
+      // Multiple MnemoNAS text elements exist (header, footer, etc.)
+      expect(screen.getAllByText(/MnemoNAS/i).length).toBeGreaterThan(0)
+      expect(screen.getByText('请登录以继续访问系统')).toBeInTheDocument()
       expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
       expect(screen.getByLabelText(/密码/i)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /登录/i })).toBeInTheDocument()

@@ -59,6 +59,48 @@
   
   --color-divider: rgba(17, 24, 39, 0.08);
 
+  /* Success - Green tones matching Meridian */
+  --color-success-50: #ecfdf5;
+  --color-success-100: #d1fae5;
+  --color-success-200: #a7f3d0;
+  --color-success-300: #6ee7b7;
+  --color-success-400: #34d399;
+  --color-success-500: #10b981;
+  --color-success-600: #059669;
+  --color-success-700: #047857;
+  --color-success-800: #065f46;
+  --color-success-900: #064e3b;
+  --color-success: var(--color-success-500);
+  --color-success-foreground: #ffffff;
+
+  /* Warning - Amber/Yellow tones matching Meridian starlight */
+  --color-warning-50: #fffbeb;
+  --color-warning-100: #fef3c7;
+  --color-warning-200: #fde68a;
+  --color-warning-300: #fcd34d;
+  --color-warning-400: #fbbf24;
+  --color-warning-500: #f59e0b;
+  --color-warning-600: #d97706;
+  --color-warning-700: #b45309;
+  --color-warning-800: #92400e;
+  --color-warning-900: #78350f;
+  --color-warning: var(--color-warning-500);
+  --color-warning-foreground: #ffffff;
+
+  /* Danger - Rose/Red tones matching Meridian */
+  --color-danger-50: #fff1f2;
+  --color-danger-100: #ffe4e6;
+  --color-danger-200: #fecdd3;
+  --color-danger-300: #fda4af;
+  --color-danger-400: #fb7185;
+  --color-danger-500: #f43f5e;
+  --color-danger-600: #e11d48;
+  --color-danger-700: #be123c;
+  --color-danger-800: #9f1239;
+  --color-danger-900: #881337;
+  --color-danger: var(--color-danger-500);
+  --color-danger-foreground: #ffffff;
+
   /* Elevation + Radius */
   --radius-lg: 16px;
   --radius-md: 12px;
@@ -789,4 +831,27 @@ label {
 
 .table-row:hover {
   background: rgba(15, 23, 42, 0.03);
+}
+
+/* Toast Customization - Meridian Style */
+[data-slot="toast-region"] {
+  z-index: 9999;
+  pointer-events: none; /* Allow clicks to pass through to elements below */
+}
+
+/* Toast styling with Meridian theme */
+[data-toast],
+[data-slot="toast"] {
+  pointer-events: auto; /* Toast itself remains clickable */
+  border-radius: 14px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  min-width: 280px;
+  max-width: 400px;
+}
+
+.dark [data-toast],
+.dark [data-slot="toast"] {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2) !important;
 }

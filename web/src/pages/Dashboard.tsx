@@ -5,7 +5,6 @@ import {
   FileBox, 
   Activity, 
   Clock,
-  CheckCircle2,
   AlertCircle,
   ArrowRight,
   Upload,

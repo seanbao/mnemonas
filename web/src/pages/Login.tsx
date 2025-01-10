@@ -5,7 +5,6 @@ import {
   CardBody,
   Button,
   Input,
-  Checkbox,
   Divider,
   addToast,
 } from '@heroui/react'
