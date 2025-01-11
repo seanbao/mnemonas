@@ -12,25 +12,34 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
-	"github.com/seanbao/mnemonas/internal/webdavcas"
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
-func setupTestServer(t *testing.T) (*Server, *webdavcas.FileSystem, string) {
+func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	tmpDir := t.TempDir()
-	casRoot := path.Join(tmpDir, "cas")
-	metaRoot := path.Join(tmpDir, "meta")
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
 
 	logger := zerolog.Nop()
 
 	server, err := NewServer(logger, &ServerConfig{
-		CASRoot:      casRoot,
-		MetadataRoot: metaRoot,
+		FileSystem: fs,
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
 	}
 
-	return server, server.fs, tmpDir
+	return server, fs, tmpDir
 }
 
 func TestServer_Health(t *testing.T) {

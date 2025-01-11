@@ -11,17 +11,22 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/seanbao/mnemonas/internal/webdavcas"
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
-func setupTestHandler(t *testing.T) (*Handler, *webdavcas.FileSystem, string) {
+func setupTestHandler(t *testing.T) (*Handler, *storage.FileSystem, string) {
 	tmpDir := t.TempDir()
-	casRoot := path.Join(tmpDir, "cas")
-	metaRoot := path.Join(tmpDir, "meta")
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
 
-	fs, err := webdavcas.NewFileSystem(casRoot, metaRoot)
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+	})
 	if err != nil {
-		t.Fatalf("NewFileSystem() error: %v", err)
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
 	}
 
 	handler := NewHandler(Config{
@@ -332,7 +337,17 @@ func TestHandler_LOCK_UNLOCK(t *testing.T) {
 
 func TestHandler_ReadOnlyMode(t *testing.T) {
 	tmpDir := t.TempDir()
-	fs, _ := webdavcas.NewFileSystem(path.Join(tmpDir, "cas"), path.Join(tmpDir, "meta"))
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
 
 	handler := NewHandler(Config{
 		FileSystem: fs,
@@ -372,7 +387,17 @@ func TestHandler_ReadOnlyMode(t *testing.T) {
 
 func TestHandler_BasicAuth(t *testing.T) {
 	tmpDir := t.TempDir()
-	fs, _ := webdavcas.NewFileSystem(path.Join(tmpDir, "cas"), path.Join(tmpDir, "meta"))
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
 
 	handler := NewHandler(Config{
 		FileSystem: fs,

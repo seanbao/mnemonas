@@ -46,14 +46,44 @@ type TLSConfig struct {
 
 // StorageConfig holds storage configuration
 type StorageConfig struct {
+	// Root is the base directory for all storage (default: /var/lib/mnemonas)
+	// User files will be stored in Root/files/
+	// Internal data will be stored in Root/.mnemonas/
+	Root string `toml:"root"`
+
+	// Legacy fields (deprecated, for migration compatibility)
 	DataDir        string `toml:"data_dir"`
 	MetadataDir    string `toml:"metadata_dir"`
 	TempDir        string `toml:"temp_dir"`
 	ThumbnailDir   string `toml:"thumbnail_dir"`
 	MaintenanceDir string `toml:"maintenance_dir"`
 	ActivityDir    string `toml:"activity_dir"`
+
 	// Version retention policy
 	Retention RetentionConfig `toml:"retention"`
+
+	// Versioning policy
+	Versioning VersioningConfig `toml:"versioning"`
+
+	// Trash configuration
+	Trash TrashConfig `toml:"trash"`
+}
+
+// VersioningConfig holds versioning policy configuration
+type VersioningConfig struct {
+	// AutoVersionedExtensions lists extensions that should have versioning by default
+	AutoVersionedExtensions []string `toml:"auto_versioned_extensions"`
+	// AutoVersionedFilenames lists filenames (without extension) that should have versioning
+	AutoVersionedFilenames []string `toml:"auto_versioned_filenames"`
+	// MaxVersionedSize is the max file size for auto versioning (default: 100MB)
+	MaxVersionedSize int64 `toml:"max_versioned_size"`
+}
+
+// TrashConfig holds trash/recycle bin configuration
+type TrashConfig struct {
+	Enabled       bool  `toml:"enabled"`
+	RetentionDays int   `toml:"retention_days"`
+	MaxSize       int64 `toml:"max_size"`
 }
 
 // RetentionConfig holds version retention policy
@@ -140,8 +170,8 @@ type LogConfig struct {
 
 // Default returns the default configuration
 func Default() *Config {
-	homeDir, _ := os.UserHomeDir()
-	dataRoot := filepath.Join(homeDir, ".mnemonas")
+	// Default storage root
+	storageRoot := "/var/lib/mnemonas"
 
 	return &Config{
 		Server: ServerConfig{
@@ -153,21 +183,43 @@ func Default() *Config {
 			TLS: TLSConfig{
 				Enabled:      false,
 				AutoGenerate: true, // Auto-generate self-signed cert for easy setup
-				CertDir:      filepath.Join(dataRoot, "certs"),
+				CertDir:      filepath.Join(storageRoot, ".mnemonas", "certs"),
 			},
 		},
 		Storage: StorageConfig{
-			DataDir:        filepath.Join(dataRoot, "data"),
-			MetadataDir:    filepath.Join(dataRoot, "metadata"),
-			TempDir:        filepath.Join(dataRoot, "tmp"),
-			ThumbnailDir:   filepath.Join(dataRoot, "thumbnails"),
-			MaintenanceDir: filepath.Join(dataRoot, "maintenance"),
-			ActivityDir:    filepath.Join(dataRoot, "activity"),
+			Root: storageRoot,
+			// Legacy fields for compatibility
+			DataDir:        filepath.Join(storageRoot, ".mnemonas", "objects"),
+			MetadataDir:    filepath.Join(storageRoot, ".mnemonas"),
+			TempDir:        filepath.Join(storageRoot, ".mnemonas", "tmp"),
+			ThumbnailDir:   filepath.Join(storageRoot, ".mnemonas", "thumbnails"),
+			MaintenanceDir: filepath.Join(storageRoot, ".mnemonas", "maintenance"),
+			ActivityDir:    filepath.Join(storageRoot, ".mnemonas", "activity"),
 			Retention: RetentionConfig{
-				MaxVersions:  100,
-				MaxAge:       365 * 24 * time.Hour,    // 1 year
+				MaxVersions:  50,
+				MaxAge:       90 * 24 * time.Hour,     // 90 days
 				MinFreeSpace: 10 * 1024 * 1024 * 1024, // 10GB
 				GCInterval:   24 * time.Hour,
+			},
+			Versioning: VersioningConfig{
+				AutoVersionedExtensions: []string{
+					".md", ".txt", ".org", ".rst", ".tex",
+					".go", ".rs", ".py", ".ts", ".js", ".tsx", ".jsx",
+					".c", ".cpp", ".h", ".java", ".kt", ".swift",
+					".toml", ".yaml", ".yml", ".json", ".xml",
+					".sh", ".bash", ".zsh", ".fish",
+				},
+				AutoVersionedFilenames: []string{
+					"Makefile", "Dockerfile", "Vagrantfile",
+					"LICENSE", "README", "CHANGELOG",
+					".gitignore", ".dockerignore", ".editorconfig",
+				},
+				MaxVersionedSize: 100 * 1024 * 1024, // 100MB
+			},
+			Trash: TrashConfig{
+				Enabled:       true,
+				RetentionDays: 30,
+				MaxSize:       10 * 1024 * 1024 * 1024, // 10GB
 			},
 		},
 		DataPlane: DataPlaneConfig{
@@ -190,15 +242,15 @@ func Default() *Config {
 			Enabled:         false, // disabled by default for easy development
 			AccessTokenTTL:  15 * time.Minute,
 			RefreshTokenTTL: 7 * 24 * time.Hour,
-			UsersFile:       filepath.Join(dataRoot, "users.json"),
+			UsersFile:       filepath.Join(storageRoot, ".mnemonas", "users.json"),
 		},
 		Share: ShareConfig{
 			Enabled:   false, // disabled by default
-			StoreFile: filepath.Join(dataRoot, "shares.json"),
+			StoreFile: filepath.Join(storageRoot, ".mnemonas", "shares.json"),
 		},
 		Favorites: FavoritesConfig{
 			Enabled:   true, // enabled by default
-			StoreFile: filepath.Join(dataRoot, "favorites.json"),
+			StoreFile: filepath.Join(storageRoot, ".mnemonas", "favorites.json"),
 		},
 		Alerts: AlertsConfig{
 			Enabled:        false, // disabled by default
@@ -290,22 +342,55 @@ func (c *Config) Validate() error {
 
 // EnsureDirs ensures all required directories exist
 func (c *Config) EnsureDirs() error {
+	// New directory structure
+	root := c.Storage.Root
 	dirs := []string{
-		c.Storage.DataDir,
-		c.Storage.MetadataDir,
-		c.Storage.TempDir,
-		c.Storage.ThumbnailDir,
-		c.Storage.MaintenanceDir,
-		c.Storage.ActivityDir,
+		filepath.Join(root, "files"),                    // User files (755)
+		filepath.Join(root, ".mnemonas"),                // Internal data (700)
+		filepath.Join(root, ".mnemonas", "objects"),     // Version objects
+		filepath.Join(root, ".mnemonas", "trash"),       // Trash
+		filepath.Join(root, ".mnemonas", "thumbnails"),  // Thumbnails
+		filepath.Join(root, ".mnemonas", "maintenance"), // Maintenance
+		filepath.Join(root, ".mnemonas", "activity"),    // Activity logs
+		filepath.Join(root, ".mnemonas", "tmp"),         // Temp files
 	}
 
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+	for i, dir := range dirs {
+		var perm os.FileMode = 0700
+		if i == 0 { // files/ directory should be accessible
+			perm = 0755
+		}
+		if err := os.MkdirAll(dir, perm); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
 
 	return nil
+}
+
+// FilesDir returns the path to user files directory
+func (c *Config) FilesDir() string {
+	return filepath.Join(c.Storage.Root, "files")
+}
+
+// InternalDir returns the path to internal data directory
+func (c *Config) InternalDir() string {
+	return filepath.Join(c.Storage.Root, ".mnemonas")
+}
+
+// IndexDBPath returns the path to SQLite index database
+func (c *Config) IndexDBPath() string {
+	return filepath.Join(c.Storage.Root, ".mnemonas", "index.db")
+}
+
+// ObjectsDir returns the path to version objects directory
+func (c *Config) ObjectsDir() string {
+	return filepath.Join(c.Storage.Root, ".mnemonas", "objects")
+}
+
+// TrashDir returns the path to trash directory
+func (c *Config) TrashDir() string {
+	return filepath.Join(c.Storage.Root, ".mnemonas", "trash")
 }
 
 // Address returns the server listen address

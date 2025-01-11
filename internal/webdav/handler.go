@@ -16,13 +16,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/seanbao/mnemonas/internal/caslayout"
-	"github.com/seanbao/mnemonas/internal/webdavcas"
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
 // Handler is the WebDAV request handler
 type Handler struct {
-	fs        *webdavcas.FileSystem
+	fs        *storage.FileSystem
 	prefix    string
 	readOnly  bool
 	pathLock  *PathLock
@@ -35,7 +34,7 @@ type Handler struct {
 
 // Config holds WebDAV handler configuration
 type Config struct {
-	FileSystem *webdavcas.FileSystem
+	FileSystem *storage.FileSystem
 	Prefix     string // URL prefix, e.g., "/dav"
 	ReadOnly   bool
 	// REM-1 fix: Authentication configuration
@@ -185,7 +184,7 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	http.ServeContent(w, r, path.Base(filePath), info.ModTime, reader)
 }
 
-func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string, info *webdavcas.FileInfo) {
+func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string, info *storage.FileInfo) {
 	children, err := h.fs.ReadDir(ctx, filePath)
 	if err != nil {
 		h.handleError(w, err)
@@ -468,7 +467,7 @@ func (h *Handler) writePropfindResponse(w http.ResponseWriter, responses []propf
 	enc.Encode(ms)
 }
 
-func (h *Handler) propResponse(filePath string, info *webdavcas.FileInfo) propfindResponse {
+func (h *Handler) propResponse(filePath string, info *storage.FileInfo) propfindResponse {
 	href := path.Join(h.prefix, filePath)
 	if info.IsDir && !strings.HasSuffix(href, "/") {
 		href += "/"
@@ -562,8 +561,16 @@ func (h *Handler) getDestination(r *http.Request) string {
 }
 
 func (h *Handler) handleError(w http.ResponseWriter, err error) {
-	if errors.Is(err, caslayout.ErrNotFound) {
+	if errors.Is(err, storage.ErrNotFound) {
 		http.Error(w, "resource not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, storage.ErrDirNotEmpty) {
+		http.Error(w, "directory not empty", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, storage.ErrAlreadyExists) {
+		http.Error(w, "resource already exists", http.StatusConflict)
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)

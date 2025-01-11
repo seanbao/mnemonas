@@ -1,0 +1,456 @@
+// Package workspace provides native file system operations for MnemoNAS
+package workspace
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// Common errors
+var (
+	ErrNotFound      = errors.New("not found")
+	ErrAlreadyExists = errors.New("already exists")
+	ErrNotDir        = errors.New("not a directory")
+	ErrIsDir         = errors.New("is a directory")
+)
+
+// FileInfo represents file metadata
+type FileInfo struct {
+	Path    string
+	Name    string
+	IsDir   bool
+	Size    int64
+	ModTime time.Time
+}
+
+// Workspace provides native file operations on a root directory
+type Workspace struct {
+	root string
+}
+
+// New creates a new Workspace with the given root directory
+func New(root string) (*Workspace, error) {
+	// Ensure root exists
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return nil, err
+	}
+
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Workspace{root: absRoot}, nil
+}
+
+// Root returns the workspace root directory
+func (w *Workspace) Root() string {
+	return w.root
+}
+
+// FullPath returns the full filesystem path for a workspace path
+func (w *Workspace) FullPath(name string) string {
+	name = CleanPath(name)
+	if name == "/" {
+		return w.root
+	}
+	return filepath.Join(w.root, name)
+}
+
+// CleanPath normalizes a path for use within the workspace
+func CleanPath(name string) string {
+	// Normalize path separators
+	name = strings.ReplaceAll(name, "\\", "/")
+
+	// Clean the path
+	name = path.Clean("/" + name)
+
+	// Prevent directory traversal
+	if strings.Contains(name, "..") {
+		return "/"
+	}
+
+	return name
+}
+
+// Stat returns file information
+func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
+	fullPath := w.FullPath(name)
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	return &FileInfo{
+		Path:    CleanPath(name),
+		Name:    info.Name(),
+		IsDir:   info.IsDir(),
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+	}, nil
+}
+
+// ReadDir lists directory contents
+func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, error) {
+	fullPath := w.FullPath(name)
+
+	entries, err := os.ReadDir(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	result := make([]*FileInfo, 0, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue // Skip entries we can't stat
+		}
+
+		childPath := path.Join(CleanPath(name), e.Name())
+		result = append(result, &FileInfo{
+			Path:    childPath,
+			Name:    e.Name(),
+			IsDir:   e.IsDir(),
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		})
+	}
+
+	return result, nil
+}
+
+// OpenFile opens a file for reading
+func (w *Workspace) OpenFile(ctx context.Context, name string) (*os.File, error) {
+	fullPath := w.FullPath(name)
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if info.IsDir() {
+		return nil, ErrIsDir
+	}
+
+	return os.Open(fullPath)
+}
+
+// ReadFile reads entire file content
+func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	fullPath := w.FullPath(name)
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if info.IsDir() {
+		return nil, ErrIsDir
+	}
+
+	return os.ReadFile(fullPath)
+}
+
+// WriteFile writes data to a file, creating parent directories as needed
+func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) error {
+	fullPath := w.FullPath(name)
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return err
+	}
+
+	// Atomic write: write to temp file then rename
+	tmpPath := fullPath + ".tmp"
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	_, writeErr := f.Write(data)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	if writeErr != nil {
+		os.Remove(tmpPath)
+		return writeErr
+	}
+	if syncErr != nil {
+		os.Remove(tmpPath)
+		return syncErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return closeErr
+	}
+
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	return nil
+}
+
+// WriteFileFromReader writes data from a reader to a file
+func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.Reader) error {
+	fullPath := w.FullPath(name)
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return err
+	}
+
+	// Atomic write: write to temp file then rename
+	tmpPath := fullPath + ".tmp"
+
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	_, copyErr := io.Copy(f, r)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return copyErr
+	}
+	if syncErr != nil {
+		os.Remove(tmpPath)
+		return syncErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return closeErr
+	}
+
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	return nil
+}
+
+// Mkdir creates a directory
+func (w *Workspace) Mkdir(ctx context.Context, name string) error {
+	fullPath := w.FullPath(name)
+
+	// Check if already exists
+	info, err := os.Stat(fullPath)
+	if err == nil {
+		if info.IsDir() {
+			return ErrAlreadyExists
+		}
+		return ErrNotDir
+	}
+
+	return os.MkdirAll(fullPath, 0755)
+}
+
+// Delete removes a file or empty directory
+func (w *Workspace) Delete(ctx context.Context, name string) error {
+	fullPath := w.FullPath(name)
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	if info.IsDir() {
+		return os.Remove(fullPath) // Will fail if not empty
+	}
+
+	return os.Remove(fullPath)
+}
+
+// DeleteAll removes a file or directory recursively
+func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
+	fullPath := w.FullPath(name)
+
+	_, err := os.Stat(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	return os.RemoveAll(fullPath)
+}
+
+// Rename moves or renames a file or directory
+func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
+	oldPath := w.FullPath(oldName)
+	newPath := w.FullPath(newName)
+
+	// Check source exists
+	_, err := os.Stat(oldPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	// Ensure destination parent exists
+	if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+		return err
+	}
+
+	return os.Rename(oldPath, newPath)
+}
+
+// Copy copies a file
+func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
+	srcPath := w.FullPath(srcName)
+	dstPath := w.FullPath(dstName)
+
+	// Check source exists and is a file
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	if srcInfo.IsDir() {
+		return ErrIsDir
+	}
+
+	// Ensure destination parent exists
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		return err
+	}
+
+	// Copy file
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	tmpPath := dstPath + ".tmp"
+	dstFile, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	_, copyErr := io.Copy(dstFile, srcFile)
+	syncErr := dstFile.Sync()
+	closeErr := dstFile.Close()
+
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return copyErr
+	}
+	if syncErr != nil {
+		os.Remove(tmpPath)
+		return syncErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return closeErr
+	}
+
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	return nil
+}
+
+// WalkFunc is the type of function called by Walk
+type WalkFunc func(path string, info *FileInfo) error
+
+// Walk walks the file tree rooted at root, calling fn for each file or directory
+func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
+	rootPath := w.FullPath(root)
+	rootClean := CleanPath(root)
+
+	return filepath.Walk(rootPath, func(absPath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip errors
+		}
+
+		// Compute relative path
+		relPath, err := filepath.Rel(w.root, absPath)
+		if err != nil {
+			return nil
+		}
+
+		cleanPath := "/" + filepath.ToSlash(relPath)
+		if cleanPath == "/." {
+			cleanPath = rootClean
+		}
+
+		return fn(cleanPath, &FileInfo{
+			Path:    cleanPath,
+			Name:    info.Name(),
+			IsDir:   info.IsDir(),
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		})
+	})
+}
+
+// CleanupStaging removes incomplete staging files (.tmp files)
+func (w *Workspace) CleanupStaging(ctx context.Context) (files int, bytes int64, err error) {
+	err = filepath.Walk(w.root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil // Continue on error
+		}
+
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".tmp") {
+			bytes += info.Size()
+			if rmErr := os.Remove(path); rmErr == nil {
+				files++
+			}
+		}
+
+		return nil
+	})
+
+	return files, bytes, err
+}
+
+// Exists checks if a path exists
+func (w *Workspace) Exists(ctx context.Context, name string) bool {
+	fullPath := w.FullPath(name)
+	_, err := os.Stat(fullPath)
+	return err == nil
+}
+
+// IsDir checks if a path is a directory
+func (w *Workspace) IsDir(ctx context.Context, name string) bool {
+	fullPath := w.FullPath(name)
+	info, err := os.Stat(fullPath)
+	return err == nil && info.IsDir()
+}
