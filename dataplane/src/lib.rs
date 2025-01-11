@@ -11,5 +11,5 @@ pub mod cdc;
 pub mod service;
 
 pub use cas::{CasStore, CasConfig, CasError};
-pub use cdc::{Chunker, ChunkerConfig, Chunk, FileManifest};
+pub use cdc::{Chunker, ChunkerConfig, Chunk, FileManifest, ChunkRef, StreamingChunker};
 pub use service::DataPlaneService;

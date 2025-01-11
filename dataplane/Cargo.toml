@@ -1,8 +1,8 @@
 [package]
 name = "dataplane"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.92"
+edition = "2021"
+rust-version = "1.75"
 
 [dependencies]
 # Async runtime
@@ -16,6 +16,9 @@ prost = "0.13"
 # Hashing (BLAKE3 - 10x faster than SHA256)
 blake3 = "1.7"
 
+# Compression
+zstd = "0.13"
+
 # CDC (Content-Defined Chunking)
 fastcdc = "3.1"
 
@@ -26,6 +29,11 @@ serde_json = "1.0"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP server
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Error handling
 thiserror = "2.0"
