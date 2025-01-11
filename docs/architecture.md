@@ -187,12 +187,26 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error
 
 #### VersionStore (`internal/versionstore/`)
 
-SQLite 驱动的版本管理：
+SQLite 驱动的版本管理，支持可插拔的对象存储后端：
 
 ```go
+// ObjectStore 接口 - 支持本地或远程存储后端
+type ObjectStore interface {
+    Put(ctx context.Context, data []byte) (hash string, err error)
+    Get(ctx context.Context, hash string) ([]byte, error)
+    Has(ctx context.Context, hash string) bool
+    Delete(ctx context.Context, hash string) error
+}
+
+// LocalObjectStore - 本地文件存储（测试/独立模式）
+type LocalObjectStore struct { root string }
+
+// RemoteObjectStore - 通过 gRPC 调用 Rust 数据面（生产模式）
+type RemoteObjectStore struct { client *dataplane.Client }
+
 type Store struct {
-    db         *sql.DB       // SQLite 连接
-    objectRoot string        // 版本对象目录
+    db      *sql.DB       // SQLite 连接
+    objects ObjectStore   // 可插拔的对象存储后端
 }
 
 // 版本记录管理
@@ -200,8 +214,8 @@ func (s *Store) AddVersion(ctx context.Context, path, hash string, size int64, c
 func (s *Store) GetVersions(ctx context.Context, path string) ([]Version, error)
 func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int, maxAge time.Duration) ([]string, error)
 
-// 版本对象存储 (CAS)
-func (s *Store) PutObject(hash string, data []byte) error
+// 版本对象存储 (委托给 ObjectStore)
+func (s *Store) PutObject(data []byte) (string, error)
 func (s *Store) GetObject(hash string) ([]byte, error)
 func (s *Store) HasObject(hash string) bool
 
@@ -215,6 +229,10 @@ func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType L
 func (s *Store) ReleaseLock(ctx context.Context, path, holder string) error
 ```
 
+**职责划分**：
+- Go `Store`: SQLite 元数据管理、版本策略、回收站、文件锁
+- `ObjectStore`: 纯数据 I/O（本地文件或 Rust gRPC）
+
 SQLite 表结构：
 - `files`: 文件索引（路径、大小、修改时间、哈希）
 - `versions`: 版本历史（路径、版本哈希、时间戳）
@@ -225,6 +243,85 @@ SQLite 表结构：
 #### WebDAV Handler (`internal/webdav/`)
 
 实现 RFC 4918 规范的 WebDAV 协议：
+
+---
+
+## Rust 数据面
+
+### 职责
+
+Go 控制面通过 gRPC 调用 Rust 数据面处理**所有数据 I/O 操作**：
+
+| 功能 | 说明 |
+|------|------|
+| **CAS 存储** | BLAKE3 哈希、内存索引（DashMap）、分片目录 |
+| **CDC 分块** | FastCDC 智能分块，大文件去重 |
+| **Scrub** | 数据完整性校验 |
+| **GC** | 对象列表供 Go 进行引用计数删除 |
+
+### 核心模块
+
+```rust
+// cas.rs - BLAKE3 内容寻址存储
+pub struct CasStore {
+    config: CasConfig,
+    index: DashMap<String, u64>,  // 内存索引
+    stats: CasStats,
+}
+
+impl CasStore {
+    pub async fn put(&self, data: &[u8]) -> Result<String>;
+    pub async fn get(&self, hash: &str) -> Result<Vec<u8>>;
+    pub fn has(&self, hash: &str) -> bool;
+    pub async fn delete(&self, hash: &str) -> Result<bool>;
+    pub async fn scrub(&self, hashes: Option<&[String]>) -> Result<ScrubSummary>;
+}
+
+// cdc.rs - FastCDC 智能分块
+pub struct Chunker { config: ChunkerConfig }
+
+impl Chunker {
+    pub fn chunk(&self, data: &[u8]) -> Vec<Chunk>;
+}
+
+// service.rs - gRPC 服务
+pub struct DataPlaneService {
+    cas: Arc<CasStore>,
+    chunker: Arc<Chunker>,
+}
+```
+
+### gRPC API
+
+```protobuf
+service DataPlane {
+  // 数据块操作
+  rpc PutChunk(PutChunkRequest) returns (PutChunkResponse);
+  rpc GetChunk(GetChunkRequest) returns (GetChunkResponse);
+  rpc HasChunk(HasChunkRequest) returns (HasChunkResponse);
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+
+  // 文件操作（CDC 分块）
+  rpc PutFile(stream PutFileRequest) returns (PutFileResponse);
+  rpc GetFile(GetFileRequest) returns (stream GetFileResponse);
+
+  // 系统操作
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+  rpc Scrub(ScrubRequest) returns (ScrubResponse);
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+}
+```
+
+### 为什么用 Rust
+
+| 场景 | Go | Rust | 选择 |
+|------|-----|------|------|
+| 协议解析、业务逻辑 | 简洁、维护性好 | 过度复杂 | **Go** |
+| CDC 分块、批量哈希 | 可用但非最优 | SIMD 优化、零拷贝 | **Rust** |
+| 内存索引（百万对象） | GC 压力 | 无 GC、DashMap 高并发 | **Rust** |
+
+**总结**：Go 做控制面逻辑，Rust 做计算密集型数据操作，分工明确、各取所长。
 
 ---
 

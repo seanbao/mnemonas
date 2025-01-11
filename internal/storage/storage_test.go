@@ -7,14 +7,46 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/seanbao/mnemonas/internal/dataplane"
 )
 
+// testDataplaneAddr is the address of the test dataplane server
+const testDataplaneAddr = "127.0.0.1:9090"
+
+// setupDataplaneClient creates a dataplane client for testing
+// Returns nil if dataplane is not available
+func setupDataplaneClient(t *testing.T) *dataplane.Client {
+	client := dataplane.NewClient(testDataplaneAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		return nil
+	}
+
+	// Check if healthy
+	if _, err := client.Health(ctx); err != nil {
+		client.Close()
+		return nil
+	}
+
+	t.Cleanup(func() { client.Close() })
+	return client
+}
+
 func setupFileSystem(t *testing.T) *FileSystem {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
 	cfg := &Config{
 		FilesRoot:          filepath.Join(tmpDir, "files"),
 		InternalRoot:       filepath.Join(tmpDir, ".mnemonas"),
 		TrashRoot:          filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:          client,
 		MaxVersions:        10,
 		MaxVersionAge:      30 * 24 * time.Hour,
 		TrashRetentionDays: 30,
@@ -29,11 +61,17 @@ func setupFileSystem(t *testing.T) *FileSystem {
 }
 
 func TestNew(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
 	cfg := &Config{
 		FilesRoot:    filepath.Join(tmpDir, "files"),
 		InternalRoot: filepath.Join(tmpDir, ".mnemonas"),
 		TrashRoot:    filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:    client,
 	}
 
 	fs, err := New(cfg)
@@ -51,6 +89,21 @@ func TestNew(t *testing.T) {
 	dbPath := filepath.Join(cfg.InternalRoot, "index.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Errorf("Database not created: %v", err)
+	}
+}
+
+func TestNew_RequiresDataplane(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{
+		FilesRoot:    filepath.Join(tmpDir, "files"),
+		InternalRoot: filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:    filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:    nil,
+	}
+
+	_, err := New(cfg)
+	if err == nil {
+		t.Error("Expected error when Dataplane is nil")
 	}
 }
 

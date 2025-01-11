@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
 	"github.com/zeebo/blake3"
@@ -79,6 +80,9 @@ type Config struct {
 	// TrashRoot is the root directory for trash content
 	TrashRoot string
 
+	// Dataplane is the Rust dataplane client (required)
+	Dataplane *dataplane.Client
+
 	// Versioning policy configuration
 	AutoVersionedExtensions []string
 	AutoVersionedFilenames  []string
@@ -102,6 +106,10 @@ type FileSystem struct {
 
 // New creates a new FileSystem
 func New(cfg *Config) (*FileSystem, error) {
+	if cfg.Dataplane == nil {
+		return nil, errors.New("dataplane client is required")
+	}
+
 	// Create workspace for native file operations
 	ws, err := workspace.New(cfg.FilesRoot)
 	if err != nil {
@@ -110,8 +118,8 @@ func New(cfg *Config) (*FileSystem, error) {
 
 	// Create version store
 	vs, err := versionstore.New(versionstore.Config{
-		DBPath:     path.Join(cfg.InternalRoot, "index.db"),
-		ObjectRoot: path.Join(cfg.InternalRoot, "objects"),
+		DBPath:    path.Join(cfg.InternalRoot, "index.db"),
+		Dataplane: cfg.Dataplane,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create version store: %w", err)
@@ -267,9 +275,9 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	// If versioning enabled and file exists, save old version first
 	if shouldVersion {
 		if oldData, err := fs.workspace.ReadFile(ctx, name); err == nil {
-			oldHash := computeHash(oldData)
-			// Store old content to version objects
-			if err := fs.versions.PutObject(oldHash, oldData); err != nil {
+			// Store old content to version objects (hash is computed by object store)
+			oldHash, err := fs.versions.PutObject(oldData)
+			if err != nil {
 				return fmt.Errorf("failed to store version: %w", err)
 			}
 			// Record version in database
@@ -563,7 +571,7 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	if currentData, err := fs.workspace.ReadFile(ctx, name); err == nil {
 		currentHash := computeHash(currentData)
 		if currentHash != hash {
-			fs.versions.PutObject(currentHash, currentData)
+			fs.versions.PutObject(currentData)
 			fs.versions.AddVersion(ctx, name, currentHash, int64(len(currentData)), "before restore")
 		}
 	}
