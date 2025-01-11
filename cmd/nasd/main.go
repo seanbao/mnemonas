@@ -21,9 +21,9 @@ import (
 	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/api"
 	"github.com/seanbao/mnemonas/internal/config"
+	"github.com/seanbao/mnemonas/internal/storage"
 	mnemonasTLS "github.com/seanbao/mnemonas/internal/tls"
 	"github.com/seanbao/mnemonas/internal/webdav"
-	"github.com/seanbao/mnemonas/internal/webdavcas"
 )
 
 var (
@@ -74,7 +74,7 @@ func main() {
 
 	log.Info().
 		Str("version", version).
-		Str("data_dir", cfg.Storage.DataDir).
+		Str("storage_root", cfg.Storage.Root).
 		Str("address", cfg.Address()).
 		Msg("starting MnemoNAS")
 
@@ -92,11 +92,22 @@ func main() {
 		log.Warn().Msg("   Set [server.tls].enabled = true for secure connections")
 	}
 
-	// Create filesystem
-	fs, err := webdavcas.NewFileSystem(cfg.Storage.DataDir, cfg.Storage.MetadataDir)
+	// Create filesystem with new storage architecture
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:               cfg.FilesDir(),
+		InternalRoot:            cfg.InternalDir(),
+		TrashRoot:               cfg.TrashDir(),
+		AutoVersionedExtensions: cfg.Storage.Versioning.AutoVersionedExtensions,
+		AutoVersionedFilenames:  cfg.Storage.Versioning.AutoVersionedFilenames,
+		MaxVersionedSize:        cfg.Storage.Versioning.MaxVersionedSize,
+		MaxVersions:             cfg.Storage.Retention.MaxVersions,
+		MaxVersionAge:           cfg.Storage.Retention.MaxAge,
+		TrashRetentionDays:      cfg.Storage.Trash.RetentionDays,
+	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create filesystem")
 	}
+	defer fs.Close()
 
 	// Cleanup staging files from previous crashes
 	ctx := context.Background()
@@ -115,11 +126,10 @@ func main() {
 	// Mount API with data plane connection
 	apiServer, err := api.NewServer(log.Logger, &api.ServerConfig{
 		DataplaneAddr:   cfg.DataPlane.Address(),
-		CASRoot:         cfg.Storage.DataDir,
-		MetadataRoot:    cfg.Storage.MetadataDir,
-		ThumbnailRoot:   cfg.Storage.ThumbnailDir,
-		MaintenanceRoot: cfg.Storage.MaintenanceDir,
-		ActivityRoot:    cfg.Storage.ActivityDir,
+		FileSystem:      fs, // Pass the new storage filesystem
+		ThumbnailRoot:   filepath.Join(cfg.InternalDir(), "thumbnails"),
+		MaintenanceRoot: filepath.Join(cfg.InternalDir(), "maintenance"),
+		ActivityRoot:    filepath.Join(cfg.InternalDir(), "activity"),
 		// Auth configuration
 		AuthEnabled:    cfg.Auth.Enabled,
 		AuthUsersFile:  cfg.Auth.UsersFile,

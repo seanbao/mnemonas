@@ -145,8 +145,9 @@ MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Ru
 │  internal/api/     → REST API (chi)     │
 │  internal/webdav/  → WebDAV protocol    │
 │  internal/config/  → TOML config        │
-│  internal/webdavcas/→ WebDAV↔CAS adapter│
-│  internal/caslayout/→ CAS storage layout│
+│  internal/storage/ → Unified storage    │
+│  internal/workspace/→ Native file ops   │
+│  internal/versionstore/→ SQLite+CAS     │
 ├─────────────────────────────────────────┤
 │              gRPC (proto/)              │
 ├─────────────────────────────────────────┤
@@ -158,10 +159,10 @@ MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Ru
 ```
 
 **核心设计决策**：
-- **CAS（内容寻址存储）**：文件按 BLAKE3 哈希存储，支持去重与版本管理
-- **CDC（内容定义分块）**：大文件切分为 256KB–4MB 的块，提升存储效率
-- **Loose Object 模型**：一个 chunk 对应一个文件（比 packfile 简单，利用文件系统原子性）
-- **软删除**：删除仅移除元数据引用，CAS 数据由 GC 清理
+- **原生文件 + 版本历史**：用户文件直接存储为原生格式，拔盘即用
+- **SQLite 元数据**：事务保证、高效查询、单文件易备份
+- **CAS（内容寻址存储）**：历史版本按 BLAKE3 哈希存储，支持去重
+- **软删除**：删除仅移入回收站，可恢复
 
 ## 构建与运行
 

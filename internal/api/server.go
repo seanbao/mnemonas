@@ -23,8 +23,8 @@ import (
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
 	"github.com/seanbao/mnemonas/internal/share"
+	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
-	"github.com/seanbao/mnemonas/internal/webdavcas"
 )
 
 // Server is the API server
@@ -32,7 +32,7 @@ type Server struct {
 	router      *chi.Mux
 	logger      zerolog.Logger
 	dataplane   *dataplane.Client
-	fs          *webdavcas.FileSystem
+	fs          *storage.FileSystem
 	thumbnail   *thumbnail.Service
 	maintenance *maintenance.HistoryStore
 	activity    *activity.Store
@@ -56,7 +56,10 @@ type Server struct {
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	DataplaneAddr   string
+	DataplaneAddr string
+	// New storage configuration
+	FileSystem *storage.FileSystem
+	// Legacy fields (for compatibility)
 	CASRoot         string
 	MetadataRoot    string
 	ThumbnailRoot   string
@@ -110,13 +113,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		}
 	}
 
-	// Initialize filesystem if CAS root provided
-	if cfg != nil && cfg.CASRoot != "" && cfg.MetadataRoot != "" {
-		fs, err := webdavcas.NewFileSystem(cfg.CASRoot, cfg.MetadataRoot)
-		if err != nil {
-			return nil, err
-		}
-		s.fs = fs
+	// Initialize filesystem (from pre-created instance or legacy config)
+	if cfg != nil && cfg.FileSystem != nil {
+		s.fs = cfg.FileSystem
 	}
 
 	// Initialize thumbnail service
@@ -472,7 +471,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		if !f.IsDir && f.ContentHash != "" {
 			item["hash"] = f.ContentHash
-			item["versions"] = len(f.Versions) + 1
+			item["versioned"] = f.Versioned
 		}
 		items = append(items, item)
 	}
@@ -1187,7 +1186,7 @@ func parseUint32(s string) (uint32, error) {
 
 // fileSystemAdapter wraps FileSystem to implement share.FileOpener
 type fileSystemAdapter struct {
-	fs *webdavcas.FileSystem
+	fs *storage.FileSystem
 }
 
 func (a *fileSystemAdapter) OpenFile(ctx context.Context, filePath string) (share.FileReader, error) {
@@ -1242,12 +1241,9 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 			"originalPath": item.OriginalPath,
 			"deletedAt":    item.DeletedAt.Format(time.RFC3339),
 			"name":         path.Base(item.OriginalPath),
-			"isDir":        item.FileInfo.IsDir,
-			"size":         item.FileInfo.Size,
-		}
-		if !item.FileInfo.IsDir && item.FileInfo.ContentHash != "" {
-			apiItem["hash"] = item.FileInfo.ContentHash
-			apiItem["versions"] = len(item.FileInfo.Versions) + 1
+			"isDir":        item.IsDir,
+			"size":         item.Size,
+			"hadVersions":  item.HadVersions,
 		}
 		apiItems = append(apiItems, apiItem)
 	}
@@ -1282,10 +1278,9 @@ func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
 		"originalPath": item.OriginalPath,
 		"deletedAt":    item.DeletedAt.Format(time.RFC3339),
 		"name":         path.Base(item.OriginalPath),
-		"isDir":        item.FileInfo.IsDir,
-		"size":         item.FileInfo.Size,
-		"hash":         item.FileInfo.ContentHash,
-		"versions":     len(item.FileInfo.Versions) + 1,
+		"isDir":        item.IsDir,
+		"size":         item.Size,
+		"hadVersions":  item.HadVersions,
 	}).Write(w, http.StatusOK)
 }
 
