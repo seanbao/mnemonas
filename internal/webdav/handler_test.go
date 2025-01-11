@@ -10,11 +10,42 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
+// testDataplaneAddr is the address of the test dataplane server
+const testDataplaneAddr = "127.0.0.1:9090"
+
+// setupDataplaneClient creates a dataplane client for testing
+// Returns nil if dataplane is not available
+func setupDataplaneClient(t *testing.T) *dataplane.Client {
+	client := dataplane.NewClient(testDataplaneAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		return nil
+	}
+
+	// Check if healthy
+	if _, err := client.Health(ctx); err != nil {
+		client.Close()
+		return nil
+	}
+
+	t.Cleanup(func() { client.Close() })
+	return client
+}
+
 func setupTestHandler(t *testing.T) (*Handler, *storage.FileSystem, string) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
 	filesRoot := path.Join(tmpDir, "files")
 	internalRoot := path.Join(tmpDir, ".mnemonas")
@@ -24,6 +55,7 @@ func setupTestHandler(t *testing.T) (*Handler, *storage.FileSystem, string) {
 		InternalRoot:       internalRoot,
 		TrashRoot:          path.Join(internalRoot, "trash"),
 		TrashRetentionDays: 30,
+		Dataplane:          client,
 	})
 	if err != nil {
 		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
@@ -336,6 +368,11 @@ func TestHandler_LOCK_UNLOCK(t *testing.T) {
 }
 
 func TestHandler_ReadOnlyMode(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
 	filesRoot := path.Join(tmpDir, "files")
 	internalRoot := path.Join(tmpDir, ".mnemonas")
@@ -344,6 +381,7 @@ func TestHandler_ReadOnlyMode(t *testing.T) {
 		InternalRoot:       internalRoot,
 		TrashRoot:          path.Join(internalRoot, "trash"),
 		TrashRetentionDays: 30,
+		Dataplane:          client,
 	})
 	if err != nil {
 		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
@@ -386,6 +424,11 @@ func TestHandler_ReadOnlyMode(t *testing.T) {
 }
 
 func TestHandler_BasicAuth(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
 	filesRoot := path.Join(tmpDir, "files")
 	internalRoot := path.Join(tmpDir, ".mnemonas")
@@ -394,6 +437,7 @@ func TestHandler_BasicAuth(t *testing.T) {
 		InternalRoot:       internalRoot,
 		TrashRoot:          path.Join(internalRoot, "trash"),
 		TrashRetentionDays: 30,
+		Dataplane:          client,
 	})
 	if err != nil {
 		t.Skipf("storage.New() error (CGO may be disabled): %v", err)

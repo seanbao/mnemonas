@@ -11,6 +11,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/seanbao/mnemonas/internal/dataplane"
 )
 
 // Common errors
@@ -60,24 +61,25 @@ type Version struct {
 
 // Store is the SQLite-based version store
 type Store struct {
-	db         *sql.DB
-	objectRoot string // Root directory for version objects
+	db      *sql.DB
+	objects *ObjectStore
 }
 
 // Config holds store configuration
 type Config struct {
-	DBPath     string // Path to SQLite database file
-	ObjectRoot string // Root directory for storing version objects
+	DBPath    string            // Path to SQLite database file
+	Dataplane *dataplane.Client // Rust dataplane client (required)
 }
 
 // New creates a new version store
 func New(cfg Config) (*Store, error) {
-	// Ensure directories exist
+	if cfg.Dataplane == nil {
+		return nil, errors.New("dataplane client is required")
+	}
+
+	// Ensure database directory exists
 	dbDir := filepath.Dir(cfg.DBPath)
 	if err := os.MkdirAll(dbDir, 0700); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(cfg.ObjectRoot, 0700); err != nil {
 		return nil, err
 	}
 
@@ -94,8 +96,8 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	return &Store{
-		db:         db,
-		objectRoot: cfg.ObjectRoot,
+		db:      db,
+		objects: NewObjectStore(cfg.Dataplane),
 	}, nil
 }
 
@@ -596,86 +598,25 @@ func (s *Store) SearchFiles(ctx context.Context, query string, limit int) ([]str
 }
 
 // ============================================================================
-// Object Storage Operations (for version content)
+// Object Storage Operations (delegated to ObjectStore backend)
 // ============================================================================
 
-// ObjectPath returns the full path for a hash object
-func (s *Store) ObjectPath(hash string) string {
-	if len(hash) < 4 {
-		return filepath.Join(s.objectRoot, hash)
-	}
-	// Sharded layout: ab/cd/abcd1234...
-	return filepath.Join(s.objectRoot, hash[:2], hash[2:4], hash)
+// PutObject stores version content and returns its hash
+func (s *Store) PutObject(data []byte) (string, error) {
+	return s.objects.Put(context.Background(), data)
 }
 
-// PutObject stores version content
-func (s *Store) PutObject(hash string, data []byte) error {
-	path := s.ObjectPath(hash)
-	dir := filepath.Dir(path)
-
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-
-	tmpPath := path + ".tmp"
-
-	// Atomic write
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return err
-	}
-
-	_, writeErr := f.Write(data)
-	syncErr := f.Sync()
-	closeErr := f.Close()
-
-	if writeErr != nil {
-		os.Remove(tmpPath)
-		return writeErr
-	}
-	if syncErr != nil {
-		os.Remove(tmpPath)
-		return syncErr
-	}
-	if closeErr != nil {
-		os.Remove(tmpPath)
-		return closeErr
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-
-	return nil
-}
-
-// GetObject retrieves version content
+// GetObject retrieves version content by hash
 func (s *Store) GetObject(hash string) ([]byte, error) {
-	path := s.ObjectPath(hash)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return data, nil
+	return s.objects.Get(context.Background(), hash)
 }
 
 // HasObject checks if an object exists
 func (s *Store) HasObject(hash string) bool {
-	path := s.ObjectPath(hash)
-	_, err := os.Stat(path)
-	return err == nil
+	return s.objects.Has(context.Background(), hash)
 }
 
 // DeleteObject removes an object
 func (s *Store) DeleteObject(hash string) error {
-	path := s.ObjectPath(hash)
-	err := os.Remove(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return s.objects.Delete(context.Background(), hash)
 }

@@ -147,7 +147,7 @@ MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Ru
 │  internal/config/  → TOML config        │
 │  internal/storage/ → Unified storage    │
 │  internal/workspace/→ Native file ops   │
-│  internal/versionstore/→ SQLite+CAS     │
+│  internal/versionstore/→ SQLite+ObjectStore │
 ├─────────────────────────────────────────┤
 │              gRPC (proto/)              │
 ├─────────────────────────────────────────┤
@@ -157,6 +157,17 @@ MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Ru
 │  src/service.rs → gRPC service impl     │
 └─────────────────────────────────────────┘
 ```
+
+**Go/Rust 职责划分**：
+
+| 层级 | 语言 | 职责 |
+|------|------|------|
+| **控制面** | Go | API、WebDAV、元数据（SQLite）、业务逻辑 |
+| **数据面** | Rust | 所有数据 I/O（CAS、CDC、压缩、哈希、Scrub） |
+
+**ObjectStore 接口**（`internal/versionstore/objectstore.go`）：
+- `LocalObjectStore` — 本地文件存储（测试/独立模式）
+- `RemoteObjectStore` — 通过 gRPC 调用 Rust（生产模式）
 
 **核心设计决策**：
 - **原生文件 + 版本历史**：用户文件直接存储为原生格式，拔盘即用

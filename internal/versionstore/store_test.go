@@ -6,13 +6,44 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/seanbao/mnemonas/internal/dataplane"
 )
 
+// testDataplaneAddr is the address of the test dataplane server
+const testDataplaneAddr = "127.0.0.1:9090"
+
+// setupDataplaneClient creates a dataplane client for testing
+// Returns nil if dataplane is not available
+func setupDataplaneClient(t *testing.T) *dataplane.Client {
+	client := dataplane.NewClient(testDataplaneAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		return nil
+	}
+
+	// Check if healthy
+	if _, err := client.Health(ctx); err != nil {
+		client.Close()
+		return nil
+	}
+
+	t.Cleanup(func() { client.Close() })
+	return client
+}
+
 func setupStore(t *testing.T) *Store {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
 	s, err := New(Config{
-		DBPath:     filepath.Join(tmpDir, "test.db"),
-		ObjectRoot: filepath.Join(tmpDir, "objects"),
+		DBPath:    filepath.Join(tmpDir, "test.db"),
+		Dataplane: client,
 	})
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
@@ -22,10 +53,15 @@ func setupStore(t *testing.T) *Store {
 }
 
 func TestNew(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
 	s, err := New(Config{
-		DBPath:     filepath.Join(tmpDir, "test.db"),
-		ObjectRoot: filepath.Join(tmpDir, "objects"),
+		DBPath:    filepath.Join(tmpDir, "test.db"),
+		Dataplane: client,
 	})
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
@@ -36,10 +72,16 @@ func TestNew(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tmpDir, "test.db")); err != nil {
 		t.Errorf("Database file not created: %v", err)
 	}
+}
 
-	// Check objects directory was created
-	if _, err := os.Stat(filepath.Join(tmpDir, "objects")); err != nil {
-		t.Errorf("Objects directory not created: %v", err)
+func TestNew_RequiresDataplane(t *testing.T) {
+	tmpDir := t.TempDir()
+	_, err := New(Config{
+		DBPath:    filepath.Join(tmpDir, "test.db"),
+		Dataplane: nil,
+	})
+	if err == nil {
+		t.Error("Expected error when Dataplane is nil")
 	}
 }
 
@@ -465,13 +507,17 @@ func TestStore_SearchFiles(t *testing.T) {
 func TestStore_Objects(t *testing.T) {
 	s := setupStore(t)
 
-	hash := "abcd1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
 	data := []byte("version content")
 
-	// Put object
-	err := s.PutObject(hash, data)
+	// Put object (hash is computed by dataplane)
+	hash, err := s.PutObject(data)
 	if err != nil {
 		t.Fatalf("PutObject() error: %v", err)
+	}
+
+	// Hash should be non-empty
+	if hash == "" {
+		t.Error("PutObject() returned empty hash")
 	}
 
 	// Check exists
@@ -498,24 +544,4 @@ func TestStore_Objects(t *testing.T) {
 	if s.HasObject(hash) {
 		t.Error("HasObject() returned true after delete")
 	}
-}
-
-func TestStore_ObjectPath(t *testing.T) {
-	s := setupStore(t)
-
-	hash := "abcd1234"
-	got := s.ObjectPath(hash)
-
-	if !filepath.IsAbs(got) {
-		t.Errorf("ObjectPath(%s) should be absolute", hash)
-	}
-
-	// Should contain sharded path
-	if !containsSubpath(got, "ab/cd/abcd1234") {
-		t.Errorf("ObjectPath(%s) = %s, should contain sharded path", hash, got)
-	}
-}
-
-func containsSubpath(fullPath, subpath string) bool {
-	return len(fullPath) >= len(subpath) && fullPath[len(fullPath)-len(subpath):] == subpath
 }

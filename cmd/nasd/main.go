@@ -21,6 +21,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/api"
 	"github.com/seanbao/mnemonas/internal/config"
+	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/storage"
 	mnemonasTLS "github.com/seanbao/mnemonas/internal/tls"
 	"github.com/seanbao/mnemonas/internal/webdav"
@@ -92,6 +93,17 @@ func main() {
 		log.Warn().Msg("   Set [server.tls].enabled = true for secure connections")
 	}
 
+	// Create background context for initialization
+	ctx := context.Background()
+
+	// Create data plane client for storage operations
+	dataplaneClient := dataplane.NewClient(cfg.DataPlane.Address())
+	if err := dataplaneClient.Connect(ctx); err != nil {
+		log.Fatal().Err(err).Str("address", cfg.DataPlane.Address()).Msg("failed to connect to dataplane")
+	}
+	defer dataplaneClient.Close()
+	log.Info().Str("address", cfg.DataPlane.Address()).Msg("connected to dataplane")
+
 	// Create filesystem with new storage architecture
 	fs, err := storage.New(&storage.Config{
 		FilesRoot:               cfg.FilesDir(),
@@ -103,6 +115,7 @@ func main() {
 		MaxVersions:             cfg.Storage.Retention.MaxVersions,
 		MaxVersionAge:           cfg.Storage.Retention.MaxAge,
 		TrashRetentionDays:      cfg.Storage.Trash.RetentionDays,
+		Dataplane:               dataplaneClient,
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create filesystem")
@@ -110,7 +123,6 @@ func main() {
 	defer fs.Close()
 
 	// Cleanup staging files from previous crashes
-	ctx := context.Background()
 	if cleanedFiles, cleanedBytes, cleanErr := fs.CleanupStaging(ctx); cleanErr != nil {
 		log.Warn().Err(cleanErr).Msg("failed to cleanup staging files")
 	} else if cleanedFiles > 0 {
