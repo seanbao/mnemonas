@@ -557,6 +557,7 @@ export function FilesPage() {
   // Multi-file upload state
   const [uploadQueue, setUploadQueue] = useState<{file: File, relativePath?: string, progress: number, status: 'pending' | 'uploading' | 'done' | 'error', error?: string}[]>([])
   const [isUploading, setIsUploading] = useState(false)
+  const [showUploadPanel, setShowUploadPanel] = useState(false)
   
   const { 
     currentPath, 
@@ -835,6 +836,7 @@ export function FilesPage() {
     
     setUploadQueue(queue)
     setIsUploading(true)
+    setShowUploadPanel(true)  // Auto show upload panel when upload starts
     
     for (let i = 0; i < fileArray.length; i++) {
       const file = fileArray[i]
@@ -1161,48 +1163,74 @@ export function FilesPage() {
       )}
 
       {/* Upload queue panel */}
-      {uploadQueue.length > 0 && (
-        <div className="absolute bottom-4 right-4 z-40 w-80 bg-content1 border border-divider rounded-xl shadow-lg overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2.5 bg-content2 border-b border-divider">
-            <span className="font-medium text-sm">
-              {isUploading ? '上传中...' : '上传完成'}
-            </span>
-            <button 
-              onClick={() => setUploadQueue([])}
-              className="p-1 hover:bg-content2 rounded"
-            >
-              <X size={14} className="text-default-500" />
-            </button>
+      {showUploadPanel && uploadQueue.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-[100] w-96 bg-content1 border border-divider rounded-xl shadow-xl overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 bg-content2 border-b border-divider">
+            <div className="flex items-center gap-2">
+              <Upload size={16} className="text-accent-primary" />
+              <span className="font-medium text-sm">
+                {isUploading ? `上传中 (${uploadQueue.filter(i => i.status === 'done').length}/${uploadQueue.length})` : '上传完成'}
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              {!isUploading && (
+                <button 
+                  onClick={() => setUploadQueue([])}
+                  className="px-2 py-1 text-xs text-default-500 hover:text-default-700 hover:bg-content3 rounded transition-colors"
+                >
+                  清空
+                </button>
+              )}
+              <button 
+                onClick={() => setShowUploadPanel(false)}
+                className="p-1.5 hover:bg-content3 rounded transition-colors"
+              >
+                <X size={14} className="text-default-500" />
+              </button>
+            </div>
           </div>
-          <div className="max-h-60 overflow-y-auto">
+          <div className="max-h-72 overflow-y-auto">
             {uploadQueue.map((item, i) => (
-              <div key={i} className="px-4 py-2.5 border-b border-divider last:border-b-0">
-                <div className="flex items-center gap-2 mb-1.5">
-                  {item.status === 'done' && <CheckCircle2 size={14} className="text-emerald-500" />}
-                  {item.status === 'error' && <AlertCircle size={14} className="text-rose" />}
+              <div key={i} className="px-4 py-3 border-b border-divider last:border-b-0 hover:bg-content2/50 transition-colors">
+                <div className="flex items-center gap-2.5 mb-1.5">
+                  {item.status === 'done' && <CheckCircle2 size={16} className="text-emerald-500 flex-shrink-0" />}
+                  {item.status === 'error' && <AlertCircle size={16} className="text-rose flex-shrink-0" />}
                   {(item.status === 'pending' || item.status === 'uploading') && (
-                    <div className="w-3.5 h-3.5 border-2 border-accent-primary border-t-transparent rounded-full animate-spin" />
+                    <div className="w-4 h-4 border-2 border-accent-primary border-t-transparent rounded-full animate-spin flex-shrink-0" />
                   )}
                   <span className="text-sm truncate flex-1" title={item.relativePath || item.file.name}>
                     {item.relativePath || item.file.name}
                   </span>
+                  {item.status === 'uploading' && (
+                    <span className="text-xs text-default-400">{Math.round(item.progress)}%</span>
+                  )}
                 </div>
                 {item.status === 'uploading' && (
                   <Progress 
                     size="sm" 
                     value={item.progress} 
                     classNames={{ 
-                      base: "h-1",
+                      base: "h-1.5",
                       indicator: "bg-accent-primary"
                     }} 
                   />
                 )}
                 {item.status === 'error' && (
-                  <p className="text-xs text-rose">{item.error}</p>
+                  <p className="text-xs text-rose mt-1">{item.error}</p>
                 )}
               </div>
             ))}
           </div>
+          {/* Summary footer */}
+          {!isUploading && uploadQueue.length > 0 && (
+            <div className="px-4 py-2.5 bg-content2 border-t border-divider text-xs text-default-500">
+              共 {uploadQueue.length} 个文件，
+              成功 {uploadQueue.filter(i => i.status === 'done').length} 个
+              {uploadQueue.filter(i => i.status === 'error').length > 0 && (
+                <span className="text-rose">，失败 {uploadQueue.filter(i => i.status === 'error').length} 个</span>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1249,11 +1277,11 @@ export function FilesPage() {
               <>
                 <Button 
                   className="btn-primary btn-md border-none font-medium rounded-xl"
-                  startContent={<Star size={16} className="fill-current" />}
+                  startContent={<Upload size={16} />}
                   onPress={() => fileInputRef.current?.click()}
                   isLoading={isUploading}
                 >
-                  {isUploading ? '上传中...' : '保存记忆'}
+                  {isUploading ? '上传中...' : '上传文件'}
                 </Button>
                 <Button 
                   variant="bordered" 
@@ -1291,6 +1319,28 @@ export function FilesPage() {
               <Grid size={16} />
             </button>
           </div>
+          
+          {/* Upload history button */}
+          {uploadQueue.length > 0 && (
+            <button 
+              onClick={() => setShowUploadPanel(!showUploadPanel)}
+              className={cn(
+                "relative p-2.5 rounded-xl border transition-all",
+                showUploadPanel 
+                  ? "bg-accent-primary text-white border-accent-primary shadow-sm" 
+                  : "bg-content1 border-divider text-default-500 hover:text-default-600 hover:border-default-400"
+              )}
+              title="上传记录"
+            >
+              <Upload size={16} />
+              {isUploading && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-accent-primary rounded-full animate-pulse" />
+              )}
+              {!isUploading && uploadQueue.filter(i => i.status === 'error').length > 0 && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose rounded-full" />
+              )}
+            </button>
+          )}
         </div>
 
         {/* File List / Grid */}

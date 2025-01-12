@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner } from '@heroui/react'
-import { X, ChevronLeft, ChevronRight, Download, ExternalLink } from 'lucide-react'
+import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
+import { getAuthHeaders } from '@/api/auth'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
 import { PdfPreview } from './PdfPreview'
@@ -183,7 +184,7 @@ export function PreviewModal({
       size="full"
       backdrop="blur"
       classNames={{
-        wrapper: "z-50",
+        wrapper: "z-[60]",
         base: "bg-content1/95 backdrop-blur-lg absolute inset-4 m-0 max-w-none max-h-none rounded-xl",
         body: "p-0",
       }}
@@ -284,19 +285,64 @@ export function PreviewModal({
 // Simple video preview using native video element
 function VideoPreview({ path }: { path: string; filename: string }) {
   const url = buildPreviewUrl(path)
+  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  
+  useEffect(() => {
+    let cancelled = false
+    let currentBlobUrl: string | null = null
+    
+    const fetchVideo = async () => {
+      setIsLoading(true)
+      setError(null)
+      setBlobUrl(null)
+      
+      try {
+        const response = await fetch(url, { headers: getAuthHeaders() })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const blob = await response.blob()
+        if (!cancelled) {
+          currentBlobUrl = URL.createObjectURL(blob)
+          setBlobUrl(currentBlobUrl)
+          setIsLoading(false)
+        }
+      } catch {
+        if (!cancelled) {
+          setError('无法加载视频')
+          setIsLoading(false)
+        }
+      }
+    }
+    
+    fetchVideo()
+    return () => {
+      cancelled = true
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl)
+    }
+  }, [url])
   
   return (
     <div className="h-full flex flex-col bg-black rounded-xl overflow-hidden">
       <div className="flex-1 flex items-center justify-center">
-        <video
-          src={url}
-          controls
-          autoPlay
-          className="max-w-full max-h-full"
-        >
-          <track kind="captions" srcLang="zh" label="中文" />
-          浏览器不支持视频播放
-        </video>
+        {isLoading && <Spinner size="lg" />}
+        {error && (
+          <div className="text-center text-danger">
+            <AlertCircle size={48} className="mx-auto mb-4" />
+            <p>{error}</p>
+          </div>
+        )}
+        {blobUrl && (
+          <video
+            src={blobUrl}
+            controls
+            autoPlay
+            className="max-w-full max-h-full"
+          >
+            <track kind="captions" srcLang="zh" label="中文" />
+            浏览器不支持视频播放
+          </video>
+        )}
       </div>
     </div>
   )
@@ -305,6 +351,42 @@ function VideoPreview({ path }: { path: string; filename: string }) {
 // Simple audio preview
 function AudioPreview({ path, filename }: { path: string; filename: string }) {
   const url = buildPreviewUrl(path)
+  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  
+  useEffect(() => {
+    let cancelled = false
+    let currentBlobUrl: string | null = null
+    
+    const fetchAudio = async () => {
+      setIsLoading(true)
+      setError(null)
+      setBlobUrl(null)
+      
+      try {
+        const response = await fetch(url, { headers: getAuthHeaders() })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const blob = await response.blob()
+        if (!cancelled) {
+          currentBlobUrl = URL.createObjectURL(blob)
+          setBlobUrl(currentBlobUrl)
+          setIsLoading(false)
+        }
+      } catch {
+        if (!cancelled) {
+          setError('无法加载音频')
+          setIsLoading(false)
+        }
+      }
+    }
+    
+    fetchAudio()
+    return () => {
+      cancelled = true
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl)
+    }
+  }, [url])
   
   return (
     <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-xl">
@@ -314,14 +396,23 @@ function AudioPreview({ path, filename }: { path: string; filename: string }) {
         </div>
         <p className="text-lg font-medium">{filename}</p>
       </div>
-      <audio
-        src={url}
-        controls
-        autoPlay
-        className="w-[400px] max-w-full"
-      >
-        浏览器不支持音频播放
-      </audio>
+      {isLoading && <Spinner size="lg" />}
+      {error && (
+        <div className="text-center text-danger">
+          <AlertCircle size={32} className="mx-auto mb-2" />
+          <p>{error}</p>
+        </div>
+      )}
+      {blobUrl && (
+        <audio
+          src={blobUrl}
+          controls
+          autoPlay
+          className="w-[400px] max-w-full"
+        >
+          浏览器不支持音频播放
+        </audio>
+      )}
     </div>
   )
 }

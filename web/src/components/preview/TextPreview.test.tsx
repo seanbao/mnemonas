@@ -79,7 +79,7 @@ describe('TextPreview', () => {
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        '/dav/documents/file.txt',
+        '/api/v1/download/documents/file.txt',
         { credentials: 'include' }
       )
     })

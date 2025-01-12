@@ -317,6 +317,18 @@ func (s *Server) setupRoutes() {
 			r.Delete("/*", s.handleDeleteFile)
 		})
 
+		// File operations requiring bodies
+		r.Post("/files-move", s.handleMoveFile)
+		r.Post("/files-copy", s.handleCopyFile)
+
+		// File download/preview (authenticated, no Basic Auth popup)
+		r.Get("/download/*", s.handleDownloadFile)
+
+		// Directory operations
+		r.Route("/directories", func(r chi.Router) {
+			r.Post("/*", s.handleCreateDirectory)
+		})
+
 		// Thumbnail operations
 		r.Get("/thumbnails/*", s.handleThumbnail)
 
@@ -533,6 +545,42 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}).WithMessage("file uploaded successfully").Write(w, http.StatusCreated)
 }
 
+func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
+	dirPath := "/" + chi.URLParam(r, "*")
+
+	// REM-5 fix: Validate path
+	dirPath, err := validatePath(dirPath)
+	if err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+
+	if s.fs == nil {
+		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+
+	if err := s.fs.Mkdir(r.Context(), dirPath); err != nil {
+		// Check if already exists
+		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "exist") {
+			// Return success for idempotent behavior
+			NewAPIResponse(map[string]any{
+				"path": dirPath,
+			}).WithMessage("directory already exists").Write(w, http.StatusOK)
+			return
+		}
+		InternalError(w, err.Error())
+		return
+	}
+
+	// Log activity
+	s.LogActivity(r, activity.ActionCreate, dirPath, map[string]string{"type": "directory"})
+
+	NewAPIResponse(map[string]any{
+		"path": dirPath,
+	}).WithMessage("directory created successfully").Write(w, http.StatusCreated)
+}
+
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	filePath := "/" + chi.URLParam(r, "*")
 
@@ -564,6 +612,160 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(map[string]any{
 		"path": filePath,
 	}).WithMessage("file deleted successfully").Write(w, http.StatusOK)
+}
+
+func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
+	filePath := "/" + chi.URLParam(r, "*")
+
+	// REM-5 fix: Validate path
+	filePath, err := validatePath(filePath)
+	if err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+
+	if s.fs == nil {
+		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+
+	// Get file info
+	info, err := s.fs.Stat(r.Context(), filePath)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			NotFound(w, err.Error())
+			return
+		}
+		InternalError(w, err.Error())
+		return
+	}
+
+	if info.IsDir {
+		BadRequest(w, "cannot download directory")
+		return
+	}
+
+	// Open file
+	file, err := s.fs.OpenFile(r.Context(), filePath)
+	if err != nil {
+		InternalError(w, err.Error())
+		return
+	}
+	defer file.Close()
+
+	// Set cache headers
+	if info.ContentHash != "" {
+		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, info.ContentHash))
+	}
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+
+	// Use http.ServeContent for proper Range support and content type detection
+	http.ServeContent(w, r, path.Base(filePath), info.ModTime, file)
+}
+
+// MoveRequest represents a move/rename request
+type MoveRequest struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
+	var req MoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	fromPath, err := validatePath(req.From)
+	if err != nil {
+		BadRequest(w, "invalid source path: "+err.Error())
+		return
+	}
+
+	toPath, err := validatePath(req.To)
+	if err != nil {
+		BadRequest(w, "invalid destination path: "+err.Error())
+		return
+	}
+
+	if s.fs == nil {
+		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+
+	if err := s.fs.Rename(r.Context(), fromPath, toPath); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			NotFound(w, err.Error())
+			return
+		}
+		InternalError(w, err.Error())
+		return
+	}
+
+	// Log activity
+	s.LogActivity(r, activity.ActionMove, fromPath, map[string]string{"to": toPath})
+
+	NewAPIResponse(map[string]any{
+		"from": fromPath,
+		"to":   toPath,
+	}).WithMessage("file moved successfully").Write(w, http.StatusOK)
+}
+
+// CopyRequest represents a copy request
+type CopyRequest struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
+	var req CopyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	fromPath, err := validatePath(req.From)
+	if err != nil {
+		BadRequest(w, "invalid source path: "+err.Error())
+		return
+	}
+
+	toPath, err := validatePath(req.To)
+	if err != nil {
+		BadRequest(w, "invalid destination path: "+err.Error())
+		return
+	}
+
+	if s.fs == nil {
+		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+
+	// Open source file
+	reader, err := s.fs.OpenFile(r.Context(), fromPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			NotFound(w, err.Error())
+			return
+		}
+		InternalError(w, err.Error())
+		return
+	}
+	defer reader.Close()
+
+	// Write to destination
+	if err := s.fs.WriteFile(r.Context(), toPath, reader); err != nil {
+		InternalError(w, err.Error())
+		return
+	}
+
+	// Log activity
+	s.LogActivity(r, activity.ActionCopy, fromPath, map[string]string{"to": toPath})
+
+	NewAPIResponse(map[string]any{
+		"from": fromPath,
+		"to":   toPath,
+	}).WithMessage("file copied successfully").Write(w, http.StatusCreated)
 }
 
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
