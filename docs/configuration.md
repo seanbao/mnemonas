@@ -25,11 +25,11 @@ write_timeout = "60s"
 idle_timeout = "120s"
 
 [storage]
-data_dir = "/var/lib/mnemonas/data"
-metadata_dir = "/var/lib/mnemonas/metadata"
-temp_dir = "/var/lib/mnemonas/tmp"
-thumbnail_dir = "/var/lib/mnemonas/thumbnails"
-maintenance_dir = "/var/lib/mnemonas/maintenance"
+data_dir = "~/.mnemonas/data"
+metadata_dir = "~/.mnemonas/metadata"
+temp_dir = "~/.mnemonas/tmp"
+thumbnail_dir = "~/.mnemonas/thumbnails"
+maintenance_dir = "~/.mnemonas/maintenance"
 
 [storage.retention]
 max_versions = 100
@@ -347,9 +347,8 @@ read_timeout = "60s"
 write_timeout = "120s"
 
 [storage]
-data_dir = "/var/lib/mnemonas/data"
-metadata_dir = "/var/lib/mnemonas/metadata"
-temp_dir = "/var/lib/mnemonas/tmp"
+# 默认使用 ~/.mnemonas，可自定义为其他路径如 /mnt/data/mnemonas
+root = "~/.mnemonas"
 
 [storage.retention]
 max_versions = 100

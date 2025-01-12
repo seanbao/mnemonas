@@ -60,7 +60,8 @@ var (
 )
 
 // NewUserStore creates a new user store
-func NewUserStore(filePath string) (*UserStore, error) {
+// Returns the store, the initial admin password (if newly created), and any error
+func NewUserStore(filePath string) (*UserStore, string, error) {
 	store := &UserStore{
 		users:    make(map[string]*User),
 		byName:   make(map[string]*User),
@@ -68,16 +69,18 @@ func NewUserStore(filePath string) (*UserStore, error) {
 	}
 
 	if err := store.load(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	if len(store.users) == 0 {
-		if err := store.createDefaultAdmin(); err != nil {
-			return nil, fmt.Errorf("failed to create default admin: %w", err)
+		password, err := store.createDefaultAdmin()
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create default admin: %w", err)
 		}
+		return store, password, nil
 	}
 
-	return store, nil
+	return store, "", nil
 }
 
 func (s *UserStore) load() error {
@@ -130,7 +133,7 @@ func (s *UserStore) save() error {
 	return nil
 }
 
-func (s *UserStore) createDefaultAdmin() error {
+func (s *UserStore) createDefaultAdmin() (string, error) {
 	password := generateRandomPassword(16)
 
 	admin := &User{
@@ -144,7 +147,7 @@ func (s *UserStore) createDefaultAdmin() error {
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return "", err
 	}
 	admin.PasswordHash = string(hash)
 
@@ -152,7 +155,7 @@ func (s *UserStore) createDefaultAdmin() error {
 	s.byName[normalizeUsername(admin.Username)] = admin
 
 	if err := s.save(); err != nil {
-		return err
+		return "", err
 	}
 
 	// Write password to a secure file for user to retrieve
@@ -167,7 +170,7 @@ This file will be automatically deleted after you login.
 `, password)
 
 	if err := os.WriteFile(passwordFile, []byte(passwordContent), 0600); err != nil {
-		return fmt.Errorf("failed to write initial password file: %w", err)
+		return "", fmt.Errorf("failed to write initial password file: %w", err)
 	}
 
 	// Also print to terminal if running interactively (for convenience)
@@ -186,7 +189,7 @@ This file will be automatically deleted after you login.
 		fmt.Printf("Initial admin password saved to: %s\n", passwordFile)
 	}
 
-	return nil
+	return password, nil
 }
 
 // GetByID retrieves a user by ID

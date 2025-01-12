@@ -38,11 +38,12 @@ type Server struct {
 	activity    *activity.Store
 	startTime   time.Time
 	// Auth components
-	userStore    *auth.UserStore
-	tokenManager *auth.TokenManager
-	authHandler  *auth.Handler
-	authMw       *auth.Middleware
-	authEnabled  bool
+	userStore          *auth.UserStore
+	tokenManager       *auth.TokenManager
+	authHandler        *auth.Handler
+	authMw             *auth.Middleware
+	authEnabled        bool
+	initialWebPassword string // Set when admin user is first created
 	// Share components
 	shareStore   *share.ShareStore
 	shareHandler *share.Handler
@@ -156,11 +157,23 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		s.authEnabled = true
 
 		// Initialize user store
-		userStore, err := auth.NewUserStore(cfg.AuthUsersFile)
+		userStore, initialPassword, err := auth.NewUserStore(cfg.AuthUsersFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize user store: %w", err)
 		}
 		s.userStore = userStore
+		s.initialWebPassword = initialPassword
+
+		// Save initial web password to secrets.json for retrieval in Setup API
+		if initialPassword != "" && cfg.Config != nil {
+			secrets, err := config.LoadSecrets(cfg.Config.Storage.Root)
+			if err == nil && secrets != nil {
+				secrets.WebPassword = initialPassword
+				if err := config.SaveSecrets(cfg.Config.Storage.Root, secrets); err != nil {
+					logger.Warn().Err(err).Msg("failed to save web password to secrets")
+				}
+			}
+		}
 
 		// Initialize token manager
 		accessTTL := cfg.AuthAccessTTL
@@ -222,6 +235,12 @@ func (s *Server) setupRoutes() {
 	// Public endpoints (no auth required)
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/api/v1/version", s.handleVersion)
+
+	// Setup status (public, for showing credentials on first run)
+	s.router.Route("/api/v1/setup", func(r chi.Router) {
+		r.Get("/", s.handleGetSetupStatus)
+		r.Post("/acknowledge", s.handleAcknowledgeSetup)
+	})
 
 	// Auth endpoints (public)
 	if s.authEnabled {
@@ -337,6 +356,7 @@ func (s *Server) setupRoutes() {
 			}
 			r.Get("/", s.handleGetSettings)
 			r.Put("/", s.handleUpdateSettings)
+			r.Get("/webdav-credentials", s.handleGetWebDAVCredentials)
 		})
 
 		// Maintenance operations (admin only when auth enabled)
@@ -1778,6 +1798,138 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "settings updated, some changes may require restart",
+	})
+}
+
+// WebDAVCredentialsResponse represents WebDAV credentials for authenticated users
+type WebDAVCredentialsResponse struct {
+	Success  bool   `json:"success"`
+	Enabled  bool   `json:"enabled"`
+	URL      string `json:"url"`
+	AuthType string `json:"auth_type"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+// handleGetWebDAVCredentials returns WebDAV credentials for authenticated users
+func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "configuration not available",
+		})
+		return
+	}
+
+	resp := WebDAVCredentialsResponse{
+		Success:  true,
+		Enabled:  s.config.WebDAV.Enabled,
+		URL:      s.config.WebDAV.Prefix + "/",
+		AuthType: s.config.WebDAV.AuthType,
+	}
+
+	// Only include credentials if WebDAV is enabled and using basic auth
+	if s.config.WebDAV.Enabled && s.config.WebDAV.AuthType == "basic" {
+		resp.Username = s.config.WebDAV.Username
+		if resp.Username == "" {
+			resp.Username = "admin"
+		}
+		// Get password from secrets
+		secrets, err := config.LoadSecrets(s.config.Storage.Root)
+		if err == nil && secrets != nil {
+			resp.Password = secrets.WebDAVPassword
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// SetupStatusResponse represents the setup status response
+type SetupStatusResponse struct {
+	Success        bool   `json:"success"`
+	IsFirstRun     bool   `json:"is_first_run"`
+	AuthEnabled    bool   `json:"auth_enabled"`
+	WebUsername    string `json:"web_username,omitempty"`
+	WebPassword    string `json:"web_password,omitempty"`
+	WebDAVEnabled  bool   `json:"webdav_enabled"`
+	WebDAVAuthType string `json:"webdav_auth_type"`
+	WebDAVUsername string `json:"webdav_username,omitempty"`
+	WebDAVPassword string `json:"webdav_password,omitempty"`
+}
+
+// handleGetSetupStatus returns setup status and credentials for first run
+func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
+	secrets, err := config.LoadSecrets(s.config.Storage.Root)
+	if err != nil {
+		// Error reading secrets file
+		s.logger.Error().Err(err).Msg("failed to load secrets")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(SetupStatusResponse{
+			Success:    true,
+			IsFirstRun: false,
+		})
+		return
+	}
+
+	// No secrets file means not first run or something went wrong
+	if secrets == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(SetupStatusResponse{
+			Success:    true,
+			IsFirstRun: false,
+		})
+		return
+	}
+
+	resp := SetupStatusResponse{
+		Success:        true,
+		IsFirstRun:     !secrets.SetupShown,
+		AuthEnabled:    s.authEnabled,
+		WebDAVEnabled:  s.config.WebDAV.Enabled,
+		WebDAVAuthType: s.config.WebDAV.AuthType,
+	}
+
+	// Only include credentials if setup hasn't been shown yet
+	if !secrets.SetupShown {
+		// Web auth credentials
+		if s.authEnabled && secrets.WebPassword != "" {
+			resp.WebUsername = "admin"
+			resp.WebPassword = secrets.WebPassword
+		}
+		// WebDAV credentials
+		if s.config.WebDAV.AuthType == "basic" {
+			resp.WebDAVUsername = s.config.WebDAV.Username
+			if resp.WebDAVUsername == "" {
+				resp.WebDAVUsername = "admin"
+			}
+			resp.WebDAVPassword = secrets.WebDAVPassword
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleAcknowledgeSetup marks the setup as shown
+func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
+	if err := config.MarkSetupShown(s.config.Storage.Root); err != nil {
+		s.logger.Error().Err(err).Msg("failed to mark setup as shown")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "failed to acknowledge setup",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "setup acknowledged",
 	})
 }
 
