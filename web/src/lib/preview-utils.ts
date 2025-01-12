@@ -128,7 +128,7 @@ export function isAudioFile(filename: string): boolean {
 
 /**
  * Build preview URL for a file
- * Uses WebDAV endpoint for direct file access
+ * Uses REST API endpoint for authenticated access (avoids Basic Auth popup)
  */
 export function buildPreviewUrl(path: string): string {
   // Normalize path
@@ -140,7 +140,7 @@ export function buildPreviewUrl(path: string): string {
     .map(segment => encodeURIComponent(segment))
     .join('/')
   
-  return `/dav${encodedPath}`
+  return `/api/v1/download${encodedPath}`
 }
 
 /**

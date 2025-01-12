@@ -171,32 +171,32 @@ describe('getPreviewType', () => {
 describe('buildPreviewUrl', () => {
   it('builds URL with WebDAV prefix', () => {
     expect(buildPreviewUrl('/documents/file.txt')).toBe(
-      '/dav/documents/file.txt'
+      '/api/v1/download/documents/file.txt'
     )
   })
 
   it('handles root level files', () => {
-    expect(buildPreviewUrl('/file.txt')).toBe('/dav/file.txt')
+    expect(buildPreviewUrl('/file.txt')).toBe('/api/v1/download/file.txt')
   })
 
   it('handles nested paths', () => {
-    expect(buildPreviewUrl('/a/b/c/file.txt')).toBe('/dav/a/b/c/file.txt')
+    expect(buildPreviewUrl('/a/b/c/file.txt')).toBe('/api/v1/download/a/b/c/file.txt')
   })
 
   it('encodes special characters in segments', () => {
     expect(buildPreviewUrl('/files/my file.txt')).toBe(
-      '/dav/files/my%20file.txt'
+      '/api/v1/download/files/my%20file.txt'
     )
   })
 
   it('encodes Chinese characters', () => {
     const url = buildPreviewUrl('/文档/文件.txt')
-    expect(url).toContain('/dav/')
+    expect(url).toContain('/api/v1/download/')
     expect(url).toContain('%E6%96%87%E6%A1%A3') // 文档 encoded
   })
 
   it('adds leading slash if missing', () => {
-    expect(buildPreviewUrl('file.txt')).toBe('/dav/file.txt')
+    expect(buildPreviewUrl('file.txt')).toBe('/api/v1/download/file.txt')
   })
 })
 

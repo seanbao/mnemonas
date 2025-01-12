@@ -246,8 +246,8 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
 export async function createDirectory(path: string): Promise<void> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await authFetch(`/dav${encodedPath}`, {
-    method: 'MKCOL',
+  const response = await authFetch(`${API_BASE}/directories${encodedPath}`, {
+    method: 'POST',
   })
   if (!response.ok) {
     throw new ApiError('创建文件夹失败', response.status, response.statusText)
@@ -292,7 +292,8 @@ export async function uploadFile(
       reject(new Error('上传超时'))
     })
     
-    xhr.open('PUT', `/dav${encodedPath}/${encodedFilename}`)
+    // Use REST API instead of WebDAV to avoid Basic Auth popup
+    xhr.open('POST', `${API_BASE}/files${encodedPath}/${encodedFilename}`)
     if (token) {
       xhr.setRequestHeader('Authorization', `Bearer ${token}`)
     }
@@ -305,7 +306,7 @@ export function getDownloadUrl(path?: string): string {
   if (!path) return ''
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  return `/dav${encodedPath}`
+  return `${API_BASE}/download${encodedPath}`
 }
 
 // Thumbnail URL
@@ -322,14 +323,16 @@ export function getThumbnailUrl(path?: string, size: ThumbnailSize = 'medium'): 
 export async function moveFile(fromPath: string, toPath: string): Promise<void> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
-  const encodedFrom = encodePathForUrl(normalizedFrom)
-  const encodedTo = encodePathForUrl(normalizedTo)
   
-  const response = await authFetch(`/dav${encodedFrom}`, {
-    method: 'MOVE',
+  const response = await authFetch(`${API_BASE}/files-move`, {
+    method: 'POST',
     headers: {
-      'Destination': `/dav${encodedTo}`,
+      'Content-Type': 'application/json',
     },
+    body: JSON.stringify({
+      from: normalizedFrom,
+      to: normalizedTo,
+    }),
   })
   if (!response.ok) {
     throw new ApiError('移动文件失败', response.status, response.statusText)
@@ -340,14 +343,16 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
 export async function copyFile(fromPath: string, toPath: string): Promise<void> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
-  const encodedFrom = encodePathForUrl(normalizedFrom)
-  const encodedTo = encodePathForUrl(normalizedTo)
   
-  const response = await authFetch(`/dav${encodedFrom}`, {
-    method: 'COPY',
+  const response = await authFetch(`${API_BASE}/files-copy`, {
+    method: 'POST',
     headers: {
-      'Destination': `/dav${encodedTo}`,
+      'Content-Type': 'application/json',
     },
+    body: JSON.stringify({
+      from: normalizedFrom,
+      to: normalizedTo,
+    }),
   })
   if (!response.ok) {
     throw new ApiError('复制文件失败', response.status, response.statusText)
