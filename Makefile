@@ -47,7 +47,7 @@ proto:
 # 构建
 build: proto
 	@echo "🏗️  Building Go control plane..."
-	go build -ldflags="$(LDFLAGS)" -o bin/nasd ./cmd/nasd
+	CGO_ENABLED=1 go build -ldflags="$(LDFLAGS)" -o bin/nasd ./cmd/nasd
 	@echo "🦀 Building Rust data plane..."
 	cd dataplane && cargo build --release
 	cp dataplane/target/release/dataplane bin/dataplane
@@ -56,7 +56,7 @@ build: proto
 # 开发模式构建
 dev:
 	@echo "🔨 Development build..."
-	go build -o bin/nasd ./cmd/nasd
+	CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd
 	cd dataplane && cargo build
 	cp dataplane/target/debug/dataplane bin/dataplane-debug
 	@echo "✅ Dev build complete"

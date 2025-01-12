@@ -46,7 +46,7 @@ type TLSConfig struct {
 
 // StorageConfig holds storage configuration
 type StorageConfig struct {
-	// Root is the base directory for all storage (default: /var/lib/mnemonas)
+	// Root is the base directory for all storage (default: ~/.mnemonas)
 	// User files will be stored in Root/files/
 	// Internal data will be stored in Root/.mnemonas/
 	Root string `toml:"root"`
@@ -168,10 +168,22 @@ type LogConfig struct {
 	TimeFormat string `toml:"time_format"` // RFC3339, Unix, etc.
 }
 
+// getDefaultStorageRoot returns the default storage root directory.
+// Uses ~/.mnemonas for easy setup without root privileges.
+// Falls back to ./data if user home directory is not available.
+func getDefaultStorageRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Fall back to current directory if home is not available
+		return filepath.Join(".", "data")
+	}
+	return filepath.Join(home, ".mnemonas")
+}
+
 // Default returns the default configuration
 func Default() *Config {
-	// Default storage root
-	storageRoot := "/var/lib/mnemonas"
+	// Default storage root: ~/.mnemonas (user home directory)
+	storageRoot := getDefaultStorageRoot()
 
 	return &Config{
 		Server: ServerConfig{
@@ -236,10 +248,10 @@ func Default() *Config {
 			Enabled:  true,
 			Prefix:   "/dav",
 			ReadOnly: false,
-			AuthType: "none", // default to no auth for development
+			AuthType: "basic", // default to basic auth with auto-generated password
 		},
 		Auth: AuthConfig{
-			Enabled:         false, // disabled by default for easy development
+			Enabled:         true, // enabled by default for security
 			AccessTokenTTL:  15 * time.Minute,
 			RefreshTokenTTL: 7 * 24 * time.Hour,
 			UsersFile:       filepath.Join(storageRoot, ".mnemonas", "users.json"),

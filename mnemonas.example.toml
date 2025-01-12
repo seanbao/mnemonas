@@ -15,9 +15,11 @@ auto_generate = true         # 自动生成自签名证书（适合内网/开发
 cert_dir = ""                # 证书存放目录（默认 ~/.mnemonas/certs）
 
 [storage]
-data_dir = "/var/lib/mnemonas/data"
-metadata_dir = "/var/lib/mnemonas/metadata"
-temp_dir = "/var/lib/mnemonas/tmp"
+# 存储根目录，默认 ~/.mnemonas（无需 root 权限）
+# 以下路径均相对于 root，通常无需单独配置
+data_dir = "~/.mnemonas/data"
+metadata_dir = "~/.mnemonas/metadata"
+temp_dir = "~/.mnemonas/tmp"
 
 [storage.retention]
 max_versions = 100           # 每个文件最多保留100个版本
@@ -40,8 +42,8 @@ enabled = true
 prefix = "/dav"
 read_only = false
 auth_type = "basic"          # none, basic
-username = "admin"           # Basic Auth 用户名
-password = "changeme"        # Basic Auth 密码（生产环境请修改）
+username = "admin"           # Basic Auth 用户名（默认 admin）
+password = ""                # Basic Auth 密码（留空则首次启动时自动生成并显示）
 
 [auth]
 enabled = false              # 启用后所有 API 需要 JWT 认证
