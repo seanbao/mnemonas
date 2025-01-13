@@ -22,7 +22,7 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <HeroUIProvider>
-        <ToastProvider placement="top-right" toastProps={{ classNames: { base: 'z-[40]' } }} />
+        <ToastProvider placement="top-right" regionProps={{ className: 'mn-toast-region' }} />
         <App />
       </HeroUIProvider>
     </QueryClientProvider>
