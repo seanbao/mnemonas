@@ -1,7 +1,12 @@
 import { defineConfig } from 'vite'
+import { webcrypto } from 'node:crypto'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
+
+if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') {
+  globalThis.crypto = webcrypto as Crypto
+}
 
 // https://vite.dev/config/
 export default defineConfig({

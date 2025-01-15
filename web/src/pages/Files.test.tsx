@@ -99,7 +99,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('保存记忆')).toBeTruthy()
+        expect(screen.getByText('上传文件')).toBeTruthy()
       })
     })
 
