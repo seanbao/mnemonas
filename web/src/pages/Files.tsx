@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useRef, useState } from 'react'
+import { useMemo, useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { 
@@ -260,6 +260,7 @@ function FileRow({
                 key="share" 
                 startContent={<Link2 size={16} />}
                 onPress={onShare}
+                isDisabled={file.isDir}
               >
                 创建分享链接
               </DropdownItem>
@@ -558,6 +559,7 @@ export function FilesPage() {
   const [uploadQueue, setUploadQueue] = useState<{file: File, relativePath?: string, progress: number, status: 'pending' | 'uploading' | 'done' | 'error', error?: string}[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [showUploadPanel, setShowUploadPanel] = useState(false)
+  const uploadClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   
   const { 
     currentPath, 
@@ -815,6 +817,11 @@ export function FilesPage() {
   // Enhanced upload handler with queue support and folder support
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
+
+    if (uploadClearTimeoutRef.current) {
+      clearTimeout(uploadClearTimeoutRef.current)
+      uploadClearTimeoutRef.current = null
+    }
     
     const fileArray = Array.from(files)
     
@@ -889,10 +896,20 @@ export function FilesPage() {
     }
     
     // Auto-clear successful uploads after 3 seconds
-    setTimeout(() => {
+    uploadClearTimeoutRef.current = setTimeout(() => {
       setUploadQueue(prev => prev.filter(item => item.status === 'error'))
+      uploadClearTimeoutRef.current = null
     }, 3000)
   }, [currentPath, queryClient, ensureDirectoryExists])
+
+  useEffect(() => {
+    return () => {
+      if (uploadClearTimeoutRef.current) {
+        clearTimeout(uploadClearTimeoutRef.current)
+        uploadClearTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
@@ -1624,6 +1641,7 @@ export function FilesPage() {
           setShareFile(null)
         }}
         filePath={shareFile?.path || ''}
+        isFolder={shareFile?.isDir}
       />
 
       {/* Move/Copy Dialog */}

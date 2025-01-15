@@ -228,7 +228,7 @@ export function useKeyboardShortcuts(
     }
     
     // Ctrl+Shift+N / Cmd+Shift+N - New folder
-    if (e.key === 'N' && ctrlOrCmd && e.shiftKey) {
+    if (e.key.toLowerCase() === 'n' && ctrlOrCmd && e.shiftKey) {
       if (h.onNewFolder) {
         e.preventDefault()
         h.onNewFolder()

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { ImagePreview } from './ImagePreview'
 
@@ -13,8 +13,25 @@ vi.mock('@heroui/react', () => ({
 }))
 
 describe('ImagePreview', () => {
+  beforeAll(() => {
+    if (!URL.createObjectURL) {
+      URL.createObjectURL = vi.fn(() => 'blob:mock-image')
+    } else {
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-image')
+    }
+    if (!URL.revokeObjectURL) {
+      URL.revokeObjectURL = vi.fn()
+    } else {
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    }
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      blob: () => Promise.resolve(new Blob(['fake'], { type: 'image/png' })),
+    })
   })
 
   it('renders with loading state', () => {
@@ -44,20 +61,21 @@ describe('ImagePreview', () => {
     expect(screen.getByText('100%')).toBeInTheDocument()
   })
 
-  it('builds correct image URL', () => {
+  it('builds correct image URL', async () => {
     render(<ImagePreview path="/documents/photo.jpg" filename="photo.jpg" />)
 
-    const img = screen.getByRole('img')
-    expect(img).toHaveAttribute(
-      'src',
-      '/api/v1/download/documents/photo.jpg'
-    )
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/v1/download/documents/photo.jpg',
+        { headers: {} }
+      )
+    })
   })
 
   it('hides spinner after image loads', async () => {
     render(<ImagePreview path="/image.png" filename="image.png" />)
 
-    const img = screen.getByRole('img')
+    const img = await screen.findByRole('img')
     fireEvent.load(img)
 
     await waitFor(() => {
@@ -68,7 +86,7 @@ describe('ImagePreview', () => {
   it('shows error message on image load failure', async () => {
     render(<ImagePreview path="/broken.png" filename="broken.png" />)
 
-    const img = screen.getByRole('img')
+    const img = await screen.findByRole('img')
     fireEvent.error(img)
 
     await waitFor(() => {
@@ -97,7 +115,7 @@ describe('ImagePreview', () => {
     expect(screen.getByText('100%')).toBeInTheDocument()
   })
 
-  it('resets zoom and rotation on reset button click', () => {
+  it('resets zoom and rotation on reset button click', async () => {
     render(<ImagePreview path="/image.png" filename="image.png" />)
 
     // Zoom in
@@ -114,21 +132,21 @@ describe('ImagePreview', () => {
     fireEvent.click(reset)
 
     expect(screen.getByText('100%')).toBeInTheDocument()
-    const img = screen.getByRole('img')
+    const img = await screen.findByRole('img')
     expect(img.style.transform).toContain('rotate(0deg)')
   })
 
-  it('rotates image by 90 degrees on rotate button click', () => {
+  it('rotates image by 90 degrees on rotate button click', async () => {
     render(<ImagePreview path="/image.png" filename="image.png" />)
 
     const rotate = screen.getByTitle('旋转')
     fireEvent.click(rotate)
 
-    const img = screen.getByRole('img')
+    const img = await screen.findByRole('img')
     expect(img.style.transform).toContain('rotate(90deg)')
   })
 
-  it('wraps rotation after 360 degrees', () => {
+  it('wraps rotation after 360 degrees', async () => {
     render(<ImagePreview path="/image.png" filename="image.png" />)
 
     const rotate = screen.getByTitle('旋转')
@@ -137,7 +155,7 @@ describe('ImagePreview', () => {
     fireEvent.click(rotate) // 270
     fireEvent.click(rotate) // 0
 
-    const img = screen.getByRole('img')
+    const img = await screen.findByRole('img')
     expect(img.style.transform).toContain('rotate(0deg)')
   })
 
@@ -189,10 +207,10 @@ describe('ImagePreview', () => {
     expect(container.querySelector('.custom-class')).toBeInTheDocument()
   })
 
-  it('sets image as non-draggable', () => {
+  it('sets image as non-draggable', async () => {
     render(<ImagePreview path="/image.png" filename="image.png" />)
 
-    const img = screen.getByRole('img')
+    const img = await screen.findByRole('img')
     expect(img).toHaveAttribute('draggable', 'false')
   })
 })

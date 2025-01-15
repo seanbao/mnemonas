@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
-import { getAuthHeaders } from '@/api/auth'
+import { getStoredToken } from '@/api/auth'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
 import { PdfPreview } from './PdfPreview'
@@ -19,6 +19,14 @@ export interface PreviewModalProps {
   file: PreviewFile | null
   files?: PreviewFile[]  // All files in current directory for navigation
   onFileChange?: (file: PreviewFile) => void
+}
+
+function buildStreamUrl(path: string): string {
+  const url = buildPreviewUrl(path)
+  const token = getStoredToken()
+  if (!token) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}auth=${encodeURIComponent(token)}`
 }
 
 export function PreviewModal({ 
@@ -107,8 +115,11 @@ export function PreviewModal({
 
   const handleOpenExternal = useCallback(() => {
     if (!currentFile) return
-    const url = buildPreviewUrl(currentFile.path)
-    window.open(url, '_blank')
+    const url = buildStreamUrl(currentFile.path)
+    const newWindow = window.open(url, '_blank', 'noopener,noreferrer')
+    if (newWindow) {
+      newWindow.opener = null
+    }
   }, [currentFile])
 
   // Render preview content based on type
@@ -284,42 +295,13 @@ export function PreviewModal({
 
 // Simple video preview using native video element
 function VideoPreview({ path }: { path: string; filename: string }) {
-  const url = buildPreviewUrl(path)
-  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+  const url = buildStreamUrl(path)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-  
+
   useEffect(() => {
-    let cancelled = false
-    let currentBlobUrl: string | null = null
-    
-    const fetchVideo = async () => {
-      setIsLoading(true)
-      setError(null)
-      setBlobUrl(null)
-      
-      try {
-        const response = await fetch(url, { headers: getAuthHeaders() })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const blob = await response.blob()
-        if (!cancelled) {
-          currentBlobUrl = URL.createObjectURL(blob)
-          setBlobUrl(currentBlobUrl)
-          setIsLoading(false)
-        }
-      } catch {
-        if (!cancelled) {
-          setError('无法加载视频')
-          setIsLoading(false)
-        }
-      }
-    }
-    
-    fetchVideo()
-    return () => {
-      cancelled = true
-      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl)
-    }
+    setIsLoading(true)
+    setError(null)
   }, [url])
   
   return (
@@ -332,12 +314,18 @@ function VideoPreview({ path }: { path: string; filename: string }) {
             <p>{error}</p>
           </div>
         )}
-        {blobUrl && (
+        {!error && (
           <video
-            src={blobUrl}
+            src={url}
             controls
+            preload="metadata"
             autoPlay
             className="max-w-full max-h-full"
+            onLoadedData={() => setIsLoading(false)}
+            onError={() => {
+              setIsLoading(false)
+              setError('无法加载视频')
+            }}
           >
             <track kind="captions" srcLang="zh" label="中文" />
             浏览器不支持视频播放
@@ -350,42 +338,13 @@ function VideoPreview({ path }: { path: string; filename: string }) {
 
 // Simple audio preview
 function AudioPreview({ path, filename }: { path: string; filename: string }) {
-  const url = buildPreviewUrl(path)
-  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+  const url = buildStreamUrl(path)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-  
+
   useEffect(() => {
-    let cancelled = false
-    let currentBlobUrl: string | null = null
-    
-    const fetchAudio = async () => {
-      setIsLoading(true)
-      setError(null)
-      setBlobUrl(null)
-      
-      try {
-        const response = await fetch(url, { headers: getAuthHeaders() })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const blob = await response.blob()
-        if (!cancelled) {
-          currentBlobUrl = URL.createObjectURL(blob)
-          setBlobUrl(currentBlobUrl)
-          setIsLoading(false)
-        }
-      } catch {
-        if (!cancelled) {
-          setError('无法加载音频')
-          setIsLoading(false)
-        }
-      }
-    }
-    
-    fetchAudio()
-    return () => {
-      cancelled = true
-      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl)
-    }
+    setIsLoading(true)
+    setError(null)
   }, [url])
   
   return (
@@ -403,12 +362,18 @@ function AudioPreview({ path, filename }: { path: string; filename: string }) {
           <p>{error}</p>
         </div>
       )}
-      {blobUrl && (
+      {!error && (
         <audio
-          src={blobUrl}
+          src={url}
           controls
+          preload="metadata"
           autoPlay
           className="w-[400px] max-w-full"
+          onLoadedData={() => setIsLoading(false)}
+          onError={() => {
+            setIsLoading(false)
+            setError('无法加载音频')
+          }}
         >
           浏览器不支持音频播放
         </audio>

@@ -30,8 +30,11 @@ export function Header({ onMenuClick }: HeaderProps) {
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await queryClient.invalidateQueries()
-    setTimeout(() => setIsRefreshing(false), 500)
+    try {
+      await queryClient.invalidateQueries()
+    } finally {
+      setIsRefreshing(false)
+    }
   }
 
   const handleSearch = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
