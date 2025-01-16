@@ -7,8 +7,8 @@ vi.mock('@heroui/react', () => ({
     isOpen ? <div data-testid="modal">{children}</div> : null,
   ModalContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ModalBody: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Button: ({ children, onPress, isDisabled, title }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; title?: string }) => (
-    <button disabled={isDisabled} onClick={onPress} title={title}>{children}</button>
+  Button: ({ children, onPress, isDisabled, title, isIconOnly, isLoading }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; title?: string; isIconOnly?: boolean; isLoading?: boolean }) => (
+    <button disabled={isDisabled || isLoading} onClick={onPress} title={title} aria-hidden={isIconOnly}>{children}</button>
   ),
   Spinner: () => <div>loading</div>,
 }))
