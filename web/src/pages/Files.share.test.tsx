@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@/test/utils'
 import React from 'react'
+import { act } from '@testing-library/react'
 import { FilesPage } from './Files'
 
 vi.mock('@tanstack/react-virtual', () => ({
@@ -20,8 +21,8 @@ vi.mock('@heroui/react', async () => {
   const react = await vi.importActual<typeof import('react')>('react')
   return {
     HeroUIProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-    Button: ({ children, onPress, isDisabled, isLoading, ...props }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; isLoading?: boolean }) => (
-      <button disabled={isDisabled || isLoading} onClick={onPress} {...props}>{children}</button>
+    Button: ({ children, onPress, isDisabled, isLoading, startContent }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; isLoading?: boolean; startContent?: React.ReactNode }) => (
+      <button disabled={isDisabled || isLoading} onClick={onPress}>{startContent}{children}</button>
     ),
     Modal: ({ children, isOpen }: { children: React.ReactNode; isOpen: boolean }) =>
       isOpen ? <div>{children}</div> : null,
@@ -129,7 +130,10 @@ describe('FilesPage sharing behavior', () => {
   })
 
   it('disables share action for folders in list view', async () => {
-    render(<FilesPage />)
+    await act(async () => {
+      render(<FilesPage />)
+      await Promise.resolve()
+    })
 
     const shareButtons = await screen.findAllByText('创建分享链接')
     expect(shareButtons.length).toBeGreaterThan(1)
@@ -137,10 +141,16 @@ describe('FilesPage sharing behavior', () => {
   })
 
   it('opens share dialog for files with isFolder=false', async () => {
-    render(<FilesPage />)
+    await act(async () => {
+      render(<FilesPage />)
+      await Promise.resolve()
+    })
 
     const shareButtons = await screen.findAllByText('创建分享链接')
-    shareButtons[1].click()
+    await act(async () => {
+      shareButtons[1].click()
+      await Promise.resolve()
+    })
 
     const dialog = await screen.findByTestId('share-dialog')
     expect(dialog.getAttribute('data-open')).toBe('true')

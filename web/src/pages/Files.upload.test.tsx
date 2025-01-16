@@ -20,8 +20,8 @@ vi.mock('@heroui/react', async () => {
   const react = await vi.importActual<typeof import('react')>('react')
   return {
     HeroUIProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-    Button: ({ children, onPress, isDisabled, isLoading, ...props }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; isLoading?: boolean }) => (
-      <button disabled={isDisabled || isLoading} onClick={onPress} {...props}>{children}</button>
+    Button: ({ children, onPress, isDisabled, isLoading, startContent }: { children: React.ReactNode; onPress?: () => void; isDisabled?: boolean; isLoading?: boolean; startContent?: React.ReactNode }) => (
+      <button disabled={isDisabled || isLoading} onClick={onPress}>{startContent}{children}</button>
     ),
     Modal: ({ children, isOpen }: { children: React.ReactNode; isOpen: boolean }) =>
       isOpen ? <div>{children}</div> : null,

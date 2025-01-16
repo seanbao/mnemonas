@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import React from 'react'
 import { Header } from './Header'
 
@@ -23,8 +23,8 @@ vi.mock('@/components/ThemeToggle', () => ({
 }))
 
 vi.mock('@heroui/react', () => ({
-  Button: ({ children, onPress, ...props }: { children: React.ReactNode; onPress?: () => void }) => (
-    <button onClick={onPress} {...props}>{children}</button>
+  Button: ({ children, onPress, isLoading, 'aria-label': ariaLabel }: { children: React.ReactNode; onPress?: () => void; isLoading?: boolean; 'aria-label'?: string }) => (
+    <button onClick={onPress} disabled={isLoading} aria-label={ariaLabel}>{children}</button>
   ),
   Avatar: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   Dropdown: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -43,7 +43,10 @@ describe('Header', () => {
     render(<Header />)
 
     const refreshButton = screen.getByLabelText('刷新数据')
-    refreshButton.click()
+    await act(async () => {
+      refreshButton.click()
+      await Promise.resolve()
+    })
 
     expect(invalidateQueries).toHaveBeenCalled()
   })
