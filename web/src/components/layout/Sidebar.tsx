@@ -8,7 +8,9 @@ import {
   ShieldCheck, 
   Activity, 
   Settings,
-  Archive
+  Archive,
+  Users,
+  FileText,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -40,12 +42,14 @@ const navSections: NavSection[] = [
       { icon: Trash2, label: '回收站', path: '/trash' },
       { icon: HardDrive, label: '存储', path: '/storage' },
       { icon: ShieldCheck, label: '守护', path: '/maintenance' },
+      { icon: Users, label: '用户', path: '/users' },
     ]
   },
   {
     title: '系统',
     items: [
       { icon: Activity, label: '健康', path: '/health' },
+      { icon: FileText, label: '活动', path: '/activity' },
       { icon: Settings, label: '设置', path: '/settings' },
     ]
   }

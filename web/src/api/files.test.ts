@@ -23,6 +23,9 @@ import {
   runScrub,
 } from './files'
 
+// Type declaration for global (Node.js environment in Vitest)
+declare const global: typeof globalThis & { fetch: typeof fetch }
+
 // Mock fetch globally
 const mockFetch = vi.fn()
 global.fetch = mockFetch

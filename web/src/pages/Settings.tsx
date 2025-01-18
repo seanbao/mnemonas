@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Card, 
   CardBody, 
@@ -10,6 +11,7 @@ import {
   Tabs,
   Tab,
   addToast,
+  Spinner,
 } from '@heroui/react'
 import { 
   Server, 
@@ -24,8 +26,11 @@ import {
   User,
   Folder,
   Zap,
+  Link2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ShareManager } from '@/components/share'
+import { getSettings, updateSettings, type UpdateSettingsRequest } from '@/api/settings'
 
 // Settings section component
 function SettingsSection({ 
@@ -84,49 +89,129 @@ function SettingRow({
 
 export function SettingsPage() {
   const [selectedTab, setSelectedTab] = useState('general')
-  const [isSaving, setIsSaving] = useState(false)
+  const queryClient = useQueryClient()
   
-  // Settings state (would be loaded from API in production)
+  // Fetch settings from API
+  const { data: settingsData, isLoading, error, refetch } = useQuery({
+    queryKey: ['settings'],
+    queryFn: getSettings,
+  })
+
+  // Local editable state
   const [settings, setSettings] = useState({
-    // Server
     serverHost: '0.0.0.0',
     serverPort: '8080',
-    
-    // Storage
-    dataDir: '/var/lib/mnemonas/data',
-    metadataDir: '/var/lib/mnemonas/metadata',
-    tempDir: '/var/lib/mnemonas/tmp',
-    
-    // Retention
+    dataDir: '',
+    metadataDir: '',
+    tempDir: '',
     maxVersions: 100,
     maxAge: '8760h',
     minFreeSpace: '10GB',
     gcInterval: '24h',
-    
-    // WebDAV
     webdavEnabled: true,
     webdavPrefix: '/dav',
     webdavReadOnly: false,
     webdavAuthType: 'basic',
     webdavUsername: 'admin',
     webdavPassword: '',
-    
-    // CDC
     minChunkSize: '256KB',
     avgChunkSize: '1MB',
     maxChunkSize: '4MB',
   })
 
-  const handleSave = async () => {
-    setIsSaving(true)
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    setIsSaving(false)
-    addToast({ title: '设置已保存', color: 'success' })
+  // Update local state when API data loads
+  useEffect(() => {
+    if (settingsData?.data) {
+      const d = settingsData.data
+      setSettings({
+        serverHost: d.server.host,
+        serverPort: String(d.server.port),
+        dataDir: d.storage.data_dir,
+        metadataDir: d.storage.metadata_dir,
+        tempDir: d.storage.temp_dir,
+        maxVersions: d.retention.max_versions,
+        maxAge: d.retention.max_age,
+        minFreeSpace: formatBytes(d.retention.min_free_space),
+        gcInterval: d.retention.gc_interval,
+        webdavEnabled: d.webdav.enabled,
+        webdavPrefix: d.webdav.prefix,
+        webdavReadOnly: d.webdav.read_only,
+        webdavAuthType: d.webdav.auth_type,
+        webdavUsername: d.webdav.username,
+        webdavPassword: '',
+        minChunkSize: formatBytes(d.cdc.min_chunk_size),
+        avgChunkSize: formatBytes(d.cdc.avg_chunk_size),
+        maxChunkSize: formatBytes(d.cdc.max_chunk_size),
+      })
+    }
+  }, [settingsData])
+
+  // Save mutation
+  const saveMutation = useMutation({
+    mutationFn: updateSettings,
+    onSuccess: () => {
+      addToast({ title: '设置已保存', color: 'success' })
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (err: Error) => {
+      addToast({ title: '保存失败: ' + err.message, color: 'danger' })
+    },
+  })
+
+  const handleSave = () => {
+    const req: UpdateSettingsRequest = {
+      server: {
+        host: settings.serverHost,
+        port: parseInt(settings.serverPort),
+      },
+      retention: {
+        max_versions: settings.maxVersions,
+        max_age: settings.maxAge,
+        gc_interval: settings.gcInterval,
+      },
+      webdav: {
+        enabled: settings.webdavEnabled,
+        prefix: settings.webdavPrefix,
+        read_only: settings.webdavReadOnly,
+        auth_type: settings.webdavAuthType,
+        username: settings.webdavUsername,
+        ...(settings.webdavPassword && { password: settings.webdavPassword }),
+      },
+    }
+    saveMutation.mutate(req)
   }
 
   const handleReset = () => {
-    addToast({ title: '设置已重置为默认值', color: 'warning' })
+    refetch()
+    addToast({ title: '设置已重置', color: 'warning' })
+  }
+
+  // Helper function to format bytes
+  function formatBytes(bytes: number): string {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return `${Math.round(bytes / 1024 / 1024 / 1024)}GB`
+    } else if (bytes >= 1024 * 1024) {
+      return `${Math.round(bytes / 1024 / 1024)}MB`
+    } else if (bytes >= 1024) {
+      return `${Math.round(bytes / 1024)}KB`
+    }
+    return `${bytes}B`
+  }
+
+  if (isLoading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <Spinner size="lg" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex items-center justify-center text-danger">
+        加载设置失败: {(error as Error).message}
+      </div>
+    )
   }
 
   return (
@@ -150,7 +235,7 @@ export function SettingsPage() {
             <Button
               className="bg-gradient-to-br from-accent-primary to-accent-dark text-white shadow-[0_4px_12px_rgba(167,139,250,0.4)]"
               startContent={<Save size={16} />}
-              isLoading={isSaving}
+              isLoading={saveMutation.isPending}
               onPress={handleSave}
             >
               保存设置
@@ -520,6 +605,18 @@ export function SettingsPage() {
                     </code>
                   </SettingRow>
                 </div>
+              </SettingsSection>
+            </div>
+          </Tab>
+
+          <Tab key="shares" title="分享管理">
+            <div className="space-y-6 mt-6">
+              <SettingsSection
+                title="分享链接管理"
+                description="管理所有已创建的分享链接"
+                icon={Link2}
+              >
+                <ShareManager />
               </SettingsSection>
             </div>
           </Tab>

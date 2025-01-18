@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useRef, useState, useEffect } from 'react'
+import { useMemo, useCallback, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { 
@@ -44,7 +44,9 @@ import {
   CheckCircle2,
   AlertCircle,
   X,
+  Link2,
 } from 'lucide-react'
+import { ShareDialog } from '@/components/share'
 import { useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { listFiles, deleteFile, createDirectory, uploadFile, moveFile } from '@/api/files'
@@ -151,6 +153,7 @@ function FileRow({
   onRename,
   onDelete,
   onViewVersions,
+  onShare,
 }: { 
   file: FileItem
   isSelected: boolean
@@ -159,6 +162,7 @@ function FileRow({
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
+  onShare: () => void
 }) {
   const handleDownload = useCallback(() => {
     // Construct download URL
@@ -276,7 +280,14 @@ function FileRow({
                 复制路径
               </DropdownItem>
             </DropdownSection>
-            <DropdownSection title="历史">
+            <DropdownSection title="分享">
+              <DropdownItem 
+                key="share" 
+                startContent={<Link2 size={16} />}
+                onPress={onShare}
+              >
+                创建分享链接
+              </DropdownItem>
               <DropdownItem 
                 key="versions" 
                 startContent={<History size={16} />}
@@ -366,6 +377,7 @@ function FileCard({
   onRename,
   onDelete,
   onViewVersions,
+  onShare,
 }: {
   file: FileItem
   isSelected: boolean
@@ -374,6 +386,7 @@ function FileCard({
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
+  onShare: () => void
 }) {
   const handleDownload = useCallback(() => {
     const downloadUrl = `/api/v1/files${file.path}?download=true`
@@ -465,6 +478,16 @@ function FileCard({
                 复制路径
               </DropdownItem>
             </DropdownSection>
+            <DropdownSection title="分享" showDivider>
+              <DropdownItem 
+                key="share" 
+                startContent={<Link2 size={16} />}
+                onPress={onShare}
+                isDisabled={file.isDir}
+              >
+                创建分享链接
+              </DropdownItem>
+            </DropdownSection>
             <DropdownSection title="历史">
               <DropdownItem 
                 key="versions" 
@@ -517,11 +540,12 @@ export function FilesPage() {
   const { isOpen: isRenameOpen, onOpen: onRenameOpen, onClose: onRenameClose } = useDisclosure()
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
+  const { isOpen: isShareOpen, onOpen: onShareOpen, onClose: onShareClose } = useDisclosure()
+  const [shareFile, setShareFile] = useState<FileItem | null>(null)
   
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   
   // Drag and drop state
   const [isDragging, setIsDragging] = useState(false)
@@ -667,6 +691,11 @@ export function FilesPage() {
   const handleViewVersions = useCallback((file: FileItem) => {
     navigate(`/versions?path=${encodeURIComponent(file.path)}`)
   }, [navigate])
+
+  const handleOpenShareModal = useCallback((file: FileItem) => {
+    setShareFile(file)
+    onShareOpen()
+  }, [onShareOpen])
 
   // Enhanced upload handler with queue support
   const handleUpload = useCallback(async (files: FileList | null) => {
@@ -991,6 +1020,7 @@ export function FilesPage() {
                         onRename={() => handleOpenRenameModal(file)}
                         onDelete={() => handleOpenDeleteModal(file)}
                         onViewVersions={() => handleViewVersions(file)}
+                        onShare={() => handleOpenShareModal(file)}
                       />
                     </div>
                   )
@@ -1031,6 +1061,7 @@ export function FilesPage() {
                     onRename={() => handleOpenRenameModal(file)}
                     onDelete={() => handleOpenDeleteModal(file)}
                     onViewVersions={() => handleViewVersions(file)}
+                    onShare={() => handleOpenShareModal(file)}
                   />
                 ))}
               </div>
@@ -1110,6 +1141,16 @@ export function FilesPage() {
           </ModalFooter>
         </ModalContent>
       </Modal>
+
+      {/* Share Dialog */}
+      <ShareDialog
+        isOpen={isShareOpen}
+        onClose={() => {
+          onShareClose()
+          setShareFile(null)
+        }}
+        filePath={shareFile?.path || ''}
+      />
     </div>
   )
 }
