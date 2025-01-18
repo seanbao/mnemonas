@@ -459,7 +459,7 @@ test_crash_recovery_doc() {
     echo "  1. Start a large file upload"
     echo "  2. Kill nasd process mid-write: pkill -9 nasd"
     echo "  3. Restart nasd"
-    echo "  4. Verify no .tmp files in ~/.mnemonas/data/"
+    echo "  4. Verify no .tmp files in <storage_root>/.mnemonas/tmp/"
     echo "  5. Verify WebDAV still works"
     echo ""
     log_skip "Crash recovery requires manual testing"
@@ -482,7 +482,7 @@ test_path_traversal() {
 test_localhost_binding() {
     log_info "Checking server binding configuration..."
     # This is a documentation/config check, not runtime test
-    if grep -q 'host.*=.*"0.0.0.0"\|host.*=.*"127.0.0.1"' ~/.mnemonas/config.toml 2>/dev/null || \
+    if grep -q 'host.*=.*"0.0.0.0"\|host.*=.*"127.0.0.1"' ~/.config/mnemonas/config.toml 2>/dev/null || \
        grep -q 'host.*=.*"0.0.0.0"\|host.*=.*"127.0.0.1"' ./mnemonas.toml 2>/dev/null; then
         log_ok "Host binding configured in config file"
     else
@@ -498,7 +498,7 @@ test_auth_login_success() {
     log_info "Testing auth login with valid credentials..."
     
     # Check if initial password file exists (fresh install)
-    local password_file="$HOME/.mnemonas/initial-password.txt"
+    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
     if [[ ! -f "$password_file" ]]; then
         log_skip "Auth login test - no initial password file (auth may be disabled or already logged in)"
         return
@@ -542,7 +542,7 @@ test_auth_login_failure() {
 test_auth_password_file_deleted_after_login() {
     log_info "Testing password file deletion after login..."
     
-    local password_file="$HOME/.mnemonas/initial-password.txt"
+    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
     
     # If auth is enabled and we just logged in, file should be deleted
     if [[ -f "$password_file" ]]; then
@@ -551,7 +551,7 @@ test_auth_password_file_deleted_after_login() {
     else
         # File doesn't exist - could be already deleted, or auth disabled
         # Check if users.json exists to confirm auth is set up
-        if [[ -f "$HOME/.mnemonas/users.json" ]]; then
+        if [[ -f "$HOME/.mnemonas/.mnemonas/users.json" ]]; then
             log_ok "Password file correctly deleted after login"
         else
             log_skip "Auth not initialized (no users.json)"
@@ -577,11 +577,11 @@ test_auth_protected_endpoint() {
 test_auth_token_refresh() {
     log_info "Testing token refresh flow..."
     
-    local password_file="$HOME/.mnemonas/initial-password.txt"
+    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
     
     # Need to get a valid token first
     # This test requires auth to be enabled and initial password available
-    if [[ ! -f "$password_file" ]] && [[ ! -f "$HOME/.mnemonas/users.json" ]]; then
+    if [[ ! -f "$password_file" ]] && [[ ! -f "$HOME/.mnemonas/.mnemonas/users.json" ]]; then
         log_skip "Auth not configured for token refresh test"
         return
     fi

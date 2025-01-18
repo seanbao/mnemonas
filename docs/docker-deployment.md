@@ -68,8 +68,7 @@ services:
       - "8080:8080"
     volumes:
       # 数据存储到外接硬盘
-      - /mnt/external-disk/mnemonas/data:/var/lib/mnemonas/data
-      - /mnt/external-disk/mnemonas/metadata:/var/lib/mnemonas/metadata
+      - /mnt/external-disk/mnemonas:/var/lib/mnemonas
       # 配置文件
       - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
     environment:
@@ -89,8 +88,7 @@ host = "0.0.0.0"
 port = 8080
 
 [storage]
-data_dir = "/var/lib/mnemonas/data"
-metadata_dir = "/var/lib/mnemonas/metadata"
+root = "/var/lib/mnemonas"
 
 [storage.retention]
 max_versions = 50        # 照片/视频保留 50 个版本足够
@@ -120,8 +118,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ~/.mnemonas/data:/var/lib/mnemonas/data
-      - ~/.mnemonas/metadata:/var/lib/mnemonas/metadata
+      - ~/.mnemonas:/var/lib/mnemonas
       - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
     restart: unless-stopped
 ```
@@ -158,8 +155,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - /srv/nas/data:/var/lib/mnemonas/data
-      - /srv/nas/metadata:/var/lib/mnemonas/metadata
+      - /srv/nas:/var/lib/mnemonas
       - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
     environment:
       - TZ=Asia/Shanghai
@@ -364,9 +360,9 @@ docker compose up -d
 # 查看详细日志
 docker compose logs mnemonas
 
-# 检查配置文件语法
+# 检查配置文件语法（启动时校验，报错会直接退出）
 docker run --rm -v $(pwd)/mnemonas.toml:/etc/mnemonas/config.toml:ro \
-  ghcr.io/seanbao/mnemonas:latest --config-check
+  ghcr.io/seanbao/mnemonas:latest --config /etc/mnemonas/config.toml
 ```
 
 ### 权限问题

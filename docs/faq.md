@@ -228,13 +228,7 @@ curl -X POST http://localhost:8080/api/v1/maintenance/scrub
 curl http://localhost:8080/api/v1/maintenance/scrub/history
 ```
 
-建议每月运行一次 scrub，或配置自动 scrub：
-
-```toml
-[maintenance]
-auto_scrub = true
-scrub_interval = "30d"  # 每 30 天
-```
+建议每月运行一次 scrub，使用维护接口或脚本触发。
 
 ### Q: 如何备份 MnemoNAS 数据？
 
@@ -243,8 +237,8 @@ scrub_interval = "30d"  # 每 30 天
 1. **冷备份**：停止服务后复制数据目录
    ```bash
    docker compose stop
-   cp -r ~/.mnemonas/data /backup/mnemonas-data
-   cp -r ~/.mnemonas/metadata /backup/mnemonas-metadata
+   cp -r ~/.mnemonas/files /backup/mnemonas-files
+   cp -r ~/.mnemonas/.mnemonas /backup/mnemonas-internal
    docker compose start
    ```
 
@@ -293,13 +287,13 @@ scrub_interval = "30d"  # 每 30 天
 
 1. 确认数据面运行中：
    ```bash
-   curl http://localhost:9090/health
+   curl http://localhost:9091/health
    ```
 
 2. 检查配置中的数据面地址：
    ```toml
    [dataplane]
-   address = "localhost:9090"
+   grpc_address = "localhost:9090"
    ```
 
 3. 检查防火墙
@@ -313,8 +307,8 @@ scrub_interval = "30d"  # 每 30 天
 docker compose down
 
 # 删除数据
-rm -rf ~/.mnemonas/data/*
-rm -rf ~/.mnemonas/metadata/*
+rm -rf ~/.mnemonas/files/*
+rm -rf ~/.mnemonas/.mnemonas/*
 
 # 重启服务
 docker compose up -d

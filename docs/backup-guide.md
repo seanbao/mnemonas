@@ -247,7 +247,8 @@ restic restore <snapshot-id> \
 restic restore latest \
     --repo /backup/mnemonas-restic \
     --target ~/.mnemonas \
-    --include /home/user/.mnemonas/data
+    --include /home/user/.mnemonas/.mnemonas \
+    --include /home/user/.mnemonas/files
 ```
 
 ### 验证恢复
@@ -262,7 +263,7 @@ docker compose up -d
 curl http://localhost:8080/health
 
 # 运行 scrub 检查数据完整性
-curl -X POST http://localhost:8080/api/v1/scrub
+curl -X POST http://localhost:8080/api/v1/maintenance/scrub
 ```
 
 ---

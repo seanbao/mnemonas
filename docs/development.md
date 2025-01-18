@@ -317,10 +317,10 @@ cd web && npm run build                             # 前端
 **终端 1 - Rust 数据面**
 ```bash
 cd dataplane
-cargo run -- --data-dir ~/.mnemonas/data --port 9090
+cargo run -- --data-dir ~/.mnemonas/.mnemonas/objects --grpc 127.0.0.1:9090 --listen 127.0.0.1:9091
 
 # 或使用构建产物
-./bin/dataplane --data-dir ~/.mnemonas/data --port 9090
+./bin/dataplane --data-dir ~/.mnemonas/.mnemonas/objects --grpc 127.0.0.1:9090 --listen 127.0.0.1:9091
 ```
 
 **终端 2 - Go 控制面**
@@ -577,7 +577,7 @@ rust-lldb target/debug/dataplane
       "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/dataplane/target/debug/dataplane",
-      "args": ["--data-dir", "/tmp/mnemonas-test"],
+      "args": ["--data-dir", "/tmp/mnemonas-test/.mnemonas/objects"],
       "cwd": "${workspaceFolder}/dataplane"
     }
   ]
