@@ -20,20 +20,26 @@ MnemoNAS 数据分为以下几个部分：
 
 ```
 ~/.mnemonas/
-├── data/           # CAS 对象存储（核心数据，必须备份）
-│   └── objects/    # 按哈希分片存储的数据块
-├── metadata/       # 元数据（文件树、版本、回收站）
-│   ├── fileinfo/   # 文件元信息
-│   ├── versions/   # 版本历史
-│   └── trash/      # 回收站
-└── config.toml     # 配置文件
+├── files/                  # 用户文件（原生文件）
+├── .mnemonas/              # 内部数据
+│   ├── objects/            # CAS 对象
+│   ├── index.db            # SQLite 元数据
+│   ├── trash/              # 回收站内容
+│   ├── thumbnails/         # 缩略图缓存
+│   ├── maintenance/        # Scrub/GC 状态
+│   └── activity/           # 活动日志
+└── secrets.json            # 自动生成密钥（JWT/WebDAV）
+
+~/.config/mnemonas/
+└── config.toml             # 配置文件
 ```
 
 | 目录 | 重要性 | 说明 |
 |------|--------|------|
-| `data/` | ⭐⭐⭐ 极高 | 所有文件内容，丢失无法恢复 |
-| `metadata/` | ⭐⭐⭐ 极高 | 文件结构和版本，丢失后文件名信息丢失 |
-| `config.toml` | ⭐⭐ 中等 | 可重新配置，但备份省事 |
+| `files/` | ⭐⭐⭐ 极高 | 用户文件内容，丢失无法恢复 |
+| `.mnemonas/` | ⭐⭐⭐ 极高 | 元数据与版本对象 |
+| `secrets.json` | ⭐⭐ 中等 | JWT/WebDAV 密钥与初始密码 |
+| `config.toml` | ⭐⭐ 中等 | 默认位于 `~/.config/mnemonas/` |
 
 ---
 
@@ -82,27 +88,30 @@ set -e
 
 # 配置
 MNEMONAS_DIR="$HOME/.mnemonas"
+CONFIG_FILE="$HOME/.config/mnemonas/config.toml"
 REMOTE="aliyun:mnemonas-backup"  # 改为你的远程配置
 DATE=$(date +%Y%m%d)
 
 echo "=== MnemoNAS 备份开始 $(date) ==="
 
-# 同步数据目录（增量）
-echo "正在同步 data 目录..."
-rclone sync "$MNEMONAS_DIR/data" "$REMOTE/data" \
+# 同步用户文件
+echo "正在同步 files 目录..."
+rclone sync "$MNEMONAS_DIR/files" "$REMOTE/files" \
     --progress \
     --transfers 4 \
     --checkers 8
 
-# 同步元数据目录
-echo "正在同步 metadata 目录..."
-rclone sync "$MNEMONAS_DIR/metadata" "$REMOTE/metadata" \
+# 同步内部数据
+echo "正在同步 .mnemonas 目录..."
+rclone sync "$MNEMONAS_DIR/.mnemonas" "$REMOTE/.mnemonas" \
     --progress
 
 # 备份配置文件
 echo "正在备份配置..."
-rclone copy "$MNEMONAS_DIR/config.toml" "$REMOTE/config/" \
+if [ -f "$CONFIG_FILE" ]; then
+  rclone copy "$CONFIG_FILE" "$REMOTE/config/" \
     --backup-dir "$REMOTE/config-history/$DATE"
+fi
 
 echo "=== 备份完成 $(date) ==="
 ```

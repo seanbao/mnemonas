@@ -7,8 +7,8 @@
 系统按以下顺序查找配置文件：
 
 1. `./mnemonas.toml` — 当前目录
-2. `$HOME/.config/mnemonas/config.toml` — 用户配置目录
-3. `/etc/mnemonas/config.toml` — 系统配置目录
+2. `/etc/mnemonas/config.toml` — 系统配置目录
+3. `$HOME/.config/mnemonas/config.toml` — 用户配置目录
 
 如果未找到配置文件，系统使用默认配置。
 
@@ -24,12 +24,21 @@ read_timeout = "30s"
 write_timeout = "60s"
 idle_timeout = "120s"
 
+[server.tls]
+enabled = false
+cert_file = ""
+key_file = ""
+auto_generate = true
+cert_dir = "~/.mnemonas/.mnemonas/certs"
+
 [storage]
-data_dir = "~/.mnemonas/data"
-metadata_dir = "~/.mnemonas/metadata"
-temp_dir = "~/.mnemonas/tmp"
-thumbnail_dir = "~/.mnemonas/thumbnails"
-maintenance_dir = "~/.mnemonas/maintenance"
+root = "~/.mnemonas"
+data_dir = "~/.mnemonas/.mnemonas/objects"
+metadata_dir = "~/.mnemonas/.mnemonas"
+temp_dir = "~/.mnemonas/.mnemonas/tmp"
+thumbnail_dir = "~/.mnemonas/.mnemonas/thumbnails"
+maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
+activity_dir = "~/.mnemonas/.mnemonas/activity"
 
 [storage.retention]
 max_versions = 100
@@ -89,34 +98,59 @@ write_timeout = "120s"
 
 ---
 
-### [storage] — 存储配置
-
-定义数据存储位置和目录结构。
+### [server.tls] — HTTPS 配置
 
 | 选项 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `data_dir` | string | `~/.mnemonas/data` | CAS 数据存储目录 |
-| `metadata_dir` | string | `~/.mnemonas/metadata` | 元数据数据库目录 |
-| `temp_dir` | string | `~/.mnemonas/tmp` | 临时文件目录（用于原子写入） |
-| `thumbnail_dir` | string | `~/.mnemonas/thumbnails` | 缩略图缓存目录 |
-| `maintenance_dir` | string | `~/.mnemonas/maintenance` | 维护状态文件目录 |
+| `enabled` | bool | `false` | 是否启用 HTTPS |
+| `cert_file` | string | `""` | 证书文件路径（留空使用 cert_dir 下的 server.crt） |
+| `key_file` | string | `""` | 私钥文件路径（留空使用 cert_dir 下的 server.key） |
+| `auto_generate` | bool | `true` | 自动生成自签名证书 |
+| `cert_dir` | string | `~/.mnemonas/.mnemonas/certs` | 证书存放目录 |
+
+**示例：**
+```toml
+[server.tls]
+enabled = true
+auto_generate = true
+```
+
+---
+
+### [storage] — 存储配置
+
+定义数据存储位置和目录结构。推荐使用 `root` 配置统一根目录，其他目录为兼容字段。
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `root` | string | `~/.mnemonas` | 存储根目录（用户文件在 `root/files`） |
+| `data_dir` | string | `~/.mnemonas/.mnemonas/objects` | 兼容字段：CAS 对象目录 |
+| `metadata_dir` | string | `~/.mnemonas/.mnemonas` | 兼容字段：元数据目录 |
+| `temp_dir` | string | `~/.mnemonas/.mnemonas/tmp` | 临时文件目录（用于原子写入） |
+| `thumbnail_dir` | string | `~/.mnemonas/.mnemonas/thumbnails` | 缩略图缓存目录 |
+| `maintenance_dir` | string | `~/.mnemonas/.mnemonas/maintenance` | 维护状态文件目录 |
+| `activity_dir` | string | `~/.mnemonas/.mnemonas/activity` | 活动日志目录 |
 
 **存储目录说明：**
 
-- **data_dir**: 存储 CAS（内容寻址存储）数据块。目录结构为 `ab/cd/abcd1234...`（两层分片）
-- **metadata_dir**: 存储文件路径映射、版本历史等元数据
-- **temp_dir**: 写入操作的临时文件，保证原子性（先写 `.tmp` → fsync → rename）
-- **thumbnail_dir**: 图片缩略图缓存，可安全删除重建
-- **maintenance_dir**: Scrub、GC 等维护任务的状态和结果
+- **root**: 存储根目录。用户文件位于 `root/files`，内部数据位于 `root/.mnemonas`
+- **data_dir**: CAS 对象目录（兼容字段）
+- **metadata_dir**: SQLite 与维护元数据目录（兼容字段）
+- **temp_dir**: 写入操作临时文件目录（原子写入）
+- **thumbnail_dir**: 缩略图缓存目录
+- **maintenance_dir**: Scrub、GC 等维护任务目录
+- **activity_dir**: 活动日志目录
 
 **示例：**
 ```toml
 [storage]
-data_dir = "/mnt/nas/data"
-metadata_dir = "/mnt/nas/meta"
-temp_dir = "/mnt/nas/tmp"
-thumbnail_dir = "/mnt/nas/cache/thumbnails"
-maintenance_dir = "/mnt/nas/maintenance"
+root = "/mnt/nas"
+data_dir = "/mnt/nas/.mnemonas/objects"
+metadata_dir = "/mnt/nas/.mnemonas"
+temp_dir = "/mnt/nas/.mnemonas/tmp"
+thumbnail_dir = "/mnt/nas/.mnemonas/thumbnails"
+maintenance_dir = "/mnt/nas/.mnemonas/maintenance"
+activity_dir = "/mnt/nas/.mnemonas/activity"
 ```
 
 ---
@@ -146,6 +180,44 @@ max_versions = 50        # 保留最近 50 个版本
 max_age = "2160h"        # 保留 90 天
 min_free_space = 53687091200  # 至少保留 50GB 空间
 gc_interval = "12h"      # 每 12 小时运行 GC
+```
+
+---
+
+### [storage.versioning] — 版本策略
+
+控制自动版本化规则与文件大小阈值。
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `auto_versioned_extensions` | string[] | 常见文本/代码后缀 | 默认启用自动版本化的后缀列表 |
+| `auto_versioned_filenames` | string[] | 常见配置文件 | 默认启用自动版本化的文件名列表 |
+| `max_versioned_size` | int64 | `104857600` | 最大自动版本化文件大小（字节） |
+
+**示例：**
+```toml
+[storage.versioning]
+auto_versioned_extensions = [".md", ".txt", ".go"]
+auto_versioned_filenames = ["README", "LICENSE"]
+max_versioned_size = 104857600
+```
+
+---
+
+### [storage.trash] — 回收站配置
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用回收站 |
+| `retention_days` | int | `30` | 回收站保留天数 |
+| `max_size` | int64 | `10737418240` | 回收站最大占用（字节） |
+
+**示例：**
+```toml
+[storage.trash]
+enabled = true
+retention_days = 30
+max_size = 10737418240
 ```
 
 ---
@@ -242,6 +314,80 @@ password = "very-strong-password-here"
 
 ---
 
+### [auth] — 认证配置
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用 JWT 认证 |
+| `jwt_secret` | string | 自动生成 | JWT 签名密钥 |
+| `access_token_ttl` | duration | `15m` | Access Token 有效期 |
+| `refresh_token_ttl` | duration | `168h` | Refresh Token 有效期 |
+| `users_file` | string | `~/.mnemonas/.mnemonas/users.json` | 用户数据文件路径 |
+
+**示例：**
+```toml
+[auth]
+enabled = true
+access_token_ttl = "15m"
+refresh_token_ttl = "168h"
+```
+
+---
+
+### [share] — 文件分享配置
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用分享 |
+| `store_file` | string | `~/.mnemonas/.mnemonas/shares.json` | 分享数据文件路径 |
+| `base_url` | string | `""` | 分享链接基础 URL |
+
+**示例：**
+```toml
+[share]
+enabled = true
+base_url = "https://nas.example.com"
+```
+
+---
+
+### [favorites] — 收藏夹配置
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用收藏 |
+| `store_file` | string | `~/.mnemonas/.mnemonas/favorites.json` | 收藏数据文件路径 |
+
+---
+
+### [alerts] — 存储空间告警配置
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用存储告警 |
+| `check_interval` | duration | `1h` | 检查间隔 |
+| `threshold_pct` | float | `90` | 告警阈值（百分比） |
+| `critical_pct` | float | `95` | 严重告警阈值（百分比） |
+| `min_free_bytes` | uint64 | `10737418240` | 最小可用空间（字节） |
+| `cooldown_period` | duration | `4h` | 告警冷却时间 |
+| `webhook_url` | string | `""` | Webhook URL |
+| `webhook_method` | string | `POST` | Webhook 方法 |
+| `webhook_headers` | string[] | `[]` | 自定义 Header（"Key:Value"） |
+
+**示例：**
+```toml
+[alerts]
+enabled = true
+check_interval = "1h"
+threshold_pct = 90.0
+critical_pct = 95.0
+min_free_bytes = 10737418240
+cooldown_period = "4h"
+webhook_url = "https://hooks.example.com/alert"
+```
+
+---
+
 ### [log] — 日志配置
 
 配置系统日志输出。
@@ -325,9 +471,10 @@ host = "127.0.0.1"
 port = 8080
 
 [storage]
-data_dir = "./data"
-metadata_dir = "./metadata"
-temp_dir = "./tmp"
+root = "./data"
+data_dir = "./data/.mnemonas/objects"
+metadata_dir = "./data/.mnemonas"
+temp_dir = "./data/.mnemonas/tmp"
 
 [webdav]
 enabled = true

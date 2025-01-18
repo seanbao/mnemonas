@@ -6,14 +6,14 @@ const (
 	// DefaultMaxConcurrentRequests is the maximum number of concurrent requests
 	DefaultMaxConcurrentRequests = 100
 
-	// DefaultMaxUploadSize is the maximum upload file size (100MB)
-	DefaultMaxUploadSize = 100 * 1024 * 1024
+	// DefaultMaxUploadSize is the maximum upload file size (10GB)
+	DefaultMaxUploadSize = 10 * 1024 * 1024 * 1024
 
 	// DefaultScrubRequestBodyLimit is the maximum scrub request body size (1MB)
 	DefaultScrubRequestBodyLimit = 1 * 1024 * 1024
 
-	// DefaultRequestTimeout is the default request timeout
-	DefaultRequestTimeout = 60
+	// DefaultRequestTimeout is the default request timeout (30 minutes)
+	DefaultRequestTimeout = 30 * 60
 
 	// DefaultScrubTimeout is the scrub operation timeout (30 minutes)
 	DefaultScrubTimeout = 30 * 60
