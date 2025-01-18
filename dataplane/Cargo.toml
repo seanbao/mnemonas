@@ -1,0 +1,51 @@
+[package]
+name = "dataplane"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.45", features = ["full"] }
+tokio-stream = "0.1"
+
+# gRPC - use matching versions
+tonic = "0.13"
+prost = "0.13"
+
+# Hashing (BLAKE3 - 10x faster than SHA256)
+blake3 = "1.7"
+
+# CDC (Content-Defined Chunking)
+fastcdc = "3.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Others
+bytes = "1.10"
+parking_lot = "0.12"
+dashmap = "6.1"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+[build-dependencies]
+tonic-build = "0.13"
+
+[dev-dependencies]
+tempfile = "3.24"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

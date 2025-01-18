@@ -1,0 +1,169 @@
+syntax = "proto3";
+
+package mnemonas.dataplane.v1;
+
+option go_package = "github.com/seanbao/mnemonas/internal/dataplane/v1";
+
+// DataPlane service - Go control plane calls Rust data plane
+service DataPlane {
+  // Store data chunk, returns CAS address
+  rpc PutChunk(PutChunkRequest) returns (PutChunkResponse);
+  
+  // Get data chunk
+  rpc GetChunk(GetChunkRequest) returns (GetChunkResponse);
+  
+  // Check if data chunk exists
+  rpc HasChunk(HasChunkRequest) returns (HasChunkResponse);
+  
+  // Delete data chunk (GC mark)
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkResponse);
+  
+  // Store file (CDC split + store)
+  rpc PutFile(stream PutFileRequest) returns (PutFileResponse);
+  
+  // Get file
+  rpc GetFile(GetFileRequest) returns (stream GetFileResponse);
+  
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+  
+  // Get storage statistics
+  rpc Stats(StatsRequest) returns (StatsResponse);
+  
+  // Run scrub to verify data integrity
+  rpc Scrub(ScrubRequest) returns (ScrubResponse);
+  
+  // List all object hashes (for GC)
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+}
+
+// === Chunk operations ===
+
+message PutChunkRequest {
+  bytes data = 1;
+  // Optional: client pre-computed hash for verification
+  optional string expected_hash = 2;
+}
+
+message PutChunkResponse {
+  string hash = 1;  // CAS address (blake3 hash)
+  uint64 size = 2;
+  bool deduplicated = 3;  // Whether dedup was hit
+}
+
+message GetChunkRequest {
+  string hash = 1;
+}
+
+message GetChunkResponse {
+  bytes data = 1;
+}
+
+message HasChunkRequest {
+  string hash = 1;
+}
+
+message HasChunkResponse {
+  bool exists = 1;
+  optional uint64 size = 2;
+}
+
+message DeleteChunkRequest {
+  string hash = 1;
+}
+
+message DeleteChunkResponse {
+  bool deleted = 1;
+}
+
+// === File operations ===
+
+message PutFileRequest {
+  oneof payload {
+    FileMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message FileMetadata {
+  string path = 1;
+  optional string content_type = 2;
+}
+
+message PutFileResponse {
+  string manifest_hash = 1;  // CAS address of file manifest
+  repeated string chunk_hashes = 2;  // All chunk hashes
+  uint64 total_size = 3;
+  uint32 chunk_count = 4;
+  double dedup_ratio = 5;  // Deduplication ratio
+}
+
+message GetFileRequest {
+  string manifest_hash = 1;
+}
+
+message GetFileResponse {
+  bytes data = 1;
+}
+
+// === System operations ===
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+  uint64 uptime_secs = 3;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+  uint64 total_chunks = 1;
+  uint64 total_size = 2;
+  uint64 unique_size = 3;  // Actual size after dedup
+  double dedup_ratio = 4;
+}
+
+// === Scrub operations ===
+
+message ScrubRequest {
+  // Optional: only verify specific hashes (empty = full scrub)
+  repeated string hashes = 1;
+}
+
+message ScrubResponse {
+  uint64 total_objects = 1;
+  uint64 valid_objects = 2;
+  uint64 corrupted_objects = 3;
+  uint64 missing_objects = 4;
+  uint64 total_size = 5;
+  uint64 duration_ms = 6;
+  repeated ScrubError errors = 7;
+}
+
+message ScrubError {
+  string hash = 1;
+  string error_type = 2;  // "corrupted", "missing", "io_error"
+  string message = 3;
+}
+
+// === Object listing (for GC) ===
+
+message ListObjectsRequest {
+  // Optional: pagination
+  optional string cursor = 1;
+  optional uint32 limit = 2;
+}
+
+message ListObjectsResponse {
+  repeated ObjectInfo objects = 1;
+  optional string next_cursor = 2;  // Empty if no more
+}
+
+message ObjectInfo {
+  string hash = 1;
+  uint64 size = 2;
+  // NEW-2 fix: Creation timestamp for GC grace period filtering
+  optional int64 created_at_unix = 3;  // Unix timestamp in seconds
+}
