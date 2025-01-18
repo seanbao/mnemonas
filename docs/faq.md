@@ -53,11 +53,11 @@ pkill dataplane
 
 **A:** 默认路径：
 
-- **数据文件**（CAS）：`~/.mnemonas/data/`
-- **元数据**：`~/.mnemonas/metadata/`
-- **配置文件**：`~/.mnemonas/config.toml` 或 `./mnemonas.toml`
+- **数据文件**（用户文件）：`~/.mnemonas/files/`
+- **内部数据**（CAS/元数据）：`~/.mnemonas/.mnemonas/`
+- **配置文件**：`~/.config/mnemonas/config.toml` 或 `./mnemonas.toml`
 
-Docker 部署时，这些路径映射到容器内的 `/data` 和 `/metadata`。
+Docker 部署时，存储根目录通常映射到容器内的 `/data`，内部数据位于 `/data/.mnemonas`。
 
 ---
 
@@ -94,16 +94,23 @@ Restart-Service WebClient
 enabled = true
 prefix = "/dav"
 auth_type = "basic"  # 启用 Basic Auth
-
-[webdav.users]
-admin = "your-password-here"
+username = "admin"
+password = "your-password-here"
 ```
 
 重启服务后生效。
 
 ### Q: 支持 HTTPS 吗？
 
-**A:** MnemoNAS 本身不直接提供 HTTPS，推荐在前面放置反向代理：
+**A:** MnemoNAS 支持内置 HTTPS（自签名或自定义证书），也可使用反向代理：
+
+```toml
+[server.tls]
+enabled = true
+auto_generate = true
+```
+
+反向代理示例：
 
 ```nginx
 # nginx 示例
