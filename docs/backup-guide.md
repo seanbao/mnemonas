@@ -199,19 +199,16 @@ rsync -avz --delete \
 
 ---
 
-### 方法 4：Docker 数据卷备份
+### 方法 4：Docker 目录备份
 
-如果使用 Docker 部署：
+如果使用 Docker 部署（宿主机目录映射到 `/root/.mnemonas`）：
 
 ```bash
 # 停止服务
 docker compose stop
 
-# 备份数据卷
-docker run --rm \
-    -v mnemonas_data:/root/.mnemonas:ro \
-    -v $(pwd):/backup \
-    alpine tar czf /backup/mnemonas-data.tar.gz -C /root/.mnemonas .
+# 备份目录
+tar czf mnemonas-data.tar.gz -C ~/.mnemonas .
 
 # 启动服务
 docker compose start
