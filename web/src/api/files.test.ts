@@ -194,9 +194,13 @@ describe('API: files', () => {
   describe('getStorageStats', () => {
     it('fetches storage statistics', async () => {
       const mockResponse = {
-        total_size: 1073741824,
-        total_chunks: 100,
-        dedup_ratio: 1.5,
+        success: true,
+        data: {
+          total_size: 1073741824,
+          total_chunks: 100,
+          unique_size: 536870912,
+          dedup_ratio: 1.5,
+        },
       }
 
       mockFetch.mockResolvedValueOnce({
@@ -207,6 +211,7 @@ describe('API: files', () => {
       const result = await getStorageStats()
       expect(result.totalSize).toBe(1073741824)
       expect(result.totalObjects).toBe(100)
+      expect(result.uniqueSize).toBe(536870912)
       expect(result.dedupRatio).toBe(1.5)
     })
   })
@@ -288,15 +293,15 @@ describe('API: files', () => {
             items: [
               {
                 id: 'item1',
-                original_path: '/deleted.txt',
-                deleted_at: '2024-01-01T00:00:00Z',
+                originalPath: '/deleted.txt',
+                deletedAt: '2024-01-01T00:00:00Z',
                 name: 'deleted.txt',
-                is_dir: false,
+                isDir: false,
                 size: 100,
               },
             ],
             count: 1,
-            total_size: 100,
+            totalSize: 100,
           },
           timestamp: '2024-01-01',
         }
@@ -398,25 +403,28 @@ describe('API: files', () => {
   describe('getDiagnostics', () => {
     it('fetches diagnostics info', async () => {
       const mockResponse = {
-        timestamp: '2024-01-15T10:00:00Z',
-        uptime: '1h30m',
-        uptime_secs: 5400,
-        version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
-        system: {
-          filesystem_initialized: true,
-          dataplane_connected: true,
-          thumbnail_service_ready: false,
+        success: true,
+        data: {
+          timestamp: '2024-01-15T10:00:00Z',
+          uptime: '1h30m',
+          uptime_secs: 5400,
+          version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
+          system: {
+            filesystem_initialized: true,
+            dataplane_connected: true,
+            thumbnail_service_ready: false,
+          },
+          memory: {
+            alloc_mb: 50,
+            total_alloc_mb: 100,
+            sys_mb: 200,
+            num_gc: 10,
+          },
+          goroutines: 25,
+          filesystem: { trash_items: 5, trash_size: 1024 },
+          storage: { total_chunks: 100, total_size: 10240, unique_size: 8192, dedup_ratio: 1.25 },
+          dataplane: { healthy: true, version: '0.1.0', uptime_sec: 3600 },
         },
-        memory: {
-          alloc_mb: 50,
-          total_alloc_mb: 100,
-          sys_mb: 200,
-          num_gc: 10,
-        },
-        goroutines: 25,
-        filesystem: { trash_items: 5, trash_size: 1024 },
-        storage: { total_chunks: 100, total_size: 10240, unique_size: 8192, dedup_ratio: 1.25 },
-        dataplane: { healthy: true, version: '0.1.0', uptime_sec: 3600 },
       }
 
       mockFetch.mockResolvedValueOnce({
@@ -436,9 +444,12 @@ describe('API: files', () => {
 
     it('handles missing optional fields', async () => {
       const mockResponse = {
-        timestamp: '2024-01-15T10:00:00Z',
-        uptime: '1h30m',
-        version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
+        success: true,
+        data: {
+          timestamp: '2024-01-15T10:00:00Z',
+          uptime: '1h30m',
+          version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
+        },
       }
 
       mockFetch.mockResolvedValueOnce({

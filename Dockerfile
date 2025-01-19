@@ -36,13 +36,15 @@ COPY --from=rust-builder /build/dataplane/target/release/dataplane /app/
 COPY --from=go-builder /build/nasd /app/
 
 # 创建数据目录
-RUN mkdir -p /var/lib/mnemonas/{data,metadata,tmp,cas}
+RUN mkdir -p /root/.mnemonas/files \
+	&& mkdir -p /root/.mnemonas/.mnemonas/{objects,trash,thumbnails,maintenance,activity,tmp}
 
 # 复制默认配置
-COPY mnemonas.example.toml /etc/mnemonas/config.toml
+COPY mnemonas.example.toml /root/.mnemonas/config.toml
+RUN sed -i 's|^root = ".*"|root = "/root/.mnemonas"|' /root/.mnemonas/config.toml
 
 # 暴露端口
-EXPOSE 8080 9090
+EXPOSE 8080 9090 9091
 
 # 启动脚本
 COPY <<EOF /app/start.sh
@@ -50,13 +52,13 @@ COPY <<EOF /app/start.sh
 set -e
 
 # 启动Rust数据面
-/app/dataplane --listen 127.0.0.1:9090 --data-dir /var/lib/mnemonas/cas &
+/app/dataplane --listen 127.0.0.1:9091 --grpc 127.0.0.1:9090 --data-dir /root/.mnemonas/.mnemonas/objects &
 
 # 等待数据面启动
 sleep 1
 
 # 启动Go控制面
-exec /app/nasd --config /etc/mnemonas/config.toml
+exec /app/nasd --config /root/.mnemonas/config.toml
 EOF
 
 RUN chmod +x /app/start.sh

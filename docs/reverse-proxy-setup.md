@@ -208,8 +208,8 @@ services:
   mnemonas:
     image: mnemonas:latest
     volumes:
-      - ./data:/data
-      - ./config:/config
+      - ~/.mnemonas:/root/.mnemonas
+      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.nas.rule=Host(`nas.example.com`)"

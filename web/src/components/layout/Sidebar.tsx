@@ -76,10 +76,8 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
     refetchInterval: 1000 * 60 * 5, // Refresh every 5 minutes
   })
 
-  // Calculate storage usage percentage (assume 1TB total for now, or use dedup ratio as indicator)
-  const totalCapacity = 1024 * 1024 * 1024 * 1024 // 1TB in bytes
   const usedBytes = storageStats?.totalSize ?? 0
-  const usagePercent = Math.min(100, Math.round((usedBytes / totalCapacity) * 100))
+  const hasUsage = usedBytes > 0
 
   return (
     <aside 
@@ -194,15 +192,19 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
               </div>
               <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
                 <div 
-                  className="h-full bg-accent-primary rounded-full transition-all duration-500 flow-line" 
-                  style={{ width: `${Math.max(5, usagePercent)}%` }}
+                  className={cn(
+                    "h-full bg-accent-primary rounded-full transition-all duration-500",
+                    hasUsage ? "flow-line opacity-60" : "opacity-20"
+                  )}
+                  style={{ width: hasUsage ? '100%' : '0%' }}
                 />
               </div>
-              {storageStats && storageStats.dedupRatio > 1 && (
+              <div className="text-[11px] text-default-400">容量未知</div>
+                {storageStats && storageStats.dedupRatio > 0 && (
                 <div className="flex items-center gap-2">
                   <div className="live-indicator scale-75" />
-                  <span className="text-default-500">
-                    去重率 {((1 - 1 / storageStats.dedupRatio) * 100).toFixed(1)}%
+                    <span className="text-default-400">
+                      去重率 {(storageStats.dedupRatio * 100).toFixed(1)}%
                   </span>
                 </div>
               )}

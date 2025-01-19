@@ -58,6 +58,11 @@ export interface UpdateSettingsRequest {
     min_free_space?: number
     gc_interval?: string
   }
+  cdc?: {
+    min_chunk_size?: number
+    avg_chunk_size?: number
+    max_chunk_size?: number
+  }
   webdav?: {
     enabled?: boolean
     prefix?: string

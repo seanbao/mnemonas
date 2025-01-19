@@ -55,9 +55,9 @@ pkill dataplane
 
 - **数据文件**（用户文件）：`~/.mnemonas/files/`
 - **内部数据**（CAS/元数据）：`~/.mnemonas/.mnemonas/`
-- **配置文件**：`~/.config/mnemonas/config.toml` 或 `./mnemonas.toml`
+- **配置文件**：`~/.mnemonas/config.toml`
 
-Docker 部署时，存储根目录通常映射到容器内的 `/data`，内部数据位于 `/data/.mnemonas`。
+Docker 部署时，存储根目录通常映射到容器内的 `/root/.mnemonas`，内部数据位于 `/root/.mnemonas/.mnemonas`。
 
 ---
 
@@ -87,7 +87,7 @@ Restart-Service WebClient
 
 ### Q: 如何启用 WebDAV 认证？
 
-**A:** 编辑配置文件 `mnemonas.toml`：
+**A:** 编辑配置文件 `~/.mnemonas/config.toml`：
 
 ```toml
 [webdav]
@@ -148,7 +148,7 @@ server {
 curl http://localhost:8080/api/v1/versions/path/to/file
 
 # 恢复到指定版本
-curl -X POST http://localhost:8080/api/v1/restore/path/to/file?version=<hash>
+curl -X POST "http://localhost:8080/api/v1/versions/<hash>/restore?path=/path/to/file"
 ```
 
 ### Q: 存储空间如何去重？
@@ -161,19 +161,19 @@ curl -X POST http://localhost:8080/api/v1/restore/path/to/file?version=<hash>
 
 查看去重效果：
 ```bash
-curl http://localhost:9090/stats
-# 返回: {"dedup_ratio": 2.5, ...}  # 2.5x 去重率
+curl http://localhost:9091/stats
+# 返回: {"dedup_ratio": 0.6, ...}  # 0.6 = 60% 去重率（节省 60% 存储）
 ```
 
 ### Q: 如何清理旧版本？
 
-**A:** 默认情况下，MnemoNAS 保留所有历史版本。配置保留策略：
+**A:** 默认情况下，MnemoNAS 按保留策略自动清理旧版本。可通过配置调整保留范围：
 
 ```toml
-[storage]
-# 保留策略（满足任一条件即保留）
-retention_days = 30      # 保留 30 天内的版本
-retention_versions = 10  # 每个文件保留最近 10 个版本
+[storage.retention]
+# 保留策略（满足任一条件即清理）
+max_age = "720h"      # 保留 30 天内的版本
+max_versions = 10     # 每个文件保留最近 10 个版本
 ```
 
 手动触发 GC：
@@ -212,7 +212,7 @@ curl http://localhost:8080/api/v1/metrics
 
 存储统计：
 ```bash
-curl http://localhost:9090/stats
+curl http://localhost:9091/stats
 # 返回 CAS 存储统计
 ```
 

@@ -102,6 +102,23 @@ describe('filesStore', () => {
       })
     })
 
+    describe('setSelection', () => {
+      it('replaces selected files', () => {
+        useFilesStore.getState().selectFile('/old.txt')
+        useFilesStore.getState().setSelection(['/new1.txt', '/new2.txt'])
+        const selected = useFilesStore.getState().selectedFiles
+        expect(selected.has('/old.txt')).toBe(false)
+        expect(selected.has('/new1.txt')).toBe(true)
+        expect(selected.has('/new2.txt')).toBe(true)
+      })
+
+      it('supports empty selection', () => {
+        useFilesStore.getState().selectFile('/old.txt')
+        useFilesStore.getState().setSelection([])
+        expect(useFilesStore.getState().selectedFiles.size).toBe(0)
+      })
+    })
+
     describe('clearSelection', () => {
       it('clears all selected files', () => {
         useFilesStore.getState().selectFile('/a.txt')

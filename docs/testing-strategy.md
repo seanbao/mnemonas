@@ -155,8 +155,9 @@ func TestCASIntegration_WriteReadVerify(t *testing.T) {
 ```bash
 # 场景：首次启动（认证启用）
 test_fresh_install_auth_enabled() {
-    rm -rf ~/.mnemonas ~/.config/mnemonas
-    echo '[auth]\nenabled = true' > mnemonas.toml
+    rm -rf ~/.mnemonas
+    mkdir -p ~/.mnemonas
+    echo '[auth]\nenabled = true' > ~/.mnemonas/config.toml
     ./bin/nasd &
     sleep 2
     

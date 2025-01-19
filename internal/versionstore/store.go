@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -335,6 +336,55 @@ func (s *Store) GetVersioningOverride(ctx context.Context, path string) (bool, b
 // DeleteVersioningOverride removes the user override for a path
 func (s *Store) DeleteVersioningOverride(ctx context.Context, path string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM versioning_overrides WHERE path = ?`, path)
+	return err
+}
+
+// RenamePath updates all metadata paths after a file or directory rename.
+func (s *Store) RenamePath(ctx context.Context, oldPath, newPath string) error {
+	if oldPath == newPath {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := renamePathInTable(ctx, tx, "versions", oldPath, newPath); err != nil {
+		return err
+	}
+	if err := renamePathInTable(ctx, tx, "files", oldPath, newPath); err != nil {
+		return err
+	}
+	if err := renamePathInTable(ctx, tx, "versioning_overrides", oldPath, newPath); err != nil {
+		return err
+	}
+	if err := renamePathInTable(ctx, tx, "file_locks", oldPath, newPath); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func renamePathInTable(ctx context.Context, tx *sql.Tx, table, oldPath, newPath string) error {
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE %s SET path = ? WHERE path = ?`, table),
+		newPath, oldPath); err != nil {
+		return err
+	}
+
+	if oldPath == "/" {
+		return nil
+	}
+
+	prefix := oldPath + "/"
+	likePattern := prefix + "%"
+	prefixStart := len(oldPath) + 1
+
+	_, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE %s SET path = ? || substr(path, ?) WHERE path LIKE ?`, table),
+		newPath, prefixStart, likePattern)
 	return err
 }
 

@@ -30,6 +30,7 @@ export function versionToDisplayFormat(v: VersionInfo): { modTime: string; size:
 export interface StorageStats {
   totalSize: number
   totalObjects: number
+  uniqueSize: number
   dedupRatio: number
 }
 
@@ -183,10 +184,12 @@ export async function getStorageStats(): Promise<StorageStats> {
   if (!response.ok) {
     throw new ApiError('获取存储统计失败', response.status, response.statusText)
   }
-  const data = await response.json()
+  const result = await response.json()
+  const data = result.data ?? result
   return {
     totalSize: data.total_size || 0,
     totalObjects: data.total_chunks || 0,
+    uniqueSize: data.unique_size || 0,
     dedupRatio: data.dedup_ratio || 0,
   }
 }
@@ -206,7 +209,8 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
   if (!response.ok) {
     throw new ApiError('获取诊断信息失败', response.status, response.statusText)
   }
-  const data = await response.json()
+  const result = await response.json()
+  const data = result.data ?? result
   return {
     timestamp: data.timestamp,
     uptime: data.uptime,
@@ -303,10 +307,25 @@ export async function uploadFile(
 
 // Download file URL
 export function getDownloadUrl(path?: string): string {
+  return buildDownloadUrl(path)
+}
+
+export function buildDownloadUrl(
+  path?: string,
+  options?: { version?: string; download?: boolean }
+): string {
   if (!path) return ''
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  return `${API_BASE}/download${encodedPath}`
+  const params = new URLSearchParams()
+  if (options?.version) {
+    params.set('version', options.version)
+  }
+  if (options?.download) {
+    params.set('download', 'true')
+  }
+  const query = params.toString()
+  return query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
 }
 
 // Thumbnail URL
@@ -408,6 +427,9 @@ export interface TrashListResponse {
   items: TrashItem[]
   count: number
   totalSize: number
+  retentionDays?: number
+  retentionEnabled?: boolean
+  retentionMaxSize?: number
 }
 
 // List trash items
@@ -416,31 +438,37 @@ export async function listTrash(): Promise<TrashListResponse> {
   const result = await handleResponse<ApiResponseWrapper<{
     items: Array<{
       id: string
-      original_path: string
-      deleted_at: string
+      originalPath: string
+      deletedAt: string
       name: string
-      is_dir: boolean
+      isDir: boolean
       size: number
       hash?: string
-      versions?: number
+      hadVersions?: boolean
     }>
     count: number
-    total_size: number
+    totalSize: number
+    retentionDays?: number
+    retentionEnabled?: boolean
+    retentionMaxSize?: number
   }>>(response, '获取回收站列表失败')
   
   return {
     items: result.data.items.map(item => ({
       id: item.id,
-      originalPath: item.original_path,
-      deletedAt: item.deleted_at,
+      originalPath: item.originalPath,
+      deletedAt: item.deletedAt,
       name: item.name,
-      isDir: item.is_dir,
+      isDir: item.isDir,
       size: item.size,
       hash: item.hash,
-      versions: item.versions,
+      versions: item.hadVersions ? 1 : 0,
     })),
     count: result.data.count,
-    totalSize: result.data.total_size,
+    totalSize: result.data.totalSize,
+    retentionDays: result.data.retentionDays,
+    retentionEnabled: result.data.retentionEnabled,
+    retentionMaxSize: result.data.retentionMaxSize,
   }
 }
 

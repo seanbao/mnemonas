@@ -312,6 +312,26 @@ func TestFileSystem_Rename(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Rename_PreservesVersions(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	fs.WriteFile(ctx, "/rename.md", bytes.NewReader([]byte("v1")))
+	fs.WriteFile(ctx, "/rename.md", bytes.NewReader([]byte("v2")))
+
+	if err := fs.Rename(ctx, "/rename.md", "/renamed.md"); err != nil {
+		t.Fatalf("Rename() error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/renamed.md")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Errorf("ListVersions() returned %d versions, want at least 2", len(versions))
+	}
+}
+
 func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -335,6 +355,32 @@ func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	_, err = fs.Stat(ctx, "/restore.txt")
 	if err != nil {
 		t.Errorf("Stat() after restore error: %v", err)
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_PreservesVersions(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	fs.WriteFile(ctx, "/restore-move.md", bytes.NewReader([]byte("v1")))
+	fs.WriteFile(ctx, "/restore-move.md", bytes.NewReader([]byte("v2")))
+	fs.Delete(ctx, "/restore-move.md")
+
+	items, _ := fs.ListTrash(ctx)
+	if len(items) == 0 {
+		t.Fatal("No items in trash")
+	}
+
+	if err := fs.RestoreFromTrashTo(ctx, items[0].ID, "/restored/restore-move.md"); err != nil {
+		t.Fatalf("RestoreFromTrashTo() error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/restored/restore-move.md")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Errorf("ListVersions() returned %d versions, want at least 2", len(versions))
 	}
 }
 

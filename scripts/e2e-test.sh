@@ -482,8 +482,7 @@ test_path_traversal() {
 test_localhost_binding() {
     log_info "Checking server binding configuration..."
     # This is a documentation/config check, not runtime test
-    if grep -q 'host.*=.*"0.0.0.0"\|host.*=.*"127.0.0.1"' ~/.config/mnemonas/config.toml 2>/dev/null || \
-       grep -q 'host.*=.*"0.0.0.0"\|host.*=.*"127.0.0.1"' ./mnemonas.toml 2>/dev/null; then
+    if grep -q 'host.*=.*"0.0.0.0"\|host.*=.*"127.0.0.1"' ~/.mnemonas/config.toml 2>/dev/null; then
         log_ok "Host binding configured in config file"
     else
         log_skip "No config file found to check binding"

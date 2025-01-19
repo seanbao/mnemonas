@@ -30,7 +30,7 @@ MnemoNAS 数据分为以下几个部分：
 │   └── activity/           # 活动日志
 └── secrets.json            # 自动生成密钥（JWT/WebDAV）
 
-~/.config/mnemonas/
+~/.mnemonas/
 └── config.toml             # 配置文件
 ```
 
@@ -39,7 +39,7 @@ MnemoNAS 数据分为以下几个部分：
 | `files/` | ⭐⭐⭐ 极高 | 用户文件内容，丢失无法恢复 |
 | `.mnemonas/` | ⭐⭐⭐ 极高 | 元数据与版本对象 |
 | `secrets.json` | ⭐⭐ 中等 | JWT/WebDAV 密钥与初始密码 |
-| `config.toml` | ⭐⭐ 中等 | 默认位于 `~/.config/mnemonas/` |
+| `config.toml` | ⭐⭐ 中等 | 默认位于 `~/.mnemonas/` |
 
 ---
 
@@ -209,9 +209,9 @@ docker compose stop
 
 # 备份数据卷
 docker run --rm \
-    -v mnemonas_data:/data:ro \
+    -v mnemonas_data:/root/.mnemonas:ro \
     -v $(pwd):/backup \
-    alpine tar czf /backup/mnemonas-data.tar.gz -C /data .
+    alpine tar czf /backup/mnemonas-data.tar.gz -C /root/.mnemonas .
 
 # 启动服务
 docker compose start

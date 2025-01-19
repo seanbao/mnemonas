@@ -489,8 +489,10 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 		return err
 	}
 
-	// Update file index
-	fs.versions.DeleteFileIndex(ctx, oldName)
+	if err := fs.versions.RenamePath(ctx, oldName, newName); err != nil {
+		_ = fs.workspace.Rename(ctx, newName, oldName)
+		return err
+	}
 
 	return nil
 }
@@ -606,7 +608,12 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	}
 
 	// Write restored version
-	return fs.workspace.WriteFile(ctx, name, data)
+	if err := fs.workspace.WriteFile(ctx, name, data); err != nil {
+		return err
+	}
+
+	fs.versions.UpdateFileIndex(ctx, name, int64(len(data)), time.Now(), computeHash(data))
+	return nil
 }
 
 // SetVersioning sets the versioning override for a file
@@ -721,6 +728,7 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 
 	// Remove from trash database
 	fs.versions.RemoveFromTrash(ctx, id)
+	fs.refreshFileIndex(ctx, item.OriginalPath)
 
 	return nil
 }
@@ -733,7 +741,8 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	newPath = workspace.CleanPath(newPath)
 
 	// Verify trash item exists
-	if _, err := fs.versions.GetTrashItem(ctx, id); err != nil {
+	item, err := fs.versions.GetTrashItem(ctx, id)
+	if err != nil {
 		if errors.Is(err, versionstore.ErrNotFound) {
 			return ErrNotFound
 		}
@@ -763,6 +772,12 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	}
 
 	fs.versions.RemoveFromTrash(ctx, id)
+	if item.HadVersions {
+		if err := fs.versions.RenamePath(ctx, item.OriginalPath, newPath); err != nil {
+			return err
+		}
+	}
+	fs.refreshFileIndex(ctx, newPath)
 
 	return nil
 }
@@ -920,6 +935,20 @@ func (fs *FileSystem) cleanupVersions(ctx context.Context, name string) {
 	for _, hash := range hashes {
 		fs.versions.DeleteObject(hash)
 	}
+}
+
+func (fs *FileSystem) refreshFileIndex(ctx context.Context, name string) {
+	info, err := fs.workspace.Stat(ctx, name)
+	if err != nil || info.IsDir {
+		return
+	}
+
+	data, err := fs.workspace.ReadFile(ctx, name)
+	if err != nil {
+		return
+	}
+
+	fs.versions.UpdateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(data))
 }
 
 // GetAllReferencedHashes returns all hashes currently referenced by version store
