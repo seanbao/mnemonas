@@ -9,10 +9,10 @@ export interface KeyboardShortcutHandlers {
   onPaste?: () => void
   onRename?: () => void
   onEnter?: () => void
-  onArrowUp?: () => void
-  onArrowDown?: () => void
-  onArrowLeft?: () => void
-  onArrowRight?: () => void
+  onArrowUp?: (event?: KeyboardEvent) => void
+  onArrowDown?: (event?: KeyboardEvent) => void
+  onArrowLeft?: (event?: KeyboardEvent) => void
+  onArrowRight?: (event?: KeyboardEvent) => void
   onRefresh?: () => void
   onNewFolder?: () => void
 }
@@ -186,7 +186,7 @@ export function useKeyboardShortcuts(
     if (e.key === 'ArrowUp' && !ctrlOrCmd) {
       if (h.onArrowUp) {
         e.preventDefault()
-        h.onArrowUp()
+        h.onArrowUp(e)
       }
       return
     }
@@ -195,7 +195,7 @@ export function useKeyboardShortcuts(
     if (e.key === 'ArrowDown' && !ctrlOrCmd) {
       if (h.onArrowDown) {
         e.preventDefault()
-        h.onArrowDown()
+        h.onArrowDown(e)
       }
       return
     }
@@ -204,7 +204,7 @@ export function useKeyboardShortcuts(
     if (e.key === 'ArrowLeft' && !ctrlOrCmd) {
       if (h.onArrowLeft) {
         e.preventDefault()
-        h.onArrowLeft()
+        h.onArrowLeft(e)
       }
       return
     }
@@ -213,7 +213,7 @@ export function useKeyboardShortcuts(
     if (e.key === 'ArrowRight' && !ctrlOrCmd) {
       if (h.onArrowRight) {
         e.preventDefault()
-        h.onArrowRight()
+        h.onArrowRight(e)
       }
       return
     }

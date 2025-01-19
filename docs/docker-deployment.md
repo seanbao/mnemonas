@@ -19,7 +19,6 @@ docker compose version
 ## 🚀 快速开始
 
 ### 1. 克隆项目
-
 ```bash
 git clone https://github.com/seanbao/mnemonas.git
 cd mnemonas
@@ -28,10 +27,11 @@ cd mnemonas
 ### 2. 创建配置文件
 
 ```bash
-cp mnemonas.example.toml mnemonas.toml
+mkdir -p ~/.mnemonas
+cp mnemonas.example.toml ~/.mnemonas/config.toml
 ```
 
-编辑 `mnemonas.toml`，至少修改：
+编辑 `~/.mnemonas/config.toml`，至少修改：
 - `password` - WebDAV 认证密码
 
 ### 3. 启动服务
@@ -51,11 +51,9 @@ docker compose logs -f
 ```
 
 ---
-
 ## 🏠 家庭场景配置
 
 ### 场景一：家庭媒体服务器
-
 将 MnemoNAS 用作家庭照片/视频存储，外接大容量硬盘。
 
 **docker-compose.yml**:
@@ -67,10 +65,10 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # 数据存储到外接硬盘
-      - /mnt/external-disk/mnemonas:/var/lib/mnemonas
+      # 数据存储到用户目录
+      - ~/.mnemonas:/root/.mnemonas
       # 配置文件
-      - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
+      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped
@@ -81,14 +79,14 @@ services:
       retries: 3
 ```
 
-**mnemonas.toml**:
+**~/.mnemonas/config.toml**:
 ```toml
 [server]
 host = "0.0.0.0"
 port = 8080
 
 [storage]
-root = "/var/lib/mnemonas"
+root = "/root/.mnemonas"  # 容器内路径，对应宿主机 ~/.mnemonas
 
 [storage.retention]
 max_versions = 50        # 照片/视频保留 50 个版本足够
@@ -118,12 +116,12 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ~/.mnemonas:/var/lib/mnemonas
-      - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
+      - ~/.mnemonas:/root/.mnemonas
+      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     restart: unless-stopped
 ```
 
-**mnemonas.toml**:
+**~/.mnemonas/config.toml**:
 ```toml
 [server]
 host = "127.0.0.1"  # 仅本地访问
@@ -155,8 +153,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - /srv/nas:/var/lib/mnemonas
-      - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
+      - ~/.mnemonas:/root/.mnemonas
+      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     environment:
       - TZ=Asia/Shanghai
     restart: always
@@ -185,8 +183,8 @@ services:
     expose:
       - "8080"
     volumes:
-      - mnemonas-data:/var/lib/mnemonas
-      - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
+      - ~/.mnemonas:/root/.mnemonas
+      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     restart: unless-stopped
     networks:
       - internal
@@ -208,9 +206,6 @@ services:
 
 networks:
   internal:
-
-volumes:
-  mnemonas-data:
 ```
 
 **nginx.conf**:
@@ -268,7 +263,7 @@ services:
       - "traefik.http.routers.mnemonas.tls.certresolver=letsencrypt"
       - "traefik.http.services.mnemonas.loadbalancer.server.port=8080"
     volumes:
-      - mnemonas-data:/var/lib/mnemonas
+      - ~/.mnemonas:/root/.mnemonas
     networks:
       - traefik-network
 ```
@@ -324,11 +319,8 @@ docker compose up -d
 # 停止服务
 docker compose stop
 
-# 备份 Volume
-docker run --rm \
-  -v mnemonas_mnemonas-data:/data \
-  -v $(pwd):/backup \
-  alpine tar czf /backup/mnemonas-backup-$(date +%Y%m%d).tar.gz /data
+# 备份目录
+tar czf mnemonas-backup-$(date +%Y%m%d).tar.gz ~/.mnemonas
 
 # 重启服务
 docker compose start
@@ -340,11 +332,9 @@ docker compose start
 # 停止服务
 docker compose down
 
-# 恢复 Volume
-docker run --rm \
-  -v mnemonas_mnemonas-data:/data \
-  -v $(pwd):/backup \
-  alpine sh -c "cd / && tar xzf /backup/mnemonas-backup-20240101.tar.gz"
+# 恢复目录
+rm -rf ~/.mnemonas
+tar xzf mnemonas-backup-YYYYMMDD.tar.gz -C ~
 
 # 启动服务
 docker compose up -d
@@ -361,18 +351,18 @@ docker compose up -d
 docker compose logs mnemonas
 
 # 检查配置文件语法（启动时校验，报错会直接退出）
-docker run --rm -v $(pwd)/mnemonas.toml:/etc/mnemonas/config.toml:ro \
-  ghcr.io/seanbao/mnemonas:latest --config /etc/mnemonas/config.toml
+docker run --rm -v ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro \
+  ghcr.io/seanbao/mnemonas:latest --config /root/.mnemonas/config.toml
 ```
 
 ### 权限问题
 
 ```bash
 # 检查挂载目录权限
-ls -la /path/to/data
+ls -la ~/.mnemonas
 
 # 修复权限（容器内使用 uid 1000）
-sudo chown -R 1000:1000 /path/to/data
+sudo chown -R 1000:1000 ~/.mnemonas
 ```
 
 ### 端口冲突

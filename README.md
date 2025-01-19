@@ -95,7 +95,8 @@ open http://localhost:8080
 tar -xzf mnemonas-v0.1.0-linux-amd64.tar.gz
 
 # 创建配置
-cp mnemonas.example.toml ~/.config/mnemonas/config.toml
+mkdir -p ~/.mnemonas
+cp mnemonas.example.toml ~/.mnemonas/config.toml
 
 # 启动数据面
 ./dataplane &

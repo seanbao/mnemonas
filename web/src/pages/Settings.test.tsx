@@ -8,7 +8,7 @@ vi.mock('@/api/settings', () => ({
   getSettings: vi.fn().mockResolvedValue({
     data: {
       server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
-      storage: { data_dir: '/var/lib/mnemonas/data', metadata_dir: '/var/lib/mnemonas/metadata', temp_dir: '/var/lib/mnemonas/tmp' },
+      storage: { data_dir: '/root/.mnemonas/.mnemonas/objects', metadata_dir: '/root/.mnemonas/.mnemonas', temp_dir: '/root/.mnemonas/.mnemonas/tmp' },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
       webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
@@ -133,7 +133,7 @@ describe('SettingsPage', () => {
     it('renders data directory input', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
-        const input = screen.getByDisplayValue('/var/lib/mnemonas/data')
+        const input = screen.getByDisplayValue('/root/.mnemonas/.mnemonas/objects')
         expect(input).toBeTruthy()
       })
     })

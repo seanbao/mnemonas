@@ -320,9 +320,7 @@ func loadConfig(path string) (*config.Config, string, error) {
 		// Try default paths
 		home, _ := os.UserHomeDir()
 		candidates := []string{
-			"mnemonas.toml",
-			"/etc/mnemonas/config.toml",
-			home + "/.config/mnemonas/config.toml",
+			home + "/.mnemonas/config.toml",
 		}
 
 		for _, p := range candidates {

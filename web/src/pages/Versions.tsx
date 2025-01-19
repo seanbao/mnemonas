@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Button, 
@@ -30,7 +31,7 @@ import {
   AlertCircle,
   Sparkles
 } from 'lucide-react'
-import { getVersions, getDownloadUrl, restoreVersion, type VersionInfo } from '@/api/files'
+import { getVersions, buildDownloadUrl, restoreVersion, type VersionInfo } from '@/api/files'
 import { formatBytes, formatDate } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -115,10 +116,18 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
 }
 
 export function VersionsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [searchPath, setSearchPath] = useState('')
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [selectedVersion, setSelectedVersion] = useState<VersionInfo | null>(null)
   const { isOpen, onOpen, onClose } = useDisclosure()
+
+  useEffect(() => {
+    const paramPath = searchParams.get('path') || ''
+    const normalizedPath = paramPath ? (paramPath.startsWith('/') ? paramPath : `/${paramPath}`) : ''
+    setSearchPath(normalizedPath)
+    setSelectedPath(normalizedPath || null)
+  }, [searchParams])
   const queryClient = useQueryClient()
 
   const { data: versions, isLoading, error } = useQuery({
@@ -140,7 +149,12 @@ export function VersionsPage() {
 
   const handleSearch = () => {
     if (searchPath.trim()) {
-      setSelectedPath(searchPath.startsWith('/') ? searchPath : `/${searchPath}`)
+      const normalizedPath = searchPath.startsWith('/') ? searchPath : `/${searchPath}`
+      setSelectedPath(normalizedPath)
+      setSearchParams({ path: normalizedPath })
+    } else {
+      setSelectedPath(null)
+      setSearchParams({})
     }
   }
 
@@ -156,7 +170,14 @@ export function VersionsPage() {
   }
 
   const handleDownload = (version: VersionInfo) => {
-    window.open(`${getDownloadUrl(selectedPath!)}?version=${version.hash}`, '_blank')
+    const url = buildDownloadUrl(selectedPath!, { version: version.hash, download: true })
+    window.open(url, '_blank')
+  }
+
+  const handlePreview = (version: VersionInfo) => {
+    if (!selectedPath) return
+    const url = buildDownloadUrl(selectedPath, { version: version.hash })
+    window.open(url, '_blank')
   }
 
   return (
@@ -242,7 +263,7 @@ export function VersionsPage() {
                     version={version}
                     index={versions.length - index - 1}
                     isLatest={index === 0}
-                    onPreview={() => handleDownload(version)}
+                    onPreview={() => handlePreview(version)}
                     onRestore={() => handleRestore(version)}
                     onDownload={() => handleDownload(version)}
                   />

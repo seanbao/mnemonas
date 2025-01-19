@@ -375,7 +375,7 @@ cd web && npm run dev
 
 ### 配置文件
 
-开发时使用项目根目录的 `mnemonas.toml`：
+开发时使用 `~/.mnemonas/config.toml`：
 
 ```toml
 [server]
@@ -577,7 +577,7 @@ rust-lldb target/debug/dataplane
       "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/dataplane/target/debug/dataplane",
-      "args": ["--data-dir", "/tmp/mnemonas-test/.mnemonas/objects"],
+      "args": ["--data-dir", "${env:HOME}/.mnemonas/.mnemonas/objects"],
       "cwd": "${workspaceFolder}/dataplane"
     }
   ]

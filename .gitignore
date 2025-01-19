@@ -44,7 +44,6 @@ Thumbs.db
 logs/
 
 # Config (may contain secrets)
-mnemonas.toml
 !mnemonas.example.toml
 
 # Data directories (local dev)

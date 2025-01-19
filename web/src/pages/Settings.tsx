@@ -33,7 +33,7 @@ import {
   CheckCircle2,
   Key,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, parseByteSize } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
@@ -208,6 +208,34 @@ export function SettingsPage() {
   })
 
   const handleSave = () => {
+    let minFreeSpaceBytes: number
+    let minChunkBytes: number
+    let avgChunkBytes: number
+    let maxChunkBytes: number
+
+    try {
+      minFreeSpaceBytes = parseByteSize(settings.minFreeSpace)
+      minChunkBytes = parseByteSize(settings.minChunkSize)
+      avgChunkBytes = parseByteSize(settings.avgChunkSize)
+      maxChunkBytes = parseByteSize(settings.maxChunkSize)
+    } catch (err) {
+      addToast({
+        title: '大小格式无效',
+        description: err instanceof Error ? err.message : '请使用 1024、1 KB、1.5 MB 之类的格式',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (Number.isNaN(Number(settings.serverPort))) {
+      addToast({
+        title: '端口格式无效',
+        description: '端口必须是数字',
+        color: 'danger',
+      })
+      return
+    }
+
     const req: UpdateSettingsRequest = {
       server: {
         host: settings.serverHost,
@@ -216,7 +244,13 @@ export function SettingsPage() {
       retention: {
         max_versions: settings.maxVersions,
         max_age: settings.maxAge,
+        min_free_space: minFreeSpaceBytes,
         gc_interval: settings.gcInterval,
+      },
+      cdc: {
+        min_chunk_size: minChunkBytes,
+        avg_chunk_size: avgChunkBytes,
+        max_chunk_size: maxChunkBytes,
       },
       webdav: {
         enabled: settings.webdavEnabled,
@@ -337,9 +371,10 @@ export function SettingsPage() {
                   <div>
                     <label className="text-sm font-medium text-default-600 mb-1.5 block">数据目录</label>
                     <Input
-                      placeholder="/var/lib/mnemonas/data"
+                      placeholder="~/.mnemonas/.mnemonas/objects"
                       value={settings.dataDir}
                       onValueChange={(v) => setSettings(s => ({ ...s, dataDir: v }))}
+                      isReadOnly
                       startContent={<Database size={16} className="text-default-500" />}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
@@ -349,9 +384,10 @@ export function SettingsPage() {
                   <div>
                     <label className="text-sm font-medium text-default-600 mb-1.5 block">元数据目录</label>
                     <Input
-                      placeholder="/var/lib/mnemonas/metadata"
+                      placeholder="~/.mnemonas/.mnemonas"
                       value={settings.metadataDir}
                       onValueChange={(v) => setSettings(s => ({ ...s, metadataDir: v }))}
+                      isReadOnly
                       startContent={<Database size={16} className="text-default-500" />}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
@@ -361,14 +397,18 @@ export function SettingsPage() {
                   <div>
                     <label className="text-sm font-medium text-default-600 mb-1.5 block">临时目录</label>
                     <Input
-                      placeholder="/var/lib/mnemonas/tmp"
+                      placeholder="~/.mnemonas/.mnemonas/tmp"
                       value={settings.tempDir}
                       onValueChange={(v) => setSettings(s => ({ ...s, tempDir: v }))}
+                      isReadOnly
                       startContent={<Folder size={16} className="text-default-500" />}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                       }}
                     />
+                  </div>
+                  <div className="text-xs text-default-500">
+                    存储路径仅展示当前配置。如需调整，请修改配置文件并重启服务。
                   </div>
                 </div>
               </SettingsSection>

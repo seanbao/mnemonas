@@ -6,9 +6,7 @@
 
 系统按以下顺序查找配置文件：
 
-1. `./mnemonas.toml` — 当前目录
-2. `/etc/mnemonas/config.toml` — 系统配置目录
-3. `$HOME/.config/mnemonas/config.toml` — 用户配置目录
+1. `$HOME/.mnemonas/config.toml` — 用户目录（与数据同目录）
 
 如果未找到配置文件，系统使用默认配置。
 
@@ -41,8 +39,8 @@ maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
 activity_dir = "~/.mnemonas/.mnemonas/activity"
 
 [storage.retention]
-max_versions = 100
-max_age = "8760h"
+max_versions = 50
+max_age = "2160h"
 min_free_space = 10737418240
 gc_interval = "24h"
 
@@ -144,13 +142,13 @@ auto_generate = true
 **示例：**
 ```toml
 [storage]
-root = "/mnt/nas"
-data_dir = "/mnt/nas/.mnemonas/objects"
-metadata_dir = "/mnt/nas/.mnemonas"
-temp_dir = "/mnt/nas/.mnemonas/tmp"
-thumbnail_dir = "/mnt/nas/.mnemonas/thumbnails"
-maintenance_dir = "/mnt/nas/.mnemonas/maintenance"
-activity_dir = "/mnt/nas/.mnemonas/activity"
+root = "~/.mnemonas"
+data_dir = "~/.mnemonas/.mnemonas/objects"
+metadata_dir = "~/.mnemonas/.mnemonas"
+temp_dir = "~/.mnemonas/.mnemonas/tmp"
+thumbnail_dir = "~/.mnemonas/.mnemonas/thumbnails"
+maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
+activity_dir = "~/.mnemonas/.mnemonas/activity"
 ```
 
 ---
@@ -161,8 +159,8 @@ activity_dir = "/mnt/nas/.mnemonas/activity"
 
 | 选项 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_versions` | int | `100` | 每个文件最大保留版本数（0 = 无限制） |
-| `max_age` | duration | `"8760h"` (1年) | 版本最大保留时间（0 = 永久保留） |
+| `max_versions` | int | `50` | 每个文件最大保留版本数（0 = 无限制） |
+| `max_age` | duration | `"2160h"` (90天) | 版本最大保留时间（0 = 永久保留） |
 | `min_free_space` | uint64 | `10737418240` (10GB) | 最小剩余磁盘空间（字节），低于此值触发强制 GC |
 | `gc_interval` | duration | `"24h"` | 自动 GC 运行间隔 |
 
@@ -184,6 +182,26 @@ gc_interval = "12h"      # 每 12 小时运行 GC
 
 ---
 
+### [storage.trash] — 回收站配置
+
+控制回收站是否启用、保留时间与容量上限。
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用回收站（关闭后删除将直接永久删除） |
+| `retention_days` | int | `30` | 回收站保留天数 |
+| `max_size` | int64 | `10737418240` (10GB) | 回收站最大容量（字节） |
+
+**示例：**
+```toml
+[storage.trash]
+enabled = true
+retention_days = 30
+max_size = 10737418240
+```
+
+---
+
 ### [storage.versioning] — 版本策略
 
 控制自动版本化规则与文件大小阈值。
@@ -200,24 +218,6 @@ gc_interval = "12h"      # 每 12 小时运行 GC
 auto_versioned_extensions = [".md", ".txt", ".go"]
 auto_versioned_filenames = ["README", "LICENSE"]
 max_versioned_size = 104857600
-```
-
----
-
-### [storage.trash] — 回收站配置
-
-| 选项 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | bool | `true` | 是否启用回收站 |
-| `retention_days` | int | `30` | 回收站保留天数 |
-| `max_size` | int64 | `10737418240` | 回收站最大占用（字节） |
-
-**示例：**
-```toml
-[storage.trash]
-enabled = true
-retention_days = 30
-max_size = 10737418240
 ```
 
 ---
@@ -471,10 +471,10 @@ host = "127.0.0.1"
 port = 8080
 
 [storage]
-root = "./data"
-data_dir = "./data/.mnemonas/objects"
-metadata_dir = "./data/.mnemonas"
-temp_dir = "./data/.mnemonas/tmp"
+root = "~/.mnemonas"
+data_dir = "~/.mnemonas/.mnemonas/objects"
+metadata_dir = "~/.mnemonas/.mnemonas"
+temp_dir = "~/.mnemonas/.mnemonas/tmp"
 
 [webdav]
 enabled = true
@@ -498,8 +498,8 @@ write_timeout = "120s"
 root = "~/.mnemonas"
 
 [storage.retention]
-max_versions = 100
-max_age = "8760h"
+max_versions = 50
+max_age = "2160h"
 min_free_space = 107374182400  # 100GB
 
 [webdav]

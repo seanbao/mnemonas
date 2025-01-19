@@ -4,8 +4,8 @@ services:
     ports:
       - "8080:8080"    # WebDAV + API
     volumes:
-      - mnemonas-data:/var/lib/mnemonas
-      - ./mnemonas.toml:/etc/mnemonas/config.toml:ro
+      - ~/.mnemonas:/root/.mnemonas
+      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     environment:
       - LOG_LEVEL=info
     restart: unless-stopped
@@ -15,6 +15,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-
-volumes:
-  mnemonas-data:

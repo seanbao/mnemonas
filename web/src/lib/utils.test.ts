@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { 
   formatBytes, 
+  parseByteSize,
   formatDate, 
   formatDuration,
   sanitizeFilename,
@@ -37,6 +38,23 @@ describe('formatBytes', () => {
   it('respects decimals parameter', () => {
     expect(formatBytes(1536, 0)).toBe('2 KB')
     expect(formatBytes(1536, 3)).toBe('1.5 KB')
+  })
+})
+
+describe('parseByteSize', () => {
+  it('parses bytes without unit', () => {
+    expect(parseByteSize('1024')).toBe(1024)
+  })
+
+  it('parses sizes with units', () => {
+    expect(parseByteSize('1 KB')).toBe(1024)
+    expect(parseByteSize('1.5MB')).toBe(1572864)
+    expect(parseByteSize('2 GB')).toBe(2147483648)
+  })
+
+  it('rejects invalid sizes', () => {
+    expect(() => parseByteSize('')).toThrow('无效的大小')
+    expect(() => parseByteSize('abc')).toThrow('无效的大小格式')
   })
 })
 

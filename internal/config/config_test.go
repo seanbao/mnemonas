@@ -101,7 +101,7 @@ func TestConfig_Validate(t *testing.T) {
 
 func TestConfig_SaveLoad(t *testing.T) {
 	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config", "mnemonas.toml")
+	configPath := filepath.Join(tmpDir, "config", "config.toml")
 
 	cfg := Default()
 	cfg.Server.Port = 9999

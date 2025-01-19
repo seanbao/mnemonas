@@ -19,25 +19,30 @@ vi.mock('react-router-dom', async () => {
   return {
     ...actual,
     useNavigate: () => mockNavigate,
+    useLocation: () => ({ pathname: '/files' }),
   }
 })
 
+const mockFilesStoreState = {
+  currentPath: '/',
+  selectedFiles: new Set<string>(),
+  viewMode: 'list' as const,
+  sortBy: 'name' as const,
+  sortOrder: 'asc' as const,
+  setCurrentPath: vi.fn(),
+  selectFile: vi.fn(),
+  toggleFileSelection: vi.fn(),
+  setSelection: vi.fn(),
+  selectAll: vi.fn(),
+  clearSelection: vi.fn(),
+  setViewMode: vi.fn(),
+  setSortBy: vi.fn(),
+  toggleSortOrder: vi.fn(),
+}
+
 // Mock stores
 vi.mock('@/stores/files', () => ({
-  useFilesStore: () => ({
-    currentPath: '/',
-    selectedFiles: new Set<string>(),
-    viewMode: 'list' as const,
-    sortBy: 'name' as const,
-    sortOrder: 'asc' as const,
-    setCurrentPath: vi.fn(),
-    toggleFileSelection: vi.fn(),
-    selectAll: vi.fn(),
-    clearSelection: vi.fn(),
-    setViewMode: vi.fn(),
-    setSortBy: vi.fn(),
-    toggleSortOrder: vi.fn(),
-  }),
+  useFilesStore: () => mockFilesStoreState,
 }))
 
 import { listFiles, createDirectory, deleteFile, moveFile } from '@/api/files'
@@ -50,6 +55,11 @@ const mockMoveFile = vi.mocked(moveFile)
 describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockFilesStoreState.selectedFiles = new Set<string>()
+    mockFilesStoreState.currentPath = '/'
+    mockFilesStoreState.viewMode = 'list'
+    mockFilesStoreState.sortBy = 'name'
+    mockFilesStoreState.sortOrder = 'asc'
     // Default mock response
     mockListFiles.mockResolvedValue({
       files: [
@@ -199,6 +209,16 @@ describe('FilesPage', () => {
         // Each file row should have a checkbox
         const checkboxes = document.querySelectorAll('[class*="checkbox"], [class*="border-2"]')
         expect(checkboxes.length).toBeGreaterThan(0)
+      })
+    })
+
+    it('shows selection summary when items are selected', async () => {
+      mockFilesStoreState.selectedFiles = new Set(['/documents', '/photo.jpg'])
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('已选')).toBeTruthy()
+        expect(screen.getByText('选择工具')).toBeTruthy()
       })
     })
   })

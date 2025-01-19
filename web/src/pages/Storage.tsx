@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { Button, Skeleton, Card, CardBody, CardHeader } from '@heroui/react'
 import { 
   HardDrive, 
@@ -79,6 +80,7 @@ function MaintenanceCard({
 }
 
 export function StoragePage() {
+  const navigate = useNavigate()
   const { data: stats, isLoading, refetch } = useQuery({
     queryKey: ['stats'],
     queryFn: getStorageStats,
@@ -109,10 +111,10 @@ export function StoragePage() {
     )
   }
 
-  // Calculate storage usage
-  // Note: totalCapacity not yet provided by API, using totalSize-based estimation
-  const totalCapacity = 10 * 1024 * 1024 * 1024 // Default 10GB
-  const usedPercent = Math.min(((stats?.totalSize || 0) / totalCapacity) * 100, 100)
+  const usedBytes = stats?.totalSize || 0
+  const hasUsage = usedBytes > 0
+  const uniqueBytes = stats?.uniqueSize ?? 0
+  const savedBytes = stats?.uniqueSize ? Math.max(0, usedBytes - uniqueBytes) : 0
 
   const statsCards = [
     {
@@ -135,7 +137,7 @@ export function StoragePage() {
     },
     {
       title: '节省空间',
-      value: formatBytes((stats?.totalSize || 0) * (stats?.dedupRatio || 0)),
+      value: formatBytes(savedBytes),
       icon: TrendingUp,
       gradient: 'from-amber-500/20 to-orange-500/20',
     },
@@ -170,7 +172,7 @@ export function StoragePage() {
             <div>
               <span className="font-semibold">存储空间使用情况</span>
               <p className="text-default-500 text-xs">
-                {formatBytes(stats?.totalSize || 0)} 已使用
+                {formatBytes(usedBytes)} 已使用 · 容量未知
               </p>
             </div>
           </div>
@@ -179,13 +181,13 @@ export function StoragePage() {
           <div className="space-y-2">
             <div className="h-2 rounded-full bg-content2 overflow-hidden">
               <div 
-                className="h-full bg-accent-primary rounded-full flow-line"
-                style={{ width: `${usedPercent}%` }}
+                className={hasUsage ? "h-full bg-accent-primary rounded-full flow-line opacity-60" : "h-full bg-accent-primary/30 rounded-full"}
+                style={{ width: hasUsage ? '100%' : '0%' }}
               />
             </div>
             <div className="flex justify-between text-sm text-default-500">
-              <span>0 GB</span>
-              <span>{formatBytes(totalCapacity)}</span>
+              <span>已用</span>
+              <span>容量未知</span>
             </div>
           </div>
         </CardBody>
@@ -220,12 +222,11 @@ export function StoragePage() {
           description="验证所有数据完整性"
           icon={Activity}
           gradient="from-emerald-500/20 to-cyan-500/20"
-          lastRun="功能开发中"
-          estimate="即将推出"
-          buttonText="开始巡检（即将推出）"
+          lastRun="在系统维护中执行"
+          estimate="支持随时启动"
+          buttonText="打开维护工具"
           buttonColor="success"
-          onPress={() => {}}
-          isDisabled
+          onPress={() => navigate('/maintenance')}
         />
         
         <MaintenanceCard
@@ -233,12 +234,11 @@ export function StoragePage() {
           description="清理无引用的数据块"
           icon={Trash2}
           gradient="from-amber-500/20 to-orange-500/20"
-          lastRun="功能开发中"
-          estimate="即将推出"
-          buttonText="开始清理（即将推出）"
+          lastRun="在系统维护中执行"
+          estimate="支持干运行与保护期"
+          buttonText="打开维护工具"
           buttonColor="warning"
-          onPress={() => {}}
-          isDisabled
+          onPress={() => navigate('/maintenance')}
         />
       </div>
     </div>

@@ -83,6 +83,37 @@ export function formatBytes(bytes: number, decimals = 2): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`
 }
 
+export function parseByteSize(value: string): number {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    throw new Error('无效的大小')
+  }
+
+  const normalized = trimmed.replace(/\s+/g, '').toUpperCase()
+  const match = normalized.match(/^(\d+(?:\.\d+)?)(B|KB|MB|GB|TB|PB)?$/)
+  if (!match) {
+    throw new Error('无效的大小格式')
+  }
+
+  const amount = Number(match[1])
+  const unit = match[2] || 'B'
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1024,
+    MB: 1024 ** 2,
+    GB: 1024 ** 3,
+    TB: 1024 ** 4,
+    PB: 1024 ** 5,
+  }
+
+  const multiplier = multipliers[unit]
+  if (!multiplier || Number.isNaN(amount)) {
+    throw new Error('无效的大小格式')
+  }
+
+  return Math.round(amount * multiplier)
+}
+
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms} 毫秒`
   

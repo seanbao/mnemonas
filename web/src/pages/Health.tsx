@@ -81,8 +81,8 @@ export function HealthPage() {
   const isLoading = diagLoading || statsLoading
 
   // Calculate dedup savings
-  const dedupSavings = stats && stats.totalSize > 0 
-    ? ((stats.totalSize - stats.totalObjects) / stats.totalSize * 100).toFixed(1)
+  const dedupSavings = stats && stats.totalSize > 0 && stats.uniqueSize > 0
+    ? ((stats.totalSize - stats.uniqueSize) / stats.totalSize * 100).toFixed(1)
     : '0'
 
   const statsCards = [
@@ -109,7 +109,9 @@ export function HealthPage() {
     {
       icon: HardDrive,
       title: '去重率',
-      value: stats?.dedupRatio ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--',
+      value: stats?.dedupRatio !== undefined
+        ? `${(stats.dedupRatio * 100).toFixed(1)}%`
+        : '--',
       subtitle: dedupSavings !== '0' ? `节省 ${dedupSavings}%` : undefined,
       gradient: 'from-amber-500/20 to-orange-500/20',
     },
@@ -219,11 +221,12 @@ export function HealthPage() {
                 <span className="data-value">{stats ? formatBytes(stats.totalSize) : '--'}</span>
               </div>
               <Progress 
-                value={70} 
+                isIndeterminate
                 color="primary" 
                 className="h-2"
                 aria-label="存储使用"
               />
+              <p className="text-xs text-default-400 mt-2">容量未知</p>
             </div>
 
             <Divider />
@@ -235,7 +238,9 @@ export function HealthPage() {
               </div>
               <div className="text-center p-3 rounded-lg bg-content2/50">
                 <p className="text-2xl font-semibold data-value">
-                  {stats?.dedupRatio ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--'}
+                  {stats?.dedupRatio !== undefined
+                    ? `${(stats.dedupRatio * 100).toFixed(1)}%`
+                    : '--'}
                 </p>
                 <p className="text-default-500 text-xs">去重比例</p>
               </div>
@@ -266,8 +271,8 @@ export function HealthPage() {
               </div>
               <div className="text-center p-3 rounded-lg bg-content2/50">
                 <p className="text-2xl font-semibold data-value">
-                  {diagnostics?.filesystem?.trashSize 
-                    ? formatBytes(diagnostics.filesystem.trashSize) 
+                  {diagnostics?.filesystem?.trashSize !== undefined
+                    ? formatBytes(diagnostics.filesystem.trashSize)
                     : '--'}
                 </p>
                 <p className="text-default-500 text-xs">占用空间</p>
@@ -275,7 +280,7 @@ export function HealthPage() {
             </div>
 
             <div className="text-xs text-default-500 p-3 rounded-lg bg-content2/30">
-              回收站文件将在 30 天后自动清理
+              回收站文件将按配置自动清理
             </div>
           </CardBody>
         </Card>

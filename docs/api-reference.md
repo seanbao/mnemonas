@@ -383,7 +383,7 @@ GET /api/v1/files/{path}
 - `path`: 目录路径，默认为根目录 `/`
 
 **查询参数**:
-- `download`: 设置为 `true` 时返回文件内容而非文件信息
+- 无
 
 **响应示例**:
 ```json
@@ -520,7 +520,11 @@ POST /api/v1/files-copy
 GET /api/v1/download/{path}
 ```
 
-**响应**: 返回文件二进制数据，支持 Range 请求
+**查询参数**:
+- `download`: 设置为 `true` 时强制下载（设置 `Content-Disposition`）
+- `version`: 指定版本哈希（64 位 BLAKE3）下载历史版本
+
+**响应**: 返回文件二进制数据；当前版本支持 Range 请求，历史版本不保证 Range
 
 ### 创建目录
 
@@ -651,7 +655,10 @@ GET /api/v1/trash
       }
     ],
     "count": 1,
-    "totalSize": 52428800
+    "totalSize": 52428800,
+    "retentionDays": 30,
+    "retentionEnabled": true,
+    "retentionMaxSize": 10737418240
   },
   "timestamp": "2024-01-15T10:00:00Z"
 }
@@ -1137,12 +1144,21 @@ GET /api/v1/settings
 PUT /api/v1/settings
 ```
 
+**说明**:
+- `storage` 路径为只读配置，需修改配置文件并重启服务
+
 **请求体**:
 ```json
 {
   "retention": {
     "max_versions": 10,
-    "max_age": "720h"
+    "max_age": "720h",
+    "min_free_space": 10737418240
+  },
+  "cdc": {
+    "min_chunk_size": 262144,
+    "avg_chunk_size": 1048576,
+    "max_chunk_size": 4194304
   },
   "webdav": {
     "enabled": true,
