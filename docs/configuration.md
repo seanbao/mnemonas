@@ -283,7 +283,7 @@ max_chunk_size = 1048576  # 1MB
 | `enabled` | bool | `true` | 是否启用 WebDAV 服务 |
 | `prefix` | string | `"/dav"` | WebDAV URL 前缀 |
 | `read_only` | bool | `false` | 是否为只读模式 |
-| `auth_type` | string | `"none"` | 认证类型：`none`（无认证）、`basic`（Basic Auth） |
+| `auth_type` | string | `"basic"` | 认证类型：`none`（无认证）、`basic`（Basic Auth） |
 | `username` | string | `""` | Basic Auth 用户名 |
 | `password` | string | `""` | Basic Auth 密码 |
 
@@ -300,6 +300,9 @@ max_chunk_size = 1048576  # 1MB
 1. 设置 `auth_type = "basic"` 并配置强密码
 2. 使用 HTTPS（通过反向代理）
 3. 考虑 `read_only = true` 限制写入
+
+**自动生成行为：**
+当 `auth_type = "basic"` 且 `password` 为空时，首次启动会自动生成密码，并写入 `<storage.root>/secrets.json`；同时在 `username` 为空时使用默认值 `admin`。
 
 **示例：**
 ```toml

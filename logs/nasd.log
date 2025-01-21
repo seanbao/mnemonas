@@ -58,3 +58,5 @@
 13:23:20 INF internal/api/server.go:1433 > request bytes=901 duration=0.208466 method=POST path=/api/v1/auth/refresh remote=127.0.0.1:38792 status=200
 13:23:20 INF internal/api/server.go:1433 > request bytes=118 duration=0.129411 method=GET path=/api/v1/scrub remote=127.0.0.1:38816 status=200
 13:23:20 INF internal/api/server.go:1433 > request bytes=82 duration=2.976384 method=GET path=/api/v1/stats remote=127.0.0.1:38822 status=200
+17:53:44 INF cmd/nasd/main.go:274 > shutting down server...
+17:53:44 INF cmd/nasd/main.go:302 > server stopped

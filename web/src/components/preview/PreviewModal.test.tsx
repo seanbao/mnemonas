@@ -23,7 +23,9 @@ vi.mock('@/lib/preview-utils', async () => {
   const actual = await vi.importActual<typeof import('@/lib/preview-utils')>('@/lib/preview-utils')
   return {
     ...actual,
-    buildPreviewUrl: (path: string) => `/api/v1/download${path}`,
+    buildPreviewUrl: (path: string) => tokenValue
+      ? `/api/v1/download${path}?auth=${tokenValue}`
+      : `/api/v1/download${path}`,
   }
 })
 

@@ -16,7 +16,7 @@ export interface PdfPreviewProps {
  * Fetches PDF with auth token and creates blob URL.
  */
 export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
-  const pdfUrl = buildPreviewUrl(path)
+  const pdfUrl = buildPreviewUrl(path, { includeAuth: false })
   const [blobUrl, setBlobUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)

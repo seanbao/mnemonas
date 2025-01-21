@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { ShareAccessPage } from './ShareAccess'
 
@@ -36,11 +37,16 @@ vi.mock('@heroui/react', () => ({
 // Mock share API
 const mockGetPublicShare = vi.fn()
 const mockAccessShareWithPassword = vi.fn()
+const mockGetShareDownloadUrl = vi.fn()
+const mockGetShareFileDownloadUrl = vi.fn()
+const mockGetPublicShareItems = vi.fn()
 
 vi.mock('@/api/share', () => ({
   getPublicShare: (...args: unknown[]) => mockGetPublicShare(...args),
   accessShareWithPassword: (...args: unknown[]) => mockAccessShareWithPassword(...args),
-  getShareDownloadUrl: (id: string) => `/s/${id}/download`,
+  getShareDownloadUrl: (...args: unknown[]) => mockGetShareDownloadUrl(...args),
+  getShareFileDownloadUrl: (...args: unknown[]) => mockGetShareFileDownloadUrl(...args),
+  getPublicShareItems: (...args: unknown[]) => mockGetPublicShareItems(...args),
   ShareError: class ShareError extends Error {
     status: number
     constructor(message: string, status: number) {
@@ -118,7 +124,7 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('shows folder message for folder shares', async () => {
+  it('shows folder listing for folder shares', async () => {
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
       type: 'folder',
@@ -126,12 +132,59 @@ describe('ShareAccessPage', () => {
       permission: 'read',
       folder_items: 5,
     })
+    mockGetPublicShareItems.mockResolvedValue({
+      path: '',
+      items: [
+        { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        { name: 'note.txt', path: 'note.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
     
     renderWithRouter('abc123')
     
     await waitFor(() => {
-      expect(screen.getByText('5 个项目')).toBeInTheDocument()
-      expect(screen.getByText('文件夹浏览功能开发中...')).toBeInTheDocument()
+      expect(screen.getByText('docs')).toBeInTheDocument()
+      expect(screen.getByText('note.txt')).toBeInTheDocument()
     })
+  })
+
+  it('uses password when downloading protected share', async () => {
+    const user = userEvent.setup()
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })
+    mockAccessShareWithPassword.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+      file_name: 'secret.txt',
+      file_size: 10,
+    })
+    mockGetShareDownloadUrl.mockReturnValue('/s/abc123/download?password=secret')
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.click(screen.getByText('验证密码'))
+
+    await waitFor(() => {
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('下载文件'))
+
+    expect(mockGetShareDownloadUrl).toHaveBeenCalledWith('abc123', 'secret')
+    expect(openSpy).toHaveBeenCalledWith('/s/abc123/download?password=secret', '_blank')
+
+    openSpy.mockRestore()
   })
 })
