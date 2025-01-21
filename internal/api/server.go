@@ -1448,6 +1448,14 @@ func (a *fileSystemAdapter) OpenFile(ctx context.Context, filePath string) (shar
 	return a.fs.OpenFile(ctx, filePath)
 }
 
+func (a *fileSystemAdapter) Stat(ctx context.Context, filePath string) (*storage.FileInfo, error) {
+	return a.fs.Stat(ctx, filePath)
+}
+
+func (a *fileSystemAdapter) ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error) {
+	return a.fs.ReadDir(ctx, filePath)
+}
+
 // zerologMiddleware is a request logging middleware using zerolog
 func zerologMiddleware(logger zerolog.Logger) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -2096,10 +2104,12 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 		if resp.Username == "" {
 			resp.Username = "admin"
 		}
-		// Get password from secrets
-		secrets, err := config.LoadSecrets(s.config.Storage.Root)
-		if err == nil && secrets != nil {
-			resp.Password = secrets.WebDAVPassword
+		if s.config.WebDAV.Password == "" {
+			// Get password from secrets (auto-generated only)
+			secrets, err := config.LoadSecrets(s.config.Storage.Root)
+			if err == nil && secrets != nil {
+				resp.Password = secrets.WebDAVPassword
+			}
 		}
 	}
 
@@ -2165,7 +2175,9 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 			if resp.WebDAVUsername == "" {
 				resp.WebDAVUsername = "admin"
 			}
-			resp.WebDAVPassword = secrets.WebDAVPassword
+			if s.config.WebDAV.Password == "" {
+				resp.WebDAVPassword = secrets.WebDAVPassword
+			}
 		}
 	}
 

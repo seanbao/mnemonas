@@ -13,6 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
 // FileReader combines read and close capabilities
@@ -24,6 +26,11 @@ type FileReader interface {
 // FileOpener interface for opening files
 type FileOpener interface {
 	OpenFile(ctx context.Context, filePath string) (FileReader, error)
+}
+
+type FileStatProvider interface {
+	Stat(ctx context.Context, filePath string) (*storage.FileInfo, error)
+	ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error)
 }
 
 // Handler provides HTTP handlers for share operations
@@ -60,6 +67,7 @@ func (h *Handler) Routes(r chi.Router) {
 func (h *Handler) PublicRoutes(r chi.Router) {
 	r.Get("/{id}", h.AccessShare)
 	r.Post("/{id}", h.AccessShareWithPassword)
+	r.Get("/{id}/items", h.ListShareItems)
 	r.Get("/{id}/download", h.DownloadShare)
 	r.Get("/{id}/download/*", h.DownloadShareFile)
 }
@@ -320,6 +328,21 @@ type PublicShareInfo struct {
 	FolderItems int        `json:"folder_items,omitempty"`
 }
 
+// PublicShareItem represents a single file item in a shared folder.
+type PublicShareItem struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	IsDir   bool      `json:"is_dir"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mod_time"`
+}
+
+// PublicShareListResponse represents the folder listing for a shared folder.
+type PublicShareListResponse struct {
+	Path  string             `json:"path"`
+	Items []*PublicShareItem `json:"items"`
+}
+
 // AccessShare handles public share access
 func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -353,6 +376,10 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 		HasPassword: share.HasPassword(),
 		Permission:  share.Permission,
 		Description: share.Description,
+	}
+
+	if !share.HasPassword() {
+		h.enrichPublicShareInfo(r.Context(), info, share)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -396,6 +423,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		Permission:  share.Permission,
 		Description: share.Description,
 	}
+	h.enrichPublicShareInfo(r.Context(), info, share)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
@@ -437,8 +465,6 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
-
-	h.store.RecordAccess(id)
 
 	filename := path.Base(share.Path)
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
@@ -490,12 +516,109 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
-	h.store.RecordAccess(id)
-
 	filename := path.Base(fullPath)
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	io.Copy(w, reader)
+}
+
+// ListShareItems lists items within a shared folder.
+func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	password := r.URL.Query().Get("password")
+	relPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	relPath = strings.TrimPrefix(relPath, "/")
+	if relPath == "." {
+		relPath = ""
+	}
+
+	share, err := h.store.Access(id, password)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrShareNotFound):
+			http.Error(w, "share not found", http.StatusNotFound)
+		case errors.Is(err, ErrInvalidPassword):
+			http.Error(w, "password required", http.StatusUnauthorized)
+		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
+			http.Error(w, err.Error(), http.StatusGone)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if share.Type != ShareTypeFolder {
+		http.Error(w, "share is not a folder", http.StatusBadRequest)
+		return
+	}
+
+	statProvider, ok := h.fs.(FileStatProvider)
+	if !ok {
+		http.Error(w, "filesystem not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	fullPath := share.Path
+	if relPath != "" {
+		fullPath = path.Join(share.Path, relPath)
+	}
+	if !isWithinSharePath(share.Path, fullPath) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	entries, err := statProvider.ReadDir(r.Context(), fullPath)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			http.Error(w, "file not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	items := make([]*PublicShareItem, 0, len(entries))
+	for _, entry := range entries {
+		relItemPath, relErr := path.Rel(share.Path, entry.Path)
+		if relErr != nil || relItemPath == "." {
+			relItemPath = entry.Name
+		}
+		items = append(items, &PublicShareItem{
+			Name:    entry.Name,
+			Path:    relItemPath,
+			IsDir:   entry.IsDir,
+			Size:    entry.Size,
+			ModTime: entry.ModTime,
+		})
+	}
+
+	resp := &PublicShareListResponse{
+		Path:  relPath,
+		Items: items,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareInfo, share *Share) {
+	info.FileName = path.Base(share.Path)
+
+	statProvider, ok := h.fs.(FileStatProvider)
+	if !ok {
+		return
+	}
+
+	switch share.Type {
+	case ShareTypeFile:
+		if fileInfo, err := statProvider.Stat(ctx, share.Path); err == nil && !fileInfo.IsDir {
+			info.FileSize = fileInfo.Size
+		}
+	case ShareTypeFolder:
+		if entries, err := statProvider.ReadDir(ctx, share.Path); err == nil {
+			info.FolderItems = len(entries)
+		}
+	}
 }
 
 func (h *Handler) buildShareURL(id string) string {
@@ -503,6 +626,21 @@ func (h *Handler) buildShareURL(id string) string {
 		return h.baseURL + "/s/" + id
 	}
 	return "/s/" + id
+}
+
+func isWithinSharePath(basePath, targetPath string) bool {
+	basePath = path.Clean(basePath)
+	targetPath = path.Clean(targetPath)
+	if basePath == "/" {
+		return strings.HasPrefix(targetPath, "/")
+	}
+	if targetPath == basePath {
+		return true
+	}
+	if strings.HasPrefix(targetPath, basePath) {
+		return len(targetPath) > len(basePath) && targetPath[len(basePath)] == '/'
+	}
+	return false
 }
 
 // Context helpers

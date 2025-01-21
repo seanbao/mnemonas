@@ -60,21 +60,23 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			}
 		}
 
-		// Get token from header
+		// Get token from header or query (download/thumbnail only)
+		tokenString := ""
 		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+				http.Error(w, `{"error":"invalid authorization header format"}`, http.StatusUnauthorized)
+				return
+			}
+			tokenString = parts[1]
+		} else if allowQueryAuth(r) {
+			tokenString = r.URL.Query().Get("auth")
+		}
+		if tokenString == "" {
 			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
 			return
 		}
-
-		// Parse Bearer token
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			http.Error(w, `{"error":"invalid authorization header format"}`, http.StatusUnauthorized)
-			return
-		}
-
-		tokenString := parts[1]
 
 		// Validate token
 		claims, err := m.tokenManager.ValidateAccessToken(tokenString)
@@ -108,6 +110,14 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func allowQueryAuth(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	path := r.URL.Path
+	return strings.HasPrefix(path, "/api/v1/download") || strings.HasPrefix(path, "/api/v1/thumbnails")
 }
 
 // RequireRole middleware that requires a specific role

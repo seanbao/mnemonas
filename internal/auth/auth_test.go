@@ -334,6 +334,40 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("require auth - query token allowed for download", func(t *testing.T) {
+		called := false
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		}))
+
+		req := httptest.NewRequest("GET", "/api/v1/download/test.txt?auth="+userToken.AccessToken, nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler was not called")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("require auth - query token rejected for non-download", func(t *testing.T) {
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler should not be called")
+		}))
+
+		req := httptest.NewRequest("GET", "/api/v1/files/test.txt?auth="+userToken.AccessToken, nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401, got %d", rec.Code)
+		}
+	})
+
 	t.Run("require role - admin only", func(t *testing.T) {
 		called := false
 		// Chain RequireAuth -> RequireRole

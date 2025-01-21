@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import { UsersPage } from './Users'
 import * as usersApi from '@/api/users'
+import * as authApi from '@/api/auth'
 
 // Mock the users API
 vi.mock('@/api/users', () => ({
@@ -14,14 +15,9 @@ vi.mock('@/api/users', () => ({
   resetUserPassword: vi.fn(),
 }))
 
-// Mock localStorage
-const localStorageMock = {
-  getItem: vi.fn(),
-  setItem: vi.fn(),
-  removeItem: vi.fn(),
-  clear: vi.fn(),
-}
-Object.defineProperty(window, 'localStorage', { value: localStorageMock })
+vi.mock('@/api/auth', () => ({
+  getStoredUser: vi.fn(),
+}))
 
 const mockUsers = [
   {
@@ -87,7 +83,13 @@ function renderUsersPage() {
 describe('UsersPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    localStorageMock.getItem.mockReturnValue('user-1')
+    vi.mocked(authApi.getStoredUser).mockReturnValue({
+      id: 'user-1',
+      username: 'admin',
+      role: 'admin',
+      homeDir: '/',
+      email: '',
+    })
     vi.mocked(usersApi.listUsers).mockResolvedValue({
       success: true,
       users: mockUsers,

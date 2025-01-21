@@ -270,7 +270,6 @@ function FileRow({
                   key="share" 
                   startContent={<Link2 size={16} />}
                   onPress={onShare}
-                  isDisabled={file.isDir}
                 >
                   创建分享链接
                 </DropdownItem>
@@ -489,7 +488,6 @@ function FileCard({
                   key="share" 
                   startContent={<Link2 size={16} />}
                   onPress={onShare}
-                  isDisabled={file.isDir}
                 >
                   创建分享链接
                 </DropdownItem>
@@ -2184,7 +2182,6 @@ export function FilesPage() {
                       handleOpenShareModal(contextMenuFile)
                       contextMenu.hide()
                     }}
-                    disabled={contextMenuFile.isDir}
                   >
                     创建分享链接
                   </ContextMenuItem>

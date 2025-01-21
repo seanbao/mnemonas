@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
+import { buildDownloadUrl } from '@/api/files'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
-import { getStoredToken } from '@/api/auth'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
 import { PdfPreview } from './PdfPreview'
@@ -22,11 +22,7 @@ export interface PreviewModalProps {
 }
 
 function buildStreamUrl(path: string): string {
-  const url = buildPreviewUrl(path)
-  const token = getStoredToken()
-  if (!token) return url
-  const separator = url.includes('?') ? '&' : '?'
-  return `${url}${separator}auth=${encodeURIComponent(token)}`
+  return buildPreviewUrl(path)
 }
 
 export function PreviewModal({ 
@@ -104,7 +100,7 @@ export function PreviewModal({
 
   const handleDownload = useCallback(() => {
     if (!currentFile) return
-    const url = buildPreviewUrl(currentFile.path)
+    const url = buildDownloadUrl(currentFile.path, { download: true })
     const link = document.createElement('a')
     link.href = url
     link.download = currentFile.name

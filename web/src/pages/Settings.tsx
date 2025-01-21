@@ -575,7 +575,9 @@ export function SettingsPage() {
                               hideSymbol
                               hideCopyButton
                             >
-                              {showWebDAVPassword ? (webdavCredentials.password || '未设置') : '••••••••••••••••'}
+                              {showWebDAVPassword
+                                ? (webdavCredentials.password || '已设置（不可读取）')
+                                : '••••••••••••••••'}
                             </Snippet>
                             <Button
                               isIconOnly

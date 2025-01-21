@@ -74,7 +74,7 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
       setError(null)
       
       try {
-        const url = buildPreviewUrl(path)
+        const url = buildPreviewUrl(path, { includeAuth: false })
         const response = await fetch(url, { headers: getAuthHeaders() })
         
         if (!response.ok) {
