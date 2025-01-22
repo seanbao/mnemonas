@@ -1,34 +1,73 @@
-18:07:17 INF cmd/nasd/main.go:343 > using default config
-18:07:17 INF cmd/nasd/main.go:91 > starting MnemoNAS address=0.0.0.0:8080 storage_root=/home/seanbao/.mnemonas version=dev
-18:07:17 WRN cmd/nasd/main.go:99 > ⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!
-18:07:17 WRN cmd/nasd/main.go:100 >    Set [server.tls].enabled = true for secure connections
-18:07:17 INF cmd/nasd/main.go:112 > 🔐 WebDAV using auto-generated password from secrets.json
-18:07:17 INF cmd/nasd/main.go:124 > connected to dataplane address=127.0.0.1:9090
-18:07:17 INF internal/api/server.go:113 > Connected to data plane addr=127.0.0.1:9090
-18:07:17 INF internal/api/server.go:129 > Thumbnail service initialized cache=/home/seanbao/.mnemonas/.mnemonas/thumbnails
-18:07:17 INF internal/api/server.go:140 > Maintenance history store initialized path=/home/seanbao/.mnemonas/.mnemonas/maintenance
-18:07:17 INF internal/api/server.go:151 > Activity store initialized path=/home/seanbao/.mnemonas/.mnemonas/activity
-18:07:17 INF internal/api/server.go:193 > Authentication enabled
-18:07:17 INF internal/api/server.go:220 > Favorites feature enabled
-18:07:17 INF cmd/nasd/main.go:206 > WebDAV enabled auth=basic prefix=/dav
-18:07:17 INF cmd/nasd/main.go:296 > server started (HTTP) address=0.0.0.0:8080
-18:07:17 INF internal/api/server.go:1231 > request bytes=138 duration=1.206871 method=GET path=/health remote=127.0.0.1:37040 status=200
-18:07:21 INF internal/api/server.go:1231 > request bytes=226 duration=0.156697 method=GET path=/api/v1/setup/ remote=127.0.0.1:37042 status=200
-18:07:21 INF internal/api/server.go:1231 > request bytes=226 duration=0.078225 method=GET path=/api/v1/setup/ remote=127.0.0.1:37054 status=200
-18:07:21 INF internal/api/server.go:1231 > request bytes=226 duration=0.064452 method=GET path=/api/v1/setup/ remote=127.0.0.1:37056 status=200
-18:07:22 INF internal/api/server.go:1231 > request bytes=226 duration=0.11056 method=GET path=/api/v1/setup/ remote=127.0.0.1:37068 status=200
-18:07:22 INF internal/api/server.go:1231 > request bytes=226 duration=0.056604 method=GET path=/api/v1/setup/ remote=127.0.0.1:37070 status=200
-18:07:30 INF internal/api/server.go:1231 > request bytes=48 duration=0.20178 method=POST path=/api/v1/setup/acknowledge remote=127.0.0.1:43700 status=200
-18:07:35 INF internal/api/server.go:1231 > request bytes=901 duration=47.787077 method=POST path=/api/v1/auth/login remote=127.0.0.1:43712 status=200
-18:07:35 INF internal/api/server.go:1231 > request bytes=502 duration=0.088887 method=GET path=/api/v1/activity/ remote=127.0.0.1:43734 status=200
-18:07:35 INF internal/api/server.go:1231 > request bytes=140 duration=0.419708 method=GET path=/health remote=127.0.0.1:43724 status=200
-18:07:35 INF internal/api/server.go:1231 > request bytes=82 duration=0.680016 method=GET path=/api/v1/stats remote=127.0.0.1:43722 status=200
-18:07:35 INF internal/api/server.go:1231 > request bytes=82 duration=0.361284 method=GET path=/api/v1/stats remote=127.0.0.1:43750 status=200
-18:07:38 INF internal/api/server.go:1231 > request bytes=27 duration=0.132362 method=GET path=/api/v1/favorites remote=127.0.0.1:51604 status=200
-18:07:39 INF internal/api/server.go:1231 > request bytes=82 duration=0.508153 method=GET path=/api/v1/stats remote=127.0.0.1:51608 status=200
-18:07:39 INF internal/api/server.go:1231 > request bytes=509 duration=0.888179 method=GET path=/api/v1/diagnostics remote=127.0.0.1:51616 status=200
-18:07:40 INF internal/api/server.go:1231 > request bytes=503 duration=0.13499 method=GET path=/api/v1/activity/ remote=127.0.0.1:51624 status=200
-18:07:41 INF internal/api/server.go:1231 > request bytes=601 duration=0.148172 method=GET path=/api/v1/settings/ remote=127.0.0.1:51636 status=200
-18:07:43 INF internal/api/server.go:1231 > request bytes=115 duration=0.255367 method=GET path=/api/v1/settings/webdav-credentials remote=127.0.0.1:51652 status=200
-18:08:17 INF internal/api/server.go:1231 > request bytes=19 duration=0.17332 method=GET path=/api/v1/shares remote=127.0.0.1:47926 status=404
-18:08:17 INF internal/api/server.go:1231 > request bytes=19 duration=0.116087 method=GET path=/api/v1/shares remote=127.0.0.1:47928 status=404
+09:36:01 INF cmd/nasd/main.go:343 > using default config
+09:36:01 INF cmd/nasd/main.go:91 > starting MnemoNAS address=0.0.0.0:8080 storage_root=/home/seanbao/.mnemonas version=dev
+09:36:01 WRN cmd/nasd/main.go:99 > ⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!
+09:36:01 WRN cmd/nasd/main.go:100 >    Set [server.tls].enabled = true for secure connections
+09:36:01 INF cmd/nasd/main.go:112 > 🔐 WebDAV using auto-generated password from secrets.json
+09:36:01 INF cmd/nasd/main.go:124 > connected to dataplane address=127.0.0.1:9090
+09:36:01 INF internal/api/server.go:113 > Connected to data plane addr=127.0.0.1:9090
+09:36:01 INF internal/api/server.go:129 > Thumbnail service initialized cache=/home/seanbao/.mnemonas/.mnemonas/thumbnails
+09:36:01 INF internal/api/server.go:140 > Maintenance history store initialized path=/home/seanbao/.mnemonas/.mnemonas/maintenance
+09:36:01 INF internal/api/server.go:151 > Activity store initialized path=/home/seanbao/.mnemonas/.mnemonas/activity
+09:36:01 INF internal/api/server.go:193 > Authentication enabled
+09:36:01 INF internal/api/server.go:220 > Favorites feature enabled
+09:36:01 INF cmd/nasd/main.go:206 > WebDAV enabled auth=basic prefix=/dav
+09:36:01 INF cmd/nasd/main.go:296 > server started (HTTP) address=0.0.0.0:8080
+09:36:01 INF internal/api/server.go:1433 > request bytes=137 duration=1.429064 method=GET path=/health remote=127.0.0.1:48172 status=200
+09:36:03 INF internal/api/server.go:1433 > request bytes=107 duration=0.179689 method=GET path=/api/v1/setup/ remote=127.0.0.1:48178 status=200
+09:36:03 INF internal/api/server.go:1433 > request bytes=107 duration=0.078631 method=GET path=/api/v1/setup/ remote=127.0.0.1:48182 status=200
+09:36:03 INF internal/api/server.go:1433 > request bytes=107 duration=0.055748 method=GET path=/api/v1/setup/ remote=127.0.0.1:48188 status=200
+09:36:03 INF internal/api/server.go:1433 > request bytes=107 duration=0.039776 method=GET path=/api/v1/setup/ remote=127.0.0.1:48196 status=200
+09:36:03 INF internal/api/server.go:1433 > request bytes=107 duration=0.036134 method=GET path=/api/v1/setup/ remote=127.0.0.1:48200 status=200
+09:36:03 INF internal/api/server.go:1433 > request bytes=19 duration=0.073013 method=GET path=/api/v1/auth/me remote=127.0.0.1:48204 status=404
+09:36:03 INF internal/api/server.go:1433 > request bytes=19 duration=0.04089 method=GET path=/api/v1/auth/me remote=127.0.0.1:48214 status=404
+09:36:03 INF internal/api/server.go:1433 > request bytes=19 duration=0.053901 method=GET path=/api/v1/auth/me remote=127.0.0.1:48228 status=404
+09:36:03 INF internal/api/server.go:1433 > request bytes=19 duration=0.049219 method=GET path=/api/v1/auth/me remote=127.0.0.1:48234 status=404
+09:36:06 INF internal/api/server.go:1433 > request bytes=107 duration=0.120989 method=GET path=/api/v1/setup/ remote=127.0.0.1:60302 status=200
+09:36:06 INF internal/api/server.go:1433 > request bytes=107 duration=0.09699 method=GET path=/api/v1/setup/ remote=127.0.0.1:60316 status=200
+09:36:06 INF internal/api/server.go:1433 > request bytes=107 duration=0.140674 method=GET path=/api/v1/setup/ remote=127.0.0.1:60330 status=200
+09:36:06 INF internal/api/server.go:1433 > request bytes=19 duration=0.035464 method=GET path=/api/v1/auth/me remote=127.0.0.1:60336 status=404
+09:36:06 INF internal/api/server.go:1433 > request bytes=19 duration=0.056963 method=GET path=/api/v1/auth/me remote=127.0.0.1:60346 status=404
+09:36:06 INF internal/api/server.go:1433 > request bytes=107 duration=0.143965 method=GET path=/api/v1/setup/ remote=127.0.0.1:60356 status=200
+09:36:06 INF internal/api/server.go:1433 > request bytes=107 duration=0.080527 method=GET path=/api/v1/setup/ remote=127.0.0.1:60364 status=200
+09:36:06 INF internal/api/server.go:1433 > request bytes=19 duration=0.040792 method=GET path=/api/v1/auth/me remote=127.0.0.1:60372 status=404
+09:36:06 INF internal/api/server.go:1433 > request bytes=19 duration=0.035827 method=GET path=/api/v1/auth/me remote=127.0.0.1:60384 status=404
+09:36:13 INF internal/api/server.go:1433 > request bytes=901 duration=49.933129 method=POST path=/api/v1/auth/login remote=127.0.0.1:60390 status=200
+09:36:13 INF internal/api/server.go:1433 > request bytes=82 duration=0.448917 method=GET path=/api/v1/stats remote=127.0.0.1:60398 status=200
+09:36:13 INF internal/api/server.go:1433 > request bytes=775 duration=0.159717 method=GET path=/api/v1/activity/ remote=127.0.0.1:60408 status=200
+09:36:13 INF internal/api/server.go:1433 > request bytes=140 duration=0.408962 method=GET path=/health remote=127.0.0.1:60402 status=200
+09:36:13 INF internal/api/server.go:1433 > request bytes=82 duration=0.39888 method=GET path=/api/v1/stats remote=127.0.0.1:60424 status=200
+09:36:15 INF internal/api/server.go:1433 > request bytes=190 duration=0.154332 method=GET path=/api/v1/files/ remote=127.0.0.1:60440 status=200
+09:36:16 INF internal/api/server.go:1433 > request bytes=190 duration=0.139178 method=GET path=/api/v1/files/ remote=127.0.0.1:33882 status=200
+09:36:16 INF internal/api/server.go:1433 > request bytes=37 duration=0.133538 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:33884 status=200
+09:36:43 INF internal/api/server.go:1433 > request bytes=443 duration=0.316746 method=GET path=/api/v1/files/test-folder remote=127.0.0.1:49390 status=200
+09:36:43 INF internal/api/server.go:1433 > request bytes=111 duration=0.11656 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:49392 status=200
+09:36:43 INF internal/api/server.go:1433 > request bytes=1582 duration=0.615593 method=GET path="/api/v1/files/test-folder/首页2" remote=127.0.0.1:49402 status=200
+09:36:43 INF internal/api/server.go:1433 > request bytes=472 duration=0.186599 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:49416 status=200
+09:37:18 INF internal/api/server.go:1433 > request bytes=72714 duration=2.239985 method=GET path="/api/v1/download/test-folder/首页2/u126.png" remote=127.0.0.1:50912 status=200
+09:37:22 INF internal/api/server.go:1433 > request bytes=472 duration=0.23142 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:50920 status=200
+09:38:48 INF internal/api/server.go:1433 > request bytes=472 duration=0.156923 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:56026 status=200
+09:38:48 INF internal/api/server.go:1433 > request bytes=1582 duration=0.37946 method=GET path="/api/v1/files/test-folder/首页2" remote=127.0.0.1:56010 status=200
+09:39:00 INF internal/api/server.go:1433 > request bytes=139 duration=2.86314 method=POST path="/api/v1/files/test-folder/首页2/u137.png" remote=127.0.0.1:37274 status=201
+09:39:00 INF internal/api/server.go:1433 > request bytes=1582 duration=0.379163 method=GET path="/api/v1/files/test-folder/首页2" remote=127.0.0.1:37286 status=200
+09:39:03 INF internal/api/server.go:1433 > request bytes=13248 duration=0.352093 method=GET path="/api/v1/download/test-folder/首页2/u432.svg" remote=127.0.0.1:37300 status=200
+09:39:27 INF internal/api/server.go:1433 > request bytes=107 duration=0.085359 method=GET path=/api/v1/setup/ remote=127.0.0.1:37446 status=200
+09:39:27 INF internal/api/server.go:1433 > request bytes=107 duration=0.053942 method=GET path=/api/v1/setup/ remote=127.0.0.1:37460 status=200
+09:39:27 INF internal/api/server.go:1433 > request bytes=107 duration=0.039592 method=GET path=/api/v1/setup/ remote=127.0.0.1:37476 status=200
+09:39:27 INF internal/api/server.go:1433 > request bytes=19 duration=0.039859 method=GET path=/api/v1/auth/me remote=127.0.0.1:37484 status=404
+09:39:27 INF internal/api/server.go:1433 > request bytes=19 duration=0.032159 method=GET path=/api/v1/auth/me remote=127.0.0.1:37500 status=404
+09:39:27 INF internal/api/server.go:1433 > request bytes=107 duration=0.071133 method=GET path=/api/v1/setup/ remote=127.0.0.1:37514 status=200
+09:39:27 INF internal/api/server.go:1433 > request bytes=107 duration=0.066051 method=GET path=/api/v1/setup/ remote=127.0.0.1:37528 status=200
+09:39:27 INF internal/api/server.go:1433 > request bytes=19 duration=0.035186 method=GET path=/api/v1/auth/me remote=127.0.0.1:37540 status=404
+09:39:27 INF internal/api/server.go:1433 > request bytes=19 duration=0.04089 method=GET path=/api/v1/auth/me remote=127.0.0.1:37556 status=404
+09:39:29 INF internal/api/server.go:1433 > request bytes=901 duration=54.983151 method=POST path=/api/v1/auth/login remote=127.0.0.1:37570 status=200
+09:39:29 INF internal/api/server.go:1433 > request bytes=190 duration=0.198257 method=GET path=/api/v1/files/ remote=127.0.0.1:37584 status=200
+09:39:29 INF internal/api/server.go:1433 > request bytes=82 duration=0.571341 method=GET path=/api/v1/stats remote=127.0.0.1:37576 status=200
+09:39:30 INF internal/api/server.go:1433 > request bytes=190 duration=0.160848 method=GET path=/api/v1/files/ remote=127.0.0.1:37594 status=200
+09:39:30 INF internal/api/server.go:1433 > request bytes=37 duration=0.105497 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:37608 status=200
+09:39:53 INF internal/api/server.go:1433 > request bytes=27 duration=0.173874 method=GET path=/api/v1/favorites remote=127.0.0.1:51056 status=200
+09:40:01 INF internal/api/server.go:1433 > request bytes=37 duration=0.106479 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:50304 status=200
+09:40:02 INF internal/api/server.go:1433 > request bytes=443 duration=0.317858 method=GET path=/api/v1/files/test-folder remote=127.0.0.1:50312 status=200
+09:40:02 INF internal/api/server.go:1433 > request bytes=111 duration=0.139763 method=POST path=/api/v1/favorites/check-batch remote=127.0.0.1:50314 status=200
+09:40:13 INF internal/api/server.go:1433 > request bytes=12 duration=0.252718 method=GET path=/api/v1/download/test-folder/test-moved.txt remote=127.0.0.1:33998 status=200
+09:44:29 INF internal/api/server.go:1433 > request bytes=82 duration=0.529426 method=GET path=/api/v1/stats remote=127.0.0.1:33366 status=200
+09:49:29 INF internal/api/server.go:1433 > request bytes=82 duration=0.388186 method=GET path=/api/v1/stats remote=127.0.0.1:49198 status=200

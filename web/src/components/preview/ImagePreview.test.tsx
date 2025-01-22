@@ -50,7 +50,7 @@ describe('ImagePreview', () => {
     const img = screen.getByRole('img')
     expect(img).toHaveAttribute(
       'src',
-      '/dav/documents/photo.jpg'
+      '/api/v1/download/documents/photo.jpg'
     )
   })
 
