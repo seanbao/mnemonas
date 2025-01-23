@@ -51,7 +51,8 @@ func NewHandler(store *ShareStore, fs FileOpener) *Handler {
 
 // SetBaseURL sets the base URL for share links
 func (h *Handler) SetBaseURL(baseURL string) {
-	h.baseURL = baseURL
+	baseURL = strings.TrimSpace(baseURL)
+	h.baseURL = strings.TrimRight(baseURL, "/")
 }
 
 // Routes registers share routes (requires auth)
@@ -357,16 +358,41 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !share.Enabled {
-		http.Error(w, "share is disabled", http.StatusGone)
+	if share.HasPassword() {
+		if err := share.CanAccess(); err != nil {
+			switch {
+			case errors.Is(err, ErrShareAccessLimit):
+				http.Error(w, "share access limit reached", http.StatusGone)
+			case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
+				http.Error(w, err.Error(), http.StatusGone)
+			default:
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		info := &PublicShareInfo{
+			ID:          share.ID,
+			Type:        share.Type,
+			HasPassword: share.HasPassword(),
+			Permission:  share.Permission,
+			Description: share.Description,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info)
 		return
 	}
-	if share.IsExpired() {
-		http.Error(w, "share has expired", http.StatusGone)
-		return
-	}
-	if share.IsAccessLimitReached() {
-		http.Error(w, "share access limit reached", http.StatusGone)
+
+	if err := share.CanAccess(); err != nil {
+		switch {
+		case errors.Is(err, ErrShareAccessLimit):
+			http.Error(w, "share access limit reached", http.StatusGone)
+		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
+			http.Error(w, err.Error(), http.StatusGone)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -378,9 +404,7 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 		Description: share.Description,
 	}
 
-	if !share.HasPassword() {
-		h.enrichPublicShareInfo(r.Context(), info, share)
-	}
+	h.enrichPublicShareInfo(r.Context(), info, share)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
@@ -401,18 +425,30 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	share, err := h.store.Access(id, req.Password)
+	share, err := h.store.Get(id)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrShareNotFound):
+		if errors.Is(err, ErrShareNotFound) {
 			http.Error(w, "share not found", http.StatusNotFound)
-		case errors.Is(err, ErrInvalidPassword):
-			http.Error(w, "invalid password", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := share.CanAccess(); err != nil {
+		switch {
+		case errors.Is(err, ErrShareAccessLimit):
+			http.Error(w, "share access limit reached", http.StatusGone)
 		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
 			http.Error(w, err.Error(), http.StatusGone)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
+		return
+	}
+
+	if share.HasPassword() && !share.CheckPassword(req.Password) {
+		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
 
@@ -441,6 +477,8 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "share not found", http.StatusNotFound)
 		case errors.Is(err, ErrInvalidPassword):
 			http.Error(w, "password required", http.StatusUnauthorized)
+		case errors.Is(err, ErrShareAccessLimit):
+			http.Error(w, "share access limit reached", http.StatusGone)
 		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
 			http.Error(w, err.Error(), http.StatusGone)
 		default:
@@ -485,6 +523,8 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "share not found", http.StatusNotFound)
 		case errors.Is(err, ErrInvalidPassword):
 			http.Error(w, "password required", http.StatusUnauthorized)
+		case errors.Is(err, ErrShareAccessLimit):
+			http.Error(w, "share access limit reached", http.StatusGone)
 		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
 			http.Error(w, err.Error(), http.StatusGone)
 		default:
@@ -499,7 +539,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fullPath := path.Join(share.Path, filePath)
-	if !strings.HasPrefix(fullPath, share.Path) {
+	if !isWithinSharePath(share.Path, fullPath) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
@@ -539,6 +579,8 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "share not found", http.StatusNotFound)
 		case errors.Is(err, ErrInvalidPassword):
 			http.Error(w, "password required", http.StatusUnauthorized)
+		case errors.Is(err, ErrShareAccessLimit):
+			http.Error(w, "share access limit reached", http.StatusGone)
 		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
 			http.Error(w, err.Error(), http.StatusGone)
 		default:

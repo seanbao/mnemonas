@@ -94,9 +94,17 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	}
 
 	// Create new secrets
+	jwtSecret, err := generateSecureKey(32)
+	if err != nil {
+		return nil, false, err
+	}
+	webdavPassword, err := generateReadablePassword(16)
+	if err != nil {
+		return nil, false, err
+	}
 	secrets := &Secrets{
-		JWTSecret:      generateSecureKey(32),
-		WebDAVPassword: generateReadablePassword(16),
+		JWTSecret:      jwtSecret,
+		WebDAVPassword: webdavPassword,
 	}
 
 	// Ensure directory exists
@@ -118,25 +126,25 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 }
 
 // generateSecureKey generates a cryptographically secure random key
-func generateSecureKey(length int) string {
+func generateSecureKey(length int) (string, error) {
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
-		panic("failed to generate random key: " + err.Error())
+		return "", fmt.Errorf("failed to generate random key: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 // generateReadablePassword generates a human-readable random password
 // Uses a mix of lowercase, uppercase, and digits (no ambiguous characters)
-func generateReadablePassword(length int) string {
+func generateReadablePassword(length int) (string, error) {
 	// Exclude ambiguous characters: 0, O, l, 1, I
 	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
-		panic("failed to generate random password: " + err.Error())
+		return "", fmt.Errorf("failed to generate random password: %w", err)
 	}
 	for i := range b {
 		b[i] = charset[int(b[i])%len(charset)]
 	}
-	return string(b)
+	return string(b), nil
 }
