@@ -52,10 +52,15 @@ export function ShareAccessPage() {
 
     setIsLoading(true)
     setError(null)
+    setNeedsPassword(false)
+    setIsAuthenticated(false)
+    setPassword('')
     
     try {
       const info = await getPublicShare(id)
       setShareInfo(info)
+      setFolderItems([])
+      setListError(null)
       if (info.type === 'folder') {
         setFolderPath('')
       }
@@ -87,6 +92,8 @@ export function ShareAccessPage() {
     try {
       const info = await accessShareWithPassword(id, password)
       setShareInfo(info)
+      setFolderItems([])
+      setListError(null)
       if (info.type === 'folder') {
         setFolderPath('')
       }
@@ -135,6 +142,7 @@ export function ShareAccessPage() {
 
     setIsListing(true)
     setListError(null)
+    setFolderItems([])
     try {
       const data = await getPublicShareItems(id, {
         path: folderPath || undefined,
@@ -142,7 +150,14 @@ export function ShareAccessPage() {
       })
       setFolderItems(data.items)
     } catch (err) {
-      setListError(err instanceof Error ? err.message : '加载文件夹失败')
+      if (err instanceof ShareError && err.isUnauthorized) {
+        setIsAuthenticated(false)
+        setNeedsPassword(true)
+        setPassword('')
+        setListError(null)
+      } else {
+        setListError(err instanceof Error ? err.message : '加载文件夹失败')
+      }
     } finally {
       setIsListing(false)
     }

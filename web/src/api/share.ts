@@ -203,7 +203,7 @@ export async function getPublicShare(id: string): Promise<PublicShareInfo> {
   if (!response.ok) {
     let message = '分享不存在或已失效'
     if (response.status === 410) {
-      message = '分享已过期或已禁用'
+      message = '分享已过期、已禁用或访问次数已达上限'
     }
     try {
       const body = await response.json()
@@ -236,7 +236,7 @@ export async function getPublicShareItems(
   if (!response.ok) {
     let message = '获取分享文件夹失败'
     if (response.status === 410) {
-      message = '分享已过期或已禁用'
+      message = '分享已过期、已禁用或访问次数已达上限'
     } else if (response.status === 401) {
       message = '密码错误'
     }
@@ -265,7 +265,7 @@ export async function accessShareWithPassword(id: string, password: string): Pro
     if (response.status === 401) {
       message = '密码错误'
     } else if (response.status === 410) {
-      message = '分享已过期或已禁用'
+      message = '分享已过期、已禁用或访问次数已达上限'
     }
     try {
       const body = await response.json()

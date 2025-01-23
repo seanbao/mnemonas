@@ -622,7 +622,10 @@ export function FilesPage() {
 
   useEffect(() => {
     lastSelectedIndexRef.current = null
-  }, [currentPath])
+    clearSelection()
+    setActiveFilePath(null)
+    setFocusedIndex(-1)
+  }, [currentPath, clearSelection])
 
   const { data, isLoading } = useQuery({
     queryKey: ['files', currentPath],
@@ -684,6 +687,36 @@ export function FilesPage() {
       return sortOrder === 'asc' ? comparison : -comparison
     })
   }, [data?.files, sortBy, sortOrder])
+
+  useEffect(() => {
+    if (selectedFiles.size === 0) return
+
+    const available = new Set(sortedFiles.map((file) => file.path))
+    const filtered = Array.from(selectedFiles).filter((path) => available.has(path))
+    if (filtered.length === selectedFiles.size) return
+
+    setSelection(filtered)
+    if (filtered.length === 0) {
+      setFocusedIndex(-1)
+      setActiveFilePath(null)
+      lastSelectedIndexRef.current = null
+      return
+    }
+
+    const firstMatch = sortedFiles.find((file) => filtered.includes(file.path))
+    if (firstMatch) {
+      const firstIndex = sortedFiles.findIndex((file) => file.path === firstMatch.path)
+      if (firstIndex >= 0) {
+        setFocusedIndex(firstIndex)
+        lastSelectedIndexRef.current = firstIndex
+      }
+      if (firstMatch.isDir) {
+        setActiveFilePath(null)
+      } else {
+        setActiveFilePath(firstMatch.path)
+      }
+    }
+  }, [sortedFiles, selectedFiles, setSelection])
 
   // Favorites query
   const filePaths = useMemo(() => sortedFiles.map(f => f.path), [sortedFiles])

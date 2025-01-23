@@ -127,7 +127,10 @@ func TestGenerateSecureKey(t *testing.T) {
 	// Generate multiple keys and verify uniqueness
 	keys := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		key := generateSecureKey(32)
+		key, err := generateSecureKey(32)
+		if err != nil {
+			t.Fatalf("generateSecureKey failed: %v", err)
+		}
 		if len(key) != 64 { // 32 bytes = 64 hex chars
 			t.Errorf("key length incorrect: got %d, want 64", len(key))
 		}
@@ -142,7 +145,10 @@ func TestGenerateReadablePassword(t *testing.T) {
 	// Generate multiple passwords and verify uniqueness and format
 	passwords := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		pwd := generateReadablePassword(16)
+		pwd, err := generateReadablePassword(16)
+		if err != nil {
+			t.Fatalf("generateReadablePassword failed: %v", err)
+		}
 		if len(pwd) != 16 {
 			t.Errorf("password length incorrect: got %d, want 16", len(pwd))
 		}

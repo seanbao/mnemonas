@@ -40,6 +40,7 @@ describe('ImagePreview', () => {
       ok: true,
       blob: () => Promise.resolve(new Blob(['fake'], { type: 'image/png' })),
     })
+    localStorage.removeItem('mnemonas_token')
   })
 
   it('renders with loading state', async () => {

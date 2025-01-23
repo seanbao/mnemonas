@@ -72,6 +72,7 @@ Authorization: Bearer <access_token>
 | 201 | 创建成功 |
 | 400 | 请求参数错误 |
 | 404 | 资源不存在 |
+| 410 | 资源不可用（过期/禁用/访问上限） |
 | 413 | 文件过大 |
 | 500 | 服务器内部错误 |
 
@@ -910,6 +911,8 @@ POST /s/{share_id}
 
 **说明**:
 - 当分享不需要密码，或已通过密码验证后，会返回 `file_name` / `file_size` / `folder_items`
+- 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`
+- `access_count` 在下载与文件夹列表请求时递增；`POST /s/{share_id}` 验证密码不会计数
 
 **下载文件**:
 ```
