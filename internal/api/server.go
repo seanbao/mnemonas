@@ -953,6 +953,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"total_chunks": 0,
 	}
 
+	if s.fs != nil {
+		if count, err := s.fs.GetFileCount(r.Context()); err == nil {
+			stats["total_files"] = count
+		}
+	}
+
 	// Get stats from data plane if connected
 	if s.dataplane != nil && s.dataplane.IsConnected() {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)

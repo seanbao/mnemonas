@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "lint-staged": {
     "*.{ts,tsx}": [
       "eslint --fix",
@@ -14,6 +17,11 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "check:node": "node ./scripts/check-node.cjs",
+    "pretest": "node ./scripts/check-node.cjs",
+    "pretest:ui": "node ./scripts/check-node.cjs",
+    "pretest:run": "node ./scripts/check-node.cjs",
+    "pretest:coverage": "node ./scripts/check-node.cjs",
     "test": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs",
     "test:ui": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs --ui",
     "test:run": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs run",
