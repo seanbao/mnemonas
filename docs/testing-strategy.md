@@ -514,8 +514,13 @@ describe('useThemeStore', () => {
 
 **运行命令**：
 
+> Vitest 依赖 `Array.prototype.findLastIndex`，需 Node.js 20+。
+
 ```bash
 cd web
+
+# 版本检查
+npm run check:node
 
 # 运行所有单元测试
 npm test

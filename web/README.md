@@ -29,9 +29,14 @@ npm run preview
 
 ## 测试
 
+> Vitest 依赖 `Array.prototype.findLastIndex`，需 Node.js 20+。
+
 ### 单元测试 (Vitest)
 
 ```bash
+# 版本检查
+npm run check:node
+
 # 运行所有单元测试
 npm test
 

@@ -121,6 +121,27 @@ func TestNormalizeWebDAVPrefix(t *testing.T) {
 	}
 }
 
+func TestLoad_NormalizesWebDAVPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[webdav]
+prefix = "dav/"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.WebDAV.Prefix != "/dav" {
+		t.Fatalf("expected normalized prefix /dav, got %q", cfg.WebDAV.Prefix)
+	}
+}
+
 func TestConfig_SaveLoad(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config", "config.toml")

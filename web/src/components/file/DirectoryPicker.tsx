@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Button,
@@ -9,6 +9,7 @@ import {
   ModalFooter,
   Input,
   Spinner,
+  addToast,
 } from '@heroui/react'
 import {
   Folder,
@@ -137,6 +138,17 @@ export function DirectoryPicker({
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [isCreating, setIsCreating] = useState(false)
+
+  useEffect(() => {
+    if (!isOpen) return
+    setSelectedPath(initialPath)
+    setExpandedPaths(new Set(['/']))
+    setLoadedPaths(new Set())
+    setFolderContents(new Map())
+    setIsCreatingFolder(false)
+    setNewFolderName('')
+  }, [isOpen, initialPath])
+
   
   // Load root directory
   const { data: rootData, isLoading: isLoadingRoot } = useQuery({
@@ -212,7 +224,7 @@ export function DirectoryPicker({
       setNewFolderName('')
       setIsCreatingFolder(false)
     } catch {
-      // Error handling
+      addToast({ title: '创建文件夹失败', color: 'danger' })
     } finally {
       setIsCreating(false)
     }

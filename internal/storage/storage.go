@@ -855,6 +855,14 @@ func (fs *FileSystem) GetTrashStats(ctx context.Context) (count int, totalSize i
 	return fs.versions.GetTrashStats(ctx)
 }
 
+// GetFileCount returns the number of indexed files
+func (fs *FileSystem) GetFileCount(ctx context.Context) (int, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	return fs.versions.CountFiles(ctx)
+}
+
 // ============================================================================
 // Search Operations
 // ============================================================================
