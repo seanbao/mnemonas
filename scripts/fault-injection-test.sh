@@ -20,8 +20,10 @@ NC='\033[0m'
 # Configuration
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 WEBDAV_URL="${BASE_URL}/dav"
-DATA_DIR="${DATA_DIR:-$HOME/.mnemonas/data}"
-METADATA_DIR="${METADATA_DIR:-$HOME/.mnemonas/metadata}"
+STORAGE_ROOT="${STORAGE_ROOT:-$HOME/.mnemonas}"
+INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
+OBJECTS_DIR="${OBJECTS_DIR:-$INTERNAL_DIR/objects}"
+INDEX_DB="${INDEX_DB:-$INTERNAL_DIR/index.db}"
 NASD_BIN="${NASD_BIN:-./bin/nasd}"
 TEST_DIR="/tmp/mnemonas-fault-$$"
 
@@ -84,7 +86,7 @@ test_crash_during_write() {
     log_info "Service killed during upload. Checking for orphaned temp files..."
     
     # Check for .tmp files in data directory
-    local tmp_files=$(find "$DATA_DIR" -name "*.tmp" 2>/dev/null | wc -l)
+    local tmp_files=$(find "$OBJECTS_DIR" -name "*.tmp" 2>/dev/null | wc -l)
     
     # Restart service
     log_info "Restarting service..."
@@ -144,7 +146,7 @@ test_object_corruption() {
     # Find the object file and corrupt it
     # Note: This requires knowing the CAS structure
     log_info "Looking for object files to corrupt..."
-    local object_file=$(find "$DATA_DIR" -type f ! -name "*.tmp" 2>/dev/null | head -1)
+    local object_file=$(find "$OBJECTS_DIR" -type f ! -name "*.tmp" 2>/dev/null | head -1)
     
     if [[ -z "$object_file" ]]; then
         log_warn "No object files found, skipping corruption test"
@@ -158,7 +160,7 @@ test_object_corruption() {
     log_info "Object file corrupted: $object_file"
     
     # Run scrub to detect corruption
-    local scrub_result=$(curl -sf -X POST "$BASE_URL/api/v1/scrub" 2>/dev/null)
+    local scrub_result=$(curl -sf -X POST "$BASE_URL/api/v1/maintenance/scrub" 2>/dev/null)
     
     if echo "$scrub_result" | grep -qi "corrupt\|error\|failed"; then
         log_ok "Scrub detected corruption"
@@ -186,24 +188,22 @@ test_metadata_corruption() {
     echo "metadata corruption test" | curl -sf -X PUT "$WEBDAV_URL/fault-test/meta-test.txt" -T - > /dev/null
     
     # Find and corrupt metadata file
-    local meta_file=$(find "$METADATA_DIR" -name "*.json" 2>/dev/null | head -1)
-    
-    if [[ -z "$meta_file" ]]; then
-        log_warn "No metadata files found, skipping test"
+    if [[ ! -f "$INDEX_DB" ]]; then
+        log_warn "Index database not found, skipping test"
         return
     fi
-    
+
     # Backup and corrupt
-    cp "$meta_file" "$TEST_DIR/meta-backup.json"
-    echo "INVALID JSON {{{" > "$meta_file"
-    
-    log_info "Metadata file corrupted: $meta_file"
+    cp "$INDEX_DB" "$TEST_DIR/index-backup.db"
+    printf 'CORRUPTED' >> "$INDEX_DB"
+
+    log_info "Index database corrupted: $INDEX_DB"
     
     # Try to access files - should handle gracefully
     local status=$(curl -s -w "%{http_code}" -o /dev/null -X PROPFIND "$WEBDAV_URL/fault-test/" -H "Depth: 1")
     
     # Restore metadata
-    cp "$TEST_DIR/meta-backup.json" "$meta_file"
+    cp "$TEST_DIR/index-backup.db" "$INDEX_DB"
     
     if [[ "$status" == "500" || "$status" == "404" || "$status" == "207" ]]; then
         log_ok "Service handled corrupted metadata gracefully (status: $status)"

@@ -1884,9 +1884,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"port": s.config.Server.Port,
 		},
 		"storage": map[string]interface{}{
-			"data_dir":     s.config.Storage.DataDir,
-			"metadata_dir": s.config.Storage.MetadataDir,
-			"temp_dir":     s.config.Storage.TempDir,
+			"root": s.config.Storage.Root,
 		},
 		"retention": map[string]interface{}{
 			"max_versions":   s.config.Storage.Retention.MaxVersions,
