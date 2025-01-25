@@ -846,7 +846,7 @@ func TestServer_Scrub_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
 	// Server has no dataplane connected
-	req := httptest.NewRequest("POST", "/api/v1/scrub", nil)
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/scrub", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -859,7 +859,7 @@ func TestServer_Scrub_NoDataplane(t *testing.T) {
 func TestServer_GC_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
-	req := httptest.NewRequest("POST", "/api/v1/gc", nil)
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/gc", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -872,7 +872,7 @@ func TestServer_GC_NoDataplane(t *testing.T) {
 func TestServer_Objects_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/v1/objects", nil)
+	req := httptest.NewRequest("GET", "/api/v1/maintenance/objects", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -885,7 +885,7 @@ func TestServer_Objects_NoDataplane(t *testing.T) {
 func TestServer_ScrubResult(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/v1/scrub", nil)
+	req := httptest.NewRequest("GET", "/api/v1/maintenance/scrub", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
