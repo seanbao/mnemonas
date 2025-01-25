@@ -17,13 +17,6 @@ cert_dir = ""                # 证书存放目录（默认 ~/.mnemonas/.mnemonas
 [storage]
 # 存储根目录，默认 ~/.mnemonas（无需 root 权限）
 root = "~/.mnemonas"
-# 兼容字段，通常无需单独配置
-data_dir = "~/.mnemonas/.mnemonas/objects"
-metadata_dir = "~/.mnemonas/.mnemonas"
-temp_dir = "~/.mnemonas/.mnemonas/tmp"
-thumbnail_dir = "~/.mnemonas/.mnemonas/thumbnails"
-maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
-activity_dir = "~/.mnemonas/.mnemonas/activity"
 
 [storage.retention]
 max_versions = 50            # 每个文件最多保留50个版本

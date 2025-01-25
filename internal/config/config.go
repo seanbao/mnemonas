@@ -52,14 +52,6 @@ type StorageConfig struct {
 	// Internal data will be stored in Root/.mnemonas/
 	Root string `toml:"root"`
 
-	// Legacy fields (deprecated, for migration compatibility)
-	DataDir        string `toml:"data_dir"`
-	MetadataDir    string `toml:"metadata_dir"`
-	TempDir        string `toml:"temp_dir"`
-	ThumbnailDir   string `toml:"thumbnail_dir"`
-	MaintenanceDir string `toml:"maintenance_dir"`
-	ActivityDir    string `toml:"activity_dir"`
-
 	// Version retention policy
 	Retention RetentionConfig `toml:"retention"`
 
@@ -201,13 +193,6 @@ func Default() *Config {
 		},
 		Storage: StorageConfig{
 			Root: storageRoot,
-			// Legacy fields for compatibility
-			DataDir:        filepath.Join(storageRoot, ".mnemonas", "objects"),
-			MetadataDir:    filepath.Join(storageRoot, ".mnemonas"),
-			TempDir:        filepath.Join(storageRoot, ".mnemonas", "tmp"),
-			ThumbnailDir:   filepath.Join(storageRoot, ".mnemonas", "thumbnails"),
-			MaintenanceDir: filepath.Join(storageRoot, ".mnemonas", "maintenance"),
-			ActivityDir:    filepath.Join(storageRoot, ".mnemonas", "activity"),
 			Retention: RetentionConfig{
 				MaxVersions:  50,
 				MaxAge:       90 * 24 * time.Hour,     // 90 days
@@ -291,32 +276,6 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	defaultInternal := filepath.Join(defaultRoot, ".mnemonas")
 	internal := filepath.Join(cfg.Storage.Root, ".mnemonas")
 
-	defaultDataDir := filepath.Join(defaultInternal, "objects")
-	defaultMetadataDir := defaultInternal
-	defaultTempDir := filepath.Join(defaultInternal, "tmp")
-	defaultThumbnailDir := filepath.Join(defaultInternal, "thumbnails")
-	defaultMaintenanceDir := filepath.Join(defaultInternal, "maintenance")
-	defaultActivityDir := filepath.Join(defaultInternal, "activity")
-
-	if cfg.Storage.DataDir == "" || cfg.Storage.DataDir == defaultDataDir {
-		cfg.Storage.DataDir = filepath.Join(internal, "objects")
-	}
-	if cfg.Storage.MetadataDir == "" || cfg.Storage.MetadataDir == defaultMetadataDir {
-		cfg.Storage.MetadataDir = internal
-	}
-	if cfg.Storage.TempDir == "" || cfg.Storage.TempDir == defaultTempDir {
-		cfg.Storage.TempDir = filepath.Join(internal, "tmp")
-	}
-	if cfg.Storage.ThumbnailDir == "" || cfg.Storage.ThumbnailDir == defaultThumbnailDir {
-		cfg.Storage.ThumbnailDir = filepath.Join(internal, "thumbnails")
-	}
-	if cfg.Storage.MaintenanceDir == "" || cfg.Storage.MaintenanceDir == defaultMaintenanceDir {
-		cfg.Storage.MaintenanceDir = filepath.Join(internal, "maintenance")
-	}
-	if cfg.Storage.ActivityDir == "" || cfg.Storage.ActivityDir == defaultActivityDir {
-		cfg.Storage.ActivityDir = filepath.Join(internal, "activity")
-	}
-
 	defaultCertDir := filepath.Join(defaultInternal, "certs")
 	if cfg.Server.TLS.CertDir == "" || cfg.Server.TLS.CertDir == defaultCertDir {
 		cfg.Server.TLS.CertDir = filepath.Join(internal, "certs")
@@ -391,8 +350,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("invalid port: %d", c.Server.Port))
 	}
 
-	if c.Storage.DataDir == "" {
-		errs = append(errs, errors.New("data_dir cannot be empty"))
+	if c.Storage.Root == "" {
+		errs = append(errs, errors.New("storage.root cannot be empty"))
 	}
 
 	if c.DataPlane.GRPCAddress == "" {

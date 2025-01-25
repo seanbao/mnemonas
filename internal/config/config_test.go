@@ -19,8 +19,8 @@ func TestDefault(t *testing.T) {
 		t.Errorf("Default host = %s, want 0.0.0.0", cfg.Server.Host)
 	}
 
-	if cfg.Storage.DataDir == "" {
-		t.Error("Default data_dir should not be empty")
+	if cfg.Storage.Root == "" {
+		t.Error("Default storage.root should not be empty")
 	}
 
 	if cfg.DataPlane.GRPCAddress != "127.0.0.1:9090" {
@@ -59,8 +59,8 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "Empty data_dir",
-			modify:  func(c *Config) { c.Storage.DataDir = "" },
+			name:    "Empty storage.root",
+			modify:  func(c *Config) { c.Storage.Root = "" },
 			wantErr: true,
 		},
 		{
