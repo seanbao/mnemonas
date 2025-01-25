@@ -399,26 +399,6 @@ export async function restoreVersion(path: string, hash: string): Promise<void> 
   }
 }
 
-// Run data scrubbing
-export async function scrubData(): Promise<void> {
-  const response = await authFetch(`${API_BASE}/scrub`, {
-    method: 'POST',
-  })
-  if (!response.ok) {
-    throw new ApiError('数据巡检启动失败', response.status, response.statusText)
-  }
-}
-
-// Run garbage collection
-export async function runGC(dryRun: boolean = true): Promise<void> {
-  const response = await authFetch(`${API_BASE}/gc?dry_run=${dryRun}`, {
-    method: 'POST',
-  })
-  if (!response.ok) {
-    throw new ApiError('垃圾回收启动失败', response.status, response.statusText)
-  }
-}
-
 // === Trash/Recycle Bin API ===
 
 export interface TrashItem {
@@ -546,14 +526,14 @@ export interface ScrubResult {
 
 // Get last scrub result
 export async function getScrubResult(): Promise<ScrubResult> {
-  const response = await authFetch(`${API_BASE}/scrub`)
+  const response = await authFetch(`${API_BASE}/maintenance/scrub`)
   const result = await handleResponse<ApiResponseWrapper<ScrubResult>>(response, '获取校验结果失败')
   return result.data
 }
 
 // Run scrub operation
 export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
-  const response = await authFetch(`${API_BASE}/scrub`, {
+  const response = await authFetch(`${API_BASE}/maintenance/scrub`, {
     method: 'POST',
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,

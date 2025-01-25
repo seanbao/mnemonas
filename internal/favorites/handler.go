@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog"
+
+	"github.com/seanbao/mnemonas/internal/auth"
 )
 
 // Handler handles favorites HTTP requests
@@ -26,8 +28,8 @@ func NewHandler(store *Store, logger zerolog.Logger) *Handler {
 // getUserID extracts user ID from request context
 // This should be set by auth middleware
 func getUserID(r *http.Request) string {
-	if userID := r.Context().Value("user_id"); userID != nil {
-		return userID.(string)
+	if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
+		return claims.UserID
 	}
 	// Fallback for when auth is disabled
 	return "anonymous"

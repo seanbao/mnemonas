@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
@@ -78,7 +79,7 @@ func TestCreateShare_UsesBaseURL(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
-	req = req.WithContext(SetUserContext(req.Context(), "user1", false))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
 	recorder := httptest.NewRecorder()
 	handler.CreateShare(recorder, req)
 
