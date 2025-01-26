@@ -834,15 +834,26 @@ label {
 }
 
 /* Toast Customization - Meridian Style */
-[data-slot="toast-region"] {
-  z-index: 9999;
-  pointer-events: none; /* Allow clicks to pass through to elements below */
+[data-slot="toast-region"],
+[data-slot="toast-region"] > div,
+.mn-toast-region,
+.mn-toast-region > div,
+.heroui-toast-container,
+[class*="toast-region"],
+[class*="ToastRegion"] {
+  z-index: 9999 !important;
+  pointer-events: none !important; /* Allow clicks to pass through to elements below */
 }
 
 /* Toast styling with Meridian theme */
 [data-toast],
-[data-slot="toast"] {
-  pointer-events: auto; /* Toast itself remains clickable */
+[data-slot="toast"],
+.mn-toast-region [role="status"],
+.mn-toast-region [role="alert"],
+[class*="toast-wrapper"],
+[data-slot="toast-region"] [role="status"],
+[data-slot="toast-region"] [role="alert"] {
+  pointer-events: auto !important; /* Toast itself remains clickable */
   border-radius: 14px !important;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06) !important;
   backdrop-filter: blur(12px);
