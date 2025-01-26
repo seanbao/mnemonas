@@ -10,6 +10,8 @@ vi.mock('@/api/files', () => ({
   createDirectory: vi.fn(),
   uploadFile: vi.fn(),
   moveFile: vi.fn(),
+  copyFile: vi.fn(),
+  downloadFile: vi.fn(),
 }))
 
 // Mock navigation
@@ -253,14 +255,15 @@ describe('FilesPage', () => {
           path: '/',
         })
 
-      const { rerender } = render(<FilesPage />)
+      const firstRender = render(<FilesPage />)
 
       await waitFor(() => {
         expect(mockListFiles).toHaveBeenCalled()
       })
 
+      firstRender.unmount()
       mockFilesStoreState.setSelection.mockClear()
-      rerender(<FilesPage />)
+      render(<FilesPage />)
 
       await waitFor(() => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith([])
@@ -284,14 +287,15 @@ describe('FilesPage', () => {
           path: '/',
         })
 
-      const { rerender } = render(<FilesPage />)
+      const firstRender = render(<FilesPage />)
 
       await waitFor(() => {
         expect(mockListFiles).toHaveBeenCalled()
       })
 
+      firstRender.unmount()
       mockFilesStoreState.setSelection.mockClear()
-      rerender(<FilesPage />)
+      render(<FilesPage />)
 
       await waitFor(() => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])

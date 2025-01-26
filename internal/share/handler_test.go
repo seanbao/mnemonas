@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,9 +21,15 @@ type fakeShareFS struct {
 	statInfo       *storage.FileInfo
 	dirItems       []*storage.FileInfo
 	dirItemsByPath map[string][]*storage.FileInfo
+	openByPath     map[string]FileReader
 }
 
 func (f *fakeShareFS) OpenFile(ctx context.Context, filePath string) (FileReader, error) {
+	if f.openByPath != nil {
+		if reader, ok := f.openByPath[filePath]; ok {
+			return reader, nil
+		}
+	}
 	return nil, nil
 }
 
@@ -426,6 +433,105 @@ func TestDownloadShareFile_PathTraversal(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+}
+
+func TestDownloadShare_NilReaderReturnsNotFound(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", recorder.Code)
+	}
+}
+
+func TestDownloadShareFile_PreservesWhitespaceInPath(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	targetPath := "/docs/ report .txt"
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			targetPath: io.NopCloser(strings.NewReader("ok")),
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/%20report%20.txt", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShareFile(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+}
+
+func TestListShareItems_PreservesWhitespaceInPath(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs/ report ": {
+				{Path: "/docs/ report /a.txt", Name: "a.txt", Size: 1, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items?path=%20report%20", share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
 }
 

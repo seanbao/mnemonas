@@ -77,8 +77,9 @@ describe('ActivityPage', () => {
 
     it('shows activity count', async () => {
       render(<ActivityPage />)
-      
+
       await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalledTimes(1)
         expect(screen.getByText(/共 3 条记录/)).toBeTruthy()
       })
     })
@@ -170,11 +171,12 @@ describe('ActivityPage', () => {
         expect(screen.getByText('刷新')).toBeTruthy()
       })
 
+      mockListActivity.mockClear()
+
       await user.click(screen.getByText('刷新'))
 
-      // Should have called listActivity again (first call + refresh)
       await waitFor(() => {
-        expect(mockListActivity).toHaveBeenCalledTimes(2)
+        expect(mockListActivity).toHaveBeenCalledTimes(1)
       })
     })
   })

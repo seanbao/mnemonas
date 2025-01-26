@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { AppLayout } from '@/components/layout'
 import { ProtectedRoute } from '@/components/auth'
-import { WelcomeDialog } from '@/components/WelcomeDialog'
 import { 
   DashboardPage, 
   FilesPage, 
@@ -33,8 +32,6 @@ function App() {
 
   return (
     <BrowserRouter>
-      {/* Global welcome dialog for first-run credential display */}
-      <WelcomeDialog />
       <Routes>
         {/* Public routes */}
         <Route path="/login" element={<LoginPage />} />

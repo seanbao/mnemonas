@@ -53,7 +53,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { useClipboardStore } from '@/stores/clipboard'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
-import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, buildDownloadUrl } from '@/api/files'
+import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 
@@ -138,13 +138,9 @@ function FileRow({
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
-    const downloadUrl = buildDownloadUrl(file.path, { download: true })
-    const link = document.createElement('a')
-    link.href = downloadUrl
-    link.download = file.name
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    void downloadFile(file.path, { filename: file.name }).catch((error: Error) => {
+      addToast({ title: '下载失败', description: error.message, color: 'danger' })
+    })
   }, [file.path, file.name])
 
   const handleCopyPath = useCallback(() => {
@@ -376,13 +372,9 @@ function FileCard({
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
-    const downloadUrl = buildDownloadUrl(file.path, { download: true })
-    const link = document.createElement('a')
-    link.href = downloadUrl
-    link.download = file.name
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    void downloadFile(file.path, { filename: file.name }).catch((error: Error) => {
+      addToast({ title: '下载失败', description: error.message, color: 'danger' })
+    })
   }, [file.path, file.name])
 
   const handleCopyPath = useCallback(() => {
@@ -885,14 +877,13 @@ export function FilesPage() {
   // Context menu actions
   const handleContextMenuDownload = useCallback(() => {
     if (!contextMenuFile || contextMenuFile.isDir) return
-    const downloadUrl = buildDownloadUrl(contextMenuFile.path, { download: true })
-    const link = document.createElement('a')
-    link.href = downloadUrl
-    link.download = contextMenuFile.name
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    contextMenu.hide()
+    void downloadFile(contextMenuFile.path, { filename: contextMenuFile.name })
+      .catch((error: Error) => {
+        addToast({ title: '下载失败', description: error.message, color: 'danger' })
+      })
+      .finally(() => {
+        contextMenu.hide()
+      })
   }, [contextMenuFile, contextMenu])
 
   const handleContextMenuCopyPath = useCallback(() => {
@@ -1099,16 +1090,13 @@ export function FilesPage() {
       addToast({ title: '未选择可下载的文件', color: 'warning' })
       return
     }
-    
-    for (const file of files) {
-      const downloadUrl = buildDownloadUrl(file.path, { download: true })
-      const link = document.createElement('a')
-      link.href = downloadUrl
-      link.download = file.name
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-    }
+
+    void Promise.allSettled(files.map((file) => downloadFile(file.path, { filename: file.name }))).then((results) => {
+      const failed = results.filter((result) => result.status === 'rejected').length
+      if (failed > 0) {
+        addToast({ title: '部分文件下载失败', description: `失败 ${failed} 个`, color: 'warning' })
+      }
+    })
     
     addToast({ title: `已开始下载 ${files.length} 个文件`, color: 'success' })
   }, [selectedFiles, sortedFiles])
@@ -1325,17 +1313,6 @@ export function FilesPage() {
     return { files, folders }
   }, [selectedFileItems])
 
-  if (isLoading) {
-    return (
-      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
-        <div className="text-center">
-          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载记忆中...</p>
-        </div>
-      </div>
-    )
-  }
-
   const hasSelection = selectedFiles.size > 0
   const isAllSelected = sortedFiles.length > 0 && selectedFiles.size === sortedFiles.length
   const isPartialSelected = selectedFiles.size > 0 && selectedFiles.size < sortedFiles.length
@@ -1402,6 +1379,17 @@ export function FilesPage() {
     setActiveFilePath(null)
     lastSelectedIndexRef.current = firstIndex
   }, [setSelection, setFocusedIndex, setActiveFilePath, sortedFiles])
+
+  if (isLoading) {
+    return (
+      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+        <div className="text-center">
+          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-default-500">加载记忆中...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div 

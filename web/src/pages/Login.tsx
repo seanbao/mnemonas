@@ -216,7 +216,7 @@ export function LoginPage() {
                 <p className="mb-2 text-sm font-medium">默认账户</p>
                 <div className="text-default-500 space-y-1 text-xs">
                   <p>首次运行时默认管理员账号为 <span className="font-mono text-accent-primary">admin</span></p>
-                  <p>初始密码请查看服务器启动日志</p>
+                  <p>初始密码请查看服务器启动日志，浏览器界面不显示初始密码</p>
                 </div>
               </div>
             </CardBody>

@@ -682,6 +682,20 @@ func TestServer_RestoreVersion_MissingPath(t *testing.T) {
 	}
 }
 
+func TestServer_RestoreVersion_NotFound(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	validHash := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	req := httptest.NewRequest("POST", "/api/v1/versions/"+validHash+"/restore?path=/restore/missing.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("RestoreVersion missing version status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
 func TestServer_NotFound(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -1070,10 +1084,11 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 }
 
-func TestServer_SetupStatus_CustomWebDAVPassword(t *testing.T) {
+func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 
 	secrets := &config.Secrets{
+		WebPassword:    "web-pass",
 		WebDAVPassword: "auto-pass",
 		SetupShown:     false,
 	}
@@ -1098,8 +1113,30 @@ func TestServer_SetupStatus_CustomWebDAVPassword(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to parse response JSON: %v", err)
 	}
+	if payload["web_password"] != nil {
+		t.Fatalf("expected web_password to be omitted from setup status")
+	}
+	if payload["web_username"] != nil {
+		t.Fatalf("expected web_username to be omitted from setup status")
+	}
 	if _, ok := payload["webdav_password"]; ok {
-		t.Fatalf("expected webdav_password to be omitted for custom password")
+		t.Fatalf("expected webdav_password to be omitted from setup status")
+	}
+	if _, ok := payload["webdav_username"]; ok {
+		t.Fatalf("expected webdav_username to be omitted from setup status")
+	}
+}
+
+func TestServer_AcknowledgeSetup_RequiresAuthentication(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("acknowledge setup status = %d, want %d", w.Code, http.StatusUnauthorized)
 	}
 }
 
@@ -1129,6 +1166,33 @@ func TestServer_RestoreVersion_Success(t *testing.T) {
 	// Should restore successfully or return appropriate error
 	if w.Code != http.StatusOK && w.Code != http.StatusNotFound {
 		t.Errorf("RestoreVersion status = %d, want %d or %d", w.Code, http.StatusOK, http.StatusNotFound)
+	}
+}
+
+func TestServer_RestoreVersion_RequiresAdmin(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginResp auth.LoginResponse
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/versions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/restore?path=/restore-version/file.txt", nil)
+	restoreReq.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+
+	if restoreRec.Code != http.StatusForbidden {
+		t.Fatalf("restore status = %d, want %d", restoreRec.Code, http.StatusForbidden)
 	}
 }
 

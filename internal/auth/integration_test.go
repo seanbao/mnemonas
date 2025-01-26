@@ -47,7 +47,7 @@ func TestConfigMatrix_AuthInitialization(t *testing.T) {
 			}
 
 			// Act: create user store (triggers initialization)
-			store, err := NewUserStore(usersFile)
+			store, _, err := NewUserStore(usersFile)
 			if err != nil {
 				t.Fatalf("failed to create user store: %v", err)
 			}
@@ -83,7 +83,7 @@ func TestPasswordFileLifecycle(t *testing.T) {
 	passwordFile := filepath.Join(dir, "initial-password.txt")
 
 	// Step 1: Fresh install - password file should be created
-	store, err := NewUserStore(usersFile)
+	store, _, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to create user store: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestPasswordFilePermissions(t *testing.T) {
 	usersFile := filepath.Join(dir, "users.json")
 	passwordFile := filepath.Join(dir, "initial-password.txt")
 
-	_, err := NewUserStore(usersFile)
+	_, _, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to create user store: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestUsersFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "users.json")
 
-	_, err := NewUserStore(usersFile)
+	_, _, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to create user store: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestPasswordFileContent(t *testing.T) {
 	usersFile := filepath.Join(dir, "users.json")
 	passwordFile := filepath.Join(dir, "initial-password.txt")
 
-	_, err := NewUserStore(usersFile)
+	_, _, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to create user store: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestReloadPreservesNoPasswordFile(t *testing.T) {
 	passwordFile := filepath.Join(dir, "initial-password.txt")
 
 	// First load: creates password file
-	store1, err := NewUserStore(usersFile)
+	store1, _, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to create user store: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestReloadPreservesNoPasswordFile(t *testing.T) {
 	}
 
 	// Second load: should NOT create new password file
-	_, err = NewUserStore(usersFile)
+	_, _, err = NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to reload user store: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestBoundaryConditions_Password(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			store, _ := NewUserStore(filepath.Join(dir, "users.json"))
+			store, _, _ := NewUserStore(filepath.Join(dir, "users.json"))
 
 			_, err := store.Create("testuser", tc.password, "", RoleUser)
 
@@ -313,7 +313,7 @@ func TestBoundaryConditions_Username(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			store, _ := NewUserStore(filepath.Join(dir, "users.json"))
+			store, _, _ := NewUserStore(filepath.Join(dir, "users.json"))
 
 			_, err := store.Create(tc.username, "validpassword123", "", RoleUser)
 
@@ -330,7 +330,7 @@ func TestBoundaryConditions_Username(t *testing.T) {
 // TestCaseInsensitiveUsername tests that usernames are case-insensitive
 func TestCaseInsensitiveUsername(t *testing.T) {
 	dir := t.TempDir()
-	store, _ := NewUserStore(filepath.Join(dir, "users.json"))
+	store, _, _ := NewUserStore(filepath.Join(dir, "users.json"))
 
 	// Create user with mixed case
 	_, err := store.Create("TestUser", "password123", "", RoleUser)

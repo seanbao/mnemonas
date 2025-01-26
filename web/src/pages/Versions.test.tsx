@@ -1,14 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
-import { VersionsPage } from './Versions'
+
+const mockUseIsAdmin = vi.fn(() => true)
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
   getVersions: vi.fn(),
-  getDownloadUrl: vi.fn((path) => `/dav${path}`),
+  buildDownloadUrl: vi.fn((path, options?: { version?: string }) => options?.version
+    ? `/api/v1/download${path}?version=${options.version}`
+    : `/api/v1/download${path}`),
   restoreVersion: vi.fn(),
 }))
+
+vi.mock('@/stores/auth', () => ({
+  useIsAdmin: () => mockUseIsAdmin(),
+}))
+
+import { VersionsPage } from './Versions'
 
 import { getVersions, restoreVersion } from '@/api/files'
 
@@ -18,6 +27,8 @@ const mockRestoreVersion = vi.mocked(restoreVersion)
 describe('VersionsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    window.history.pushState({}, '', '/')
+    mockUseIsAdmin.mockReturnValue(true)
     mockGetVersions.mockResolvedValue([
       { version: 3, hash: 'hash3', size: 3000, timestamp: '2024-01-03T00:00:00Z' },
       { version: 2, hash: 'hash2', size: 2000, timestamp: '2024-01-02T00:00:00Z' },
@@ -132,8 +143,7 @@ describe('VersionsPage', () => {
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        // Check for version content in table
-        expect(screen.getByTestId('table-body')).toBeTruthy()
+        expect(screen.getByRole('table', { name: '版本历史' })).toBeTruthy()
       })
     })
 
@@ -173,6 +183,21 @@ describe('VersionsPage', () => {
         const restoreButtons = screen.queryAllByTitle('恢复到此版本')
         expect(restoreButtons.length).toBeGreaterThan(0)
       })
+    })
+
+    it('hides restore button for non-admin users', async () => {
+      mockUseIsAdmin.mockReturnValue(false)
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+      })
+
+      expect(screen.queryAllByTitle('恢复到此版本')).toHaveLength(0)
     })
 
     it('opens restore modal when clicking restore button', async () => {
@@ -232,6 +257,23 @@ describe('VersionsPage', () => {
         const downloadButtons = screen.queryAllByTitle('下载此版本')
         expect(downloadButtons.length).toBeGreaterThan(0)
       })
+    })
+
+    it('opens preview with isolated window features', async () => {
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('预览')[0])
+
+      expect(openSpy).toHaveBeenCalledWith('/api/v1/download/test.txt?version=hash3', '_blank', 'noopener,noreferrer')
     })
   })
 
