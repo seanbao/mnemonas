@@ -116,6 +116,22 @@ export function clearTokens(): void {
   localStorage.removeItem(USER_KEY)
 }
 
+async function syncDownloadSession(): Promise<void> {
+  const token = getStoredToken()
+  if (!token) return
+
+  try {
+    await fetch(`${API_BASE}/auth/download-session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+  } catch {
+    // Ignore download session sync failures; header-based fetch remains available.
+  }
+}
+
 // Auth header helper
 export function getAuthHeaders(): HeadersInit {
   const token = getStoredToken()
@@ -169,6 +185,7 @@ async function tryRefreshToken(): Promise<boolean> {
     
     const data: RefreshResponse = await response.json()
     storeTokens(data.access_token, data.refresh_token, data.user)
+    await syncDownloadSession()
     return true
   } catch {
     clearTokens()
@@ -197,6 +214,7 @@ export async function login(username: string, password: string): Promise<User> {
   
   const data: LoginResponse = await response.json()
   storeTokens(data.access_token, data.refresh_token, data.user)
+  await syncDownloadSession()
   return data.user
 }
 
@@ -231,6 +249,7 @@ export async function getCurrentUser(): Promise<User | null> {
   }
   
   const data = await response.json()
+  await syncDownloadSession()
   return data.user
 }
 

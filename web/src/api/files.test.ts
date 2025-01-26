@@ -387,9 +387,9 @@ describe('API: files', () => {
         expect(getDownloadUrl('/文档/测试.txt')).toBe('/api/v1/download/%E6%96%87%E6%A1%A3/%E6%B5%8B%E8%AF%95.txt')
       })
 
-      it('adds auth query when token exists', () => {
+      it('does not add auth query when token exists', () => {
         localStorage.setItem('mnemonas_token', 'test-token')
-        expect(getDownloadUrl('/docs/file.pdf')).toBe('/api/v1/download/docs/file.pdf?auth=test-token')
+        expect(getDownloadUrl('/docs/file.pdf')).toBe('/api/v1/download/docs/file.pdf')
       })
     })
 
@@ -459,9 +459,9 @@ describe('API: files', () => {
         expect(getThumbnailUrl('/photo.jpg', 'large')).toBe('/api/v1/thumbnails/photo.jpg?size=large')
       })
 
-      it('adds auth query when token exists', () => {
+      it('does not add auth query when token exists', () => {
         localStorage.setItem('mnemonas_token', 'test-token')
-        expect(getThumbnailUrl('/photo.jpg')).toBe('/api/v1/thumbnails/photo.jpg?size=medium&auth=test-token')
+      expect(getThumbnailUrl('/photo.jpg')).toBe('/api/v1/thumbnails/photo.jpg?size=medium')
       })
     })
   })

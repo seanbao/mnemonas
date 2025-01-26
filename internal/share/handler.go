@@ -2,6 +2,9 @@ package share
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -40,6 +43,8 @@ type Handler struct {
 	fs      FileOpener
 	baseURL string
 }
+
+const shareAccessCookiePrefix = "mnemonas_share_"
 
 // NewHandler creates a new share handler
 // fs can be nil if file download is not needed
@@ -360,6 +365,22 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if share.HasPassword() {
+		if h.hasShareAccess(r, share) {
+			info := &PublicShareInfo{
+				ID:          share.ID,
+				Type:        share.Type,
+				HasPassword: share.HasPassword(),
+				Permission:  share.Permission,
+				Description: share.Description,
+			}
+
+			h.enrichPublicShareInfo(r.Context(), info, share)
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(info)
+			return
+		}
+
 		if err := share.CanAccess(); err != nil {
 			switch {
 			case errors.Is(err, ErrShareAccessLimit):
@@ -453,6 +474,8 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	h.setShareAccessCookie(w, r, share)
+
 	info := &PublicShareInfo{
 		ID:          share.ID,
 		Type:        share.Type,
@@ -469,9 +492,8 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 // DownloadShare handles file download for shares
 func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	password := r.URL.Query().Get("password")
 
-	share, err := h.store.Access(id, password)
+	share, err := h.accessAuthorizedShare(r, id)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrShareNotFound):
@@ -519,7 +541,6 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	filePath := chi.URLParam(r, "*")
-	password := r.URL.Query().Get("password")
 	if filePath == "" {
 		prefix := "/s/" + id + "/download/"
 		if strings.HasPrefix(r.URL.Path, prefix) {
@@ -528,7 +549,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 	filePath = strings.TrimPrefix(filePath, "/")
 
-	share, err := h.store.Access(id, password)
+	share, err := h.accessAuthorizedShare(r, id)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrShareNotFound):
@@ -586,14 +607,13 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 // ListShareItems lists items within a shared folder.
 func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	password := r.URL.Query().Get("password")
 	relPath := r.URL.Query().Get("path")
 	relPath = strings.TrimPrefix(relPath, "/")
 	if relPath == "." {
 		relPath = ""
 	}
 
-	share, err := h.store.Access(id, password)
+	share, err := h.accessAuthorizedShare(r, id)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrShareNotFound):
@@ -689,6 +709,84 @@ func (h *Handler) buildShareURL(id string) string {
 		return h.baseURL + "/s/" + id
 	}
 	return "/s/" + id
+}
+
+func (h *Handler) accessAuthorizedShare(r *http.Request, id string) (*Share, error) {
+	share, err := h.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := share.CanAccess(); err != nil {
+		return nil, err
+	}
+
+	if share.HasPassword() && !h.hasShareAccess(r, share) {
+		return nil, ErrInvalidPassword
+	}
+
+	if err := h.store.RecordAccess(id); err != nil {
+		return nil, err
+	}
+
+	return h.store.Get(id)
+}
+
+func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {
+	if share == nil || !share.HasPassword() {
+		return true
+	}
+
+	cookie, err := r.Cookie(shareAccessCookieName(share.ID))
+	if err != nil {
+		return false
+	}
+
+	expected := h.shareAccessToken(share)
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expected)) == 1
+}
+
+func (h *Handler) setShareAccessCookie(w http.ResponseWriter, r *http.Request, share *Share) {
+	if share == nil || !share.HasPassword() {
+		return
+	}
+
+	cookie := &http.Cookie{
+		Name:     shareAccessCookieName(share.ID),
+		Value:    h.shareAccessToken(share),
+		Path:     "/s/" + share.ID,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsHTTPS(r),
+	}
+
+	if share.ExpiresAt != nil {
+		cookie.Expires = share.ExpiresAt.UTC()
+		cookie.MaxAge = int(time.Until(*share.ExpiresAt).Seconds())
+		if cookie.MaxAge < 0 {
+			cookie.MaxAge = 0
+		}
+	} else {
+		cookie.MaxAge = int((24 * time.Hour).Seconds())
+	}
+
+	http.SetCookie(w, cookie)
+}
+
+func (h *Handler) shareAccessToken(share *Share) string {
+	sum := sha256.Sum256([]byte(share.ID + ":" + share.PasswordHash))
+	return hex.EncodeToString(sum[:])
+}
+
+func shareAccessCookieName(id string) string {
+	return shareAccessCookiePrefix + id
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func shareRelativePath(basePath, entryPath string) (string, error) {

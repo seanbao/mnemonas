@@ -201,14 +201,14 @@ describe('buildPreviewUrl', () => {
     expect(buildPreviewUrl('file.txt')).toBe('/api/v1/download/file.txt')
   })
 
-  it('adds auth query when token exists', () => {
+  it('does not append auth query when token exists', () => {
     localStorage.setItem('mnemonas_token', 'test-token')
     expect(buildPreviewUrl('/documents/file.txt')).toBe(
-      '/api/v1/download/documents/file.txt?auth=test-token'
+      '/api/v1/download/documents/file.txt'
     )
   })
 
-  it('skips auth query when includeAuth is false', () => {
+  it('returns the same URL when includeAuth is false', () => {
     localStorage.setItem('mnemonas_token', 'test-token')
     expect(buildPreviewUrl('/documents/file.txt', { includeAuth: false })).toBe(
       '/api/v1/download/documents/file.txt'

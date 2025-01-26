@@ -220,14 +220,11 @@ export async function getPublicShare(id: string): Promise<PublicShareInfo> {
  */
 export async function getPublicShareItems(
   id: string,
-  options?: { path?: string; password?: string }
+  options?: { path?: string }
 ): Promise<PublicShareItemsResponse> {
   const params = new URLSearchParams()
   if (options?.path) {
     params.set('path', options.path)
-  }
-  if (options?.password) {
-    params.set('password', options.password)
   }
   const query = params.toString()
   const url = query ? `/s/${id}/items?${query}` : `/s/${id}/items`
@@ -258,6 +255,7 @@ export async function accessShareWithPassword(id: string, password: string): Pro
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password }),
+    credentials: 'same-origin',
   })
   
   if (!response.ok) {
@@ -280,26 +278,18 @@ export async function accessShareWithPassword(id: string, password: string): Pro
 /**
  * Get download URL for shared file
  */
-export function getShareDownloadUrl(id: string, password?: string): string {
-  const url = `/s/${id}/download`
-  if (password) {
-    return `${url}?password=${encodeURIComponent(password)}`
-  }
-  return url
+export function getShareDownloadUrl(id: string): string {
+  return `/s/${id}/download`
 }
 
 /**
  * Get download URL for file in shared folder
  */
-export function getShareFileDownloadUrl(id: string, filePath: string, password?: string): string {
+export function getShareFileDownloadUrl(id: string, filePath: string): string {
   const normalizedPath = normalizePath(filePath)
   const encodedPath = encodePathForUrl(normalizedPath)
   const trimmedPath = encodedPath.startsWith('/') ? encodedPath.slice(1) : encodedPath
-  const url = `/s/${id}/download/${trimmedPath}`
-  if (password) {
-    return `${url}?password=${encodeURIComponent(password)}`
-  }
-  return url
+  return `/s/${id}/download/${trimmedPath}`
 }
 
 // === Utility functions ===
