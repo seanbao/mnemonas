@@ -210,39 +210,39 @@ docker compose up -d
 
 ### Go 控制面
 
-**配置加载**（[internal/config/config.go](internal/config/config.go)）：
+**配置加载**（[../internal/config/config.go](../internal/config/config.go)）：
 - TOML 格式，默认目录 `~/.mnemonas/`
 - 候选路径：`~/.mnemonas/config.toml`
 
-**WebDAV 实现**（[internal/webdav/handler.go](internal/webdav/handler.go)）：
+**WebDAV 实现**（[../internal/webdav/handler.go](../internal/webdav/handler.go)）：
 - 实现 RFC 4918（PROPFIND、GET、PUT、DELETE、MKCOL、COPY、MOVE、LOCK/UNLOCK）
 - `LOCK/UNLOCK` 返回虚拟锁（简化实现）
 - 始终使用 `cleanPath()` 规范化路径
 
-**CAS 布局**（[internal/caslayout/layout.go](internal/caslayout/layout.go)）：
+**CAS 布局**（[../internal/caslayout/layout.go](../internal/caslayout/layout.go)）：
 - 分片目录结构：`ab/cd/abcd1234...`（2 层，每层 2 字符）
 - 原子写入：写入 `.tmp` → fsync → rename
 - 设计为未来可独立开源的模块
 
 ### Rust 数据面
 
-**CAS 存储**（[dataplane/src/cas.rs](dataplane/src/cas.rs)）：
+**CAS 存储**（[../dataplane/src/cas.rs](../dataplane/src/cas.rs)）：
 - BLAKE3 哈希（比 SHA256 快 10 倍以上）
 - 内存索引（DashMap）加速存在性检查
 - 存储层去重
 
-**CDC 分块**（[dataplane/src/cdc.rs](dataplane/src/cdc.rs)）：
+**CDC 分块**（[../dataplane/src/cdc.rs](../dataplane/src/cdc.rs)）：
 - 使用 `fastcdc` crate，块大小可配置
 - `FileManifest` 记录块列表用于重组文件
 - 可用重复模式数据测试去重效果
 
-**gRPC 服务**（[dataplane/src/service.rs](dataplane/src/service.rs)）：
+**gRPC 服务**（[../dataplane/src/service.rs](../dataplane/src/service.rs)）：
 - 大文件使用流式传输（`PutFile`、`GetFile`）
 - 所有 chunk 读取时校验哈希
 
 ## 配置说明
 
-`~/.mnemonas/config.toml` 关键配置（参见 [mnemonas.example.toml](mnemonas.example.toml)）：
+`~/.mnemonas/config.toml` 关键配置（参见 [../mnemonas.example.toml](../mnemonas.example.toml)）：
 
 | 配置段 | 关键设置 |
 |---------|-------------|
@@ -298,6 +298,6 @@ curl http://localhost:9091/stats
 
 ## 相关文档
 
-详细设计与路线图见 [ideas-lab-notes](../ideas-lab-notes/)：
-- [ideas/open-source-nas-go-rust.md](../ideas-lab-notes/ideas/open-source-nas-go-rust.md) — 完整项目规格说明
-- [ideas/nas-data-safety-principles.md](../ideas-lab-notes/ideas/nas-data-safety-principles.md) — 数据安全设计原则
+详细设计与路线图见 [../../ideas-lab-notes](../../ideas-lab-notes/)：
+- [../../ideas-lab-notes/ideas/open-source-nas-go-rust.md](../../ideas-lab-notes/ideas/open-source-nas-go-rust.md) — 完整项目规格说明
+- [../../ideas-lab-notes/ideas/mnemonas/nas-data-safety-principles.md](../../ideas-lab-notes/ideas/mnemonas/nas-data-safety-principles.md) — 数据安全设计原则

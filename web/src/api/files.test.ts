@@ -13,6 +13,7 @@ import {
   deleteFromTrash,
   emptyTrash,
   ApiError,
+  downloadFile,
   getDownloadUrl,
   getThumbnailUrl,
   versionToDisplayFormat,
@@ -389,6 +390,62 @@ describe('API: files', () => {
       it('adds auth query when token exists', () => {
         localStorage.setItem('mnemonas_token', 'test-token')
         expect(getDownloadUrl('/docs/file.pdf')).toBe('/api/v1/download/docs/file.pdf?auth=test-token')
+      })
+    })
+
+    describe('downloadFile', () => {
+      it('downloads via authenticated fetch without auth query', async () => {
+        const blob = new Blob(['file-content'], { type: 'text/plain' })
+        const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+        const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        const revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+
+        localStorage.setItem('mnemonas_token', 'test-token')
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'Content-Disposition': 'attachment; filename="report.txt"' }),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs/report.txt')
+
+        expect(mockFetch).toHaveBeenCalledWith('/api/v1/download/docs/report.txt?download=true', expect.objectContaining({
+          headers: { Authorization: 'Bearer test-token' },
+        }))
+        expect(clickSpy).toHaveBeenCalled()
+        expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
+        expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:test')
+      })
+
+      it('uses fallback filename when header is missing', async () => {
+        const blob = new Blob(['file-content'])
+        let createdLink: HTMLAnchorElement | null = null
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs/report.txt', { filename: 'custom.txt' })
+
+	        expect(createdLink?.download).toBe('custom.txt')
+        createElementSpy.mockRestore()
       })
     })
 

@@ -7,7 +7,7 @@ import {
   getStoredUser,
   getStoredToken,
 } from '@/api/auth'
-import { getSetupStatus } from '@/api/setup'
+import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
 
 interface AuthState {
   user: User | null
@@ -86,7 +86,21 @@ export const useAuthStore = create<AuthState>((set) => ({
     
     try {
       const user = await apiLogin(username, password)
+
       set({ user, isAuthenticated: true, isLoading: false, error: null })
+
+      if (user.role === 'admin') {
+        void (async () => {
+          try {
+            const setupStatus = await getSetupStatus()
+            if (setupStatus.is_first_run) {
+              await acknowledgeSetup()
+            }
+          } catch {
+            // Ignore setup acknowledgement failures to avoid blocking login.
+          }
+        })()
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : '登录失败'
       set({ isLoading: false, error: message })
