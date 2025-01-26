@@ -49,10 +49,13 @@ func (e *APIError) WithRequestID(id string) *APIError {
 }
 
 // Write writes the error as JSON response
-func (e *APIError) Write(w http.ResponseWriter, status int) {
+func (e *APIError) Write(w http.ResponseWriter, status int) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(e)
+	if err := json.NewEncoder(w).Encode(e); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Common error responses
@@ -115,8 +118,11 @@ func (r *APIResponse) WithRequestID(id string) *APIResponse {
 }
 
 // Write writes the response as JSON
-func (r *APIResponse) Write(w http.ResponseWriter, status int) {
+func (r *APIResponse) Write(w http.ResponseWriter, status int) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(r)
+	if err := json.NewEncoder(w).Encode(r); err != nil {
+		return err
+	}
+	return nil
 }

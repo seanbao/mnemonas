@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 # 项目根目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+FRONTEND_NODE_VERSION_FILE="$PROJECT_ROOT/.nvmrc"
 
 # 日志目录
 LOG_DIR="$PROJECT_ROOT/logs"
@@ -42,6 +43,50 @@ log_error() {
 
 log_section() {
     echo -e "\n${BLUE}━━━ $1 ━━━${NC}"
+}
+
+require_frontend_node() {
+    local required_version=""
+
+    if [ ! -f "$FRONTEND_NODE_VERSION_FILE" ]; then
+        log_error "缺少 Node.js 版本文件: $FRONTEND_NODE_VERSION_FILE"
+        log_info "请在项目根目录添加 .nvmrc 后重试"
+        return 1
+    fi
+
+    required_version="$(tr -d '[:space:]' < "$FRONTEND_NODE_VERSION_FILE")"
+    if [ -z "$required_version" ]; then
+        log_error ".nvmrc 为空，无法确定前端 Node.js 版本"
+        return 1
+    fi
+
+    if [ ! -f "$HOME/.nvm/nvm.sh" ]; then
+        log_error "未找到 nvm，请先安装并加载 nvm"
+        log_info "参考命令: source \"$HOME/.nvm/nvm.sh\" && nvm install $required_version && nvm use $required_version"
+        return 1
+    fi
+
+    # shellcheck source=/dev/null
+    source "$HOME/.nvm/nvm.sh"
+
+    if ! nvm install "$required_version" >/dev/null; then
+        log_error "无法安装 Node.js $required_version"
+        return 1
+    fi
+
+    if ! nvm use "$required_version" >/dev/null; then
+        log_error "无法切换到 Node.js $required_version"
+        return 1
+    fi
+
+    if ! node ./scripts/check-node.cjs >/dev/null; then
+        log_error "当前 Node.js 版本不满足前端要求: $(node --version 2>/dev/null || echo unknown)"
+        log_info "请执行: source \"$HOME/.nvm/nvm.sh\" && nvm use"
+        return 1
+    fi
+
+    log_info "前端 Node.js 版本: $(node --version)"
+    return 0
 }
 
 # 检查端口是否被占用
@@ -227,15 +272,9 @@ start_frontend() {
     fi
     
     cd "$PROJECT_ROOT/web"
-    
-    # 确保使用正确的 Node.js 版本
-    if [ -f "$HOME/.nvm/nvm.sh" ]; then
-        source "$HOME/.nvm/nvm.sh"
-        if [ -f ".nvmrc" ]; then
-            nvm use >/dev/null 2>&1 || nvm install >/dev/null 2>&1
-        else
-            nvm use 22 >/dev/null 2>&1 || nvm use node >/dev/null 2>&1
-        fi
+
+    if ! require_frontend_node; then
+        return 1
     fi
     
     # 检查依赖

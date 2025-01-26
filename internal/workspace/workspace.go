@@ -4,6 +4,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -11,6 +12,13 @@ import (
 	"strings"
 	"time"
 )
+
+func cleanupTempPath(tmpPath string, operationErr error) error {
+	if removeErr := os.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
+	}
+	return operationErr
+}
 
 // Common errors
 var (
@@ -192,21 +200,17 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 	closeErr := f.Close()
 
 	if writeErr != nil {
-		os.Remove(tmpPath)
-		return writeErr
+		return cleanupTempPath(tmpPath, writeErr)
 	}
 	if syncErr != nil {
-		os.Remove(tmpPath)
-		return syncErr
+		return cleanupTempPath(tmpPath, syncErr)
 	}
 	if closeErr != nil {
-		os.Remove(tmpPath)
-		return closeErr
+		return cleanupTempPath(tmpPath, closeErr)
 	}
 
 	if err := os.Rename(tmpPath, fullPath); err != nil {
-		os.Remove(tmpPath)
-		return err
+		return cleanupTempPath(tmpPath, err)
 	}
 
 	return nil
@@ -234,21 +238,17 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 	closeErr := f.Close()
 
 	if copyErr != nil {
-		os.Remove(tmpPath)
-		return copyErr
+		return cleanupTempPath(tmpPath, copyErr)
 	}
 	if syncErr != nil {
-		os.Remove(tmpPath)
-		return syncErr
+		return cleanupTempPath(tmpPath, syncErr)
 	}
 	if closeErr != nil {
-		os.Remove(tmpPath)
-		return closeErr
+		return cleanupTempPath(tmpPath, closeErr)
 	}
 
 	if err := os.Rename(tmpPath, fullPath); err != nil {
-		os.Remove(tmpPath)
-		return err
+		return cleanupTempPath(tmpPath, err)
 	}
 
 	return nil
@@ -367,21 +367,17 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 	closeErr := dstFile.Close()
 
 	if copyErr != nil {
-		os.Remove(tmpPath)
-		return copyErr
+		return cleanupTempPath(tmpPath, copyErr)
 	}
 	if syncErr != nil {
-		os.Remove(tmpPath)
-		return syncErr
+		return cleanupTempPath(tmpPath, syncErr)
 	}
 	if closeErr != nil {
-		os.Remove(tmpPath)
-		return closeErr
+		return cleanupTempPath(tmpPath, closeErr)
 	}
 
 	if err := os.Rename(tmpPath, dstPath); err != nil {
-		os.Remove(tmpPath)
-		return err
+		return cleanupTempPath(tmpPath, err)
 	}
 
 	return nil

@@ -19,16 +19,12 @@ test.describe('存储管理页面', () => {
 
   test('应显示存储管理标题', async ({ page }) => {
     const title = page.getByText('存储管理').first()
-    // Soft assertion: element may not exist in all states
-    const isVisible = await title.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(title).toBeVisible()
   })
 
   test('应显示刷新按钮', async ({ page }) => {
     const refreshBtn = page.getByRole('button', { name: /刷新/i })
-    // Soft assertion: element may not exist in all states
-    const isVisible = await refreshBtn.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(refreshBtn).toBeVisible()
   })
 })
 
@@ -39,9 +35,7 @@ test.describe('存储空间概览', () => {
 
   test('应显示存储使用进度条', async ({ page }) => {
     const storageOverview = page.getByText(/存储空间使用|已使用/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await storageOverview.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(storageOverview).toBeVisible()
   })
 })
 
@@ -52,30 +46,22 @@ test.describe('存储统计卡片', () => {
 
   test('应显示对象总数', async ({ page }) => {
     const objectsCard = page.getByText(/对象总数/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await objectsCard.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(objectsCard).toBeVisible()
   })
 
   test('应显示存储大小', async ({ page }) => {
     const sizeCard = page.getByText(/存储大小/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await sizeCard.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(sizeCard).toBeVisible()
   })
 
   test('应显示去重率', async ({ page }) => {
     const dedupCard = page.getByText(/去重率/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await dedupCard.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(dedupCard).toBeVisible()
   })
 
   test('应显示节省空间', async ({ page }) => {
     const savingsCard = page.getByText(/节省空间/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await savingsCard.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(savingsCard).toBeVisible()
   })
 })
 
@@ -86,23 +72,17 @@ test.describe('维护操作卡片', () => {
 
   test('应显示数据巡检卡片', async ({ page }) => {
     const scrubCard = page.getByText(/数据巡检|Scrub/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await scrubCard.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(scrubCard).toBeVisible()
   })
 
   test('应显示垃圾回收卡片', async ({ page }) => {
     const gcCard = page.getByText(/垃圾回收|GC/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await gcCard.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(gcCard).toBeVisible()
   })
 
   test('维护按钮应标记为即将推出', async ({ page }) => {
-    const comingSoon = page.getByText(/即将推出|功能开发中/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await comingSoon.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    const maintenanceButton = page.getByRole('button', { name: '打开维护工具' }).first()
+    await expect(maintenanceButton).toBeVisible()
   })
 })
 
@@ -111,13 +91,9 @@ test.describe('存储管理刷新功能', () => {
     await ensureAuthenticatedAt(page, '/storage')
 
     const refreshBtn = page.getByRole('button', { name: /刷新/i })
-    if (await refreshBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await refreshBtn.click()
-      await page.waitForTimeout(1000)
-      
-      // 页面应仍然正常显示
-      await expect(page.locator('body')).toBeVisible()
-    }
+    await expect(refreshBtn).toBeVisible()
+    await refreshBtn.click()
+    await expect(page.locator('body')).toBeVisible()
   })
 })
 
@@ -126,9 +102,7 @@ test.describe('CAS 存储系统说明', () => {
     await ensureAuthenticatedAt(page, '/storage')
 
     const casDescription = page.getByText(/CAS|内容寻址存储/i)
-    // Soft assertion: element may not exist in all states
-    const isVisible = await casDescription.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found, this might be expected') }
+    await expect(casDescription).toBeVisible()
   })
 })
 
@@ -141,8 +115,7 @@ test.describe('存储管理页面响应式', () => {
     await expect(body).toBeVisible()
 
     const title = page.getByText('存储管理').first()
-    const isVisible = await title.isVisible({ timeout: 3000 }).catch(() => false)
-    if (!isVisible) { console.log('Title not found on mobile - might be collapsed') }
+    await expect(title).toBeVisible()
   })
 
   test('平板端布局', async ({ page }) => {

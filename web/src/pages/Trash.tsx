@@ -128,6 +128,7 @@ export function TrashPage() {
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
 
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
+  const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
   const { isOpen: isEmptyOpen, onOpen: onEmptyOpen, onClose: onEmptyClose } = useDisclosure()
 
   const { data, isLoading } = useQuery({
@@ -221,7 +222,8 @@ export function TrashPage() {
     const ids = Array.from(selectedItems)
     if (ids.length === 0) return
     await executeBatchDelete(ids)
-  }, [selectedItems, executeBatchDelete])
+    onBatchDeleteClose()
+  }, [selectedItems, executeBatchDelete, onBatchDeleteClose])
 
   const handleDeleteClick = useCallback((item: TrashItem) => {
     setActionItem(item)
@@ -303,7 +305,7 @@ export function TrashPage() {
             variant="flat"
             color="danger"
             startContent={<Trash2 size={14} />}
-            onPress={handleBatchDelete}
+            onPress={onBatchDeleteOpen}
             isLoading={isBatchDeleting}
             className="rounded-xl"
           >
@@ -401,6 +403,50 @@ export function TrashPage() {
               color="danger"
               onPress={handleConfirmDelete}
               isLoading={deleteMutation.isPending}
+              className="rounded-xl"
+            >
+              永久删除
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Batch Delete Confirmation Modal */}
+      <Modal
+        isOpen={isBatchDeleteOpen}
+        onClose={onBatchDeleteClose}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
+      >
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <AlertTriangle size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">确认批量永久删除</h3>
+              <p className="text-xs text-default-500 font-normal">此操作无法撤销</p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4">
+            <p className="text-foreground">确定要永久删除已选择的 <strong>{selectedItems.size}</strong> 项吗？</p>
+            <p className="text-xs text-default-500 mt-2">
+              所选项目将从回收站中彻底移除，无法找回。
+            </p>
+          </ModalBody>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onBatchDeleteClose} className="text-default-600 rounded-xl">
+              取消
+            </Button>
+            <Button
+              color="danger"
+              onPress={handleBatchDelete}
+              isLoading={isBatchDeleting}
               className="rounded-xl"
             >
               永久删除

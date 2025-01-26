@@ -36,6 +36,8 @@
 | cargo-watch | Rust 热重载 |
 | nvm | Node.js 版本管理 |
 
+项目根目录 `.nvmrc` 固定前端开发版本为 `22`。前端相关命令默认通过 `nvm use` 进入该版本执行。
+
 ---
 
 ## 依赖安装
@@ -129,6 +131,10 @@ protoc --version    # libprotoc 28.x
 # 验证 Go protobuf 插件
 which protoc-gen-go       # 应该在 $GOPATH/bin 下
 which protoc-gen-go-grpc
+
+# 加载仓库要求的 Node.js 版本
+source ~/.nvm/nvm.sh
+nvm use
 ```
 
 ---
@@ -274,6 +280,13 @@ cd web && npm run build                             # 前端
 使用 `scripts/dev.sh` 脚本可以一键启动完整的开发环境：
 
 ```bash
+source ~/.nvm/nvm.sh
+nvm use
+```
+
+未安装或未加载 `nvm` 时，`./scripts/dev.sh --frontend` 会直接退出并提示修复方式。
+
+```bash
 # 启动所有组件（构建 + dataplane + nasd + 前端）
 ./scripts/dev.sh
 
@@ -296,7 +309,7 @@ cd web && npm run build                             # 前端
 - **健康检查**：等待服务就绪后再继续
 - **日志管理**：所有日志写入 `logs/` 目录
 - **PID 跟踪**：使用 `.pids/` 目录跟踪进程，支持干净停止
-- **Node.js 版本**：检测 nvm，优先使用 `web/.nvmrc`（默认 22）
+- **Node.js 版本**：检测并强制使用项目根 `.nvmrc`，版本不匹配时直接失败
 
 启动后的服务状态表：
 
@@ -333,6 +346,9 @@ go run ./cmd/nasd
 
 **终端 3 - 前端开发服务器**
 ```bash
+source ~/.nvm/nvm.sh
+nvm use
+
 cd web
 npm run dev
 

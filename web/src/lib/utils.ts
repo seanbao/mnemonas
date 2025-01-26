@@ -90,6 +90,38 @@ export function formatWebDAVUrl(origin: string, url: string): string {
 }
 
 /**
+ * Copy text to clipboard with a fallback for restricted environments.
+ */
+export async function copyTextToClipboard(text: string): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  if (typeof document === 'undefined') {
+    throw new Error('剪贴板不可用')
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.appendChild(textarea)
+  textarea.select()
+
+  try {
+    const success = typeof document.execCommand === 'function' && document.execCommand('copy')
+    if (!success) {
+      throw new Error('剪贴板不可用')
+    }
+  } finally {
+    document.body.removeChild(textarea)
+  }
+}
+
+/**
  * Encode path segments for URL use while preserving the path structure.
  */
 export function encodePathForUrl(path: string): string {

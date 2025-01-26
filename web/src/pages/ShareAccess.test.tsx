@@ -135,6 +135,26 @@ describe('ShareAccessPage', () => {
     })
   })
 
+  it('reuses existing authorized cookie access for protected shares', async () => {
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+      file_name: 'secret.txt',
+      file_size: 1024,
+    })
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('secret.txt')).toBeInTheDocument()
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('此分享需要密码')).not.toBeInTheDocument()
+  })
+
   it('shows folder listing for folder shares', async () => {
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -159,7 +179,7 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('uses password when downloading protected share', async () => {
+  it('downloads protected share via access cookie flow without password in url', async () => {
     const user = userEvent.setup()
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
     mockGetPublicShare.mockResolvedValue({
@@ -176,7 +196,7 @@ describe('ShareAccessPage', () => {
       file_name: 'secret.txt',
       file_size: 10,
     })
-    mockGetShareDownloadUrl.mockReturnValue('/s/abc123/download?password=secret')
+    mockGetShareDownloadUrl.mockReturnValue('/s/abc123/download')
 
     renderWithRouter('abc123')
 
@@ -193,8 +213,9 @@ describe('ShareAccessPage', () => {
 
     await user.click(screen.getByText('下载文件'))
 
-    expect(mockGetShareDownloadUrl).toHaveBeenCalledWith('abc123', 'secret')
-    expect(openSpy).toHaveBeenCalledWith('/s/abc123/download?password=secret', '_blank', 'noopener,noreferrer')
+    expect(mockAccessShareWithPassword).toHaveBeenCalledWith('abc123', 'secret')
+    expect(mockGetShareDownloadUrl).toHaveBeenCalledWith('abc123')
+    expect(openSpy).toHaveBeenCalledWith('/s/abc123/download', '_blank', 'noopener,noreferrer')
 
     openSpy.mockRestore()
   })

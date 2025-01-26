@@ -4,6 +4,7 @@ package webdav
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -227,6 +228,24 @@ func TestHandler_DELETE(t *testing.T) {
 	_, err := fs.Stat(ctx, "/deltest/file.txt")
 	if err == nil {
 		t.Error("File still exists after DELETE")
+	}
+}
+
+func TestHandler_HandleError_DoesNotLeakInternalDetails(t *testing.T) {
+	handler := NewHandler(Config{AuthType: "none"})
+	w := httptest.NewRecorder()
+
+	handler.handleError(w, errors.New("sensitive backend detail"))
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "sensitive backend detail") {
+		t.Fatalf("expected internal error details to be hidden, got %q", body)
+	}
+	if !strings.Contains(body, "internal server error") {
+		t.Fatalf("expected generic internal error message, got %q", body)
 	}
 }
 

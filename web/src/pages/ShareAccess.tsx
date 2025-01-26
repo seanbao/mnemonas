@@ -29,6 +29,10 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { formatBytes, formatDate } from '@/lib/utils'
 
+function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
+  return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
+}
+
 export function ShareAccessPage() {
   const { id } = useParams<{ id: string }>()
   const [isLoading, setIsLoading] = useState(true)
@@ -61,10 +65,11 @@ export function ShareAccessPage() {
       setShareInfo(info)
       setFolderItems([])
       setListError(null)
+      const hasAccess = !info.has_password || hasAuthorizedShareContent(info)
       if (info.type === 'folder') {
         setFolderPath('')
       }
-      if (info.has_password) {
+      if (!hasAccess) {
         setNeedsPassword(true)
       } else {
         setIsAuthenticated(true)

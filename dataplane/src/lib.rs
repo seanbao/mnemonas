@@ -1,5 +1,5 @@
 //! MnemoNAS DataPlane - High-performance Rust data plane
-//! 
+//!
 //! Responsibilities:
 //! - CAS (Content-Addressable Storage)
 //! - CDC (Content-Defined Chunking)
@@ -10,6 +10,6 @@ pub mod cas;
 pub mod cdc;
 pub mod service;
 
-pub use cas::{CasStore, CasConfig, CasError};
-pub use cdc::{Chunker, ChunkerConfig, Chunk, FileManifest, ChunkRef, StreamingChunker};
+pub use cas::{CasConfig, CasError, CasStore};
+pub use cdc::{Chunk, ChunkRef, Chunker, ChunkerConfig, FileManifest, StreamingChunker};
 pub use service::DataPlaneService;

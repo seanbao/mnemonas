@@ -45,6 +45,17 @@ export interface SettingsResponse {
   data: SettingsData
 }
 
+interface SettingsApiError {
+  code?: string
+  message: string
+}
+
+interface SettingsApiResponse<T> {
+  success: boolean
+  data?: T
+  message?: string
+}
+
 export interface UpdateSettingsRequest {
   server?: {
     host?: string
@@ -78,8 +89,8 @@ export async function getSettings(): Promise<SettingsResponse> {
   const response = await authFetch(`${API_BASE}/`)
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to get settings')
+    const error = await response.json() as SettingsApiError
+    throw new Error(error.message || 'Failed to get settings')
   }
   
   return response.json()
@@ -98,8 +109,8 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to update settings')
+    const error = await response.json() as SettingsApiError
+    throw new Error(error.message || 'Failed to update settings')
   }
   
   return response.json()
@@ -109,7 +120,6 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
  * WebDAV credentials response
  */
 export interface WebDAVCredentialsResponse {
-  success: boolean
   enabled: boolean
   url: string
   auth_type: string
@@ -124,9 +134,13 @@ export async function getWebDAVCredentials(): Promise<WebDAVCredentialsResponse>
   const response = await authFetch(`${API_BASE}/webdav-credentials`)
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to get WebDAV credentials')
+    const error = await response.json() as SettingsApiError
+    throw new Error(error.message || 'Failed to get WebDAV credentials')
   }
-  
-  return response.json()
+
+  const body = await response.json() as SettingsApiResponse<WebDAVCredentialsResponse>
+  if (!body.data) {
+    throw new Error('Invalid WebDAV credentials response')
+  }
+  return body.data
 }

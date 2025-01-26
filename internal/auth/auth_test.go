@@ -573,6 +573,13 @@ func TestAuthHandler(t *testing.T) {
 
 	h := NewHandler(store, tm)
 
+	type authEnvelope struct {
+		Success bool            `json:"success"`
+		Data    json.RawMessage `json:"data"`
+		Message string          `json:"message"`
+		Error   *ErrorDetail    `json:"error"`
+	}
+
 	t.Run("login success", func(t *testing.T) {
 		body := `{"username":"handleruser","password":"password123"}`
 		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
@@ -584,10 +591,16 @@ func TestAuthHandler(t *testing.T) {
 			t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
 		var resp LoginResponse
-		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if err := json.Unmarshal(envelope.Data, &resp); err != nil {
+			t.Fatalf("unmarshal login payload error: %v", err)
+		}
 
-		if !resp.Success {
+		if !envelope.Success {
 			t.Error("expected success true")
 		}
 		if resp.AccessToken == "" {
@@ -607,6 +620,14 @@ func TestAuthHandler(t *testing.T) {
 
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("expected status 401, got %d", rec.Code)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_CREDENTIALS" {
+			t.Fatalf("expected INVALID_CREDENTIALS error, got %+v", envelope.Error)
 		}
 	})
 
@@ -628,8 +649,14 @@ func TestAuthHandler(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h.HandleLogin(rec, req)
 
+		var loginEnvelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &loginEnvelope); err != nil {
+			t.Fatalf("unmarshal login envelope error: %v", err)
+		}
 		var loginResp LoginResponse
-		json.Unmarshal(rec.Body.Bytes(), &loginResp)
+		if err := json.Unmarshal(loginEnvelope.Data, &loginResp); err != nil {
+			t.Fatalf("unmarshal login payload error: %v", err)
+		}
 
 		refreshBody, _ := json.Marshal(RefreshRequest{RefreshToken: loginResp.RefreshToken})
 		req = httptest.NewRequest("POST", "/api/v1/auth/refresh", bytes.NewBuffer(refreshBody))
@@ -640,8 +667,14 @@ func TestAuthHandler(t *testing.T) {
 			t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 
+		var refreshEnvelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &refreshEnvelope); err != nil {
+			t.Fatalf("unmarshal refresh envelope error: %v", err)
+		}
 		var refreshResp LoginResponse
-		json.Unmarshal(rec.Body.Bytes(), &refreshResp)
+		if err := json.Unmarshal(refreshEnvelope.Data, &refreshResp); err != nil {
+			t.Fatalf("unmarshal refresh payload error: %v", err)
+		}
 
 		if refreshResp.AccessToken == "" {
 			t.Error("expected new access token")
@@ -658,6 +691,14 @@ func TestAuthHandler(t *testing.T) {
 
 		if rec.Code != http.StatusOK {
 			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal me envelope error: %v", err)
+		}
+		if !envelope.Success {
+			t.Fatal("expected me success")
 		}
 	})
 
@@ -707,8 +748,14 @@ func TestAuthHandler(t *testing.T) {
 			t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal users envelope error: %v", err)
+		}
 		var resp map[string]interface{}
-		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if err := json.Unmarshal(envelope.Data, &resp); err != nil {
+			t.Fatalf("unmarshal users payload error: %v", err)
+		}
 
 		users := resp["users"].([]interface{})
 		if len(users) < 2 {
@@ -727,6 +774,14 @@ func TestAuthHandler(t *testing.T) {
 
 		if rec.Code != http.StatusCreated {
 			t.Errorf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create user envelope error: %v", err)
+		}
+		if !envelope.Success {
+			t.Fatal("expected create user success")
 		}
 	})
 

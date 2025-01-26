@@ -41,7 +41,28 @@ export interface UserResponse {
   user: User
 }
 
+interface UsersApiError {
+  code?: string
+  message: string
+}
+
+interface UsersApiResponse<T> {
+  success: boolean
+  data?: T
+  message?: string
+  error?: UsersApiError
+}
+
 const API_BASE = '/api/v1/admin/users'
+
+async function parseUsersError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const body = await response.json() as UsersApiResponse<never>
+    return new Error(body.error?.message || fallback)
+  } catch {
+    return new Error(fallback)
+  }
+}
 
 /**
  * List all users (admin only)
@@ -50,11 +71,19 @@ export async function listUsers(): Promise<ListUsersResponse> {
   const response = await authFetch(`${API_BASE}/`)
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to list users')
+    throw await parseUsersError(response, 'Failed to list users')
   }
-  
-  return response.json()
+
+  const body = await response.json() as UsersApiResponse<{ users: User[]; total: number }>
+  if (!body.data) {
+    throw new Error('Invalid users response')
+  }
+
+  return {
+    success: body.success,
+    users: body.data.users,
+    total: body.data.total,
+  }
 }
 
 /**
@@ -70,11 +99,18 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to create user')
+    throw await parseUsersError(response, 'Failed to create user')
   }
-  
-  return response.json()
+
+  const body = await response.json() as UsersApiResponse<{ user: User }>
+  if (!body.data) {
+    throw new Error('Invalid create user response')
+  }
+
+  return {
+    success: body.success,
+    user: body.data.user,
+  }
 }
 
 /**
@@ -86,11 +122,11 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to delete user')
+    throw await parseUsersError(response, 'Failed to delete user')
   }
-  
-  return response.json()
+
+  const body = await response.json() as UsersApiResponse<null>
+  return { success: body.success }
 }
 
 /**
@@ -109,11 +145,11 @@ export async function resetUserPassword(
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to reset password')
+    throw await parseUsersError(response, 'Failed to reset password')
   }
-  
-  return response.json()
+
+  const body = await response.json() as UsersApiResponse<null>
+  return { success: body.success }
 }
 
 /**
@@ -132,9 +168,9 @@ export async function toggleUserStatus(
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to update user status')
+    throw await parseUsersError(response, 'Failed to update user status')
   }
-  
-  return response.json()
+
+  const body = await response.json() as UsersApiResponse<{ disabled: boolean }>
+  return { success: body.success }
 }

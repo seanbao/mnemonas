@@ -2,11 +2,32 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type failingResponseWriter struct {
+	header http.Header
+	code   int
+}
+
+func (w *failingResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingResponseWriter) WriteHeader(statusCode int) {
+	w.code = statusCode
+}
+
+func (w *failingResponseWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("write failed")
+}
 
 func TestNewAPIError(t *testing.T) {
 	err := NewAPIError("TEST_CODE", "test message")
@@ -50,7 +71,9 @@ func TestAPIError_WithRequestID(t *testing.T) {
 func TestAPIError_Write(t *testing.T) {
 	w := httptest.NewRecorder()
 	err := NewAPIError("TEST_CODE", "test message")
-	err.Write(w, http.StatusBadRequest)
+	if writeErr := err.Write(w, http.StatusBadRequest); writeErr != nil {
+		t.Fatalf("Write() error: %v", writeErr)
+	}
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -68,6 +91,16 @@ func TestAPIError_Write(t *testing.T) {
 
 	if response.Code != "TEST_CODE" {
 		t.Errorf("Response code = %q, want %q", response.Code, "TEST_CODE")
+	}
+}
+
+func TestAPIError_Write_ReturnsEncodingError(t *testing.T) {
+	w := &failingResponseWriter{}
+	err := NewAPIError("TEST_CODE", "test message")
+
+	writeErr := err.Write(w, http.StatusBadRequest)
+	if writeErr == nil {
+		t.Fatal("expected write error")
 	}
 }
 
@@ -207,7 +240,9 @@ func TestAPIResponse_Write(t *testing.T) {
 	w := httptest.NewRecorder()
 	data := map[string]string{"status": "ok"}
 	resp := NewAPIResponse(data)
-	resp.Write(w, http.StatusCreated)
+	if writeErr := resp.Write(w, http.StatusCreated); writeErr != nil {
+		t.Fatalf("Write() error: %v", writeErr)
+	}
 
 	if w.Code != http.StatusCreated {
 		t.Errorf("Status = %d, want %d", w.Code, http.StatusCreated)
@@ -225,6 +260,16 @@ func TestAPIResponse_Write(t *testing.T) {
 
 	if !response.Success {
 		t.Error("Response success should be true")
+	}
+}
+
+func TestAPIResponse_Write_ReturnsEncodingError(t *testing.T) {
+	w := &failingResponseWriter{}
+	resp := NewAPIResponse(map[string]string{"status": "ok"})
+
+	writeErr := resp.Write(w, http.StatusCreated)
+	if writeErr == nil {
+		t.Fatal("expected write error")
 	}
 }
 
