@@ -339,14 +339,6 @@ function triggerBrowserDownload(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
-function withAuthQuery(url: string): string {
-  const token = getStoredToken()
-  if (!token) return url
-  if (url.includes('auth=')) return url
-  const separator = url.includes('?') ? '&' : '?'
-  return `${url}${separator}auth=${encodeURIComponent(token)}`
-}
-
 export function buildDownloadUrl(
   path?: string,
   options?: { version?: string; download?: boolean }
@@ -362,8 +354,7 @@ export function buildDownloadUrl(
     params.set('download', 'true')
   }
   const query = params.toString()
-  const url = query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
-  return withAuthQuery(url)
+  return query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
 }
 
 export async function downloadFile(
@@ -401,7 +392,7 @@ export function getThumbnailUrl(path?: string, size: ThumbnailSize = 'medium'): 
   if (!path) return ''
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  return withAuthQuery(`${API_BASE}/thumbnails${encodedPath}?size=${size}`)
+  return `${API_BASE}/thumbnails${encodedPath}?size=${size}`
 }
 
 // Rename/Move file

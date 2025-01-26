@@ -2,8 +2,6 @@
  * Preview utility functions for file type detection and URL building
  */
 
-import { getStoredToken } from '@/api/auth'
-
 export type PreviewType = 
   | 'text' 
   | 'image' 
@@ -142,18 +140,8 @@ export function buildPreviewUrl(path: string, options?: { includeAuth?: boolean 
     .join('/')
   
   const url = `/api/v1/download${encodedPath}`
-  if (options?.includeAuth === false) {
-    return url
-  }
-  return withAuthQuery(url)
-}
-
-function withAuthQuery(url: string): string {
-  const token = getStoredToken()
-  if (!token) return url
-  if (url.includes('auth=')) return url
-  const separator = url.includes('?') ? '&' : '?'
-  return `${url}${separator}auth=${encodeURIComponent(token)}`
+  void options
+  return url
 }
 
 /**

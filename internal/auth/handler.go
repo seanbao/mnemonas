@@ -192,12 +192,75 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if claims != nil {
 		h.tokenManager.RevokeToken(claims.TokenID)
 	}
+	clearDownloadSessionCookie(w, r)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "logged out successfully",
 	})
+}
+
+// HandleCreateDownloadSession handles POST /api/v1/auth/download-session.
+func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "METHOD_NOT_ALLOWED")
+		return
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+		writeError(w, http.StatusUnauthorized, "missing authorization header", "MISSING_AUTH")
+		return
+	}
+
+	claims := GetClaimsFromContext(r.Context())
+	if claims == nil || claims.ExpiresAt == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
+		return
+	}
+
+	maxAge := int(time.Until(claims.ExpiresAt.Time).Seconds())
+	if maxAge < 0 {
+		maxAge = 0
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     string(DownloadSessionCookieName),
+		Value:    parts[1],
+		Path:     "/api/v1",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsHTTPS(r),
+		Expires:  claims.ExpiresAt.Time.UTC(),
+		MaxAge:   maxAge,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}
+
+func clearDownloadSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     string(DownloadSessionCookieName),
+		Value:    "",
+		Path:     "/api/v1",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsHTTPS(r),
+		Expires:  time.Unix(0, 0).UTC(),
+		MaxAge:   -1,
+	})
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 // HandleMe handles GET /api/v1/auth/me

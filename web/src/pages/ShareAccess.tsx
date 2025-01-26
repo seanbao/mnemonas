@@ -99,6 +99,7 @@ export function ShareAccessPage() {
       }
       setIsAuthenticated(true)
       setNeedsPassword(false)
+      setPassword('')
     } catch (err) {
       if (err instanceof ShareError && err.isUnauthorized) {
         addToast({ title: '密码错误', color: 'danger' })
@@ -115,13 +116,13 @@ export function ShareAccessPage() {
 
   const handleDownload = () => {
     if (!id) return
-    const url = getShareDownloadUrl(id, shareInfo?.has_password ? password : undefined)
+    const url = getShareDownloadUrl(id)
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
   const handleDownloadItem = (itemPath: string) => {
     if (!id) return
-    const url = getShareFileDownloadUrl(id, itemPath, shareInfo?.has_password ? password : undefined)
+    const url = getShareFileDownloadUrl(id, itemPath)
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
@@ -146,7 +147,6 @@ export function ShareAccessPage() {
     try {
       const data = await getPublicShareItems(id, {
         path: folderPath || undefined,
-        password: shareInfo.has_password ? password : undefined,
       })
       setFolderItems(data.items)
     } catch (err) {
@@ -161,7 +161,7 @@ export function ShareAccessPage() {
     } finally {
       setIsListing(false)
     }
-  }, [id, shareInfo, isAuthenticated, folderPath, password])
+  }, [id, shareInfo, isAuthenticated, folderPath])
 
   useEffect(() => {
     loadFolderItems()

@@ -272,6 +272,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/auth/logout", s.handleLogoutWithActivity)
 			r.Get("/auth/me", s.authHandler.HandleMe)
 			r.Post("/auth/password", s.authHandler.HandleChangePassword)
+			r.Post("/auth/download-session", s.authHandler.HandleCreateDownloadSession)
 
 			r.Route("/setup", func(r chi.Router) {
 				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
