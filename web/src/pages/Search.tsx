@@ -53,8 +53,14 @@ export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const initialQuery = searchParams.get('q') || ''
+  const urlQuery = searchParams.get('q') || ''
   const [query, setQuery] = useState(initialQuery)
   const [debouncedQuery, setDebouncedQuery] = useState(initialQuery)
+
+  useEffect(() => {
+    setQuery((current) => current === urlQuery ? current : urlQuery)
+    setDebouncedQuery((current) => current === urlQuery ? current : urlQuery)
+  }, [urlQuery])
 
   // Debounce search query
   useEffect(() => {

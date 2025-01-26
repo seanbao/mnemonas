@@ -55,7 +55,7 @@ import { useClipboardStore } from '@/stores/clipboard'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
 import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
-import { formatBytes, formatDate, cn } from '@/lib/utils'
+import { copyTextToClipboard, formatBytes, formatDate, cn } from '@/lib/utils'
 
 // Breadcrumb navigation component
 function Breadcrumbs({ 
@@ -144,7 +144,7 @@ function FileRow({
   }, [file.path, file.name])
 
   const handleCopyPath = useCallback(() => {
-    navigator.clipboard.writeText(file.path)
+    copyTextToClipboard(file.path)
       .then(() => {
         addToast({ title: '路径已复制', color: 'success' })
       })
@@ -378,8 +378,13 @@ function FileCard({
   }, [file.path, file.name])
 
   const handleCopyPath = useCallback(() => {
-    navigator.clipboard.writeText(file.path)
-    addToast({ title: '路径已复制', color: 'success' })
+    copyTextToClipboard(file.path)
+      .then(() => {
+        addToast({ title: '路径已复制', color: 'success' })
+      })
+      .catch(() => {
+        addToast({ title: '复制失败', color: 'danger' })
+      })
   }, [file.path])
 
   return (
@@ -888,9 +893,16 @@ export function FilesPage() {
 
   const handleContextMenuCopyPath = useCallback(() => {
     if (!contextMenuFile) return
-    navigator.clipboard.writeText(contextMenuFile.path)
-    addToast({ title: '路径已复制', color: 'success' })
-    contextMenu.hide()
+    copyTextToClipboard(contextMenuFile.path)
+      .then(() => {
+        addToast({ title: '路径已复制', color: 'success' })
+      })
+      .catch(() => {
+        addToast({ title: '复制失败', color: 'danger' })
+      })
+      .finally(() => {
+        contextMenu.hide()
+      })
   }, [contextMenuFile, contextMenu])
 
   // Track created directories to avoid duplicate MKCOL calls

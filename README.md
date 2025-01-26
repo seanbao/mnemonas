@@ -151,6 +151,15 @@ mnemonas/
 
 推荐使用 `scripts/dev.sh` 脚本快速启动开发环境：
 
+前端 Node.js 版本由项目根目录 `.nvmrc` 固定为 `22`。执行前端相关命令前先加载：
+
+```bash
+source "$HOME/.nvm/nvm.sh"
+nvm use
+```
+
+`scripts/dev.sh` 在启动前端前会强制校验该版本；未安装或未加载 `nvm` 时会直接失败，不再静默使用错误版本继续启动。
+
 ```bash
 # 一键启动完整环境（后端 + 前端）
 ./scripts/dev.sh
@@ -166,7 +175,7 @@ mnemonas/
 - 构建 Go 控制面和 Rust 数据面
 - 启动服务并检查端口状态
 - 将日志写入 `logs/` 目录
-- 检测 nvm 并切换 Node.js 版本
+- 检测并强制使用 `.nvmrc` 指定的 Node.js 版本
 
 ### Makefile 命令
 

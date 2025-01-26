@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { vi } from 'vitest'
 import { 
+  copyTextToClipboard,
   formatBytes, 
   parseByteSize,
   formatDate, 
@@ -13,6 +15,49 @@ import {
   getFileIcon,
   cn
 } from './utils'
+
+describe('copyTextToClipboard', () => {
+  it('uses navigator clipboard when available', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+
+    await expect(copyTextToClipboard('hello')).resolves.toBeUndefined()
+    expect(writeText).toHaveBeenCalledWith('hello')
+  })
+
+  it('falls back to document.execCommand when clipboard api is unavailable', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+    const execCommandMock = vi.fn().mockReturnValue(true)
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommandMock,
+    })
+
+    await expect(copyTextToClipboard('fallback')).resolves.toBeUndefined()
+    expect(execCommandMock).toHaveBeenCalledWith('copy')
+  })
+
+  it('rejects when both clipboard strategies fail', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+    const execCommandMock = vi.fn().mockReturnValue(false)
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommandMock,
+    })
+
+    await expect(copyTextToClipboard('fail')).rejects.toThrow('剪贴板不可用')
+    expect(execCommandMock).toHaveBeenCalledWith('copy')
+  })
+})
 
 describe('formatBytes', () => {
   it('formats 0 bytes', () => {

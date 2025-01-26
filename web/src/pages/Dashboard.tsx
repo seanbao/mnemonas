@@ -190,6 +190,7 @@ export function DashboardPage() {
   }
 
   const isHealthy = health?.status === 'healthy'
+  const hasStorageData = (stats?.totalSize || 0) > 0
 
   const statsCards = [
     {
@@ -297,12 +298,15 @@ export function DashboardPage() {
               <span className="data-value">{formatBytes(stats?.totalSize || 0)}</span>
             </div>
             <div className="h-2 rounded-full bg-content2 overflow-hidden">
-              <div 
-                className={stats?.totalSize ? "h-full rounded-full bg-accent-primary flow-line opacity-60" : "h-full rounded-full bg-accent-primary/30"}
-                style={{ width: stats?.totalSize ? '100%' : '0%' }}
-              />
+              {hasStorageData ? (
+                <div className="h-full w-12 rounded-full bg-accent-primary/60 flow-line" />
+              ) : (
+                <div className="h-full w-0 rounded-full bg-accent-primary/30" />
+              )}
             </div>
-            <div className="text-xs text-default-400">容量未知</div>
+            <div className="text-xs text-default-400">
+              {hasStorageData ? '总容量未配置，无法计算占用比例' : '暂无存储数据'}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

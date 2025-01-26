@@ -19,15 +19,13 @@ test.describe('回收站页面', () => {
 
   test('应显示回收站标题', async ({ page }) => {
     const title = page.getByText('回收站').first()
-    const isVisible = await title.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('应显示回收站统计信息', async ({ page }) => {
     // 检查统计信息（项数、大小、自动清理时间）
     const statsText = page.getByText(/项|天后自动清理/i)
-    const isVisible = await statsText.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(statsText).toBeVisible({ timeout: 5000 })
   })
 
   test('回收站为空时应显示空状态', async ({ page }) => {
@@ -83,34 +81,26 @@ test.describe('回收站单项操作', () => {
 
   // 这个测试需要回收站中有实际数据才能运行
   // 在没有测试数据的情况下跳过
-  test.skip('每个项目应有恢复和删除按钮', async ({ page }) => {
+  test('每个项目应有恢复和删除按钮', async ({ page }) => {
     // 等待页面稳定
     await page.waitForTimeout(1000)
     
     // 如果有项目，检查操作按钮
     const trashItem = page.locator('[class*="trash"], [class*="item"]').first()
     const isItemVisible = await trashItem.isVisible({ timeout: 2000 }).catch(() => false)
-    
-    if (!isItemVisible) {
-      console.log('No trash items found, skipping button check')
-      return
-    }
-    
-    try {
-      // 悬停显示操作按钮
-      await trashItem.hover()
-      await page.waitForTimeout(500)
-      
-      const restoreBtn = trashItem.getByRole('button', { name: /恢复/i })
-      const deleteBtn = trashItem.getByRole('button', { name: /删除/i })
-      
-      const hasRestore = await restoreBtn.isVisible({ timeout: 1000 }).catch(() => false)
-      const hasDelete = await deleteBtn.isVisible({ timeout: 1000 }).catch(() => false)
-      
-      console.log('Buttons found - restore:', hasRestore, 'delete:', hasDelete)
-    } catch {
-      console.log('Could not hover on trash item')
-    }
+
+    test.skip(!isItemVisible, '当前测试数据中没有回收站条目')
+
+    await trashItem.hover()
+    await page.waitForTimeout(500)
+
+    const restoreBtn = trashItem.getByRole('button', { name: /恢复/i })
+    const deleteBtn = trashItem.getByRole('button', { name: /删除/i })
+
+    const hasRestore = await restoreBtn.isVisible({ timeout: 1000 }).catch(() => false)
+    const hasDelete = await deleteBtn.isVisible({ timeout: 1000 }).catch(() => false)
+
+    expect(hasRestore || hasDelete).toBe(true)
   })
 })
 
@@ -124,8 +114,7 @@ test.describe('回收站确认对话框', () => {
       
       // 检查确认对话框
       const confirmDialog = page.getByText(/确定要清空|无法撤销/i)
-      const isVisible = await confirmDialog.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+      await expect(confirmDialog).toBeVisible({ timeout: 5000 })
     }
   })
 })
@@ -136,8 +125,7 @@ test.describe('回收站自动清理提示', () => {
 
     // 检查自动清理提示（30天）
     const autoCleanHint = page.getByText(/30 天|自动清理/i)
-    const isVisible = await autoCleanHint.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(autoCleanHint).toBeVisible({ timeout: 5000 })
   })
 })
 
@@ -150,8 +138,7 @@ test.describe('回收站页面响应式', () => {
     await expect(body).toBeVisible()
 
     const title = page.getByText('回收站').first()
-    const isVisible = await title.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('平板端布局', async ({ page }) => {

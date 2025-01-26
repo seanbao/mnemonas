@@ -34,31 +34,29 @@ test.describe('搜索页面', () => {
 
   test('输入搜索词应触发搜索', async ({ page }) => {
     const searchInput = page.getByPlaceholder(/输入文件名/i)
-    if (await searchInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await searchInput.fill('test')
-      await page.waitForTimeout(500)
-      
-      // URL 应该包含搜索参数
-      await expect(page).toHaveURL(/q=test/)
-    }
+    await expect(searchInput).toBeVisible({ timeout: 2000 })
+    await searchInput.fill('test')
+    await page.waitForTimeout(500)
+
+    // URL 应该包含搜索参数
+    await expect(page).toHaveURL(/q=test/)
   })
 
   test('搜索不存在的文件应显示无结果提示', async ({ page }) => {
     const searchInput = page.getByPlaceholder(/输入文件名/i)
-    if (await searchInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await searchInput.fill('nonexistent_file_xyz_123')
-      await page.waitForTimeout(2000)
-      
-      // 应显示无结果提示
-      const noResults = page.getByText(/未找到|no.*result|没有匹配/i)
-      const hasNoResults = await noResults.isVisible({ timeout: 3000 }).catch(() => false)
-      
-      // 或者显示结果数为 0
-      const zeroResults = page.getByText(/找到 0 个结果/i)
-      const hasZeroResults = await zeroResults.isVisible({ timeout: 1000 }).catch(() => false)
-      
-      expect(hasNoResults || hasZeroResults).toBe(true)
-    }
+    await expect(searchInput).toBeVisible({ timeout: 2000 })
+    await searchInput.fill('nonexistent_file_xyz_123')
+    await page.waitForTimeout(2000)
+
+    // 应显示无结果提示
+    const noResults = page.getByText(/未找到|no.*result|没有匹配/i)
+    const hasNoResults = await noResults.isVisible({ timeout: 3000 }).catch(() => false)
+
+    // 或者显示结果数为 0
+    const zeroResults = page.getByText(/找到 0 个结果/i)
+    const hasZeroResults = await zeroResults.isVisible({ timeout: 1000 }).catch(() => false)
+
+    expect(hasNoResults || hasZeroResults).toBe(true)
   })
 })
 
@@ -68,9 +66,9 @@ test.describe('搜索结果交互', () => {
 
     // 如果有搜索结果，验证可以点击
     const resultItem = page.locator('[class*="result"], [class*="item"]').first()
-    if (await resultItem.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await expect(resultItem).toBeVisible()
-    }
+  const hasResultItem = await resultItem.isVisible({ timeout: 2000 }).catch(() => false)
+  test.skip(!hasResultItem, '当前测试数据未产生搜索结果')
+  await expect(resultItem).toBeVisible()
   })
 })
 

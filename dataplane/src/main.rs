@@ -1,5 +1,5 @@
 //! DataPlane main entry point
-//! 
+//!
 //! Provides HTTP API and gRPC API for CAS storage operations
 
 use std::io::IsTerminal;
@@ -8,13 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::get,
-    Router,
-};
+use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
 use clap::Parser;
 use serde::Serialize;
 use tonic::transport::Server;
@@ -22,7 +16,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use dataplane::{CasStore, CasConfig, ChunkerConfig, DataPlaneService};
+use dataplane::{CasConfig, CasStore, ChunkerConfig, DataPlaneService};
 
 /// MnemoNAS DataPlane - High-performance Rust data plane
 #[derive(Parser, Debug)]
@@ -31,27 +25,27 @@ struct Args {
     /// HTTP listen address
     #[arg(short, long, default_value = "127.0.0.1:9091")]
     listen: SocketAddr,
-    
+
     /// gRPC listen address
     #[arg(short, long, default_value = "127.0.0.1:9090")]
     grpc: SocketAddr,
-    
+
     /// CAS storage directory
     #[arg(short, long)]
     data_dir: Option<PathBuf>,
-    
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: Level,
-    
+
     /// CDC minimum chunk size (KB)
     #[arg(long, default_value = "256")]
     min_chunk_kb: u32,
-    
+
     /// CDC average chunk size (KB)
     #[arg(long, default_value = "1024")]
     avg_chunk_kb: u32,
-    
+
     /// CDC maximum chunk size (KB)
     #[arg(long, default_value = "4096")]
     max_chunk_kb: u32,
@@ -59,7 +53,10 @@ struct Args {
 
 fn default_data_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".mnemonas").join(".mnemonas").join("objects");
+        return PathBuf::from(home)
+            .join(".mnemonas")
+            .join(".mnemonas")
+            .join("objects");
     }
     PathBuf::from("./data/.mnemonas/objects")
 }
@@ -134,7 +131,7 @@ async fn not_found() -> StatusCode {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    
+
     // Initialize logging
     let use_ansi = std::io::stderr().is_terminal();
     FmtSubscriber::builder()
@@ -145,7 +142,7 @@ async fn main() -> Result<()> {
         .with_line_number(false)
         .with_ansi(use_ansi)
         .init();
-    
+
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
 
     info!(
@@ -155,7 +152,7 @@ async fn main() -> Result<()> {
         data_dir = %data_dir.display(),
         "starting MnemoNAS DataPlane"
     );
-    
+
     // Create CAS configuration
     let cas_config = CasConfig {
         root: data_dir.clone(),
@@ -163,21 +160,21 @@ async fn main() -> Result<()> {
         shard_size: 2,
         ..Default::default()
     };
-    
+
     // Create CDC configuration
     let chunker_config = ChunkerConfig {
         min_size: args.min_chunk_kb * 1024,
         avg_size: args.avg_chunk_kb * 1024,
         max_size: args.max_chunk_kb * 1024,
     };
-    
+
     // Create shared CAS storage
     let cas = Arc::new(CasStore::new(cas_config).await?);
-    
+
     // Start gRPC server with shared CAS
     let grpc_addr = args.grpc;
     let grpc_service = DataPlaneService::with_cas(Arc::clone(&cas), chunker_config);
-    
+
     tokio::spawn(async move {
         info!(address = %grpc_addr, "gRPC service starting");
         if let Err(e) = Server::builder()
@@ -188,7 +185,7 @@ async fn main() -> Result<()> {
             tracing::error!(error = %e, "gRPC server error");
         }
     });
-    
+
     // Build HTTP router with axum
     let state = AppState { cas };
     let app = Router::new()
@@ -197,11 +194,11 @@ async fn main() -> Result<()> {
         .fallback(not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
-    
+
     // Start HTTP server
     info!(address = %args.listen, "HTTP service ready");
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     axum::serve(listener, app).await?;
-    
+
     Ok(())
 }

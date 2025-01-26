@@ -13,9 +13,10 @@ vi.mock('@/api/files', () => ({
 }))
 
 // Mock useBatchOperation hook
+const mockBatchExecute = vi.fn().mockResolvedValue({ succeeded: 1, failed: 0, total: 1 })
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: () => ({
-    execute: vi.fn().mockResolvedValue({ succeeded: 1, failed: 0 }),
+    execute: mockBatchExecute,
     isLoading: false,
   }),
 }))
@@ -30,6 +31,7 @@ const mockEmptyTrash = vi.mocked(emptyTrash)
 describe('TrashPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockBatchExecute.mockClear()
     mockListTrash.mockResolvedValue({
       items: [
         {
@@ -295,6 +297,41 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+    })
+
+    it('confirms before batch permanent delete', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      const deleteButtons = screen.getAllByRole('button', { name: '永久删除' })
+      await user.click(deleteButtons[0])
+
+      await waitFor(() => {
+        expect(screen.getByText('确认批量永久删除')).toBeTruthy()
+      })
+
+      expect(mockBatchExecute).not.toHaveBeenCalled()
+
+      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
+      await user.click(confirmButtons[confirmButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockBatchExecute).toHaveBeenCalledWith(['item1'])
       })
     })
   })

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -22,6 +24,7 @@ type fakeShareFS struct {
 	dirItems       []*storage.FileInfo
 	dirItemsByPath map[string][]*storage.FileInfo
 	openByPath     map[string]FileReader
+	readDirErr     error
 }
 
 func (f *fakeShareFS) OpenFile(ctx context.Context, filePath string) (FileReader, error) {
@@ -41,6 +44,9 @@ func (f *fakeShareFS) Stat(ctx context.Context, filePath string) (*storage.FileI
 }
 
 func (f *fakeShareFS) ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error) {
+	if f.readDirErr != nil {
+		return nil, f.readDirErr
+	}
 	if f.dirItemsByPath != nil {
 		if items, ok := f.dirItemsByPath[filePath]; ok {
 			return items, nil
@@ -51,6 +57,7 @@ func (f *fakeShareFS) ReadDir(ctx context.Context, filePath string) ([]*storage.
 
 func newRouteRequest(method, target, id string, body []byte) *http.Request {
 	req := httptest.NewRequest(method, target, bytes.NewReader(body))
+	req.RemoteAddr = "203.0.113.5:1234"
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", id)
 	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
@@ -63,6 +70,21 @@ func decodeResponseBody(t *testing.T, recorder *httptest.ResponseRecorder) map[s
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	return payload
+}
+
+func decodeEnvelopeData(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var payload struct {
+		Success bool           `json:"success"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode envelope: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success envelope, got %s", recorder.Body.String())
+	}
+	return payload.Data
 }
 
 func TestCreateShare_UsesBaseURL(t *testing.T) {
@@ -94,7 +116,7 @@ func TestCreateShare_UsesBaseURL(t *testing.T) {
 		t.Fatalf("expected status 201, got %d", recorder.Code)
 	}
 
-	payload := decodeResponseBody(t, recorder)
+	payload := decodeEnvelopeData(t, recorder)
 	urlValue, ok := payload["url"].(string)
 	if !ok {
 		t.Fatalf("expected url in response")
@@ -104,6 +126,50 @@ func TestCreateShare_UsesBaseURL(t *testing.T) {
 	}
 	if strings.Contains(urlValue, "https://nas.example.com//s/") {
 		t.Fatalf("expected trimmed base URL, got %q", urlValue)
+	}
+}
+
+func TestListShares_WrapsResponseData(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	_, err = store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares", nil)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.ListShares(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var payload struct {
+		Success bool             `json:"success"`
+		Data    []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", recorder.Body.String())
+	}
+	if len(payload.Data) != 1 {
+		t.Fatalf("expected 1 share, got %d", len(payload.Data))
 	}
 }
 
@@ -694,5 +760,148 @@ func TestAccessShareWithPassword_AccessLimitReached(t *testing.T) {
 
 	if recorder.Code != http.StatusGone {
 		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+}
+
+func TestAccessShareWithPassword_RateLimitedAfterRepeatedFailures(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/secret.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.passwordFailureDelay = 0
+
+	body, err := json.Marshal(map[string]string{"password": "wrong"})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	for attempt := 1; attempt < handler.passwordFailureLimit; attempt++ {
+		req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+		recorder := httptest.NewRecorder()
+
+		handler.AccessShareWithPassword(recorder, req)
+
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected status 401, got %d", attempt, recorder.Code)
+		}
+	}
+
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	recorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429 on lock, got %d", recorder.Code)
+	}
+
+	lockedReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, []byte(`{"password":"secret"}`))
+	lockedRecorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(lockedRecorder, lockedReq)
+
+	if lockedRecorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429 while locked, got %d", lockedRecorder.Code)
+	}
+}
+
+func TestAccessShareWithPassword_LockExpiresAndSuccessResetsFailures(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/secret.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.passwordFailureDelay = 0
+	handler.passwordLockDuration = time.Minute
+
+	now := time.Date(2026, 3, 13, 12, 0, 0, 0, time.UTC)
+	handler.passwordAttempts.now = func() time.Time { return now }
+
+	wrongBody := []byte(`{"password":"wrong"}`)
+	for attempt := 0; attempt < handler.passwordFailureLimit; attempt++ {
+		req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, wrongBody)
+		recorder := httptest.NewRecorder()
+		handler.AccessShareWithPassword(recorder, req)
+	}
+
+	now = now.Add(handler.passwordLockDuration + time.Second)
+
+	successReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, []byte(`{"password":"secret"}`))
+	successRecorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(successRecorder, successReq)
+
+	if successRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200 after lock expiry, got %d", successRecorder.Code)
+	}
+
+	postSuccessReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, wrongBody)
+	postSuccessRecorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(postSuccessRecorder, postSuccessReq)
+
+	if postSuccessRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401 after successful reset, got %d", postSuccessRecorder.Code)
+	}
+}
+
+func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{readDirErr: errors.New("database offline")})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", recorder.Code)
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "database offline") {
+		t.Fatalf("expected internal error details to be hidden, got %q", body)
+	}
+	if !strings.Contains(body, "failed to list share items") {
+		t.Fatalf("expected generic public error message, got %q", body)
 	}
 }

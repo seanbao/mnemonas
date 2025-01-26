@@ -10,8 +10,8 @@ use dataplane::DataPlaneService;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::iter;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
 use tonic::Code;
 

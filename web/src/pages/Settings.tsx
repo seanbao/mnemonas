@@ -32,7 +32,7 @@ import {
   CheckCircle2,
   Key,
 } from 'lucide-react'
-import { cn, parseByteSize, normalizeWebDAVPrefix, formatWebDAVUrl, formatBytes } from '@/lib/utils'
+import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
@@ -120,18 +120,11 @@ export function SettingsPage() {
   // Copy to clipboard helper
   const handleCopy = async (field: string, value: string) => {
     try {
-      await navigator.clipboard.writeText(value)
+      await copyTextToClipboard(value)
       setCopiedField(field)
       setTimeout(() => setCopiedField(null), 2000)
     } catch {
-      const textarea = document.createElement('textarea')
-      textarea.value = value
-      document.body.appendChild(textarea)
-      textarea.select()
-      document.execCommand('copy')
-      document.body.removeChild(textarea)
-      setCopiedField(field)
-      setTimeout(() => setCopiedField(null), 2000)
+      addToast({ title: '复制失败', color: 'danger' })
     }
   }
 
