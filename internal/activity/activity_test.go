@@ -57,6 +57,44 @@ func TestLogAndList(t *testing.T) {
 	}
 }
 
+func TestLogRollsBackWhenSaveFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	if err := store.Log(ActionUpload, "/original.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Initial Log() error: %v", err)
+	}
+
+	originalRoot := store.root
+	store.root = filepath.Join(tmpDir, "missing", "nested")
+
+	err := store.Log(ActionDelete, "/should-not-persist.txt", "user", "127.0.0.1", nil)
+	if err == nil {
+		t.Fatal("Expected Log() to fail when save path is invalid")
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("Expected original entries to remain after failed log, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].Path != "/original.txt" {
+		t.Fatalf("Expected original log entry to remain after rollback, got %s", entries[0].Path)
+	}
+
+	store.root = originalRoot
+	reloaded, reloadErr := NewStore(tmpDir)
+	if reloadErr != nil {
+		t.Fatalf("NewStore() reload error: %v", reloadErr)
+	}
+	reloadedEntries, reloadedTotal := reloaded.List(10, 0, "", "")
+	if reloadedTotal != 1 || len(reloadedEntries) != 1 {
+		t.Fatalf("Expected persisted entries to remain unchanged after failed log, got total=%d len=%d", reloadedTotal, len(reloadedEntries))
+	}
+	if reloadedEntries[0].Path != "/original.txt" {
+		t.Fatalf("Expected persisted original entry after failed log, got %s", reloadedEntries[0].Path)
+	}
+}
+
 func TestListWithFilters(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
@@ -136,6 +174,44 @@ func TestClear(t *testing.T) {
 
 	if store.Count() != 0 {
 		t.Errorf("Expected 0 entries after clear, got %d", store.Count())
+	}
+}
+
+func TestClearRollsBackWhenSaveFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	if err := store.Log(ActionUpload, "/test.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	originalRoot := store.root
+	store.root = filepath.Join(tmpDir, "missing", "nested")
+
+	err := store.Clear()
+	if err == nil {
+		t.Fatal("Expected Clear() to fail when save path is invalid")
+	}
+
+	if store.Count() != 1 {
+		t.Fatalf("Expected in-memory entries to be restored after clear failure, got %d", store.Count())
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("Expected 1 entry after rollback, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].Path != "/test.txt" {
+		t.Fatalf("Expected rolled back entry path /test.txt, got %s", entries[0].Path)
+	}
+
+	store.root = originalRoot
+	reloaded, reloadErr := NewStore(tmpDir)
+	if reloadErr != nil {
+		t.Fatalf("NewStore() reload error: %v", reloadErr)
+	}
+	if reloaded.Count() != 1 {
+		t.Fatalf("Expected persisted activity log to remain unchanged after failed clear, got %d", reloaded.Count())
 	}
 }
 

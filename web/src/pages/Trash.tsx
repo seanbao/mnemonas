@@ -191,8 +191,8 @@ export function TrashPage() {
       failure: '{count} 项恢复失败',
       partial: '{succeeded} 项恢复成功，{failed} 项失败',
     },
-    onComplete: () => {
-      setSelectedItems(new Set())
+    onComplete: (result) => {
+      setSelectedItems(new Set(result.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
     },
@@ -212,8 +212,8 @@ export function TrashPage() {
       failure: '{count} 项永久删除失败',
       partial: '{succeeded} 项永久删除成功，{failed} 项失败',
     },
-    onComplete: () => {
-      setSelectedItems(new Set())
+    onComplete: (result) => {
+      setSelectedItems(new Set(result.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: ['trash'] })
     },
   })

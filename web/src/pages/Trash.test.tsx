@@ -13,10 +13,25 @@ vi.mock('@/api/files', () => ({
 }))
 
 // Mock useBatchOperation hook
-const mockBatchExecute = vi.fn().mockResolvedValue({ succeeded: 1, failed: 0, total: 1 })
+const mockBatchExecute = vi.fn()
+let mockBatchResult = {
+  succeeded: 1,
+  failed: 0,
+  total: 1,
+  succeededItems: ['item1'],
+  failedItems: [] as string[],
+}
 vi.mock('@/lib/useBatchOperation', () => ({
-  useBatchOperation: () => ({
-    execute: mockBatchExecute,
+  useBatchOperation: (options: { onComplete?: (result: typeof mockBatchResult) => void }) => ({
+    execute: vi.fn(async (items: string[]) => {
+      const result = {
+        ...mockBatchResult,
+        total: items.length,
+      }
+      mockBatchExecute(items)
+      options.onComplete?.(result)
+      return result
+    }),
     isLoading: false,
   }),
 }))
@@ -32,6 +47,13 @@ describe('TrashPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockBatchExecute.mockClear()
+    mockBatchResult = {
+      succeeded: 1,
+      failed: 0,
+      total: 1,
+      succeededItems: ['item1'],
+      failedItems: [],
+    }
     mockListTrash.mockResolvedValue({
       items: [
         {
@@ -332,6 +354,85 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockBatchExecute).toHaveBeenCalledWith(['item1'])
+      })
+    })
+
+    it('keeps failed items selected after partial batch restore failure', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockBatchResult = {
+        succeeded: 1,
+        failed: 1,
+        total: 2,
+        succeededItems: ['item1'],
+        failedItems: ['item2'],
+      }
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+    })
+
+    it('keeps failed items selected after batch permanent delete failure', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockBatchResult = {
+        succeeded: 0,
+        failed: 1,
+        total: 1,
+        succeededItems: [],
+        failedItems: ['item1'],
+      }
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('永久删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('确认批量永久删除')).toBeTruthy()
+      })
+
+      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
+      await user.click(confirmButtons[confirmButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockBatchExecute).toHaveBeenCalledWith(['item1'])
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
       })
     })
   })

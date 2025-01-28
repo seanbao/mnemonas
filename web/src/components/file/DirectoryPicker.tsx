@@ -159,14 +159,20 @@ export function DirectoryPicker({
 
   // Load expanded directories
   const loadDirectory = useCallback(async (path: string) => {
-    if (loadedPaths.has(path)) return
+    if (loadedPaths.has(path)) return true
     
     try {
       const data = await listFiles(path)
       setFolderContents(prev => new Map(prev).set(path, data.files))
       setLoadedPaths(prev => new Set(prev).add(path))
-    } catch {
-      // Silently fail - directory will show as empty
+      return true
+    } catch (error) {
+      addToast({
+        title: '加载目录失败',
+        description: error instanceof Error ? error.message : '无法读取目录内容',
+        color: 'danger',
+      })
+      return false
     }
   }, [loadedPaths])
 
@@ -174,12 +180,16 @@ export function DirectoryPicker({
     const newExpanded = new Set(expandedPaths)
     if (newExpanded.has(path)) {
       newExpanded.delete(path)
+      setExpandedPaths(newExpanded)
     } else {
-      newExpanded.add(path)
       // Load contents when expanding
-      await loadDirectory(path)
+      const loaded = await loadDirectory(path)
+      if (!loaded) {
+        return
+      }
+      newExpanded.add(path)
+      setExpandedPaths(newExpanded)
     }
-    setExpandedPaths(newExpanded)
   }, [expandedPaths, loadDirectory])
 
   // Build tree structure
@@ -223,8 +233,12 @@ export function DirectoryPicker({
       
       setNewFolderName('')
       setIsCreatingFolder(false)
-    } catch {
-      addToast({ title: '创建文件夹失败', color: 'danger' })
+    } catch (error) {
+      addToast({
+        title: '创建文件夹失败',
+        description: error instanceof Error ? error.message : '无法创建文件夹',
+        color: 'danger',
+      })
     } finally {
       setIsCreating(false)
     }

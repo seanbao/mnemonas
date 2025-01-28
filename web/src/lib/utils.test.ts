@@ -4,6 +4,7 @@ import {
   copyTextToClipboard,
   formatBytes, 
   parseByteSize,
+  openUrlInNewTab,
   formatDate, 
   formatDuration,
   sanitizeFilename,
@@ -56,6 +57,25 @@ describe('copyTextToClipboard', () => {
 
     await expect(copyTextToClipboard('fail')).rejects.toThrow('剪贴板不可用')
     expect(execCommandMock).toHaveBeenCalledWith('copy')
+  })
+})
+
+describe('openUrlInNewTab', () => {
+  it('returns true when browser allows opening a new tab', () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue({ opener: window } as unknown as Window)
+
+    expect(openUrlInNewTab('/download')).toBe(true)
+    expect(openSpy).toHaveBeenCalledWith('/download', '_blank', 'noopener,noreferrer')
+
+    openSpy.mockRestore()
+  })
+
+  it('returns false when browser blocks the new tab', () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+
+    expect(openUrlInNewTab('/download')).toBe(false)
+
+    openSpy.mockRestore()
   })
 })
 

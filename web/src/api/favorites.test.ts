@@ -63,6 +63,18 @@ describe('Favorites API', () => {
       await expect(listFavorites()).rejects.toThrow(FavoritesError)
     })
 
+    it('reads legacy string error responses', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ success: false, error: '旧格式错误' }),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: '旧格式错误',
+      })
+    })
+
     it('uses default message when error parsing fails', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -183,6 +195,18 @@ describe('Favorites API', () => {
       })
 
       await expect(removeFavorite('/file.txt')).rejects.toThrow(FavoritesError)
+    })
+
+    it('uses legacy message field for remove failures', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ success: false, message: '删除收藏失败' }),
+      })
+
+      await expect(removeFavorite('/file.txt')).rejects.toMatchObject({
+        message: '删除收藏失败',
+      })
     })
   })
 

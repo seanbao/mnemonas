@@ -47,7 +47,20 @@ interface FavoritesApiResponse<T> {
   success: boolean
   data?: T
   message?: string
-  error?: FavoritesApiError
+  error?: FavoritesApiError | string
+}
+
+function getFavoritesErrorMessage(body: FavoritesApiResponse<never>, fallback: string): string {
+  if (typeof body.error === 'string' && body.error) {
+    return body.error
+  }
+  if (body.error && typeof body.error === 'object' && body.error.message) {
+    return body.error.message
+  }
+  if (body.message) {
+    return body.message
+  }
+  return fallback
 }
 
 /**
@@ -60,7 +73,7 @@ export async function listFavorites(): Promise<Favorite[]> {
     let message = '获取收藏列表失败'
     try {
       const body: FavoritesApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
@@ -91,7 +104,7 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
     }
     try {
       const body: FavoritesApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
@@ -117,7 +130,7 @@ export async function removeFavorite(path: string): Promise<void> {
     let message = '移除收藏失败'
     try {
       const body: FavoritesApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
@@ -199,7 +212,7 @@ export async function updateFavoriteNote(path: string, note: string): Promise<vo
     let message = '更新备注失败'
     try {
       const body: FavoritesApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }

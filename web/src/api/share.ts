@@ -99,7 +99,20 @@ interface ShareApiResponse<T> {
   success: boolean
   data?: T
   message?: string
-  error?: ShareApiError
+  error?: ShareApiError | string
+}
+
+function getShareErrorMessage(body: ShareApiResponse<never> | { error?: string; message?: string }, fallback: string): string {
+  if (typeof body.error === 'string' && body.error) {
+    return body.error
+  }
+  if (body.error && typeof body.error === 'object' && 'message' in body.error && body.error.message) {
+    return body.error.message
+  }
+  if (body.message) {
+    return body.message
+  }
+  return fallback
 }
 
 // === Authenticated Share APIs ===
@@ -116,7 +129,7 @@ export async function listShares(all = false): Promise<Share[]> {
     let message = '获取分享列表失败'
     try {
       const body: ShareApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }
@@ -142,7 +155,7 @@ export async function createShare(req: CreateShareRequest): Promise<Share> {
     let message = '创建分享失败'
     try {
       const body: ShareApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }
@@ -164,7 +177,7 @@ export async function getShare(id: string): Promise<Share> {
     let message = '获取分享详情失败'
     try {
       const body: ShareApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }
@@ -190,7 +203,7 @@ export async function updateShare(id: string, req: UpdateShareRequest): Promise<
     let message = '更新分享失败'
     try {
       const body: ShareApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }
@@ -214,7 +227,7 @@ export async function deleteShare(id: string): Promise<void> {
     let message = '删除分享失败'
     try {
       const body: ShareApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }
@@ -234,8 +247,8 @@ export async function getPublicShare(id: string): Promise<PublicShareInfo> {
       message = '分享已过期、已禁用或访问次数已达上限'
     }
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }
@@ -266,8 +279,8 @@ export async function getPublicShareItems(
       message = '密码错误'
     }
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }
@@ -294,8 +307,8 @@ export async function accessShareWithPassword(id: string, password: string): Pro
       message = '分享已过期、已禁用或访问次数已达上限'
     }
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
+      message = getShareErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new ShareError(message, response.status)
   }

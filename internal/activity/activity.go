@@ -100,7 +100,33 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.logFilePath(), data, 0640)
+	tmpPath := s.logFilePath() + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
+	if err != nil {
+		return err
+	}
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	if err := os.Rename(tmpPath, s.logFilePath()); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	return nil
 }
 
 // generateID creates a unique ID for an entry
@@ -112,6 +138,7 @@ func generateID() string {
 func (s *Store) Log(action ActionType, path, user, ip string, details map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := append([]Entry(nil), s.entries...)
 
 	entry := Entry{
 		ID:        generateID(),
@@ -131,7 +158,11 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 		s.entries = s.entries[:s.maxSize]
 	}
 
-	return s.save()
+	if err := s.save(); err != nil {
+		s.entries = previous
+		return err
+	}
+	return nil
 }
 
 // List returns recent activity entries
@@ -178,8 +209,13 @@ func (s *Store) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	previous := append([]Entry(nil), s.entries...)
 	s.entries = make([]Entry, 0)
-	return s.save()
+	if err := s.save(); err != nil {
+		s.entries = previous
+		return err
+	}
+	return nil
 }
 
 // GetByID returns a specific entry by ID

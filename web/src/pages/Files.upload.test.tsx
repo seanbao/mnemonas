@@ -3,6 +3,8 @@ import { render, screen, fireEvent, act } from '@/test/utils'
 import React from 'react'
 import { FilesPage } from './Files'
 
+const mockAddToast = vi.fn()
+
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: ({ count }: { count: number }) => ({
     getTotalSize: () => count * 72,
@@ -48,7 +50,7 @@ vi.mock('@heroui/react', async () => {
         onClose: () => setIsOpen(false),
       }
     },
-    addToast: vi.fn(),
+    addToast: (...args: unknown[]) => mockAddToast(...args),
   }
 })
 
@@ -86,6 +88,16 @@ vi.mock('@/api/files', () => ({
   uploadFile: vi.fn(),
   moveFile: vi.fn(),
   copyFile: vi.fn(),
+  ApiError: class ApiError extends Error {
+    status: number
+    statusText: string
+
+    constructor(message: string, status: number, statusText: string) {
+      super(message)
+      this.status = status
+      this.statusText = statusText
+    }
+  },
 }))
 
 vi.mock('@/api/favorites', () => ({
@@ -110,10 +122,11 @@ vi.mock('@/stores/files', () => ({
   }),
 }))
 
-import { listFiles, uploadFile } from '@/api/files'
+import { listFiles, uploadFile, createDirectory } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockUploadFile = vi.mocked(uploadFile)
+const mockCreateDirectory = vi.mocked(createDirectory)
 
 describe('FilesPage upload queue', () => {
   beforeEach(() => {
@@ -124,6 +137,7 @@ describe('FilesPage upload queue', () => {
       path: '/',
     })
     mockUploadFile.mockResolvedValue(undefined)
+    mockCreateDirectory.mockResolvedValue(undefined)
   })
 
   afterEach(() => {
@@ -198,5 +212,63 @@ describe('FilesPage upload queue', () => {
     })
 
     expect(screen.queryByText('上传完成')).toBeNull()
+  })
+
+  it('stops folder upload when creating parent directory fails', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockCreateDirectory.mockRejectedValueOnce(new Error('权限不足'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+    const file = new File(['data'], 'test.txt', { type: 'text/plain' })
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/test.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
+    expect(mockUploadFile).not.toHaveBeenCalled()
+    expect(screen.getByText('权限不足')).toBeTruthy()
+  })
+
+  it('shows partial summary for folder uploads with failures', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('网络错误'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const firstFile = new File(['ok'], 'first.txt', { type: 'text/plain' })
+    const secondFile = new File(['bad'], 'second.txt', { type: 'text/plain' })
+    Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
+    Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/second.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传部分完成',
+      description: '成功上传 1 个文件，失败 1 个',
+      color: 'warning',
+    })
   })
 })
