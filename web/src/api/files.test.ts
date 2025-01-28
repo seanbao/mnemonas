@@ -669,6 +669,17 @@ describe('API: files', () => {
       await expect(listFiles('/test')).rejects.toThrow('参数错误')
     })
 
+    it('handles JSON error response with structured error field', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        json: () => Promise.resolve({ error: { message: '结构化参数错误', code: 'INVALID_ARGUMENT' } }),
+      })
+
+      await expect(listFiles('/test')).rejects.toThrow('结构化参数错误')
+    })
+
     it('handles JSON error response with message field', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,

@@ -122,6 +122,23 @@ export async function copyTextToClipboard(text: string): Promise<void> {
 }
 
 /**
+ * Open a URL in a new tab and report whether the browser allowed it.
+ */
+export function openUrlInNewTab(url: string): boolean {
+  if (typeof window === 'undefined' || typeof window.open !== 'function') {
+    return false
+  }
+
+  const newWindow = window.open(url, '_blank', 'noopener,noreferrer')
+  if (newWindow) {
+    newWindow.opener = null
+    return true
+  }
+
+  return false
+}
+
+/**
  * Encode path segments for URL use while preserving the path structure.
  */
 export function encodePathForUrl(path: string): string {

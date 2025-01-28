@@ -39,7 +39,7 @@ describe('Settings API', () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
       status: 503,
-      json: () => Promise.resolve({ code: 'SERVICE_UNAVAILABLE', message: 'settings not available' }),
+      json: () => Promise.resolve({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'settings not available' } }),
     })
 
     await expect(getSettings()).rejects.toThrow('settings not available')
@@ -74,5 +74,15 @@ describe('Settings API', () => {
     const result = await getWebDAVCredentials()
 
     expect(result.password).toBe('secret')
+  })
+
+  it('uses wrapped error message for webdav credentials failures', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({ success: false, error: { message: 'webdav unavailable' } }),
+    })
+
+    await expect(getWebDAVCredentials()).rejects.toThrow('webdav unavailable')
   })
 })

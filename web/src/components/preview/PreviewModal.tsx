@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Modal, ModalContent, ModalBody, Button, Spinner } from '@heroui/react'
+import { Modal, ModalContent, ModalBody, Button, Spinner, addToast } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
 import { buildDownloadUrl, downloadFile } from '@/api/files'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
 import { PdfPreview } from './PdfPreview'
-import { cn } from '@/lib/utils'
+import { cn, openUrlInNewTab } from '@/lib/utils'
 
 export interface PreviewFile {
   path: string
@@ -106,9 +106,8 @@ export function PreviewModal({
   const handleOpenExternal = useCallback(() => {
     if (!currentFile) return
     const url = buildStreamUrl(currentFile.path)
-    const newWindow = window.open(url, '_blank', 'noopener,noreferrer')
-    if (newWindow) {
-      newWindow.opener = null
+    if (!openUrlInNewTab(url)) {
+      addToast({ title: '浏览器拦截了新标签页，请允许弹窗后重试', color: 'warning' })
     }
   }, [currentFile])
 

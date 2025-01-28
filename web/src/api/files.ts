@@ -121,8 +121,10 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
     let message = errorPrefix
     try {
       const body = await response.json()
-      if (body.error) {
+      if (typeof body.error === 'string') {
         message = body.error
+      } else if (body.error?.message) {
+        message = body.error.message
       } else if (body.message) {
         message = body.message
       }

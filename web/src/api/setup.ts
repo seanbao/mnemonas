@@ -7,6 +7,12 @@ import { authFetch } from './auth'
 
 const API_BASE = '/api/v1/setup'
 
+interface SetupErrorResponse {
+  success?: boolean
+  message?: string
+  error?: string | { message?: string }
+}
+
 export interface SetupStatusResponse {
   success: boolean
   is_first_run: boolean
@@ -22,8 +28,18 @@ export async function getSetupStatus(): Promise<SetupStatusResponse> {
   const response = await fetch(`${API_BASE}/`)
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to get setup status')
+    try {
+      const error = await response.json() as SetupErrorResponse
+      const message = typeof error.error === 'string'
+        ? error.error
+        : error.error?.message || error.message || 'Failed to get setup status'
+      throw new Error(message)
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error
+      }
+      throw new Error('Failed to get setup status')
+    }
   }
   
   return response.json()
@@ -38,8 +54,18 @@ export async function acknowledgeSetup(): Promise<{ success: boolean; message: s
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Failed to acknowledge setup')
+    try {
+      const error = await response.json() as SetupErrorResponse
+      const message = typeof error.error === 'string'
+        ? error.error
+        : error.error?.message || error.message || 'Failed to acknowledge setup'
+      throw new Error(message)
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error
+      }
+      throw new Error('Failed to acknowledge setup')
+    }
   }
   
   return response.json()
