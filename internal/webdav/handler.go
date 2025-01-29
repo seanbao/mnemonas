@@ -337,6 +337,11 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
+		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		return
+	}
+
 	// NEW-3 fix: Acquire locks in deterministic order to avoid deadlock (same as MOVE)
 	first, second := srcPath, dst
 	if first > second {
@@ -388,6 +393,11 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
+		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		return
+	}
+
 	// Acquire locks for both paths (in deterministic order to avoid deadlock)
 	first, second := srcPath, dst
 	if first > second {
@@ -410,6 +420,24 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	h.propCache.Invalidate(path.Dir(dst))
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) checkOverwriteHeader(ctx context.Context, r *http.Request, dst string) error {
+	overwrite := r.Header.Get("Overwrite")
+	if overwrite == "" || strings.EqualFold(overwrite, "T") {
+		return nil
+	}
+	if !strings.EqualFold(overwrite, "F") {
+		return errors.New("invalid Overwrite header")
+	}
+
+	if _, err := h.fs.Stat(ctx, dst); err == nil {
+		return errors.New("destination exists and overwrite is disabled")
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return err
+	}
+
+	return nil
 }
 
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
@@ -509,6 +537,11 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 }
 
 func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	if _, err := h.fs.Stat(ctx, filePath); err != nil {
+		h.handleError(w, err)
+		return
+	}
+
 	// Simple implementation: return virtual lock
 	token := fmt.Sprintf("opaquelocktoken:%d", time.Now().UnixNano())
 
@@ -531,6 +564,16 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 }
 
 func (h *Handler) handleUnlock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	if _, err := h.fs.Stat(ctx, filePath); err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	if r.Header.Get("Lock-Token") == "" {
+		http.Error(w, "missing lock token", http.StatusBadRequest)
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -554,6 +597,9 @@ func (h *Handler) getDestination(r *http.Request) string {
 
 	// Validate - reject path traversal
 	if strings.Contains(dstPath, "..") {
+		return ""
+	}
+	if h.prefix != "" && dstPath != h.prefix && !strings.HasPrefix(dstPath, h.prefix+"/") {
 		return ""
 	}
 
