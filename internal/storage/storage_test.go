@@ -6,12 +6,16 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 // testDataplaneAddr is the address of the test dataplane server
@@ -132,6 +136,56 @@ func TestFileSystem_WriteFile_Read(t *testing.T) {
 
 	if string(got[:n]) != string(content) {
 		t.Errorf("Content = %q, want %q", got[:n], content)
+	}
+}
+
+func TestFileSystem_WriteFile_RollsBackNewFileWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.versions.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	err := fs.WriteFile(ctx, "/rollback-new.bin", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() to fail when file index update cannot persist")
+	}
+
+	if _, statErr := fs.Stat(ctx, "/rollback-new.bin"); statErr != ErrNotFound {
+		t.Fatalf("Expected new file to be removed after rollback, got %v", statErr)
+	}
+}
+
+func TestFileSystem_WriteFile_RollsBackOverwriteWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rollback-existing.bin", bytes.NewReader([]byte("old content"))); err != nil {
+		t.Fatalf("Initial WriteFile() error: %v", err)
+	}
+
+	if err := fs.versions.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	err := fs.WriteFile(ctx, "/rollback-existing.bin", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() overwrite to fail when file index update cannot persist")
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/rollback-existing.bin")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != "old content" {
+		t.Fatalf("Expected original content after rollback, got %q", string(data))
 	}
 }
 
@@ -259,6 +313,152 @@ func TestFileSystem_Delete(t *testing.T) {
 	}
 }
 
+func TestFileSystem_DeleteAndRestore_EmptyDirectory(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/emptydir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	if err := fs.Delete(ctx, "/emptydir"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	if _, err := fs.Stat(ctx, "/emptydir"); err != ErrNotFound {
+		t.Fatalf("Expected deleted directory to be absent, got %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+	if !items[0].IsDir {
+		t.Fatal("Expected trash item to be a directory")
+	}
+
+	if err := fs.RestoreFromTrash(ctx, items[0].ID); err != nil {
+		t.Fatalf("RestoreFromTrash() error: %v", err)
+	}
+
+	info, err := fs.Stat(ctx, "/emptydir")
+	if err != nil {
+		t.Fatalf("Stat() after restore error: %v", err)
+	}
+	if !info.IsDir {
+		t.Fatal("Expected restored path to be a directory")
+	}
+}
+
+func TestFileSystem_Delete_RollsBackFileWhenIndexDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-rollback.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	fs.deleteFileIndex = func(ctx context.Context, path string) error {
+		return errors.New("index delete failed")
+	}
+
+	err := fs.Delete(ctx, "/delete-rollback.txt")
+	if err == nil {
+		t.Fatal("Expected Delete() to fail when file index removal fails")
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/delete-rollback.txt")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != "keep me" {
+		t.Fatalf("Expected original file content after rollback, got %q", string(data))
+	}
+
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Expected trash to remain empty after rollback, got %d items", len(items))
+	}
+}
+
+func TestFileSystem_Delete_RollsBackDirectoryWhenIndexDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/delete-rollback-dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	fs.deleteFileIndex = func(ctx context.Context, path string) error {
+		return errors.New("index delete failed")
+	}
+
+	err := fs.Delete(ctx, "/delete-rollback-dir")
+	if err == nil {
+		t.Fatal("Expected Delete() to fail when directory index removal fails")
+	}
+
+	info, statErr := fs.Stat(ctx, "/delete-rollback-dir")
+	if statErr != nil {
+		t.Fatalf("Stat() after directory rollback error: %v", statErr)
+	}
+	if !info.IsDir {
+		t.Fatal("Expected rolled back path to remain a directory")
+	}
+
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Expected trash to remain empty after rollback, got %d items", len(items))
+	}
+}
+
+func TestFileSystem_Delete_FailsWhenVersionLookupFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-version-lookup.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	if err := fs.versions.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	err := fs.Delete(ctx, "/delete-version-lookup.txt")
+	if err == nil {
+		t.Fatal("Expected Delete() to fail when version metadata lookup fails")
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/delete-version-lookup.txt")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after failed delete error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after failed delete error: %v", readErr)
+	}
+	if string(data) != "keep me" {
+		t.Fatalf("Expected file content to remain unchanged, got %q", string(data))
+	}
+}
+
 func TestFileSystem_PermanentDelete(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -274,6 +474,115 @@ func TestFileSystem_PermanentDelete(t *testing.T) {
 	items, _ := fs.ListTrash(ctx)
 	if len(items) != 0 {
 		t.Errorf("Trash should be empty after permanent delete")
+	}
+}
+
+func TestFileSystem_PermanentDelete_RollsBackFileWhenMetadataDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/permanent-rollback.bin", bytes.NewReader([]byte("keep me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	if err := fs.versions.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	err := fs.PermanentDelete(ctx, "/permanent-rollback.bin")
+	if err == nil {
+		t.Fatal("Expected PermanentDelete() to fail when metadata cleanup cannot persist")
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/permanent-rollback.bin")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != "keep me" {
+		t.Fatalf("Expected original file content after rollback, got %q", string(data))
+	}
+}
+
+func TestFileSystem_PermanentDelete_RollsBackDirectoryWhenIndexDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/permanent-dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	if err := fs.versions.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	err := fs.PermanentDelete(ctx, "/permanent-dir")
+	if err == nil {
+		t.Fatal("Expected PermanentDelete() directory delete to fail when index cleanup cannot persist")
+	}
+
+	info, statErr := fs.Stat(ctx, "/permanent-dir")
+	if statErr != nil {
+		t.Fatalf("Stat() after directory rollback error: %v", statErr)
+	}
+	if !info.IsDir {
+		t.Fatal("Expected rolled back path to remain a directory")
+	}
+}
+
+func TestFileSystem_PermanentDelete_AttemptsAllVersionObjectDeletes(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/permanent-objects.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/permanent-objects.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/permanent-objects.md", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(v3) error: %v", err)
+	}
+
+	versions, err := fs.versions.GetVersions(ctx, "/permanent-objects.md")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("Expected historical versions, got %d", len(versions))
+	}
+
+	called := make(map[string]int)
+	fs.deleteVersionObject = func(hash string) error {
+		called[hash]++
+		return errors.New("delete object failed")
+	}
+
+	err = fs.PermanentDelete(ctx, "/permanent-objects.md")
+	if err == nil {
+		t.Fatal("Expected PermanentDelete() to report object deletion failures")
+	}
+
+	for _, version := range versions {
+		if called[version.Hash] != 1 {
+			t.Fatalf("Expected deleteVersionObject to be attempted once for %s, got %d", version.Hash, called[version.Hash])
+		}
+	}
+
+	if _, statErr := fs.Stat(ctx, "/permanent-objects.md"); statErr != ErrNotFound {
+		t.Fatalf("Expected file content to remain deleted after object cleanup failure, got %v", statErr)
+	}
+	trashItems, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(trashItems) != 0 {
+		t.Fatalf("Expected permanent delete not to move file to trash, got %d items", len(trashItems))
 	}
 }
 
@@ -332,6 +641,67 @@ func TestFileSystem_Rename_PreservesVersions(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Rename_RollsBackWhenMetadataRenameFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-fail.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	fs.renameMetadataPath = func(ctx context.Context, oldName, newName string) error {
+		return errors.New("metadata rename failed")
+	}
+
+	err := fs.Rename(ctx, "/rename-fail.txt", "/rename-fail-new.txt")
+	if err == nil {
+		t.Fatal("Expected Rename() to fail when metadata rename fails")
+	}
+
+	if _, statErr := fs.Stat(ctx, "/rename-fail.txt"); statErr != nil {
+		t.Fatalf("Expected original path to remain after rollback, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-fail-new.txt"); statErr != ErrNotFound {
+		t.Fatalf("Expected new path to be absent after rollback, got %v", statErr)
+	}
+}
+
+func TestFileSystem_Rename_ReturnsRollbackFailure(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-rollback.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	firstRename := true
+	fs.renameWorkspacePath = func(ctx context.Context, oldName, newName string) error {
+		if firstRename {
+			firstRename = false
+			return fs.workspace.Rename(ctx, oldName, newName)
+		}
+		return errors.New("rollback rename failed")
+	}
+	fs.renameMetadataPath = func(ctx context.Context, oldName, newName string) error {
+		return errors.New("metadata rename failed")
+	}
+
+	err := fs.Rename(ctx, "/rename-rollback.txt", "/rename-rollback-new.txt")
+	if err == nil {
+		t.Fatal("Expected Rename() to fail when rollback fails")
+	}
+	if !strings.Contains(err.Error(), "failed to rename metadata") {
+		t.Fatalf("Expected metadata rename failure in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed to rollback workspace rename") {
+		t.Fatalf("Expected rollback failure in error, got %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/rename-rollback-new.txt"); statErr != nil {
+		t.Fatalf("Expected file to remain at new path when rollback fails, got %v", statErr)
+	}
+}
+
 func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -358,6 +728,47 @@ func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	}
 }
 
+func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-index-fail.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-index-fail.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("No items in trash")
+	}
+
+	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
+		return errors.New("index update failed")
+	}
+
+	err = fs.RestoreFromTrash(ctx, items[0].ID)
+	if err == nil {
+		t.Fatal("Expected RestoreFromTrash() to fail when file index update fails")
+	}
+
+	if _, statErr := fs.Stat(ctx, "/restore-index-fail.txt"); statErr != ErrNotFound {
+		t.Fatalf("Expected restored file to be moved back to trash, got %v", statErr)
+	}
+
+	trashItems, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after rollback error: %v", listErr)
+	}
+	if len(trashItems) != 1 {
+		t.Fatalf("Expected trash item to remain after rollback, got %d items", len(trashItems))
+	}
+}
+
 func TestFileSystem_RestoreFromTrashTo_PreservesVersions(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -381,6 +792,115 @@ func TestFileSystem_RestoreFromTrashTo_PreservesVersions(t *testing.T) {
 	}
 	if len(versions) < 2 {
 		t.Errorf("ListVersions() returned %d versions, want at least 2", len(versions))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_RollsBackWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-to-index-fail.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-to-index-fail.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-to-index-fail.md"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("No items in trash")
+	}
+
+	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
+		return errors.New("index update failed")
+	}
+
+	newPath := "/restored/restore-to-index-fail.md"
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, newPath)
+	if err == nil {
+		t.Fatal("Expected RestoreFromTrashTo() to fail when file index update fails")
+	}
+
+	if _, statErr := fs.Stat(ctx, newPath); statErr != ErrNotFound {
+		t.Fatalf("Expected restored target path to be rolled back, got %v", statErr)
+	}
+
+	trashItems, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after rollback error: %v", listErr)
+	}
+	if len(trashItems) != 1 {
+		t.Fatalf("Expected trash item to remain after rollback, got %d items", len(trashItems))
+	}
+
+	versions, versionErr := fs.ListVersions(ctx, "/restore-to-index-fail.md")
+	if versionErr != nil {
+		t.Fatalf("ListVersions() after rollback error: %v", versionErr)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("Expected original version metadata to remain after rollback, got %d versions", len(versions))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_RollsBackOnMetadataConflict(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-conflict.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-conflict.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-conflict.md"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("No items in trash")
+	}
+
+	conflictPath := "/restored/restore-conflict.md"
+	if err := fs.versions.UpdateFileIndex(ctx, conflictPath, 1, time.Now(), "conflict-hash"); err != nil {
+		t.Fatalf("UpdateFileIndex() error: %v", err)
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, conflictPath)
+	if err == nil {
+		t.Fatal("Expected RestoreFromTrashTo() to fail when metadata path conflicts")
+	}
+
+	if _, statErr := fs.Stat(ctx, conflictPath); statErr != ErrNotFound {
+		t.Fatalf("Expected restored file to be rolled back from target path, got %v", statErr)
+	}
+
+	trashItems, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after rollback error: %v", listErr)
+	}
+	if len(trashItems) != 1 {
+		t.Fatalf("Expected trash item to remain after rollback, got %d items", len(trashItems))
+	}
+	if trashItems[0].OriginalPath != "/restore-conflict.md" {
+		t.Fatalf("Expected original trash item path to remain unchanged, got %s", trashItems[0].OriginalPath)
+	}
+
+	versions, versionErr := fs.ListVersions(ctx, "/restore-conflict.md")
+	if versionErr != nil {
+		t.Fatalf("ListVersions() after rollback error: %v", versionErr)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("Expected original version metadata to remain after rollback, got %d versions", len(versions))
 	}
 }
 
@@ -429,6 +949,137 @@ func TestFileSystem_EmptyTrash(t *testing.T) {
 	}
 }
 
+func TestFileSystem_DeleteFromTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-delete-fail.txt", bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-delete-fail.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+
+	fs.removeTrashPath = func(path string) error {
+		return errors.New("trash delete failed")
+	}
+
+	err = fs.DeleteFromTrash(ctx, items[0].ID)
+	if err == nil {
+		t.Fatal("Expected DeleteFromTrash() to fail when trash content deletion fails")
+	}
+
+	items, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after failed delete error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected trash metadata to remain after failed content delete, got %d items", len(items))
+	}
+}
+
+func TestFileSystem_EmptyTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/empty-fail-1.txt", bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/empty-fail-2.txt", bytes.NewReader([]byte("y"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/empty-fail-1.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/empty-fail-2.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	fs.removeTrashPath = func(path string) error {
+		return errors.New("trash delete failed")
+	}
+
+	deleted, err := fs.EmptyTrash(ctx)
+	if err == nil {
+		t.Fatal("Expected EmptyTrash() to fail when trash content deletion fails")
+	}
+	if deleted != 0 {
+		t.Fatalf("Expected no metadata deletion on failure, got %d", deleted)
+	}
+
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed empty error: %v", listErr)
+	}
+	if len(items) != 2 {
+		t.Fatalf("Expected trash metadata to remain after failed empty, got %d items", len(items))
+	}
+}
+
+func TestFileSystem_CleanupExpiredTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/expired-trash.txt", bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/expired-trash.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.versions.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("versions.ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+
+	original := items[0]
+	if err := fs.versions.RemoveFromTrash(ctx, original.ID); err != nil {
+		t.Fatalf("RemoveFromTrash() error: %v", err)
+	}
+	if err := fs.versions.AddToTrash(ctx, &versionstore.TrashItem{
+		ID:           original.ID,
+		OriginalPath: original.OriginalPath,
+		Size:         original.Size,
+		DeletedAt:    original.DeletedAt,
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		IsDir:        original.IsDir,
+		HadVersions:  original.HadVersions,
+	}); err != nil {
+		t.Fatalf("AddToTrash() error: %v", err)
+	}
+
+	fs.removeTrashPath = func(path string) error {
+		return errors.New("trash delete failed")
+	}
+
+	deleted, err := fs.CleanupExpiredTrash(ctx)
+	if err == nil {
+		t.Fatal("Expected CleanupExpiredTrash() to fail when trash content deletion fails")
+	}
+	if deleted != 0 {
+		t.Fatalf("Expected no expired metadata deletion on failure, got %d", deleted)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed cleanup error: %v", listErr)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("Expected expired trash metadata to remain after failed cleanup, got %d items", len(remaining))
+	}
+}
+
 func TestFileSystem_ListVersions(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -453,6 +1104,162 @@ func TestFileSystem_ListVersions(t *testing.T) {
 	// First should be current
 	if versions[0].Comment != "(current)" {
 		t.Errorf("First version comment = %s, want '(current)'", versions[0].Comment)
+	}
+}
+
+func TestFileSystem_RestoreVersion_RollsBackWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-version.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/restore-version.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("Expected at least one historical version")
+	}
+
+	if err := fs.versions.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	err = fs.RestoreVersion(ctx, "/restore-version.txt", historicalHash)
+	if err == nil {
+		t.Fatal("Expected RestoreVersion() to fail when file index update cannot persist")
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/restore-version.txt")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != "v2" {
+		t.Fatalf("Expected current content to remain after rollback, got %q", string(data))
+	}
+}
+
+func TestFileSystem_WriteFile_FailsWhenCleanupVersionsObjectDeleteFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	fs.config.MaxVersions = 1
+	if err := fs.WriteFile(ctx, "/cleanup-fail.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/cleanup-fail.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	fs.deleteVersionObject = func(hash string) error {
+		return errors.New("delete object failed")
+	}
+
+	err := fs.WriteFile(ctx, "/cleanup-fail.md", bytes.NewReader([]byte("v3")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() to fail when old version object cleanup fails")
+	}
+	if !strings.Contains(err.Error(), "failed to cleanup old versions") {
+		t.Fatalf("Expected cleanup failure in error, got %v", err)
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/cleanup-fail.md")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after cleanup failure error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after cleanup failure error: %v", readErr)
+	}
+	if string(data) != "v2" {
+		t.Fatalf("Expected current content to remain unchanged after cleanup failure, got %q", string(data))
+	}
+}
+
+func TestMovePath_NonEmptyDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	src := filepath.Join(tempDir, "src")
+	dst := filepath.Join(tempDir, "dst")
+
+	if err := os.MkdirAll(filepath.Join(src, "nested"), 0755); err != nil {
+		t.Fatalf("MkdirAll(src) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "nested", "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	if err := movePath(src, dst); err != nil {
+		t.Fatalf("movePath() error: %v", err)
+	}
+
+	if _, err := os.Stat(src); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Expected source directory to be removed, got %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst, "nested", "file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(dst) error: %v", err)
+	}
+	if string(data) != "content" {
+		t.Fatalf("Expected moved file content to match, got %q", string(data))
+	}
+}
+
+func TestMovePath_PreservesDirectoryAndFileModes(t *testing.T) {
+	tempDir := t.TempDir()
+	src := filepath.Join(tempDir, "src")
+	dst := filepath.Join(tempDir, "dst")
+
+	if err := os.MkdirAll(filepath.Join(src, "nested"), 0700); err != nil {
+		t.Fatalf("MkdirAll(src) error: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(src, "nested"), 0700); err != nil {
+		t.Fatalf("Chmod(nested) error: %v", err)
+	}
+	filePath := filepath.Join(src, "nested", "file.txt")
+	if err := os.WriteFile(filePath, []byte("content"), 0600); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	if err := movePath(src, dst); err != nil {
+		t.Fatalf("movePath() error: %v", err)
+	}
+
+	nestedInfo, err := os.Stat(filepath.Join(dst, "nested"))
+	if err != nil {
+		t.Fatalf("Stat(nested) error: %v", err)
+	}
+	if nestedInfo.Mode().Perm() != 0700 {
+		t.Fatalf("Expected nested directory mode 0700, got %#o", nestedInfo.Mode().Perm())
+	}
+
+	fileInfo, err := os.Stat(filepath.Join(dst, "nested", "file.txt"))
+	if err != nil {
+		t.Fatalf("Stat(file) error: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0600 {
+		t.Fatalf("Expected file mode 0600, got %#o", fileInfo.Mode().Perm())
 	}
 }
 
