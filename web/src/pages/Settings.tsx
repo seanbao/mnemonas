@@ -344,25 +344,18 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="存储路径"
-                description="配置数据存储根目录"
+                description="显示当前数据存储根目录"
                 icon={Folder}
               >
                 <div className="space-y-4">
                   <div>
                     <label className="text-sm font-medium text-default-600 mb-1.5 block">存储根目录</label>
-                    <Input
-                      placeholder="~/.mnemonas"
-                      value={settings.storageRoot}
-                      onValueChange={(v) => setSettings(s => ({ ...s, storageRoot: v }))}
-                      isReadOnly
-                      startContent={<Folder size={16} className="text-default-500" />}
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                      }}
-                    />
+                    <div className="w-full rounded-xl border border-divider bg-content2/40 px-3 py-3 text-sm text-foreground">
+                      {settings.storageRoot || '~/.mnemonas'}
+                    </div>
                   </div>
                   <div className="text-xs text-default-500">
-                    存储路径仅展示当前配置。如需调整，请修改配置文件并重启服务。
+                    当前值由服务端配置文件决定，界面中不可直接修改。如需调整，请修改配置文件并重启服务。
                   </div>
                 </div>
               </SettingsSection>
@@ -473,6 +466,7 @@ export function SettingsPage() {
                               variant="flat"
                               onPress={() => handleCopy('url', webdavUrl)}
                             >
+                              <span className="sr-only">复制 WebDAV 地址</span>
                               {copiedField === 'url' ? (
                                 <CheckCircle2 size={16} className="text-success" />
                               ) : (
@@ -505,6 +499,7 @@ export function SettingsPage() {
                               variant="flat"
                               onPress={() => handleCopy('username', webdavCredentials.username || 'admin')}
                             >
+                              <span className="sr-only">复制 WebDAV 用户名</span>
                               {copiedField === 'username' ? (
                                 <CheckCircle2 size={16} className="text-success" />
                               ) : (
@@ -539,6 +534,7 @@ export function SettingsPage() {
                               variant="flat"
                               onPress={() => setShowWebDAVPassword(!showWebDAVPassword)}
                             >
+                              <span className="sr-only">{showWebDAVPassword ? '隐藏 WebDAV 密码' : '显示 WebDAV 密码'}</span>
                               {showWebDAVPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                             </Button>
                             <Button
@@ -548,6 +544,7 @@ export function SettingsPage() {
                               onPress={() => handleCopy('password', webdavCredentials.password || '')}
                               isDisabled={!webdavCredentials.password}
                             >
+                              <span className="sr-only">复制 WebDAV 密码</span>
                               {copiedField === 'password' ? (
                                 <CheckCircle2 size={16} className="text-success" />
                               ) : (

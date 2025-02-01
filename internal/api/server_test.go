@@ -9,12 +9,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/seanbao/mnemonas/internal/activity"
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
@@ -216,6 +218,30 @@ func TestServer_Health(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "healthy") {
 		t.Error("Response should contain 'healthy'")
+	}
+}
+
+func TestServer_Health_DataplaneFailureDoesNotExposeInternalError(t *testing.T) {
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{DataplaneAddr: "127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Health status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(strings.ToLower(body), "connection refused") || strings.Contains(strings.ToLower(body), "rpc error") {
+		t.Fatalf("expected health response to hide internal dataplane errors, got %q", body)
+	}
+	if !strings.Contains(body, "unavailable") {
+		t.Fatalf("expected health response to include generic dataplane status, got %q", body)
 	}
 }
 
@@ -579,6 +605,12 @@ func TestServer_PathTraversal(t *testing.T) {
 			if w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound {
 				t.Errorf("Path traversal should be blocked, got status %d", w.Code)
 			}
+			if w.Code == http.StatusBadRequest {
+				body := w.Body.String()
+				if strings.Contains(strings.ToLower(body), "traversal") || strings.Contains(body, "..") {
+					t.Fatalf("expected sanitized invalid path error, got %s", body)
+				}
+			}
 		})
 	}
 }
@@ -684,6 +716,10 @@ func TestServer_RestoreVersion_InvalidHash(t *testing.T) {
 
 			if w.Code != tt.wantStatus {
 				t.Errorf("RestoreVersion status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			body := w.Body.String()
+			if strings.Contains(body, tt.hash) || strings.Contains(strings.ToLower(body), "expected 64") || strings.Contains(strings.ToLower(body), "non-hexadecimal") {
+				t.Fatalf("expected sanitized invalid hash error, got %s", body)
 			}
 		})
 	}
@@ -932,6 +968,84 @@ func TestServer_Scrub_NoDataplane(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("Scrub without dataplane status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServer_Scrub_InvalidBodyDoesNotExposeParserDetails(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/scrub", strings.NewReader(`{"hashes":`))
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Scrub invalid body status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	body := w.Body.String()
+	if strings.Contains(strings.ToLower(body), "unexpected eof") || strings.Contains(strings.ToLower(body), "invalid character") {
+		t.Fatalf("expected sanitized scrub parse error, got %s", body)
+	}
+	if !strings.Contains(body, "invalid request body") {
+		t.Fatalf("expected generic invalid request body message, got %s", body)
+	}
+}
+
+func TestServer_ClearActivity_DoesNotExposeInternalDetails(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+	activityRoot := path.Join(tmpDir, "activity")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		FileSystem:   fs,
+		ActivityRoot: activityRoot,
+		Config:       config.Default(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	if err := server.activity.Log(activity.ActionLogin, "/", "tester", "127.0.0.1", nil); err != nil {
+		t.Fatalf("activity.Log() error: %v", err)
+	}
+	if err := os.Chmod(activityRoot, 0500); err != nil {
+		t.Fatalf("Chmod(activityRoot) error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(activityRoot, 0755)
+	})
+
+	req := httptest.NewRequest("DELETE", "/api/v1/activity/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Clear activity status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "disk offline") {
+		t.Fatalf("expected internal clear failure to be hidden, got %s", body)
+	}
+	if !strings.Contains(body, "failed to clear activity log") {
+		t.Fatalf("expected generic clear failure message, got %s", body)
 	}
 }
 

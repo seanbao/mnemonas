@@ -35,6 +35,7 @@ import {
   Calendar,
   HardDrive,
   RefreshCw,
+  AlertCircle,
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
@@ -188,7 +189,7 @@ export function UsersPage() {
   const [newRole, setNewRole] = useState<'admin' | 'user' | 'guest'>('user')
   const [resetPassword, setResetPassword] = useState('')
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['users'],
     queryFn: listUsers,
   })
@@ -242,7 +243,14 @@ export function UsersPage() {
   }, [])
 
   const handleCreate = useCallback(() => {
-    if (!newUsername.trim() || !newPassword.trim()) return
+    if (!newUsername.trim() || !newPassword.trim()) {
+      addToast({ title: '请输入用户名和密码', color: 'warning' })
+      return
+    }
+    if (newPassword.length < 8) {
+      addToast({ title: '密码长度至少为 8 位', color: 'warning' })
+      return
+    }
     createMutation.mutate({
       username: newUsername.trim(),
       password: newPassword,
@@ -257,7 +265,15 @@ export function UsersPage() {
   }, [actionUser, deleteMutation])
 
   const handleResetPassword = useCallback(() => {
-    if (!actionUser || !resetPassword.trim()) return
+    if (!actionUser) return
+    if (!resetPassword.trim()) {
+      addToast({ title: '请输入新密码', color: 'warning' })
+      return
+    }
+    if (resetPassword.length < 8) {
+      addToast({ title: '新密码长度至少为 8 位', color: 'warning' })
+      return
+    }
     resetPasswordMutation.mutate({ userId: actionUser.id, password: resetPassword })
   }, [actionUser, resetPassword, resetPasswordMutation])
 
@@ -339,6 +355,19 @@ export function UsersPage() {
                 <div className="w-10 h-10 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
                 <p className="text-default-500 text-sm">加载用户列表...</p>
               </div>
+            </div>
+          ) : error ? (
+            <div className="flex items-center justify-center h-40">
+              <EmptyState
+                icon={AlertCircle}
+                title="加载用户列表失败"
+                description={(error as Error).message || '请稍后重试'}
+                action={
+                  <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                    重新加载
+                  </Button>
+                }
+              />
             </div>
           ) : !data?.users?.length ? (
             <div className="flex items-center justify-center h-40">

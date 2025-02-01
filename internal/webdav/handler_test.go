@@ -456,6 +456,76 @@ func TestHandler_COPY_DirectoryRecursive(t *testing.T) {
 	}
 }
 
+func TestHandler_COPY_DirectoryIntoDescendantRejected(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/srcdir/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://localhost/dav/srcdir/nested/copied-dir")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("COPY directory into descendant status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if _, err := fs.Stat(ctx, "/srcdir/nested/copied-dir"); err == nil {
+		t.Fatal("Expected descendant destination to remain absent after rejected COPY")
+	}
+}
+
+func TestHandler_COPY_DirectoryOverwriteExistingDestinationRejected(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/dst/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://localhost/dav/dst")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("COPY directory overwrite existing destination status = %d, want %d", w.Code, http.StatusConflict)
+	}
+
+	f, err := fs.OpenFile(ctx, "/dst/existing.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(existing) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(existing) error: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("Expected existing destination content unchanged, got %q", string(data))
+	}
+}
+
 func TestHandler_COPY_InvalidDestinationPrefix(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -478,6 +548,41 @@ func TestHandler_COPY_InvalidDestinationPrefix(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/other/copied.txt"); err == nil {
 		t.Fatal("Expected destination outside WebDAV prefix to be rejected")
+	}
+}
+
+func TestHandler_COPY_SameSourceAndDestinationRejected(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "http://localhost/dav/src/file.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("COPY same source/destination status = %d, want %d", w.Code, http.StatusConflict)
+	}
+
+	f, err := fs.OpenFile(ctx, "/src/file.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(src) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(src) error: %v", err)
+	}
+	if string(data) != "copy me" {
+		t.Fatalf("Expected source content unchanged, got %q", string(data))
 	}
 }
 
@@ -604,6 +709,63 @@ func TestHandler_MOVE_InvalidDestinationPrefix(t *testing.T) {
 	}
 }
 
+func TestHandler_MOVE_SameSourceAndDestinationRejected(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://localhost/dav/movetest/orig.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE same source/destination status = %d, want %d", w.Code, http.StatusConflict)
+	}
+
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+		t.Fatalf("Expected source file to remain after rejected MOVE, got %v", err)
+	}
+}
+
+func TestHandler_MOVE_DirectoryIntoDescendantRejected(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir(movetest) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/movetest/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest", nil)
+	req.Header.Set("Destination", "http://localhost/dav/movetest/nested/moved")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE directory into descendant status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+		t.Fatalf("Expected source directory to remain after rejected MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/nested/moved"); err == nil {
+		t.Fatal("Expected descendant destination to remain absent after rejected MOVE")
+	}
+}
+
 func TestHandler_LOCK(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -653,14 +815,48 @@ func TestHandler_UNLOCK(t *testing.T) {
 	}
 
 	t.Run("ExistingResourceWithToken", func(t *testing.T) {
+		lockReq := httptest.NewRequest("LOCK", "/dav/unlocktest/file.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+		lockW := httptest.NewRecorder()
+		handler.ServeHTTP(lockW, lockReq)
+		if lockW.Code != http.StatusOK {
+			t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+		}
+
 		req := httptest.NewRequest("UNLOCK", "/dav/unlocktest/file.txt", nil)
-		req.Header.Set("Lock-Token", "<opaquelocktoken:test>")
+		req.Header.Set("Lock-Token", lockW.Header().Get("Lock-Token"))
 		w := httptest.NewRecorder()
 
 		handler.ServeHTTP(w, req)
 
 		if w.Code != http.StatusNoContent {
 			t.Fatalf("UNLOCK status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("MismatchedToken", func(t *testing.T) {
+		lockReq := httptest.NewRequest("LOCK", "/dav/unlocktest/file.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+		lockW := httptest.NewRecorder()
+		handler.ServeHTTP(lockW, lockReq)
+		if lockW.Code != http.StatusOK {
+			t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+		}
+
+		req := httptest.NewRequest("UNLOCK", "/dav/unlocktest/file.txt", nil)
+		req.Header.Set("Lock-Token", "<opaquelocktoken:wrong>")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusConflict {
+			t.Fatalf("UNLOCK mismatched token status = %d, want %d", w.Code, http.StatusConflict)
+		}
+
+		unlockReq := httptest.NewRequest("UNLOCK", "/dav/unlocktest/file.txt", nil)
+		unlockReq.Header.Set("Lock-Token", lockW.Header().Get("Lock-Token"))
+		unlockW := httptest.NewRecorder()
+		handler.ServeHTTP(unlockW, unlockReq)
+		if unlockW.Code != http.StatusNoContent {
+			t.Fatalf("UNLOCK cleanup status = %d, want %d", unlockW.Code, http.StatusNoContent)
 		}
 	})
 
@@ -695,6 +891,8 @@ func TestHandler_PROPFIND(t *testing.T) {
 	fs.Mkdir(ctx, "/proptest")
 	fs.WriteFile(ctx, "/proptest/a.txt", bytes.NewReader([]byte("aaa")))
 	fs.WriteFile(ctx, "/proptest/b.txt", bytes.NewReader([]byte("bbb")))
+	fs.Mkdir(ctx, "/proptest/nested")
+	fs.WriteFile(ctx, "/proptest/nested/c.txt", bytes.NewReader([]byte("ccc")))
 
 	t.Run("Depth0", func(t *testing.T) {
 		req := httptest.NewRequest("PROPFIND", "/dav/proptest", nil)
@@ -728,6 +926,26 @@ func TestHandler_PROPFIND(t *testing.T) {
 		if !strings.Contains(body, "a.txt") || !strings.Contains(body, "b.txt") {
 			t.Error("Response should contain child files")
 		}
+		if strings.Contains(body, "c.txt") {
+			t.Error("Depth 1 should not contain nested child files")
+		}
+	})
+
+	t.Run("DepthInfinity", func(t *testing.T) {
+		req := httptest.NewRequest("PROPFIND", "/dav/proptest", nil)
+		req.Header.Set("Depth", "infinity")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusMultiStatus {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusMultiStatus)
+		}
+
+		body := w.Body.String()
+		if !strings.Contains(body, "nested/") || !strings.Contains(body, "c.txt") {
+			t.Error("Depth infinity should contain nested resources")
+		}
 	})
 
 	t.Run("InvalidDepth", func(t *testing.T) {
@@ -744,7 +962,12 @@ func TestHandler_PROPFIND(t *testing.T) {
 }
 
 func TestHandler_LOCK_UNLOCK(t *testing.T) {
-	handler, _, _ := setupTestHandler(t)
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/locktest", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(locktest) error: %v", err)
+	}
 
 	// LOCK
 	req := httptest.NewRequest("LOCK", "/dav/locktest", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
@@ -771,6 +994,154 @@ func TestHandler_LOCK_UNLOCK(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Errorf("UNLOCK status = %d, want %d", w.Code, http.StatusNoContent)
 	}
+
+	req = httptest.NewRequest("UNLOCK", "/dav/locktest", nil)
+	req.Header.Set("Lock-Token", lockToken)
+	w = httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("UNLOCK after release status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/locked"); err != nil {
+		t.Fatalf("Mkdir(locked) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/locked/file.txt", bytes.NewReader([]byte("initial"))); err != nil {
+		t.Fatalf("WriteFile(file) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/locked-dst"); err != nil {
+		t.Fatalf("Mkdir(locked-dst) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/locked/file.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	t.Run("PutRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/locked/file.txt", strings.NewReader("updated"))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("PUT without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("DeleteRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/dav/locked/file.txt", nil)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("DELETE without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("MoveRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("MOVE", "/dav/locked/file.txt", nil)
+		req.Header.Set("Destination", "http://localhost/dav/locked-dst/file.txt")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("MOVE without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("PutWithMatchingTokenSucceeds", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/locked/file.txt", strings.NewReader("updated"))
+		req.Header.Set("Lock-Token", lockToken)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("PUT with token status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+	})
+}
+
+func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/locked-dir"); err != nil {
+		t.Fatalf("Mkdir(locked-dir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src/file.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/locked-dir", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	t.Run("PutChildRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/locked-dir/new.txt", strings.NewReader("new content"))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("PUT child without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("MkcolChildRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("MKCOL", "/dav/locked-dir/new-folder", nil)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("MKCOL child without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("MoveIntoLockedCollectionRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("MOVE", "/dav/src/file.txt", nil)
+		req.Header.Set("Destination", "http://localhost/dav/locked-dir/moved.txt")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("MOVE into locked collection without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("PutChildWithMatchingTokenSucceeds", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/locked-dir/new.txt", strings.NewReader("new content"))
+		req.Header.Set("Lock-Token", lockToken)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("PUT child with token status = %d, want %d", w.Code, http.StatusCreated)
+		}
+	})
 }
 
 func TestHandler_ReadOnlyMode(t *testing.T) {

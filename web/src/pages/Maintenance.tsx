@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Card, CardBody, CardHeader, Button, Chip, Progress, Divider, Table, TableHeader, TableColumn, TableBody, TableRow, TableCell } from '@heroui/react'
+import { Card, CardBody, CardHeader, Button, Chip, Progress, Divider, Table, TableHeader, TableColumn, TableBody, TableRow, TableCell, addToast } from '@heroui/react'
 import { 
   ShieldCheck, 
   Play, 
@@ -132,6 +132,14 @@ export default function Maintenance() {
     mutationFn: () => runScrub(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scrub-result'] })
+      addToast({ title: '数据校验已启动', color: 'success' })
+    },
+    onError: (error: Error) => {
+      addToast({
+        title: '启动校验失败',
+        description: error.message,
+        color: 'danger',
+      })
     },
   })
   
@@ -140,8 +148,13 @@ export default function Maintenance() {
     setIsExporting(true)
     try {
       await downloadDiagnosticsExport()
+      addToast({ title: '诊断信息导出已开始', color: 'success' })
     } catch (error) {
-      console.error('Export failed:', error)
+      addToast({
+        title: '导出诊断信息失败',
+        description: error instanceof Error ? error.message : '请稍后重试',
+        color: 'danger',
+      })
     } finally {
       setIsExporting(false)
     }

@@ -119,6 +119,30 @@ describe('ShareAccessPage', () => {
     })
   })
 
+  it('shows warning feedback when submitting an empty password', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('验证密码'))
+
+    expect(mockAccessShareWithPassword).not.toHaveBeenCalled()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '请输入访问密码',
+      color: 'warning',
+    })
+  })
+
   it('shows file info when share is accessible', async () => {
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',

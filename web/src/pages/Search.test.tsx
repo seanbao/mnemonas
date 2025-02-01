@@ -218,6 +218,24 @@ describe('SearchPage', () => {
       
       expect(mockNavigate).toHaveBeenCalledWith('/files/photos')
     })
+
+    it('supports keyboard navigation for search results', async () => {
+      const user = userEvent.setup()
+      renderSearchPage()
+
+      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      await user.type(input, 'test')
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '打开文件 /documents/document.pdf' })).toBeInTheDocument()
+      }, { timeout: 1000 })
+
+      const resultButton = screen.getByRole('button', { name: '打开文件 /documents/document.pdf' })
+      resultButton.focus()
+      await user.keyboard('{Enter}')
+
+      expect(mockNavigate).toHaveBeenCalledWith('/files/documents')
+    })
   })
 
   describe('error handling', () => {

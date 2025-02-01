@@ -304,5 +304,34 @@ describe('DashboardPage', () => {
         expect(screen.getByText('系统概览')).toBeTruthy()
       })
     })
+
+    it('shows a partial-data warning when overview queries fail', async () => {
+      mockGetStorageStats.mockRejectedValueOnce(new Error('Network error'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('部分系统数据加载失败')).toBeTruthy()
+        expect(screen.getByText('当前页面展示的是可用数据，部分卡片或活动记录可能不是最新状态。')).toBeTruthy()
+      })
+    })
+
+    it('offers a retry action when overview queries fail', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetStorageStats.mockRejectedValueOnce(new Error('Network error'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockGetHealth).toHaveBeenCalledTimes(2)
+        expect(mockGetStorageStats).toHaveBeenCalledTimes(2)
+      })
+    })
   })
 })

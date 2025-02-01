@@ -19,12 +19,13 @@ vi.mock('@/api/files', () => ({
 
 // Mock navigation
 const mockNavigate = vi.fn()
+let mockLocationPathname = '/files'
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual('react-router-dom')
   return {
     ...actual,
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: '/files' }),
+    useLocation: () => ({ pathname: mockLocationPathname }),
   }
 })
 
@@ -86,6 +87,7 @@ describe('FilesPage', () => {
     mockClipboardState.paths = []
     mockClipboardState.operation = null
     mockClipboardState.sourcePath = null
+    mockLocationPathname = '/files'
     mockClipboardState.copy.mockClear()
     mockClipboardState.cut.mockClear()
     mockClipboardState.clear.mockClear()
@@ -132,6 +134,21 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(screen.getByText('这里空空如也')).toBeTruthy()
       })
+    })
+
+    it('falls back to root when the route path has invalid URI encoding', async () => {
+      mockLocationPathname = '/files/%E0%A4%A'
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '路径格式无效，已返回根目录',
+          color: 'warning',
+        }))
+      })
+
+      expect(mockNavigate).toHaveBeenCalledWith('/files', { replace: true })
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/%E0%A4%A')
     })
   })
 

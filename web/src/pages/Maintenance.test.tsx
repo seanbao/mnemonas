@@ -3,6 +3,16 @@ import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import Maintenance from './Maintenance'
 
+const mockAddToast = vi.fn()
+
+vi.mock('@heroui/react', async () => {
+  const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
+  return {
+    ...actual,
+    addToast: (...args: unknown[]) => mockAddToast(...args),
+  }
+})
+
 // Mock API
 vi.mock('@/api/files', () => ({
   getScrubResult: vi.fn(),
@@ -10,10 +20,11 @@ vi.mock('@/api/files', () => ({
   downloadDiagnosticsExport: vi.fn(),
 }))
 
-import { getScrubResult, runScrub } from '@/api/files'
+import { getScrubResult, runScrub, downloadDiagnosticsExport } from '@/api/files'
 
 const mockGetScrubResult = getScrubResult as ReturnType<typeof vi.fn>
 const mockRunScrub = runScrub as ReturnType<typeof vi.fn>
+const mockDownloadDiagnosticsExport = downloadDiagnosticsExport as ReturnType<typeof vi.fn>
 
 describe('MaintenancePage', () => {
   const mockCompletedResult = {
@@ -65,6 +76,7 @@ describe('MaintenancePage', () => {
     vi.clearAllMocks()
     mockGetScrubResult.mockResolvedValue(mockCompletedResult)
     mockRunScrub.mockResolvedValue(mockRunningResult)
+    mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
   })
 
   describe('header', () => {
@@ -249,6 +261,55 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(mockRunScrub).toHaveBeenCalled()
       })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '数据校验已启动',
+        color: 'success',
+      })
+    })
+  })
+
+  describe('diagnostics export', () => {
+    it('shows success feedback when export starts', async () => {
+      const user = userEvent.setup()
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('导出诊断信息')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('导出诊断信息'))
+
+      await waitFor(() => {
+        expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '诊断信息导出已开始',
+        color: 'success',
+      })
+    })
+
+    it('shows error feedback when export fails', async () => {
+      const user = userEvent.setup()
+      mockDownloadDiagnosticsExport.mockRejectedValue(new Error('磁盘不可用'))
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('导出诊断信息')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('导出诊断信息'))
+
+      await waitFor(() => {
+        expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '导出诊断信息失败',
+        description: '磁盘不可用',
+        color: 'danger',
+      })
     })
   })
 
@@ -296,6 +357,12 @@ describe('MaintenancePage', () => {
       // Should not crash
       await waitFor(() => {
         expect(mockRunScrub).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '启动校验失败',
+        description: 'Already running',
+        color: 'danger',
       })
     })
   })

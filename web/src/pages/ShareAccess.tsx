@@ -91,7 +91,11 @@ export function ShareAccessPage() {
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!id || !password.trim()) return
+    if (!id) return
+    if (!password.trim()) {
+      addToast({ title: '请输入访问密码', color: 'warning' })
+      return
+    }
 
     setIsVerifying(true)
     try {

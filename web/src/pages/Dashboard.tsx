@@ -19,6 +19,7 @@ import {
   Move,
   TrendingUp,
   Database,
+  RefreshCw,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { getHealth, getStorageStats } from '@/api/files'
@@ -137,25 +138,32 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
 export function DashboardPage() {
   const navigate = useNavigate()
   
-  const { data: health, isLoading: healthLoading } = useQuery({
+  const { data: health, isLoading: healthLoading, error: healthError, refetch: refetchHealth } = useQuery({
     queryKey: ['health'],
     queryFn: getHealth,
     refetchInterval: 30000,
   })
 
-  const { data: stats, isLoading: statsLoading } = useQuery({
+  const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery({
     queryKey: ['stats'],
     queryFn: getStorageStats,
     refetchInterval: 30000,
   })
 
-  const { data: recentActivity } = useQuery({
+  const { data: recentActivity, error: recentActivityError, refetch: refetchRecentActivity } = useQuery({
     queryKey: ['recent-activity'],
     queryFn: () => listActivity({ limit: 5 }),
     refetchInterval: 30000,
   })
 
   const isLoading = healthLoading || statsLoading
+  const hasPartialError = Boolean(healthError || statsError || recentActivityError)
+
+  const handleRetry = () => {
+    void refetchHealth()
+    void refetchStats()
+    void refetchRecentActivity()
+  }
 
   if (isLoading) {
     return (
@@ -254,6 +262,29 @@ export function DashboardPage() {
           </div>
         </div>
       </div>
+
+      {hasPartialError && (
+        <Card className="border-warning/30 bg-warning/5 shadow-none">
+          <CardBody className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-start gap-3">
+              <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+              <div>
+                <p className="text-sm font-medium text-foreground">部分系统数据加载失败</p>
+                <p className="text-xs text-default-600">当前页面展示的是可用数据，部分卡片或活动记录可能不是最新状态。</p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-xl"
+              startContent={<RefreshCw size={14} />}
+              onPress={handleRetry}
+            >
+              重新加载
+            </Button>
+          </CardBody>
+        </Card>
+      )}
 
       {/* Stats Grid - Meridian Style */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

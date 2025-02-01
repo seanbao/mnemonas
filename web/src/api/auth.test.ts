@@ -214,4 +214,58 @@ describe('auth API', () => {
     expect(retriedRequestHeaders.get('Content-Type')).toBe('application/json')
     expect(retriedRequestHeaders.get('X-Trace-Id')).toBe('trace-1')
   })
+
+  it('shares a single refresh request across concurrent unauthorized calls', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+    let fileAttempts = 0
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+
+      if (url === '/api/v1/files') {
+        fileAttempts += 1
+        if (fileAttempts <= 2) {
+          return { ok: false, status: 401, statusText: 'Unauthorized' } as Response
+        }
+
+        const authHeader = (init?.headers as Headers).get('Authorization')
+        expect(authHeader).toBe('Bearer access-2')
+        return { ok: true, status: 200, json: () => Promise.resolve({ success: true }) } as Response
+      }
+
+      if (url === '/api/v1/auth/refresh') {
+        return {
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              access_token: 'access-2',
+              refresh_token: 'refresh-2',
+              expires_at: '2026-03-13T00:00:00Z',
+              token_type: 'Bearer',
+              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            },
+          }),
+        } as Response
+      }
+
+      if (url === '/api/v1/auth/download-session') {
+        return { ok: true, status: 200, json: () => Promise.resolve({ success: true }) } as Response
+      }
+
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const [first, second] = await Promise.all([
+      authFetch('/api/v1/files'),
+      authFetch('/api/v1/files'),
+    ])
+
+    expect(first.ok).toBe(true)
+    expect(second.ok).toBe(true)
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/download-session')).toHaveLength(1)
+  })
 })
