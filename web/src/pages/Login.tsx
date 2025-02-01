@@ -29,6 +29,9 @@ export function LoginPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+  const usernameInputId = 'login-username'
+  const passwordInputId = 'login-password'
 
   // Initialize auth state on mount
   useEffect(() => {
@@ -46,20 +49,37 @@ export function LoginPage() {
   // Show error toast
   useEffect(() => {
     if (error) {
+      setFormError(error)
       addToast({ title: error, color: 'danger' })
       clearError()
     }
   }, [error, clearError])
 
+  const handleUsernameChange = (value: string) => {
+    setUsername(value)
+    if (formError) {
+      setFormError(null)
+    }
+  }
+
+  const handlePasswordChange = (value: string) => {
+    setPassword(value)
+    if (formError) {
+      setFormError(null)
+    }
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     
     if (!username.trim() || !password.trim()) {
+      setFormError('请输入用户名和密码')
       addToast({ title: '请输入用户名和密码', color: 'warning' })
       return
     }
 
     try {
+      setFormError(null)
       await login(username, password)
       addToast({ title: '登录成功', color: 'success' })
       const from = (location.state as { from?: string })?.from || '/'
@@ -141,13 +161,20 @@ export function LoginPage() {
                 <p className="text-default-500 mt-2">请登录以继续访问系统</p>
               </div>
 
-              <form onSubmit={handleSubmit} className="space-y-6">
+              {formError && (
+                <div role="alert" className="rounded-xl border border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">
+                  {formError}
+                </div>
+              )}
+
+              <form onSubmit={handleSubmit} noValidate className="space-y-6">
                 <div>
-                  <label className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
+                  <label htmlFor={usernameInputId} className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
                   <Input
+                    id={usernameInputId}
                     placeholder="请输入用户名"
                     value={username}
-                    onValueChange={setUsername}
+                    onValueChange={handleUsernameChange}
                     isDisabled={isLoading}
                     autoComplete="username"
                     variant="bordered"
@@ -161,12 +188,13 @@ export function LoginPage() {
                 </div>
                 
                 <div>
-                  <label className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
+                  <label htmlFor={passwordInputId} className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
                   <Input
+                    id={passwordInputId}
                     type={showPassword ? 'text' : 'password'}
                     placeholder="请输入密码"
                     value={password}
-                    onValueChange={setPassword}
+                    onValueChange={handlePasswordChange}
                     isDisabled={isLoading}
                     autoComplete="current-password"
                     variant="bordered"
@@ -178,6 +206,8 @@ export function LoginPage() {
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
                         className="focus:outline-none"
+                        aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                        aria-pressed={showPassword}
                       >
                         {showPassword ? (
                           <EyeOff className="text-default-400 h-4 w-4" />
@@ -192,10 +222,8 @@ export function LoginPage() {
                   />
                 </div>
 
-                <div className="flex items-center justify-end">
-                  <Button variant="light" size="sm" className="text-accent-primary rounded-xl" isDisabled>
-                    忘记密码？
-                  </Button>
+                <div className="rounded-lg bg-content2/40 px-3 py-2 text-xs text-default-500">
+                  当前版本未提供浏览器内密码重置入口。管理员密码重置需通过服务端配置或运维流程完成。
                 </div>
 
                 <Button

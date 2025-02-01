@@ -193,13 +193,14 @@ describe('StoragePage', () => {
   })
 
   describe('error handling', () => {
-    it('handles API error gracefully', async () => {
+    it('shows retryable error state on stats fetch failure', async () => {
       mockGetStorageStats.mockRejectedValue(new Error('Network error'))
       render(<StoragePage />)
 
-      // Should not crash
       await waitFor(() => {
-        expect(mockGetStorageStats).toHaveBeenCalled()
+        expect(screen.getByText('加载存储统计失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
 

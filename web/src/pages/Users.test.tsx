@@ -7,6 +7,16 @@ import { UsersPage } from './Users'
 import * as usersApi from '@/api/users'
 import * as authApi from '@/api/auth'
 
+const mockAddToast = vi.fn()
+
+vi.mock('@heroui/react', async () => {
+  const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
+  return {
+    ...actual,
+    addToast: (...args: unknown[]) => mockAddToast(...args),
+  }
+})
+
 // Mock the users API
 vi.mock('@/api/users', () => ({
   listUsers: vi.fn(),
@@ -341,6 +351,37 @@ describe('UsersPage', () => {
       await waitFor(() => {
         expect(screen.getByText('暂无用户')).toBeInTheDocument()
       })
+    })
+
+    it('shows retryable error state when loading users fails', async () => {
+      vi.mocked(usersApi.listUsers).mockRejectedValue(new Error('Network error'))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('加载用户列表失败')).toBeInTheDocument()
+        expect(screen.getByText('Network error')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+      })
+    })
+  })
+
+  describe('validation feedback', () => {
+    it('shows warning when trying to create a user with a short password', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      await waitFor(() => {
+        expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
+      })
+
+      await user.type(screen.getByLabelText(/用户名/i), 'newuser')
+      await user.type(screen.getByLabelText(/密码/i), 'short')
+
+      expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+      expect(usersApi.createUser).not.toHaveBeenCalled()
     })
   })
 })

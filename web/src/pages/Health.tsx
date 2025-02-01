@@ -72,13 +72,18 @@ export function HealthPage() {
     refetchInterval: 30000, // Refresh every 30 seconds
   })
 
-  const { data: stats, isLoading: statsLoading } = useQuery({
+  const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useQuery({
     queryKey: ['storage-stats'],
     queryFn: getStorageStats,
     refetchInterval: 30000,
   })
 
   const isLoading = diagLoading || statsLoading
+
+  const handleRefresh = () => {
+    void refetchDiag()
+    void refetchStats()
+  }
 
   // Calculate dedup savings
   const dedupSavings = stats && stats.totalSize > 0 && stats.uniqueSize > 0
@@ -129,7 +134,7 @@ export function HealthPage() {
         <Button
           className="btn-secondary rounded-xl"
           startContent={<RefreshCw size={16} />}
-          onPress={() => refetchDiag()}
+          onPress={handleRefresh}
           isLoading={isLoading}
         >
           刷新

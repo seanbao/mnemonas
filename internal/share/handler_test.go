@@ -870,6 +870,62 @@ func TestAccessShareWithPassword_LockExpiresAndSuccessResetsFailures(t *testing.
 	}
 }
 
+func TestAccessShareWithPassword_StaleFailuresExpire(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/secret.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.passwordFailureDelay = 0
+	handler.passwordFailureWindow = time.Minute
+	handler.passwordLockDuration = time.Minute
+
+	now := time.Date(2026, 3, 13, 12, 0, 0, 0, time.UTC)
+	handler.passwordAttempts.now = func() time.Time { return now }
+
+	wrongBody := []byte(`{"password":"wrong"}`)
+	for attempt := 0; attempt < handler.passwordFailureLimit-1; attempt++ {
+		req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, wrongBody)
+		recorder := httptest.NewRecorder()
+		handler.AccessShareWithPassword(recorder, req)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d", attempt+1, recorder.Code)
+		}
+	}
+
+	now = now.Add(handler.passwordFailureWindow + time.Second)
+
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, wrongBody)
+	recorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected stale failures to expire and return 401, got %d", recorder.Code)
+	}
+
+	lockedReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, []byte(`{"password":"secret"}`))
+	lockedRecorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(lockedRecorder, lockedReq)
+
+	if lockedRecorder.Code != http.StatusOK {
+		t.Fatalf("expected valid password after stale failures expiry, got %d", lockedRecorder.Code)
+	}
+}
+
 func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

@@ -604,13 +604,27 @@ export function FilesPage() {
   useEffect(() => {
     if (!location.pathname.startsWith('/files')) return
     const routePath = location.pathname.replace(/^\/files/, '')
-    const decodedPath = routePath ? decodeURI(routePath) : '/'
+    let decodedPath = '/'
+    if (routePath) {
+      try {
+        decodedPath = decodeURI(routePath)
+      } catch {
+        addToast({ title: '路径格式无效，已返回根目录', color: 'warning' })
+        if (currentPath !== '/') {
+          setCurrentPath('/')
+        }
+        if (location.pathname !== '/files') {
+          navigate('/files', { replace: true })
+        }
+        return
+      }
+    }
     const normalizedPath = decodedPath.startsWith('/') ? decodedPath : `/${decodedPath}`
     const finalPath = normalizedPath === '' ? '/' : normalizedPath
     if (finalPath !== currentPath) {
       setCurrentPath(finalPath)
     }
-  }, [location.pathname, currentPath, setCurrentPath])
+  }, [location.pathname, currentPath, navigate, setCurrentPath])
 
   useEffect(() => {
     const encodedPath = currentPath === '/' ? '' : encodeURI(currentPath)

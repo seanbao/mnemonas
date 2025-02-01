@@ -53,13 +53,14 @@ type errorDetail struct {
 
 // Handler provides HTTP handlers for share operations
 type Handler struct {
-	store                *ShareStore
-	fs                   FileOpener
-	baseURL              string
-	passwordAttempts     *passwordAttemptTracker
-	passwordFailureLimit int
-	passwordFailureDelay time.Duration
-	passwordLockDuration time.Duration
+	store                 *ShareStore
+	fs                    FileOpener
+	baseURL               string
+	passwordAttempts      *passwordAttemptTracker
+	passwordFailureLimit  int
+	passwordFailureWindow time.Duration
+	passwordFailureDelay  time.Duration
+	passwordLockDuration  time.Duration
 }
 
 type passwordAttemptTracker struct {
@@ -70,12 +71,14 @@ type passwordAttemptTracker struct {
 
 type passwordAttemptState struct {
 	failures    int
+	lastFailure time.Time
 	lockedUntil time.Time
 }
 
 const (
 	shareAccessCookiePrefix      = "mnemonas_share_"
 	defaultPasswordFailureLimit  = 5
+	defaultPasswordFailureWindow = 15 * time.Minute
 	defaultPasswordFailureDelay  = 200 * time.Millisecond
 	defaultPasswordLockDuration  = 5 * time.Minute
 	defaultRateLimitErrorMessage = "too many attempts, try later"
@@ -92,11 +95,12 @@ func (t *passwordAttemptTracker) isLocked(key string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	now := t.now()
 	state, ok := t.attempts[key]
 	if !ok {
 		return false
 	}
-	if state.lockedUntil.After(t.now()) {
+	if state.lockedUntil.After(now) {
 		return true
 	}
 	if !state.lockedUntil.IsZero() {
@@ -105,14 +109,19 @@ func (t *passwordAttemptTracker) isLocked(key string) bool {
 	return false
 }
 
-func (t *passwordAttemptTracker) recordFailure(key string, limit int, lockDuration time.Duration) bool {
+func (t *passwordAttemptTracker) recordFailure(key string, limit int, failureWindow, lockDuration time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	now := t.now()
 	state := t.attempts[key]
+	if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
+		state = passwordAttemptState{}
+	}
 	state.failures++
+	state.lastFailure = now
 	if state.failures >= limit {
-		state.lockedUntil = t.now().Add(lockDuration)
+		state.lockedUntil = now.Add(lockDuration)
 	}
 	t.attempts[key] = state
 
@@ -129,12 +138,13 @@ func (t *passwordAttemptTracker) reset(key string) {
 // fs can be nil if file download is not needed
 func NewHandler(store *ShareStore, fs FileOpener) *Handler {
 	return &Handler{
-		store:                store,
-		fs:                   fs,
-		passwordAttempts:     newPasswordAttemptTracker(),
-		passwordFailureLimit: defaultPasswordFailureLimit,
-		passwordFailureDelay: defaultPasswordFailureDelay,
-		passwordLockDuration: defaultPasswordLockDuration,
+		store:                 store,
+		fs:                    fs,
+		passwordAttempts:      newPasswordAttemptTracker(),
+		passwordFailureLimit:  defaultPasswordFailureLimit,
+		passwordFailureWindow: defaultPasswordFailureWindow,
+		passwordFailureDelay:  defaultPasswordFailureDelay,
+		passwordLockDuration:  defaultPasswordLockDuration,
 	}
 }
 
@@ -543,7 +553,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		}
 
 		if !share.CheckPassword(req.Password) {
-			locked := h.passwordAttempts.recordFailure(attemptKey, h.passwordFailureLimit, h.passwordLockDuration)
+			locked := h.passwordAttempts.recordFailure(attemptKey, h.passwordFailureLimit, h.passwordFailureWindow, h.passwordLockDuration)
 			if h.passwordFailureDelay > 0 {
 				time.Sleep(h.passwordFailureDelay)
 			}
