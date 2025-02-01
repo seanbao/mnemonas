@@ -7,7 +7,6 @@ import { LoginPage } from './Login'
 // Mock the auth store
 const mockLogin = vi.fn()
 const mockClearError = vi.fn()
-const mockInitialize = vi.fn()
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: vi.fn(() => ({
@@ -15,7 +14,6 @@ vi.mock('@/stores/auth', () => ({
     error: null,
     isLoading: false,
     clearError: mockClearError,
-    initialize: mockInitialize,
   })),
   useIsAuthenticated: vi.fn(() => false),
 }))
@@ -50,7 +48,6 @@ describe('LoginPage', () => {
       error: null,
       isLoading: false,
       clearError: mockClearError,
-      initialize: mockInitialize,
     })
   })
 
@@ -82,9 +79,9 @@ describe('LoginPage', () => {
       expect(screen.getByText(/当前版本未提供浏览器内密码重置入口/i)).toBeInTheDocument()
     })
 
-    it('initializes auth on mount', () => {
+    it('does not initialize auth directly on mount', () => {
       renderLogin()
-      expect(mockInitialize).toHaveBeenCalled()
+      expect(mockLogin).not.toHaveBeenCalled()
     })
 
     it('shows a persistent inline error when auth store reports a login error', async () => {
@@ -94,7 +91,6 @@ describe('LoginPage', () => {
         error: '用户名或密码错误',
         isLoading: false,
         clearError: mockClearError,
-        initialize: mockInitialize,
       })
 
       renderLogin()
@@ -182,7 +178,6 @@ describe('LoginPage', () => {
         error: null,
         isLoading: true,
         clearError: mockClearError,
-        initialize: mockInitialize,
       })
       
       renderLogin()

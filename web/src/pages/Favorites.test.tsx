@@ -3,6 +3,16 @@ import { render, screen, waitFor, userEvent } from '@/test/utils'
 import { FavoritesPage } from './Favorites'
 import * as favoritesApi from '@/api/favorites'
 
+const mockNavigate = vi.fn()
+
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+  }
+})
+
 vi.mock('@/api/favorites', () => ({
   listFavorites: vi.fn(),
   removeFavorite: vi.fn(),
@@ -33,6 +43,7 @@ const mockFavorites = [
 describe('FavoritesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockNavigate.mockClear()
     vi.mocked(favoritesApi.listFavorites).mockResolvedValue(mockFavorites)
   })
 
@@ -83,5 +94,20 @@ describe('FavoritesPage', () => {
       expect(screen.getByText('2 项收藏')).toBeInTheDocument()
       expect(screen.getByText('report.pdf')).toBeInTheDocument()
     })
+  })
+
+  it('supports keyboard navigation to a favorite item', async () => {
+    const user = userEvent.setup()
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '打开文件 /docs/report.pdf' })).toBeInTheDocument()
+    })
+
+    const navigateButton = screen.getByRole('button', { name: '打开文件 /docs/report.pdf' })
+    navigateButton.focus()
+    await user.keyboard('{Enter}')
+
+    expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
   })
 })

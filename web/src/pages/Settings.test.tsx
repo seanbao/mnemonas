@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { SettingsPage } from './Settings'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
+
+import { getSettings } from '@/api/settings'
+
+const mockGetSettings = vi.mocked(getSettings)
 
 vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
@@ -81,6 +88,7 @@ vi.mock('@/api/settings', () => ({
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
   })
 
   const openTab = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
@@ -380,7 +388,7 @@ describe('SettingsPage', () => {
       })
     })
 
-    it('shows toast on reset', async () => {
+    it('shows success toast on reset after refetch succeeds', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
@@ -391,7 +399,83 @@ describe('SettingsPage', () => {
       const resetBtn = screen.getByText('重置')
       await user.click(resetBtn)
 
-      // Toast should be triggered (mocked)
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '已恢复为服务端当前配置', color: 'success' })
+      })
+    })
+
+    it('shows danger toast on reset when refetch fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockResolvedValueOnce({
+          data: {
+            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            storage: { root: '/root/.mnemonas' },
+            retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
+            dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          },
+        })
+        .mockRejectedValueOnce(new Error('Network error'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('重置')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('重置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '重置失败',
+          description: 'Network error',
+          color: 'danger',
+        })
+      })
+    })
+  })
+
+  describe('error state', () => {
+    it('shows retryable error state when initial settings load fails', async () => {
+      mockGetSettings.mockRejectedValueOnce(new Error('Network error'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('加载设置失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
+    it('retries loading settings from the error state', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({
+          data: {
+            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            storage: { root: '/root/.mnemonas' },
+            retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
+            dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          },
+        })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('系统设置')).toBeTruthy()
+      })
     })
   })
 

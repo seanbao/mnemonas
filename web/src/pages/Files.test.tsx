@@ -625,14 +625,35 @@ describe('FilesPage', () => {
       expect(screen.getByText('加载记忆中...')).toBeTruthy()
     })
 
+    it('shows retryable error state on API failure', async () => {
+      mockListFiles.mockRejectedValueOnce(new Error('Network error'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('当前目录加载失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('retries on API failure', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
       mockListFiles.mockRejectedValueOnce(new Error('Network error'))
       mockListFiles.mockResolvedValueOnce({ files: [], path: '/' })
       
       render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      mockListFiles.mockClear()
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
       
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalled()
+        expect(mockListFiles).toHaveBeenCalledTimes(1)
+        expect(screen.getByText('这里空空如也')).toBeTruthy()
       })
     })
   })

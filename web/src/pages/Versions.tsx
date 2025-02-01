@@ -134,7 +134,7 @@ export function VersionsPage() {
   }, [searchParams])
   const queryClient = useQueryClient()
 
-  const { data: versions, isLoading, error } = useQuery({
+  const { data: versions, isLoading, error, refetch } = useQuery({
     queryKey: ['versions', selectedPath],
     queryFn: () => getVersions(selectedPath!),
     enabled: !!selectedPath,
@@ -245,6 +245,9 @@ export function VersionsPage() {
               </div>
               <p className="font-medium text-danger mb-1">获取版本历史失败</p>
               <p className="text-sm">{(error as Error).message}</p>
+              <Button variant="bordered" className="mt-4 rounded-xl" onPress={() => refetch()}>
+                重新加载
+              </Button>
             </div>
           ) : versions && versions.length > 0 ? (
             <Table 

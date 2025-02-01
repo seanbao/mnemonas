@@ -141,6 +141,18 @@ describe('ActivityPage', () => {
         expect(screen.getByText('暂无活动记录')).toBeTruthy()
       })
     })
+
+    it('shows retryable error state when activity loading fails', async () => {
+      mockListActivity.mockRejectedValue(new Error('Network error'))
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('加载活动日志失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
   })
 
   describe('filtering', () => {
