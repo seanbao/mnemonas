@@ -19,6 +19,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
 	"github.com/seanbao/mnemonas/internal/share"
@@ -45,6 +46,9 @@ type Server struct {
 	// Share components
 	shareStore   *share.ShareStore
 	shareHandler *share.Handler
+	// Favorites components
+	favoritesStore   *favorites.Store
+	favoritesHandler *favorites.Handler
 	// Config
 	config     *config.Config
 	configPath string
@@ -67,6 +71,8 @@ type ServerConfig struct {
 	// Share configuration
 	ShareEnabled   bool
 	ShareStoreFile string
+	// Favorites configuration
+	FavoritesStoreFile string
 	// Config (for settings API)
 	Config     *config.Config
 	ConfigPath string
@@ -191,6 +197,18 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		logger.Info().Msg("File sharing enabled")
 	}
 
+	// Initialize favorites store
+	if cfg != nil && cfg.FavoritesStoreFile != "" {
+		favStore, err := favorites.NewStore(cfg.FavoritesStoreFile)
+		if err != nil {
+			logger.Warn().Err(err).Msg("Failed to initialize favorites store")
+		} else {
+			s.favoritesStore = favStore
+			s.favoritesHandler = favorites.NewHandler(favStore, logger)
+			logger.Info().Msg("Favorites feature enabled")
+		}
+	}
+
 	// Store config for settings API
 	if cfg != nil && cfg.Config != nil {
 		s.config = cfg.Config
@@ -259,6 +277,18 @@ func (s *Server) setupRoutes() {
 				r.Get("/{id}", s.shareHandler.GetShare)
 				r.Put("/{id}", s.shareHandler.UpdateShare)
 				r.Delete("/{id}", s.handleDeleteShareWithActivity)
+			})
+		}
+
+		// Favorites endpoints
+		if s.favoritesHandler != nil {
+			r.Route("/favorites", func(r chi.Router) {
+				r.Get("/", s.favoritesHandler.ListFavorites)
+				r.Post("/", s.favoritesHandler.AddFavorite)
+				r.Get("/check", s.favoritesHandler.CheckFavorite)
+				r.Post("/check-batch", s.favoritesHandler.CheckFavorites)
+				r.Delete("/*", s.favoritesHandler.RemoveFavorite)
+				r.Patch("/*", s.favoritesHandler.UpdateNote)
 			})
 		}
 
