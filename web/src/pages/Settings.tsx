@@ -31,10 +31,12 @@ import {
   Copy,
   CheckCircle2,
   Key,
+  AlertCircle,
 } from 'lucide-react'
 import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
 
 // Settings section component
@@ -101,7 +103,7 @@ export function SettingsPage() {
   const [copiedField, setCopiedField] = useState<string | null>(null)
   
   // Fetch settings from API
-  const { data: settingsData, isLoading, error, refetch } = useQuery({
+  const { data: settingsData, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['settings'],
     queryFn: getSettings,
   })
@@ -244,9 +246,18 @@ export function SettingsPage() {
     saveMutation.mutate(req)
   }
 
-  const handleReset = () => {
-    refetch()
-    addToast({ title: '设置已重置', color: 'warning' })
+  const handleReset = async () => {
+    const result = await refetch()
+    if (result.error) {
+      addToast({
+        title: '重置失败',
+        description: result.error instanceof Error ? result.error.message : '请稍后重试',
+        color: 'danger',
+      })
+      return
+    }
+
+    addToast({ title: '已恢复为服务端当前配置', color: 'success' })
   }
 
   if (isLoading) {
@@ -262,8 +273,17 @@ export function SettingsPage() {
 
   if (error) {
     return (
-      <div className="h-full flex items-center justify-center text-danger">
-        加载设置失败: {(error as Error).message}
+      <div className="h-full flex items-center justify-center p-6">
+        <EmptyState
+          icon={AlertCircle}
+          title="加载设置失败"
+          description={(error as Error).message}
+          action={
+            <Button variant="bordered" className="rounded-xl" onPress={() => refetch()} isLoading={isRefetching}>
+              重新加载
+            </Button>
+          }
+        />
       </div>
     )
   }
@@ -282,6 +302,7 @@ export function SettingsPage() {
                 className="btn-secondary btn-md rounded-xl"
                 startContent={<RefreshCw size={16} />}
                 onPress={handleReset}
+                isLoading={isRefetching}
               >
                 重置
               </Button>

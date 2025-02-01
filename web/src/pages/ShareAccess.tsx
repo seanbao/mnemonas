@@ -208,6 +208,9 @@ export function ShareAccessPage() {
               无法访问分享
             </h2>
             <p className="text-default-500">{error}</p>
+            <Button className="mt-4" variant="bordered" onPress={loadShareInfo}>
+              重新加载
+            </Button>
           </CardBody>
         </Card>
       </div>
@@ -365,7 +368,12 @@ export function ShareAccessPage() {
                 <div className="text-sm text-default-500">加载文件夹内容...</div>
               )}
               {listError && (
-                <div className="text-sm text-danger">{listError}</div>
+                <div className="space-y-2">
+                  <div className="text-sm text-danger">{listError}</div>
+                  <Button size="sm" variant="bordered" onPress={loadFolderItems}>
+                    重试加载
+                  </Button>
+                </div>
               )}
 
               {!isListing && !listError && folderItems.length === 0 && (

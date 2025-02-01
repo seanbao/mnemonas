@@ -24,7 +24,7 @@ export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const isAuthenticated = useIsAuthenticated()
-  const { login, error, isLoading, clearError, initialize } = useAuthStore()
+  const { login, error, isLoading, clearError } = useAuthStore()
   
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -32,11 +32,6 @@ export function LoginPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const usernameInputId = 'login-username'
   const passwordInputId = 'login-password'
-
-  // Initialize auth state on mount
-  useEffect(() => {
-    initialize()
-  }, [initialize])
 
   // Redirect if already authenticated
   useEffect(() => {
