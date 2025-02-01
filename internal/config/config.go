@@ -20,6 +20,7 @@ type Config struct {
 	Auth      AuthConfig      `toml:"auth"`
 	Share     ShareConfig     `toml:"share"`
 	Favorites FavoritesConfig `toml:"favorites"`
+	Alerts    AlertsConfig    `toml:"alerts"`
 	Log       LogConfig       `toml:"log"`
 }
 
@@ -116,6 +117,19 @@ type FavoritesConfig struct {
 	StoreFile string `toml:"store_file"` // Path to favorites.json
 }
 
+// AlertsConfig holds storage space alerting configuration
+type AlertsConfig struct {
+	Enabled        bool          `toml:"enabled"`         // Enable storage alerts
+	CheckInterval  time.Duration `toml:"check_interval"`  // How often to check (default 1h)
+	ThresholdPct   float64       `toml:"threshold_pct"`   // Alert when usage exceeds this % (default 90)
+	CriticalPct    float64       `toml:"critical_pct"`    // Critical alert threshold (default 95)
+	MinFreeBytes   uint64        `toml:"min_free_bytes"`  // Alert when free space < this (default 10GB)
+	CooldownPeriod time.Duration `toml:"cooldown_period"` // Min time between alerts (default 4h)
+	WebhookURL     string        `toml:"webhook_url"`     // Webhook URL for notifications
+	WebhookMethod  string        `toml:"webhook_method"`  // POST or GET (default POST)
+	WebhookHeaders []string      `toml:"webhook_headers"` // Additional headers (key:value format)
+}
+
 // LogConfig holds logging configuration
 type LogConfig struct {
 	Level      string `toml:"level"`       // debug, info, warn, error
@@ -185,6 +199,15 @@ func Default() *Config {
 		Favorites: FavoritesConfig{
 			Enabled:   true, // enabled by default
 			StoreFile: filepath.Join(dataRoot, "favorites.json"),
+		},
+		Alerts: AlertsConfig{
+			Enabled:        false, // disabled by default
+			CheckInterval:  1 * time.Hour,
+			ThresholdPct:   90.0,
+			CriticalPct:    95.0,
+			MinFreeBytes:   10 * 1024 * 1024 * 1024, // 10GB
+			CooldownPeriod: 4 * time.Hour,
+			WebhookMethod:  "POST",
 		},
 		Log: LogConfig{
 			Level:      "info",
