@@ -76,6 +76,20 @@ describe('Share API', () => {
         status: 500,
       })
     })
+
+    it('surfaces rate limit errors for shared folder listing', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        json: () => Promise.resolve({ success: false, error: { code: 'SHARE_PASSWORD_RATE_LIMITED', message: 'too many attempts, try later' } }),
+      })
+
+      await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
+        message: 'too many attempts, try later',
+        status: 429,
+        code: 'SHARE_PASSWORD_RATE_LIMITED',
+      })
+    })
   })
 
   describe('getPublicShare', () => {
@@ -185,6 +199,20 @@ describe('Share API', () => {
       await expect(accessShareWithPassword('share-1', 'bad')).rejects.toMatchObject({
         message: 'password rejected',
         status: 401,
+      })
+    })
+
+    it('surfaces rate limit errors for password-protected share access', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        json: () => Promise.resolve({ success: false, error: { code: 'SHARE_PASSWORD_RATE_LIMITED', message: 'too many attempts, try later' } }),
+      })
+
+      await expect(accessShareWithPassword('share-1', 'bad')).rejects.toMatchObject({
+        message: 'too many attempts, try later',
+        status: 429,
+        code: 'SHARE_PASSWORD_RATE_LIMITED',
       })
     })
   })

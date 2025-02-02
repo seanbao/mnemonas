@@ -441,17 +441,17 @@ type PublicShareListResponse struct {
 func writePublicShareAccessError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrShareNotFound):
-		http.Error(w, "share not found", http.StatusNotFound)
+		writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 	case errors.Is(err, ErrInvalidPassword):
-		http.Error(w, "password required", http.StatusUnauthorized)
+		writeShareError(w, http.StatusUnauthorized, "password required", "PASSWORD_REQUIRED")
 	case errors.Is(err, ErrShareAccessLimit):
-		http.Error(w, "share access limit reached", http.StatusGone)
+		writeShareError(w, http.StatusGone, "share access limit reached", "SHARE_ACCESS_LIMIT_REACHED")
 	case errors.Is(err, ErrShareExpired):
-		http.Error(w, "share expired", http.StatusGone)
+		writeShareError(w, http.StatusGone, "share expired", "SHARE_EXPIRED")
 	case errors.Is(err, ErrShareDisabled):
-		http.Error(w, "share disabled", http.StatusGone)
+		writeShareError(w, http.StatusGone, "share disabled", "SHARE_DISABLED")
 	default:
-		http.Error(w, "failed to access share", http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to access share", "ACCESS_SHARE_FAILED")
 	}
 }
 
@@ -530,7 +530,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 
 	var req AccessShareRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
 
@@ -548,7 +548,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	if share.HasPassword() {
 		attemptKey := sharePasswordAttemptKey(id, r)
 		if h.passwordAttempts.isLocked(attemptKey) {
-			http.Error(w, defaultRateLimitErrorMessage, http.StatusTooManyRequests)
+			writeShareError(w, http.StatusTooManyRequests, defaultRateLimitErrorMessage, "SHARE_PASSWORD_RATE_LIMITED")
 			return
 		}
 
@@ -558,10 +558,10 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 				time.Sleep(h.passwordFailureDelay)
 			}
 			if locked {
-				http.Error(w, defaultRateLimitErrorMessage, http.StatusTooManyRequests)
+				writeShareError(w, http.StatusTooManyRequests, defaultRateLimitErrorMessage, "SHARE_PASSWORD_RATE_LIMITED")
 				return
 			}
-			http.Error(w, "invalid password", http.StatusUnauthorized)
+			writeShareError(w, http.StatusUnauthorized, "invalid password", "INVALID_PASSWORD")
 			return
 		}
 
@@ -617,22 +617,22 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if share.Type != ShareTypeFile {
-		http.Error(w, "use /download/{path} for folders", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "use /download/{path} for folders", "INVALID_SHARE_TYPE")
 		return
 	}
 
 	if h.fs == nil {
-		http.Error(w, "filesystem not available", http.StatusServiceUnavailable)
+		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
 		return
 	}
 
 	reader, err := h.fs.OpenFile(r.Context(), share.Path)
 	if err != nil {
-		http.Error(w, "file not found", http.StatusNotFound)
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 		return
 	}
 	if reader == nil {
-		http.Error(w, "file not found", http.StatusNotFound)
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 		return
 	}
 	defer reader.Close()
@@ -662,33 +662,33 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if share.Type != ShareTypeFolder {
-		http.Error(w, "share is not a folder", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "share is not a folder", "INVALID_SHARE_TYPE")
 		return
 	}
 
 	if filePath == "" || filePath == "." {
-		http.Error(w, "invalid path", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 		return
 	}
 
 	fullPath := path.Join(share.Path, filePath)
 	if !isWithinSharePath(share.Path, fullPath) {
-		http.Error(w, "invalid path", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 		return
 	}
 
 	if h.fs == nil {
-		http.Error(w, "filesystem not available", http.StatusServiceUnavailable)
+		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
 		return
 	}
 
 	reader, err := h.fs.OpenFile(r.Context(), fullPath)
 	if err != nil {
-		http.Error(w, "file not found", http.StatusNotFound)
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 		return
 	}
 	if reader == nil {
-		http.Error(w, "file not found", http.StatusNotFound)
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 		return
 	}
 	defer reader.Close()
@@ -715,13 +715,13 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if share.Type != ShareTypeFolder {
-		http.Error(w, "share is not a folder", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "share is not a folder", "INVALID_SHARE_TYPE")
 		return
 	}
 
 	statProvider, ok := h.fs.(FileStatProvider)
 	if !ok {
-		http.Error(w, "filesystem not available", http.StatusServiceUnavailable)
+		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
 		return
 	}
 
@@ -730,17 +730,17 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		fullPath = path.Join(share.Path, relPath)
 	}
 	if !isWithinSharePath(share.Path, fullPath) {
-		http.Error(w, "invalid path", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 		return
 	}
 
 	entries, err := statProvider.ReadDir(r.Context(), fullPath)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			http.Error(w, "file not found", http.StatusNotFound)
+			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 			return
 		}
-		http.Error(w, "failed to list share items", http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to list share items", "LIST_SHARE_ITEMS_FAILED")
 		return
 	}
 

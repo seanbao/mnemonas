@@ -580,6 +580,14 @@ func TestDownloadShareFile_PathTraversal(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
 	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_PATH" {
+		t.Fatalf("expected INVALID_PATH code, got %v", errorPayload["code"])
+	}
 }
 
 func TestDownloadShare_NilReaderReturnsNotFound(t *testing.T) {
@@ -608,6 +616,14 @@ func TestDownloadShare_NilReaderReturnsNotFound(t *testing.T) {
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "FILE_NOT_FOUND" {
+		t.Fatalf("expected FILE_NOT_FOUND code, got %v", errorPayload["code"])
 	}
 }
 
@@ -808,6 +824,14 @@ func TestAccessShareWithPassword_RateLimitedAfterRepeatedFailures(t *testing.T) 
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected status 429 on lock, got %d", recorder.Code)
 	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "SHARE_PASSWORD_RATE_LIMITED" {
+		t.Fatalf("expected SHARE_PASSWORD_RATE_LIMITED code, got %v", errorPayload["code"])
+	}
 
 	lockedReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, []byte(`{"password":"secret"}`))
 	lockedRecorder := httptest.NewRecorder()
@@ -953,11 +977,19 @@ func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", recorder.Code)
 	}
+	payload := decodeResponseBody(t, recorder)
 	body := recorder.Body.String()
 	if strings.Contains(body, "database offline") {
 		t.Fatalf("expected internal error details to be hidden, got %q", body)
 	}
 	if !strings.Contains(body, "failed to list share items") {
 		t.Fatalf("expected generic public error message, got %q", body)
+	}
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
+		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
 	}
 }
