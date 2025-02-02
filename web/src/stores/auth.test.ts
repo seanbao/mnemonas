@@ -10,6 +10,7 @@ const acknowledgeSetupMock = vi.fn()
 const getSetupStatusMock = vi.fn()
 
 vi.mock('@/api/auth', () => ({
+  AUTH_CLEARED_EVENT: 'mnemonas:auth-cleared',
   login: (...args: unknown[]) => loginMock(...args),
   logout: (...args: unknown[]) => logoutMock(...args),
   getCurrentUser: (...args: unknown[]) => getCurrentUserMock(...args),
@@ -100,5 +101,29 @@ describe('authStore', () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(true)
     expect(getSetupStatusMock).not.toHaveBeenCalled()
     expect(acknowledgeSetupMock).not.toHaveBeenCalled()
+  })
+
+  it('resets auth state when auth is cleared externally', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new Event('mnemonas:auth-cleared'))
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('登录已过期，请重新登录')
   })
 })

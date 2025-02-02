@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { authFetch, getCurrentUser, getStoredUser, login } from './auth'
+import { AUTH_CLEARED_EVENT, authFetch, getCurrentUser, getStoredUser, login } from './auth'
 
 const fetchMock = vi.fn()
 
@@ -267,5 +267,33 @@ describe('auth API', () => {
     expect(second.ok).toBe(true)
     expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/refresh')).toHaveLength(1)
     expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/auth/download-session')).toHaveLength(1)
+  })
+
+  it('dispatches auth-cleared when refresh fails', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(401)
+    expect(authCleared).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
 })

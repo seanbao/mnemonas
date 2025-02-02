@@ -103,6 +103,7 @@ export class AuthError extends Error {
 const TOKEN_KEY = 'mnemonas_token'
 const REFRESH_TOKEN_KEY = 'mnemonas_refresh_token'
 const USER_KEY = 'mnemonas_user'
+export const AUTH_CLEARED_EVENT = 'mnemonas:auth-cleared'
 let refreshPromise: Promise<boolean> | null = null
 
 export function getStoredToken(): string | null {
@@ -143,6 +144,10 @@ export function clearTokens(): void {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
   localStorage.removeItem(USER_KEY)
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(AUTH_CLEARED_EVENT))
+  }
 }
 
 async function syncDownloadSession(): Promise<void> {
