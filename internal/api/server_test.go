@@ -740,6 +740,91 @@ func TestServer_RestoreVersion_MissingPath(t *testing.T) {
 	}
 }
 
+func TestShouldSkipGCObjectByGrace(t *testing.T) {
+	graceCutoff := time.Date(2026, 3, 17, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		obj  dataplane.ObjectInfo
+		want bool
+	}{
+		{
+			name: "unknown timestamp is skipped conservatively",
+			obj:  dataplane.ObjectInfo{Hash: "obj-1", Size: 1},
+			want: true,
+		},
+		{
+			name: "recent object is skipped",
+			obj: dataplane.ObjectInfo{
+				Hash:      "obj-2",
+				Size:      1,
+				CreatedAt: graceCutoff.Add(time.Minute),
+			},
+			want: true,
+		},
+		{
+			name: "old object is eligible",
+			obj: dataplane.ObjectInfo{
+				Hash:      "obj-3",
+				Size:      1,
+				CreatedAt: graceCutoff.Add(-time.Minute),
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldSkipGCObjectByGrace(tt.obj, graceCutoff)
+			if got != tt.want {
+				t.Fatalf("shouldSkipGCObjectByGrace() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServer_MoveFile_InvalidSourcePathIsSanitized(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	body := `{"from":"../etc/passwd","to":"/safe.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("move file invalid source status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid source path") {
+		t.Fatalf("expected invalid source path message, got %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "..") || strings.Contains(strings.ToLower(bodyStr), "traversal") {
+		t.Fatalf("expected sanitized invalid source path error, got %s", bodyStr)
+	}
+}
+
+func TestServer_RestoreFromTrash_InvalidPathIsSanitized(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/test-id/restore?path=../etc/passwd", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("restore from trash invalid path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid path") {
+		t.Fatalf("expected invalid path message, got %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "..") || strings.Contains(strings.ToLower(bodyStr), "traversal") {
+		t.Fatalf("expected sanitized invalid path error, got %s", bodyStr)
+	}
+}
+
 func TestServer_RestoreVersion_NotFound(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -1284,6 +1369,59 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 	if server.config.WebDAV.Prefix != "/dav" {
 		t.Fatalf("expected prefix normalized to /dav, got %q", server.config.WebDAV.Prefix)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidConfigDoesNotLeakOrMutate(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalMin := server.config.DataPlane.CDC.MinChunkSize
+	originalAvg := server.config.DataPlane.CDC.AvgChunkSize
+	originalMax := server.config.DataPlane.CDC.MaxChunkSize
+
+	body := `{"cdc":{"min_chunk_size":2097152,"avg_chunk_size":1048576,"max_chunk_size":4194304}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid config status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid configuration") {
+		t.Fatalf("expected generic invalid configuration message, got %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "min_chunk_size") || strings.Contains(bodyStr, "avg_chunk_size") {
+		t.Fatalf("expected validation internals to stay hidden, got %s", bodyStr)
+	}
+	if server.config.DataPlane.CDC.MinChunkSize != originalMin || server.config.DataPlane.CDC.AvgChunkSize != originalAvg || server.config.DataPlane.CDC.MaxChunkSize != originalMax {
+		t.Fatalf("expected invalid settings update to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_InvalidDurationRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalMaxAge := server.config.Storage.Retention.MaxAge
+
+	body := `{"retention":{"max_age":"not-a-duration"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid duration status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid retention.max_age") {
+		t.Fatalf("expected invalid retention.max_age message, got %s", bodyStr)
+	}
+	if server.config.Storage.Retention.MaxAge != originalMaxAge {
+		t.Fatalf("expected invalid duration to leave in-memory config unchanged")
 	}
 }
 

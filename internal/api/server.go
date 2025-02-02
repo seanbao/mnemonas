@@ -434,6 +434,30 @@ func validateHash(hash string) error {
 	return nil
 }
 
+func badRequestInvalidPath(w http.ResponseWriter) {
+	BadRequest(w, "invalid path")
+}
+
+func badRequestInvalidHash(w http.ResponseWriter) {
+	BadRequest(w, "invalid hash")
+}
+
+func badRequestInvalidSourcePath(w http.ResponseWriter) {
+	BadRequest(w, "invalid source path")
+}
+
+func badRequestInvalidDestinationPath(w http.ResponseWriter) {
+	BadRequest(w, "invalid destination path")
+}
+
+func shouldSkipGCObjectByGrace(obj dataplane.ObjectInfo, graceCutoff time.Time) bool {
+	if obj.CreatedAt.IsZero() {
+		return true
+	}
+
+	return obj.CreatedAt.After(graceCutoff)
+}
+
 // === Handlers ===
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -500,7 +524,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path to prevent traversal attacks
 	filePath, err := validatePath(filePath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -545,7 +569,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -576,7 +600,7 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	dirPath, err := validatePath(dirPath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -612,7 +636,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -645,7 +669,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -659,7 +683,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 	if versionHash != "" {
 		if err := validateHash(versionHash); err != nil {
-			BadRequest(w, err.Error())
+			badRequestInvalidHash(w)
 			return
 		}
 
@@ -735,13 +759,13 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 
 	fromPath, err := validatePath(req.From)
 	if err != nil {
-		BadRequest(w, "invalid source path: "+err.Error())
+		badRequestInvalidSourcePath(w)
 		return
 	}
 
 	toPath, err := validatePath(req.To)
 	if err != nil {
-		BadRequest(w, "invalid destination path: "+err.Error())
+		badRequestInvalidDestinationPath(w)
 		return
 	}
 
@@ -783,13 +807,13 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 
 	fromPath, err := validatePath(req.From)
 	if err != nil {
-		BadRequest(w, "invalid source path: "+err.Error())
+		badRequestInvalidSourcePath(w)
 		return
 	}
 
 	toPath, err := validatePath(req.To)
 	if err != nil {
-		BadRequest(w, "invalid destination path: "+err.Error())
+		badRequestInvalidDestinationPath(w)
 		return
 	}
 
@@ -831,7 +855,7 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -876,7 +900,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 
 	// Validate hash format (BLAKE3 = 64 hex chars)
 	if err := validateHash(hash); err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidHash(w)
 		return
 	}
 
@@ -890,7 +914,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -1280,8 +1304,8 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	var skippedByGrace int
 	for _, obj := range allObjects {
 		if _, ok := referencedSet[obj.Hash]; !ok {
-			// NEW-2 fix: Check object creation time against grace period
-			if !obj.CreatedAt.IsZero() && obj.CreatedAt.After(graceCutoff) {
+			// Keep grace protection active even when the dataplane could not provide a timestamp.
+			if shouldSkipGCObjectByGrace(obj, graceCutoff) {
 				skippedByGrace++
 				continue
 			}
@@ -1620,7 +1644,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		// Restore to custom path
 		newPath, err = validatePath(newPath)
 		if err != nil {
-			BadRequest(w, err.Error())
+			badRequestInvalidPath(w)
 			return
 		}
 		err = s.fs.RestoreFromTrashTo(r.Context(), id, newPath)
@@ -1715,7 +1739,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
-		BadRequest(w, err.Error())
+		badRequestInvalidPath(w)
 		return
 	}
 
@@ -2002,81 +2026,92 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	updatedConfig := *s.config
+
 	// Apply updates
 	if req.Server != nil {
 		if req.Server.Host != nil {
-			s.config.Server.Host = *req.Server.Host
+			updatedConfig.Server.Host = *req.Server.Host
 		}
 		if req.Server.Port != nil {
-			s.config.Server.Port = *req.Server.Port
+			updatedConfig.Server.Port = *req.Server.Port
 		}
 	}
 
 	if req.Retention != nil {
 		if req.Retention.MaxVersions != nil {
-			s.config.Storage.Retention.MaxVersions = *req.Retention.MaxVersions
+			updatedConfig.Storage.Retention.MaxVersions = *req.Retention.MaxVersions
 		}
 		if req.Retention.MaxAge != nil {
-			if d, err := time.ParseDuration(*req.Retention.MaxAge); err == nil {
-				s.config.Storage.Retention.MaxAge = d
+			d, err := time.ParseDuration(*req.Retention.MaxAge)
+			if err != nil {
+				BadRequest(w, "invalid retention.max_age")
+				return
 			}
+			updatedConfig.Storage.Retention.MaxAge = d
 		}
 		if req.Retention.MinFreeSpace != nil {
-			s.config.Storage.Retention.MinFreeSpace = *req.Retention.MinFreeSpace
+			updatedConfig.Storage.Retention.MinFreeSpace = *req.Retention.MinFreeSpace
 		}
 		if req.Retention.GCInterval != nil {
-			if d, err := time.ParseDuration(*req.Retention.GCInterval); err == nil {
-				s.config.Storage.Retention.GCInterval = d
+			d, err := time.ParseDuration(*req.Retention.GCInterval)
+			if err != nil {
+				BadRequest(w, "invalid retention.gc_interval")
+				return
 			}
+			updatedConfig.Storage.Retention.GCInterval = d
 		}
 	}
 
 	if req.CDC != nil {
 		if req.CDC.MinChunkSize != nil {
-			s.config.DataPlane.CDC.MinChunkSize = *req.CDC.MinChunkSize
+			updatedConfig.DataPlane.CDC.MinChunkSize = *req.CDC.MinChunkSize
 		}
 		if req.CDC.AvgChunkSize != nil {
-			s.config.DataPlane.CDC.AvgChunkSize = *req.CDC.AvgChunkSize
+			updatedConfig.DataPlane.CDC.AvgChunkSize = *req.CDC.AvgChunkSize
 		}
 		if req.CDC.MaxChunkSize != nil {
-			s.config.DataPlane.CDC.MaxChunkSize = *req.CDC.MaxChunkSize
+			updatedConfig.DataPlane.CDC.MaxChunkSize = *req.CDC.MaxChunkSize
 		}
 	}
 
 	if req.WebDAV != nil {
 		if req.WebDAV.Enabled != nil {
-			s.config.WebDAV.Enabled = *req.WebDAV.Enabled
+			updatedConfig.WebDAV.Enabled = *req.WebDAV.Enabled
 		}
 		if req.WebDAV.Prefix != nil {
-			s.config.WebDAV.Prefix = *req.WebDAV.Prefix
+			updatedConfig.WebDAV.Prefix = *req.WebDAV.Prefix
 		}
 		if req.WebDAV.ReadOnly != nil {
-			s.config.WebDAV.ReadOnly = *req.WebDAV.ReadOnly
+			updatedConfig.WebDAV.ReadOnly = *req.WebDAV.ReadOnly
 		}
 		if req.WebDAV.AuthType != nil {
-			s.config.WebDAV.AuthType = *req.WebDAV.AuthType
+			updatedConfig.WebDAV.AuthType = *req.WebDAV.AuthType
 		}
 		if req.WebDAV.Username != nil {
-			s.config.WebDAV.Username = *req.WebDAV.Username
+			updatedConfig.WebDAV.Username = *req.WebDAV.Username
 		}
 		if req.WebDAV.Password != nil {
-			s.config.WebDAV.Password = *req.WebDAV.Password
+			updatedConfig.WebDAV.Password = *req.WebDAV.Password
 		}
-		s.config.WebDAV.Prefix = config.NormalizeWebDAVPrefix(s.config.WebDAV.Prefix)
+		updatedConfig.WebDAV.Prefix = config.NormalizeWebDAVPrefix(updatedConfig.WebDAV.Prefix)
 	}
 
 	// Validate config
-	if err := s.config.Validate(); err != nil {
-		BadRequest(w, "invalid configuration: "+err.Error())
+	if err := updatedConfig.Validate(); err != nil {
+		s.logger.Warn().Err(err).Msg("invalid settings update rejected")
+		BadRequest(w, "invalid configuration")
 		return
 	}
 
 	// Save to file
-	if err := s.config.Save(s.configPath); err != nil {
+	if err := updatedConfig.Save(s.configPath); err != nil {
 		s.logger.Error().Err(err).Msg("failed to save config")
 		InternalError(w, "failed to save settings")
 		return
 	}
+
+	*s.config = updatedConfig
 
 	s.logger.Info().Msg("settings updated and saved")
 
