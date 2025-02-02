@@ -189,6 +189,46 @@ func TestFileSystem_WriteFile_RollsBackOverwriteWhenIndexUpdateFails(t *testing.
 	}
 }
 
+func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rollback-version.md", bytes.NewReader([]byte("old content"))); err != nil {
+		t.Fatalf("Initial WriteFile() error: %v", err)
+	}
+
+	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
+		return errors.New("index update failed")
+	}
+
+	err := fs.WriteFile(ctx, "/rollback-version.md", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() overwrite to fail when file index update fails")
+	}
+
+	versions, versionErr := fs.versions.GetVersions(ctx, "/rollback-version.md")
+	if versionErr != nil {
+		t.Fatalf("GetVersions() after rollback error: %v", versionErr)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("Expected no historical version metadata after rollback, got %d entries", len(versions))
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/rollback-version.md")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != "old content" {
+		t.Fatalf("Expected original content after rollback, got %q", string(data))
+	}
+}
+
 func TestFileSystem_Stat(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

@@ -558,6 +558,43 @@ func TestStore_RenamePath(t *testing.T) {
 	}
 }
 
+func TestStore_RenamePath_TargetAlreadyExists(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if err := s.AddVersion(ctx, "/docs/readme.md", "hash1", 100, ""); err != nil {
+		t.Fatalf("AddVersion(source) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docs/readme.md", 100, time.Now(), "hash1"); err != nil {
+		t.Fatalf("UpdateFileIndex(source) error: %v", err)
+	}
+
+	if err := s.AddVersion(ctx, "/notes/existing.md", "hash2", 200, ""); err != nil {
+		t.Fatalf("AddVersion(target) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/notes/existing.md", 200, time.Now(), "hash2"); err != nil {
+		t.Fatalf("UpdateFileIndex(target) error: %v", err)
+	}
+
+	err := s.RenamePath(ctx, "/docs", "/notes")
+	if err != ErrAlreadyExists {
+		t.Fatalf("RenamePath() error = %v, want ErrAlreadyExists", err)
+	}
+
+	versions, err := s.GetVersions(ctx, "/docs/readme.md")
+	if err != nil {
+		t.Fatalf("GetVersions(source) error: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("expected source metadata to remain unchanged, got %d versions", len(versions))
+	}
+
+	_, _, _, err = s.GetFileIndex(ctx, "/notes/existing.md")
+	if err != nil {
+		t.Fatalf("GetFileIndex(target) error after failed rename: %v", err)
+	}
+}
+
 func TestStore_SearchFiles(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

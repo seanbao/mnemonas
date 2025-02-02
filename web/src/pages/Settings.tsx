@@ -149,38 +149,46 @@ export function SettingsPage() {
     avgChunkSize: '1MB',
     maxChunkSize: '4MB',
   })
+  const [isDirty, setIsDirty] = useState(false)
+
+  const applyServerSettings = (data: NonNullable<typeof settingsData>['data']) => {
+    setSettings({
+      serverHost: data.server.host,
+      serverPort: String(data.server.port),
+      storageRoot: data.storage.root,
+      maxVersions: data.retention.max_versions,
+      maxAge: data.retention.max_age,
+      minFreeSpace: formatBytes(data.retention.min_free_space),
+      gcInterval: data.retention.gc_interval,
+      webdavEnabled: data.webdav.enabled,
+      webdavPrefix: data.webdav.prefix,
+      webdavReadOnly: data.webdav.read_only,
+      webdavAuthType: data.webdav.auth_type,
+      webdavUsername: data.webdav.username,
+      webdavPassword: '',
+      minChunkSize: formatBytes(data.cdc.min_chunk_size),
+      avgChunkSize: formatBytes(data.cdc.avg_chunk_size),
+      maxChunkSize: formatBytes(data.cdc.max_chunk_size),
+    })
+  }
+
+  const updateDirtySettings = (updater: (prev: typeof settings) => typeof settings) => {
+    setIsDirty(true)
+    setSettings(updater)
+  }
 
   // Update local state when API data loads
-  // This is a common pattern for editable forms that sync from server data
   useEffect(() => {
-    if (settingsData?.data) {
-      const d = settingsData.data
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync server data to local editable state
-      setSettings({
-        serverHost: d.server.host,
-        serverPort: String(d.server.port),
-        storageRoot: d.storage.root,
-        maxVersions: d.retention.max_versions,
-        maxAge: d.retention.max_age,
-        minFreeSpace: formatBytes(d.retention.min_free_space),
-        gcInterval: d.retention.gc_interval,
-        webdavEnabled: d.webdav.enabled,
-        webdavPrefix: d.webdav.prefix,
-        webdavReadOnly: d.webdav.read_only,
-        webdavAuthType: d.webdav.auth_type,
-        webdavUsername: d.webdav.username,
-        webdavPassword: '',
-        minChunkSize: formatBytes(d.cdc.min_chunk_size),
-        avgChunkSize: formatBytes(d.cdc.avg_chunk_size),
-        maxChunkSize: formatBytes(d.cdc.max_chunk_size),
-      })
+    if (settingsData?.data && !isDirty) {
+      applyServerSettings(settingsData.data)
     }
-  }, [settingsData])
+  }, [isDirty, settingsData])
 
   // Save mutation
   const saveMutation = useMutation({
     mutationFn: updateSettings,
     onSuccess: () => {
+      setIsDirty(false)
       addToast({ title: '设置已保存', color: 'success' })
       queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
@@ -256,6 +264,11 @@ export function SettingsPage() {
       })
       return
     }
+
+    if (result.data?.data) {
+      applyServerSettings(result.data.data)
+    }
+    setIsDirty(false)
 
     addToast({ title: '已恢复为服务端当前配置', color: 'success' })
   }
@@ -342,7 +355,7 @@ export function SettingsPage() {
                     <Input
                       placeholder="0.0.0.0"
                       value={settings.serverHost}
-                      onValueChange={(v) => setSettings(s => ({ ...s, serverHost: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverHost: v }))}
                       startContent={<Globe size={16} className="text-default-500" />}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
@@ -354,7 +367,7 @@ export function SettingsPage() {
                     <Input
                       placeholder="8080"
                       value={settings.serverPort}
-                      onValueChange={(v) => setSettings(s => ({ ...s, serverPort: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverPort: v }))}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                       }}
@@ -398,7 +411,7 @@ export function SettingsPage() {
                     <Input
                       type="number"
                       value={String(settings.maxVersions)}
-                      onValueChange={(v) => setSettings(s => ({ ...s, maxVersions: parseInt(v) || 0 }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxVersions: parseInt(v) || 0 }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -412,7 +425,7 @@ export function SettingsPage() {
                   >
                     <Input
                       value={settings.maxAge}
-                      onValueChange={(v) => setSettings(s => ({ ...s, maxAge: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxAge: v }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -426,7 +439,7 @@ export function SettingsPage() {
                   >
                     <Input
                       value={settings.minFreeSpace}
-                      onValueChange={(v) => setSettings(s => ({ ...s, minFreeSpace: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, minFreeSpace: v }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -440,7 +453,7 @@ export function SettingsPage() {
                   >
                     <Input
                       value={settings.gcInterval}
-                      onValueChange={(v) => setSettings(s => ({ ...s, gcInterval: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, gcInterval: v }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -597,7 +610,7 @@ export function SettingsPage() {
                   >
                     <Switch
                       isSelected={settings.webdavEnabled}
-                      onValueChange={(v) => setSettings(s => ({ ...s, webdavEnabled: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavEnabled: v }))}
                       classNames={{
                         wrapper: cn(
                           "group-data-[selected=true]:bg-accent-primary",
@@ -613,7 +626,7 @@ export function SettingsPage() {
                   >
                     <Input
                       value={settings.webdavPrefix}
-                      onValueChange={(v) => setSettings(s => ({ ...s, webdavPrefix: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPrefix: v }))}
                       className="w-32"
                       isDisabled={!settings.webdavEnabled}
                       classNames={{ 
@@ -628,7 +641,7 @@ export function SettingsPage() {
                   >
                     <Switch
                       isSelected={settings.webdavReadOnly}
-                      onValueChange={(v) => setSettings(s => ({ ...s, webdavReadOnly: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavReadOnly: v }))}
                       isDisabled={!settings.webdavEnabled}
                       classNames={{
                         wrapper: cn(
@@ -663,7 +676,7 @@ export function SettingsPage() {
                       <Input
                         placeholder="admin"
                         value={settings.webdavUsername}
-                        onValueChange={(v) => setSettings(s => ({ ...s, webdavUsername: v }))}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavUsername: v }))}
                         isDisabled={!settings.webdavEnabled}
                         startContent={<User size={16} className="text-default-500" />}
                         classNames={{ 
@@ -677,7 +690,7 @@ export function SettingsPage() {
                         type="password"
                         placeholder="••••••••"
                         value={settings.webdavPassword}
-                        onValueChange={(v) => setSettings(s => ({ ...s, webdavPassword: v }))}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v }))}
                         isDisabled={!settings.webdavEnabled}
                         startContent={<Lock size={16} className="text-default-500" />}
                         classNames={{ 
@@ -721,7 +734,7 @@ export function SettingsPage() {
                   >
                     <Input
                       value={settings.minChunkSize}
-                      onValueChange={(v) => setSettings(s => ({ ...s, minChunkSize: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, minChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -735,7 +748,7 @@ export function SettingsPage() {
                   >
                     <Input
                       value={settings.avgChunkSize}
-                      onValueChange={(v) => setSettings(s => ({ ...s, avgChunkSize: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, avgChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -749,7 +762,7 @@ export function SettingsPage() {
                   >
                     <Input
                       value={settings.maxChunkSize}
-                      onValueChange={(v) => setSettings(s => ({ ...s, maxChunkSize: v }))}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",

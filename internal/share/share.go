@@ -358,12 +358,35 @@ func (s *ShareStore) Delete(id string) error {
 
 // RecordAccess records an access to the share
 func (s *ShareStore) RecordAccess(id string) error {
-	return s.Update(id, func(share *Share) error {
-		share.AccessCount++
-		now := time.Now()
-		share.LastAccess = &now
-		return nil
-	})
+	_, err := s.RecordAuthorizedAccess(id)
+	return err
+}
+
+// RecordAuthorizedAccess validates access constraints and records an access atomically.
+func (s *ShareStore) RecordAuthorizedAccess(id string) (*Share, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	share, ok := s.shares[id]
+	if !ok {
+		return nil, ErrShareNotFound
+	}
+
+	if err := share.CanAccess(); err != nil {
+		return nil, err
+	}
+
+	prev := copyShare(share)
+	share.AccessCount++
+	now := time.Now()
+	share.LastAccess = &now
+
+	if err := s.save(); err != nil {
+		*share = *prev
+		return nil, err
+	}
+
+	return copyShare(share), nil
 }
 
 // Access validates and records access to a share

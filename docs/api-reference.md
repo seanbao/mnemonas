@@ -594,10 +594,16 @@ POST /api/v1/files-copy
 GET /api/v1/download/{path}
 ```
 
+**需要认证**: 是
+
 **查询参数**:
 - `download`: 设置为 `true` 时强制下载（设置 `Content-Disposition`）
 - `version`: 指定版本哈希（64 位 BLAKE3）下载历史版本
-- `auth`: 可选，访问令牌（当浏览器无法设置 `Authorization` 头时用于预览/播放）
+
+**鉴权说明**:
+- API 客户端可使用现有认证会话或 `Authorization` 请求头
+- 浏览器下载、预览与外部打开使用短期 `HttpOnly` download-session cookie
+- 当前实现不再支持通过 `auth` 查询参数传递访问令牌
 
 **响应**: 返回文件二进制数据；当前版本支持 Range 请求，历史版本不保证 Range
 
@@ -631,9 +637,15 @@ POST /api/v1/directories/{path}
 GET /api/v1/thumbnails/{path}
 ```
 
+**需要认证**: 是
+
 **查询参数**:
 - `size`: 缩略图尺寸，可选值: `small` (150px), `medium` (300px), `large` (600px)
-- `auth`: 可选，访问令牌（当浏览器无法设置 `Authorization` 头时使用）
+
+**鉴权说明**:
+- API 客户端可使用现有认证会话或 `Authorization` 请求头
+- 浏览器缩略图请求依赖短期 `HttpOnly` download-session cookie
+- 当前实现不再支持通过 `auth` 查询参数传递访问令牌
 
 **支持格式**: JPEG, PNG, GIF, WebP
 
@@ -1466,7 +1478,7 @@ POST /api/v1/maintenance/gc
 ```
 
 **查询参数**:
-- `dry_run`: 是否仅计算不删除（默认 `true`）
+- `dry_run`: 是否仅计算不删除（默认 `true`，只有显式传入 `false` 才会执行删除）
 - `grace_period_hours`: 跳过最近创建对象的小时数（默认 24）
 
 **说明**:

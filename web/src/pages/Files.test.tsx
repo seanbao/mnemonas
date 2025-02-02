@@ -150,6 +150,23 @@ describe('FilesPage', () => {
       expect(mockNavigate).toHaveBeenCalledWith('/files', { replace: true })
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/%E0%A4%A')
     })
+
+    it('returns to the last valid folder when an invalid route path is encountered', async () => {
+      mockFilesStoreState.currentPath = '/documents'
+      mockLocationPathname = '/files/%E0%A4%A'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '路径格式无效，已返回上一个有效位置',
+          color: 'warning',
+        }))
+      })
+
+      expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: true })
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/')
+    })
   })
 
   describe('toolbar', () => {
