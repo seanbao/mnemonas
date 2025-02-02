@@ -76,15 +76,8 @@ func CleanPath(name string) string {
 	// Normalize path separators
 	name = strings.ReplaceAll(name, "\\", "/")
 
-	// Clean the path
-	name = path.Clean("/" + name)
-
-	// Prevent directory traversal
-	if strings.Contains(name, "..") {
-		return "/"
-	}
-
-	return name
+	// Keep paths rooted inside the workspace while preserving valid names like foo..txt.
+	return path.Clean("/" + name)
 }
 
 // Stat returns file information

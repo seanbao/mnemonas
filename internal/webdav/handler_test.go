@@ -1028,6 +1028,64 @@ func TestHandler_LOCK_UNLOCK(t *testing.T) {
 	}
 }
 
+func TestHandler_ExpiredLockIsIgnoredAndCleanedUp(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/expired-lock.txt", bytes.NewReader([]byte("initial"))); err != nil {
+		t.Fatalf("WriteFile(expired-lock.txt) error: %v", err)
+	}
+
+	handler.locksMu.Lock()
+	handler.locks["/expired-lock.txt"] = webdavLock{
+		token:     "opaquelocktoken:expired",
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	handler.locksMu.Unlock()
+
+	putReq := httptest.NewRequest("PUT", "/dav/expired-lock.txt", strings.NewReader("updated"))
+	putW := httptest.NewRecorder()
+	handler.ServeHTTP(putW, putReq)
+
+	if putW.Code != http.StatusNoContent {
+		t.Fatalf("PUT with expired lock status = %d, want %d", putW.Code, http.StatusNoContent)
+	}
+
+	handler.locksMu.Lock()
+	_, exists := handler.locks["/expired-lock.txt"]
+	handler.locksMu.Unlock()
+	if exists {
+		t.Fatal("expected expired lock to be cleaned up")
+	}
+}
+
+func TestHandler_LOCK_ReplacesExpiredLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/lock-replace.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(lock-replace.txt) error: %v", err)
+	}
+
+	handler.locksMu.Lock()
+	handler.locks["/lock-replace.txt"] = webdavLock{
+		token:     "opaquelocktoken:expired",
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	handler.locksMu.Unlock()
+
+	req := httptest.NewRequest("LOCK", "/dav/lock-replace.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("LOCK with expired existing lock status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Lock-Token") == "<opaquelocktoken:expired>" {
+		t.Fatal("expected a new lock token to be issued after expired lock cleanup")
+	}
+}
+
 func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()

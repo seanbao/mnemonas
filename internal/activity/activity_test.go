@@ -3,6 +3,7 @@ package activity
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,51 @@ func TestNewStore(t *testing.T) {
 
 	if store.Count() != 0 {
 		t.Errorf("Expected 0 entries, got %d", store.Count())
+	}
+}
+
+func TestNewStore_RecoversFromCorruptLogFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "activity.json")
+	if err := os.WriteFile(logPath, []byte("{invalid json"), 0640); err != nil {
+		t.Fatalf("WriteFile(activity.json) error: %v", err)
+	}
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if store.Count() != 0 {
+		t.Fatalf("Expected recovered store to start empty, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created")
+	}
+
+	if err := store.Log(ActionUpload, "/recovered.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log() after recovery error: %v", err)
+	}
+
+	reloaded, reloadErr := NewStore(tmpDir)
+	if reloadErr != nil {
+		t.Fatalf("NewStore() reload error: %v", reloadErr)
+	}
+	if reloaded.Count() != 1 {
+		t.Fatalf("Expected recovered store to persist new entries, got %d", reloaded.Count())
 	}
 }
 
