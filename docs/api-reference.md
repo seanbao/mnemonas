@@ -60,12 +60,24 @@ Authorization: Bearer <access_token>
 
 ### 分享/收藏端点响应
 
-认证后的分享管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 `/s/*` 保持原始 JSON 对象或数组，错误场景仍可能返回纯文本错误页或简单错误对象。
+认证后的分享管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 `/s/*` 的成功响应保持原始 JSON 对象或数组，错误响应使用 `success: false` 和结构化 `error` 对象。
 
 ```json
 {
   "success": true,
   "data": { ... }
+}
+```
+
+公开分享错误响应示例：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "SHARE_PASSWORD_RATE_LIMITED",
+    "message": "too many attempts, try later"
+  }
 }
 ```
 
@@ -77,6 +89,7 @@ Authorization: Bearer <access_token>
 | 201 | 创建成功 |
 | 400 | 请求参数错误 |
 | 404 | 资源不存在 |
+| 429 | 请求过于频繁 / 密码尝试次数过多 |
 | 410 | 资源不可用（过期/禁用/访问上限） |
 | 413 | 文件过大 |
 | 500 | 服务器内部错误 |
@@ -980,15 +993,17 @@ POST /s/{share_id}
 - 当分享不需要密码，或已通过密码验证后，会返回 `file_name` / `file_size` / `folder_items`
 - 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`
 - `access_count` 在下载与文件夹列表请求时递增；`POST /s/{share_id}` 验证密码不会计数
+- 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
+- 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
 
 **下载文件**:
 ```
-GET /s/{share_id}/download?password=xxx
+GET /s/{share_id}/download
 ```
 
 **列出分享文件夹内容**:
 ```
-GET /s/{share_id}/items?path=subdir&password=xxx
+GET /s/{share_id}/items?path=subdir
 ```
 
 **响应示例**:
@@ -1009,12 +1024,12 @@ GET /s/{share_id}/items?path=subdir&password=xxx
 
 **下载分享文件夹内文件**:
 ```
-GET /s/{share_id}/download/{path}?password=xxx
+GET /s/{share_id}/download/{path}
 ```
 
 **说明**:
 - `{path}` 需要按路径段进行 URL 编码（保留 `/` 分隔）
-- `password` 仅在分享启用密码时必填
+- 分享启用密码时，需先通过 `POST /s/{share_id}` 完成密码验证，再使用返回的 cookie 访问下载和文件夹列表接口
 
 ---
 
@@ -1322,6 +1337,11 @@ PUT /api/v1/settings
 }
 ```
 
+**失败行为**:
+- 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`
+- 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
+- 非法设置请求不会修改进程内当前生效配置
+
 ### 获取 WebDAV 凭据
 
 ```
@@ -1415,6 +1435,10 @@ GET /api/v1/maintenance/objects
 - `limit`: 返回数量限制（默认 1000）
 - `cursor`: 游标（从上一次返回的 `next_cursor` 开始）
 
+**说明**:
+- 当前响应仅返回 `hash` 和 `size`
+- 服务端内部会读取对象时间戳用于 GC grace period 判断，但该字段不通过此接口暴露
+
 **响应示例**:
 ```json
 {
@@ -1444,6 +1468,11 @@ POST /api/v1/maintenance/gc
 **查询参数**:
 - `dry_run`: 是否仅计算不删除（默认 `true`）
 - `grace_period_hours`: 跳过最近创建对象的小时数（默认 24）
+
+**说明**:
+- GC 会跳过 grace period 内的新对象，避免删除正在上传或刚写入的数据块
+- 当对象缺少可用时间戳时，也会按保守策略计入 `skipped_by_grace`，不会直接进入删除集合
+- dataplane 会优先使用对象创建时间，无法获取时回退到修改时间
 
 **响应示例**:
 ```json

@@ -20,6 +20,13 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
+var (
+	errInvalidOverwriteHeader             = errors.New("invalid Overwrite header")
+	errOverwriteDisabled                  = errors.New("destination exists and overwrite is disabled")
+	errDestinationInsideSourceDirectory   = errors.New("destination cannot be inside source directory")
+	errDirectoryCopyOverwriteNotSupported = errors.New("overwriting an existing destination with a directory copy is not supported")
+)
+
 // Handler is the WebDAV request handler
 type Handler struct {
 	fs        *storage.FileSystem
@@ -75,16 +82,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if filePath == "" {
 		filePath = "/"
 	}
+	if hasTraversalSegment(filePath) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
 
 	// Validate path to prevent path traversal attacks (C1 fix)
 	filePath = path.Clean(filePath)
 	if !path.IsAbs(filePath) {
 		filePath = "/" + filePath
-	}
-	// Reject any path containing .. after cleaning
-	if strings.Contains(filePath, "..") {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
 	}
 
 	ctx := r.Context()
@@ -206,8 +212,9 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 `, html.EscapeString(filePath), html.EscapeString(filePath))
 
 	if filePath != "/" {
+		parentHref := path.Join(h.prefix, path.Dir(filePath))
 		fmt.Fprintf(w, `<a href="%s">..</a>
-`, html.EscapeString(path.Dir(filePath)))
+`, html.EscapeString(parentHref))
 	}
 
 	for _, child := range children {
@@ -276,7 +283,7 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 		}
 	} else {
 		// If-Match with non-existent file should fail
-		if im := r.Header.Get("If-Match"); im != "" && im != "*" {
+		if im := r.Header.Get("If-Match"); im != "" {
 			http.Error(w, "precondition failed", http.StatusPreconditionFailed)
 			return
 		}
@@ -362,7 +369,10 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	dstExists := h.destinationExists(ctx, dst)
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -392,11 +402,17 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDestinationInsideSourceDirectory) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 	if err := h.rejectDirectoryCopyOverwrite(ctx, srcPath, dst, dstExists); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDirectoryCopyOverwriteNotSupported) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -467,7 +483,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	dstExists := h.destinationExists(ctx, dst)
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -484,7 +503,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDestinationInsideSourceDirectory) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -510,11 +532,11 @@ func (h *Handler) checkOverwriteHeader(ctx context.Context, r *http.Request, dst
 		return nil
 	}
 	if !strings.EqualFold(overwrite, "F") {
-		return errors.New("invalid Overwrite header")
+		return errInvalidOverwriteHeader
 	}
 
 	if _, err := h.fs.Stat(ctx, dst); err == nil {
-		return errors.New("destination exists and overwrite is disabled")
+		return errOverwriteDisabled
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
@@ -531,7 +553,7 @@ func (h *Handler) rejectDirectoryDescendantDestination(ctx context.Context, srcP
 		return nil
 	}
 	if isDescendantPath(srcPath, dstPath) {
-		return errors.New("destination cannot be inside source directory")
+		return errDestinationInsideSourceDirectory
 	}
 	return nil
 }
@@ -546,7 +568,7 @@ func (h *Handler) rejectDirectoryCopyOverwrite(ctx context.Context, srcPath, dst
 		return err
 	}
 	if info.IsDir {
-		return errors.New("overwriting an existing destination with a directory copy is not supported")
+		return errDirectoryCopyOverwriteNotSupported
 	}
 	return nil
 }
@@ -561,6 +583,17 @@ func isDescendantPath(parentPath, childPath string) bool {
 func (h *Handler) destinationExists(ctx context.Context, dst string) bool {
 	_, err := h.fs.Stat(ctx, dst)
 	return err == nil
+}
+
+func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, status int, expected ...error) bool {
+	for _, candidate := range expected {
+		if errors.Is(err, candidate) {
+			http.Error(w, err.Error(), status)
+			return true
+		}
+	}
+
+	return false
 }
 
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
@@ -819,6 +852,9 @@ func (h *Handler) getDestination(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
+	if hasTraversalSegment(u.Path) {
+		return ""
+	}
 
 	// Get path and clean it
 	dstPath := path.Clean(u.Path)
@@ -826,15 +862,21 @@ func (h *Handler) getDestination(r *http.Request) string {
 		dstPath = "/" + dstPath
 	}
 
-	// Validate - reject path traversal
-	if strings.Contains(dstPath, "..") {
-		return ""
-	}
 	if h.prefix != "" && dstPath != h.prefix && !strings.HasPrefix(dstPath, h.prefix+"/") {
 		return ""
 	}
 
 	return strings.TrimPrefix(dstPath, h.prefix)
+}
+
+func hasTraversalSegment(rawPath string) bool {
+	for _, segment := range strings.Split(rawPath, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (h *Handler) handleError(w http.ResponseWriter, err error) {
