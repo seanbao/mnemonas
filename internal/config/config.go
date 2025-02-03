@@ -282,6 +282,61 @@ func Default() *Config {
 	}
 }
 
+func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
+	if cfg.Storage.Root == "" {
+		cfg.Storage.Root = defaultRoot
+	}
+
+	defaultInternal := filepath.Join(defaultRoot, ".mnemonas")
+	internal := filepath.Join(cfg.Storage.Root, ".mnemonas")
+
+	defaultDataDir := filepath.Join(defaultInternal, "objects")
+	defaultMetadataDir := defaultInternal
+	defaultTempDir := filepath.Join(defaultInternal, "tmp")
+	defaultThumbnailDir := filepath.Join(defaultInternal, "thumbnails")
+	defaultMaintenanceDir := filepath.Join(defaultInternal, "maintenance")
+	defaultActivityDir := filepath.Join(defaultInternal, "activity")
+
+	if cfg.Storage.DataDir == "" || cfg.Storage.DataDir == defaultDataDir {
+		cfg.Storage.DataDir = filepath.Join(internal, "objects")
+	}
+	if cfg.Storage.MetadataDir == "" || cfg.Storage.MetadataDir == defaultMetadataDir {
+		cfg.Storage.MetadataDir = internal
+	}
+	if cfg.Storage.TempDir == "" || cfg.Storage.TempDir == defaultTempDir {
+		cfg.Storage.TempDir = filepath.Join(internal, "tmp")
+	}
+	if cfg.Storage.ThumbnailDir == "" || cfg.Storage.ThumbnailDir == defaultThumbnailDir {
+		cfg.Storage.ThumbnailDir = filepath.Join(internal, "thumbnails")
+	}
+	if cfg.Storage.MaintenanceDir == "" || cfg.Storage.MaintenanceDir == defaultMaintenanceDir {
+		cfg.Storage.MaintenanceDir = filepath.Join(internal, "maintenance")
+	}
+	if cfg.Storage.ActivityDir == "" || cfg.Storage.ActivityDir == defaultActivityDir {
+		cfg.Storage.ActivityDir = filepath.Join(internal, "activity")
+	}
+
+	defaultCertDir := filepath.Join(defaultInternal, "certs")
+	if cfg.Server.TLS.CertDir == "" || cfg.Server.TLS.CertDir == defaultCertDir {
+		cfg.Server.TLS.CertDir = filepath.Join(internal, "certs")
+	}
+
+	defaultUsersFile := filepath.Join(defaultInternal, "users.json")
+	if cfg.Auth.UsersFile == "" || cfg.Auth.UsersFile == defaultUsersFile {
+		cfg.Auth.UsersFile = filepath.Join(internal, "users.json")
+	}
+
+	defaultShareFile := filepath.Join(defaultInternal, "shares.json")
+	if cfg.Share.StoreFile == "" || cfg.Share.StoreFile == defaultShareFile {
+		cfg.Share.StoreFile = filepath.Join(internal, "shares.json")
+	}
+
+	defaultFavoritesFile := filepath.Join(defaultInternal, "favorites.json")
+	if cfg.Favorites.StoreFile == "" || cfg.Favorites.StoreFile == defaultFavoritesFile {
+		cfg.Favorites.StoreFile = filepath.Join(internal, "favorites.json")
+	}
+}
+
 // Load loads configuration from file
 func Load(path string) (*Config, error) {
 	cfg := Default()
@@ -297,6 +352,8 @@ func Load(path string) (*Config, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+
+	applyStorageRootDefaults(cfg, getDefaultStorageRoot())
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
