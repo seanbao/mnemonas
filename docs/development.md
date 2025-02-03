@@ -383,11 +383,12 @@ host = "127.0.0.1"
 port = 8080
 
 [storage]
-data_dir = "~/.mnemonas/data"
-metadata_dir = "~/.mnemonas/meta"
+root = "~/.mnemonas"
+data_dir = "~/.mnemonas/.mnemonas/objects"
+metadata_dir = "~/.mnemonas/.mnemonas"
 
 [dataplane]
-address = "127.0.0.1:9090"
+grpc_address = "127.0.0.1:9090"
 
 [webdav]
 enabled = true
@@ -395,7 +396,7 @@ prefix = "/dav"
 
 [log]
 level = "debug"
-format = "pretty"
+format = "console"
 ```
 
 ---

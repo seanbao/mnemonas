@@ -61,8 +61,7 @@ func main() {
 	}
 
 	// Load or create secrets (for JWT, etc.)
-	homeDir, _ := os.UserHomeDir()
-	dataRoot := filepath.Join(homeDir, ".mnemonas")
+	dataRoot := cfg.Storage.Root
 	secrets, isNewSecrets, err := config.LoadOrCreateSecrets(dataRoot)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load secrets")
@@ -220,7 +219,7 @@ func main() {
 			WebhookMethod:  cfg.Alerts.WebhookMethod,
 			WebhookHeaders: cfg.Alerts.WebhookHeaders,
 		}
-		alertMonitor = alerts.NewMonitor(alertsCfg, cfg.Storage.DataDir, log.Logger)
+		alertMonitor = alerts.NewMonitor(alertsCfg, cfg.Storage.Root, log.Logger)
 		alertMonitor.Start(ctx)
 		log.Info().
 			Float64("threshold_pct", cfg.Alerts.ThresholdPct).

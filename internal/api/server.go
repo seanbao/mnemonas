@@ -459,11 +459,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	s.json(w, http.StatusOK, map[string]any{
+	NewAPIResponse(map[string]any{
 		"name":    AppName,
 		"version": AppVersion,
 		"go":      runtime.Version(),
-	})
+	}).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
@@ -928,7 +928,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.json(w, http.StatusOK, stats)
+	NewAPIResponse(stats).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
@@ -997,7 +997,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.json(w, http.StatusOK, diag)
+	NewAPIResponse(diag).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {

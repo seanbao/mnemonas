@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ var (
 	ErrFileLocked      = errors.New("file is locked")
 	ErrVersionNotFound = errors.New("version not found")
 )
+
+const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
 
 // FileInfo represents file metadata
 type FileInfo struct {
@@ -263,42 +266,68 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 
 	name = workspace.CleanPath(name)
 
-	// Read data (with size limit for safety)
-	data, err := io.ReadAll(io.LimitReader(r, 500*1024*1024)) // 500MB limit
+	fullPath := fs.workspace.FullPath(name)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory: %w", err)
+	}
+
+	tmpPath := fullPath + ".tmp"
+	f, err := os.Create(tmpPath)
 	if err != nil {
-		return fmt.Errorf("failed to read data: %w", err)
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	hasher := blake3.New()
+	limited := &io.LimitedReader{R: r, N: defaultMaxWriteSize + 1}
+	written, copyErr := io.Copy(io.MultiWriter(f, hasher), limited)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to write file: %w", copyErr)
+	}
+	if syncErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync file: %w", syncErr)
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close file: %w", closeErr)
+	}
+	if written > defaultMaxWriteSize {
+		os.Remove(tmpPath)
+		return fmt.Errorf("file too large (max: %d bytes)", defaultMaxWriteSize)
 	}
 
 	// Check if versioning is needed
-	shouldVersion := fs.policy.ShouldVersion(ctx, name, int64(len(data)))
+	shouldVersion := fs.policy.ShouldVersion(ctx, name, written)
 
 	// If versioning enabled and file exists, save old version first
 	if shouldVersion {
 		if oldData, err := fs.workspace.ReadFile(ctx, name); err == nil {
-			// Store old content to version objects (hash is computed by object store)
 			oldHash, err := fs.versions.PutObject(oldData)
 			if err != nil {
+				os.Remove(tmpPath)
 				return fmt.Errorf("failed to store version: %w", err)
 			}
-			// Record version in database
 			if err := fs.versions.AddVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
+				os.Remove(tmpPath)
 				return fmt.Errorf("failed to record version: %w", err)
 			}
-			// Cleanup old versions based on retention policy
 			if fs.config.MaxVersions > 0 || fs.config.MaxVersionAge > 0 {
 				fs.cleanupVersions(ctx, name)
 			}
 		}
 	}
 
-	// Write new file
-	if err := fs.workspace.WriteFile(ctx, name, data); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to replace file: %w", err)
 	}
 
-	// Update file index
-	newHash := computeHash(data)
-	fs.versions.UpdateFileIndex(ctx, name, int64(len(data)), time.Now(), newHash)
+	newHash := fmt.Sprintf("%x", hasher.Sum(nil))
+	fs.versions.UpdateFileIndex(ctx, name, written, time.Now(), newHash)
 
 	return nil
 }
