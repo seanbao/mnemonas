@@ -18,8 +18,7 @@ import {
 import {
   getPublicShare,
   accessShareWithPassword,
-  getShareDownloadUrl,
-  getShareFileDownloadUrl,
+  downloadShare,
   getPublicShareItems,
   type PublicShareInfo,
   type PublicShareItem,
@@ -27,7 +26,7 @@ import {
 } from '@/api/share'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
-import { formatBytes, formatDate, openUrlInNewTab } from '@/lib/utils'
+import { formatBytes, formatDate } from '@/lib/utils'
 
 function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
   return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
@@ -129,19 +128,44 @@ export function ShareAccessPage() {
     }
   }
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (!id) return
-    const url = getShareDownloadUrl(id)
-    if (!openUrlInNewTab(url)) {
-      addToast({ title: '浏览器拦截了下载窗口，请允许弹窗后重试', color: 'warning' })
+
+    try {
+      await downloadShare(id, { filename: shareInfo?.file_name })
+    } catch (err) {
+      if (err instanceof ShareError && err.isUnauthorized) {
+        setIsAuthenticated(false)
+        setNeedsPassword(true)
+        setPassword('')
+        addToast({ title: '访问凭证已失效，请重新输入密码', color: 'warning' })
+        return
+      }
+      addToast({
+        title: err instanceof Error ? err.message : '下载失败',
+        color: 'danger',
+      })
     }
   }
 
-  const handleDownloadItem = (itemPath: string) => {
+  const handleDownloadItem = async (itemPath: string) => {
     if (!id) return
-    const url = getShareFileDownloadUrl(id, itemPath)
-    if (!openUrlInNewTab(url)) {
-      addToast({ title: '浏览器拦截了下载窗口，请允许弹窗后重试', color: 'warning' })
+
+    const item = folderItems.find((folderItem) => folderItem.path === itemPath)
+    try {
+      await downloadShare(id, { filePath: itemPath, filename: item?.name })
+    } catch (err) {
+      if (err instanceof ShareError && err.isUnauthorized) {
+        setIsAuthenticated(false)
+        setNeedsPassword(true)
+        setPassword('')
+        addToast({ title: '访问凭证已失效，请重新输入密码', color: 'warning' })
+        return
+      }
+      addToast({
+        title: err instanceof Error ? err.message : '下载失败',
+        color: 'danger',
+      })
     }
   }
 

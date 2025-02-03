@@ -1423,3 +1423,70 @@ func TestFileSystem_GetAllReferencedHashes(t *testing.T) {
 		t.Log("No version hashes found (may be expected if versioning not triggered)")
 	}
 }
+
+func TestFileSystem_AcquireGCLock_BlocksMutationsUntilReleased(t *testing.T) {
+	fs := &FileSystem{
+		listReferencedHashes: func(ctx context.Context) ([]string, error) {
+			return []string{"hash1", "hash2"}, nil
+		},
+	}
+
+	hashes, release, err := fs.AcquireGCLock(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireGCLock() error: %v", err)
+	}
+
+	if len(hashes) != 2 {
+		t.Fatalf("AcquireGCLock() returned %d hashes, want 2", len(hashes))
+	}
+
+	locked := make(chan struct{})
+	go func() {
+		fs.mu.Lock()
+		close(locked)
+		fs.mu.Unlock()
+	}()
+
+	select {
+	case <-locked:
+		t.Fatal("expected storage mutation lock to remain held during GC")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("expected blocked mutation to proceed after GC lock release")
+	}
+}
+
+func TestFileSystem_AcquireGCLock_ReleasesLockOnSnapshotError(t *testing.T) {
+	fs := &FileSystem{
+		listReferencedHashes: func(ctx context.Context) ([]string, error) {
+			return nil, errors.New("snapshot failed")
+		},
+	}
+
+	_, release, err := fs.AcquireGCLock(context.Background())
+	if err == nil {
+		t.Fatal("expected AcquireGCLock() to fail")
+	}
+	if release != nil {
+		t.Fatal("expected no release function on error")
+	}
+
+	locked := make(chan struct{})
+	go func() {
+		fs.mu.Lock()
+		close(locked)
+		fs.mu.Unlock()
+	}()
+
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("expected mutex to be released after snapshot error")
+	}
+}

@@ -218,6 +218,10 @@ export async function authFetch(url: string, options: RequestInit = {}, retryCou
   return response
 }
 
+export async function refreshAuthSession(): Promise<boolean> {
+  return tryRefreshToken()
+}
+
 // Try to refresh the token
 async function tryRefreshToken(): Promise<boolean> {
   if (refreshPromise) {

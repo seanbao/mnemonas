@@ -309,6 +309,21 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var expiresAt *time.Time
+	if req.ExpiresIn != nil {
+		if *req.ExpiresIn == "" {
+			expiresAt = nil
+		} else {
+			duration, err := parseDuration(*req.ExpiresIn)
+			if err != nil {
+				writeShareError(w, http.StatusBadRequest, "invalid expires_in format", "INVALID_EXPIRES_IN")
+				return
+			}
+			exp := time.Now().Add(duration)
+			expiresAt = &exp
+		}
+	}
+
 	share, err := h.store.Get(id)
 	if err != nil {
 		if errors.Is(err, ErrShareNotFound) {
@@ -331,16 +346,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 			s.Enabled = *req.Enabled
 		}
 		if req.ExpiresIn != nil {
-			if *req.ExpiresIn == "" {
-				s.ExpiresAt = nil
-			} else {
-				duration, err := parseDuration(*req.ExpiresIn)
-				if err != nil {
-					return err
-				}
-				exp := time.Now().Add(duration)
-				s.ExpiresAt = &exp
-			}
+			s.ExpiresAt = expiresAt
 		}
 		if req.Password != nil {
 			if *req.Password == "" {
@@ -798,6 +804,10 @@ func (h *Handler) buildShareURL(id string) string {
 func (h *Handler) accessAuthorizedShare(r *http.Request, id string) (*Share, error) {
 	share, err := h.store.Get(id)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := share.CanAccess(); err != nil {
 		return nil, err
 	}
 

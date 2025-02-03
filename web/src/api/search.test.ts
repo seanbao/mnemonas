@@ -42,4 +42,14 @@ describe('Search API', () => {
 
     await expect(searchFiles('report')).rejects.toThrow('search unavailable')
   })
+
+  it('falls back to a generic error when the error body is invalid', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('Search failed')
+  })
 })

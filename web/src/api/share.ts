@@ -106,6 +106,35 @@ interface ShareApiResponse<T> {
   error?: ShareApiError | string
 }
 
+function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
+  if (!contentDisposition) {
+    return fallback
+  }
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+
+  const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+  return filenameMatch?.[1] ?? fallback
+}
+
+function triggerBrowserDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 function getShareErrorMessage(body: ShareApiResponse<never> | { error?: string; message?: string }, fallback: string): string {
   if (typeof body.error === 'string' && body.error) {
     return body.error
@@ -351,6 +380,36 @@ export function getShareFileDownloadUrl(id: string, filePath: string): string {
   const encodedPath = encodePathForUrl(normalizedPath)
   const trimmedPath = encodedPath.startsWith('/') ? encodedPath.slice(1) : encodedPath
   return `/s/${id}/download/${trimmedPath}`
+}
+
+export async function downloadShare(id: string, options?: { filePath?: string; filename?: string }): Promise<void> {
+  const url = options?.filePath ? getShareFileDownloadUrl(id, options.filePath) : getShareDownloadUrl(id)
+  const response = await fetch(url, { credentials: 'same-origin' })
+
+  if (!response.ok) {
+    let message = '下载分享文件失败'
+    let code: string | undefined
+    if (response.status === 401) {
+      message = '访问凭证已失效，请重新输入密码'
+    } else if (response.status === 410) {
+      message = '分享已过期、已禁用或访问次数已达上限'
+    } else if (response.status === 429) {
+      message = '尝试次数过多，请稍后再试'
+    }
+    try {
+      const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
+      message = getShareErrorMessage(body, message)
+      code = getShareErrorCode(body)
+    } catch { /* ignore */ }
+    throw new ShareError(message, response.status, code)
+  }
+
+  const fallbackFilename = options?.filename
+    ?? (options?.filePath ? normalizePath(options.filePath).split('/').filter(Boolean).pop() : undefined)
+    ?? 'download'
+  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const blob = await response.blob()
+  triggerBrowserDownload(blob, filename)
 }
 
 // === Utility functions ===

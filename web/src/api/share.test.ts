@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { accessShareWithPassword, copyShareUrl, createShare, getPublicShare, getPublicShareItems, listShares, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
+import { accessShareWithPassword, copyShareUrl, createShare, downloadShare, getPublicShare, getPublicShareItems, listShares, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
 
 const mockCopyTextToClipboard = vi.fn()
 
@@ -22,6 +22,42 @@ describe('Share API', () => {
   it('encodes shared folder download path segments', () => {
     const url = getShareFileDownloadUrl('abc123', '/folder/my file.txt')
     expect(url).toBe('/s/abc123/download/folder/my%20file.txt')
+  })
+
+  describe('downloadShare', () => {
+    it('downloads the root shared file as a blob', async () => {
+      const blob = new Blob(['share-content'], { type: 'text/plain' })
+      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share')
+      const revokeObjectURLSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ 'Content-Disposition': 'attachment; filename="secret.txt"' }),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1')
+
+      expect(global.fetch).toHaveBeenCalledWith('/s/share-1/download', { credentials: 'same-origin' })
+      expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
+      expect(clickSpy).toHaveBeenCalled()
+      expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:share')
+    })
+
+    it('throws a ShareError with structured details when download fails', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ success: false, error: { code: 'PASSWORD_REQUIRED', message: '访问凭证已失效，请重新输入密码' } }),
+      })
+
+      await expect(downloadShare('share-1')).rejects.toMatchObject({
+        message: '访问凭证已失效，请重新输入密码',
+        status: 401,
+        code: 'PASSWORD_REQUIRED',
+      })
+    })
   })
 
   it('preserves path separators for nested files', () => {
