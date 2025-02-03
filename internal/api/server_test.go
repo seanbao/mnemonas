@@ -20,6 +20,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
@@ -1193,6 +1194,41 @@ func TestServer_ScrubResult(t *testing.T) {
 	}
 }
 
+func TestServer_ScrubResult_DoesNotExposeInternalErrorMessage(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	maint, err := maintenance.NewHistoryStore(path.Join(tmpDir, "maintenance"))
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+	server.maintenance = maint
+	if err := maint.SaveScrubResult(&maintenance.ScrubResult{
+		ID:           "scrub-1",
+		StartTime:    time.Now().Add(-time.Minute),
+		EndTime:      time.Now(),
+		Status:       "failed",
+		ErrorMessage: "dial tcp 127.0.0.1:9090: connection refused",
+	}); err != nil {
+		t.Fatalf("SaveScrubResult() error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/maintenance/scrub", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetScrubResult status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if strings.Contains(strings.ToLower(body), "connection refused") || strings.Contains(strings.ToLower(body), "dial tcp") {
+		t.Fatalf("expected scrub result to hide internal error details, got %s", body)
+	}
+	if !strings.Contains(body, scrubFailurePublicMessage) {
+		t.Fatalf("expected scrub result to include sanitized error message, got %s", body)
+	}
+}
+
 func TestServer_Thumbnail_NoService(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -1238,6 +1274,41 @@ func TestServer_DiagnosticsExport(t *testing.T) {
 	// Should return OK with zip content or service unavailable if maintenance not configured
 	if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
 		t.Errorf("DiagnosticsExport status = %d", w.Code)
+	}
+}
+
+func TestServer_DiagnosticsExport_DoesNotExposeInternalScrubErrorMessage(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	maint, err := maintenance.NewHistoryStore(path.Join(tmpDir, "maintenance"))
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+	server.maintenance = maint
+	if err := maint.SaveScrubResult(&maintenance.ScrubResult{
+		ID:           "scrub-1",
+		StartTime:    time.Now().Add(-time.Minute),
+		EndTime:      time.Now(),
+		Status:       "failed",
+		ErrorMessage: "sqlite: database is locked",
+	}); err != nil {
+		t.Fatalf("SaveScrubResult() error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/diagnostics-export", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("DiagnosticsExport status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if strings.Contains(strings.ToLower(body), "database is locked") || strings.Contains(strings.ToLower(body), "sqlite") {
+		t.Fatalf("expected diagnostics export to hide internal scrub error details, got %s", body)
+	}
+	if !strings.Contains(body, scrubFailurePublicMessage) {
+		t.Fatalf("expected diagnostics export to include sanitized scrub error message, got %s", body)
 	}
 }
 

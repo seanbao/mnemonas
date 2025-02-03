@@ -173,6 +173,51 @@ func TestListShares_WrapsResponseData(t *testing.T) {
 	}
 }
 
+func TestUpdateShare_InvalidExpiresInReturnsBadRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"expires_in":"not-a-duration"}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil {
+		t.Fatalf("expected error payload, got %s", recorder.Body.String())
+	}
+	if payload.Error.Code != "INVALID_EXPIRES_IN" {
+		t.Fatalf("expected INVALID_EXPIRES_IN, got %q", payload.Error.Code)
+	}
+	if payload.Error.Message != "invalid expires_in format" {
+		t.Fatalf("unexpected error message: %q", payload.Error.Message)
+	}
+}
+
 func TestAccessShare_PublicInfoFile(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -476,6 +521,52 @@ func TestListShareItems_RequiresPassword(t *testing.T) {
 	}
 }
 
+func TestListShareItems_ExpiredProtectedShareReturnsGoneWithoutCookie(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	expiredAt := time.Now().Add(-time.Minute)
+	if err := store.Update(share.ID, func(s *Share) error {
+		s.ExpiresAt = &expiredAt
+		return nil
+	}); err != nil {
+		t.Fatalf("failed to expire share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "SHARE_EXPIRED" {
+		t.Fatalf("expected SHARE_EXPIRED code, got %v", errorPayload["code"])
+	}
+}
+
 func TestAccessShare_WithValidCookieExposesInfo(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -624,6 +715,52 @@ func TestDownloadShare_NilReaderReturnsNotFound(t *testing.T) {
 	}
 	if errorPayload["code"] != "FILE_NOT_FOUND" {
 		t.Fatalf("expected FILE_NOT_FOUND code, got %v", errorPayload["code"])
+	}
+}
+
+func TestDownloadShare_ExpiredProtectedShareReturnsGoneWithoutCookie(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	expiredAt := time.Now().Add(-time.Minute)
+	if err := store.Update(share.ID, func(s *Share) error {
+		s.ExpiresAt = &expiredAt
+		return nil
+	}); err != nil {
+		t.Fatalf("failed to expire share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "SHARE_EXPIRED" {
+		t.Fatalf("expected SHARE_EXPIRED code, got %v", errorPayload["code"])
 	}
 }
 

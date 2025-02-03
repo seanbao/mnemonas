@@ -46,18 +46,16 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
   const response = await authFetch(`/api/v1/search?${params}`)
   
   if (!response.ok) {
+    let message = 'Search failed'
     try {
       const body = await response.json() as SearchApiResponse<never>
-      const message = typeof body.error === 'string'
+      message = typeof body.error === 'string'
         ? body.error
         : body.error?.message || body.message || 'Search failed'
-      throw new Error(message)
-    } catch (error) {
-      if (error instanceof Error) {
-        throw error
-      }
-      throw new Error('Search failed')
+    } catch {
+      // Fall back to a generic error when the backend did not return valid JSON.
     }
+    throw new Error(message)
   }
 
   const result = await response.json() as SearchApiResponse<SearchResponse> & SearchResponse

@@ -20,6 +20,7 @@ import {
   getDiagnostics,
   getScrubResult,
   runScrub,
+  uploadFile,
 } from './files'
 
 // Type declaration for global (Node.js environment in Vitest)
@@ -28,6 +29,68 @@ declare const global: typeof globalThis & { fetch: typeof fetch }
 // Mock fetch globally
 const mockFetch = vi.fn()
 global.fetch = mockFetch
+
+type MockXHRResult = {
+  type: 'load' | 'error' | 'timeout'
+  status?: number
+  statusText?: string
+}
+
+class MockXMLHttpRequest {
+  static queuedResults: MockXHRResult[] = []
+  static instances: MockXMLHttpRequest[] = []
+
+  static reset(): void {
+    MockXMLHttpRequest.queuedResults = []
+    MockXMLHttpRequest.instances = []
+  }
+
+  upload = {
+    addEventListener: vi.fn(),
+  }
+
+  status = 0
+  statusText = ''
+  method = ''
+  url = ''
+  body: Document | XMLHttpRequestBodyInit | null = null
+  headers = new Map<string, string>()
+  private listeners = new Map<string, Array<() => void>>()
+
+  constructor() {
+    MockXMLHttpRequest.instances.push(this)
+  }
+
+  open(method: string, url: string): void {
+    this.method = method
+    this.url = url
+  }
+
+  setRequestHeader(name: string, value: string): void {
+    this.headers.set(name, value)
+  }
+
+  addEventListener(type: string, listener: () => void): void {
+    const existing = this.listeners.get(type) ?? []
+    existing.push(listener)
+    this.listeners.set(type, existing)
+  }
+
+  send(body: Document | XMLHttpRequestBodyInit | null = null): void {
+    this.body = body
+    const next = MockXMLHttpRequest.queuedResults.shift()
+    if (!next) {
+      throw new Error('No queued XHR result available')
+    }
+
+    this.status = next.status ?? 0
+    this.statusText = next.statusText ?? ''
+    const listeners = this.listeners.get(next.type) ?? []
+    for (const listener of listeners) {
+      listener()
+    }
+  }
+}
 
 function expectFetchCall(
   index: number,
@@ -69,10 +132,76 @@ describe('API: files', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.removeItem('mnemonas_token')
+    localStorage.removeItem('mnemonas_refresh_token')
+    MockXMLHttpRequest.reset()
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  describe('uploadFile', () => {
+    const originalXMLHttpRequest = global.XMLHttpRequest
+
+    beforeEach(() => {
+      vi.stubGlobal('XMLHttpRequest', MockXMLHttpRequest as unknown as typeof XMLHttpRequest)
+    })
+
+    afterEach(() => {
+      vi.stubGlobal('XMLHttpRequest', originalXMLHttpRequest)
+    })
+
+    it('retries once after refreshing token on 401', async () => {
+      localStorage.setItem('mnemonas_token', 'access-1')
+      localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+      MockXMLHttpRequest.queuedResults.push(
+        { type: 'load', status: 401, statusText: 'Unauthorized' },
+        { type: 'load', status: 201, statusText: 'Created' },
+      )
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              access_token: 'access-2',
+              refresh_token: 'refresh-2',
+              expires_at: '2026-03-13T00:00:00Z',
+              token_type: 'Bearer',
+              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toBeUndefined()
+
+      expect(mockFetch).toHaveBeenNthCalledWith(1, '/api/v1/auth/refresh', expect.objectContaining({ method: 'POST' }))
+      expect(mockFetch).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({ method: 'POST' }))
+      expect(MockXMLHttpRequest.instances).toHaveLength(2)
+      expect(MockXMLHttpRequest.instances[0]?.headers.get('Authorization')).toBe('Bearer access-1')
+      expect(MockXMLHttpRequest.instances[1]?.headers.get('Authorization')).toBe('Bearer access-2')
+    })
+
+    it('fails with unauthorized error when refresh does not recover the session', async () => {
+      localStorage.setItem('mnemonas_token', 'access-1')
+      localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+      MockXMLHttpRequest.queuedResults.push({ type: 'load', status: 401, statusText: 'Unauthorized' })
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toMatchObject({
+        message: '上传失败',
+        status: 401,
+      })
+
+      expect(MockXMLHttpRequest.instances).toHaveLength(1)
+      expect(localStorage.getItem('mnemonas_token')).toBeNull()
+      expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    })
   })
 
   describe('ApiError', () => {
