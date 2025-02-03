@@ -177,6 +177,30 @@ describe('useKeyboardShortcuts', () => {
     })
   })
 
+  describe('New folder (Ctrl+Shift+N)', () => {
+    it('calls onNewFolder when Ctrl+Shift+N pressed with lowercase key', () => {
+      const onNewFolder = vi.fn()
+      const handlers: KeyboardShortcutHandlers = { onNewFolder }
+
+      renderHook(() => useKeyboardShortcuts(handlers))
+
+      triggerKeyDown('n', { ctrlKey: true, shiftKey: true })
+
+      expect(onNewFolder).toHaveBeenCalled()
+    })
+
+    it('calls onNewFolder when Ctrl+Shift+N pressed with uppercase key', () => {
+      const onNewFolder = vi.fn()
+      const handlers: KeyboardShortcutHandlers = { onNewFolder }
+
+      renderHook(() => useKeyboardShortcuts(handlers))
+
+      triggerKeyDown('N', { ctrlKey: true, shiftKey: true })
+
+      expect(onNewFolder).toHaveBeenCalled()
+    })
+  })
+
   describe('Refresh (Ctrl+R / F5)', () => {
     it('calls onRefresh when F5 pressed', () => {
       const onRefresh = vi.fn()

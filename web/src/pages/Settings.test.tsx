@@ -16,6 +16,14 @@ vi.mock('@/api/settings', () => ({
     },
   }),
   updateSettings: vi.fn().mockResolvedValue({ success: true }),
+  getWebDAVCredentials: vi.fn().mockResolvedValue({
+    success: true,
+    enabled: true,
+    url: 'http://localhost:8080/dav',
+    auth_type: 'basic',
+    username: 'admin',
+    password: 'secret',
+  }),
 }))
 
 describe('SettingsPage', () => {
