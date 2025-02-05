@@ -1438,6 +1438,33 @@ func TestHandler_HeadRequest(t *testing.T) {
 	}
 }
 
+func TestHandler_HeadDirectoryRequest(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/head-dir"); err != nil {
+		t.Fatalf("Mkdir(/head-dir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/head-dir/file.txt", bytes.NewReader([]byte("test content"))); err != nil {
+		t.Fatalf("WriteFile(/head-dir/file.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("HEAD", "/dav/head-dir/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("HEAD directory status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("HEAD directory response should have no body, got %q", w.Body.String())
+	}
+	if contentType := w.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("HEAD directory content type = %q, want %q", contentType, "text/html; charset=utf-8")
+	}
+}
+
 func TestHandler_DirectoryListing(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()

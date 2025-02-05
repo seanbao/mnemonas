@@ -30,6 +30,7 @@ var (
 	ErrDirNotEmpty     = errors.New("directory not empty")
 	ErrAlreadyExists   = errors.New("already exists")
 	ErrFileLocked      = errors.New("file is locked")
+	ErrFileTooLarge    = errors.New("file too large")
 	ErrVersionNotFound = errors.New("version not found")
 )
 
@@ -319,7 +320,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	}
 	if written > defaultMaxWriteSize {
 		os.Remove(tmpPath)
-		return fmt.Errorf("file too large (max: %d bytes)", defaultMaxWriteSize)
+		return fmt.Errorf("%w (max: %d bytes)", ErrFileTooLarge, defaultMaxWriteSize)
 	}
 
 	// Check if versioning is needed
