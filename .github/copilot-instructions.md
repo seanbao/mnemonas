@@ -1,18 +1,70 @@
 # Copilot Instructions for MnemoNAS
 
-## 沟通约定
+## 代码协作规范
 
-- 回复默认使用中文，代码注释保持英文；引用目录/文件时使用反引号
-- 代码修改保持现有风格，新增接口需同步声明到对应文件
-- 当新增或调整功能时，需同步更新本说明与相关 Markdown 文档，保持文档与实现一致
-- 浏览或修改代码时若发现严重问题（如潜在内存泄漏、数据竞争等），需主动提示并与用户确认处理方案
-- 不要随意产生兼容代码或脚本，如有必要需与用户确认后再进行
+### 语言与风格
 
-## 文档规范
+| 场景 | 规范 |
+|------|------|
+| 对话回复 | 中文 |
+| 代码注释 | 英文 |
+| 日志/UI | 中文 |
+| 目录/文件引用 | 反引号包裹 |
 
-- 文档语气保持中性、工程化：避免第二人称（如"你/你的/如果你…"）与口语化/营销化表达
-- 用"如需/可/建议/按实际环境"替代对话式句式；避免"AI 味"描述与拟人化措辞
+### 代码变更
+
+- 保持现有代码风格，不引入额外格式化变更
+- 新增接口同步声明到对应头文件
+- 功能变更同步更新关联的 Markdown 文档（包括本说明）
+- 不主动生成兼容层代码或迁移脚本，如有必要先与用户确认
+
+### 问题发现与处理
+
+发现以下问题时需主动提示并确认处理方案：
+
+- 潜在内存泄漏
+- 数据竞争（race condition）
+- 安全漏洞
+- 明显的逻辑错误
+- 代码质量问题（重复代码、过长函数、硬编码、命名不规范等）
+- 架构设计问题（循环依赖、职责不清、抽象层次混乱、耦合过紧等）
+
+## 文档写作规范
+
+### 语气与措辞
+
+| 避免 | 替代 |
+|------|------|
+| 第二人称（你/你的/如果你…） | 无主语陈述或"用户/调用方" |
+| 口语化（其实/然后/那么） | 直接陈述 |
+| 营销化（强大/轻松/一键） | 客观描述功能 |
+
+### 文风收敛（去 AI 痕迹）
+
+| 避免 | 替代 |
+|------|------|
+| 主观措辞（建议/适用于/可以考虑） | 客观表述（用于/范围/约束/行为说明） |
+| 占位标记（for test/临时/先这样） | 正式、可复用的描述 |
+| 引导式语句（接下来我们…） | 系统行为/接口约束/返回结构 |
+
+### 格式要求
+
 - 中文和英文之间添加空格（如 `使用 Rust 编写`）
+- 修改标题后校验目录锚点与章节标题一致性
+- 新增章节同步更新文档索引
+
+## 版本控制
+
+### Commit Message
+
+格式：`<type>(<scope>): <subject>`
+
+常用 type：
+- `feat`: 新功能
+- `fix`: 修复
+- `docs`: 文档变更
+- `refactor`: 重构
+- `test`: 测试相关
 
 ---
 
@@ -63,9 +115,16 @@ make dev
 # Run tests
 make test
 
-# Start service (after build)
+# 一键启动开发环境（推荐）
+./scripts/dev.sh                # 启动所有组件
+./scripts/dev.sh --backend      # 仅后端
+./scripts/dev.sh --frontend     # 仅前端
+./scripts/dev.sh --status       # 查看状态
+./scripts/dev.sh --kill         # 停止所有
+
+# 分别启动各组件
 ./bin/nasd                      # Go control plane (port 8080)
-./bin/dataplane                 # Rust data plane (port 9090)
+./bin/dataplane                 # Rust data plane (HTTP:9091, gRPC:9090)
 
 # Or via Docker
 docker compose up -d
@@ -122,13 +181,20 @@ docker compose up -d
 
 ## API 端点
 
+Go 控制面（端口 8080）：
 - `GET /health` — 健康检查
 - `GET /api/v1/version` — 版本信息
 - `GET /api/v1/files/*` — 文件列表
 - `GET /api/v1/versions/*` — 版本历史
+- `GET /api/v1/search?q=keyword` — 文件搜索
+- `POST /api/v1/auth/login` — 用户登录
+- `GET /api/v1/activity` — 活动日志
+- `GET /api/v1/shares` — 分享列表
+- `GET /api/v1/favorites` — 收藏列表
+- `GET /api/v1/settings` — 系统设置
 - WebDAV 挂载点 `/dav/*`（可配置前缀）
 
-Rust 数据面 HTTP（端口 9090）：
+Rust 数据面（HTTP 端口 9091，gRPC 端口 9090）：
 - `GET /health` — `{"status":"healthy","chunks":N,"size":N,...}`
 - `GET /stats` — 存储统计与去重率
 
@@ -141,8 +207,19 @@ go test -v ./...
 # Rust tests
 cd dataplane && cargo test
 
+# E2E 验收测试
+./scripts/e2e-test.sh           # 完整测试
+./scripts/e2e-test.sh --quick   # 快速测试
+
+# 性能基准测试
+./scripts/benchmark.sh
+
 # 手动测试 WebDAV
 curl -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
+
+# 测试 dataplane
+curl http://localhost:9091/health
+curl http://localhost:9091/stats
 ```
 
 **崩溃一致性测试**：写入过程中 kill 进程，重启后验证无半写入文件对外可见。
