@@ -16,12 +16,20 @@ interface TableProps {
   'aria-label'?: string
   removeWrapper?: boolean
   classNames?: Record<string, string>
+  isStriped?: boolean
   selectionMode?: string
   selectedKeys?: Set<string>
   onSelectionChange?: (keys: Set<string>) => void
 }
 
-export function Table({ children, 'aria-label': ariaLabel, ...props }: TableProps) {
+export function Table({
+  children,
+  'aria-label': ariaLabel,
+  removeWrapper,
+  classNames,
+  isStriped,
+  ...props
+}: TableProps) {
   return (
     <div data-testid="heroui-table" role="table" aria-label={ariaLabel} {...props}>
       {children}

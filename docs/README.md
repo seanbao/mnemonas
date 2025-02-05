@@ -18,6 +18,7 @@
 | 文档 | 说明 |
 |------|------|
 | [FAQ](faq.md) | 常见问题与故障排除 |
+| [存储原理与最佳实践](storage-internals.md) | CAS 存储原理、文件系统推荐、性能调优 |
 | [备份指南](backup-guide.md) | 3-2-1 备份策略与恢复流程 |
 | [WebDAV 兼容性](webdav-compatibility.md) | 客户端兼容性与协议支持 |
 | [安全指南](security.md) | 认证、HTTPS、网络安全配置 |
@@ -27,6 +28,7 @@
 | 文档 | 说明 |
 |------|------|
 | [架构设计](architecture.md) | 系统架构与技术选型 |
+| [设计决策](design-decisions.md) | 技术选型理由与竞争力目标 |
 | [开发指南](development.md) | 本地开发环境搭建 |
 | [API 参考](api-reference.md) | REST API 端点与请求/响应格式 |
 | [扩展点设计](extension-points.md) | 阶段 2 接口草案（S3/插件/Runner） |
@@ -43,7 +45,6 @@
 
 - [GitHub 仓库](https://github.com/seanbao/mnemonas)
 - [问题反馈](https://github.com/seanbao/mnemonas/issues)
-- [设计文档](https://github.com/seanbao/ideas-lab-notes/blob/main/ideas/open-source-nas-go-rust.md)
 
 ## 📖 阅读建议
 

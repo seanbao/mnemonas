@@ -91,6 +91,18 @@ export function SettingsPage() {
   const [selectedTab, setSelectedTab] = useState('general')
   const queryClient = useQueryClient()
   
+  // Helper function to format bytes
+  const formatBytes = (bytes: number): string => {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return `${Math.round(bytes / 1024 / 1024 / 1024)}GB`
+    } else if (bytes >= 1024 * 1024) {
+      return `${Math.round(bytes / 1024 / 1024)}MB`
+    } else if (bytes >= 1024) {
+      return `${Math.round(bytes / 1024)}KB`
+    }
+    return `${bytes}B`
+  }
+  
   // Fetch settings from API
   const { data: settingsData, isLoading, error, refetch } = useQuery({
     queryKey: ['settings'],
@@ -120,9 +132,11 @@ export function SettingsPage() {
   })
 
   // Update local state when API data loads
+  // This is a common pattern for editable forms that sync from server data
   useEffect(() => {
     if (settingsData?.data) {
       const d = settingsData.data
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync server data to local editable state
       setSettings({
         serverHost: d.server.host,
         serverPort: String(d.server.port),
@@ -184,18 +198,6 @@ export function SettingsPage() {
   const handleReset = () => {
     refetch()
     addToast({ title: '设置已重置', color: 'warning' })
-  }
-
-  // Helper function to format bytes
-  function formatBytes(bytes: number): string {
-    if (bytes >= 1024 * 1024 * 1024) {
-      return `${Math.round(bytes / 1024 / 1024 / 1024)}GB`
-    } else if (bytes >= 1024 * 1024) {
-      return `${Math.round(bytes / 1024 / 1024)}MB`
-    } else if (bytes >= 1024) {
-      return `${Math.round(bytes / 1024)}KB`
-    }
-    return `${bytes}B`
   }
 
   if (isLoading) {

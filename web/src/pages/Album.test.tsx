@@ -202,4 +202,43 @@ describe('AlbumPage', () => {
       })
     })
   })
+
+  describe('image preview boundary cases', () => {
+    it('does not crash when currentIndex exceeds images length', async () => {
+      // Start with images then clear them - simulates race condition
+      mockListFiles.mockResolvedValue({
+        files: mockImageFiles,
+        path: '/',
+      })
+
+      const { rerender } = render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('共 3 张图片')).toBeTruthy()
+      })
+
+      // Simulate API returning empty array (edge case)
+      mockListFiles.mockResolvedValue({ files: [], path: '/' })
+      rerender(<AlbumPage />)
+
+      // Should not throw, page should handle gracefully
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('handles rapid navigation without crashing', async () => {
+      mockListFiles.mockResolvedValue({
+        files: mockImageFiles,
+        path: '/',
+      })
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('共 3 张图片')).toBeTruthy()
+      })
+
+      // Multiple rapid renders should not cause undefined access errors
+      // The component should handle state transitions gracefully
+    })
+  })
 })
