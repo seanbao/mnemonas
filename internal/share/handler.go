@@ -472,6 +472,11 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if share.HasPassword() {
+		if err := share.CanAccess(); err != nil {
+			writePublicShareAccessError(w, err)
+			return
+		}
+
 		if h.hasShareAccess(r, share) {
 			info := &PublicShareInfo{
 				ID:          share.ID,
@@ -485,11 +490,6 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(info)
-			return
-		}
-
-		if err := share.CanAccess(); err != nil {
-			writePublicShareAccessError(w, err)
 			return
 		}
 

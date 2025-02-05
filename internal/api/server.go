@@ -517,6 +517,10 @@ func (s *Server) respondInternalError(w http.ResponseWriter, operation string, e
 	InternalError(w, "internal server error")
 }
 
+func respondPayloadTooLarge(w http.ResponseWriter, message string) {
+	NewAPIError(ErrCodeBadRequest, message).Write(w, http.StatusRequestEntityTooLarge)
+}
+
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	filePath := chi.URLParam(r, "*")
 	if filePath == "" {
@@ -584,6 +588,11 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxUploadSize)
 
 	if err := s.fs.WriteFile(r.Context(), filePath, r.Body); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) || errors.Is(err, storage.ErrFileTooLarge) {
+			respondPayloadTooLarge(w, fmt.Sprintf("file too large (max %d bytes)", DefaultMaxUploadSize))
+			return
+		}
 		s.respondInternalError(w, "upload file", err)
 		return
 	}
@@ -969,9 +978,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Get optional limit parameter (default 50)
 	limit := 50
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
-			limit = l
+		l, err := strconv.Atoi(limitStr)
+		if err != nil || l <= 0 || l > 100 {
+			BadRequest(w, "limit parameter must be between 1 and 100")
+			return
 		}
+		limit = l
 	}
 
 	results, err := s.fs.Search(r.Context(), query, limit)

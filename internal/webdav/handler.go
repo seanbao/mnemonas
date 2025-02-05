@@ -156,6 +156,11 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	}
 
 	if info.IsDir {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			return
+		}
+
 		// Return directory listing (simple HTML)
 		h.serveDirectory(ctx, w, r, filePath, info)
 		return
