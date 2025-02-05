@@ -25,9 +25,13 @@ interface TableProps {
 export function Table({
   children,
   'aria-label': ariaLabel,
-  removeWrapper,
-  classNames,
-  isStriped,
+  // Destructure HeroUI-specific props to prevent them from being spread to DOM
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  removeWrapper: _removeWrapper,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  classNames: _classNames,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  isStriped: _isStriped,
   ...props
 }: TableProps) {
   return (

@@ -47,24 +47,21 @@ export function Header({ onMenuClick }: HeaderProps) {
   const displayEmail = user?.email || 'guest@local'
 
   return (
-    <header className="h-[60px] bg-bg-primary/80 backdrop-blur-md border-b border-divider flex items-center justify-between px-7 sticky top-0 z-40">
-      {/* Left section: Breadcrumb */}
-      <div className="flex items-center gap-4">
+    <header className="h-[56px] border-b border-divider flex items-center justify-between px-6 sticky top-0 z-40 header-surface glass-strong">
+      {/* Left section */}
+      <div className="flex items-center gap-3">
         <Button
           isIconOnly
           variant="light"
-          className="lg:hidden text-text-secondary"
+          className="lg:hidden text-default-600"
           onPress={onMenuClick}
         >
           <Menu size={20} />
         </Button>
-        
         <div className="hidden md:flex items-center gap-2 text-sm">
-          <span className="text-text-secondary hover:text-accent-light cursor-pointer transition-colors">记忆宫殿</span>
-          <ChevronRight size={14} className="text-text-muted" />
-          <span className="text-text-secondary hover:text-accent-light cursor-pointer transition-colors">照片</span>
-          <ChevronRight size={14} className="text-text-muted" />
-          <span className="text-text-primary font-medium">2025</span>
+          <span className="text-foreground font-medium">MnemoNAS</span>
+          <ChevronRight size={14} className="text-default-500" />
+          <span className="text-default-600">控制台</span>
         </div>
       </div>
 
@@ -72,31 +69,28 @@ export function Header({ onMenuClick }: HeaderProps) {
       <div className="flex items-center gap-3">
         {/* Search - Mnemosyne Style */}
         <div 
-          className="hidden sm:flex items-center gap-2.5 px-3.5 py-2 bg-bg-card border border-divider rounded-[10px] w-[260px] focus-within:border-accent-primary focus-within:ring-1 focus-within:ring-accent-primary/20 transition-all duration-200 cursor-pointer"
+          className="hidden sm:flex items-center gap-2 px-3 py-2 glass rounded-[10px] w-[240px] focus-within:border-accent-primary focus-within:ring-1 focus-within:ring-accent-primary/15 transition-all duration-200 cursor-pointer"
           onClick={handleSearchClick}
         >
-          <Search size={16} className="text-text-muted" />
+          <Search size={16} className="text-default-500" />
           <input 
             type="text" 
-            placeholder="搜索记忆..." 
-            className="flex-1 bg-transparent border-none outline-none text-[13px] text-text-primary placeholder:text-text-muted"
+            placeholder="搜索文件与记忆" 
+            className="flex-1 bg-transparent border-none outline-none text-[13px] text-foreground placeholder:text-default-500"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleSearch}
             onClick={(e) => e.stopPropagation()}
           />
-          <span className="text-[10px] px-1.5 py-0.5 bg-bg-hover rounded text-text-muted font-mono">⌘K</span>
         </div>
 
-        <div className="h-6 w-[1px] bg-divider mx-1" />
-
-        <Button isIconOnly variant="light" className="w-[38px] h-[38px] min-w-[38px] rounded-[10px] border border-divider bg-bg-card text-text-secondary hover:bg-bg-hover hover:text-text-primary hover:border-divider/50">
+        <Button isIconOnly variant="light" className="w-[36px] h-[36px] min-w-[36px] rounded-[10px] border border-divider glass text-default-600 hover:text-foreground">
           <Bell size={18} />
         </Button>
 
         <Dropdown placement="bottom-end">
           <DropdownTrigger>
-            <button className="w-[38px] h-[38px] rounded-[10px] border border-divider bg-bg-card p-0.5 hover:border-accent-primary/50 transition-colors overflow-hidden">
+            <button className="w-[38px] h-[38px] rounded-[10px] border border-divider glass p-0.5 hover:border-accent-primary/50 transition-colors overflow-hidden">
               <Avatar
                 src={avatarUrl}
                 className="w-full h-full rounded-lg"
@@ -105,9 +99,9 @@ export function Header({ onMenuClick }: HeaderProps) {
           </DropdownTrigger>
           <DropdownMenu 
             aria-label="User menu" 
-            className="w-56 bg-bg-card border border-divider rounded-xl shadow-xl"
+            className="w-56 bg-content1 border border-divider rounded-xl shadow-xl"
             itemClasses={{
-              base: "data-[hover=true]:bg-bg-hover data-[hover=true]:text-text-primary text-text-secondary",
+              base: "data-[hover=true]:bg-content2 data-[hover=true]:text-foreground text-default-600",
             }}
             onAction={(key) => {
               if (key === 'logout') handleLogout()
@@ -121,8 +115,8 @@ export function Header({ onMenuClick }: HeaderProps) {
                   className="w-10 h-10"
                 />
                 <div>
-                  <p className="font-semibold text-text-primary">{displayName}</p>
-                  <p className="text-xs text-text-muted">{displayEmail}</p>
+                  <p className="font-semibold text-foreground">{displayName}</p>
+                  <p className="text-xs text-default-500">{displayEmail}</p>
                 </div>
               </div>
             </DropdownItem>

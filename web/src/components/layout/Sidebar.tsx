@@ -35,7 +35,7 @@ const navSections: NavSection[] = [
     items: [
       { icon: Folder, label: '文件', path: '/files' },
       { icon: Image, label: '相册', path: '/album' },
-      { icon: History, label: '时光回溯', path: '/versions', badge: '核心', badgeColor: 'bg-gradient-to-r from-rose to-accent-primary' },
+      { icon: History, label: '时光回溯', path: '/versions', badge: '核心', badgeColor: 'bg-accent-primary/15 text-accent-primary' },
     ]
   },
   {
@@ -80,24 +80,21 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
   return (
     <aside 
       className={cn(
-        "h-screen bg-bg-secondary border-r border-divider flex flex-col transition-all duration-300 relative overflow-hidden sidebar-glow",
-        collapsed ? "w-16" : "w-[260px]"
+        "h-screen border-r border-divider flex flex-col transition-all duration-300 relative overflow-hidden sidebar-surface glass-strong",
+        collapsed ? "w-16" : "w-[248px]"
       )}
     >
-      {/* Starry Background */}
-      <div className="stars-bg" />
-
       {/* Logo */}
-      <div className="p-6 flex items-center gap-3.5 border-b border-divider relative z-10">
-        <div className="w-[42px] h-[42px] rounded-xl bg-gradient-to-br from-accent-primary to-accent-dark flex items-center justify-center logo-glow flex-shrink-0">
+      <div className="p-5 flex items-center gap-3 border-b border-divider relative z-10">
+        <div className="w-10 h-10 rounded-xl gradient-meridian flex items-center justify-center logo-glow flex-shrink-0">
           <Archive size={20} className="text-white" />
         </div>
         {!collapsed && (
           <div>
-            <div className="font-bold text-lg tracking-tight text-text-primary">
-              <span className="bg-gradient-to-br from-accent-light to-moonlight bg-clip-text text-transparent">Mnemo</span>NAS
+            <div className="font-semibold text-base tracking-tight text-gradient-meridian">
+              MnemoNAS
             </div>
-            <div className="text-[10px] text-text-muted tracking-widest uppercase mt-0.5">
+            <div className="text-[10px] text-default-500 tracking-widest uppercase mt-0.5">
               Memory Palace
             </div>
           </div>
@@ -105,11 +102,11 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 py-5 px-3 overflow-y-auto relative z-10 custom-scrollbar">
+      <nav className="flex-1 py-4 px-3 overflow-y-auto relative z-10 custom-scrollbar">
         {navSections.map((section) => (
           <div key={section.title} className={cn("mb-7", collapsed && "mb-4")}>
             {!collapsed && (
-              <div className="px-3.5 mb-2.5 text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+              <div className="px-3.5 mb-2 text-[10px] font-semibold uppercase tracking-widest text-default-500">
                 {section.title}
               </div>
             )}
@@ -123,10 +120,10 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                     <Link
                       to={item.path}
                       className={cn(
-                        "flex items-center gap-3 px-3.5 py-2.5 rounded-[10px] transition-all duration-200 group",
+                        "flex items-center gap-3 px-3 py-2.5 rounded-[10px] transition-all duration-200 group",
                         isActive 
                           ? "nav-item-active" 
-                          : "text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                          : "text-default-600 hover:bg-content2 hover:text-foreground"
                       )}
                       title={collapsed ? item.label : undefined}
                     >
@@ -134,7 +131,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                         size={20} 
                         className={cn(
                           "flex-shrink-0 transition-colors",
-                          isActive ? "text-accent-light" : "text-text-secondary group-hover:text-text-primary"
+                          isActive ? "text-accent-light" : "text-default-600 group-hover:text-foreground"
                         )} 
                       />
                       {!collapsed && (
@@ -144,7 +141,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                           </span>
                           {item.badge && (
                             <span className={cn(
-                              "px-2 py-0.5 text-[10px] font-semibold rounded-md text-white shadow-sm",
+                              "px-2 py-0.5 text-[10px] font-medium rounded-md",
                               item.badgeColor || "bg-accent-primary"
                             )}>
                               {item.badge}
@@ -163,21 +160,21 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
 
       {/* Storage Status */}
       {!collapsed && (
-        <div className="p-5 border-t border-divider bg-bg-secondary/50 relative z-10">
+        <div className="p-4 border-t border-divider glass relative z-10">
           <div className="flex items-center justify-between text-xs mb-2">
-            <span className="text-text-muted">存储空间</span>
+            <span className="text-default-500">存储空间</span>
             <span className="text-accent-light font-medium">
               {storageStats ? formatBytes(usedBytes) : '--'}
             </span>
           </div>
-          <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
+          <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
             <div 
-              className="h-full bg-gradient-to-r from-accent-primary to-aurora rounded-full shadow-[0_0_8px_rgba(167,139,250,0.4)] transition-all duration-500" 
+              className="h-full bg-accent-primary rounded-full transition-all duration-500" 
               style={{ width: `${Math.max(5, usagePercent)}%` }}
             />
           </div>
           {storageStats && storageStats.dedupRatio > 1 && (
-            <div className="mt-1.5 text-[10px] text-text-muted">
+            <div className="mt-1.5 text-[10px] text-default-500">
               去重率 {((1 - 1 / storageStats.dedupRatio) * 100).toFixed(1)}%
             </div>
           )}

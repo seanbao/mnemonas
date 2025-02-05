@@ -3,6 +3,8 @@
  * Admin-only endpoints for system configuration
  */
 
+import { authFetch } from './auth'
+
 const API_BASE = '/api/v1/settings'
 
 export interface SettingsData {
@@ -70,9 +72,7 @@ export interface UpdateSettingsRequest {
  * Get current settings
  */
 export async function getSettings(): Promise<SettingsResponse> {
-  const response = await fetch(`${API_BASE}/`, {
-    credentials: 'include',
-  })
+  const response = await authFetch(`${API_BASE}/`)
   
   if (!response.ok) {
     const error = await response.json()
@@ -86,12 +86,11 @@ export async function getSettings(): Promise<SettingsResponse> {
  * Update settings
  */
 export async function updateSettings(data: UpdateSettingsRequest): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/`, {
+  const response = await authFetch(`${API_BASE}/`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
     },
-    credentials: 'include',
     body: JSON.stringify(data),
   })
   

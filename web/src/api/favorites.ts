@@ -1,4 +1,5 @@
 import { authFetch } from './auth'
+import { encodePathForUrl, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 let batchCheckSupported: boolean | null = null
@@ -60,10 +61,11 @@ export async function listFavorites(): Promise<Favorite[]> {
  * Add path to favorites
  */
 export async function addFavorite(path: string, note = ''): Promise<Favorite> {
+  const normalizedPath = normalizePath(path)
   const response = await authFetch(`${API_BASE}/favorites`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, note }),
+    body: JSON.stringify({ path: normalizedPath, note }),
   })
   
   if (!response.ok) {
@@ -85,7 +87,9 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
  * Remove path from favorites
  */
 export async function removeFavorite(path: string): Promise<void> {
-  const response = await authFetch(`${API_BASE}/favorites${path}`, {
+  const normalizedPath = normalizePath(path)
+  const encodedPath = encodePathForUrl(normalizedPath)
+  const response = await authFetch(`${API_BASE}/favorites${encodedPath}`, {
     method: 'DELETE',
   })
   
@@ -103,7 +107,8 @@ export async function removeFavorite(path: string): Promise<void> {
  * Check if a path is favorited
  */
 export async function checkFavorite(path: string): Promise<boolean> {
-  const response = await authFetch(`${API_BASE}/favorites/check?path=${encodeURIComponent(path)}`)
+  const normalizedPath = normalizePath(path)
+  const response = await authFetch(`${API_BASE}/favorites/check?path=${encodeURIComponent(normalizedPath)}`)
   
   if (!response.ok) {
     return false
@@ -120,10 +125,16 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
   if (batchCheckSupported === false) {
     return Object.fromEntries(paths.map(p => [p, false]))
   }
+  const normalizedMap = new Map<string, string>()
+  const normalizedPaths = paths.map((path) => {
+    const normalized = normalizePath(path)
+    normalizedMap.set(normalized, path)
+    return normalized
+  })
   const response = await authFetch(`${API_BASE}/favorites/check-batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ paths }),
+    body: JSON.stringify({ paths: normalizedPaths }),
   })
   
   if (!response.ok) {
@@ -135,14 +146,23 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
   }
   batchCheckSupported = true
   const data: CheckPathsResponse = await response.json()
-  return data.favorites
+  const mapped: Record<string, boolean> = {}
+  for (const [normalized, isFavorite] of Object.entries(data.favorites)) {
+    const original = normalizedMap.get(normalized)
+    if (original) {
+      mapped[original] = isFavorite
+    }
+  }
+  return mapped
 }
 
 /**
  * Update note for a favorite
  */
 export async function updateFavoriteNote(path: string, note: string): Promise<void> {
-  const response = await authFetch(`${API_BASE}/favorites${path}`, {
+  const normalizedPath = normalizePath(path)
+  const encodedPath = encodePathForUrl(normalizedPath)
+  const response = await authFetch(`${API_BASE}/favorites${encodedPath}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ note }),

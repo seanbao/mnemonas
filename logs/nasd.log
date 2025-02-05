@@ -1,41 +1,86 @@
-[90m16:04:29[0m [32mINF[0m [1mcmd/nasd/main.go:191[0m[36m >[0m [1musing default config[0m
-[90m16:04:29[0m [32mINF[0m [1mcmd/nasd/main.go:62[0m[36m >[0m [1mstarting MnemoNAS[0m [36maddress=[0m0.0.0.0:8080 [36mdata_dir=[0m/home/seanbao/.mnemonas/data [36mversion=[0mdev
-[90m16:04:29[0m [32mINF[0m [1minternal/api/server.go:73[0m[36m >[0m [1mConnected to data plane[0m [36maddr=[0m127.0.0.1:9090
-[90m16:04:29[0m [32mINF[0m [1minternal/api/server.go:93[0m[36m >[0m [1mThumbnail service initialized[0m [36mcache=[0m/home/seanbao/.mnemonas/thumbnails
-[90m16:04:29[0m [32mINF[0m [1minternal/api/server.go:104[0m[36m >[0m [1mMaintenance history store initialized[0m [36mpath=[0m/home/seanbao/.mnemonas/maintenance
-[90m16:04:29[0m [32mINF[0m [1mcmd/nasd/main.go:119[0m[36m >[0m [1mWebDAV enabled[0m [36mauth=[0mnone [36mprefix=[0m/dav
-[90m16:04:29[0m [32mINF[0m [1mcmd/nasd/main.go:148[0m[36m >[0m [1mserver started[0m [36maddress=[0m0.0.0.0:8080
-[90m16:04:30[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m138 [36mduration=[0m5.396061 [36mmethod=[0mGET [36mpath=[0m/health [36mremote=[0m127.0.0.1:47482 [36mstatus=[0m200
-[90m16:04:36[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m1.190749 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:47496 [36mstatus=[0m200
-[90m16:04:40[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m1519 [36mduration=[0m4.22594 [36mmethod=[0mGET [36mpath=[0m/api/v1/files/ [36mremote=[0m127.0.0.1:40204 [36mstatus=[0m200
-[90m16:04:42[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m1519 [36mduration=[0m0.354553 [36mmethod=[0mGET [36mpath=[0m/api/v1/files/ [36mremote=[0m127.0.0.1:40212 [36mstatus=[0m200
-[90m16:04:49[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.422975 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:50202 [36mstatus=[0m200
-[90m16:05:03[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m1519 [36mduration=[0m0.609601 [36mmethod=[0mGET [36mpath=[0m/api/v1/files/ [36mremote=[0m127.0.0.1:48348 [36mstatus=[0m200
-[90m16:07:09[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m1519 [36mduration=[0m0.526286 [36mmethod=[0mGET [36mpath=[0m/api/v1/files/ [36mremote=[0m127.0.0.1:45294 [36mstatus=[0m200
-[90m16:09:19[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m1519 [36mduration=[0m0.363858 [36mmethod=[0mGET [36mpath=[0m/api/v1/files/ [36mremote=[0m127.0.0.1:60612 [36mstatus=[0m200
-[90m16:09:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.491656 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:60622 [36mstatus=[0m200
-[90m16:09:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.556998 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:49982 [36mstatus=[0m200
-[90m16:10:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.288683 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:51548 [36mstatus=[0m200
-[90m16:10:43[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.55446 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:47514 [36mstatus=[0m200
-[90m16:10:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.424697 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:48640 [36mstatus=[0m200
-[90m16:11:13[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.494194 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:58654 [36mstatus=[0m200
-[90m16:11:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.415161 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:55018 [36mstatus=[0m200
-[90m16:11:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.486706 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:54436 [36mstatus=[0m200
-[90m16:12:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.347045 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:48122 [36mstatus=[0m200
-[90m16:12:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.403537 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:54612 [36mstatus=[0m200
-[90m16:13:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.31522 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:60276 [36mstatus=[0m200
-[90m16:13:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.318597 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:50652 [36mstatus=[0m200
-[90m16:14:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.306105 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:44468 [36mstatus=[0m200
-[90m16:14:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.564041 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:32960 [36mstatus=[0m200
-[90m16:15:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.588809 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:60420 [36mstatus=[0m200
-[90m16:15:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.560858 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:54764 [36mstatus=[0m200
-[90m16:16:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.358927 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:47182 [36mstatus=[0m200
-[90m16:16:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.389209 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:57004 [36mstatus=[0m200
-[90m16:17:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.344198 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:45566 [36mstatus=[0m200
-[90m16:17:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.497882 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:47644 [36mstatus=[0m200
-[90m16:18:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.594515 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:49966 [36mstatus=[0m200
-[90m16:18:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.347127 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:45780 [36mstatus=[0m200
-[90m16:19:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.550986 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:51838 [36mstatus=[0m200
-[90m16:19:51[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.361328 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:54180 [36mstatus=[0m200
-[90m16:20:21[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m82 [36mduration=[0m0.655386 [36mmethod=[0mGET [36mpath=[0m/api/v1/stats [36mremote=[0m127.0.0.1:53366 [36mstatus=[0m200
-[90m16:24:16[0m [32mINF[0m [1minternal/api/server.go:931[0m[36m >[0m [1mrequest[0m [36mbytes=[0m1519 [36mduration=[0m0.463531 [36mmethod=[0mGET [36mpath=[0m/api/v1/files/ [36mremote=[0m127.0.0.1:38934 [36mstatus=[0m200
+14:06:23 INF cmd/nasd/main.go:297 > loading config file path=/home/seanbao/.config/mnemonas/config.toml
+14:06:23 INF cmd/nasd/main.go:79 > starting MnemoNAS address=0.0.0.0:8080 data_dir=/home/seanbao/.mnemonas/data version=dev
+14:06:23 WRN cmd/nasd/main.go:87 > ⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!
+14:06:23 WRN cmd/nasd/main.go:88 >    Set [webdav].auth_type = "basic" to enable WebDAV authentication
+14:06:23 WRN cmd/nasd/main.go:91 > ⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!
+14:06:23 WRN cmd/nasd/main.go:92 >    Set [server.tls].enabled = true for secure connections
+14:06:23 INF internal/api/server.go:109 > Connected to data plane addr=127.0.0.1:9090
+14:06:23 INF internal/api/server.go:129 > Thumbnail service initialized cache=/home/seanbao/.mnemonas/thumbnails
+14:06:23 INF internal/api/server.go:140 > Maintenance history store initialized path=/home/seanbao/.mnemonas/maintenance
+14:06:23 INF internal/api/server.go:151 > Activity store initialized path=/home/seanbao/.mnemonas/activity
+14:06:23 INF internal/api/server.go:181 > Authentication enabled
+14:06:23 INF internal/api/server.go:208 > Favorites feature enabled
+14:06:23 INF cmd/nasd/main.go:165 > WebDAV enabled auth=none prefix=/dav
+14:06:23 INF cmd/nasd/main.go:255 > server started (HTTP) address=0.0.0.0:8080
+14:06:24 INF internal/api/server.go:1211 > request bytes=138 duration=1.370011 method=GET path=/health remote=127.0.0.1:53880 status=200
+14:06:26 INF internal/api/server.go:1211 > request bytes=19 duration=0.047938 method=GET path=/api/v1/auth/me remote=127.0.0.1:53892 status=404
+14:06:26 INF internal/api/server.go:1211 > request bytes=19 duration=0.061744 method=GET path=/api/v1/auth/me remote=127.0.0.1:53898 status=404
+14:06:26 INF internal/api/server.go:1211 > request bytes=19 duration=0.044121 method=GET path=/api/v1/auth/me remote=127.0.0.1:53902 status=404
+14:06:26 INF internal/api/server.go:1211 > request bytes=19 duration=0.040712 method=GET path=/api/v1/auth/me remote=127.0.0.1:53908 status=404
+14:06:28 INF internal/api/server.go:1211 > request bytes=19 duration=0.065613 method=GET path=/api/v1/auth/me remote=127.0.0.1:34156 status=404
+14:06:28 INF internal/api/server.go:1211 > request bytes=19 duration=0.049666 method=GET path=/api/v1/auth/me remote=127.0.0.1:34164 status=404
+14:06:28 INF internal/api/server.go:1211 > request bytes=19 duration=0.03903 method=GET path=/api/v1/auth/me remote=127.0.0.1:34178 status=404
+14:06:28 INF internal/api/server.go:1211 > request bytes=19 duration=0.030243 method=GET path=/api/v1/auth/me remote=127.0.0.1:34188 status=404
+14:06:33 INF internal/api/server.go:1211 > request bytes=901 duration=50.099231 method=POST path=/api/v1/auth/login remote=127.0.0.1:34192 status=200
+14:06:34 INF internal/api/server.go:1211 > request bytes=82 duration=0.863015 method=GET path=/api/v1/stats remote=127.0.0.1:34194 status=200
+14:06:34 INF internal/api/server.go:1211 > request bytes=784 duration=0.860563 method=GET path=/api/v1/activity/ remote=127.0.0.1:34204 status=200
+14:06:34 INF internal/api/server.go:1211 > request bytes=140 duration=0.625782 method=GET path=/health remote=127.0.0.1:34196 status=200
+14:06:34 INF internal/api/server.go:1211 > request bytes=82 duration=0.435663 method=GET path=/api/v1/stats remote=127.0.0.1:34206 status=200
+14:06:35 INF internal/api/server.go:1211 > request bytes=1519 duration=4.584645 method=GET path=/api/v1/files/ remote=127.0.0.1:34216 status=200
+14:07:47 INF internal/api/server.go:1211 > request bytes=1519 duration=0.352022 method=GET path=/api/v1/files/ remote=127.0.0.1:34738 status=200
+14:08:49 INF internal/api/server.go:1211 > request bytes=1519 duration=0.576366 method=GET path=/api/v1/files/ remote=127.0.0.1:53526 status=200
+14:11:34 INF internal/api/server.go:1211 > request bytes=82 duration=2.691794 method=GET path=/api/v1/stats remote=127.0.0.1:56038 status=200
+14:14:09 INF internal/api/server.go:1211 > request bytes=41 duration=0.065086 method=GET path=/api/v1/ui/config remote=127.0.0.1:37828 status=401
+14:14:09 INF internal/api/server.go:1211 > request bytes=41 duration=0.031804 method=GET path=/api/v1/ui/config remote=127.0.0.1:37830 status=401
+14:14:13 INF internal/api/server.go:1211 > request bytes=572 duration=1.682914 method=GET path=/api/v1/settings/ remote=127.0.0.1:37842 status=200
+14:14:13 INF internal/api/server.go:1211 > request bytes=82 duration=4.642877 method=GET path=/api/v1/stats remote=127.0.0.1:37832 status=200
+14:14:13 INF internal/api/server.go:1211 > request bytes=19 duration=0.234011 method=GET path=/api/v1/auth/me remote=127.0.0.1:37852 status=404
+14:14:13 INF internal/api/server.go:1211 > request bytes=19 duration=0.038451 method=GET path=/api/v1/auth/me remote=127.0.0.1:37854 status=404
+14:14:13 INF internal/api/server.go:1211 > request bytes=19 duration=0.033861 method=GET path=/api/v1/auth/me remote=127.0.0.1:37864 status=404
+14:14:13 INF internal/api/server.go:1211 > request bytes=19 duration=0.028192 method=GET path=/api/v1/auth/me remote=127.0.0.1:37876 status=404
+14:14:14 INF internal/api/server.go:1211 > request bytes=1519 duration=10.273777 method=GET path=/api/v1/files/ remote=127.0.0.1:37884 status=200
+14:14:18 INF internal/api/server.go:1211 > request bytes=86 duration=49.657521 method=POST path=/api/v1/auth/login remote=127.0.0.1:35532 status=401
+14:14:23 INF internal/api/server.go:1211 > request bytes=86 duration=48.504725 method=POST path=/api/v1/auth/login remote=127.0.0.1:35538 status=401
+14:19:08 INF internal/api/server.go:1211 > request bytes=41 duration=0.044059 method=GET path=/api/v1/ui/config remote=127.0.0.1:47192 status=401
+14:19:08 INF internal/api/server.go:1211 > request bytes=41 duration=0.037124 method=GET path=/api/v1/ui/config remote=127.0.0.1:47202 status=401
+14:19:26 INF internal/api/server.go:1211 > request bytes=41 duration=0.068365 method=GET path=/api/v1/ui/config remote=127.0.0.1:41004 status=401
+14:19:26 INF internal/api/server.go:1211 > request bytes=41 duration=0.068063 method=GET path=/api/v1/ui/config remote=127.0.0.1:41018 status=401
+14:19:56 INF internal/api/server.go:1211 > request bytes=41 duration=0.053915 method=GET path=/api/v1/ui/config remote=127.0.0.1:52898 status=401
+14:19:56 INF internal/api/server.go:1211 > request bytes=41 duration=0.032862 method=GET path=/api/v1/ui/config remote=127.0.0.1:52910 status=401
+14:20:34 INF internal/api/server.go:1211 > request bytes=41 duration=0.038022 method=GET path=/api/v1/ui/config remote=127.0.0.1:44108 status=401
+14:20:34 INF internal/api/server.go:1211 > request bytes=41 duration=0.021034 method=GET path=/api/v1/ui/config remote=127.0.0.1:44120 status=401
+14:31:59 INF internal/api/server.go:1211 > request bytes=41 duration=0.065746 method=GET path=/api/v1/ui/config remote=127.0.0.1:44538 status=401
+14:31:59 INF internal/api/server.go:1211 > request bytes=41 duration=0.042695 method=GET path=/api/v1/ui/config remote=127.0.0.1:44540 status=401
+14:32:00 INF internal/api/server.go:1211 > request bytes=41 duration=0.062255 method=GET path=/api/v1/ui/config remote=127.0.0.1:44544 status=401
+14:32:00 INF internal/api/server.go:1211 > request bytes=41 duration=0.035309 method=GET path=/api/v1/ui/config remote=127.0.0.1:44554 status=401
+14:32:29 INF internal/api/server.go:1211 > request bytes=41 duration=0.061616 method=GET path=/api/v1/ui/config remote=127.0.0.1:43588 status=401
+14:32:29 INF internal/api/server.go:1211 > request bytes=41 duration=0.036724 method=GET path=/api/v1/ui/config remote=127.0.0.1:43604 status=401
+14:34:32 INF internal/api/server.go:1211 > request bytes=41 duration=0.046311 method=GET path=/api/v1/ui/config remote=127.0.0.1:38988 status=401
+14:34:32 INF internal/api/server.go:1211 > request bytes=41 duration=0.045239 method=GET path=/api/v1/ui/config remote=127.0.0.1:38996 status=401
+14:34:33 INF internal/api/server.go:1211 > request bytes=41 duration=0.08368 method=GET path=/api/v1/ui/config remote=127.0.0.1:39008 status=401
+14:34:33 INF internal/api/server.go:1211 > request bytes=41 duration=0.062441 method=GET path=/api/v1/ui/config remote=127.0.0.1:39012 status=401
+14:34:34 INF internal/api/server.go:1211 > request bytes=41 duration=0.033389 method=GET path=/api/v1/ui/config remote=127.0.0.1:39016 status=401
+14:34:34 INF internal/api/server.go:1211 > request bytes=41 duration=0.035914 method=GET path=/api/v1/ui/config remote=127.0.0.1:39020 status=401
+14:38:58 INF internal/api/server.go:1211 > request bytes=41 duration=0.077317 method=GET path=/api/v1/ui/config remote=127.0.0.1:33226 status=401
+14:38:59 INF internal/api/server.go:1211 > request bytes=41 duration=0.034306 method=GET path=/api/v1/ui/config remote=127.0.0.1:33228 status=401
+14:42:31 INF internal/api/server.go:1211 > request bytes=41 duration=0.042474 method=GET path=/api/v1/ui/config remote=127.0.0.1:44694 status=401
+14:42:31 INF internal/api/server.go:1211 > request bytes=41 duration=0.023508 method=GET path=/api/v1/ui/config remote=127.0.0.1:44698 status=401
+14:42:36 INF internal/api/server.go:1211 > request bytes=41 duration=0.036518 method=GET path=/api/v1/ui/config remote=127.0.0.1:36112 status=401
+14:42:36 INF internal/api/server.go:1211 > request bytes=41 duration=0.035958 method=GET path=/api/v1/ui/config remote=127.0.0.1:36118 status=401
+14:42:37 INF internal/api/server.go:1211 > request bytes=41 duration=0.072128 method=GET path=/api/v1/ui/config remote=127.0.0.1:36122 status=401
+14:42:37 INF internal/api/server.go:1211 > request bytes=41 duration=0.031101 method=GET path=/api/v1/ui/config remote=127.0.0.1:36136 status=401
+14:42:37 INF internal/api/server.go:1211 > request bytes=41 duration=0.06911 method=GET path=/api/v1/ui/config remote=127.0.0.1:36148 status=401
+14:42:37 INF internal/api/server.go:1211 > request bytes=41 duration=0.046781 method=GET path=/api/v1/ui/config remote=127.0.0.1:36154 status=401
+14:42:41 INF internal/api/server.go:1211 > request bytes=86 duration=46.850127 method=POST path=/api/v1/auth/login remote=127.0.0.1:36160 status=401
+14:50:28 INF internal/api/server.go:1211 > request bytes=41 duration=5.916369 method=GET path=/api/v1/ui/config remote=127.0.0.1:45674 status=401
+14:50:28 INF internal/api/server.go:1211 > request bytes=41 duration=0.042373 method=GET path=/api/v1/ui/config remote=127.0.0.1:45690 status=401
+14:53:36 INF internal/api/server.go:1211 > request bytes=41 duration=0.071768 method=GET path=/api/v1/ui/config remote=127.0.0.1:36940 status=401
+14:53:36 INF internal/api/server.go:1211 > request bytes=41 duration=0.0411 method=GET path=/api/v1/ui/config remote=127.0.0.1:36952 status=401
+14:53:36 INF internal/api/server.go:1211 > request bytes=41 duration=0.061711 method=GET path=/api/v1/ui/config remote=127.0.0.1:51010 status=401
+14:53:36 INF internal/api/server.go:1211 > request bytes=41 duration=0.03292 method=GET path=/api/v1/ui/config remote=127.0.0.1:51012 status=401
+14:53:39 INF internal/api/server.go:1211 > request bytes=86 duration=47.778058 method=POST path=/api/v1/auth/login remote=127.0.0.1:51018 status=401
+14:53:43 INF internal/api/server.go:1211 > request bytes=86 duration=48.903142 method=POST path=/api/v1/auth/login remote=127.0.0.1:51024 status=401
+14:53:45 INF internal/api/server.go:1211 > request bytes=86 duration=45.858668 method=POST path=/api/v1/auth/login remote=127.0.0.1:51040 status=401
+14:53:45 INF internal/api/server.go:1211 > request bytes=86 duration=46.125384 method=POST path=/api/v1/auth/login remote=127.0.0.1:51046 status=401
+14:55:21 INF internal/api/server.go:1211 > request bytes=86 duration=51.794351 method=POST path=/api/v1/auth/login remote=[::1]:49590 status=401
+14:56:07 INF internal/api/server.go:1211 > request bytes=41 duration=0.033305 method=GET path=/api/v1/health remote=[::1]:49270 status=401

@@ -10,7 +10,7 @@ interface ThemeState {
 }
 
 const getSystemTheme = (): 'light' | 'dark' => {
-  if (typeof window === 'undefined') return 'dark'
+  if (typeof window === 'undefined') return 'light'
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
@@ -44,8 +44,8 @@ const initializeTheme = () => {
     // Ignore parse errors
   }
   
-  // Default to dark theme
-  applyTheme('dark')
+  // Default to system theme
+  applyTheme(getSystemTheme())
 }
 
 // Run immediately on module load
@@ -54,8 +54,8 @@ initializeTheme()
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set) => ({
-      theme: 'dark',
-      resolvedTheme: 'dark',
+      theme: 'system',
+      resolvedTheme: getSystemTheme(),
       setTheme: (theme) => {
         const resolved = theme === 'system' ? getSystemTheme() : theme
         set({ theme, resolvedTheme: resolved })

@@ -1,5 +1,6 @@
 import type { FileItem } from '@/stores/files'
 import { sanitizeFilename, normalizePath, encodePathForUrl } from '@/lib/utils'
+import { authFetch, getStoredToken } from './auth'
 
 export type { FileItem }
 
@@ -150,7 +151,7 @@ interface ApiResponseWrapper<T> {
 export async function listFiles(path: string): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await fetch(`${API_BASE}/files${encodedPath}`)
+  const response = await authFetch(`${API_BASE}/files${encodedPath}`)
   const result = await handleResponse<ApiResponseWrapper<FileListResponse>>(response, '获取文件列表失败')
   return result.data
 }
@@ -159,7 +160,7 @@ export async function listFiles(path: string): Promise<FileListResponse> {
 export async function getVersions(path: string): Promise<VersionInfo[]> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await fetch(`${API_BASE}/versions${encodedPath}`)
+  const response = await authFetch(`${API_BASE}/versions${encodedPath}`)
   const result = await handleResponse<ApiResponseWrapper<{path: string, versions: VersionInfo[]}>>(response, '获取版本历史失败')
   return result.data.versions
 }
@@ -168,7 +169,7 @@ export async function getVersions(path: string): Promise<VersionInfo[]> {
 export async function deleteFile(path: string): Promise<void> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await fetch(`${API_BASE}/files${encodedPath}`, {
+  const response = await authFetch(`${API_BASE}/files${encodedPath}`, {
     method: 'DELETE',
   })
   if (!response.ok) {
@@ -178,7 +179,7 @@ export async function deleteFile(path: string): Promise<void> {
 
 // Get storage stats (direct response, not wrapped)
 export async function getStorageStats(): Promise<StorageStats> {
-  const response = await fetch(`${API_BASE}/stats`)
+  const response = await authFetch(`${API_BASE}/stats`)
   if (!response.ok) {
     throw new ApiError('获取存储统计失败', response.status, response.statusText)
   }
@@ -201,7 +202,7 @@ export async function getHealth(): Promise<HealthStatus> {
 
 // Get diagnostics info (direct response, not wrapped)
 export async function getDiagnostics(): Promise<DiagnosticsInfo> {
-  const response = await fetch(`${API_BASE}/diagnostics`)
+  const response = await authFetch(`${API_BASE}/diagnostics`)
   if (!response.ok) {
     throw new ApiError('获取诊断信息失败', response.status, response.statusText)
   }
@@ -245,7 +246,7 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
 export async function createDirectory(path: string): Promise<void> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
-  const response = await fetch(`/dav${encodedPath}`, {
+  const response = await authFetch(`/dav${encodedPath}`, {
     method: 'MKCOL',
   })
   if (!response.ok) {
@@ -267,6 +268,7 @@ export async function uploadFile(
   
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    const token = getStoredToken()
     
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable && onProgress) {
@@ -291,6 +293,9 @@ export async function uploadFile(
     })
     
     xhr.open('PUT', `/dav${encodedPath}/${encodedFilename}`)
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    }
     xhr.send(file)
   })
 }
@@ -318,11 +323,12 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
   const encodedFrom = encodePathForUrl(normalizedFrom)
+  const encodedTo = encodePathForUrl(normalizedTo)
   
-  const response = await fetch(`/dav${encodedFrom}`, {
+  const response = await authFetch(`/dav${encodedFrom}`, {
     method: 'MOVE',
     headers: {
-      'Destination': `/dav${normalizedTo}`,
+      'Destination': `/dav${encodedTo}`,
     },
   })
   if (!response.ok) {
@@ -334,7 +340,7 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
 export async function restoreVersion(path: string, hash: string): Promise<void> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodeURIComponent(normalizedPath)
-  const response = await fetch(`${API_BASE}/versions/${hash}/restore?path=${encodedPath}`, {
+  const response = await authFetch(`${API_BASE}/versions/${hash}/restore?path=${encodedPath}`, {
     method: 'POST',
   })
   if (!response.ok) {
@@ -344,7 +350,7 @@ export async function restoreVersion(path: string, hash: string): Promise<void> 
 
 // Run data scrubbing
 export async function scrubData(): Promise<void> {
-  const response = await fetch(`${API_BASE}/scrub`, {
+  const response = await authFetch(`${API_BASE}/scrub`, {
     method: 'POST',
   })
   if (!response.ok) {
@@ -354,7 +360,7 @@ export async function scrubData(): Promise<void> {
 
 // Run garbage collection
 export async function runGC(dryRun: boolean = true): Promise<void> {
-  const response = await fetch(`${API_BASE}/gc?dry_run=${dryRun}`, {
+  const response = await authFetch(`${API_BASE}/gc?dry_run=${dryRun}`, {
     method: 'POST',
   })
   if (!response.ok) {
@@ -383,7 +389,7 @@ export interface TrashListResponse {
 
 // List trash items
 export async function listTrash(): Promise<TrashListResponse> {
-  const response = await fetch(`${API_BASE}/trash/`)
+  const response = await authFetch(`${API_BASE}/trash/`)
   const result = await handleResponse<ApiResponseWrapper<{
     items: Array<{
       id: string
@@ -421,7 +427,7 @@ export async function restoreFromTrash(id: string, newPath?: string): Promise<vo
     ? `${API_BASE}/trash/${id}/restore?path=${encodeURIComponent(newPath)}`
     : `${API_BASE}/trash/${id}/restore`
   
-  const response = await fetch(url, {
+  const response = await authFetch(url, {
     method: 'POST',
   })
   if (!response.ok) {
@@ -436,7 +442,7 @@ export async function restoreFromTrash(id: string, newPath?: string): Promise<vo
 
 // Permanently delete item from trash
 export async function deleteFromTrash(id: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/trash/${id}`, {
+  const response = await authFetch(`${API_BASE}/trash/${id}`, {
     method: 'DELETE',
   })
   if (!response.ok) {
@@ -446,7 +452,7 @@ export async function deleteFromTrash(id: string): Promise<void> {
 
 // Empty trash (delete all items permanently)
 export async function emptyTrash(): Promise<number> {
-  const response = await fetch(`${API_BASE}/trash/`, {
+  const response = await authFetch(`${API_BASE}/trash/`, {
     method: 'DELETE',
   })
   const result = await handleResponse<ApiResponseWrapper<{deleted_count: number}>>(response, '清空回收站失败')
@@ -480,14 +486,14 @@ export interface ScrubResult {
 
 // Get last scrub result
 export async function getScrubResult(): Promise<ScrubResult> {
-  const response = await fetch(`${API_BASE}/scrub`)
+  const response = await authFetch(`${API_BASE}/scrub`)
   const result = await handleResponse<ApiResponseWrapper<ScrubResult>>(response, '获取校验结果失败')
   return result.data
 }
 
 // Run scrub operation
 export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
-  const response = await fetch(`${API_BASE}/scrub`, {
+  const response = await authFetch(`${API_BASE}/scrub`, {
     method: 'POST',
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,
@@ -501,7 +507,7 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
 
 // Download diagnostics export
 export async function downloadDiagnosticsExport(): Promise<void> {
-  const response = await fetch(`${API_BASE}/diagnostics-export`)
+  const response = await authFetch(`${API_BASE}/diagnostics-export`)
   if (!response.ok) {
     throw new ApiError('导出诊断信息失败', response.status, response.statusText)
   }

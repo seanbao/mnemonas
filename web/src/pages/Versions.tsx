@@ -32,6 +32,8 @@ import {
 } from 'lucide-react'
 import { getVersions, getDownloadUrl, restoreVersion, type VersionInfo } from '@/api/files'
 import { formatBytes, formatDate } from '@/lib/utils'
+import { PageHeader } from '@/components/ui/PageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
 
 interface VersionRowProps {
   version: VersionInfo
@@ -47,11 +49,11 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
     <TableRow key={version.hash} className="hover:bg-content2 transition-colors">
       <TableCell>
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500/20 to-purple-500/20 flex items-center justify-center">
-            <span className="font-mono text-sm font-medium text-violet-400">v{index + 1}</span>
+          <div className="w-8 h-8 rounded-lg bg-accent-primary/15 flex items-center justify-center">
+            <span className="font-mono text-sm font-medium text-accent-primary">v{index + 1}</span>
           </div>
           {isLatest && (
-            <Chip size="sm" color="primary" variant="flat" className="animate-pulse">
+            <Chip size="sm" variant="flat" className="chip-soft">
               当前版本
             </Chip>
           )}
@@ -79,7 +81,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
             variant="light"
             onPress={onPreview}
             title="预览"
-            className="hover:bg-primary/20"
+            className="btn-secondary btn-sm"
           >
             <Eye size={16} />
           </Button>
@@ -89,7 +91,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
             variant="light"
             onPress={onDownload}
             title="下载此版本"
-            className="hover:bg-success/20"
+            className="btn-secondary btn-sm"
           >
             <Download size={16} />
           </Button>
@@ -101,7 +103,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
               color="warning"
               onPress={onRestore}
               title="恢复到此版本"
-              className="hover:bg-warning/20"
+              className="btn-secondary btn-sm"
             >
               <RotateCcw size={16} />
             </Button>
@@ -158,20 +160,17 @@ export function VersionsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="h-full overflow-auto custom-scrollbar">
+      <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-4">
-        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-500 flex items-center justify-center shadow-lg shadow-cyan-500/25">
-          <History size={24} className="text-white" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold">版本历史</h1>
-          <p className="text-default-400 text-sm">查看和恢复文件历史版本</p>
-        </div>
-      </div>
+      <PageHeader
+        title="版本历史"
+        subtitle="查看和恢复文件历史版本"
+        icon={History}
+      />
 
       {/* Search */}
-      <div className="glass-card rounded-xl p-4">
+      <div className="glass-card rounded-xl p-4 shadow-[var(--shadow-soft)]">
         <div className="flex items-center gap-4">
           <Input
             placeholder="输入文件路径，例如: /documents/report.pdf"
@@ -197,7 +196,7 @@ export function VersionsPage() {
 
       {/* Version List */}
       {selectedPath && (
-        <div className="glass-card rounded-xl p-6 space-y-4">
+        <div className="glass-card rounded-xl p-6 space-y-4 shadow-[var(--shadow-soft)]">
           <div className="flex items-center gap-2 text-default-400">
             <History size={18} />
             <span>文件路径:</span>
@@ -225,8 +224,8 @@ export function VersionsPage() {
               aria-label="版本历史" 
               removeWrapper
               classNames={{
-                th: "bg-content2/50 text-default-400 font-medium",
-                td: "py-3",
+                th: "table-head font-medium",
+                td: "py-2.5",
               }}
             >
               <TableHeader>
@@ -264,20 +263,18 @@ export function VersionsPage() {
 
       {/* Empty State */}
       {!selectedPath && (
-        <div className="glass-card rounded-xl p-12 flex flex-col items-center justify-center">
-          <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 flex items-center justify-center mb-6">
-            <Sparkles size={40} className="text-cyan-400" />
-          </div>
-          <h2 className="text-xl font-semibold mb-2">查看文件版本历史</h2>
-          <p className="text-default-400 text-center max-w-md mb-6">
-            MnemoNAS 自动保留每个文件的历史版本。输入文件路径即可查看所有历史版本，支持预览、下载和一键回滚。
-          </p>
-          <div className="flex items-center gap-2 text-sm text-default-500 bg-content2/50 px-4 py-2 rounded-lg">
-            <span>提示: 也可以在文件管理器中右键点击文件</span>
-            <ChevronRight size={14} />
-            <span className="font-medium text-primary">"版本历史"</span>
-          </div>
-        </div>
+        <EmptyState
+          icon={Sparkles}
+          title="查看文件版本历史"
+          description="MnemoNAS 自动保留每个文件的历史版本。输入文件路径即可查看所有历史版本，支持预览、下载和一键回滚。"
+          action={
+            <div className="flex items-center gap-2 text-sm text-default-500 bg-content2/50 px-4 py-2 rounded-lg">
+              <span>提示: 也可以在文件管理器中右键点击文件</span>
+              <ChevronRight size={14} />
+              <span className="font-medium text-primary">"版本历史"</span>
+            </div>
+          }
+        />
       )}
 
       {/* Restore Confirmation Modal */}
@@ -336,6 +333,7 @@ export function VersionsPage() {
           </ModalFooter>
         </ModalContent>
       </Modal>
+      </div>
     </div>
   )
 }

@@ -30,6 +30,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
+import { PageHeader } from '@/components/ui/PageHeader'
 import { getSettings, updateSettings, type UpdateSettingsRequest } from '@/api/settings'
 
 // Settings section component
@@ -45,14 +46,14 @@ function SettingsSection({
   children: React.ReactNode 
 }) {
   return (
-    <Card className="bg-bg-card border border-divider shadow-sm">
+    <Card className="bg-content1 border border-divider shadow-[var(--shadow-soft)]">
       <CardHeader className="flex gap-4 pb-2">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-primary to-accent-dark flex items-center justify-center shadow-sm">
+        <div className="w-10 h-10 rounded-xl bg-accent-primary flex items-center justify-center shadow-sm">
           <Icon size={20} className="text-white" />
         </div>
         <div className="flex-1">
-          <h3 className="text-base font-semibold text-text-primary">{title}</h3>
-          <p className="text-xs text-text-muted mt-0.5">{description}</p>
+          <h3 className="text-base font-semibold text-foreground">{title}</h3>
+          <p className="text-xs text-default-500 mt-0.5">{description}</p>
         </div>
       </CardHeader>
       <CardBody className="pt-2">
@@ -73,11 +74,11 @@ function SettingRow({
   children: React.ReactNode 
 }) {
   return (
-    <div className="flex items-center justify-between py-3 first:pt-0 last:pb-0">
+    <div className="flex items-center justify-between py-2.5 first:pt-0 last:pb-0">
       <div className="flex-1 min-w-0 pr-4">
-        <div className="text-sm font-medium text-text-primary">{label}</div>
+        <div className="text-sm font-medium text-foreground">{label}</div>
         {description && (
-          <div className="text-xs text-text-muted mt-0.5">{description}</div>
+          <div className="text-xs text-default-500 mt-0.5">{description}</div>
         )}
       </div>
       <div className="shrink-0">
@@ -220,38 +221,39 @@ export function SettingsPage() {
     <div className="h-full overflow-auto custom-scrollbar">
       <div className="max-w-4xl mx-auto p-7">
         {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-2xl font-bold text-text-primary">系统设置</h1>
-            <p className="text-sm text-text-muted mt-1">配置 MnemoNAS 系统参数</p>
-          </div>
-          <div className="flex gap-3">
-            <Button
-              variant="bordered"
-              className="border-divider bg-bg-card text-text-secondary hover:bg-bg-hover"
-              startContent={<RefreshCw size={16} />}
-              onPress={handleReset}
-            >
-              重置
-            </Button>
-            <Button
-              className="bg-gradient-to-br from-accent-primary to-accent-dark text-white shadow-[0_4px_12px_rgba(167,139,250,0.4)]"
-              startContent={<Save size={16} />}
-              isLoading={saveMutation.isPending}
-              onPress={handleSave}
-            >
-              保存设置
-            </Button>
-          </div>
-        </div>
+        <PageHeader
+          title="系统设置"
+          subtitle="配置 MnemoNAS 系统参数"
+          actions={
+            <>
+              <Button
+                variant="bordered"
+                className="btn-secondary btn-md"
+                startContent={<RefreshCw size={16} />}
+                onPress={handleReset}
+              >
+                重置
+              </Button>
+              <Button
+                className="btn-primary btn-md"
+                startContent={<Save size={16} />}
+                isLoading={saveMutation.isPending}
+                onPress={handleSave}
+              >
+                保存设置
+              </Button>
+            </>
+          }
+          className="mb-8"
+        />
 
         {/* Tabs */}
         <Tabs 
           selectedKey={selectedTab}
           onSelectionChange={(key) => setSelectedTab(key as string)}
           classNames={{
-            tabList: "bg-bg-card border border-divider rounded-xl p-1 gap-1",
-            tab: "px-4 py-2 rounded-lg data-[selected=true]:bg-accent-primary data-[selected=true]:text-white",
+            tabList: "bg-content1 border border-divider rounded-xl p-1 gap-1 shadow-[var(--shadow-soft)]",
+            tab: "px-4 py-2 rounded-lg text-default-600 data-[selected=true]:bg-accent-primary data-[selected=true]:text-white data-[selected=true]:shadow-sm",
             cursor: "hidden",
           }}
         >
@@ -268,10 +270,10 @@ export function SettingsPage() {
                     placeholder="0.0.0.0"
                     value={settings.serverHost}
                     onValueChange={(v) => setSettings(s => ({ ...s, serverHost: v }))}
-                    startContent={<Globe size={16} className="text-text-muted" />}
+                    startContent={<Globe size={16} className="text-default-500" />}
                     classNames={{ 
-                      inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                      label: "text-text-secondary",
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                      label: "text-default-600",
                     }}
                   />
                   <Input
@@ -280,8 +282,8 @@ export function SettingsPage() {
                     value={settings.serverPort}
                     onValueChange={(v) => setSettings(s => ({ ...s, serverPort: v }))}
                     classNames={{ 
-                      inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                      label: "text-text-secondary",
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                      label: "text-default-600",
                     }}
                   />
                 </div>
@@ -298,10 +300,10 @@ export function SettingsPage() {
                     placeholder="/var/lib/mnemonas/data"
                     value={settings.dataDir}
                     onValueChange={(v) => setSettings(s => ({ ...s, dataDir: v }))}
-                    startContent={<Database size={16} className="text-text-muted" />}
+                    startContent={<Database size={16} className="text-default-500" />}
                     classNames={{ 
-                      inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                      label: "text-text-secondary",
+                      inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                      label: "text-default-600",
                     }}
                   />
                   <Input
@@ -309,10 +311,10 @@ export function SettingsPage() {
                     placeholder="/var/lib/mnemonas/metadata"
                     value={settings.metadataDir}
                     onValueChange={(v) => setSettings(s => ({ ...s, metadataDir: v }))}
-                    startContent={<Database size={16} className="text-text-muted" />}
+                    startContent={<Database size={16} className="text-default-500" />}
                     classNames={{ 
-                      inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                      label: "text-text-secondary",
+                      inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                      label: "text-default-600",
                     }}
                   />
                   <Input
@@ -320,10 +322,10 @@ export function SettingsPage() {
                     placeholder="/var/lib/mnemonas/tmp"
                     value={settings.tempDir}
                     onValueChange={(v) => setSettings(s => ({ ...s, tempDir: v }))}
-                    startContent={<Folder size={16} className="text-text-muted" />}
+                    startContent={<Folder size={16} className="text-default-500" />}
                     classNames={{ 
-                      inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                      label: "text-text-secondary",
+                      inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                      label: "text-default-600",
                     }}
                   />
                 </div>
@@ -349,7 +351,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, maxVersions: parseInt(v) || 0 }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -363,7 +365,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, maxAge: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -377,7 +379,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, minFreeSpace: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -391,7 +393,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, gcInterval: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -418,7 +420,7 @@ export function SettingsPage() {
                       classNames={{
                         wrapper: cn(
                           "group-data-[selected=true]:bg-accent-primary",
-                          "bg-bg-secondary"
+                          "bg-content2"
                         ),
                       }}
                     />
@@ -434,7 +436,7 @@ export function SettingsPage() {
                       className="w-32"
                       isDisabled={!settings.webdavEnabled}
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -450,7 +452,7 @@ export function SettingsPage() {
                       classNames={{
                         wrapper: cn(
                           "group-data-[selected=true]:bg-accent-primary",
-                          "bg-bg-secondary"
+                          "bg-content2"
                         ),
                       }}
                     />
@@ -468,7 +470,7 @@ export function SettingsPage() {
                     label="认证方式"
                     description="当前使用 Basic Auth 认证"
                   >
-                    <div className="flex items-center gap-2 text-sm text-text-secondary">
+                    <div className="flex items-center gap-2 text-sm text-default-600">
                       <Lock size={14} />
                       <span>Basic Auth</span>
                     </div>
@@ -481,10 +483,10 @@ export function SettingsPage() {
                       value={settings.webdavUsername}
                       onValueChange={(v) => setSettings(s => ({ ...s, webdavUsername: v }))}
                       isDisabled={!settings.webdavEnabled}
-                      startContent={<User size={16} className="text-text-muted" />}
+                      startContent={<User size={16} className="text-default-500" />}
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                        label: "text-text-secondary",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                        label: "text-default-600",
                       }}
                     />
                     <Input
@@ -494,10 +496,10 @@ export function SettingsPage() {
                       value={settings.webdavPassword}
                       onValueChange={(v) => setSettings(s => ({ ...s, webdavPassword: v }))}
                       isDisabled={!settings.webdavEnabled}
-                      startContent={<Lock size={16} className="text-text-muted" />}
+                      startContent={<Lock size={16} className="text-default-500" />}
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary",
-                        label: "text-text-secondary",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                        label: "text-default-600",
                       }}
                     />
                   </div>
@@ -514,14 +516,14 @@ export function SettingsPage() {
                 icon={Zap}
               >
                 <div className="space-y-4">
-                  <div className="p-4 rounded-xl bg-bg-secondary border border-divider">
+                  <div className="p-4 rounded-xl bg-content2 border border-divider">
                     <div className="flex items-start gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-starlight/20 flex items-center justify-center shrink-0 mt-0.5">
-                        <HardDrive size={16} className="text-starlight" />
+                      <div className="w-8 h-8 rounded-lg bg-accent-primary/15 flex items-center justify-center shrink-0 mt-0.5">
+                        <HardDrive size={16} className="text-accent-primary" />
                       </div>
                       <div>
-                        <div className="text-sm font-medium text-text-primary">关于 CDC 分块</div>
-                        <div className="text-xs text-text-muted mt-1 leading-relaxed">
+                        <div className="text-sm font-medium text-foreground">关于 CDC 分块</div>
+                        <div className="text-xs text-default-500 mt-1 leading-relaxed">
                           内容定义分块（CDC）将文件按内容边界切分，实现高效去重。
                           较小的块大小可提高去重率，但会增加元数据开销；
                           较大的块大小则相反。建议保持默认值。
@@ -539,7 +541,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, minChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -553,7 +555,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, avgChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -567,7 +569,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, maxChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-bg-secondary border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -593,7 +595,7 @@ export function SettingsPage() {
                     label="连接超时"
                     description="gRPC 调用超时时间"
                   >
-                    <code className="text-sm text-text-secondary bg-bg-secondary px-2 py-1 rounded">
+                    <code className="text-sm text-default-600 bg-content2 px-2 py-1 rounded">
                       30s
                     </code>
                   </SettingRow>
@@ -602,7 +604,7 @@ export function SettingsPage() {
                     label="最大重试次数"
                     description="失败后重试次数"
                   >
-                    <code className="text-sm text-text-secondary bg-bg-secondary px-2 py-1 rounded">
+                    <code className="text-sm text-default-600 bg-content2 px-2 py-1 rounded">
                       3
                     </code>
                   </SettingRow>

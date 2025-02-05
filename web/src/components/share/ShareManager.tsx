@@ -23,8 +23,6 @@ import {
   Trash2,
   ToggleLeft,
   ToggleRight,
-  FileText,
-  Folder,
   Lock,
   Clock,
   Eye,
@@ -38,6 +36,8 @@ import {
   formatExpiration,
   type Share,
 } from '@/api/share'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { FileIcon } from '@/components/ui/FileIcon'
 
 interface ShareManagerProps {
   showAllShares?: boolean
@@ -123,11 +123,12 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
 
   if (shares.length === 0) {
     return (
-      <div className="text-center py-12">
-        <Link2 size={48} className="mx-auto text-text-muted mb-4" />
-        <h3 className="text-lg font-medium text-text-primary mb-2">暂无分享</h3>
-        <p className="text-text-muted">在文件浏览器中选择文件或文件夹创建分享链接</p>
-      </div>
+      <EmptyState
+        icon={Link2}
+        title="暂无分享"
+        description="在文件浏览器中选择文件或文件夹创建分享链接"
+        className="py-12"
+      />
     )
   }
 
@@ -135,7 +136,7 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-text-primary">
+        <h2 className="text-lg font-semibold text-foreground">
           我的分享 ({shares.length})
         </h2>
         <Button
@@ -166,7 +167,7 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
         isOpen={!!deleteTarget} 
         onClose={() => setDeleteTarget(null)}
         classNames={{
-          base: "bg-bg-card border border-divider",
+          base: "bg-content1 border border-divider",
         }}
       >
         <ModalContent>
@@ -174,8 +175,8 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
           <ModalBody>
             <p>确定要删除此分享链接吗？已分享的链接将失效。</p>
             {deleteTarget && (
-              <div className="p-3 bg-bg-secondary rounded-lg mt-2">
-                <div className="text-sm text-text-muted">分享路径</div>
+              <div className="p-3 bg-content2 rounded-lg mt-2">
+                <div className="text-sm text-default-500">分享路径</div>
                 <div className="font-medium truncate">{deleteTarget.path}</div>
               </div>
             )}
@@ -210,24 +211,20 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
   const isExpired = share.expires_at && new Date(share.expires_at) < new Date()
 
   return (
-    <Card className="bg-bg-card border border-divider">
+    <Card className="bg-content1 border border-divider">
       <CardBody className="p-4">
         <div className="flex items-start gap-4">
           {/* Icon */}
-          <div className={`
-            p-2 rounded-lg 
-            ${share.type === 'folder' ? 'bg-status-warning/10' : 'bg-accent-primary/10'}
-          `}>
-            {share.type === 'folder' 
-              ? <Folder size={24} className="text-status-warning" />
-              : <FileText size={24} className="text-accent-primary" />
-            }
-          </div>
+          <FileIcon
+            name={fileName}
+            isDir={share.type === 'folder'}
+            size={28}
+          />
 
           {/* Content */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
-              <span className="font-medium text-text-primary truncate">
+              <span className="font-medium text-foreground truncate">
                 {fileName}
               </span>
               {!share.enabled && (
@@ -238,12 +235,12 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
               )}
             </div>
             
-            <div className="text-sm text-text-muted truncate mb-2">
+            <div className="text-sm text-default-500 truncate mb-2">
               {share.path}
             </div>
 
             {/* Stats */}
-            <div className="flex flex-wrap items-center gap-3 text-xs text-text-muted">
+            <div className="flex flex-wrap items-center gap-3 text-xs text-default-500">
               {share.has_password && (
                 <div className="flex items-center gap-1">
                   <Lock size={12} />
