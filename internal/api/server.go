@@ -1254,6 +1254,16 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
+	gracePeriod := 24 * time.Hour
+	if gpStr := r.URL.Query().Get("grace_period_hours"); gpStr != "" {
+		hours, err := strconv.Atoi(gpStr)
+		if err != nil || hours < 0 {
+			BadRequest(w, "grace_period_hours must be a non-negative integer")
+			return
+		}
+		gracePeriod = time.Duration(hours) * time.Hour
+	}
+
 	if s.dataplane == nil || !s.dataplane.IsConnected() {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
@@ -1276,12 +1286,6 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 
 	// I3 fix: Grace period - skip objects created in the last 24 hours
 	// This prevents deleting chunks from in-progress uploads
-	gracePeriod := 24 * time.Hour
-	if gpStr := r.URL.Query().Get("grace_period_hours"); gpStr != "" {
-		if hours, err := strconv.Atoi(gpStr); err == nil && hours >= 0 {
-			gracePeriod = time.Duration(hours) * time.Hour
-		}
-	}
 	graceCutoff := time.Now().Add(-gracePeriod) // NEW-2 fix: actual cutoff time
 
 	// Step 1: Block storage mutations for the duration of GC and snapshot referenced hashes.
@@ -1830,16 +1834,22 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 
 	limit := 50
 	if limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 500 {
-			limit = l
+		l, err := strconv.Atoi(limitStr)
+		if err != nil || l <= 0 || l > 500 {
+			BadRequest(w, "limit parameter must be between 1 and 500")
+			return
 		}
+		limit = l
 	}
 
 	offset := 0
 	if offsetStr != "" {
-		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
-			offset = o
+		o, err := strconv.Atoi(offsetStr)
+		if err != nil || o < 0 {
+			BadRequest(w, "offset parameter must be a non-negative integer")
+			return
 		}
+		offset = o
 	}
 
 	entries, total := s.activity.List(limit, offset, activity.ActionType(actionFilter), userFilter)

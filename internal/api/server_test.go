@@ -383,6 +383,37 @@ func TestServer_Search_InvalidLimitReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_Activity_InvalidPaginationReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	tests := []struct {
+		name    string
+		query   string
+		message string
+	}{
+		{name: "invalid limit", query: "/api/v1/activity?limit=0", message: "limit parameter must be between 1 and 500"},
+		{name: "overlarge limit", query: "/api/v1/activity?limit=501", message: "limit parameter must be between 1 and 500"},
+		{name: "invalid offset", query: "/api/v1/activity?offset=-1", message: "offset parameter must be a non-negative integer"},
+		{name: "nonnumeric offset", query: "/api/v1/activity?offset=nope", message: "offset parameter must be a non-negative integer"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, testCase.query, nil)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Activity invalid pagination status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			if !strings.Contains(w.Body.String(), testCase.message) {
+				t.Fatalf("expected invalid pagination error %q, got %s", testCase.message, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_DeleteFile(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -1201,6 +1232,22 @@ func TestServer_GC_NoDataplane(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("GC without dataplane status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServer_GC_InvalidGracePeriodReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/gc?grace_period_hours=-1", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GC invalid grace period status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "grace_period_hours must be a non-negative integer") {
+		t.Fatalf("expected invalid grace period error, got %s", w.Body.String())
 	}
 }
 

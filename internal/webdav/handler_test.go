@@ -108,6 +108,23 @@ func TestHandler_MKCOL(t *testing.T) {
 	}
 }
 
+func TestHandler_MKCOL_RejectsUnknownLengthBody(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("MKCOL", "/dav/testdir", io.NopCloser(strings.NewReader("body")))
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("MKCOL unknown-length body status = %d, want %d", w.Code, http.StatusUnsupportedMediaType)
+	}
+	if !strings.Contains(w.Body.String(), "MKCOL does not allow request body") {
+		t.Fatalf("expected MKCOL body rejection message, got %q", w.Body.String())
+	}
+}
+
 func TestHandler_PUT_GET(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 

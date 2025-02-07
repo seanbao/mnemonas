@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -346,7 +347,7 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 
 func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
 	// MKCOL does not allow request body
-	if r.ContentLength > 0 {
+	if requestHasBody(r) {
 		http.Error(w, "MKCOL does not allow request body", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -363,6 +364,25 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 	h.propCache.Invalidate(path.Dir(filePath))
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+func requestHasBody(r *http.Request) bool {
+	if r.Body == nil || r.Body == http.NoBody {
+		return false
+	}
+	if r.ContentLength > 0 {
+		return true
+	}
+	if r.ContentLength == 0 {
+		return false
+	}
+
+	var probe [1]byte
+	n, err := r.Body.Read(probe[:])
+	if n > 0 {
+		return true
+	}
+	return err != io.EOF
 }
 
 func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http.Request, srcPath string) {
