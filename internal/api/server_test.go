@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,40 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	}
 
 	return server, fs, tmpDir
+}
+
+func TestNewServer_DoesNotInitializeFavoritesWhenDisabled(t *testing.T) {
+	logger := zerolog.Nop()
+	storeFile := filepath.Join(t.TempDir(), "favorites.json")
+
+	server, err := NewServer(logger, &ServerConfig{
+		FavoritesEnabled:   false,
+		FavoritesStoreFile: storeFile,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	if server.favoritesHandler != nil {
+		t.Fatal("expected favorites handler to remain nil when favorites are disabled")
+	}
+}
+
+func TestNewServer_InitializesFavoritesWhenEnabled(t *testing.T) {
+	logger := zerolog.Nop()
+	storeFile := filepath.Join(t.TempDir(), "favorites.json")
+
+	server, err := NewServer(logger, &ServerConfig{
+		FavoritesEnabled:   true,
+		FavoritesStoreFile: storeFile,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	if server.favoritesHandler == nil {
+		t.Fatal("expected favorites handler to be initialized when favorites are enabled")
+	}
 }
 
 func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string, string) {
@@ -1596,6 +1631,80 @@ func TestServer_UpdateSettings_InvalidDurationRejected(t *testing.T) {
 	}
 	if server.config.Storage.Retention.MaxAge != originalMaxAge {
 		t.Fatalf("expected invalid duration to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_NegativeMaxAgeRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalMaxAge := server.config.Storage.Retention.MaxAge
+
+	body := `{"retention":{"max_age":"-1h"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings negative max_age status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid retention.max_age") {
+		t.Fatalf("expected invalid retention.max_age message, got %s", w.Body.String())
+	}
+	if server.config.Storage.Retention.MaxAge != originalMaxAge {
+		t.Fatalf("expected negative max_age to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_NonPositiveGCIntervalRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalGCInterval := server.config.Storage.Retention.GCInterval
+
+	for _, body := range []string{
+		`{"retention":{"gc_interval":"0s"}}`,
+		`{"retention":{"gc_interval":"-1h"}}`,
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("update settings invalid gc_interval status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+		if !strings.Contains(w.Body.String(), "invalid retention.gc_interval") {
+			t.Fatalf("expected invalid retention.gc_interval message, got %s", w.Body.String())
+		}
+		if server.config.Storage.Retention.GCInterval != originalGCInterval {
+			t.Fatalf("expected invalid gc_interval to leave in-memory config unchanged")
+		}
+	}
+}
+
+func TestServer_UpdateSettings_InvalidPortRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalPort := server.config.Server.Port
+
+	body := `{"server":{"port":70000}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid port status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid server.port") {
+		t.Fatalf("expected invalid server.port message, got %s", bodyStr)
+	}
+	if server.config.Server.Port != originalPort {
+		t.Fatalf("expected invalid port to leave in-memory config unchanged")
 	}
 }
 

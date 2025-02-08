@@ -134,8 +134,13 @@ export function SettingsPage() {
   const [settings, setSettings] = useState({
     serverHost: '0.0.0.0',
     serverPort: '8080',
+    tlsEnabled: false,
+    tlsCertFile: '',
+    tlsKeyFile: '',
+    tlsAutoGenerate: true,
+    tlsCertDir: '',
     storageRoot: '',
-    maxVersions: 100,
+    maxVersions: '100',
     maxAge: '8760h',
     minFreeSpace: '10GB',
     gcInterval: '24h',
@@ -145,6 +150,11 @@ export function SettingsPage() {
     webdavAuthType: 'basic',
     webdavUsername: 'admin',
     webdavPassword: '',
+    shareEnabled: false,
+    shareBaseURL: '',
+    dataplaneGrpcAddress: '127.0.0.1:9090',
+    dataplaneTimeout: '30s',
+    dataplaneMaxRetries: '3',
     minChunkSize: '256KB',
     avgChunkSize: '1MB',
     maxChunkSize: '4MB',
@@ -155,8 +165,13 @@ export function SettingsPage() {
     setSettings({
       serverHost: data.server.host,
       serverPort: String(data.server.port),
+      tlsEnabled: data.server.tls?.enabled ?? false,
+      tlsCertFile: data.server.tls?.cert_file ?? '',
+      tlsKeyFile: data.server.tls?.key_file ?? '',
+      tlsAutoGenerate: data.server.tls?.auto_generate ?? true,
+      tlsCertDir: data.server.tls?.cert_dir ?? '',
       storageRoot: data.storage.root,
-      maxVersions: data.retention.max_versions,
+      maxVersions: String(data.retention.max_versions),
       maxAge: data.retention.max_age,
       minFreeSpace: formatBytes(data.retention.min_free_space),
       gcInterval: data.retention.gc_interval,
@@ -166,6 +181,11 @@ export function SettingsPage() {
       webdavAuthType: data.webdav.auth_type,
       webdavUsername: data.webdav.username,
       webdavPassword: '',
+      shareEnabled: data.share.enabled,
+      shareBaseURL: data.share.base_url,
+      dataplaneGrpcAddress: data.dataplane.grpc_address,
+      dataplaneTimeout: data.dataplane.timeout,
+      dataplaneMaxRetries: String(data.dataplane.max_retries),
       minChunkSize: formatBytes(data.cdc.min_chunk_size),
       avgChunkSize: formatBytes(data.cdc.avg_chunk_size),
       maxChunkSize: formatBytes(data.cdc.max_chunk_size),
@@ -202,6 +222,13 @@ export function SettingsPage() {
     let minChunkBytes: number
     let avgChunkBytes: number
     let maxChunkBytes: number
+    const trimmedPort = settings.serverPort.trim()
+    const parsedPort = Number(trimmedPort)
+    const trimmedMaxVersions = settings.maxVersions.trim()
+    const parsedMaxVersions = Number(trimmedMaxVersions)
+    const trimmedDataplaneTimeout = settings.dataplaneTimeout.trim()
+    const trimmedMaxRetries = settings.dataplaneMaxRetries.trim()
+    const parsedMaxRetries = Number(trimmedMaxRetries)
 
     try {
       minFreeSpaceBytes = parseByteSize(settings.minFreeSpace)
@@ -217,10 +244,37 @@ export function SettingsPage() {
       return
     }
 
-    if (Number.isNaN(Number(settings.serverPort))) {
+    if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
       addToast({
         title: '端口格式无效',
-        description: '端口必须是数字',
+        description: '端口必须是 1 到 65535 之间的整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedMaxVersions) || !Number.isInteger(parsedMaxVersions) || parsedMaxVersions < 0) {
+      addToast({
+        title: '最大版本数格式无效',
+        description: '最大版本数必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedDataplaneTimeout) {
+      addToast({
+        title: '数据面超时格式无效',
+        description: '连接超时不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedMaxRetries) || !Number.isInteger(parsedMaxRetries) || parsedMaxRetries < 0) {
+      addToast({
+        title: '最大重试次数格式无效',
+        description: '最大重试次数必须是 0 或正整数',
         color: 'danger',
       })
       return
@@ -229,13 +283,29 @@ export function SettingsPage() {
     const req: UpdateSettingsRequest = {
       server: {
         host: settings.serverHost,
-        port: parseInt(settings.serverPort),
+        port: parsedPort,
+      tls: {
+        enabled: settings.tlsEnabled,
+        cert_file: settings.tlsCertFile.trim(),
+        key_file: settings.tlsKeyFile.trim(),
+        auto_generate: settings.tlsAutoGenerate,
+        cert_dir: settings.tlsCertDir.trim(),
+      },
       },
       retention: {
-        max_versions: settings.maxVersions,
+        max_versions: parsedMaxVersions,
         max_age: settings.maxAge,
         min_free_space: minFreeSpaceBytes,
         gc_interval: settings.gcInterval,
+      },
+      dataplane: {
+        grpc_address: settings.dataplaneGrpcAddress,
+        timeout: trimmedDataplaneTimeout,
+        max_retries: parsedMaxRetries,
+      },
+      share: {
+        enabled: settings.shareEnabled,
+        base_url: settings.shareBaseURL.trim(),
       },
       cdc: {
         min_chunk_size: minChunkBytes,
@@ -376,6 +446,83 @@ export function SettingsPage() {
                 </div>
               </SettingsSection>
 
+        <SettingsSection
+        title="TLS / HTTPS"
+        description="配置 HTTPS 证书与自动生成策略"
+        icon={Shield}
+        >
+        <div className="space-y-4">
+          <SettingRow
+          label="启用 HTTPS"
+          description="启用后服务将使用 TLS 证书提供 HTTPS"
+          >
+          <Switch
+            isSelected={settings.tlsEnabled}
+            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsEnabled: v }))}
+            classNames={{
+            wrapper: cn(
+              "group-data-[selected=true]:bg-accent-primary",
+              "bg-content2"
+            ),
+            }}
+          />
+          </SettingRow>
+          <Divider className="bg-divider" />
+          <SettingRow
+          label="自动生成证书"
+          description="证书缺失时自动生成自签名证书"
+          >
+          <Switch
+            isSelected={settings.tlsAutoGenerate}
+            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsAutoGenerate: v }))}
+            isDisabled={!settings.tlsEnabled}
+            classNames={{
+            wrapper: cn(
+              "group-data-[selected=true]:bg-accent-primary",
+              "bg-content2"
+            ),
+            }}
+          />
+          </SettingRow>
+          <Divider className="bg-divider" />
+          <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="text-sm font-medium text-default-600 mb-1.5 block">证书文件</label>
+            <Input
+            value={settings.tlsCertFile}
+            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsCertFile: v }))}
+            placeholder="/path/to/server.crt"
+            isDisabled={!settings.tlsEnabled}
+            classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium text-default-600 mb-1.5 block">私钥文件</label>
+            <Input
+            value={settings.tlsKeyFile}
+            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsKeyFile: v }))}
+            placeholder="/path/to/server.key"
+            isDisabled={!settings.tlsEnabled}
+            classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+            />
+          </div>
+          </div>
+          <Divider className="bg-divider" />
+          <SettingRow
+          label="证书目录"
+          description="自动生成证书时使用的存放目录"
+          >
+          <Input
+            value={settings.tlsCertDir}
+            onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsCertDir: v }))}
+            placeholder="~/.mnemonas/certs"
+            isDisabled={!settings.tlsEnabled || !settings.tlsAutoGenerate}
+            classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9" }}
+          />
+          </SettingRow>
+        </div>
+        </SettingsSection>
+
               <SettingsSection
                 title="存储路径"
                 description="显示当前数据存储根目录"
@@ -410,8 +557,8 @@ export function SettingsPage() {
                   >
                     <Input
                       type="number"
-                      value={String(settings.maxVersions)}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxVersions: parseInt(v) || 0 }))}
+                      value={settings.maxVersions}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxVersions: v }))}
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -662,12 +809,21 @@ export function SettingsPage() {
                 <div className="space-y-4">
                   <SettingRow
                     label="认证方式"
-                    description="当前使用 Basic Auth 认证"
+                    description="选择 WebDAV 访问所需的认证方式"
                   >
-                    <div className="flex items-center gap-2 text-sm text-default-600">
-                      <Lock size={14} />
-                      <span>Basic Auth</span>
-                    </div>
+                    <select
+                      value={settings.webdavAuthType}
+                      onChange={(event) => updateDirtySettings((current) => ({
+                        ...current,
+                        webdavAuthType: event.target.value as 'basic' | 'none',
+                      }))}
+                      disabled={!settings.webdavEnabled}
+                      className="input-shell h-9 rounded-xl px-3 text-sm bg-content1 border border-divider min-w-[160px]"
+                      aria-label="WebDAV 认证方式"
+                    >
+                      <option value="basic">Basic Auth</option>
+                      <option value="none">无认证</option>
+                    </select>
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <div className="grid grid-cols-2 gap-4">
@@ -677,7 +833,7 @@ export function SettingsPage() {
                         placeholder="admin"
                         value={settings.webdavUsername}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavUsername: v }))}
-                        isDisabled={!settings.webdavEnabled}
+                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType === 'none'}
                         startContent={<User size={16} className="text-default-500" />}
                         classNames={{ 
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
@@ -691,7 +847,7 @@ export function SettingsPage() {
                         placeholder="••••••••"
                         value={settings.webdavPassword}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v }))}
-                        isDisabled={!settings.webdavEnabled}
+                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType === 'none'}
                         startContent={<Lock size={16} className="text-default-500" />}
                         classNames={{ 
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
@@ -782,27 +938,43 @@ export function SettingsPage() {
                     label="gRPC 地址"
                     description="Rust 数据面服务地址"
                   >
-                    <code className="text-sm text-accent-primary bg-accent-primary/10 px-2 py-1 rounded">
-                      127.0.0.1:9090
-                    </code>
+                    <Input
+                      value={settings.dataplaneGrpcAddress}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneGrpcAddress: v }))}
+                      className="w-56"
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="连接超时"
                     description="gRPC 调用超时时间"
                   >
-                    <code className="text-sm text-default-600 bg-content2 px-2 py-1 rounded">
-                      30s
-                    </code>
+                    <Input
+                      value={settings.dataplaneTimeout}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneTimeout: v }))}
+                      className="w-32"
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="最大重试次数"
                     description="失败后重试次数"
                   >
-                    <code className="text-sm text-default-600 bg-content2 px-2 py-1 rounded">
-                      3
-                    </code>
+                    <Input
+                      type="number"
+                      value={settings.dataplaneMaxRetries}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneMaxRetries: v }))}
+                      className="w-24"
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
                   </SettingRow>
                 </div>
               </SettingsSection>
@@ -811,6 +983,45 @@ export function SettingsPage() {
 
           <Tab key="shares" title="分享管理">
             <div className="space-y-6 mt-6">
+              <SettingsSection
+                title="分享功能配置"
+                description="控制分享链接功能与默认基础地址"
+                icon={Link2}
+              >
+                <div className="space-y-4">
+                  <SettingRow
+                    label="启用分享功能"
+                    description="允许创建和访问公开分享链接"
+                  >
+                    <Switch
+                      isSelected={settings.shareEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareEnabled: v }))}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="分享基础 URL"
+                    description="用于生成完整分享链接，可留空使用当前访问地址"
+                  >
+                    <Input
+                      value={settings.shareBaseURL}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareBaseURL: v }))}
+                      placeholder="https://nas.example.com"
+                      isDisabled={!settings.shareEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                </div>
+              </SettingsSection>
+
               <SettingsSection
                 title="分享链接管理"
                 description="管理所有已创建的分享链接"

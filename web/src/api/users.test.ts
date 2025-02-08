@@ -57,6 +57,24 @@ describe('Users API', () => {
     await expect(createUser({ username: 'admin', password: 'password123' })).rejects.toThrow('user already exists')
   })
 
+  it('falls back to top-level message when structured error is absent', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.resolve({ success: false, message: 'cannot delete current user' }),
+    })
+
+    await expect(deleteUser('u1')).rejects.toThrow('cannot delete current user')
+  })
+
+  it('falls back to generic error when error body is invalid', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+    })
+
+    await expect(toggleUserStatus('u1', true)).rejects.toThrow('Failed to update user status')
+  })
+
   it('maps wrapped success for delete, reset password, and toggle status', async () => {
     mockAuthFetch
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, message: 'user deleted successfully' }) })

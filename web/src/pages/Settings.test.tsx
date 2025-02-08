@@ -8,8 +8,10 @@ import * as HeroUI from '@heroui/react'
 const mockAddToast = vi.fn()
 
 import { getSettings } from '@/api/settings'
+import { updateSettings } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
+const mockUpdateSettings = vi.mocked(updateSettings)
 
 const { defaultSettingsResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
@@ -18,6 +20,7 @@ const { defaultSettingsResponse } = vi.hoisted(() => ({
       storage: { root: '/root/.mnemonas' },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
       webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+      share: { enabled: false, base_url: '' },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
       dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
     },
@@ -184,6 +187,133 @@ describe('SettingsPage', () => {
     })
   })
 
+  describe('webdav settings', () => {
+    it('allows changing WebDAV auth type and saves it', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('WebDAV 认证方式')).toBeTruthy()
+      })
+
+      await user.selectOptions(screen.getByLabelText('WebDAV 认证方式'), 'none')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          webdav: expect.objectContaining({
+            auth_type: 'none',
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
+  describe('dataplane settings', () => {
+    it('allows editing dataplane connection settings and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('127.0.0.1:9090')).toBeTruthy()
+      })
+
+      const grpcInput = screen.getByDisplayValue('127.0.0.1:9090')
+      await user.clear(grpcInput)
+      await user.type(grpcInput, '10.0.0.2:9091')
+
+      const timeoutInput = screen.getByDisplayValue('30s')
+      await user.clear(timeoutInput)
+      await user.type(timeoutInput, '45s')
+
+      const retriesInput = screen.getByDisplayValue('3')
+      await user.clear(retriesInput)
+      await user.type(retriesInput, '5')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          dataplane: expect.objectContaining({
+            grpc_address: '10.0.0.2:9091',
+            timeout: '45s',
+            max_retries: 5,
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
+  describe('share settings', () => {
+    it('allows editing share configuration and saves it', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享管理')
+
+      await waitFor(() => {
+        expect(screen.getByText('分享功能配置')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch'))
+      const baseUrlInput = screen.getByPlaceholderText('https://nas.example.com')
+      await user.type(baseUrlInput, 'https://share.example.com')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://share.example.com',
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
+  describe('tls settings', () => {
+    it('allows editing TLS configuration and saves it', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('TLS / HTTPS')).toBeTruthy()
+      })
+
+      const switches = screen.getAllByRole('switch')
+      await user.click(switches[0])
+
+      const certInput = screen.getByPlaceholderText('/path/to/server.crt')
+      await user.type(certInput, '/etc/mnemonas/tls/server.crt')
+
+      const keyInput = screen.getByPlaceholderText('/path/to/server.key')
+      await user.type(keyInput, '/etc/mnemonas/tls/server.key')
+
+      const certDirInput = screen.getByPlaceholderText('~/.mnemonas/certs')
+      await user.clear(certDirInput)
+      await user.type(certDirInput, '/etc/mnemonas/tls')
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          server: expect.objectContaining({
+            tls: expect.objectContaining({
+              enabled: true,
+              auto_generate: true,
+              cert_file: '/etc/mnemonas/tls/server.crt',
+              key_file: '/etc/mnemonas/tls/server.key',
+              cert_dir: '/etc/mnemonas/tls',
+            }),
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
   describe('general settings', () => {
     it('renders server host input', async () => {
       render(<SettingsPage />)
@@ -233,6 +363,7 @@ describe('SettingsPage', () => {
             storage: { root: '/root/.mnemonas' },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            share: { enabled: false, base_url: '' },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -243,6 +374,7 @@ describe('SettingsPage', () => {
             storage: { root: '/srv/mnemonas' },
             retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
             webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
+            share: { enabled: true, base_url: 'https://share.example.com' },
             cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -276,6 +408,7 @@ describe('SettingsPage', () => {
           storage: { root: '/srv/mnemonas' },
           retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
           webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
+          share: { enabled: true, base_url: 'https://share.example.com' },
           cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
         },
@@ -445,12 +578,61 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('gRPC 地址')).toBeTruthy()
-        expect(screen.getByText('127.0.0.1:9090')).toBeTruthy()
+        expect(screen.getByDisplayValue('127.0.0.1:9090')).toBeTruthy()
+        expect(screen.getByDisplayValue('30s')).toBeTruthy()
+        expect(screen.getByDisplayValue('3')).toBeTruthy()
       })
     })
   })
 
   describe('actions', () => {
+  it('shows danger toast and skips save for out-of-range server ports', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('8080')).toBeTruthy()
+    })
+
+    const portInput = screen.getByDisplayValue('8080')
+    await user.clear(portInput)
+    await user.type(portInput, '70000')
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '端口格式无效',
+        description: '端口必须是 1 到 65535 之间的整数',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for blank max versions', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '版本保留')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('100')).toBeTruthy()
+    })
+
+    const maxVersionsInput = screen.getByDisplayValue('100')
+    await user.clear(maxVersionsInput)
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '最大版本数格式无效',
+        description: '最大版本数必须是 0 或正整数',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
     it('shows loading state on save', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -494,6 +676,7 @@ describe('SettingsPage', () => {
             storage: { root: '/root/.mnemonas' },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            share: { enabled: false, base_url: '' },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -541,6 +724,7 @@ describe('SettingsPage', () => {
             storage: { root: '/root/.mnemonas' },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            share: { enabled: false, base_url: '' },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },

@@ -227,6 +227,28 @@ describe('AlbumPage', () => {
   })
 
   describe('image preview boundary cases', () => {
+    it('exposes accessible labels for preview controls', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByAltText('photo1.jpg')).toBeTruthy()
+      })
+
+      await user.click(screen.getByAltText('photo1.jpg'))
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '关闭预览' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '上一张图片' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '下一张图片' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '缩小图片' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '放大图片' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '旋转图片' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '显示图片信息' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '下载当前图片' })).toBeTruthy()
+      })
+    })
+
     it('does not crash when currentIndex exceeds images length', async () => {
       // Start with images then clear them - simulates race condition
       mockListFiles.mockResolvedValue({

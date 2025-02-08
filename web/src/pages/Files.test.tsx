@@ -243,6 +243,31 @@ describe('FilesPage', () => {
       })
     })
 
+    it('trims folder name before creating a folder', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCreateDirectory.mockResolvedValue(undefined)
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新建空间')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('新建空间'))
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText('请输入文件夹名称')).toBeTruthy()
+      })
+
+      const input = screen.getByPlaceholderText('请输入文件夹名称')
+      await user.type(input, '  spaced-folder  ')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockCreateDirectory.mock.calls[0][0]).toBe('/spaced-folder')
+      })
+    })
+
     it('closes modal on cancel', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<FilesPage />)
@@ -271,8 +296,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        // Each file row should have a checkbox
-        const checkboxes = document.querySelectorAll('[class*="checkbox"], [class*="border-2"]')
+        const checkboxes = document.querySelectorAll('[class*="border-2"]')
         expect(checkboxes.length).toBeGreaterThan(0)
       })
     })

@@ -322,6 +322,7 @@ function ImagePreview({
           <Button
             isIconOnly
             variant="light"
+            aria-label="关闭预览"
             className="absolute top-4 right-4 z-50 text-white rounded-xl"
             onPress={onClose}
           >
@@ -332,6 +333,7 @@ function ImagePreview({
           <Button
             isIconOnly
             variant="light"
+            aria-label="上一张图片"
             className="absolute left-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-xl"
             onPress={handlePrev}
           >
@@ -341,6 +343,7 @@ function ImagePreview({
           <Button
             isIconOnly
             variant="light"
+            aria-label="下一张图片"
             className="absolute right-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-xl"
             onPress={handleNext}
           >
@@ -388,6 +391,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
+                  aria-label="缩小图片"
                   className="text-white rounded-xl"
                   onPress={() => setZoom(z => Math.max(0.5, z - 0.25))}
                 >
@@ -397,6 +401,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
+                  aria-label="放大图片"
                   className="text-white rounded-xl"
                   onPress={() => setZoom(z => Math.min(3, z + 0.25))}
                 >
@@ -406,6 +411,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
+                  aria-label="旋转图片"
                   className="text-white rounded-xl"
                   onPress={() => setRotation(r => (r + 90) % 360)}
                 >
@@ -415,6 +421,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
+                  aria-label={showInfo ? '隐藏图片信息' : '显示图片信息'}
                   className="text-white rounded-xl"
                   onPress={() => setShowInfo(!showInfo)}
                 >
@@ -424,6 +431,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
+                  aria-label="下载当前图片"
                   className="text-white rounded-xl"
                   onPress={() => currentImage && void downloadFile(currentImage.path, { filename: currentImage.name })}
                 >

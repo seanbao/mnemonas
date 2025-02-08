@@ -207,8 +207,9 @@ export function FavoritesPage() {
       failure: '{count} 项取消收藏失败',
       partial: '{succeeded} 项取消收藏成功，{failed} 项失败',
     },
-    onComplete: () => {
-      setSelectedItems(new Set())
+    onComplete: (result) => {
+      const failedPaths = result.failedItems.filter((item): item is string => typeof item === 'string')
+      setSelectedItems(new Set(failedPaths))
       queryClient.invalidateQueries({ queryKey: ['favorites'] })
     },
   })

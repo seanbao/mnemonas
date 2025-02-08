@@ -422,6 +422,12 @@ export function DashboardPage() {
                 <RecentActivityItem key={entry.id} entry={entry} />
               ))}
             </div>
+          ) : recentActivityError ? (
+            <div className="py-8 text-center text-default-500">
+              <AlertCircle size={24} className="mx-auto mb-2 text-warning" />
+              <p className="text-sm font-medium text-foreground">活动记录暂时不可用</p>
+              <p className="mt-1 text-xs text-default-500">请稍后重试，或前往活动页查看最新状态。</p>
+            </div>
           ) : (
             <div className="py-8 text-center text-default-500">
               <Activity size={24} className="mx-auto mb-2 opacity-50" />

@@ -181,13 +181,13 @@ max_age = "2160h"           # 版本最长保留 90 天
 
 ```bash
 # 查看文件版本历史
-GET /api/v1/versions/documents/report.docx
+curl -H "Authorization: Bearer <access-token>" \
+    http://localhost:8080/api/v1/versions/documents/report.docx
 
 # 恢复指定版本
-POST /api/v1/versions/documents/report.docx/restore
-{
-  "hash": "abc123..."
-}
+curl -X POST \
+    -H "Authorization: Bearer <access-token>" \
+    "http://localhost:8080/api/v1/versions/abc123.../restore?path=/documents/report.docx"
 ```
 
 ---

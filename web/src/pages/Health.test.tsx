@@ -270,13 +270,15 @@ describe('HealthPage', () => {
   })
 
   describe('error handling', () => {
-    it('handles API error gracefully', async () => {
+    it('shows retryable error state when health queries fail', async () => {
       mockGetDiagnostics.mockRejectedValue(new Error('Network error'))
       mockGetStorageStats.mockRejectedValue(new Error('Network error'))
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(mockGetDiagnostics).toHaveBeenCalled()
+        expect(screen.getByText('加载系统健康信息失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
 
