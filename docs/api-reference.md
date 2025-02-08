@@ -1320,6 +1320,11 @@ GET /api/v1/settings
       "min_free_space": 10737418240,
       "gc_interval": "24h"
     },
+    "versioning": {
+      "auto_versioned_extensions": [".md", ".txt", ".go"],
+      "auto_versioned_filenames": ["README", "Dockerfile", "Makefile"],
+      "max_versioned_size": 104857600
+    },
     "webdav": {
       "enabled": true,
       "prefix": "/dav",
@@ -1331,8 +1336,13 @@ GET /api/v1/settings
       "enabled": false,
       "base_url": ""
     },
-    "trash": {
+    "favorites": {
       "enabled": true
+    },
+    "trash": {
+      "enabled": true,
+      "retention_days": 30,
+      "max_size": 10737418240
     },
     "alerts": {
       "enabled": false,
@@ -1391,9 +1401,22 @@ PUT /api/v1/settings
     "max_age": "720h",
     "min_free_space": 10737418240
   },
+  "versioning": {
+    "auto_versioned_extensions": [".md", ".txt", ".rs"],
+    "auto_versioned_filenames": ["README", "Dockerfile", "Cargo.toml"],
+    "max_versioned_size": 268435456
+  },
+  "trash": {
+    "enabled": true,
+    "retention_days": 14,
+    "max_size": 2147483648
+  },
   "share": {
     "enabled": true,
     "base_url": "https://share.example.com"
+  },
+  "favorites": {
+    "enabled": false
   },
   "alerts": {
     "enabled": true,
@@ -1432,12 +1455,17 @@ PUT /api/v1/settings
 ```
 
 **失败行为**:
-- `trash` 支持更新 `enabled`
-- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`
-- `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`
-- `share` 支持更新 `enabled`、`base_url`
-- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`
-- `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`
+- `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
+- `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；其中 `max_versions` 和 `max_age` 会立即影响后续版本清理
+- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`；保存后需重启服务才能影响运行中的 HTTP 监听器
+- `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
+- `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后需重启服务才能影响运行中的自动版本策略
+- `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接
+- `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
+- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`；保存后会立即更新运行中的告警监控
+- `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后需重启服务才能重建运行中的数据面连接
+- 请求中的 `trash.retention_days` 不能为负数，`trash.max_size` 必须是正整数
+- 请求中的 `versioning.max_versioned_size` 必须是正整数，`versioning.auto_versioned_extensions` 每项必须以 `.` 开头，`versioning.auto_versioned_filenames` 不能包含空项
 - `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`，保存后用于后续重启启动的新 WebDAV 配置
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`

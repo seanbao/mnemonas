@@ -97,6 +97,7 @@ type Config struct {
 	MaxVersionAge      time.Duration
 	TrashEnabled       *bool
 	TrashRetentionDays int
+	MaxTrashSize       int64
 }
 
 // FileSystem provides unified storage operations
@@ -114,6 +115,34 @@ type FileSystem struct {
 	renameMetadataPath   func(ctx context.Context, oldName, newName string) error
 	removeTrashPath      func(path string) error
 	mu                   sync.RWMutex
+}
+
+// UpdateTrashSettings applies trash settings to the running filesystem.
+func (fs *FileSystem) UpdateTrashSettings(enabled bool, retentionDays int, maxSize int64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.config == nil {
+		return
+	}
+	if fs.config.TrashEnabled == nil {
+		fs.config.TrashEnabled = new(bool)
+	}
+	*fs.config.TrashEnabled = enabled
+	fs.config.TrashRetentionDays = retentionDays
+	fs.config.MaxTrashSize = maxSize
+}
+
+// UpdateRetentionSettings applies version retention settings to the running filesystem.
+func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge time.Duration) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.config == nil {
+		return
+	}
+	fs.config.MaxVersions = maxVersions
+	fs.config.MaxVersionAge = maxVersionAge
 }
 
 // New creates a new FileSystem
@@ -455,6 +484,10 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		}
 	}
 
+	if err := fs.ensureTrashCapacityLocked(ctx, info.Size); err != nil {
+		return err
+	}
+
 	// Generate trash ID
 	id := generateID()
 
@@ -527,6 +560,38 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 			)
 		}
 		return fmt.Errorf("failed to delete file index: %w", err)
+	}
+
+	return nil
+}
+
+func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSize int64) error {
+	if fs.config == nil || fs.config.MaxTrashSize <= 0 || incomingSize > fs.config.MaxTrashSize {
+		return nil
+	}
+
+	_, totalSize, err := fs.versions.GetTrashStats(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read trash stats: %w", err)
+	}
+	if totalSize+incomingSize <= fs.config.MaxTrashSize {
+		return nil
+	}
+
+	items, err := fs.versions.ListTrash(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list trash items: %w", err)
+	}
+
+	for i := len(items) - 1; i >= 0 && totalSize+incomingSize > fs.config.MaxTrashSize; i-- {
+		item := items[i]
+		if err := fs.removeTrashPath(path.Join(fs.trashRoot, item.ID)); err != nil {
+			return fmt.Errorf("failed to evict trash content for %s: %w", item.ID, err)
+		}
+		if err := fs.versions.RemoveFromTrash(ctx, item.ID); err != nil {
+			return fmt.Errorf("failed to evict trash metadata for %s: %w", item.ID, err)
+		}
+		totalSize -= item.Size
 	}
 
 	return nil

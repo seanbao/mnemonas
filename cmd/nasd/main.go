@@ -134,6 +134,7 @@ func main() {
 		MaxVersionAge:           cfg.Storage.Retention.MaxAge,
 		TrashEnabled:            &cfg.Storage.Trash.Enabled,
 		TrashRetentionDays:      cfg.Storage.Trash.RetentionDays,
+		MaxTrashSize:            cfg.Storage.Trash.MaxSize,
 		Dataplane:               dataplaneClient,
 	})
 	if err != nil {
@@ -154,6 +155,27 @@ func main() {
 	// Create router
 	router := chi.NewRouter()
 
+	// Initialize storage alerts monitor
+	alertMonitor := alerts.NewMonitor(alerts.Config{
+		Enabled:        cfg.Alerts.Enabled,
+		CheckInterval:  cfg.Alerts.CheckInterval,
+		ThresholdPct:   cfg.Alerts.ThresholdPct,
+		CriticalPct:    cfg.Alerts.CriticalPct,
+		MinFreeBytes:   cfg.Alerts.MinFreeBytes,
+		CooldownPeriod: cfg.Alerts.CooldownPeriod,
+		WebhookURL:     cfg.Alerts.WebhookURL,
+		WebhookMethod:  cfg.Alerts.WebhookMethod,
+		WebhookHeaders: cfg.Alerts.WebhookHeaders,
+	}, cfg.Storage.Root, log.Logger)
+	alertMonitor.Start(ctx)
+	if cfg.Alerts.Enabled {
+		log.Info().
+			Float64("threshold_pct", cfg.Alerts.ThresholdPct).
+			Float64("critical_pct", cfg.Alerts.CriticalPct).
+			Dur("interval", cfg.Alerts.CheckInterval).
+			Msg("storage alerts enabled")
+	}
+
 	// Mount API with data plane connection
 	apiServer, err := api.NewServer(log.Logger, &api.ServerConfig{
 		DataplaneAddr:   cfg.DataPlane.Address(),
@@ -171,6 +193,7 @@ func main() {
 		ShareEnabled:   cfg.Share.Enabled,
 		ShareStoreFile: cfg.Share.StoreFile,
 		ShareBaseURL:   cfg.Share.BaseURL,
+		AlertMonitor:   alertMonitor,
 		// Favorites configuration
 		FavoritesEnabled:   cfg.Favorites.Enabled,
 		FavoritesStoreFile: cfg.Favorites.StoreFile,
@@ -214,29 +237,6 @@ func main() {
 			router.ServeHTTP(w, r)
 		})
 		log.Info().Str("prefix", cfg.WebDAV.Prefix).Str("auth", cfg.WebDAV.AuthType).Msg("WebDAV enabled")
-	}
-
-	// Initialize storage alerts monitor
-	var alertMonitor *alerts.Monitor
-	if cfg.Alerts.Enabled {
-		alertsCfg := alerts.Config{
-			Enabled:        cfg.Alerts.Enabled,
-			CheckInterval:  cfg.Alerts.CheckInterval,
-			ThresholdPct:   cfg.Alerts.ThresholdPct,
-			CriticalPct:    cfg.Alerts.CriticalPct,
-			MinFreeBytes:   cfg.Alerts.MinFreeBytes,
-			CooldownPeriod: cfg.Alerts.CooldownPeriod,
-			WebhookURL:     cfg.Alerts.WebhookURL,
-			WebhookMethod:  cfg.Alerts.WebhookMethod,
-			WebhookHeaders: cfg.Alerts.WebhookHeaders,
-		}
-		alertMonitor = alerts.NewMonitor(alertsCfg, cfg.Storage.Root, log.Logger)
-		alertMonitor.Start(ctx)
-		log.Info().
-			Float64("threshold_pct", cfg.Alerts.ThresholdPct).
-			Float64("critical_pct", cfg.Alerts.CriticalPct).
-			Dur("interval", cfg.Alerts.CheckInterval).
-			Msg("storage alerts enabled")
 	}
 
 	// Create HTTP server

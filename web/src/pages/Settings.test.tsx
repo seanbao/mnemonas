@@ -18,10 +18,12 @@ const { defaultSettingsResponse } = vi.hoisted(() => ({
     data: {
       server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
       storage: { root: '/root/.mnemonas' },
-      trash: { enabled: true },
+    trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+      versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
       webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       share: { enabled: false, base_url: '' },
+      favorites: { enabled: true },
       alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
       dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
@@ -327,8 +329,7 @@ describe('SettingsPage', () => {
         expect(screen.getByText('存储告警')).toBeTruthy()
       })
 
-      const alertsSwitch = screen.getAllByRole('switch')[0]
-      await user.click(alertsSwitch)
+      await user.click(screen.getByRole('switch', { name: '启用告警' }))
 
       const checkIntervalInput = screen.getByDisplayValue('1h')
       await user.clear(checkIntervalInput)
@@ -395,6 +396,100 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
           trash: expect.objectContaining({
+            enabled: false,
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
+  describe('versioning settings', () => {
+    it('allows editing auto-versioning rules and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await waitFor(() => {
+        expect(screen.getByText('自动版本化')).toBeTruthy()
+      })
+
+      const extensionsInput = screen.getByLabelText('自动版本化后缀')
+      await user.clear(extensionsInput)
+      await user.type(extensionsInput, '.md{enter}.txt{enter}.rs')
+
+      const filenamesInput = screen.getByLabelText('自动版本化文件名')
+      await user.clear(filenamesInput)
+      await user.type(filenamesInput, 'README{enter}Dockerfile{enter}Cargo.toml')
+
+      const maxSizeInput = screen.getByDisplayValue('100 MB')
+      await user.clear(maxSizeInput)
+      await user.type(maxSizeInput, '256MB')
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          versioning: expect.objectContaining({
+            auto_versioned_extensions: ['.md', '.txt', '.rs'],
+            auto_versioned_filenames: ['README', 'Dockerfile', 'Cargo.toml'],
+            max_versioned_size: 268435456,
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
+  describe('trash settings', () => {
+    it('allows editing trash retention policy and saves it', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '版本保留')
+
+    await waitFor(() => {
+      expect(screen.getByText('版本策略')).toBeTruthy()
+    })
+
+    const retentionInput = screen.getByLabelText('回收站保留天数')
+    await user.clear(retentionInput)
+    await user.type(retentionInput, '7')
+
+    const maxSizeInput = screen.getByLabelText('回收站最大容量')
+    await user.clear(maxSizeInput)
+    await user.type(maxSizeInput, '2GB')
+
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      trash: expect.objectContaining({
+        enabled: true,
+        retention_days: 7,
+        max_size: 2147483648,
+      }),
+      }), expect.anything())
+    })
+    })
+  })
+
+  describe('favorites settings', () => {
+    it('allows toggling favorites behavior and saves it', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('收藏功能')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用收藏功能' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          favorites: expect.objectContaining({
             enabled: false,
           }),
         }), expect.anything())
@@ -482,10 +577,12 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/root/.mnemonas' },
-            trash: { enabled: true },
+            trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
+            favorites: { enabled: true },
             alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
@@ -495,10 +592,12 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/srv/mnemonas' },
-            trash: { enabled: false },
+            trash: { enabled: false, retention_days: 14, max_size: 2147483648 },
             retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
+            versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 209715200 },
             webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
             share: { enabled: true, base_url: 'https://share.example.com' },
+            favorites: { enabled: false },
             alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'] },
             cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
@@ -531,10 +630,12 @@ describe('SettingsPage', () => {
         data: {
           server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', read_timeout_seconds: 60, write_timeout_seconds: 300 },
           storage: { root: '/srv/mnemonas' },
-          trash: { enabled: false },
+          trash: { enabled: false, retention_days: 14, max_size: 2147483648 },
           retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
+          versioning: { auto_versioned_extensions: ['.md', '.txt'], auto_versioned_filenames: ['README', 'LICENSE'], max_versioned_size: 209715200 },
           webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
           share: { enabled: true, base_url: 'https://share.example.com' },
+          favorites: { enabled: false },
           alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'] },
           cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
@@ -801,10 +902,12 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/root/.mnemonas' },
-            trash: { enabled: true },
+            trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
+            favorites: { enabled: true },
             alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
@@ -851,10 +954,12 @@ describe('SettingsPage', () => {
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/root/.mnemonas' },
-            trash: { enabled: true },
+            trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
+            favorites: { enabled: true },
             alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
