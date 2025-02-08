@@ -27,12 +27,19 @@ export interface SettingsData {
   }
   trash?: {
     enabled: boolean
+    retention_days: number
+    max_size: number
   }
   retention: {
     max_versions: number
     max_age: string
     min_free_space: number
     gc_interval: string
+  }
+  versioning?: {
+    auto_versioned_extensions: string[]
+    auto_versioned_filenames: string[]
+    max_versioned_size: number
   }
   webdav: {
     enabled: boolean
@@ -45,6 +52,9 @@ export interface SettingsData {
     enabled: boolean
     base_url: string
   }
+  favorites?: {
+    enabled: boolean
+  }
   alerts?: {
     enabled: boolean
     check_interval: string
@@ -55,8 +65,6 @@ export interface SettingsData {
     webhook_url: string
     webhook_method: string
     webhook_headers: string[]
-    webhook_method?: string
-    webhook_headers?: string[]
   }
   dataplane: {
     grpc_address: string
@@ -104,12 +112,19 @@ export interface UpdateSettingsRequest {
   }
   trash?: {
     enabled?: boolean
+    retention_days?: number
+    max_size?: number
   }
   retention?: {
     max_versions?: number
     max_age?: string
     min_free_space?: number
     gc_interval?: string
+  }
+  versioning?: {
+    auto_versioned_extensions?: string[]
+    auto_versioned_filenames?: string[]
+    max_versioned_size?: number
   }
   dataplane?: {
     grpc_address?: string
@@ -125,6 +140,9 @@ export interface UpdateSettingsRequest {
     enabled?: boolean
     base_url?: string
   }
+  favorites?: {
+    enabled?: boolean
+  }
   alerts?: {
     enabled?: boolean
     check_interval?: string
@@ -133,6 +151,8 @@ export interface UpdateSettingsRequest {
     min_free_bytes?: number
     cooldown_period?: string
     webhook_url?: string
+    webhook_method?: string
+    webhook_headers?: string[]
   }
   webdav?: {
     enabled?: boolean

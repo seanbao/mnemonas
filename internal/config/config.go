@@ -362,6 +362,26 @@ func (c *Config) Validate() error {
 	if c.Storage.Root == "" {
 		errs = append(errs, errors.New("storage.root cannot be empty"))
 	}
+	if c.Storage.Trash.RetentionDays < 0 {
+		errs = append(errs, errors.New("storage.trash.retention_days cannot be negative"))
+	}
+	if c.Storage.Trash.MaxSize <= 0 {
+		errs = append(errs, errors.New("storage.trash.max_size must be positive"))
+	}
+	if c.Storage.Versioning.MaxVersionedSize <= 0 {
+		errs = append(errs, errors.New("storage.versioning.max_versioned_size must be positive"))
+	}
+	for _, ext := range c.Storage.Versioning.AutoVersionedExtensions {
+		trimmed := strings.TrimSpace(ext)
+		if trimmed == "" || !strings.HasPrefix(trimmed, ".") {
+			errs = append(errs, fmt.Errorf("invalid storage.versioning.auto_versioned_extensions entry: %q", ext))
+		}
+	}
+	for _, name := range c.Storage.Versioning.AutoVersionedFilenames {
+		if strings.TrimSpace(name) == "" {
+			errs = append(errs, errors.New("storage.versioning.auto_versioned_filenames cannot contain empty entries"))
+		}
+	}
 
 	if c.DataPlane.GRPCAddress == "" {
 		errs = append(errs, errors.New("dataplane.grpc_address cannot be empty"))

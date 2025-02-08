@@ -79,6 +79,35 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Negative trash retention days",
+			modify:  func(c *Config) { c.Storage.Trash.RetentionDays = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid trash max size",
+			modify:  func(c *Config) { c.Storage.Trash.MaxSize = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid versioning max size",
+			modify:  func(c *Config) { c.Storage.Versioning.MaxVersionedSize = 0 },
+			wantErr: true,
+		},
+		{
+			name: "Invalid versioning extension entry",
+			modify: func(c *Config) {
+				c.Storage.Versioning.AutoVersionedExtensions = []string{"txt"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid versioning filename entry",
+			modify: func(c *Config) {
+				c.Storage.Versioning.AutoVersionedFilenames = []string{"README", "   "}
+			},
+			wantErr: true,
+		},
+		{
 			name:    "Empty gRPC address",
 			modify:  func(c *Config) { c.DataPlane.GRPCAddress = "" },
 			wantErr: true,

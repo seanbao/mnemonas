@@ -92,3 +92,29 @@ func TestStartStop(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	monitor.Stop()
 }
+
+func TestUpdateConfig_StartsMonitorAfterEnable(t *testing.T) {
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	monitor := NewMonitor(Config{Enabled: false}, "/tmp", logger)
+	monitor.Start(context.Background())
+	t.Cleanup(func() { monitor.Stop() })
+
+	monitor.UpdateConfig(Config{
+		Enabled:        true,
+		CheckInterval:  50 * time.Millisecond,
+		ThresholdPct:   99.9,
+		CriticalPct:    99.99,
+		MinFreeBytes:   1,
+		CooldownPeriod: time.Second,
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if stats := monitor.LastStats(); stats != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatal("expected monitor to collect stats after enabling via UpdateConfig")
+}
