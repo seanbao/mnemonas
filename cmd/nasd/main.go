@@ -177,6 +177,14 @@ func main() {
 		// Config for settings API
 		Config:     cfg,
 		ConfigPath: path,
+		ActiveWebDAV: &api.WebDAVRuntimeConfig{
+			Enabled:             cfg.WebDAV.Enabled,
+			Prefix:              cfg.WebDAV.Prefix,
+			AuthType:            cfg.WebDAV.AuthType,
+			Username:            cfg.WebDAV.Username,
+			Password:            cfg.WebDAV.Password,
+			PasswordIsGenerated: webdavPasswordGenerated,
+		},
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create API server")

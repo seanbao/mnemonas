@@ -1300,6 +1300,9 @@ GET /api/v1/settings
     "server": {
       "host": "0.0.0.0",
       "port": 8080,
+      "read_timeout": "30s",
+      "write_timeout": "60s",
+      "idle_timeout": "120s",
       "tls": {
         "enabled": false,
         "cert_file": "",
@@ -1328,6 +1331,20 @@ GET /api/v1/settings
       "enabled": false,
       "base_url": ""
     },
+    "trash": {
+      "enabled": true
+    },
+    "alerts": {
+      "enabled": false,
+      "check_interval": "1h",
+      "threshold_pct": 90,
+      "critical_pct": 95,
+      "min_free_bytes": 10737418240,
+      "cooldown_period": "4h",
+      "webhook_url": "",
+      "webhook_method": "POST",
+      "webhook_headers": []
+    },
     "dataplane": {
       "grpc_address": "127.0.0.1:9090",
       "timeout": "30s",
@@ -1354,7 +1371,15 @@ PUT /api/v1/settings
 **请求体**:
 ```json
 {
+  "trash": {
+    "enabled": false
+  },
   "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "read_timeout": "30s",
+    "write_timeout": "60s",
+    "idle_timeout": "120s",
     "tls": {
       "enabled": true,
       "auto_generate": true,
@@ -1369,6 +1394,17 @@ PUT /api/v1/settings
   "share": {
     "enabled": true,
     "base_url": "https://share.example.com"
+  },
+  "alerts": {
+    "enabled": true,
+    "check_interval": "30m",
+    "threshold_pct": 85,
+    "critical_pct": 92,
+    "min_free_bytes": 21474836480,
+    "cooldown_period": "2h",
+    "webhook_url": "https://hooks.example.com/storage",
+    "webhook_method": "POST",
+    "webhook_headers": ["Authorization: Bearer token", "X-MnemoNAS: alerts"]
   },
   "dataplane": {
     "grpc_address": "127.0.0.1:9090",
@@ -1396,10 +1432,17 @@ PUT /api/v1/settings
 ```
 
 **失败行为**:
+- `trash` 支持更新 `enabled`
+- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`
 - `share` 支持更新 `enabled`、`base_url`
+- `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`
+- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`，保存后用于后续重启启动的新 WebDAV 配置
+- 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`
+- 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
+- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`，`alerts.webhook_headers` 每项必须是 `Key:Value` 格式
 - 请求中的 `dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
 - 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
 - 非法设置请求不会修改进程内当前生效配置
@@ -1414,15 +1457,18 @@ GET /api/v1/settings/webdav-credentials
 ```json
 {
   "success": true,
-  "enabled": true,
-  "url": "/dav/",
-  "auth_type": "basic",
-  "username": "admin",
-  "password": "***"
+  "data": {
+    "enabled": true,
+    "url": "/dav/",
+    "auth_type": "basic",
+    "username": "admin",
+    "password": "***"
+  }
 }
 ```
 
 **说明**:
+- 该端点返回当前运行中的 WebDAV 服务凭据，而不是最近一次保存到配置文件但尚未重启生效的值
 - `password` 仅在使用自动生成密码时可返回
 
 ---

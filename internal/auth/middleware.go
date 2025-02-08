@@ -129,7 +129,7 @@ func (m *Middleware) RequireRole(roles ...Role) func(http.Handler) http.Handler 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user := GetUserFromContext(r.Context())
 			if user == nil {
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
 				return
 			}
 
@@ -143,7 +143,7 @@ func (m *Middleware) RequireRole(roles ...Role) func(http.Handler) http.Handler 
 			}
 
 			if !hasRole {
-				http.Error(w, `{"error":"insufficient permissions"}`, http.StatusForbidden)
+				writeError(w, http.StatusForbidden, "insufficient permissions", "INSUFFICIENT_PERMISSIONS")
 				return
 			}
 

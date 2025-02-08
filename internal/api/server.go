@@ -57,8 +57,18 @@ type Server struct {
 	favoritesStore   *favorites.Store
 	favoritesHandler *favorites.Handler
 	// Config
-	config     *config.Config
-	configPath string
+	config       *config.Config
+	configPath   string
+	activeWebDAV WebDAVRuntimeConfig
+}
+
+type WebDAVRuntimeConfig struct {
+	Enabled             bool
+	Prefix              string
+	AuthType            string
+	Username            string
+	Password            string
+	PasswordIsGenerated bool
 }
 
 // ServerConfig holds server configuration
@@ -84,8 +94,9 @@ type ServerConfig struct {
 	FavoritesEnabled   bool
 	FavoritesStoreFile string
 	// Config (for settings API)
-	Config     *config.Config
-	ConfigPath string
+	Config       *config.Config
+	ConfigPath   string
+	ActiveWebDAV *WebDAVRuntimeConfig
 }
 
 // NewServer creates a new API server
@@ -234,6 +245,16 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	if cfg != nil && cfg.Config != nil {
 		s.config = cfg.Config
 		s.configPath = cfg.ConfigPath
+		s.activeWebDAV = WebDAVRuntimeConfig{
+			Enabled:  cfg.Config.WebDAV.Enabled,
+			Prefix:   cfg.Config.WebDAV.Prefix,
+			AuthType: cfg.Config.WebDAV.AuthType,
+			Username: cfg.Config.WebDAV.Username,
+			Password: cfg.Config.WebDAV.Password,
+		}
+	}
+	if cfg != nil && cfg.ActiveWebDAV != nil {
+		s.activeWebDAV = *cfg.ActiveWebDAV
 	}
 
 	s.setupRoutes()
@@ -1977,8 +1998,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 	settings := map[string]interface{}{
 		"server": map[string]interface{}{
-			"host": s.config.Server.Host,
-			"port": s.config.Server.Port,
+			"host":          s.config.Server.Host,
+			"port":          s.config.Server.Port,
+			"read_timeout":  s.config.Server.ReadTimeout.String(),
+			"write_timeout": s.config.Server.WriteTimeout.String(),
+			"idle_timeout":  s.config.Server.IdleTimeout.String(),
 			"tls": map[string]interface{}{
 				"enabled":       s.config.Server.TLS.Enabled,
 				"cert_file":     s.config.Server.TLS.CertFile,
@@ -1989,6 +2013,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		},
 		"storage": map[string]interface{}{
 			"root": s.config.Storage.Root,
+		},
+		"trash": map[string]interface{}{
+			"enabled": s.config.Storage.Trash.Enabled,
 		},
 		"retention": map[string]interface{}{
 			"max_versions":   s.config.Storage.Retention.MaxVersions,
@@ -2015,6 +2042,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"min_free_bytes":  s.config.Alerts.MinFreeBytes,
 			"cooldown_period": s.config.Alerts.CooldownPeriod.String(),
 			"webhook_url":     s.config.Alerts.WebhookURL,
+			"webhook_method":  s.config.Alerts.WebhookMethod,
+			"webhook_headers": s.config.Alerts.WebhookHeaders,
 		},
 		"dataplane": map[string]interface{}{
 			"grpc_address": s.config.DataPlane.GRPCAddress,
@@ -2034,6 +2063,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 // UpdateSettingsRequest represents settings update request
 type UpdateSettingsRequest struct {
 	Server    *ServerSettingsUpdate    `json:"server,omitempty"`
+	Trash     *TrashSettingsUpdate     `json:"trash,omitempty"`
 	Retention *RetentionSettingsUpdate `json:"retention,omitempty"`
 	DataPlane *DataPlaneSettingsUpdate `json:"dataplane,omitempty"`
 	CDC       *CDCSettingsUpdate       `json:"cdc,omitempty"`
@@ -2043,9 +2073,12 @@ type UpdateSettingsRequest struct {
 }
 
 type ServerSettingsUpdate struct {
-	Host *string `json:"host,omitempty"`
-	Port *int    `json:"port,omitempty"`
-	TLS  *ServerTLSSettingsUpdate `json:"tls,omitempty"`
+	Host         *string                  `json:"host,omitempty"`
+	Port         *int                     `json:"port,omitempty"`
+	ReadTimeout  *string                  `json:"read_timeout,omitempty"`
+	WriteTimeout *string                  `json:"write_timeout,omitempty"`
+	IdleTimeout  *string                  `json:"idle_timeout,omitempty"`
+	TLS          *ServerTLSSettingsUpdate `json:"tls,omitempty"`
 }
 
 type ServerTLSSettingsUpdate struct {
@@ -2063,6 +2096,10 @@ type RetentionSettingsUpdate struct {
 	GCInterval   *string `json:"gc_interval,omitempty"`
 }
 
+type TrashSettingsUpdate struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 type DataPlaneSettingsUpdate struct {
 	GRPCAddress *string `json:"grpc_address,omitempty"`
 	Timeout     *string `json:"timeout,omitempty"`
@@ -2075,13 +2112,15 @@ type ShareSettingsUpdate struct {
 }
 
 type AlertsSettingsUpdate struct {
-	Enabled        *bool    `json:"enabled,omitempty"`
-	CheckInterval  *string  `json:"check_interval,omitempty"`
-	ThresholdPct   *float64 `json:"threshold_pct,omitempty"`
-	CriticalPct    *float64 `json:"critical_pct,omitempty"`
-	MinFreeBytes   *uint64  `json:"min_free_bytes,omitempty"`
-	CooldownPeriod *string  `json:"cooldown_period,omitempty"`
-	WebhookURL     *string  `json:"webhook_url,omitempty"`
+	Enabled        *bool     `json:"enabled,omitempty"`
+	CheckInterval  *string   `json:"check_interval,omitempty"`
+	ThresholdPct   *float64  `json:"threshold_pct,omitempty"`
+	CriticalPct    *float64  `json:"critical_pct,omitempty"`
+	MinFreeBytes   *uint64   `json:"min_free_bytes,omitempty"`
+	CooldownPeriod *string   `json:"cooldown_period,omitempty"`
+	WebhookURL     *string   `json:"webhook_url,omitempty"`
+	WebhookMethod  *string   `json:"webhook_method,omitempty"`
+	WebhookHeaders *[]string `json:"webhook_headers,omitempty"`
 }
 
 type WebDAVSettingsUpdate struct {
@@ -2125,6 +2164,30 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updatedConfig.Server.Port = *req.Server.Port
+		}
+		if req.Server.ReadTimeout != nil {
+			d, err := time.ParseDuration(*req.Server.ReadTimeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid server.read_timeout")
+				return
+			}
+			updatedConfig.Server.ReadTimeout = d
+		}
+		if req.Server.WriteTimeout != nil {
+			d, err := time.ParseDuration(*req.Server.WriteTimeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid server.write_timeout")
+				return
+			}
+			updatedConfig.Server.WriteTimeout = d
+		}
+		if req.Server.IdleTimeout != nil {
+			d, err := time.ParseDuration(*req.Server.IdleTimeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid server.idle_timeout")
+				return
+			}
+			updatedConfig.Server.IdleTimeout = d
 		}
 		if req.Server.TLS != nil {
 			if req.Server.TLS.Enabled != nil {
@@ -2170,6 +2233,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.Trash != nil {
+		if req.Trash.Enabled != nil {
+			updatedConfig.Storage.Trash.Enabled = *req.Trash.Enabled
+		}
+	}
+
 	if req.DataPlane != nil {
 		if req.DataPlane.GRPCAddress != nil {
 			updatedConfig.DataPlane.GRPCAddress = *req.DataPlane.GRPCAddress
@@ -2197,6 +2266,9 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Share.BaseURL != nil {
 			updatedConfig.Share.BaseURL = *req.Share.BaseURL
+			if s.shareHandler != nil {
+				s.shareHandler.SetBaseURL(updatedConfig.Share.BaseURL)
+			}
 		}
 	}
 
@@ -2231,6 +2303,20 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Alerts.WebhookURL != nil {
 			updatedConfig.Alerts.WebhookURL = *req.Alerts.WebhookURL
+		}
+		if req.Alerts.WebhookMethod != nil {
+			updatedConfig.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(*req.Alerts.WebhookMethod))
+		}
+		if req.Alerts.WebhookHeaders != nil {
+			cleaned := make([]string, 0, len(*req.Alerts.WebhookHeaders))
+			for _, header := range *req.Alerts.WebhookHeaders {
+				trimmed := strings.TrimSpace(header)
+				if trimmed == "" {
+					continue
+				}
+				cleaned = append(cleaned, trimmed)
+			}
+			updatedConfig.Alerts.WebhookHeaders = cleaned
 		}
 	}
 
@@ -2305,19 +2391,22 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	runtimeCfg := s.activeWebDAV
 	resp := WebDAVCredentialsResponse{
-		Enabled:  s.config.WebDAV.Enabled,
-		URL:      formatWebDAVPrefix(s.config.WebDAV.Prefix),
-		AuthType: s.config.WebDAV.AuthType,
+		Enabled:  runtimeCfg.Enabled,
+		URL:      formatWebDAVPrefix(runtimeCfg.Prefix),
+		AuthType: runtimeCfg.AuthType,
 	}
 
 	// Only include credentials if WebDAV is enabled and using basic auth
-	if s.config.WebDAV.Enabled && s.config.WebDAV.AuthType == "basic" {
-		resp.Username = s.config.WebDAV.Username
+	if runtimeCfg.Enabled && runtimeCfg.AuthType == "basic" {
+		resp.Username = runtimeCfg.Username
 		if resp.Username == "" {
 			resp.Username = "admin"
 		}
-		if s.config.WebDAV.Password == "" {
+		if runtimeCfg.PasswordIsGenerated && runtimeCfg.Password != "" {
+			resp.Password = runtimeCfg.Password
+		} else if runtimeCfg.Password == "" {
 			// Get password from secrets (auto-generated only)
 			secrets, err := config.LoadSecrets(s.config.Storage.Root)
 			if err == nil && secrets != nil {
@@ -2387,12 +2476,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
 	if err := config.MarkSetupShown(s.config.Storage.Root); err != nil {
 		s.logger.Error().Err(err).Msg("failed to mark setup as shown")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "failed to acknowledge setup",
-		})
+		InternalError(w, "failed to acknowledge setup")
 		return
 	}
 

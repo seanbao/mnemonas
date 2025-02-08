@@ -11,6 +11,9 @@ export interface SettingsData {
   server: {
     host: string
     port: number
+    read_timeout: string
+    write_timeout: string
+    idle_timeout: string
     tls?: {
       enabled: boolean
       cert_file: string
@@ -21,6 +24,9 @@ export interface SettingsData {
   }
   storage: {
     root: string
+  }
+  trash?: {
+    enabled: boolean
   }
   retention: {
     max_versions: number
@@ -47,6 +53,10 @@ export interface SettingsData {
     min_free_bytes: number
     cooldown_period: string
     webhook_url: string
+    webhook_method: string
+    webhook_headers: string[]
+    webhook_method?: string
+    webhook_headers?: string[]
   }
   dataplane: {
     grpc_address: string
@@ -81,6 +91,9 @@ export interface UpdateSettingsRequest {
   server?: {
     host?: string
     port?: number
+    read_timeout?: string
+    write_timeout?: string
+    idle_timeout?: string
     tls?: {
       enabled?: boolean
       cert_file?: string
@@ -88,6 +101,9 @@ export interface UpdateSettingsRequest {
       auto_generate?: boolean
       cert_dir?: string
     }
+  }
+  trash?: {
+    enabled?: boolean
   }
   retention?: {
     max_versions?: number

@@ -16,11 +16,13 @@ const mockUpdateSettings = vi.mocked(updateSettings)
 const { defaultSettingsResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
     data: {
-      server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+      server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
       storage: { root: '/root/.mnemonas' },
+      trash: { enabled: true },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
       webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       share: { enabled: false, base_url: '' },
+      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
       dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
     },
@@ -314,7 +316,126 @@ describe('SettingsPage', () => {
     })
   })
 
+  describe('alerts settings', () => {
+    it('allows editing alerts configuration and saves it', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警')).toBeTruthy()
+      })
+
+      const alertsSwitch = screen.getAllByRole('switch')[0]
+      await user.click(alertsSwitch)
+
+      const checkIntervalInput = screen.getByDisplayValue('1h')
+      await user.clear(checkIntervalInput)
+      await user.type(checkIntervalInput, '30m')
+
+      const thresholdInput = screen.getByDisplayValue('90')
+      await user.clear(thresholdInput)
+      await user.type(thresholdInput, '85')
+
+      const criticalInput = screen.getByDisplayValue('95')
+      await user.clear(criticalInput)
+      await user.type(criticalInput, '92')
+
+      const minFreeInput = screen.getByDisplayValue('10 GB')
+      await user.clear(minFreeInput)
+      await user.type(minFreeInput, '20GB')
+
+      const cooldownInput = screen.getByDisplayValue('4h')
+      await user.clear(cooldownInput)
+      await user.type(cooldownInput, '2h')
+
+      const webhookInput = screen.getByPlaceholderText('https://hooks.example.com/alert')
+      await user.type(webhookInput, 'https://hooks.example.com/storage')
+
+      await user.selectOptions(screen.getByLabelText('Webhook 方法'), 'GET')
+
+      const headersInput = screen.getByLabelText('Webhook 自定义 Header')
+      await user.type(headersInput, 'Authorization: Bearer token{enter}X-MnemoNAS: alerts')
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          alerts: expect.objectContaining({
+            enabled: true,
+            check_interval: '30m',
+            threshold_pct: 85,
+            critical_pct: 92,
+            min_free_bytes: 21474836480,
+            cooldown_period: '2h',
+            webhook_url: 'https://hooks.example.com/storage',
+            webhook_method: 'GET',
+            webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'],
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
+  describe('trash settings', () => {
+    it('allows toggling trash behavior and saves it', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await waitFor(() => {
+        expect(screen.getByText('启用回收站')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch'))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          trash: expect.objectContaining({
+            enabled: false,
+          }),
+        }), expect.anything())
+      })
+    })
+  })
+
   describe('general settings', () => {
+    it('allows editing server timeouts and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('30s')).toBeTruthy()
+      })
+
+      const readTimeoutInput = screen.getByDisplayValue('30s')
+      await user.clear(readTimeoutInput)
+      await user.type(readTimeoutInput, '45s')
+
+      const writeTimeoutInput = screen.getByDisplayValue('60s')
+      await user.clear(writeTimeoutInput)
+      await user.type(writeTimeoutInput, '90s')
+
+      const idleTimeoutInput = screen.getByDisplayValue('120s')
+      await user.clear(idleTimeoutInput)
+      await user.type(idleTimeoutInput, '5m')
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          server: expect.objectContaining({
+            read_timeout: '45s',
+            write_timeout: '90s',
+            idle_timeout: '5m',
+          }),
+        }), expect.anything())
+      })
+    })
+
     it('renders server host input', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
@@ -359,22 +480,26 @@ describe('SettingsPage', () => {
       mockGetSettings
         .mockResolvedValueOnce({
           data: {
-            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/root/.mnemonas' },
+            trash: { enabled: true },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
+            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
         })
         .mockResolvedValue({
           data: {
-            server: { host: '10.0.0.1', port: 9090, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/srv/mnemonas' },
+            trash: { enabled: false },
             retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
             webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
             share: { enabled: true, base_url: 'https://share.example.com' },
+            alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'] },
             cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -404,11 +529,13 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSettings.mockResolvedValue({
         data: {
-          server: { host: '10.0.0.1', port: 9090, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+          server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', read_timeout_seconds: 60, write_timeout_seconds: 300 },
           storage: { root: '/srv/mnemonas' },
+          trash: { enabled: false },
           retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
           webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
           share: { enabled: true, base_url: 'https://share.example.com' },
+          alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'] },
           cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
         },
@@ -672,11 +799,13 @@ describe('SettingsPage', () => {
       mockGetSettings
         .mockResolvedValueOnce({
           data: {
-            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/root/.mnemonas' },
+            trash: { enabled: true },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
+            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -720,11 +849,13 @@ describe('SettingsPage', () => {
         .mockRejectedValueOnce(new Error('Network error'))
         .mockResolvedValueOnce({
           data: {
-            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/root/.mnemonas' },
+            trash: { enabled: true },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
+            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },

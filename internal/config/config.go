@@ -349,6 +349,15 @@ func (c *Config) Validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		errs = append(errs, fmt.Errorf("invalid port: %d", c.Server.Port))
 	}
+	if c.Server.ReadTimeout <= 0 {
+		errs = append(errs, errors.New("server.read_timeout must be positive"))
+	}
+	if c.Server.WriteTimeout <= 0 {
+		errs = append(errs, errors.New("server.write_timeout must be positive"))
+	}
+	if c.Server.IdleTimeout <= 0 {
+		errs = append(errs, errors.New("server.idle_timeout must be positive"))
+	}
 
 	if c.Storage.Root == "" {
 		errs = append(errs, errors.New("storage.root cannot be empty"))
@@ -365,6 +374,35 @@ func (c *Config) Validate() error {
 	}
 	if cdc.AvgChunkSize >= cdc.MaxChunkSize {
 		errs = append(errs, errors.New("avg_chunk_size must be less than max_chunk_size"))
+	}
+
+	if c.Alerts.CheckInterval <= 0 {
+		errs = append(errs, errors.New("alerts.check_interval must be positive"))
+	}
+	if c.Alerts.CooldownPeriod <= 0 {
+		errs = append(errs, errors.New("alerts.cooldown_period must be positive"))
+	}
+	if c.Alerts.ThresholdPct < 0 || c.Alerts.ThresholdPct > 100 {
+		errs = append(errs, errors.New("alerts.threshold_pct must be between 0 and 100"))
+	}
+	if c.Alerts.CriticalPct < 0 || c.Alerts.CriticalPct > 100 {
+		errs = append(errs, errors.New("alerts.critical_pct must be between 0 and 100"))
+	}
+	if c.Alerts.CriticalPct < c.Alerts.ThresholdPct {
+		errs = append(errs, errors.New("alerts.critical_pct must be greater than or equal to alerts.threshold_pct"))
+	}
+	if c.Alerts.WebhookMethod != "" && c.Alerts.WebhookMethod != "GET" && c.Alerts.WebhookMethod != "POST" {
+		errs = append(errs, errors.New("alerts.webhook_method must be GET or POST"))
+	}
+	for _, header := range c.Alerts.WebhookHeaders {
+		trimmed := strings.TrimSpace(header)
+		if trimmed == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			errs = append(errs, fmt.Errorf("invalid alerts.webhook_headers entry: %q", header))
+		}
 	}
 
 	return errors.Join(errs...)

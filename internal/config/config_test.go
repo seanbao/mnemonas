@@ -59,6 +59,21 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Invalid read timeout",
+			modify:  func(c *Config) { c.Server.ReadTimeout = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid write timeout",
+			modify:  func(c *Config) { c.Server.WriteTimeout = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid idle timeout",
+			modify:  func(c *Config) { c.Server.IdleTimeout = 0 },
+			wantErr: true,
+		},
+		{
 			name:    "Empty storage.root",
 			modify:  func(c *Config) { c.Storage.Root = "" },
 			wantErr: true,
@@ -81,6 +96,28 @@ func TestConfig_Validate(t *testing.T) {
 			modify: func(c *Config) {
 				c.DataPlane.CDC.AvgChunkSize = 5 * 1024 * 1024
 				c.DataPlane.CDC.MaxChunkSize = 4 * 1024 * 1024
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook method",
+			modify: func(c *Config) {
+				c.Alerts.WebhookMethod = "PATCH"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts webhook header",
+			modify: func(c *Config) {
+				c.Alerts.WebhookHeaders = []string{"Authorization"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts critical threshold below warning",
+			modify: func(c *Config) {
+				c.Alerts.ThresholdPct = 90
+				c.Alerts.CriticalPct = 80
 			},
 			wantErr: true,
 		},
