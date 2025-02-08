@@ -114,6 +114,7 @@ export function SearchPage() {
         <Button
           isIconOnly
           variant="light"
+          aria-label="返回上一页"
           onPress={() => navigate(-1)}
           className="text-default-500 rounded-xl"
         >

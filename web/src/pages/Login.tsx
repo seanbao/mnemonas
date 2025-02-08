@@ -71,15 +71,16 @@ export function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    const trimmedUsername = username.trim()
     
-    if (!username.trim() || !password.trim()) {
+    if (!trimmedUsername || !password.trim()) {
       setFormError('请输入用户名和密码')
       return
     }
 
     try {
       setFormError(null)
-      await login(username, password)
+      await login(trimmedUsername, password)
       addToast({ title: '登录成功', color: 'success' })
       const from = (location.state as { from?: string })?.from || '/'
       navigate(from, { replace: true })

@@ -173,7 +173,11 @@ function FileRow({
       onContextMenu={onContextMenu}
     >
       <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
-        <div 
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={isSelected}
+          aria-label={`选择 ${file.name}`}
           className={cn(
             "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 cursor-pointer",
             isSelected 
@@ -186,7 +190,7 @@ function FileRow({
           }}
         >
           {isSelected && <span className="text-white text-xs font-bold">✓</span>}
-        </div>
+        </button>
       </div>
       
       <div className="flex items-center gap-3.5 min-w-0">
@@ -216,7 +220,7 @@ function FileRow({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-content2">
+              <button aria-label={`${file.name} 操作菜单`} className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-content2">
                 <MoreVertical size={16} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -411,7 +415,11 @@ function FileCard({
         className="absolute top-3 left-3 z-10"
         onClick={(e) => e.stopPropagation()}
       >
-        <div
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={isSelected}
+          aria-label={`选择 ${file.name}`}
           className={cn(
             "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 bg-content1/80 backdrop-blur-sm cursor-pointer",
             isSelected
@@ -424,7 +432,7 @@ function FileCard({
           }}
         >
           {isSelected && <span className="text-white text-xs font-bold">✓</span>}
-        </div>
+        </button>
       </div>
 
       {/* Action menu */}
@@ -435,7 +443,7 @@ function FileCard({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity bg-content1/80 backdrop-blur-sm hover:bg-content2">
+              <button aria-label={`${file.name} 操作菜单`} className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity bg-content1/80 backdrop-blur-sm hover:bg-content2">
                 <MoreVertical size={14} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -828,15 +836,18 @@ export function FilesPage() {
   }, [sortedFiles, selectedFiles.size, selectAll, clearSelection])
 
   const handleCreateFolder = useCallback(() => {
-    if (!newFolderName.trim()) return
-    const path = currentPath === '/' ? `/${newFolderName}` : `${currentPath}/${newFolderName}`
+    const trimmedFolderName = newFolderName.trim()
+    if (!trimmedFolderName) return
+    const path = currentPath === '/' ? `/${trimmedFolderName}` : `${currentPath}/${trimmedFolderName}`
     createFolderMutation.mutate(path)
   }, [newFolderName, currentPath, createFolderMutation])
 
   const handleRename = useCallback(() => {
-    if (!actionFile || !renameValue.trim()) return
+    const trimmedRenameValue = renameValue.trim()
+    if (!actionFile || !trimmedRenameValue) return
+    if (trimmedRenameValue === actionFile.name) return
     const parentPath = actionFile.path.substring(0, actionFile.path.lastIndexOf('/')) || '/'
-    const newPath = parentPath === '/' ? `/${renameValue}` : `${parentPath}/${renameValue}`
+    const newPath = parentPath === '/' ? `/${trimmedRenameValue}` : `${parentPath}/${trimmedRenameValue}`
     renameMutation.mutate({ from: actionFile.path, to: newPath })
   }, [actionFile, renameValue, renameMutation])
 
@@ -2038,7 +2049,7 @@ export function FilesPage() {
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button variant="flat" onPress={onRenameClose} className="text-default-600 rounded-xl">取消</Button>
-            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name} className="rounded-xl">确定</Button>
+            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue.trim() === actionFile?.name} className="rounded-xl">确定</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

@@ -370,6 +370,42 @@ func TestMiddleware(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("expected status 401, got %d", rec.Code)
 		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"MISSING_AUTH_HEADER"`)) {
+			t.Fatalf("expected MISSING_AUTH_HEADER payload, got %s", rec.Body.String())
+		}
+	})
+
+	t.Run("require auth - disabled user", func(t *testing.T) {
+		disabledUser, err := store.Create("middleware-disabled", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create disabled user: %v", err)
+		}
+		disabledUser.Disabled = true
+		if err := store.Update(disabledUser); err != nil {
+			t.Fatalf("failed to disable user: %v", err)
+		}
+
+		disabledToken, err := tm.GenerateTokenPair(disabledUser)
+		if err != nil {
+			t.Fatalf("failed to generate token: %v", err)
+		}
+
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler should not be called")
+		}))
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("Authorization", "Bearer "+disabledToken.AccessToken)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403, got %d", rec.Code)
+		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"USER_DISABLED"`)) {
+			t.Fatalf("expected USER_DISABLED payload, got %s", rec.Body.String())
+		}
 	})
 
 	t.Run("require auth - invalid token", func(t *testing.T) {
@@ -385,6 +421,9 @@ func TestMiddleware(t *testing.T) {
 
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("expected status 401, got %d", rec.Code)
+		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"INVALID_TOKEN"`)) {
+			t.Fatalf("expected INVALID_TOKEN payload, got %s", rec.Body.String())
 		}
 	})
 

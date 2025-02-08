@@ -83,6 +83,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
             isIconOnly
             size="sm"
             variant="light"
+            aria-label="预览此版本"
             onPress={onPreview}
             title="预览"
             className="btn-secondary btn-sm rounded-xl"
@@ -93,6 +94,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
             isIconOnly
             size="sm"
             variant="light"
+            aria-label="下载此版本"
             onPress={onDownload}
             title="下载此版本"
             className="btn-secondary btn-sm rounded-xl"
@@ -105,6 +107,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
               size="sm"
               variant="light"
               color="warning"
+              aria-label="恢复到此版本"
               onPress={onRestore}
               title="恢复到此版本"
               className="btn-secondary btn-sm rounded-xl"
@@ -127,7 +130,7 @@ export function VersionsPage() {
   const { isOpen, onOpen, onClose } = useDisclosure()
 
   useEffect(() => {
-    const paramPath = searchParams.get('path') || ''
+    const paramPath = (searchParams.get('path') || '').trim()
     const normalizedPath = paramPath ? (paramPath.startsWith('/') ? paramPath : `/${paramPath}`) : ''
     setSearchPath(normalizedPath)
     setSelectedPath(normalizedPath || null)
@@ -153,8 +156,9 @@ export function VersionsPage() {
   })
 
   const handleSearch = () => {
-    if (searchPath.trim()) {
-      const normalizedPath = searchPath.startsWith('/') ? searchPath : `/${searchPath}`
+    const trimmedPath = searchPath.trim()
+    if (trimmedPath) {
+      const normalizedPath = trimmedPath.startsWith('/') ? trimmedPath : `/${trimmedPath}`
       setSelectedPath(normalizedPath)
       setSearchParams({ path: normalizedPath })
     } else {

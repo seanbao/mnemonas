@@ -24,6 +24,8 @@ import (
 var (
 	errInvalidDepthHeader                 = errors.New("invalid Depth header")
 	errInvalidOverwriteHeader             = errors.New("invalid Overwrite header")
+	errPreconditionFailed                 = errors.New("precondition failed")
+	errFileAlreadyExists                  = errors.New("file already exists")
 	errOverwriteDisabled                  = errors.New("destination exists and overwrite is disabled")
 	errDestinationInsideSourceDirectory   = errors.New("destination cannot be inside source directory")
 	errDirectoryCopyOverwriteNotSupported = errors.New("overwriting an existing destination with a directory copy is not supported")
@@ -180,7 +182,7 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	// Check If-Match (precondition)
 	if im := r.Header.Get("If-Match"); im != "" {
 		if !h.matchETag(im, etag) {
-			http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 			return
 		}
 	}
@@ -285,20 +287,20 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 		// If-Match: only update if ETag matches (prevent overwrite conflicts)
 		if im := r.Header.Get("If-Match"); im != "" {
 			if !h.matchETag(im, etag) {
-				http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+				http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 				return
 			}
 		}
 
 		// If-None-Match: prevent update if file exists (for create-only)
 		if inm := r.Header.Get("If-None-Match"); inm == "*" {
-			http.Error(w, "file already exists", http.StatusPreconditionFailed)
+			http.Error(w, errFileAlreadyExists.Error(), http.StatusPreconditionFailed)
 			return
 		}
 	} else {
 		// If-Match with non-existent file should fail
 		if im := r.Header.Get("If-Match"); im != "" {
-			http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 			return
 		}
 	}

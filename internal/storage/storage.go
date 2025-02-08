@@ -95,6 +95,7 @@ type Config struct {
 	// Retention policy
 	MaxVersions        int
 	MaxVersionAge      time.Duration
+	TrashEnabled       *bool
 	TrashRetentionDays int
 }
 
@@ -425,6 +426,10 @@ func (fs *FileSystem) Mkdir(ctx context.Context, name string) error {
 
 // Delete deletes a file or directory (soft delete to trash)
 func (fs *FileSystem) Delete(ctx context.Context, name string) error {
+	if fs.config != nil && fs.config.TrashEnabled != nil && !*fs.config.TrashEnabled {
+		return fs.PermanentDelete(ctx, name)
+	}
+
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 

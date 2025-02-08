@@ -37,7 +37,7 @@ import {
   RefreshCw,
   AlertCircle,
 } from 'lucide-react'
-import { listUsers, createUser, deleteUser, resetUserPassword, type User } from '@/api/users'
+import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -69,11 +69,13 @@ function UserCard({
   user,
   onResetPassword,
   onDelete,
+  onToggleStatus,
   isCurrentUser,
 }: {
   user: User
   onResetPassword: () => void
   onDelete: () => void
+  onToggleStatus: () => void
   isCurrentUser: boolean
 }) {
   return (
@@ -113,6 +115,7 @@ function UserCard({
                 isIconOnly
                 variant="light"
                 size="sm"
+                aria-label={`${user.username} 用户操作`}
                 className="text-default-500 rounded-xl"
               >
                 <MoreVertical size={16} />
@@ -123,6 +126,14 @@ function UserCard({
               classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
             >
               <DropdownSection title="操作">
+                <DropdownItem
+                  key="toggle-status"
+                  startContent={user.disabled ? <UserIcon size={16} /> : <UserX size={16} />}
+                  onPress={onToggleStatus}
+                  isDisabled={isCurrentUser}
+                >
+                  {user.disabled ? '启用用户' : '禁用用户'}
+                </DropdownItem>
                 <DropdownItem
                   key="reset-password"
                   startContent={<KeyRound size={16} />}
@@ -235,6 +246,18 @@ export function UsersPage() {
     },
   })
 
+  const toggleStatusMutation = useMutation({
+    mutationFn: ({ userId, disabled }: { userId: string; disabled: boolean }) =>
+      toggleUserStatus(userId, disabled),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      addToast({ title: variables.disabled ? '用户已禁用' : '用户已启用', color: 'success' })
+    },
+    onError: (error: Error) => {
+      addToast({ title: '状态更新失败', description: error.message, color: 'danger' })
+    },
+  })
+
   const resetCreateForm = useCallback(() => {
     setNewUsername('')
     setNewPassword('')
@@ -290,6 +313,11 @@ export function UsersPage() {
 
   // Get current user from stored auth state
   const currentUserId = getStoredUser()?.id
+
+  const handleToggleStatus = useCallback((user: User) => {
+    if (user.id === currentUserId) return
+    toggleStatusMutation.mutate({ userId: user.id, disabled: !user.disabled })
+  }, [currentUserId, toggleStatusMutation])
 
   return (
     <div className="h-full flex flex-col p-6">
@@ -382,6 +410,7 @@ export function UsersPage() {
                   isCurrentUser={user.id === currentUserId}
                   onResetPassword={() => handleOpenResetModal(user)}
                   onDelete={() => handleOpenDeleteModal(user)}
+                  onToggleStatus={() => handleToggleStatus(user)}
                 />
               ))}
             </div>

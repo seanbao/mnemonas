@@ -262,7 +262,9 @@ docker compose up -d
 curl http://localhost:8080/health
 
 # 运行 scrub 检查数据完整性
-curl -X POST http://localhost:8080/api/v1/maintenance/scrub
+curl -X POST \
+    -H "Authorization: Bearer <access-token>" \
+    http://localhost:8080/api/v1/maintenance/scrub
 ```
 
 ---

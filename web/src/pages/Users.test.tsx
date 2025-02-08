@@ -23,6 +23,7 @@ vi.mock('@/api/users', () => ({
   createUser: vi.fn(),
   deleteUser: vi.fn(),
   resetUserPassword: vi.fn(),
+	 toggleUserStatus: vi.fn(),
 }))
 
 vi.mock('@/api/auth', () => ({
@@ -271,19 +272,11 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      // Find and click the menu button for testuser card
-      const menuButtons = screen.getAllByRole('button', { name: '' })
-      const testUserMenuButton = menuButtons.find(btn => 
-        btn.closest('[class*="CardBody"]')?.textContent?.includes('testuser')
-      )
-      
-      if (testUserMenuButton) {
-        await user.click(testUserMenuButton)
-        
-        await waitFor(() => {
-          expect(screen.getByText('删除用户')).toBeInTheDocument()
-        })
-      }
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除用户')).toBeInTheDocument()
+      })
     })
 
     it('calls delete API on confirm', async () => {
@@ -299,6 +292,37 @@ describe('UsersPage', () => {
       // For now, we just verify the delete function exists
       expect(usersApi.deleteUser).toBeDefined()
     })
+
+    it('calls toggle status API when disabling a user', async () => {
+      vi.mocked(usersApi.toggleUserStatus).mockResolvedValue({ success: true })
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('禁用用户')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('禁用用户'))
+
+      await waitFor(() => {
+        expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-2', true)
+      })
+    })
+
+    it('exposes accessible user action menu labels', async () => {
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'admin 用户操作' })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'testuser 用户操作' })).toBeInTheDocument()
+      })
+    })
   })
 
   describe('reset password', () => {
@@ -310,19 +334,11 @@ describe('UsersPage', () => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      // Find and click the menu button
-      const menuButtons = screen.getAllByRole('button', { name: '' })
-      const testUserMenuButton = menuButtons.find(btn => 
-        btn.closest('[class*="CardBody"]')?.textContent?.includes('testuser')
-      )
-      
-      if (testUserMenuButton) {
-        await user.click(testUserMenuButton)
-        
-        await waitFor(() => {
-          expect(screen.getByText('重置密码')).toBeInTheDocument()
-        })
-      }
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('重置密码')).toBeInTheDocument()
+      })
     })
 
     it('resetUserPassword API function is defined', () => {
