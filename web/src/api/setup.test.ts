@@ -33,4 +33,13 @@ describe('Setup API', () => {
 
     await expect(acknowledgeSetup()).rejects.toThrow('failed to acknowledge setup')
   })
+
+  it('reads structured error for acknowledge setup', async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.resolve({ code: 'INTERNAL_ERROR', message: 'failed to acknowledge setup' }),
+    } as Response)
+
+    await expect(acknowledgeSetup()).rejects.toThrow('failed to acknowledge setup')
+  })
 })

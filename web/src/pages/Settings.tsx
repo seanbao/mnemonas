@@ -134,12 +134,16 @@ export function SettingsPage() {
   const [settings, setSettings] = useState({
     serverHost: '0.0.0.0',
     serverPort: '8080',
+    serverReadTimeout: '30s',
+    serverWriteTimeout: '60s',
+    serverIdleTimeout: '120s',
     tlsEnabled: false,
     tlsCertFile: '',
     tlsKeyFile: '',
     tlsAutoGenerate: true,
     tlsCertDir: '',
     storageRoot: '',
+    trashEnabled: true,
     maxVersions: '100',
     maxAge: '8760h',
     minFreeSpace: '10GB',
@@ -152,6 +156,15 @@ export function SettingsPage() {
     webdavPassword: '',
     shareEnabled: false,
     shareBaseURL: '',
+    alertsEnabled: false,
+    alertsCheckInterval: '1h',
+    alertsThresholdPct: '90',
+    alertsCriticalPct: '95',
+    alertsMinFreeSpace: '10GB',
+    alertsCooldownPeriod: '4h',
+    alertsWebhookURL: '',
+    alertsWebhookMethod: 'POST',
+    alertsWebhookHeaders: '',
     dataplaneGrpcAddress: '127.0.0.1:9090',
     dataplaneTimeout: '30s',
     dataplaneMaxRetries: '3',
@@ -165,12 +178,16 @@ export function SettingsPage() {
     setSettings({
       serverHost: data.server.host,
       serverPort: String(data.server.port),
+      serverReadTimeout: data.server.read_timeout,
+      serverWriteTimeout: data.server.write_timeout,
+      serverIdleTimeout: data.server.idle_timeout,
       tlsEnabled: data.server.tls?.enabled ?? false,
       tlsCertFile: data.server.tls?.cert_file ?? '',
       tlsKeyFile: data.server.tls?.key_file ?? '',
       tlsAutoGenerate: data.server.tls?.auto_generate ?? true,
       tlsCertDir: data.server.tls?.cert_dir ?? '',
       storageRoot: data.storage.root,
+      trashEnabled: data.trash?.enabled ?? true,
       maxVersions: String(data.retention.max_versions),
       maxAge: data.retention.max_age,
       minFreeSpace: formatBytes(data.retention.min_free_space),
@@ -183,6 +200,15 @@ export function SettingsPage() {
       webdavPassword: '',
       shareEnabled: data.share.enabled,
       shareBaseURL: data.share.base_url,
+      alertsEnabled: data.alerts?.enabled ?? false,
+      alertsCheckInterval: data.alerts?.check_interval ?? '1h',
+      alertsThresholdPct: String(data.alerts?.threshold_pct ?? 90),
+      alertsCriticalPct: String(data.alerts?.critical_pct ?? 95),
+      alertsMinFreeSpace: formatBytes(data.alerts?.min_free_bytes ?? 10737418240),
+      alertsCooldownPeriod: data.alerts?.cooldown_period ?? '4h',
+      alertsWebhookURL: data.alerts?.webhook_url ?? '',
+      alertsWebhookMethod: data.alerts?.webhook_method ?? 'POST',
+      alertsWebhookHeaders: data.alerts?.webhook_headers?.join('\n') ?? '',
       dataplaneGrpcAddress: data.dataplane.grpc_address,
       dataplaneTimeout: data.dataplane.timeout,
       dataplaneMaxRetries: String(data.dataplane.max_retries),
@@ -219,19 +245,35 @@ export function SettingsPage() {
 
   const handleSave = () => {
     let minFreeSpaceBytes: number
+    let alertsMinFreeBytes: number
     let minChunkBytes: number
     let avgChunkBytes: number
     let maxChunkBytes: number
     const trimmedPort = settings.serverPort.trim()
     const parsedPort = Number(trimmedPort)
+    const trimmedReadTimeout = settings.serverReadTimeout.trim()
+    const trimmedWriteTimeout = settings.serverWriteTimeout.trim()
+    const trimmedIdleTimeout = settings.serverIdleTimeout.trim()
     const trimmedMaxVersions = settings.maxVersions.trim()
     const parsedMaxVersions = Number(trimmedMaxVersions)
     const trimmedDataplaneTimeout = settings.dataplaneTimeout.trim()
     const trimmedMaxRetries = settings.dataplaneMaxRetries.trim()
     const parsedMaxRetries = Number(trimmedMaxRetries)
+    const trimmedAlertsCheckInterval = settings.alertsCheckInterval.trim()
+    const trimmedAlertsCooldownPeriod = settings.alertsCooldownPeriod.trim()
+    const trimmedAlertsThresholdPct = settings.alertsThresholdPct.trim()
+    const trimmedAlertsCriticalPct = settings.alertsCriticalPct.trim()
+    const trimmedAlertsWebhookMethod = settings.alertsWebhookMethod.trim().toUpperCase()
+    const alertsWebhookHeaders = settings.alertsWebhookHeaders
+      .split('\n')
+      .map(header => header.trim())
+      .filter(Boolean)
+    const parsedAlertsThresholdPct = Number(trimmedAlertsThresholdPct)
+    const parsedAlertsCriticalPct = Number(trimmedAlertsCriticalPct)
 
     try {
       minFreeSpaceBytes = parseByteSize(settings.minFreeSpace)
+      alertsMinFreeBytes = parseByteSize(settings.alertsMinFreeSpace)
       minChunkBytes = parseByteSize(settings.minChunkSize)
       avgChunkBytes = parseByteSize(settings.avgChunkSize)
       maxChunkBytes = parseByteSize(settings.maxChunkSize)
@@ -252,6 +294,33 @@ export function SettingsPage() {
       })
       return
     }
+
+	if (!trimmedReadTimeout) {
+		addToast({
+			title: '读取超时格式无效',
+			description: '读取超时不能为空',
+			color: 'danger',
+		})
+		return
+	}
+
+	if (!trimmedWriteTimeout) {
+		addToast({
+			title: '写入超时格式无效',
+			description: '写入超时不能为空',
+			color: 'danger',
+		})
+		return
+	}
+
+	if (!trimmedIdleTimeout) {
+		addToast({
+			title: '空闲超时格式无效',
+			description: '空闲超时不能为空',
+			color: 'danger',
+		})
+		return
+	}
 
     if (!/^\d+$/.test(trimmedMaxVersions) || !Number.isInteger(parsedMaxVersions) || parsedMaxVersions < 0) {
       addToast({
@@ -280,23 +349,95 @@ export function SettingsPage() {
       return
     }
 
+    if (!trimmedAlertsCheckInterval) {
+      addToast({
+        title: '告警检查间隔格式无效',
+        description: '检查间隔不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedAlertsCooldownPeriod) {
+      addToast({
+        title: '告警冷却时间格式无效',
+        description: '冷却时间不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!Number.isFinite(parsedAlertsThresholdPct) || parsedAlertsThresholdPct < 0 || parsedAlertsThresholdPct > 100) {
+      addToast({
+        title: '告警阈值格式无效',
+        description: '告警阈值必须在 0 到 100 之间',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!Number.isFinite(parsedAlertsCriticalPct) || parsedAlertsCriticalPct < 0 || parsedAlertsCriticalPct > 100) {
+      addToast({
+        title: '严重告警阈值格式无效',
+        description: '严重告警阈值必须在 0 到 100 之间',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (parsedAlertsCriticalPct < parsedAlertsThresholdPct) {
+      addToast({
+        title: '告警阈值关系无效',
+        description: '严重告警阈值不能小于普通告警阈值',
+        color: 'danger',
+      })
+      return
+    }
+
+	if (trimmedAlertsWebhookMethod !== 'GET' && trimmedAlertsWebhookMethod !== 'POST') {
+		addToast({
+			title: 'Webhook 方法无效',
+			description: 'Webhook 方法必须是 GET 或 POST',
+			color: 'danger',
+		})
+		return
+	}
+
+	for (const header of alertsWebhookHeaders) {
+		const separator = header.indexOf(':')
+		if (separator <= 0 || separator === header.length - 1) {
+			addToast({
+				title: 'Webhook Header 格式无效',
+				description: '每行必须使用 Key:Value 格式',
+				color: 'danger',
+			})
+			return
+		}
+	}
+
     const req: UpdateSettingsRequest = {
       server: {
         host: settings.serverHost,
         port: parsedPort,
-      tls: {
-        enabled: settings.tlsEnabled,
-        cert_file: settings.tlsCertFile.trim(),
-        key_file: settings.tlsKeyFile.trim(),
-        auto_generate: settings.tlsAutoGenerate,
-        cert_dir: settings.tlsCertDir.trim(),
-      },
+        read_timeout: trimmedReadTimeout,
+        write_timeout: trimmedWriteTimeout,
+        idle_timeout: trimmedIdleTimeout,
+        tls: {
+          enabled: settings.tlsEnabled,
+          cert_file: settings.tlsCertFile.trim(),
+          key_file: settings.tlsKeyFile.trim(),
+          auto_generate: settings.tlsAutoGenerate,
+          cert_dir: settings.tlsCertDir.trim(),
+        },
       },
       retention: {
         max_versions: parsedMaxVersions,
         max_age: settings.maxAge,
         min_free_space: minFreeSpaceBytes,
         gc_interval: settings.gcInterval,
+      },
+      trash: {
+        enabled: settings.trashEnabled,
       },
       dataplane: {
         grpc_address: settings.dataplaneGrpcAddress,
@@ -306,6 +447,17 @@ export function SettingsPage() {
       share: {
         enabled: settings.shareEnabled,
         base_url: settings.shareBaseURL.trim(),
+      },
+      alerts: {
+        enabled: settings.alertsEnabled,
+        check_interval: trimmedAlertsCheckInterval,
+        threshold_pct: parsedAlertsThresholdPct,
+        critical_pct: parsedAlertsCriticalPct,
+        min_free_bytes: alertsMinFreeBytes,
+        cooldown_period: trimmedAlertsCooldownPeriod,
+        webhook_url: settings.alertsWebhookURL.trim(),
+        webhook_method: trimmedAlertsWebhookMethod,
+        webhook_headers: alertsWebhookHeaders,
       },
       cdc: {
         min_chunk_size: minChunkBytes,
@@ -419,29 +571,67 @@ export function SettingsPage() {
                 description="配置服务器网络参数"
                 icon={Server}
               >
-                <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">监听地址</label>
+                      <Input
+                        placeholder="0.0.0.0"
+                        value={settings.serverHost}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverHost: v }))}
+                        startContent={<Globe size={16} className="text-default-500" />}
+                        classNames={{ 
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">端口</label>
+                      <Input
+                        placeholder="8080"
+                        value={settings.serverPort}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverPort: v }))}
+                        classNames={{ 
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <Divider className="bg-divider" />
+                  <div className="grid grid-cols-3 gap-4">
                   <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">监听地址</label>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">读取超时</label>
                     <Input
-                      placeholder="0.0.0.0"
-                      value={settings.serverHost}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverHost: v }))}
-                      startContent={<Globe size={16} className="text-default-500" />}
+                      placeholder="30s"
+                      value={settings.serverReadTimeout}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverReadTimeout: v }))}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                       }}
                     />
                   </div>
                   <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">端口</label>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">写入超时</label>
                     <Input
-                      placeholder="8080"
-                      value={settings.serverPort}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverPort: v }))}
+                      placeholder="60s"
+                      value={settings.serverWriteTimeout}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverWriteTimeout: v }))}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                       }}
                     />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">空闲超时</label>
+                    <Input
+                      placeholder="120s"
+                      value={settings.serverIdleTimeout}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverIdleTimeout: v }))}
+                      classNames={{ 
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
+                      }}
+                    />
+                  </div>
                   </div>
                 </div>
               </SettingsSection>
@@ -552,6 +742,22 @@ export function SettingsPage() {
               >
                 <div className="space-y-4">
                   <SettingRow
+                    label="启用回收站"
+                    description="关闭后删除操作将直接永久删除，不再进入回收站"
+                  >
+                    <Switch
+                      isSelected={settings.trashEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashEnabled: v }))}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
                     label="最大版本数"
                     description="每个文件最多保留的历史版本数量"
                   >
@@ -618,7 +824,7 @@ export function SettingsPage() {
               {webdavCredentials?.enabled && webdavCredentials?.auth_type === 'basic' && (
                 <SettingsSection
                   title="WebDAV 访问凭据"
-                  description="用于挂载网络驱动器的登录凭据"
+                  description="用于挂载当前运行中的 WebDAV 服务；保存后的 WebDAV 配置需重启后这里才会更新"
                   icon={Key}
                 >
                   <div className="space-y-4">
@@ -976,6 +1182,147 @@ export function SettingsPage() {
                       }}
                     />
                   </SettingRow>
+                </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="存储告警"
+                description="配置磁盘空间监控和 Webhook 告警"
+                icon={AlertCircle}
+              >
+                <div className="space-y-4">
+                  <SettingRow
+                    label="启用告警"
+                    description="启用后定期检查存储空间并发送告警"
+                  >
+                    <Switch
+                      isSelected={settings.alertsEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsEnabled: v }))}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="检查间隔"
+                    description="磁盘空间检查频率"
+                  >
+                    <Input
+                      value={settings.alertsCheckInterval}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCheckInterval: v }))}
+                      className="w-32"
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">普通告警阈值 (%)</label>
+                      <Input
+                        type="number"
+                        value={settings.alertsThresholdPct}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsThresholdPct: v }))}
+                        isDisabled={!settings.alertsEnabled}
+                        classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">严重告警阈值 (%)</label>
+                      <Input
+                        type="number"
+                        value={settings.alertsCriticalPct}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCriticalPct: v }))}
+                        isDisabled={!settings.alertsEnabled}
+                        classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+                      />
+                    </div>
+                  </div>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="最小剩余空间"
+                    description="剩余空间低于该值时发送告警"
+                  >
+                    <Input
+                      value={settings.alertsMinFreeSpace}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsMinFreeSpace: v }))}
+                      className="w-32"
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="冷却时间"
+                    description="同级别连续告警之间的最小间隔"
+                  >
+                    <Input
+                      value={settings.alertsCooldownPeriod}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCooldownPeriod: v }))}
+                      className="w-32"
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="Webhook URL"
+                    description="发送告警通知的目标地址"
+                  >
+                    <Input
+                      value={settings.alertsWebhookURL}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWebhookURL: v }))}
+                      placeholder="https://hooks.example.com/alert"
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="Webhook 方法"
+                    description="告警通知请求使用的 HTTP 方法"
+                  >
+                    <select
+                      aria-label="Webhook 方法"
+                      value={settings.alertsWebhookMethod}
+                      onChange={(event) => updateDirtySettings(s => ({ ...s, alertsWebhookMethod: event.target.value }))}
+                      disabled={!settings.alertsEnabled}
+                      className="input-shell min-w-[8rem] px-3 py-2 text-sm bg-transparent outline-none"
+                    >
+                      <option value="POST">POST</option>
+                      <option value="GET">GET</option>
+                    </select>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <div>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">自定义 Header</label>
+                    <textarea
+                      aria-label="Webhook 自定义 Header"
+                      value={settings.alertsWebhookHeaders}
+                      onChange={(event) => updateDirtySettings(s => ({ ...s, alertsWebhookHeaders: event.target.value }))}
+                      disabled={!settings.alertsEnabled}
+                      placeholder={"Authorization: Bearer token\nX-MnemoNAS: alerts"}
+                      rows={3}
+                      className={cn(
+                        "input-shell w-full rounded-medium px-3 py-2 text-sm bg-transparent outline-none",
+                        "border border-transparent focus:border-accent-primary",
+                        !settings.alertsEnabled && "opacity-60 cursor-not-allowed"
+                      )}
+                    />
+                    <p className="text-xs text-default-500 mt-1">每行一个 Header，使用 Key:Value 格式。</p>
+                  </div>
                 </div>
               </SettingsSection>
             </div>
