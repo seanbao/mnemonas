@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
@@ -95,6 +96,7 @@ type Config struct {
 	// Retention policy
 	MaxVersions        int
 	MaxVersionAge      time.Duration
+	MinFreeSpace       uint64
 	TrashEnabled       *bool
 	TrashRetentionDays int
 	MaxTrashSize       int64
@@ -134,7 +136,7 @@ func (fs *FileSystem) UpdateTrashSettings(enabled bool, retentionDays int, maxSi
 }
 
 // UpdateRetentionSettings applies version retention settings to the running filesystem.
-func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge time.Duration) {
+func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge time.Duration, minFreeSpace uint64) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -143,6 +145,15 @@ func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge tim
 	}
 	fs.config.MaxVersions = maxVersions
 	fs.config.MaxVersionAge = maxVersionAge
+	fs.config.MinFreeSpace = minFreeSpace
+}
+
+// RunRetentionSweep applies version retention rules across all versioned files.
+func (fs *FileSystem) RunRetentionSweep(ctx context.Context) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return fs.runRetentionSweepLocked(ctx)
 }
 
 // New creates a new FileSystem
@@ -426,6 +437,12 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	if shouldVersion && (fs.config.MaxVersions > 0 || fs.config.MaxVersionAge > 0) {
 		if err := fs.cleanupVersions(ctx, name); err != nil {
 			return fmt.Errorf("failed to cleanup old versions: %w", err)
+		}
+	}
+
+	if fs.shouldForceRetentionSweepLocked() {
+		if err := fs.runRetentionSweepLocked(ctx); err != nil {
+			return fmt.Errorf("failed to enforce retention free space: %w", err)
 		}
 	}
 
@@ -1288,6 +1305,35 @@ func (fs *FileSystem) cleanupVersions(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+func (fs *FileSystem) runRetentionSweepLocked(ctx context.Context) error {
+	paths, err := fs.versions.ListVersionPaths(ctx)
+	if err != nil {
+		return fmt.Errorf("list version paths: %w", err)
+	}
+
+	for _, name := range paths {
+		if err := fs.cleanupVersions(ctx, name); err != nil {
+			return fmt.Errorf("cleanup versions for %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+func (fs *FileSystem) shouldForceRetentionSweepLocked() bool {
+	if fs.config == nil || fs.config.MinFreeSpace == 0 {
+		return false
+	}
+
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(fs.workspace.Root(), &stat); err != nil {
+		return false
+	}
+
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	return freeBytes < fs.config.MinFreeSpace
 }
 
 func (fs *FileSystem) refreshFileIndex(ctx context.Context, name string) {

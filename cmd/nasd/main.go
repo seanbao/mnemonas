@@ -132,6 +132,7 @@ func main() {
 		MaxVersionedSize:        cfg.Storage.Versioning.MaxVersionedSize,
 		MaxVersions:             cfg.Storage.Retention.MaxVersions,
 		MaxVersionAge:           cfg.Storage.Retention.MaxAge,
+		MinFreeSpace:            cfg.Storage.Retention.MinFreeSpace,
 		TrashEnabled:            &cfg.Storage.Trash.Enabled,
 		TrashRetentionDays:      cfg.Storage.Trash.RetentionDays,
 		MaxTrashSize:            cfg.Storage.Trash.MaxSize,
@@ -141,6 +142,15 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to create filesystem")
 	}
 	defer fs.Close()
+
+	retentionMonitor := storage.NewRetentionMonitor(fs, storage.RetentionMonitorConfig{
+		MaxVersions:   cfg.Storage.Retention.MaxVersions,
+		MaxVersionAge: cfg.Storage.Retention.MaxAge,
+		MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
+		SweepInterval: cfg.Storage.Retention.GCInterval,
+	}, log.Logger)
+	retentionMonitor.Start(ctx)
+	defer retentionMonitor.Stop()
 
 	// Cleanup staging files from previous crashes
 	if cleanedFiles, cleanedBytes, cleanErr := fs.CleanupStaging(ctx); cleanErr != nil {
@@ -190,10 +200,11 @@ func main() {
 		AuthAccessTTL:  cfg.Auth.AccessTokenTTL,
 		AuthRefreshTTL: cfg.Auth.RefreshTokenTTL,
 		// Share configuration
-		ShareEnabled:   cfg.Share.Enabled,
-		ShareStoreFile: cfg.Share.StoreFile,
-		ShareBaseURL:   cfg.Share.BaseURL,
-		AlertMonitor:   alertMonitor,
+		ShareEnabled:     cfg.Share.Enabled,
+		ShareStoreFile:   cfg.Share.StoreFile,
+		ShareBaseURL:     cfg.Share.BaseURL,
+		AlertMonitor:     alertMonitor,
+		RetentionMonitor: retentionMonitor,
 		// Favorites configuration
 		FavoritesEnabled:   cfg.Favorites.Enabled,
 		FavoritesStoreFile: cfg.Favorites.StoreFile,
