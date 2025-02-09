@@ -25,6 +25,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
+	"github.com/seanbao/mnemonas/internal/requestip"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
@@ -1862,9 +1863,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Generate or retrieve cached thumbnail
 	data, err := s.thumbnail.GetThumbnail(r.Context(), filePath, size, reader)
 	if err != nil {
-		// Log the error but return a generic message
-		s.logger.Warn().Err(err).Str("path", filePath).Msg("Failed to generate thumbnail")
-		InternalError(w, "failed to generate thumbnail")
+		s.respondInternalError(w, "generate thumbnail", err)
 		return
 	}
 
@@ -1948,8 +1947,7 @@ func (s *Server) handleClearActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.activity.Clear(); err != nil {
-		s.logger.Error().Err(err).Msg("failed to clear activity log")
-		InternalError(w, "failed to clear activity log")
+		s.respondInternalError(w, "clear activity log", err)
 		return
 	}
 
@@ -1971,10 +1969,7 @@ func (s *Server) LogActivity(r *http.Request, action activity.ActionType, path s
 		}
 	}
 
-	ip := r.RemoteAddr
-	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		ip = realIP
-	}
+	ip := requestip.ClientIP(r)
 
 	if err := s.activity.Log(action, path, user, ip, details); err != nil {
 		s.logger.Warn().Err(err).Msg("Failed to log activity")
@@ -1997,10 +1992,7 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionLogin, "", user, ip, nil)
 	}
@@ -2015,10 +2007,7 @@ func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionLogout, "", user, ip, nil)
 	}
@@ -2511,8 +2500,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Save to file
 	if err := updatedConfig.Save(s.configPath); err != nil {
-		s.logger.Error().Err(err).Msg("failed to save config")
-		InternalError(w, "failed to save settings")
+		s.respondInternalError(w, "save settings", err)
 		return
 	}
 
@@ -2623,8 +2611,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 // handleAcknowledgeSetup marks the setup as shown
 func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
 	if err := config.MarkSetupShown(s.config.Storage.Root); err != nil {
-		s.logger.Error().Err(err).Msg("failed to mark setup as shown")
-		InternalError(w, "failed to acknowledge setup")
+		s.respondInternalError(w, "acknowledge setup", err)
 		return
 	}
 
@@ -2783,10 +2770,7 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionShare, "", user, ip, nil)
 	}
@@ -2804,10 +2788,7 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionUnshare, "", user, ip, nil)
 	}

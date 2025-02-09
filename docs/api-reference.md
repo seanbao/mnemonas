@@ -133,6 +133,11 @@ POST /api/v1/auth/login
 }
 ```
 
+**失败行为**:
+- 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
+- `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
+- 客户端地址默认使用直连来源；只有当请求直接来自 loopback 或私有网段代理时，才采信 `X-Forwarded-For` / `X-Real-IP`
+
 ### 刷新令牌
 
 使用 refresh_token 获取新的 access_token。
@@ -1026,6 +1031,7 @@ POST /s/{share_id}
 - `access_count` 在下载与文件夹列表请求时递增；`POST /s/{share_id}` 验证密码不会计数
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
+- 口令失败限流默认按 share ID 与直连客户端地址组合统计；只有当请求直接来自 loopback 或私有网段代理时，才采信 `X-Forwarded-For` / `X-Real-IP`
 
 **下载文件**:
 ```

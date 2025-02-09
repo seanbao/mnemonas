@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"path"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/requestip"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
@@ -114,6 +114,7 @@ func (t *passwordAttemptTracker) recordFailure(key string, limit int, failureWin
 	defer t.mu.Unlock()
 
 	now := t.now()
+	t.pruneExpiredLocked(now, failureWindow)
 	state := t.attempts[key]
 	if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
 		state = passwordAttemptState{}
@@ -126,6 +127,18 @@ func (t *passwordAttemptTracker) recordFailure(key string, limit int, failureWin
 	t.attempts[key] = state
 
 	return !state.lockedUntil.IsZero()
+}
+
+func (t *passwordAttemptTracker) pruneExpiredLocked(now time.Time, failureWindow time.Duration) {
+	for key, state := range t.attempts {
+		if !state.lockedUntil.IsZero() && !state.lockedUntil.After(now) {
+			delete(t.attempts, key)
+			continue
+		}
+		if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
+			delete(t.attempts, key)
+		}
+	}
 }
 
 func (t *passwordAttemptTracker) reset(key string) {
@@ -594,22 +607,7 @@ func sharePasswordAttemptKey(id string, r *http.Request) string {
 }
 
 func clientIdentifier(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
-	}
-
-	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil && host != "" {
-		return host
-	}
-
-	if remoteAddr := strings.TrimSpace(r.RemoteAddr); remoteAddr != "" {
-		return remoteAddr
-	}
-
-	return "unknown"
+	return requestip.ClientIP(r)
 }
 
 // DownloadShare handles file download for shares
@@ -872,7 +870,10 @@ func requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	if !requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
 func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {

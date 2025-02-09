@@ -287,6 +287,53 @@ func TestGetByID(t *testing.T) {
 	}
 }
 
+func TestLogCopiesDetailsMap(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	details := map[string]string{"reason": "original"}
+	if err := store.Log(ActionDelete, "/file.txt", "user", "127.0.0.1", details); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+	details["reason"] = "mutated"
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("Expected 1 entry, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].Details["reason"] != "original" {
+		t.Fatalf("Expected stored details to remain original, got %q", entries[0].Details["reason"])
+	}
+}
+
+func TestListAndGetByIDReturnDetachedDetails(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	if err := store.Log(ActionDelete, "/file.txt", "user", "127.0.0.1", map[string]string{"reason": "original"}); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	entries, _ := store.List(10, 0, "", "")
+	entries[0].Details["reason"] = "mutated-via-list"
+
+	reloadedEntries, _ := store.List(10, 0, "", "")
+	if reloadedEntries[0].Details["reason"] != "original" {
+		t.Fatalf("Expected list mutation to stay detached, got %q", reloadedEntries[0].Details["reason"])
+	}
+
+	entry, err := store.GetByID(reloadedEntries[0].ID)
+	if err != nil {
+		t.Fatalf("GetByID() error: %v", err)
+	}
+	entry.Details["reason"] = "mutated-via-get"
+
+	finalEntries, _ := store.List(10, 0, "", "")
+	if finalEntries[0].Details["reason"] != "original" {
+		t.Fatalf("Expected GetByID mutation to stay detached, got %q", finalEntries[0].Details["reason"])
+	}
+}
+
 func TestStatistics(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
