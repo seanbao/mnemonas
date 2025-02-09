@@ -315,6 +315,26 @@ func (s *Store) GetAllVersionHashes(ctx context.Context) ([]string, error) {
 	return hashes, rows.Err()
 }
 
+// ListVersionPaths returns all file paths that have historical versions.
+func (s *Store) ListVersionPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT path FROM versions ORDER BY path ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+
+	return paths, rows.Err()
+}
+
 // ============================================================================
 // Versioning Override Operations
 // ============================================================================

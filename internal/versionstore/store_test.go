@@ -210,6 +210,27 @@ func TestStore_GetAllVersionHashes(t *testing.T) {
 	}
 }
 
+func TestStore_ListVersionPaths(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	s.AddVersion(ctx, "/b.txt", "hash1", 100, "")
+	s.AddVersion(ctx, "/a.txt", "hash2", 200, "")
+	s.AddVersion(ctx, "/b.txt", "hash3", 150, "")
+
+	paths, err := s.ListVersionPaths(ctx)
+	if err != nil {
+		t.Fatalf("ListVersionPaths() error: %v", err)
+	}
+
+	if len(paths) != 2 {
+		t.Fatalf("ListVersionPaths() returned %d paths, want 2", len(paths))
+	}
+	if paths[0] != "/a.txt" || paths[1] != "/b.txt" {
+		t.Fatalf("unexpected version paths: %#v", paths)
+	}
+}
+
 func TestStore_VersioningOverride(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

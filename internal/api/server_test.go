@@ -41,6 +41,16 @@ func (m *fakeAlertMonitor) UpdateConfig(cfg alerts.Config) {
 	m.lastConfig = cfg
 }
 
+type fakeRetentionMonitor struct {
+	updateCount int
+	lastConfig  storage.RetentionMonitorConfig
+}
+
+func (m *fakeRetentionMonitor) UpdateConfig(cfg storage.RetentionMonitorConfig) {
+	m.updateCount++
+	m.lastConfig = cfg
+}
+
 // setupDataplaneClient creates a dataplane client for testing
 // Returns nil if dataplane is not available
 func setupDataplaneClient(t *testing.T) *dataplane.Client {
@@ -1948,30 +1958,26 @@ func TestServer_UpdateSettings_NegativeMaxAgeRejected(t *testing.T) {
 	}
 }
 
-func TestServer_UpdateSettings_NonPositiveGCIntervalRejected(t *testing.T) {
+func TestServer_UpdateSettings_NegativeGCIntervalRejected(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	originalGCInterval := server.config.Storage.Retention.GCInterval
 
-	for _, body := range []string{
-		`{"retention":{"gc_interval":"0s"}}`,
-		`{"retention":{"gc_interval":"-1h"}}`,
-	} {
-		req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
+	body := `{"retention":{"gc_interval":"-1h"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
 
-		server.Router().ServeHTTP(w, req)
+	server.Router().ServeHTTP(w, req)
 
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("update settings invalid gc_interval status = %d, want %d", w.Code, http.StatusBadRequest)
-		}
-		if !strings.Contains(w.Body.String(), "invalid retention.gc_interval") {
-			t.Fatalf("expected invalid retention.gc_interval message, got %s", w.Body.String())
-		}
-		if server.config.Storage.Retention.GCInterval != originalGCInterval {
-			t.Fatalf("expected invalid gc_interval to leave in-memory config unchanged")
-		}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid gc_interval status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid retention.gc_interval") {
+		t.Fatalf("expected invalid retention.gc_interval message, got %s", w.Body.String())
+	}
+	if server.config.Storage.Retention.GCInterval != originalGCInterval {
+		t.Fatalf("expected invalid gc_interval to leave in-memory config unchanged")
 	}
 }
 
@@ -2227,6 +2233,79 @@ func TestServer_UpdateSettings_UpdatesRetentionConfigForRunningStorage(t *testin
 	}
 	if len(versions) != 2 {
 		t.Fatalf("expected current version plus one retained historical version, got %d versions", len(versions))
+	}
+}
+
+func TestServer_GetSettings_NormalizesZeroRetentionDurations(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Storage.Retention.MaxAge = 0
+	server.config.Storage.Retention.GCInterval = 0
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Retention struct {
+				MaxAge     string `json:"max_age"`
+				GCInterval string `json:"gc_interval"`
+			} `json:"retention"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if resp.Data.Retention.MaxAge != "0" {
+		t.Fatalf("expected max_age to be normalized to 0, got %q", resp.Data.Retention.MaxAge)
+	}
+	if resp.Data.Retention.GCInterval != "0" {
+		t.Fatalf("expected gc_interval to be normalized to 0, got %q", resp.Data.Retention.GCInterval)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesRetentionMonitorConfig(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	monitor := &fakeRetentionMonitor{}
+	server.retentionMonitor = monitor
+
+	body := `{"retention":{"max_versions":2,"max_age":"48h","min_free_space":2048,"gc_interval":"0"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings retention monitor status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if monitor.updateCount != 1 {
+		t.Fatalf("expected retention monitor update count 1, got %d", monitor.updateCount)
+	}
+	if monitor.lastConfig.MaxVersions != 2 {
+		t.Fatalf("expected max_versions 2, got %d", monitor.lastConfig.MaxVersions)
+	}
+	if monitor.lastConfig.MaxVersionAge != 48*time.Hour {
+		t.Fatalf("expected max_age 48h, got %s", monitor.lastConfig.MaxVersionAge)
+	}
+	if monitor.lastConfig.MinFreeSpace != 2048 {
+		t.Fatalf("expected min_free_space 2048, got %d", monitor.lastConfig.MinFreeSpace)
+	}
+	if monitor.lastConfig.SweepInterval != 0 {
+		t.Fatalf("expected gc_interval 0 to disable periodic sweep, got %s", monitor.lastConfig.SweepInterval)
+	}
+	if server.config.Storage.Retention.GCInterval != 0 {
+		t.Fatalf("expected in-memory gc_interval 0, got %s", server.config.Storage.Retention.GCInterval)
 	}
 }
 

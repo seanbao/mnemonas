@@ -130,7 +130,7 @@ port = 8080
 [storage.retention]
 max_versions = 200       # 代码文件保留更多版本
 max_age = "8760h"        # 保留 1 年
-gc_interval = "1h"       # 更频繁的 GC
+gc_interval = "1h"       # 更频繁的版本清理
 
 [webdav]
 enabled = true

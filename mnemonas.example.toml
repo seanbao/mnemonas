@@ -22,7 +22,7 @@ root = "~/.mnemonas"
 max_versions = 50            # 每个文件最多保留50个版本
 max_age = "2160h"            # 版本保留90天
 min_free_space = 10737418240 # 最少保留10GB空闲空间
-gc_interval = "24h"          # 每24小时运行GC
+gc_interval = "24h"          # 每24小时运行一次版本清理
 
 [storage.versioning]
 auto_versioned_extensions = [".md", ".txt", ".go", ".rs", ".toml", ".yaml", ".json"]

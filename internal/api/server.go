@@ -52,9 +52,10 @@ type Server struct {
 	authEnabled        bool
 	initialWebPassword string // Set when admin user is first created
 	// Share components
-	shareStore   *share.ShareStore
-	shareHandler *share.Handler
-	alertMonitor AlertMonitor
+	shareStore       *share.ShareStore
+	shareHandler     *share.Handler
+	alertMonitor     AlertMonitor
+	retentionMonitor RetentionMonitor
 	// Favorites components
 	favoritesStore   *favorites.Store
 	favoritesHandler *favorites.Handler
@@ -77,6 +78,17 @@ type AlertMonitor interface {
 	UpdateConfig(cfg alerts.Config)
 }
 
+type RetentionMonitor interface {
+	UpdateConfig(cfg storage.RetentionMonitorConfig)
+}
+
+func formatSettingsDuration(d time.Duration) string {
+	if d == 0 {
+		return "0"
+	}
+	return d.String()
+}
+
 // ServerConfig holds server configuration
 type ServerConfig struct {
 	DataplaneAddr string
@@ -93,10 +105,11 @@ type ServerConfig struct {
 	AuthAccessTTL  time.Duration
 	AuthRefreshTTL time.Duration
 	// Share configuration
-	ShareEnabled   bool
-	ShareStoreFile string
-	ShareBaseURL   string
-	AlertMonitor   AlertMonitor
+	ShareEnabled     bool
+	ShareStoreFile   string
+	ShareBaseURL     string
+	AlertMonitor     AlertMonitor
+	RetentionMonitor RetentionMonitor
 	// Favorites configuration
 	FavoritesEnabled   bool
 	FavoritesStoreFile string
@@ -144,6 +157,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	}
 	if cfg != nil {
 		s.alertMonitor = cfg.AlertMonitor
+		s.retentionMonitor = cfg.RetentionMonitor
 	}
 
 	// Initialize thumbnail service
@@ -2045,9 +2059,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		},
 		"retention": map[string]interface{}{
 			"max_versions":   s.config.Storage.Retention.MaxVersions,
-			"max_age":        s.config.Storage.Retention.MaxAge.String(),
+			"max_age":        formatSettingsDuration(s.config.Storage.Retention.MaxAge),
 			"min_free_space": s.config.Storage.Retention.MinFreeSpace,
-			"gc_interval":    s.config.Storage.Retention.GCInterval.String(),
+			"gc_interval":    formatSettingsDuration(s.config.Storage.Retention.GCInterval),
 		},
 		"versioning": map[string]interface{}{
 			"auto_versioned_extensions": s.config.Storage.Versioning.AutoVersionedExtensions,
@@ -2273,16 +2287,24 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Retention.GCInterval != nil {
 			d, err := time.ParseDuration(*req.Retention.GCInterval)
-			if err != nil || d <= 0 {
+			if err != nil || d < 0 {
 				BadRequest(w, "invalid retention.gc_interval")
 				return
 			}
 			updatedConfig.Storage.Retention.GCInterval = d
 		}
-		if s.fs != nil {
+		if s.retentionMonitor != nil {
+			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
+				MaxVersions:   updatedConfig.Storage.Retention.MaxVersions,
+				MaxVersionAge: updatedConfig.Storage.Retention.MaxAge,
+				MinFreeSpace:  updatedConfig.Storage.Retention.MinFreeSpace,
+				SweepInterval: updatedConfig.Storage.Retention.GCInterval,
+			})
+		} else if s.fs != nil {
 			s.fs.UpdateRetentionSettings(
 				updatedConfig.Storage.Retention.MaxVersions,
 				updatedConfig.Storage.Retention.MaxAge,
+				updatedConfig.Storage.Retention.MinFreeSpace,
 			)
 		}
 	}
