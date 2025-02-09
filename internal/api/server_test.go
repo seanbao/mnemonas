@@ -1473,7 +1473,7 @@ func TestServer_ClearActivity_DoesNotExposeInternalDetails(t *testing.T) {
 	if strings.Contains(body, "disk offline") {
 		t.Fatalf("expected internal clear failure to be hidden, got %s", body)
 	}
-	if !strings.Contains(body, "failed to clear activity log") {
+	if !strings.Contains(body, "internal server error") {
 		t.Fatalf("expected generic clear failure message, got %s", body)
 	}
 }
@@ -2453,11 +2453,41 @@ func TestServer_AcknowledgeSetup_InternalErrorUsesStructuredAPIError(t *testing.
 	if payload.Code != ErrCodeInternal {
 		t.Fatalf("expected error code %q, got %q", ErrCodeInternal, payload.Code)
 	}
-	if payload.Message != "failed to acknowledge setup" {
+	if payload.Message != "internal server error" {
 		t.Fatalf("expected sanitized message, got %q", payload.Message)
 	}
 	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
 		t.Fatalf("expected internal file error details to stay hidden, got %s", w.Body.String())
+	}
+}
+
+func TestServer_UpdateSettings_SaveFailureHidden(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = tmpDir
+
+	body := `{"server":{"host":"127.0.0.1"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("update settings save failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeInternal {
+		t.Fatalf("expected error code %q, got %q", ErrCodeInternal, payload.Code)
+	}
+	if payload.Message != "internal server error" {
+		t.Fatalf("expected generic save failure message, got %q", payload.Message)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "directory") {
+		t.Fatalf("expected filesystem details to stay hidden, got %s", w.Body.String())
 	}
 }
 
