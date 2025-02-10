@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -171,17 +172,29 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 
 	etag := fmt.Sprintf(`"%s"`, info.ContentHash)
 
+	// Check If-Match (precondition) before cache validators.
+	if im := r.Header.Get("If-Match"); im != "" {
+		if !h.matchETag(im, etag) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return
+		}
+	}
+
 	// Check If-None-Match (conditional GET)
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
 		if h.matchETag(inm, etag) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
+	} else if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+		if modifiedSince, err := http.ParseTime(ims); err == nil && !isHTTPTimeAfter(info.ModTime, modifiedSince) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 	}
 
-	// Check If-Match (precondition)
-	if im := r.Header.Get("If-Match"); im != "" {
-		if !h.matchETag(im, etag) {
+	if ius := r.Header.Get("If-Unmodified-Since"); ius != "" {
+		if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(info.ModTime, unmodifiedSince) {
 			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 			return
 		}
@@ -198,6 +211,9 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	// Set ETag header for caching
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Accept-Ranges", "bytes")
+	if contentType := fileContentType(filePath); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
 
 	if r.Method == http.MethodHead {
 		w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
@@ -208,6 +224,18 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	// Use http.ServeContent to handle Range requests automatically
 	// Pass filename from path for Content-Disposition
 	http.ServeContent(w, r, path.Base(filePath), info.ModTime, reader)
+}
+
+func fileContentType(filePath string) string {
+	contentType := mime.TypeByExtension(path.Ext(filePath))
+	if contentType == "" {
+		return "application/octet-stream"
+	}
+	return contentType
+}
+
+func isHTTPTimeAfter(modTime, headerTime time.Time) bool {
+	return modTime.UTC().Truncate(time.Second).After(headerTime.UTC().Truncate(time.Second))
 }
 
 func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string, info *storage.FileInfo) {
@@ -480,13 +508,13 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath string) err
 
 		children, err := h.fs.ReadDir(ctx, srcPath)
 		if err != nil {
-			return err
+			return h.rollbackCopiedDirectory(dstPath, err)
 		}
 
 		for _, child := range children {
 			childName := path.Base(child.Path)
 			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName)); err != nil {
-				return err
+				return h.rollbackCopiedDirectory(dstPath, err)
 			}
 		}
 		return nil
@@ -499,6 +527,13 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath string) err
 	defer reader.Close()
 
 	return h.fs.WriteFile(ctx, dstPath, reader)
+}
+
+func (h *Handler) rollbackCopiedDirectory(dstPath string, copyErr error) error {
+	if rollbackErr := h.fs.PermanentDelete(context.Background(), dstPath); rollbackErr != nil && !errors.Is(rollbackErr, storage.ErrNotFound) {
+		return errors.Join(copyErr, fmt.Errorf("rollback copied directory %s: %w", dstPath, rollbackErr))
+	}
+	return copyErr
 }
 
 func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Request, srcPath string) {
@@ -901,6 +936,9 @@ func (h *Handler) getDestination(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
+	if u.Host != "" && !strings.EqualFold(u.Host, requestHost(r)) {
+		return ""
+	}
 	if hasTraversalSegment(u.Path) {
 		return ""
 	}
@@ -916,6 +954,13 @@ func (h *Handler) getDestination(r *http.Request) string {
 	}
 
 	return strings.TrimPrefix(dstPath, h.prefix)
+}
+
+func requestHost(r *http.Request) string {
+	if r.Host != "" {
+		return r.Host
+	}
+	return r.URL.Host
 }
 
 func hasTraversalSegment(rawPath string) bool {

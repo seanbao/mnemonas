@@ -5,8 +5,10 @@ package versionstore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -684,5 +686,94 @@ func TestStore_Objects(t *testing.T) {
 
 	if s.HasObject(hash) {
 		t.Error("HasObject() returned true after delete")
+	}
+}
+
+func TestStore_RunGC_ReturnsDeleteErrorsAndContinues(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO chunk_refs (hash, ref_count, size, created_at) VALUES (?, 0, ?, ?)`, "orphan-fail", 10, time.Now().Unix()); err != nil {
+		t.Fatalf("insert orphan-fail error: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO chunk_refs (hash, ref_count, size, created_at) VALUES (?, 0, ?, ?)`, "orphan-ok", 20, time.Now().Unix()); err != nil {
+		t.Fatalf("insert orphan-ok error: %v", err)
+	}
+
+	called := make(map[string]int)
+	s.deleteObjectFn = func(hash string) error {
+		called[hash]++
+		if hash == "orphan-fail" {
+			return errors.New("delete object failed")
+		}
+		return nil
+	}
+
+	deleted, freed, err := s.RunGC(ctx, 10)
+	if err == nil {
+		t.Fatal("expected RunGC() to return aggregated delete error")
+	}
+	if !strings.Contains(err.Error(), "orphan-fail") {
+		t.Fatalf("expected error to mention failed hash, got %v", err)
+	}
+	if called["orphan-fail"] != 1 || called["orphan-ok"] != 1 {
+		t.Fatalf("expected both orphan deletes to be attempted once, got %+v", called)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected one successful deletion, got %d", deleted)
+	}
+	if freed != 20 {
+		t.Fatalf("expected freed bytes 20, got %d", freed)
+	}
+
+	remaining, getErr := s.GetOrphanedChunks(ctx, 10)
+	if getErr != nil {
+		t.Fatalf("GetOrphanedChunks() error: %v", getErr)
+	}
+	if len(remaining) != 1 || remaining[0] != "orphan-fail" {
+		t.Fatalf("expected failed orphan to remain referenced, got %v", remaining)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunk_refs WHERE hash = ?`, "orphan-ok").Scan(&count); err != nil {
+		t.Fatalf("chunk ref lookup error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected successful orphan ref to be removed, count=%d", count)
+	}
+}
+
+func TestStore_RunGC_ReturnsChunkRefDeleteErrors(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO chunk_refs (hash, ref_count, size, created_at) VALUES (?, 0, ?, ?)`, "orphan-ref-fail", 30, time.Now().Unix()); err != nil {
+		t.Fatalf("insert orphan-ref-fail error: %v", err)
+	}
+
+	s.deleteObjectFn = func(hash string) error { return nil }
+	s.deleteChunkRefFn = func(ctx context.Context, chunkHash string) error {
+		return errors.New("delete chunk ref failed")
+	}
+
+	deleted, freed, err := s.RunGC(ctx, 10)
+	if err == nil {
+		t.Fatal("expected RunGC() to return chunk ref delete error")
+	}
+	if !strings.Contains(err.Error(), "orphan-ref-fail") {
+		t.Fatalf("expected error to mention failed chunk hash, got %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected zero successful deletions, got %d", deleted)
+	}
+	if freed != 0 {
+		t.Fatalf("expected freed bytes 0, got %d", freed)
+	}
+
+	remaining, getErr := s.GetOrphanedChunks(ctx, 10)
+	if getErr != nil {
+		t.Fatalf("GetOrphanedChunks() error: %v", getErr)
+	}
+	if len(remaining) != 1 || remaining[0] != "orphan-ref-fail" {
+		t.Fatalf("expected orphan to remain when ref deletion fails, got %v", remaining)
 	}
 }

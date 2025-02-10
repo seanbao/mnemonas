@@ -73,8 +73,8 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate path
-	cleanPath := path.Clean("/" + req.Path)
-	if cleanPath == "" {
+	cleanPath := path.Clean("/" + strings.TrimSpace(req.Path))
+	if cleanPath == "/" {
 		h.error(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
 		return
 	}
@@ -86,7 +86,7 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to add favorite")
-		h.error(w, http.StatusInternalServerError, "failed to add favorite", "ADD_FAVORITE_FAILED")
+		h.error(w, http.StatusInternalServerError, "internal server error", "ADD_FAVORITE_FAILED")
 		return
 	}
 
@@ -112,7 +112,7 @@ func (h *Handler) RemoveFavorite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to remove favorite")
-		h.error(w, http.StatusInternalServerError, "failed to remove favorite", "REMOVE_FAVORITE_FAILED")
+		h.error(w, http.StatusInternalServerError, "internal server error", "REMOVE_FAVORITE_FAILED")
 		return
 	}
 
@@ -193,7 +193,7 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to update note")
-		h.error(w, http.StatusInternalServerError, "failed to update note", "UPDATE_NOTE_FAILED")
+		h.error(w, http.StatusInternalServerError, "internal server error", "UPDATE_NOTE_FAILED")
 		return
 	}
 
