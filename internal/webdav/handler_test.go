@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +169,39 @@ func TestHandler_PUT_GET(t *testing.T) {
 	}
 }
 
+func TestHandler_HEAD_PreservesFileContentType(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("MKCOL", "/dav/files", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("PUT", "/dav/files/test.txt", strings.NewReader("Hello, WebDAV!"))
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("GET", "/dav/files/test.txt", nil)
+	getW := httptest.NewRecorder()
+	handler.ServeHTTP(getW, req)
+
+	req = httptest.NewRequest("HEAD", "/dav/files/test.txt", nil)
+	headW := httptest.NewRecorder()
+	handler.ServeHTTP(headW, req)
+
+	if headW.Code != http.StatusOK {
+		t.Fatalf("HEAD status = %d, want %d", headW.Code, http.StatusOK)
+	}
+	if headW.Header().Get("Content-Type") == "" {
+		t.Fatal("HEAD should return Content-Type header for files")
+	}
+	if headW.Header().Get("Content-Type") != getW.Header().Get("Content-Type") {
+		t.Fatalf("HEAD Content-Type = %q, want GET Content-Type %q", headW.Header().Get("Content-Type"), getW.Header().Get("Content-Type"))
+	}
+	if headW.Body.Len() != 0 {
+		t.Fatalf("HEAD body length = %d, want 0", headW.Body.Len())
+	}
+}
+
 func TestHandler_PUT_ToExistingDirectoryReturnsConflict(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -267,6 +302,49 @@ func TestHandler_ConditionalGET(t *testing.T) {
 
 		if w.Code != http.StatusPreconditionFailed {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+			t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("If-Match_Precedes_If-None-Match", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
+		req.Header.Set("If-Match", `"wrong-etag"`)
+		req.Header.Set("If-None-Match", etag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+			t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("If-Modified-Since_NotModified", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
+		req.Header.Set("If-Modified-Since", info.ModTime.Add(time.Minute).UTC().Format(http.TimeFormat))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotModified {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotModified)
+		}
+	})
+
+	t.Run("If-Unmodified-Since_PreconditionFailed", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
+		req.Header.Set("If-Unmodified-Since", info.ModTime.Add(-time.Minute).UTC().Format(http.TimeFormat))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusPreconditionFailed)
 		}
 		if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
 			t.Fatalf("expected precondition failed message, got %q", w.Body.String())
@@ -498,6 +576,48 @@ func TestHandler_COPY_DirectoryRecursive(t *testing.T) {
 	}
 	if string(childData) != "child" {
 		t.Fatalf("Expected child file content, got %q", string(childData))
+	}
+}
+
+func TestHandler_COPY_DirectoryRollbackOnChildCopyFailure(t *testing.T) {
+	handler, fs, tmpDir := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/a.txt", bytes.NewReader([]byte("copied"))); err != nil {
+		t.Fatalf("WriteFile(a.txt) error: %v", err)
+	}
+
+	unreadablePath := filepath.Join(tmpDir, "files", "srcdir", "z.txt")
+	if err := os.WriteFile(unreadablePath, []byte("secret"), 0600); err != nil {
+		t.Fatalf("WriteFile(z.txt) error: %v", err)
+	}
+	if err := os.Chmod(unreadablePath, 0); err != nil {
+		t.Fatalf("Chmod(z.txt) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(unreadablePath, 0600)
+	}()
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://localhost/dav/dst/copied-dir")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("COPY rollback status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/dst/copied-dir"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected partial destination tree to be removed, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/srcdir/a.txt"); err != nil {
+		t.Fatalf("expected source file to remain after failed copy, got %v", err)
 	}
 }
 
@@ -1426,12 +1546,24 @@ func TestHandler_LegalDoubleDotFilenameAllowed(t *testing.T) {
 func TestHandler_GetDestination_AllowsDoubleDotFilename(t *testing.T) {
 	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
 	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "localhost"
 	req.Header.Set("Destination", "http://localhost/dav/dst/foo..txt")
 
 	dst := handler.getDestination(req)
 
 	if dst != "/dst/foo..txt" {
 		t.Fatalf("getDestination() = %q, want %q", dst, "/dst/foo..txt")
+	}
+}
+
+func TestHandler_GetDestination_RejectsCrossHostDestination(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "localhost"
+	req.Header.Set("Destination", "http://evil.example/dav/dst/foo.txt")
+
+	if dst := handler.getDestination(req); dst != "" {
+		t.Fatalf("getDestination() = %q, want empty string for cross-host destination", dst)
 	}
 }
 
