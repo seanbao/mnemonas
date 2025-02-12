@@ -199,3 +199,139 @@ func TestHandler_InternalErrorsHideOperationDetails(t *testing.T) {
 	handler.UpdateNote(updateRec, updateReq)
 	assertInternal(t, updateRec, "UPDATE_NOTE_FAILED")
 }
+
+func TestHandler_CheckFavorite_TrimsSurroundingWhitespace(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := store.Add("user-123", "/docs/report.pdf", "note"); err != nil {
+		t.Fatalf("seed favorite error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=%20/docs/report.pdf%20", nil)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	rec := httptest.NewRecorder()
+
+	handler.CheckFavorite(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Path       string `json:"path"`
+			IsFavorite bool   `json:"is_favorite"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !payload.Success || !payload.Data.IsFavorite {
+		t.Fatalf("expected trimmed path to match favorite, got %s", rec.Body.String())
+	}
+	if payload.Data.Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized path, got %q", payload.Data.Path)
+	}
+}
+
+func TestHandler_CheckFavorite_WhitespaceOnlyPathReturnsBadRequest(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=%20%20%20", nil)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	rec := httptest.NewRecorder()
+
+	handler.CheckFavorite(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Error   *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Success || payload.Error == nil || payload.Error.Code != "MISSING_PATH" {
+		t.Fatalf("expected MISSING_PATH error, got %s", rec.Body.String())
+	}
+}
+
+func TestHandler_CheckFavorites_TrimsSurroundingWhitespace(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := store.Add("user-123", "/docs/report.pdf", "note"); err != nil {
+		t.Fatalf("seed favorite error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":[" /docs/report.pdf ","/docs/missing.pdf"]}`))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	rec := httptest.NewRecorder()
+
+	handler.CheckFavorites(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Favorites map[string]bool `json:"favorites"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", rec.Body.String())
+	}
+	if !payload.Data.Favorites["/docs/report.pdf"] {
+		t.Fatalf("expected trimmed favorite path to match, got %#v", payload.Data.Favorites)
+	}
+	if payload.Data.Favorites["/docs/missing.pdf"] {
+		t.Fatalf("expected missing path to remain false, got %#v", payload.Data.Favorites)
+	}
+}
+
+func TestHandler_CheckFavorites_RejectsWhitespaceOnlyPath(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/docs/report.pdf","   "]}`))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	rec := httptest.NewRecorder()
+
+	handler.CheckFavorites(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Error   *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Success || payload.Error == nil || payload.Error.Code != "MISSING_PATH" {
+		t.Fatalf("expected MISSING_PATH error, got %s", rec.Body.String())
+	}
+}

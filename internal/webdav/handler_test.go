@@ -248,6 +248,49 @@ func TestHandler_PUT_IfMatchStarOnMissingFileFails(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_IfNoneMatchMatchingETagFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/files/existing.txt", strings.NewReader("initial")); err != nil {
+		t.Fatalf("WriteFile(existing.txt) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, "/files/existing.txt")
+	if err != nil {
+		t.Fatalf("Stat(existing.txt) error: %v", err)
+	}
+	etag := `"` + info.ContentHash + `"`
+
+	req := httptest.NewRequest("PUT", "/dav/files/existing.txt", strings.NewReader("updated"))
+	req.Header.Set("If-None-Match", etag)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("PUT If-None-Match matching ETag status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+	if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+		t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+	}
+
+	reader, err := fs.OpenFile(ctx, "/files/existing.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(existing.txt) error: %v", err)
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(existing.txt) error: %v", err)
+	}
+	if string(body) != "initial" {
+		t.Fatalf("expected existing file content to remain unchanged, got %q", string(body))
+	}
+}
+
 func TestHandler_ConditionalGET(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1129,6 +1172,18 @@ func TestHandler_PROPFIND(t *testing.T) {
 	})
 }
 
+func TestHandler_PROPPATCH_MissingResourceReturnsNotFound(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+	req := httptest.NewRequest("PROPPATCH", "/dav/missing-proppatch.txt", strings.NewReader(`<?xml version="1.0"?><propertyupdate xmlns="DAV:"/>`))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
 func TestHandler_LOCK_UNLOCK(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1232,6 +1287,46 @@ func TestHandler_LOCK_ReplacesExpiredLock(t *testing.T) {
 	}
 }
 
+func TestHandler_LOCK_RefreshWithMatchingIfToken(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/lock-refresh.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(lock-refresh.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/lock-refresh.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("initial LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	handler.locksMu.Lock()
+	before := handler.locks["/lock-refresh.txt"].expiresAt
+	handler.locksMu.Unlock()
+
+	refreshReq := httptest.NewRequest("LOCK", "/dav/lock-refresh.txt", nil)
+	refreshReq.Header.Set("If", "</dav/lock-refresh.txt> ("+lockToken+")")
+	refreshW := httptest.NewRecorder()
+	handler.ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusOK {
+		t.Fatalf("refresh LOCK status = %d, want %d", refreshW.Code, http.StatusOK)
+	}
+	if refreshW.Header().Get("Lock-Token") != lockToken {
+		t.Fatalf("expected refresh to preserve lock token, got %q want %q", refreshW.Header().Get("Lock-Token"), lockToken)
+	}
+
+	handler.locksMu.Lock()
+	after := handler.locks["/lock-refresh.txt"].expiresAt
+	handler.locksMu.Unlock()
+	if !after.After(before) {
+		t.Fatalf("expected refreshed expiry to move forward: before=%v after=%v", before, after)
+	}
+}
+
 func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1297,6 +1392,18 @@ func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 
 		if w.Code != http.StatusNoContent {
 			t.Fatalf("PUT with token status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("PutWithIfHeaderTokenSucceeds", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/locked/file.txt", strings.NewReader("updated via if"))
+		req.Header.Set("If", "(<"+strings.Trim(lockToken, "<>")+">)")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("PUT with If token status = %d, want %d", w.Code, http.StatusNoContent)
 		}
 	})
 }
@@ -1366,6 +1473,19 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 
 		if w.Code != http.StatusCreated {
 			t.Fatalf("PUT child with token status = %d, want %d", w.Code, http.StatusCreated)
+		}
+	})
+
+	t.Run("MoveIntoLockedCollectionWithIfHeaderTokenSucceeds", func(t *testing.T) {
+		req := httptest.NewRequest("MOVE", "/dav/src/file.txt", nil)
+		req.Header.Set("Destination", "http://localhost/dav/locked-dir/if-header.txt")
+		req.Header.Set("If", "</dav/locked-dir> (<"+strings.Trim(lockToken, "<>")+">)")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("MOVE with If token status = %d, want %d", w.Code, http.StatusCreated)
 		}
 	})
 }

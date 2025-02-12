@@ -85,6 +85,8 @@ const (
 	defaultRateLimitErrorMessage = "too many attempts, try later"
 )
 
+var errInvalidSharePermission = errors.New("invalid permission")
+
 func newPasswordAttemptTracker() *passwordAttemptTracker {
 	return &passwordAttemptTracker{
 		attempts: make(map[string]passwordAttemptState),
@@ -205,15 +207,21 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Path == "" {
+	cleanPath := strings.TrimSpace(req.Path)
+	if cleanPath == "" {
 		writeShareError(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
+		return
+	}
+	cleanPath = path.Clean("/" + cleanPath)
+	if req.MaxAccess < 0 {
+		writeShareError(w, http.StatusBadRequest, "invalid max_access", "INVALID_MAX_ACCESS")
 		return
 	}
 
 	userID := getUserIDFromContext(r.Context())
 
 	opts := CreateShareOptions{
-		Path:        req.Path,
+		Path:        cleanPath,
 		CreatedBy:   userID,
 		Password:    req.Password,
 		MaxAccess:   req.MaxAccess,
@@ -221,10 +229,13 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch req.Type {
+	case "", "file":
+		opts.Type = ShareTypeFile
 	case "folder":
 		opts.Type = ShareTypeFolder
 	default:
-		opts.Type = ShareTypeFile
+		writeShareError(w, http.StatusBadRequest, "invalid share type", "INVALID_SHARE_TYPE")
+		return
 	}
 
 	if req.ExpiresIn != "" {
@@ -237,10 +248,15 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch req.Permission {
+	case "":
+		opts.Permission = PermissionRead
+	case "read":
+		opts.Permission = PermissionRead
 	case "read_write":
 		opts.Permission = PermissionReadWrite
 	default:
-		opts.Permission = PermissionRead
+		writeShareError(w, http.StatusBadRequest, "invalid permission", "INVALID_PERMISSION")
+		return
 	}
 
 	share, err := h.store.Create(opts)
@@ -337,6 +353,10 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 			expiresAt = &exp
 		}
 	}
+	if req.MaxAccess != nil && *req.MaxAccess < 0 {
+		writeShareError(w, http.StatusBadRequest, "invalid max_access", "INVALID_MAX_ACCESS")
+		return
+	}
 
 	share, err := h.store.Get(id)
 	if err != nil {
@@ -375,10 +395,14 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Permission != nil {
 			switch *req.Permission {
+			case "":
+				s.Permission = PermissionRead
+			case "read":
+				s.Permission = PermissionRead
 			case "read_write":
 				s.Permission = PermissionReadWrite
 			default:
-				s.Permission = PermissionRead
+				return errInvalidSharePermission
 			}
 		}
 		if req.MaxAccess != nil {
@@ -391,6 +415,10 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
+		if errors.Is(err, errInvalidSharePermission) {
+			writeShareError(w, http.StatusBadRequest, "invalid permission", "INVALID_PERMISSION")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
 		return
 	}
@@ -755,6 +783,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	relPath := r.URL.Query().Get("path")
 	relPath = strings.TrimPrefix(relPath, "/")
+	relPath = path.Clean(relPath)
 	if relPath == "." {
 		relPath = ""
 	}
@@ -798,7 +827,11 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	items := make([]*PublicShareItem, 0, len(entries))
 	for _, entry := range entries {
 		relItemPath, relErr := shareRelativePath(share.Path, entry.Path)
-		if relErr != nil || relItemPath == "." {
+		if relErr != nil {
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
+			return
+		}
+		if relItemPath == "." {
 			relItemPath = entry.Name
 		}
 		items = append(items, &PublicShareItem{
