@@ -471,8 +471,8 @@ func validatePath(filePath string) (string, error) {
 	// Clean the path first
 	cleaned := path.Clean("/" + filePath)
 
-	// Reject any path with .. components
-	if strings.Contains(filePath, "..") {
+	// Reject any path with .. segments while allowing legal names like foo..txt.
+	if hasTraversalSegment(filePath) {
 		return "", errors.New("invalid path")
 	}
 
@@ -482,6 +482,15 @@ func validatePath(filePath string) (string, error) {
 	}
 
 	return cleaned, nil
+}
+
+func hasTraversalSegment(filePath string) bool {
+	for _, segment := range strings.Split(filePath, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // validateHash validates a BLAKE3 hash string (64 hex characters).
