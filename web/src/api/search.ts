@@ -8,14 +8,13 @@ import { authFetch } from './auth'
 export interface SearchResult {
   name: string
   path: string
-  is_dir: boolean
+  isDir: boolean
   size: number
-  mod_time: string
+  modTime: string
   hash?: string
 }
 
 export interface SearchResponse {
-  success: boolean
   query: string
   results: SearchResult[]
   count: number
@@ -38,6 +37,19 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
     const error = await response.json()
     throw new Error(error.error || 'Search failed')
   }
-  
-  return response.json()
+
+  const result = await response.json()
+  const data = result.data ?? result
+  return {
+    query: data.query,
+    count: data.count,
+    results: (data.results || []).map((item: any) => ({
+      name: item.name,
+      path: item.path,
+      isDir: item.isDir ?? item.is_dir,
+      size: item.size,
+      modTime: item.modTime ?? item.mod_time,
+      hash: item.hash,
+    })),
+  }
 }

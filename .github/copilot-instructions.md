@@ -212,7 +212,7 @@ docker compose up -d
 
 **配置加载**（[internal/config/config.go](internal/config/config.go)）：
 - TOML 格式，默认目录 `~/.mnemonas/`
-- 候选路径：`./mnemonas.toml`、`/etc/mnemonas/config.toml`、`~/.config/mnemonas/config.toml`
+- 候选路径：`~/.mnemonas/config.toml`
 
 **WebDAV 实现**（[internal/webdav/handler.go](internal/webdav/handler.go)）：
 - 实现 RFC 4918（PROPFIND、GET、PUT、DELETE、MKCOL、COPY、MOVE、LOCK/UNLOCK）
@@ -242,7 +242,7 @@ docker compose up -d
 
 ## 配置说明
 
-`mnemonas.toml` 关键配置（参见 [mnemonas.example.toml](mnemonas.example.toml)）：
+`~/.mnemonas/config.toml` 关键配置（参见 [mnemonas.example.toml](mnemonas.example.toml)）：
 
 | 配置段 | 关键设置 |
 |---------|-------------|

@@ -48,8 +48,14 @@ pub struct CasConfig {
 
 impl Default for CasConfig {
     fn default() -> Self {
+        let default_root = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./data"))
+            .join(".mnemonas")
+            .join(".mnemonas")
+            .join("objects");
         Self {
-            root: PathBuf::from("/var/lib/mnemonas/cas"),
+            root: default_root,
             shard_levels: 2,
             shard_size: 2,
             compression_enabled: true,
@@ -72,6 +78,7 @@ pub struct CasStore {
 #[derive(Default)]
 pub struct CasStats {
     pub total_chunks: AtomicU64,
+    pub logical_size: AtomicU64,
     pub total_size: AtomicU64,
     pub compressed_size: AtomicU64,
     pub hit_count: AtomicU64,
@@ -130,6 +137,7 @@ impl CasStore {
     pub async fn put(&self, data: &[u8]) -> Result<String> {
         let hash = compute_hash(data);
         let original_size = data.len() as u64;
+        self.stats.logical_size.fetch_add(original_size, Ordering::Relaxed);
         
         // Atomic check-and-insert using entry API (C3 fix - prevents TOCTOU race)
         use dashmap::mapref::entry::Entry;
@@ -265,10 +273,11 @@ impl CasStore {
         }
     }
     
-    /// Get statistics (chunks, original_size, compressed_size, hits, misses)
-    pub fn stats(&self) -> (u64, u64, u64, u64, u64) {
+    /// Get statistics (chunks, logical_size, unique_size, compressed_size, hits, misses)
+    pub fn stats(&self) -> (u64, u64, u64, u64, u64, u64) {
         (
             self.stats.total_chunks.load(Ordering::Relaxed),
+            self.stats.logical_size.load(Ordering::Relaxed),
             self.stats.total_size.load(Ordering::Relaxed),
             self.stats.compressed_size.load(Ordering::Relaxed),
             self.stats.hit_count.load(Ordering::Relaxed),
@@ -522,6 +531,7 @@ impl CasStore {
         }
         
         self.stats.total_chunks.store(count, Ordering::Relaxed);
+        self.stats.logical_size.store(original_size, Ordering::Relaxed);
         self.stats.total_size.store(original_size, Ordering::Relaxed);
         self.stats.compressed_size.store(disk_size, Ordering::Relaxed);
         
@@ -578,9 +588,10 @@ mod tests {
         let hash2 = store.put(data).await.unwrap();
         assert_eq!(hash, hash2);
         
-        let (chunks, size, _compressed, hits, _) = store.stats();
+        let (chunks, logical_size, unique_size, _compressed, hits, _) = store.stats();
         assert_eq!(chunks, 1);
-        assert_eq!(size, data.len() as u64);
+        assert_eq!(logical_size, data.len() as u64 * 2);
+        assert_eq!(unique_size, data.len() as u64);
         assert_eq!(hits, 1); // Second put hits dedup
         
         // Delete
@@ -614,7 +625,7 @@ mod tests {
         assert_eq!(retrieved, data);
         
         // Check compression stats
-        let (chunks, original_size, compressed_size, _, _) = store.stats();
+        let (chunks, _logical_size, original_size, compressed_size, _, _) = store.stats();
         assert_eq!(chunks, 1);
         assert_eq!(original_size, data.len() as u64);
         

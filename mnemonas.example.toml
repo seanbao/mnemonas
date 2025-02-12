@@ -12,7 +12,7 @@ enabled = false              # 启用 HTTPS
 cert_file = ""               # 证书文件路径（留空使用 cert_dir 下的 server.crt）
 key_file = ""                # 私钥文件路径（留空使用 cert_dir 下的 server.key）
 auto_generate = true         # 自动生成自签名证书（适合内网/开发环境）
-cert_dir = ""                # 证书存放目录（默认 ~/.mnemonas/certs）
+cert_dir = ""                # 证书存放目录（默认 ~/.mnemonas/.mnemonas/certs）
 
 [storage]
 # 存储根目录，默认 ~/.mnemonas（无需 root 权限）
@@ -26,8 +26,8 @@ maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
 activity_dir = "~/.mnemonas/.mnemonas/activity"
 
 [storage.retention]
-max_versions = 100           # 每个文件最多保留100个版本
-max_age = "8760h"            # 版本保留1年
+max_versions = 50            # 每个文件最多保留50个版本
+max_age = "2160h"            # 版本保留90天
 min_free_space = 10737418240 # 最少保留10GB空闲空间
 gc_interval = "24h"          # 每24小时运行GC
 

@@ -6,7 +6,7 @@
 
 ### Basic Auth（当前支持）
 
-编辑 `mnemonas.toml`：
+编辑 `~/.mnemonas/config.toml`：
 
 ```toml
 [webdav]

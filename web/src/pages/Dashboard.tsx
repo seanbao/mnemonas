@@ -208,7 +208,9 @@ export function DashboardPage() {
     },
     {
       title: '去重率',
-      value: `${((stats?.dedupRatio || 1) * 100).toFixed(1)}%`,
+      value: stats?.dedupRatio !== undefined
+        ? `${(stats.dedupRatio * 100).toFixed(1)}%`
+        : '--',
       icon: Activity,
       trend: '存储效率',
       gradient: 'from-violet-500/20 to-fuchsia-500/20',
@@ -296,17 +298,18 @@ export function DashboardPage() {
             </div>
             <div className="h-2 rounded-full bg-content2 overflow-hidden">
               <div 
-                className="h-full rounded-full bg-accent-primary flow-line"
-                style={{ width: '30%' }}
+                className={stats?.totalSize ? "h-full rounded-full bg-accent-primary flow-line opacity-60" : "h-full rounded-full bg-accent-primary/30"}
+                style={{ width: stats?.totalSize ? '100%' : '0%' }}
               />
             </div>
+            <div className="text-xs text-default-400">容量未知</div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
               { label: '总对象数', value: stats?.totalObjects?.toLocaleString() || '0' },
               { label: '总大小', value: formatBytes(stats?.totalSize || 0) },
-              { label: '去重率', value: `${((stats?.dedupRatio || 1) * 100).toFixed(1)}%` },
+              { label: '去重率', value: stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--' },
               { label: '版本', value: health?.version || '-' },
             ].map((item, i) => (
               <div key={i} className="p-3 rounded-lg bg-content2/50 text-center">

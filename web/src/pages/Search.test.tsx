@@ -25,24 +25,24 @@ const mockSearchResults = [
   {
     name: 'document.pdf',
     path: '/documents/document.pdf',
-    is_dir: false,
+    isDir: false,
     size: 102400,
-    mod_time: '2024-01-15T10:00:00Z',
+    modTime: '2024-01-15T10:00:00Z',
     hash: 'abc123',
   },
   {
     name: 'photos',
     path: '/photos',
-    is_dir: true,
+    isDir: true,
     size: 0,
-    mod_time: '2024-01-10T08:00:00Z',
+    modTime: '2024-01-10T08:00:00Z',
   },
   {
     name: 'video.mp4',
     path: '/media/video.mp4',
-    is_dir: false,
+    isDir: false,
     size: 52428800,
-    mod_time: '2024-01-12T14:30:00Z',
+    modTime: '2024-01-12T14:30:00Z',
     hash: 'def456',
   },
 ]
@@ -80,7 +80,6 @@ describe('SearchPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(searchApi.searchFiles).mockResolvedValue({
-      success: true,
       query: 'test',
       results: mockSearchResults,
       count: mockSearchResults.length,
@@ -153,7 +152,6 @@ describe('SearchPage', () => {
 
     it('shows no results message when empty', async () => {
       vi.mocked(searchApi.searchFiles).mockResolvedValue({
-        success: true,
         query: 'notfound',
         results: [],
         count: 0,
@@ -225,7 +223,6 @@ describe('SearchPage', () => {
     it('shows loading spinner during search', async () => {
       vi.mocked(searchApi.searchFiles).mockImplementation(
         () => new Promise((resolve) => setTimeout(() => resolve({
-          success: true,
           query: 'test',
           results: mockSearchResults,
           count: mockSearchResults.length,

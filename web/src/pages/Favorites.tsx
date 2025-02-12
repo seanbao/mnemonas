@@ -216,11 +216,11 @@ export function FavoritesPage() {
     const isDir = path.endsWith('/')
     if (isDir) {
       // Go to the folder
-      navigate(`/files${path}`)
+      navigate(`/files${encodeURI(path)}`)
     } else {
       // Go to the parent folder and highlight the file
       const parentPath = getParentPath(path)
-      navigate(`/files${parentPath || '/'}`)
+      navigate(`/files${encodeURI(parentPath || '/')}`)
     }
   }, [navigate])
 

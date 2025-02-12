@@ -22,6 +22,7 @@ interface FilesState {
   selectFile: (path: string) => void
   deselectFile: (path: string) => void
   toggleFileSelection: (path: string) => void
+  setSelection: (paths: string[]) => void
   selectAll: (paths: string[]) => void
   clearSelection: () => void
   setViewMode: (mode: ViewMode) => void
@@ -57,6 +58,8 @@ export const useFilesStore = create<FilesState>((set) => ({
     }
     return { selectedFiles: newSet }
   }),
+
+  setSelection: (paths) => set({ selectedFiles: new Set(paths) }),
   
   selectAll: (paths) => set({ selectedFiles: new Set(paths) }),
   
