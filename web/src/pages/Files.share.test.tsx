@@ -129,7 +129,7 @@ describe('FilesPage sharing behavior', () => {
     })
   })
 
-  it('disables share action for folders in list view', async () => {
+  it('opens share dialog for folders with isFolder=true', async () => {
     await act(async () => {
       render(<FilesPage />)
       await Promise.resolve()
@@ -137,7 +137,15 @@ describe('FilesPage sharing behavior', () => {
 
     const shareButtons = await screen.findAllByText('创建分享链接')
     expect(shareButtons.length).toBeGreaterThan(1)
-    expect(shareButtons[0]).toBeDisabled()
+
+    await act(async () => {
+      shareButtons[0].click()
+      await Promise.resolve()
+    })
+
+    const dialog = await screen.findByTestId('share-dialog')
+    expect(dialog.getAttribute('data-open')).toBe('true')
+    expect(dialog.getAttribute('data-folder')).toBe('true')
   })
 
   it('opens share dialog for files with isFolder=false', async () => {

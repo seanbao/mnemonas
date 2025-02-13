@@ -13,17 +13,21 @@ import {
   AlertCircle,
   HardDrive,
   Folder,
+  ChevronLeft,
 } from 'lucide-react'
 import {
   getPublicShare,
   accessShareWithPassword,
   getShareDownloadUrl,
+  getShareFileDownloadUrl,
+  getPublicShareItems,
   type PublicShareInfo,
+  type PublicShareItem,
   ShareError,
 } from '@/api/share'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
-import { formatBytes } from '@/lib/utils'
+import { formatBytes, formatDate } from '@/lib/utils'
 
 export function ShareAccessPage() {
   const { id } = useParams<{ id: string }>()
@@ -34,6 +38,10 @@ export function ShareAccessPage() {
   const [password, setPassword] = useState('')
   const [isVerifying, setIsVerifying] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [folderItems, setFolderItems] = useState<PublicShareItem[]>([])
+  const [folderPath, setFolderPath] = useState('')
+  const [isListing, setIsListing] = useState(false)
+  const [listError, setListError] = useState<string | null>(null)
 
   const loadShareInfo = useCallback(async () => {
     if (!id) {
@@ -48,6 +56,9 @@ export function ShareAccessPage() {
     try {
       const info = await getPublicShare(id)
       setShareInfo(info)
+      if (info.type === 'folder') {
+        setFolderPath('')
+      }
       if (info.has_password) {
         setNeedsPassword(true)
       } else {
@@ -76,6 +87,9 @@ export function ShareAccessPage() {
     try {
       const info = await accessShareWithPassword(id, password)
       setShareInfo(info)
+      if (info.type === 'folder') {
+        setFolderPath('')
+      }
       setIsAuthenticated(true)
       setNeedsPassword(false)
     } catch (err) {
@@ -94,9 +108,49 @@ export function ShareAccessPage() {
 
   const handleDownload = () => {
     if (!id) return
-    const url = getShareDownloadUrl(id, needsPassword ? password : undefined)
+    const url = getShareDownloadUrl(id, shareInfo?.has_password ? password : undefined)
     window.open(url, '_blank')
   }
+
+  const handleDownloadItem = (itemPath: string) => {
+    if (!id) return
+    const url = getShareFileDownloadUrl(id, itemPath, shareInfo?.has_password ? password : undefined)
+    window.open(url, '_blank')
+  }
+
+  const handleEnterFolder = (item: PublicShareItem) => {
+    if (!item.is_dir) return
+    setFolderPath(item.path)
+  }
+
+  const handleNavigateUp = () => {
+    if (!folderPath) return
+    const segments = folderPath.split('/').filter(Boolean)
+    segments.pop()
+    setFolderPath(segments.join('/'))
+  }
+
+  const loadFolderItems = useCallback(async () => {
+    if (!id || !shareInfo || shareInfo.type !== 'folder' || !isAuthenticated) return
+
+    setIsListing(true)
+    setListError(null)
+    try {
+      const data = await getPublicShareItems(id, {
+        path: folderPath || undefined,
+        password: shareInfo.has_password ? password : undefined,
+      })
+      setFolderItems(data.items)
+    } catch (err) {
+      setListError(err instanceof Error ? err.message : '加载文件夹失败')
+    } finally {
+      setIsListing(false)
+    }
+  }, [id, shareInfo, isAuthenticated, folderPath, password])
+
+  useEffect(() => {
+    loadFolderItems()
+  }, [loadFolderItems])
 
   // Loading state
   if (isLoading) {
@@ -259,12 +313,79 @@ export function ShareAccessPage() {
           )}
 
           {shareInfo?.type === 'folder' && (
-            <EmptyState
-              icon={Folder}
-              title="暂不支持文件夹浏览"
-              description="文件夹浏览功能开发中..."
-              className="py-6"
-            />
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-default-500">
+                  <Folder size={16} />
+                  <span className="text-sm">
+                    {folderPath ? `/${folderPath}` : '根目录'}
+                  </span>
+                </div>
+                {folderPath && (
+                  <Button
+                    size="sm"
+                    variant="flat"
+                    onPress={handleNavigateUp}
+                    startContent={<ChevronLeft size={16} />}
+                  >
+                    返回上级
+                  </Button>
+                )}
+              </div>
+
+              {isListing && (
+                <div className="text-sm text-default-500">加载文件夹内容...</div>
+              )}
+              {listError && (
+                <div className="text-sm text-danger">{listError}</div>
+              )}
+
+              {!isListing && !listError && folderItems.length === 0 && (
+                <EmptyState
+                  icon={Folder}
+                  title="文件夹为空"
+                  description="当前目录没有可分享的内容"
+                  className="py-6"
+                />
+              )}
+
+              {!isListing && !listError && folderItems.length > 0 && (
+                <div className="space-y-2">
+                  {folderItems.map((item) => (
+                    <div
+                      key={item.path}
+                      className="flex items-center justify-between rounded-lg border border-divider/60 bg-content2/40 px-3 py-2"
+                    >
+                      <button
+                        type="button"
+                        className="flex items-center gap-3 text-left min-w-0"
+                        onClick={() => handleEnterFolder(item)}
+                        disabled={!item.is_dir}
+                      >
+                        <FileIcon name={item.name} isDir={item.is_dir} size={36} variant="tile" />
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-foreground truncate">{item.name}</div>
+                          <div className="text-xs text-default-500">
+                            {item.is_dir ? '文件夹' : formatBytes(item.size)}
+                            {item.mod_time && !item.is_dir && ` · ${formatDate(item.mod_time)}`}
+                          </div>
+                        </div>
+                      </button>
+                      {!item.is_dir && (
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          onPress={() => handleDownloadItem(item.path)}
+                          startContent={<Download size={16} />}
+                        >
+                          下载
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </CardBody>
       </Card>

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import {
   getPreviewType,
   buildPreviewUrl,
@@ -126,11 +126,9 @@ describe('getPreviewType', () => {
   })
 
   describe('special filename handling', () => {
-    // Note: Files without extensions return 'unsupported' in current implementation
-    // because early return happens before special case check
-    it('handles files without extensions as unsupported', () => {
-      expect(getPreviewType('Makefile')).toBe('unsupported')
-      expect(getPreviewType('Dockerfile')).toBe('unsupported')
+    it('handles special filenames without extensions', () => {
+      expect(getPreviewType('Makefile')).toBe('text')
+      expect(getPreviewType('Dockerfile')).toBe('text')
     })
 
     it('handles dotfiles with valid text extensions', () => {
@@ -169,6 +167,10 @@ describe('getPreviewType', () => {
 })
 
 describe('buildPreviewUrl', () => {
+  beforeEach(() => {
+    localStorage.removeItem('mnemonas_token')
+  })
+
   it('builds URL with WebDAV prefix', () => {
     expect(buildPreviewUrl('/documents/file.txt')).toBe(
       '/api/v1/download/documents/file.txt'
@@ -197,6 +199,20 @@ describe('buildPreviewUrl', () => {
 
   it('adds leading slash if missing', () => {
     expect(buildPreviewUrl('file.txt')).toBe('/api/v1/download/file.txt')
+  })
+
+  it('adds auth query when token exists', () => {
+    localStorage.setItem('mnemonas_token', 'test-token')
+    expect(buildPreviewUrl('/documents/file.txt')).toBe(
+      '/api/v1/download/documents/file.txt?auth=test-token'
+    )
+  })
+
+  it('skips auth query when includeAuth is false', () => {
+    localStorage.setItem('mnemonas_token', 'test-token')
+    expect(buildPreviewUrl('/documents/file.txt', { includeAuth: false })).toBe(
+      '/api/v1/download/documents/file.txt'
+    )
   })
 })
 

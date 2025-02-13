@@ -24,7 +24,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const imageRef = useRef<HTMLImageElement>(null)
 
-  const imageUrl = buildPreviewUrl(path)
+  const imageUrl = buildPreviewUrl(path, { includeAuth: false })
 
   // Fetch image with auth token and create blob URL
   useEffect(() => {

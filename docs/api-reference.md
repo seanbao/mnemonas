@@ -135,6 +135,14 @@ GET /api/v1/auth/me
 
 **需要认证**: 是
 
+### 退出登录
+
+```
+POST /api/v1/auth/logout
+```
+
+**需要认证**: 是
+
 ### 修改密码
 
 ```
@@ -247,6 +255,10 @@ GET /api/v1/setup/
   "webdav_password": "***"
 }
 ```
+
+**说明**:
+- 仅在 `is_first_run = true` 时返回 `web_password` / `webdav_password` 等凭据
+- `POST /api/v1/setup/acknowledge` 后不再返回凭据
 
 标记初始化已完成：
 
@@ -523,6 +535,7 @@ GET /api/v1/download/{path}
 **查询参数**:
 - `download`: 设置为 `true` 时强制下载（设置 `Content-Disposition`）
 - `version`: 指定版本哈希（64 位 BLAKE3）下载历史版本
+- `auth`: 可选，访问令牌（当浏览器无法设置 `Authorization` 头时用于预览/播放）
 
 **响应**: 返回文件二进制数据；当前版本支持 Range 请求，历史版本不保证 Range
 
@@ -558,6 +571,7 @@ GET /api/v1/thumbnails/{path}
 
 **查询参数**:
 - `size`: 缩略图尺寸，可选值: `small` (150px), `medium` (300px), `large` (600px)
+- `auth`: 可选，访问令牌（当浏览器无法设置 `Authorization` 头时使用）
 
 **支持格式**: JPEG, PNG, GIF, WebP
 
@@ -771,6 +785,10 @@ POST /api/v1/shares
 }
 ```
 
+**字段说明**:
+- `type`: `file` | `folder`
+- `permission`: `read` | `read_write`
+
 **响应示例**:
 ```json
 {
@@ -796,6 +814,9 @@ POST /api/v1/shares
 ```
 GET /api/v1/shares
 ```
+
+**查询参数**:
+- `all=true`: 管理员查看所有用户的分享
 
 **响应示例**:
 ```json
@@ -887,15 +908,43 @@ POST /s/{share_id}
 }
 ```
 
+**说明**:
+- 当分享不需要密码，或已通过密码验证后，会返回 `file_name` / `file_size` / `folder_items`
+
 **下载文件**:
 ```
 GET /s/{share_id}/download?password=xxx
+```
+
+**列出分享文件夹内容**:
+```
+GET /s/{share_id}/items?path=subdir&password=xxx
+```
+
+**响应示例**:
+```json
+{
+  "path": "subdir",
+  "items": [
+    {
+      "name": "report.pdf",
+      "path": "subdir/report.pdf",
+      "is_dir": false,
+      "size": 1234,
+      "mod_time": "2024-01-15T10:00:00Z"
+    }
+  ]
+}
 ```
 
 **下载分享文件夹内文件**:
 ```
 GET /s/{share_id}/download/{path}?password=xxx
 ```
+
+**说明**:
+- `{path}` 需要按路径段进行 URL 编码（保留 `/` 分隔）
+- `password` 仅在分享启用密码时必填
 
 ---
 
@@ -989,6 +1038,9 @@ POST /api/v1/favorites/check-batch
 DELETE /api/v1/favorites/{path}
 ```
 
+**说明**:
+- `{path}` 需要 URL 编码，支持包含 `/` 的完整路径
+
 **响应**: `204 No Content`
 
 ### 更新备注
@@ -996,6 +1048,9 @@ DELETE /api/v1/favorites/{path}
 ```
 PATCH /api/v1/favorites/{path}
 ```
+
+**说明**:
+- `{path}` 需要 URL 编码，支持包含 `/` 的完整路径
 
 **响应**: `204 No Content`
 
@@ -1193,6 +1248,9 @@ GET /api/v1/settings/webdav-credentials
 }
 ```
 
+**说明**:
+- `password` 仅在使用自动生成密码时可返回
+
 ---
 
 ## 维护操作
@@ -1380,7 +1438,7 @@ MnemoNAS 支持标准 WebDAV 协议，可用于文件管理器挂载。
 ## 版本变更记录
 
 ### v0.4.0
-- 新增认证系统 API（登录/注册/用户管理）
+- 新增认证系统 API（登录/用户管理）
 - 新增文件分享 API
 - 新增收藏夹 API
 - 新增活动日志 API

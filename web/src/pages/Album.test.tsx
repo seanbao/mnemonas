@@ -6,7 +6,7 @@ import { AlbumPage } from './Album'
 vi.mock('@/api/files', () => ({
   listFiles: vi.fn(),
   getDownloadUrl: vi.fn((path: string) => `/api/v1/download${path}?download=true`),
-  getThumbnailUrl: vi.fn((path: string) => `/api/v1/thumbnail${path}?size=medium`),
+  getThumbnailUrl: vi.fn((path: string) => `/api/v1/thumbnails${path}?size=medium`),
 }))
 
 import { listFiles } from '@/api/files'
