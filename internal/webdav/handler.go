@@ -657,10 +657,14 @@ func (h *Handler) destinationExists(ctx context.Context, dst string) bool {
 	return err == nil
 }
 
+func writeKnownWebDAVError(w http.ResponseWriter, known error, status int) {
+	http.Error(w, known.Error(), status)
+}
+
 func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, status int, expected ...error) bool {
 	for _, candidate := range expected {
 		if errors.Is(err, candidate) {
-			http.Error(w, candidate.Error(), status)
+			writeKnownWebDAVError(w, candidate, status)
 			return true
 		}
 	}
@@ -671,7 +675,7 @@ func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, sta
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
 	depth, err := h.parsePropfindDepth(r.Header.Get("Depth"))
 	if err != nil {
-		http.Error(w, errInvalidDepthHeader.Error(), http.StatusBadRequest)
+		writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
 		return
 	}
 

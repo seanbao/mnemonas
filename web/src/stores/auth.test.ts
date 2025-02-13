@@ -48,6 +48,10 @@ describe('authStore', () => {
     })
   })
 
+  afterEach(async () => {
+    await useAuthStore.getState().logout()
+  })
+
   it('completes admin login without waiting for setup acknowledgement', async () => {
     let resolveSetup: ((value: {
       success: boolean
@@ -125,5 +129,71 @@ describe('authStore', () => {
     expect(state.isAuthenticated).toBe(false)
     expect(state.isLoading).toBe(false)
     expect(state.error).toBe('登录已过期，请重新登录')
+  })
+
+  it('fails closed when current user validation throws even if a cached user exists', async () => {
+    getStoredTokenMock.mockReturnValue('access-1')
+    getStoredUserMock.mockReturnValue({
+      id: 'cached-1',
+      username: 'cached-admin',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+    })
+    getCurrentUserMock.mockRejectedValue(new Error('network down'))
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+  })
+
+  it('does not let a stale initialize result overwrite a successful login', async () => {
+    let resolveSetupStatus: ((value: {
+      success: boolean
+      is_first_run: boolean
+      auth_enabled: boolean
+      webdav_enabled: boolean
+      webdav_auth_type: string
+    }) => void) | null = null
+    let resolveCurrentUser: ((value: null) => void) | null = null
+
+    getStoredTokenMock.mockReturnValue('stale-token')
+    getSetupStatusMock.mockImplementation(() => new Promise((resolve) => {
+      resolveSetupStatus = resolve
+    }))
+    getCurrentUserMock.mockImplementation(() => new Promise((resolve) => {
+      resolveCurrentUser = resolve
+    }))
+    loginMock.mockResolvedValue({
+      id: 'user-1',
+      username: 'user',
+      role: 'user',
+      email: '',
+      homeDir: '/',
+    })
+
+    const initializePromise = useAuthStore.getState().initialize()
+
+    await expect(useAuthStore.getState().login('user', 'password')).resolves.toBeUndefined()
+
+    resolveSetupStatus?.({
+      success: true,
+      is_first_run: false,
+      auth_enabled: true,
+      webdav_enabled: true,
+      webdav_auth_type: 'basic',
+    })
+    await Promise.resolve()
+
+    resolveCurrentUser?.(null)
+    await initializePromise
+
+    const state = useAuthStore.getState()
+    expect(state.user?.username).toBe('user')
+    expect(state.isAuthenticated).toBe(true)
+    expect(state.isLoading).toBe(false)
   })
 })
