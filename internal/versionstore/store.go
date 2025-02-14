@@ -644,6 +644,15 @@ func (s *Store) DeleteFileIndex(ctx context.Context, path string) error {
 	return err
 }
 
+// CountFiles returns the number of indexed files
+func (s *Store) CountFiles(ctx context.Context) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // SearchFiles searches the file index
 func (s *Store) SearchFiles(ctx context.Context, query string, limit int) ([]string, error) {
 	query = "%" + strings.ToLower(query) + "%"

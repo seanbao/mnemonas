@@ -116,13 +116,13 @@ export function ShareAccessPage() {
   const handleDownload = () => {
     if (!id) return
     const url = getShareDownloadUrl(id, shareInfo?.has_password ? password : undefined)
-    window.open(url, '_blank')
+    window.open(url, '_blank', 'noopener,noreferrer')
   }
 
   const handleDownloadItem = (itemPath: string) => {
     if (!id) return
     const url = getShareFileDownloadUrl(id, itemPath, shareInfo?.has_password ? password : undefined)
-    window.open(url, '_blank')
+    window.open(url, '_blank', 'noopener,noreferrer')
   }
 
   const handleEnterFolder = (item: PublicShareItem) => {

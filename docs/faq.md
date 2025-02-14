@@ -224,8 +224,8 @@ curl http://localhost:9091/stats
 # 手动触发 scrub
 curl -X POST http://localhost:8080/api/v1/maintenance/scrub
 
-# 查看 scrub 历史
-curl http://localhost:8080/api/v1/maintenance/scrub/history
+# 查看最新 scrub 结果
+curl http://localhost:8080/api/v1/maintenance/scrub
 ```
 
 建议每月运行一次 scrub，使用维护接口或脚本触发。

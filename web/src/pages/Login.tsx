@@ -29,7 +29,6 @@ export function LoginPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [rememberMe, setRememberMe] = useState(false)
 
   // Initialize auth state on mount
   useEffect(() => {
@@ -193,16 +192,7 @@ export function LoginPage() {
                   />
                 </div>
 
-                <div className="flex items-center justify-between">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input
-                      type="checkbox"
-                      className="w-4 h-4 rounded-lg border-divider text-accent-primary focus:ring-accent-primary/20 transition-colors cursor-pointer"
-                      checked={rememberMe}
-                      onChange={(e) => setRememberMe(e.target.checked)}
-                    />
-                    <span className="text-sm text-default-600 group-hover:text-foreground transition-colors">记住登录状态</span>
-                  </label>
+                <div className="flex items-center justify-end">
                   <Button variant="light" size="sm" className="text-accent-primary rounded-xl" isDisabled>
                     忘记密码？
                   </Button>

@@ -484,7 +484,18 @@ func TestServer_Trash(t *testing.T) {
 }
 
 func TestServer_Stats(t *testing.T) {
-	server, _, _ := setupTestServer(t)
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/stats"); err != nil {
+		t.Fatalf("mkdir error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/stats/a.txt", bytes.NewReader([]byte("a"))); err != nil {
+		t.Fatalf("write file error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/stats/b.txt", bytes.NewReader([]byte("b"))); err != nil {
+		t.Fatalf("write file error: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/api/v1/stats", nil)
 	w := httptest.NewRecorder()
@@ -493,6 +504,20 @@ func TestServer_Stats(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Stats status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+	value, ok := payload.Data["total_files"].(float64)
+	if !ok {
+		t.Fatalf("total_files missing or invalid type")
+	}
+	if int(value) != 2 {
+		t.Errorf("total_files = %d, want 2", int(value))
 	}
 }
 
@@ -1023,6 +1048,25 @@ func TestServer_WebDAVCredentials_URLNormalized(t *testing.T) {
 	}
 	if payload.URL != "/dav/" {
 		t.Fatalf("expected url /dav/, got %q", payload.URL)
+	}
+}
+
+func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"webdav":{"prefix":"dav/"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.config.WebDAV.Prefix != "/dav" {
+		t.Fatalf("expected prefix normalized to /dav, got %q", server.config.WebDAV.Prefix)
 	}
 }
 

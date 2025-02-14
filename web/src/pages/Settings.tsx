@@ -33,7 +33,7 @@ import {
   CheckCircle2,
   Key,
 } from 'lucide-react'
-import { cn, parseByteSize, normalizeWebDAVPrefix, formatWebDAVUrl } from '@/lib/utils'
+import { cn, parseByteSize, normalizeWebDAVPrefix, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
@@ -101,18 +101,6 @@ export function SettingsPage() {
   const [showWebDAVPassword, setShowWebDAVPassword] = useState(false)
   const [copiedField, setCopiedField] = useState<string | null>(null)
   
-  // Helper function to format bytes
-  const formatBytes = (bytes: number): string => {
-    if (bytes >= 1024 * 1024 * 1024) {
-      return `${Math.round(bytes / 1024 / 1024 / 1024)}GB`
-    } else if (bytes >= 1024 * 1024) {
-      return `${Math.round(bytes / 1024 / 1024)}MB`
-    } else if (bytes >= 1024) {
-      return `${Math.round(bytes / 1024)}KB`
-    }
-    return `${bytes}B`
-  }
-  
   // Fetch settings from API
   const { data: settingsData, isLoading, error, refetch } = useQuery({
     queryKey: ['settings'],
@@ -127,8 +115,7 @@ export function SettingsPage() {
   })
 
   const webdavUrl = useMemo(() => {
-    if (!webdavCredentials?.url) return ''
-    return formatWebDAVUrl(window.location.origin, webdavCredentials.url)
+    return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
   }, [webdavCredentials?.url])
 
   // Copy to clipboard helper

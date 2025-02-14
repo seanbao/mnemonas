@@ -296,7 +296,7 @@ cd web && npm run build                             # 前端
 - **健康检查**：等待服务就绪后再继续
 - **日志管理**：所有日志写入 `logs/` 目录
 - **PID 跟踪**：使用 `.pids/` 目录跟踪进程，支持干净停止
-- **Node.js 版本**：检测 nvm 并自动切换到 Node.js 22
+- **Node.js 版本**：检测 nvm，优先使用 `web/.nvmrc`（默认 22）
 
 启动后的服务状态表：
 
@@ -448,8 +448,13 @@ cargo tarpaulin --out Html
 
 ### 前端测试
 
+> Vitest 依赖 `Array.prototype.findLastIndex`，需 Node.js 20+。
+
 ```bash
 cd web
+
+# 版本检查
+npm run check:node
 
 # 运行前端单元测试（一次性）
 npm run test:run

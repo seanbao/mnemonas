@@ -21,70 +21,106 @@ afterEach(() => {
   cleanup()
 })
 
-// Global HeroUI Table mock to avoid jsdom compatibility issues
-// HeroUI uses React Aria Collections which throws errors in jsdom
+// Mock HeroUI components to avoid jsdom incompatibilities.
 vi.mock('@heroui/react', async () => {
-  const actual = await vi.importActual('@heroui/react')
   const React = await import('react')
-  
-  // Mock Table components that have jsdom issues
-  const MockTable = ({
-    children,
-    'aria-label': ariaLabel,
-    // Strip HeroUI-only props to avoid React warnings
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    removeWrapper: _removeWrapper,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    classNames: _classNames,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    isStriped: _isStriped,
-    ...props
-  }: { 
-    children: React.ReactNode
-    'aria-label'?: string
-    removeWrapper?: boolean
-    classNames?: Record<string, string>
-    isStriped?: boolean
-  }) => 
-    React.createElement('div', { 'data-testid': 'heroui-table', role: 'table', 'aria-label': ariaLabel, ...props }, children)
-  
-  const MockTableHeader = ({ children }: { children: React.ReactNode }) => 
-    React.createElement('div', { 'data-testid': 'table-header', role: 'rowgroup' },
-      React.createElement('div', { role: 'row' }, children))
-  
-  const MockTableColumn = ({ children }: { children: React.ReactNode }) => 
-    React.createElement('div', { role: 'columnheader' }, children)
-  
-  const MockTableBody = ({ children, items, emptyContent }: { 
-    children: React.ReactNode | ((item: unknown) => React.ReactNode)
-    items?: unknown[]
-    emptyContent?: React.ReactNode 
-  }) => {
-    if (typeof children === 'function' && items) {
-      if (items.length === 0) {
-        return React.createElement('div', { 'data-testid': 'table-body', role: 'rowgroup' }, emptyContent)
-      }
-      return React.createElement('div', { 'data-testid': 'table-body', role: 'rowgroup' },
-        items.map((item, index) => React.createElement(React.Fragment, { key: index }, children(item))))
-    }
-    const childrenNode = typeof children === 'function' ? null : children
-    return React.createElement('div', { 'data-testid': 'table-body', role: 'rowgroup' }, childrenNode)
+  const noop = () => {}
+
+  const passthrough = (tag = 'div') => {
+    return ({ children, ...props }: { children?: React.ReactNode }) =>
+      React.createElement(tag, props, children)
   }
-  
-  const MockTableRow = ({ children, className }: { children: React.ReactNode; className?: string }) => 
-    React.createElement('div', { role: 'row', className }, children)
-  
-  const MockTableCell = ({ children }: { children: React.ReactNode }) => 
-    React.createElement('div', { role: 'cell' }, children)
+
+  const Button = ({ children, onPress, onClick, ...props }: { children?: React.ReactNode; onPress?: () => void; onClick?: () => void }) =>
+    React.createElement('button', { onClick: onClick ?? onPress, ...props }, children)
+
+  const Input = ({ value, onValueChange, onChange, ...props }: { value?: string; onValueChange?: (value: string) => void; onChange?: React.ChangeEventHandler<HTMLInputElement> }) =>
+    React.createElement('input', {
+      value: value ?? '',
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+        onValueChange?.(event.target.value)
+        onChange?.(event)
+      },
+      ...props,
+    })
+
+  const Switch = ({ isSelected, onValueChange, onChange, ...props }: { isSelected?: boolean; onValueChange?: (value: boolean) => void; onChange?: React.ChangeEventHandler<HTMLInputElement> }) =>
+    React.createElement('input', {
+      type: 'checkbox',
+      checked: !!isSelected,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+        onValueChange?.(event.target.checked)
+        onChange?.(event)
+      },
+      ...props,
+    })
+
+  const Select = ({ children, selectedKeys, onSelectionChange, ...props }: { children?: React.ReactNode; selectedKeys?: Iterable<string>; onSelectionChange?: (keys: Set<string>) => void }) => {
+    const selected = selectedKeys ? Array.from(selectedKeys)[0] ?? '' : ''
+    return React.createElement(
+      'select',
+      {
+        value: selected,
+        onChange: (event: React.ChangeEvent<HTMLSelectElement>) => {
+          onSelectionChange?.(new Set([event.target.value]))
+        },
+        ...props,
+      },
+      children
+    )
+  }
+
+  const SelectItem = ({ children, value, ...props }: { children?: React.ReactNode; value?: string }) =>
+    React.createElement('option', { value, ...props }, children)
+
+  const Tabs = ({ children }: { children?: React.ReactNode }) => React.createElement('div', null, children)
+  const Tab = ({ children }: { children?: React.ReactNode }) => React.createElement('div', null, children)
+
+  const Modal = ({ children, isOpen }: { children?: React.ReactNode; isOpen?: boolean }) =>
+    (isOpen ? React.createElement('div', null, children) : null)
+
+  const addToast = noop
+
+  // Table mocks (HeroUI Table uses React Aria Collections)
+  const Table = ({ children, 'aria-label': ariaLabel, ...props }: { children?: React.ReactNode; 'aria-label'?: string }) =>
+    React.createElement('div', { role: 'table', 'aria-label': ariaLabel, ...props }, children)
+  const TableHeader = ({ children }: { children?: React.ReactNode }) =>
+    React.createElement('div', { role: 'rowgroup' }, React.createElement('div', { role: 'row' }, children))
+  const TableColumn = passthrough('div')
+  const TableBody = ({ children }: { children?: React.ReactNode }) => passthrough('div')({ children })
+  const TableRow = passthrough('div')
+  const TableCell = passthrough('div')
 
   return {
-    ...actual,
-    Table: MockTable,
-    TableHeader: MockTableHeader,
-    TableColumn: MockTableColumn,
-    TableBody: MockTableBody,
-    TableRow: MockTableRow,
-    TableCell: MockTableCell,
+    Button,
+    Input,
+    Switch,
+    Select,
+    SelectItem,
+    Tabs,
+    Tab,
+    Modal,
+    ModalContent: passthrough('div'),
+    ModalHeader: passthrough('div'),
+    ModalBody: passthrough('div'),
+    ModalFooter: passthrough('div'),
+    Card: passthrough('div'),
+    CardBody: passthrough('div'),
+    CardHeader: passthrough('div'),
+    Dropdown: passthrough('div'),
+    DropdownTrigger: passthrough('div'),
+    DropdownMenu: passthrough('div'),
+    DropdownItem: passthrough('div'),
+    Chip: passthrough('span'),
+    Divider: passthrough('div'),
+    Snippet: passthrough('pre'),
+    addToast,
+    Table,
+    TableHeader,
+    TableColumn,
+    TableBody,
+    TableRow,
+    TableCell,
   }
 })
 
