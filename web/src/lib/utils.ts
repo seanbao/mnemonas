@@ -62,6 +62,34 @@ export function normalizePath(path: string): string {
 }
 
 /**
+ * Normalize WebDAV prefix input for config updates.
+ */
+export function normalizeWebDAVPrefix(prefix: string): string {
+  const trimmed = prefix.trim()
+  if (!trimmed || trimmed === '/') {
+    return '/'
+  }
+  const withSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  return withSlash.endsWith('/') ? withSlash.slice(0, -1) : withSlash
+}
+
+/**
+ * Format a WebDAV URL for display and copy.
+ */
+export function formatWebDAVUrl(origin: string, url: string): string {
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return origin
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed
+  }
+  const normalizedOrigin = origin.endsWith('/') ? origin.slice(0, -1) : origin
+  const normalizedPath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  return `${normalizedOrigin}${normalizedPath}`
+}
+
+/**
  * Encode path segments for URL use while preserving the path structure.
  */
 export function encodePathForUrl(path: string): string {

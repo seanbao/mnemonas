@@ -76,6 +76,7 @@ type ServerConfig struct {
 	// Share configuration
 	ShareEnabled   bool
 	ShareStoreFile string
+	ShareBaseURL   string
 	// Favorites configuration
 	FavoritesStoreFile string
 	// Config (for settings API)
@@ -207,6 +208,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			fsAdapter = &fileSystemAdapter{fs: s.fs}
 		}
 		s.shareHandler = share.NewHandler(shareStore, fsAdapter)
+		if cfg.ShareBaseURL != "" {
+			s.shareHandler.SetBaseURL(cfg.ShareBaseURL)
+		}
 		logger.Info().Msg("File sharing enabled")
 	}
 
@@ -2035,6 +2039,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if req.WebDAV.Password != nil {
 			s.config.WebDAV.Password = *req.WebDAV.Password
 		}
+		s.config.WebDAV.Prefix = config.NormalizeWebDAVPrefix(s.config.WebDAV.Prefix)
 	}
 
 	// Validate config
@@ -2094,7 +2099,7 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 	resp := WebDAVCredentialsResponse{
 		Success:  true,
 		Enabled:  s.config.WebDAV.Enabled,
-		URL:      s.config.WebDAV.Prefix + "/",
+		URL:      formatWebDAVPrefix(s.config.WebDAV.Prefix),
 		AuthType: s.config.WebDAV.AuthType,
 	}
 
@@ -2115,6 +2120,14 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func formatWebDAVPrefix(prefix string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(prefix), "/")
+	if trimmed == "" || trimmed == "/" {
+		return "/"
+	}
+	return trimmed + "/"
 }
 
 // SetupStatusResponse represents the setup status response

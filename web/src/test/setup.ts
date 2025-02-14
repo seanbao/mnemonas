@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom/vitest'
+import { webcrypto } from 'node:crypto'
 import { cleanup } from '@testing-library/react'
 import { afterEach, vi } from 'vitest'
 
@@ -7,6 +8,12 @@ declare const global: typeof globalThis & {
   ResizeObserver: typeof ResizeObserver
   IntersectionObserver: typeof IntersectionObserver
   URL: typeof URL
+  crypto: Crypto
+}
+
+if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') {
+  globalThis.crypto = webcrypto as Crypto
+  global.crypto = webcrypto as Crypto
 }
 
 // Cleanup after each test

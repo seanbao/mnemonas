@@ -44,6 +44,16 @@ max_age = "2160h"
 min_free_space = 10737418240
 gc_interval = "24h"
 
+[storage.versioning]
+auto_versioned_extensions = [".md", ".txt", ".go", ".rs", ".toml", ".yaml", ".json"]
+auto_versioned_filenames = ["README", "LICENSE", "CHANGELOG", "Dockerfile", "Makefile"]
+max_versioned_size = 104857600
+
+[storage.trash]
+enabled = true
+retention_days = 30
+max_size = 10737418240
+
 [dataplane]
 grpc_address = "127.0.0.1:9090"
 timeout = "30s"
@@ -61,6 +71,32 @@ read_only = false
 auth_type = "basic"
 username = "admin"
 password = "changeme"
+
+[auth]
+enabled = true
+jwt_secret = ""
+access_token_ttl = "15m"
+refresh_token_ttl = "168h"
+users_file = ""
+
+[share]
+enabled = false
+store_file = ""
+base_url = ""
+
+[favorites]
+enabled = true
+store_file = ""
+
+[alerts]
+enabled = false
+check_interval = "1h"
+threshold_pct = 90.0
+critical_pct = 95.0
+min_free_bytes = 10737418240
+cooldown_period = "4h"
+webhook_url = ""
+webhook_method = "POST"
 
 [log]
 level = "info"

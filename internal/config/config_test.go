@@ -99,6 +99,28 @@ func TestConfig_Validate(t *testing.T) {
 	}
 }
 
+func TestNormalizeWebDAVPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "adds leading slash", input: "dav", expected: "/dav"},
+		{name: "trims trailing slash", input: "/dav/", expected: "/dav"},
+		{name: "empty defaults to root", input: "", expected: "/"},
+		{name: "root stays root", input: "/", expected: "/"},
+		{name: "trims whitespace", input: " /dav ", expected: "/dav"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeWebDAVPrefix(tt.input); got != tt.expected {
+				t.Fatalf("NormalizeWebDAVPrefix(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestConfig_SaveLoad(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config", "config.toml")

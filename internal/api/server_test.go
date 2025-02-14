@@ -134,6 +134,10 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 }
 
 func setupShareServer(t *testing.T) (*Server, string) {
+	return setupShareServerWithBaseURL(t, "")
+}
+
+func setupShareServerWithBaseURL(t *testing.T, baseURL string) (*Server, string) {
 	client := setupDataplaneClient(t)
 	if client == nil {
 		t.Skip("dataplane not available, skipping test")
@@ -188,6 +192,7 @@ func setupShareServer(t *testing.T) (*Server, string) {
 		Config:         settings,
 		ShareEnabled:   true,
 		ShareStoreFile: shareStorePath,
+		ShareBaseURL:   baseURL,
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
@@ -387,6 +392,36 @@ func TestServer_PublicShareListItems(t *testing.T) {
 	}
 	if isDir, ok := paths["sub"]; !ok || !isDir {
 		t.Fatalf("expected sub directory in share items")
+	}
+}
+
+func TestServer_CreateShare_UsesBaseURL(t *testing.T) {
+	server, _ := setupShareServerWithBaseURL(t, "https://nas.example.com/")
+
+	body := `{"path":"/docs/a.txt","type":"file"}`
+	req := httptest.NewRequest("POST", "/api/v1/shares", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	urlValue, ok := payload["url"].(string)
+	if !ok {
+		t.Fatalf("expected url in response")
+	}
+	if !strings.HasPrefix(urlValue, "https://nas.example.com/s/") {
+		t.Fatalf("expected base URL applied, got %q", urlValue)
+	}
+	if strings.Contains(urlValue, "https://nas.example.com//s/") {
+		t.Fatalf("expected trimmed base URL, got %q", urlValue)
 	}
 }
 
@@ -953,6 +988,41 @@ func TestServer_WebDAVCredentials_CustomPassword(t *testing.T) {
 	}
 	if _, ok := payload["password"]; ok {
 		t.Fatalf("expected password to be omitted for custom WebDAV password")
+	}
+}
+
+func TestServer_WebDAVCredentials_URLNormalized(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	secrets := &config.Secrets{
+		WebDAVPassword: "auto-pass",
+	}
+	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
+
+	server.config.Storage.Root = tmpDir
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Password = ""
+	server.config.WebDAV.Prefix = "/dav/"
+
+	req := httptest.NewRequest("GET", "/api/v1/settings/webdav-credentials", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("WebDAV credentials status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.URL != "/dav/" {
+		t.Fatalf("expected url /dav/, got %q", payload.URL)
 	}
 }
 

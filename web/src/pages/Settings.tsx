@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Card, 
@@ -33,7 +33,7 @@ import {
   CheckCircle2,
   Key,
 } from 'lucide-react'
-import { cn, parseByteSize } from '@/lib/utils'
+import { cn, parseByteSize, normalizeWebDAVPrefix, formatWebDAVUrl } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
@@ -125,6 +125,11 @@ export function SettingsPage() {
     queryFn: getWebDAVCredentials,
     enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
   })
+
+  const webdavUrl = useMemo(() => {
+    if (!webdavCredentials?.url) return ''
+    return formatWebDAVUrl(window.location.origin, webdavCredentials.url)
+  }, [webdavCredentials?.url])
 
   // Copy to clipboard helper
   const handleCopy = async (field: string, value: string) => {
@@ -254,7 +259,7 @@ export function SettingsPage() {
       },
       webdav: {
         enabled: settings.webdavEnabled,
-        prefix: settings.webdavPrefix,
+        prefix: normalizeWebDAVPrefix(settings.webdavPrefix),
         read_only: settings.webdavReadOnly,
         auth_type: settings.webdavAuthType,
         username: settings.webdavUsername,
@@ -511,13 +516,13 @@ export function SettingsPage() {
                               hideSymbol
                               hideCopyButton
                             >
-                              {`${window.location.origin}${webdavCredentials.url}`}
+                              {webdavUrl}
                             </Snippet>
                             <Button
                               isIconOnly
                               size="sm"
                               variant="flat"
-                              onPress={() => handleCopy('url', `${window.location.origin}${webdavCredentials.url}`)}
+                              onPress={() => handleCopy('url', webdavUrl)}
                             >
                               {copiedField === 'url' ? (
                                 <CheckCircle2 size={16} className="text-success" />
