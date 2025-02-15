@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"path"
 	"runtime"
@@ -539,21 +540,33 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"uptime":    time.Since(s.startTime).String(),
 	}
 
-	// Check data plane health if connected
-	if s.dataplane != nil && s.dataplane.IsConnected() {
-		ctx, cancel := context.WithTimeout(r.Context(), DefaultHealthCheckTimeout*time.Second)
-		defer cancel()
-		if dpHealth, err := s.dataplane.Health(ctx); err == nil {
-			health["dataplane"] = map[string]any{
-				"healthy": dpHealth.Healthy,
-				"version": dpHealth.Version,
-				"uptime":  dpHealth.UptimeSecs,
-			}
-		} else {
-			s.logger.Warn().Err(err).Msg("dataplane health check failed")
+	// Reflect dataplane availability in the overall health status when configured.
+	if s.dataplane != nil {
+		if !s.dataplane.IsConnected() {
+			health["status"] = "degraded"
 			health["dataplane"] = map[string]any{
 				"healthy": false,
 				"status":  "unavailable",
+			}
+		} else {
+			ctx, cancel := context.WithTimeout(r.Context(), DefaultHealthCheckTimeout*time.Second)
+			defer cancel()
+			if dpHealth, err := s.dataplane.Health(ctx); err == nil {
+				health["dataplane"] = map[string]any{
+					"healthy": dpHealth.Healthy,
+					"version": dpHealth.Version,
+					"uptime":  dpHealth.UptimeSecs,
+				}
+				if !dpHealth.Healthy {
+					health["status"] = "degraded"
+				}
+			} else {
+				s.logger.Warn().Err(err).Msg("dataplane health check failed")
+				health["status"] = "degraded"
+				health["dataplane"] = map[string]any{
+					"healthy": false,
+					"status":  "unavailable",
+				}
 			}
 		}
 	}
@@ -612,7 +625,12 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	// Get directory listing
 	files, err := s.fs.ReadDir(r.Context(), filePath)
 	if err != nil {
-		s.respondNotFound(w, "list files", err)
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "list files", err)
+			return
+		}
+
+		s.respondInternalError(w, "list files", err)
 		return
 	}
 
@@ -780,11 +798,13 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		defer reader.Close()
 
 		if forceDownload {
-			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", path.Base(filePath)))
+			w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, reader)
+		if err := streamAPIResponse(w, reader); err != nil {
+			s.respondInternalError(w, "download file version", err)
+			return
+		}
 		return
 	}
 
@@ -818,7 +838,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	if forceDownload {
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", path.Base(filePath)))
+		w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 	}
 
 	// Use http.ServeContent for proper Range support and content type detection
@@ -856,6 +876,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.Rename(r.Context(), fromPath, toPath); err != nil {
+		if isStorageConflict(err) {
+			Conflict(w, "resource already exists")
+			return
+		}
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "move file", err)
 			return
@@ -917,6 +941,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 
 	// Write to destination
 	if err := s.fs.WriteFile(r.Context(), toPath, reader); err != nil {
+		if isStorageConflict(err) {
+			Conflict(w, "resource already exists")
+			return
+		}
 		s.respondInternalError(w, "copy file", err)
 		return
 	}
@@ -951,7 +979,12 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 			BadRequest(w, "cannot list versions for directory")
 			return
 		}
-		s.respondNotFound(w, "list versions", err)
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "list versions", err)
+			return
+		}
+
+		s.respondInternalError(w, "list versions", err)
 		return
 	}
 
@@ -1564,6 +1597,37 @@ func sanitizeScrubErrorMessage(message string) string {
 	return scrubFailurePublicMessage
 }
 
+func formatAttachmentHeader(filename string) string {
+	if value := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); value != "" {
+		return value
+	}
+	return "attachment"
+}
+
+func streamAPIResponse(w http.ResponseWriter, reader io.Reader) error {
+	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
+	_, err := io.Copy(trackingWriter, reader)
+	if err != nil && !trackingWriter.started {
+		return err
+	}
+	return nil
+}
+
+type apiDownloadResponseWriter struct {
+	http.ResponseWriter
+	started bool
+}
+
+func (w *apiDownloadResponseWriter) WriteHeader(statusCode int) {
+	w.started = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *apiDownloadResponseWriter) Write(p []byte) (int, error) {
+	w.started = true
+	return w.ResponseWriter.Write(p)
+}
+
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	stats := metrics.Global().GetStats()
 
@@ -1705,7 +1769,12 @@ func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
 
 	item, err := s.fs.GetTrashItem(r.Context(), id)
 	if err != nil {
-		s.respondNotFound(w, "get trash item", err)
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "get trash item", err)
+			return
+		}
+
+		s.respondInternalError(w, "get trash item", err)
 		return
 	}
 
@@ -1784,7 +1853,12 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
-		s.respondNotFound(w, "delete from trash", err)
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "delete from trash", err)
+			return
+		}
+
+		s.respondInternalError(w, "delete from trash", err)
 		return
 	}
 

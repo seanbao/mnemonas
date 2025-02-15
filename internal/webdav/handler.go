@@ -296,7 +296,11 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 	if parent != "/" {
 		parentInfo, err := h.fs.Stat(ctx, parent)
 		if err != nil {
-			http.Error(w, "parent directory not found", http.StatusConflict)
+			if errors.Is(err, storage.ErrNotFound) {
+				http.Error(w, "parent directory not found", http.StatusConflict)
+				return
+			}
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		if !parentInfo.IsDir {
