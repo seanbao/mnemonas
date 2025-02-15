@@ -681,6 +681,14 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 			respondPayloadTooLarge(w, fmt.Sprintf("file too large (max %d bytes)", DefaultMaxUploadSize))
 			return
 		}
+		if errors.Is(err, storage.ErrIsDir) {
+			BadRequest(w, "cannot upload to directory")
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
 		s.respondInternalError(w, "upload file", err)
 		return
 	}
@@ -717,6 +725,10 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 			}).WithMessage("directory already exists").Write(w, http.StatusOK)
 			return
 		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
 		s.respondInternalError(w, "create directory", err)
 		return
 	}
@@ -745,6 +757,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.Delete(r.Context(), filePath); err != nil {
+		if errors.Is(err, storage.ErrDirNotEmpty) {
+			Conflict(w, "directory not empty")
+			return
+		}
 		// Check if it's a "not found" error
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "delete file", err)
@@ -1043,6 +1059,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
+		if errors.Is(err, storage.ErrIsDir) {
+			BadRequest(w, "cannot restore version for directory")
+			return
+		}
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "restore version", err)
 			return

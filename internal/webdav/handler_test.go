@@ -244,6 +244,28 @@ func TestHandler_PUT_ParentStatUnexpectedErrorReturnsInternalServerError(t *test
 	}
 }
 
+func TestHandler_PUT_TargetStatUnexpectedErrorWithIfMatchReturnsInternalServerError(t *testing.T) {
+	handler, _, tmpDir := setupTestHandler(t)
+
+	loopPath := filepath.Join(tmpDir, "files", "loop-target")
+	if err := os.Symlink("loop-target", loopPath); err != nil {
+		t.Fatalf("Symlink() error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/loop-target", strings.NewReader("content"))
+	req.Header.Set("If-Match", "*")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("PUT target stat error with If-Match status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+		t.Fatalf("expected target stat failure to avoid false precondition response, got %q", w.Body.String())
+	}
+}
+
 func TestHandler_PUT_IfMatchStarOnMissingFileFails(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -403,6 +425,22 @@ func TestHandler_ConditionalGET(t *testing.T) {
 	t.Run("If-Unmodified-Since_PreconditionFailed", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
 		req.Header.Set("If-Unmodified-Since", info.ModTime.Add(-time.Minute).UTC().Format(http.TimeFormat))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+			t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("If-Unmodified-Since_Precedes_If-Modified-Since", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/dav/cond/file.txt", nil)
+		req.Header.Set("If-Unmodified-Since", info.ModTime.Add(-time.Minute).UTC().Format(http.TimeFormat))
+		req.Header.Set("If-Modified-Since", info.ModTime.Add(time.Minute).UTC().Format(http.TimeFormat))
 		w := httptest.NewRecorder()
 
 		handler.ServeHTTP(w, req)
