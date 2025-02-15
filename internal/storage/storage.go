@@ -340,6 +340,9 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 
 	fullPath := fs.workspace.FullPath(name)
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		if isPathNotDirError(err) {
+			return ErrNotDir
+		}
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
@@ -1548,6 +1551,10 @@ func movePath(src, dst string) error {
 		return err
 	}
 	return nil
+}
+
+func isPathNotDirError(err error) bool {
+	return errors.Is(err, syscall.ENOTDIR)
 }
 
 func copyDir(src, dst string) error {
