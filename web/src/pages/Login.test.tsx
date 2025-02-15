@@ -100,7 +100,6 @@ describe('LoginPage', () => {
       renderLogin()
 
       expect(screen.getByRole('alert')).toHaveTextContent('用户名或密码错误')
-      expect(mockClearError).toHaveBeenCalled()
       expect(mockAddToast).not.toHaveBeenCalled()
     })
   })

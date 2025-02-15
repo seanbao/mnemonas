@@ -27,17 +27,10 @@ import {
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { formatBytes, formatDate } from '@/lib/utils'
+import { getFolderPathAfterShareAuth } from './shareAccessUtils'
 
 function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
   return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
-}
-
-export function getFolderPathAfterShareAuth(currentFolderPath: string, info: PublicShareInfo): string {
-  if (info.type !== 'folder') {
-    return ''
-  }
-
-  return currentFolderPath
 }
 
 export function ShareAccessPage() {

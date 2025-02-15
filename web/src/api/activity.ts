@@ -34,9 +34,9 @@ async function handleResponse<T>(response: Response, errorMessage: string): Prom
     let message = errorMessage
     try {
       const body = await response.json() as ApiResponseWrapper<never> | { error?: string; message?: string }
-      if (typeof (body as { error?: string }).error === 'string') {
-        message = (body as { error?: string }).error || errorMessage
-      } else if ('error' in body && body.error?.message) {
+      if (typeof body.error === 'string') {
+        message = body.error || errorMessage
+      } else if (body.error && typeof body.error === 'object' && 'message' in body.error && typeof body.error.message === 'string') {
         message = body.error.message
       } else if (body.message) {
         message = body.message

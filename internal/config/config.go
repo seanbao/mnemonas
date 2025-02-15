@@ -178,7 +178,7 @@ func Default() *Config {
 	// Default storage root: ~/.mnemonas (user home directory)
 	storageRoot := getDefaultStorageRoot()
 
-	return &Config{
+	cfg := &Config{
 		Server: ServerConfig{
 			Host:         "0.0.0.0",
 			Port:         8080,
@@ -266,6 +266,9 @@ func Default() *Config {
 			TimeFormat: time.RFC3339,
 		},
 	}
+
+	applyStorageRootDefaults(cfg, storageRoot)
+	return cfg
 }
 
 func applyStorageRootDefaults(cfg *Config, defaultRoot string) {

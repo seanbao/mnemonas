@@ -30,6 +30,20 @@ func TestDefault(t *testing.T) {
 	if cfg.WebDAV.Prefix != "/dav" {
 		t.Errorf("Default WebDAV prefix = %s, want /dav", cfg.WebDAV.Prefix)
 	}
+
+	internalRoot := filepath.Join(cfg.Storage.Root, ".mnemonas")
+	if cfg.Server.TLS.CertDir != filepath.Join(internalRoot, "certs") {
+		t.Errorf("Default cert dir = %s, want %s", cfg.Server.TLS.CertDir, filepath.Join(internalRoot, "certs"))
+	}
+	if cfg.Auth.UsersFile != filepath.Join(internalRoot, "users.json") {
+		t.Errorf("Default users file = %s, want %s", cfg.Auth.UsersFile, filepath.Join(internalRoot, "users.json"))
+	}
+	if cfg.Share.StoreFile != filepath.Join(internalRoot, "shares.json") {
+		t.Errorf("Default share store = %s, want %s", cfg.Share.StoreFile, filepath.Join(internalRoot, "shares.json"))
+	}
+	if cfg.Favorites.StoreFile != filepath.Join(internalRoot, "favorites.json") {
+		t.Errorf("Default favorites store = %s, want %s", cfg.Favorites.StoreFile, filepath.Join(internalRoot, "favorites.json"))
+	}
 }
 
 func TestConfig_Validate(t *testing.T) {

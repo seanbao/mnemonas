@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
-import { ShareAccessPage, getFolderPathAfterShareAuth } from './ShareAccess'
+import { ShareAccessPage } from './ShareAccess'
+import { getFolderPathAfterShareAuth } from './shareAccessUtils'
 import { ShareError } from '@/api/share'
 
 const mockAddToast = vi.fn()
@@ -68,7 +69,7 @@ const renderWithRouter = (shareId: string) => {
   )
 }
 
-const NavigatingWrapper = ({ initialId, nextId }: { initialId: string; nextId: string }) => {
+const NavigatingWrapper = ({ nextId }: { nextId: string }) => {
   const navigate = useNavigate()
   return (
     <div>

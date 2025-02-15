@@ -767,7 +767,7 @@ func (s *Store) GetObject(hash string) ([]byte, error) {
 }
 
 // HasObject checks if an object exists
-func (s *Store) HasObject(hash string) bool {
+func (s *Store) HasObject(hash string) (bool, error) {
 	return s.objects.Has(context.Background(), hash)
 }
 

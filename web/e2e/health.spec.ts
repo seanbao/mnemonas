@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test } from '@playwright/test'
 
 /**
  * 注意：/health 路由被 Vite 代理到后端 API (http://localhost:8080/health)
