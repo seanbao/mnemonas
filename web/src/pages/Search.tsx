@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useCallback, useDeferredValue } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -55,30 +55,9 @@ function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: 
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
-  const initialQuery = searchParams.get('q') || ''
-  const urlQuery = searchParams.get('q') || ''
-  const [query, setQuery] = useState(initialQuery)
-  const [debouncedQuery, setDebouncedQuery] = useState(initialQuery)
+  const query = searchParams.get('q') || ''
   const trimmedQuery = query.trim()
-  const trimmedDebouncedQuery = debouncedQuery.trim()
-
-  useEffect(() => {
-    setQuery((current) => current === urlQuery ? current : urlQuery)
-    setDebouncedQuery((current) => current === urlQuery ? current : urlQuery)
-  }, [urlQuery])
-
-  // Debounce search query
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedQuery(query)
-      if (trimmedQuery) {
-        setSearchParams({ q: trimmedQuery })
-      } else {
-        setSearchParams({})
-      }
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [query, setSearchParams, trimmedQuery])
+  const trimmedDebouncedQuery = useDeferredValue(trimmedQuery)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['search', trimmedDebouncedQuery],
@@ -98,14 +77,21 @@ export function SearchPage() {
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
-      setDebouncedQuery(query)
       if (trimmedQuery) {
-        setSearchParams({ q: trimmedQuery })
+        setSearchParams({ q: query })
       } else {
         setSearchParams({})
       }
     }
   }, [query, setSearchParams, trimmedQuery])
+
+  const handleQueryChange = useCallback((value: string) => {
+    if (value.trim()) {
+      setSearchParams({ q: value })
+      return
+    }
+    setSearchParams({})
+  }, [setSearchParams])
 
   return (
     <div className="h-full flex flex-col p-6">
@@ -133,7 +119,7 @@ export function SearchPage() {
         <Input
           placeholder="输入文件名搜索..."
           value={query}
-          onValueChange={setQuery}
+          onValueChange={handleQueryChange}
           onKeyDown={handleKeyDown}
           startContent={<SearchIcon size={18} className="text-default-500" />}
           autoFocus

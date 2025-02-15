@@ -5,7 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
 if (!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') {
-  globalThis.crypto = webcrypto as Crypto
+  globalThis.crypto = webcrypto as typeof globalThis.crypto
 }
 
 // https://vite.dev/config/

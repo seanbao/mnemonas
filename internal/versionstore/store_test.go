@@ -16,12 +16,17 @@ import (
 )
 
 // testDataplaneAddr is the address of the test dataplane server
-const testDataplaneAddr = "127.0.0.1:9090"
+func testDataplaneAddr() string {
+	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:9090"
+}
 
 // setupDataplaneClient creates a dataplane client for testing
 // Returns nil if dataplane is not available
 func setupDataplaneClient(t *testing.T) *dataplane.Client {
-	client := dataplane.NewClient(testDataplaneAddr)
+	client := dataplane.NewClient(testDataplaneAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -664,7 +669,11 @@ func TestStore_Objects(t *testing.T) {
 	}
 
 	// Check exists
-	if !s.HasObject(hash) {
+	exists, err := s.HasObject(hash)
+	if err != nil {
+		t.Fatalf("HasObject() error: %v", err)
+	}
+	if !exists {
 		t.Error("HasObject() returned false for existing object")
 	}
 
@@ -684,7 +693,11 @@ func TestStore_Objects(t *testing.T) {
 		t.Fatalf("DeleteObject() error: %v", err)
 	}
 
-	if s.HasObject(hash) {
+	exists, err = s.HasObject(hash)
+	if err != nil {
+		t.Fatalf("HasObject() after delete error: %v", err)
+	}
+	if exists {
 		t.Error("HasObject() returned true after delete")
 	}
 }

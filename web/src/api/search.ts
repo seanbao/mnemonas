@@ -32,6 +32,17 @@ export interface SearchResponse {
   count: number
 }
 
+interface SearchResultWire {
+  name: string
+  path: string
+  isDir?: boolean
+  is_dir?: boolean
+  size: number
+  modTime?: string
+  mod_time?: string
+  hash?: string
+}
+
 /**
  * Search for files matching the query
  * @param query - Search query (case-insensitive substring match)
@@ -71,12 +82,12 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
   return {
     query: data.query,
     count: data.count,
-    results: (data.results || []).map((item: any) => ({
+    results: (data.results || []).map((item: SearchResultWire) => ({
       name: item.name,
       path: item.path,
-      isDir: item.isDir ?? item.is_dir,
+      isDir: item.isDir ?? item.is_dir ?? false,
       size: item.size,
-      modTime: item.modTime ?? item.mod_time,
+      modTime: item.modTime ?? item.mod_time ?? '',
       hash: item.hash,
     })),
   }

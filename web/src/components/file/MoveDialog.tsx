@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -39,15 +39,15 @@ export function MoveDialog({
   const actionText = mode === 'move' ? '移动' : '复制'
   const Icon = mode === 'move' ? Move : Move // Could use different icons
 
-  useEffect(() => {
-    if (!isOpen) return
+  // Exclude paths that cannot be moved into (self and descendants)
+  const excludePaths = pendingFiles.map(f => f.path)
+
+  const resetState = useCallback(() => {
     setPendingFiles(files)
     setTargetPath(null)
     setIsPickerOpen(false)
-  }, [isOpen, files])
-
-  // Exclude paths that cannot be moved into (self and descendants)
-  const excludePaths = pendingFiles.map(f => f.path)
+    setIsProcessing(false)
+  }, [files])
 
   const handleSelectTarget = useCallback((path: string) => {
     setTargetPath(path)
@@ -85,7 +85,7 @@ export function MoveDialog({
 
     // Show result
     if (errorCount === 0) {
-      setIsProcessing(false)
+      resetState()
       onClose()
       addToast({
         title: `成功${actionText} ${successCount} 个项目`,
@@ -110,13 +110,12 @@ export function MoveDialog({
         color: 'danger',
       })
     }
-  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText])
+  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText, resetState])
 
   const handleClose = useCallback(() => {
-    setTargetPath(null)
-    setPendingFiles(files)
+    resetState()
     onClose()
-  }, [files, onClose])
+  }, [onClose, resetState])
 
   return (
     <>

@@ -32,6 +32,7 @@ export function LoginPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const usernameInputId = 'login-username'
   const passwordInputId = 'login-password'
+  const displayError = formError ?? error
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -40,14 +41,6 @@ export function LoginPage() {
       navigate(from, { replace: true })
     }
   }, [isAuthenticated, navigate, location])
-
-  // Show error toast
-  useEffect(() => {
-    if (error) {
-      setFormError(error)
-      clearError()
-    }
-  }, [error, clearError])
 
   const handleUsernameChange = (value: string) => {
     setUsername(value)
@@ -81,11 +74,12 @@ export function LoginPage() {
     try {
       setFormError(null)
       await login(trimmedUsername, password)
+      clearError()
       addToast({ title: '登录成功', color: 'success' })
       const from = (location.state as { from?: string })?.from || '/'
       navigate(from, { replace: true })
     } catch {
-      // Error is handled by auth store and shown via error useEffect
+      // Error is exposed by auth store and rendered via displayError.
     }
   }
 
@@ -161,9 +155,9 @@ export function LoginPage() {
                 <p className="text-default-500 mt-2">请登录以继续访问系统</p>
               </div>
 
-              {formError && (
+              {displayError && (
                 <div role="alert" className="rounded-xl border border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">
-                  {formError}
+                  {displayError}
                 </div>
               )}
 

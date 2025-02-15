@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -89,6 +90,9 @@ func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return nil, ErrNotDir
+		}
 		return nil, err
 	}
 
@@ -109,6 +113,9 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return nil, ErrNotDir
 		}
 		return nil, err
 	}
@@ -142,6 +149,9 @@ func (w *Workspace) OpenFile(ctx context.Context, name string) (*os.File, error)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return nil, ErrNotDir
+		}
 		return nil, err
 	}
 
@@ -161,6 +171,9 @@ func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return nil, ErrNotDir
+		}
 		return nil, err
 	}
 
@@ -177,6 +190,9 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 
 	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 
@@ -185,6 +201,9 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 
@@ -215,6 +234,9 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 
 	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 
@@ -223,6 +245,9 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 
@@ -259,8 +284,18 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 		}
 		return ErrNotDir
 	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		return ErrNotDir
+	}
 
-	return os.MkdirAll(fullPath, 0755)
+	if err := os.MkdirAll(fullPath, 0755); err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
+		return err
+	}
+
+	return nil
 }
 
 // Delete removes a file or empty directory
@@ -308,15 +343,34 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
 		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
+		return err
+	}
+
+	if _, err := os.Stat(newPath); err == nil {
+		return ErrAlreadyExists
+	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 		return err
 	}
 
 	// Ensure destination parent exists
 	if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 
-	return os.Rename(oldPath, newPath)
+	if err := os.Rename(oldPath, newPath); err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
+		return err
+	}
+
+	return nil
 }
 
 // Copy copies a file
@@ -386,13 +440,13 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 
 	return filepath.Walk(rootPath, func(absPath string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // Skip errors
+			return err
 		}
 
 		// Compute relative path
 		relPath, err := filepath.Rel(w.root, absPath)
 		if err != nil {
-			return nil
+			return err
 		}
 
 		cleanPath := "/" + filepath.ToSlash(relPath)
@@ -414,7 +468,7 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 func (w *Workspace) CleanupStaging(ctx context.Context) (files int, bytes int64, err error) {
 	err = filepath.Walk(w.root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
-			return nil // Continue on error
+			return walkErr
 		}
 
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".tmp") {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
@@ -124,17 +124,12 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
 export function VersionsPage() {
   const isAdmin = useIsAdmin()
   const [searchParams, setSearchParams] = useSearchParams()
-  const [searchPath, setSearchPath] = useState('')
-  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const initialPath = (searchParams.get('path') || '').trim()
+  const normalizedInitialPath = initialPath ? (initialPath.startsWith('/') ? initialPath : `/${initialPath}`) : ''
+  const [searchPath, setSearchPath] = useState(normalizedInitialPath)
+  const [selectedPath, setSelectedPath] = useState<string | null>(normalizedInitialPath || null)
   const [selectedVersion, setSelectedVersion] = useState<VersionInfo | null>(null)
   const { isOpen, onOpen, onClose } = useDisclosure()
-
-  useEffect(() => {
-    const paramPath = (searchParams.get('path') || '').trim()
-    const normalizedPath = paramPath ? (paramPath.startsWith('/') ? paramPath : `/${paramPath}`) : ''
-    setSearchPath(normalizedPath)
-    setSelectedPath(normalizedPath || null)
-  }, [searchParams])
   const queryClient = useQueryClient()
 
   const { data: versions, isLoading, error, refetch } = useQuery({

@@ -49,7 +49,6 @@ test.describe('回收站批量操作', () => {
 
   test('清空回收站按钮应可见（有内容时）', async ({ page }) => {
     // 清空按钮可能只在有内容时显示
-    const emptyTrashBtn = page.getByRole('button', { name: /清空回收站/i })
     const body = page.locator('body')
     
     // 页面应正常渲染

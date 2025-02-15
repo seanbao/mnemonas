@@ -241,7 +241,7 @@ func main() {
 		prefix := cfg.WebDAV.Prefix
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Route to WebDAV handler if path matches prefix
-			if len(r.URL.Path) >= len(prefix) && r.URL.Path[:len(prefix)] == prefix {
+			if matchesWebDAVPrefix(prefix, r.URL.Path) {
 				davHandler.ServeHTTP(w, r)
 				return
 			}
@@ -361,4 +361,16 @@ func loadConfig(path string) (*config.Config, string, error) {
 
 	log.Info().Msg("using default config")
 	return config.Default(), "", nil
+}
+
+func matchesWebDAVPrefix(prefix, requestPath string) bool {
+	if requestPath == prefix {
+		return true
+	}
+
+	if prefix == "/" {
+		return true
+	}
+
+	return len(requestPath) > len(prefix) && requestPath[:len(prefix)] == prefix && requestPath[len(prefix)] == '/'
 }

@@ -50,7 +50,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
           currentBlobUrl = URL.createObjectURL(blob)
           setBlobUrl(currentBlobUrl)
         }
-      } catch (err) {
+      } catch {
         if (!cancelled) {
           setError('无法加载图片')
           setIsLoading(false)
