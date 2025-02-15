@@ -127,6 +127,20 @@ describe('DashboardPage', () => {
       })
     })
 
+    it('shows unhealthy status when system is degraded', async () => {
+      mockGetHealth.mockResolvedValueOnce({
+        status: 'degraded',
+        version: '0.1.0',
+        uptime: '1h30m',
+      })
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('异常')).toBeTruthy()
+      })
+    })
+
     it('displays storage statistics', async () => {
       render(<DashboardPage />)
       
