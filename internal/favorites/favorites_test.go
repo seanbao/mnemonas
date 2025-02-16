@@ -1,6 +1,7 @@
 package favorites
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -176,6 +177,24 @@ func TestStoreEmptyFile(t *testing.T) {
 	}
 }
 
+func TestStore_RejectsSymlinkPathOnLoad(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "real-favorites.json")
+	symlinkPath := filepath.Join(tmpDir, "favorites.json")
+
+	if err := os.WriteFile(targetPath, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to write target store: %v", err)
+	}
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	_, err := NewStore(symlinkPath)
+	if !errors.Is(err, errFavoritesStoreSymlink) {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+}
+
 func TestStore_ReturnedFavoritesAreDetachedCopies(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
@@ -232,5 +251,36 @@ func TestStore_RollsBackFailedMutations(t *testing.T) {
 	}
 	if !store.IsFavorite("user1", "/docs/file.txt") {
 		t.Fatal("expected failed remove to keep favorite in store")
+	}
+}
+
+func TestStore_AddRejectsSymlinkPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	targetPath := filepath.Join(tmpDir, "real-favorites.json")
+	if err := os.WriteFile(targetPath, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to write target store: %v", err)
+	}
+	symlinkPath := filepath.Join(tmpDir, "favorites-link.json")
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+	store.filePath = symlinkPath
+
+	fav, err := store.Add("user1", "/docs/file.txt", "note")
+	if !errors.Is(err, errFavoritesStoreSymlink) {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+	if fav != nil {
+		t.Fatal("expected failed add to return nil favorite")
+	}
+	if store.Count("user1") != 0 {
+		t.Fatalf("expected failed add to roll back store state, got %d favorites", store.Count("user1"))
 	}
 }

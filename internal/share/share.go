@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	ErrShareNotFound    = errors.New("share not found")
-	ErrShareExpired     = errors.New("share has expired")
-	ErrShareAccessLimit = errors.New("share access limit reached")
-	ErrInvalidPassword  = errors.New("invalid password")
-	ErrShareDisabled    = errors.New("share is disabled")
+	ErrShareNotFound     = errors.New("share not found")
+	ErrShareExpired      = errors.New("share has expired")
+	ErrShareAccessLimit  = errors.New("share access limit reached")
+	ErrInvalidPassword   = errors.New("invalid password")
+	ErrShareDisabled     = errors.New("share is disabled")
+	errShareStoreSymlink = errors.New("share store path must not be a symlink")
 )
 
 // ShareType represents the type of shared resource
@@ -108,6 +109,12 @@ type ShareStore struct {
 	filePath string
 }
 
+type authorizedAccessReservation struct {
+	id                 string
+	currentLastAccess  time.Time
+	previousLastAccess *time.Time
+}
+
 // NewShareStore creates a new share store
 func NewShareStore(filePath string) (*ShareStore, error) {
 	store := &ShareStore{
@@ -124,6 +131,9 @@ func NewShareStore(filePath string) (*ShareStore, error) {
 }
 
 func (s *ShareStore) load() error {
+	if err := validateShareStorePath(s.filePath); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(s.filePath)
 	if err != nil {
 		return err
@@ -156,20 +166,68 @@ func (s *ShareStore) save() error {
 		return fmt.Errorf("failed to serialize shares: %w", err)
 	}
 
-	dir := filepath.Dir(s.filePath)
+	if err := writeShareStoreFile(s.filePath, data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateShareStorePath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat share store: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errShareStoreSymlink
+	}
+	return nil
+}
+
+func writeShareStoreFile(path string, data []byte) error {
+	if err := validateShareStorePath(path); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	tmpFile := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	tmpFile, err := os.CreateTemp(dir, ".shares-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp shares file: %w", err)
 	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	if err := os.Rename(tmpFile, s.filePath); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename file: %w", err)
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to set temp shares permissions: %w", err)
 	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write shares file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync shares file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp shares file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to replace shares file: %w", err)
+	}
+	cleanup = false
 
 	return nil
 }
@@ -406,16 +464,24 @@ func (s *ShareStore) RecordAccess(id string) error {
 
 // RecordAuthorizedAccess validates access constraints and records an access atomically.
 func (s *ShareStore) RecordAuthorizedAccess(id string) (*Share, error) {
+	share, _, err := s.reserveAuthorizedAccess(id)
+	if err != nil {
+		return nil, err
+	}
+	return share, nil
+}
+
+func (s *ShareStore) reserveAuthorizedAccess(id string) (*Share, *authorizedAccessReservation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	share, ok := s.shares[id]
 	if !ok {
-		return nil, ErrShareNotFound
+		return nil, nil, ErrShareNotFound
 	}
 
 	if err := share.CanAccess(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	prev := copyShare(share)
@@ -425,10 +491,44 @@ func (s *ShareStore) RecordAuthorizedAccess(id string) (*Share, error) {
 
 	if err := s.save(); err != nil {
 		*share = *prev
-		return nil, err
+		return nil, nil, err
 	}
 
-	return copyShare(share), nil
+	return copyShare(share), &authorizedAccessReservation{
+		id:                 id,
+		currentLastAccess:  now,
+		previousLastAccess: cloneTimePtr(prev.LastAccess),
+	}, nil
+}
+
+func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReservation) error {
+	if reservation == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	share, ok := s.shares[reservation.id]
+	if !ok {
+		return ErrShareNotFound
+	}
+	if share.AccessCount == 0 {
+		return nil
+	}
+
+	prev := copyShare(share)
+	share.AccessCount--
+	if share.LastAccess != nil && share.LastAccess.Equal(reservation.currentLastAccess) {
+		share.LastAccess = cloneTimePtr(reservation.previousLastAccess)
+	}
+
+	if err := s.save(); err != nil {
+		*share = *prev
+		return err
+	}
+
+	return nil
 }
 
 // Access validates and records access to a share
@@ -478,6 +578,14 @@ func copyShare(share *Share) *Share {
 	}
 
 	return &copy
+}
+
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func generateShareID() (string, error) {

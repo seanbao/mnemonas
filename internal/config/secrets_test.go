@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,35 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 
 		if info.Mode().Perm() != 0600 {
 			t.Errorf("secrets file permissions incorrect: got %o, want 0600", info.Mode().Perm())
+		}
+	})
+
+	t.Run("tightens permissions for existing secrets file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+		data, err := json.Marshal(&Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+		if err != nil {
+			t.Fatalf("failed to marshal secrets: %v", err)
+		}
+		if err := os.WriteFile(secretsPath, data, 0644); err != nil {
+			t.Fatalf("failed to write existing secrets: %v", err)
+		}
+
+		_, isNew, err := LoadOrCreateSecrets(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadOrCreateSecrets failed: %v", err)
+		}
+		if isNew {
+			t.Fatal("expected existing secrets to load without recreation")
+		}
+
+		info, err := os.Stat(secretsPath)
+		if err != nil {
+			t.Fatalf("failed to stat secrets file: %v", err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("expected existing secrets permissions to be tightened to 0600, got %o", info.Mode().Perm())
 		}
 	})
 
@@ -90,6 +120,14 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		if err == nil {
 			t.Error("expected error for invalid JSON, got nil")
 		}
+
+		info, statErr := os.Stat(secretsPath)
+		if statErr != nil {
+			t.Fatalf("failed to stat invalid secrets file: %v", statErr)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("expected invalid secrets file permissions to be tightened to 0600, got %o", info.Mode().Perm())
+		}
 	})
 
 	t.Run("preserves existing secrets content", func(t *testing.T) {
@@ -121,6 +159,144 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 			t.Errorf("WebDAVPassword changed: got %s, want %s", secrets.WebDAVPassword, customWebDAV)
 		}
 	})
+}
+
+func TestSaveSecrets_TightensExistingFilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+	if err := os.WriteFile(secretsPath, []byte(`{"jwt_secret":"old"}`), 0644); err != nil {
+		t.Fatalf("failed to seed secrets file: %v", err)
+	}
+
+	if err := SaveSecrets(tmpDir, &Secrets{JWTSecret: "new", WebDAVPassword: "password"}); err != nil {
+		t.Fatalf("SaveSecrets failed: %v", err)
+	}
+
+	info, err := os.Stat(secretsPath)
+	if err != nil {
+		t.Fatalf("failed to stat secrets file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected SaveSecrets to tighten permissions to 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestLoadSecrets_TightensExistingFilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+	data, err := json.Marshal(&Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if err != nil {
+		t.Fatalf("failed to marshal secrets: %v", err)
+	}
+	if err := os.WriteFile(secretsPath, data, 0644); err != nil {
+		t.Fatalf("failed to seed secrets file: %v", err)
+	}
+
+	secrets, err := LoadSecrets(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadSecrets failed: %v", err)
+	}
+	if secrets == nil {
+		t.Fatal("expected secrets to load")
+	}
+
+	info, err := os.Stat(secretsPath)
+	if err != nil {
+		t.Fatalf("failed to stat secrets file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected LoadSecrets to tighten permissions to 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestLoadSecrets_TightensInvalidExistingFilePermissionsBeforeParseError(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+	if err := os.WriteFile(secretsPath, []byte("not valid json"), 0644); err != nil {
+		t.Fatalf("failed to seed invalid secrets file: %v", err)
+	}
+
+	_, err := LoadSecrets(tmpDir)
+	if err == nil {
+		t.Fatal("expected LoadSecrets to fail on invalid JSON")
+	}
+
+	info, statErr := os.Stat(secretsPath)
+	if statErr != nil {
+		t.Fatalf("failed to stat invalid secrets file: %v", statErr)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected invalid secrets file permissions to be tightened to 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestSaveSecrets_RejectsSymlinkPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "sensitive.json")
+	secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+	if err := os.WriteFile(targetPath, []byte(`{"keep":"original"}`), 0600); err != nil {
+		t.Fatalf("failed to seed target file: %v", err)
+	}
+	if err := os.Symlink(targetPath, secretsPath); err != nil {
+		t.Fatalf("failed to create symlink secrets path: %v", err)
+	}
+
+	err := SaveSecrets(tmpDir, &Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if !errors.Is(err, errSecretsFileSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read target file: %v", err)
+	}
+	if string(data) != `{"keep":"original"}` {
+		t.Fatalf("expected target file to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestLoadSecrets_RejectsSymlinkPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "sensitive.json")
+	secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+	data, err := json.Marshal(&Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if err != nil {
+		t.Fatalf("failed to marshal secrets: %v", err)
+	}
+	if err := os.WriteFile(targetPath, data, 0600); err != nil {
+		t.Fatalf("failed to seed target file: %v", err)
+	}
+	if err := os.Symlink(targetPath, secretsPath); err != nil {
+		t.Fatalf("failed to create symlink secrets path: %v", err)
+	}
+
+	_, err = LoadSecrets(tmpDir)
+	if !errors.Is(err, errSecretsFileSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestLoadOrCreateSecrets_RejectsSymlinkPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "sensitive.json")
+	secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+	if err := os.WriteFile(targetPath, []byte(`{"keep":"original"}`), 0600); err != nil {
+		t.Fatalf("failed to seed target file: %v", err)
+	}
+	if err := os.Symlink(targetPath, secretsPath); err != nil {
+		t.Fatalf("failed to create symlink secrets path: %v", err)
+	}
+
+	_, _, err := LoadOrCreateSecrets(tmpDir)
+	if !errors.Is(err, errSecretsFileSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
 }
 
 func TestGenerateSecureKey(t *testing.T) {

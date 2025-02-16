@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrFavoriteNotFound = errors.New("favorite not found")
-	ErrAlreadyFavorited = errors.New("already favorited")
+	ErrFavoriteNotFound      = errors.New("favorite not found")
+	ErrAlreadyFavorited      = errors.New("already favorited")
+	errFavoritesStoreSymlink = errors.New("favorites store path must not be a symlink")
 )
 
 // Favorite represents a favorited file or folder
@@ -56,6 +57,9 @@ func NewStore(filePath string) (*Store, error) {
 }
 
 func (s *Store) load() error {
+	if err := validateFavoritesStorePath(s.filePath); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(s.filePath)
 	if err != nil {
 		return err
@@ -90,20 +94,68 @@ func (s *Store) save() error {
 		return fmt.Errorf("failed to serialize favorites: %w", err)
 	}
 
-	dir := filepath.Dir(s.filePath)
+	if err := writeFavoritesStoreFile(s.filePath, data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateFavoritesStorePath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat favorites store: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errFavoritesStoreSymlink
+	}
+	return nil
+}
+
+func writeFavoritesStoreFile(path string, data []byte) error {
+	if err := validateFavoritesStorePath(path); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	tmpFile := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	tmpFile, err := os.CreateTemp(dir, ".favorites-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp favorites file: %w", err)
 	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	if err := os.Rename(tmpFile, s.filePath); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename file: %w", err)
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to set temp favorites permissions: %w", err)
 	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write favorites file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync favorites file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp favorites file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to replace favorites file: %w", err)
+	}
+	cleanup = false
 
 	return nil
 }
