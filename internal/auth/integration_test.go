@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,6 +253,51 @@ func TestReloadPreservesNoPasswordFile(t *testing.T) {
 
 	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
 		t.Error("password file should NOT be created on reload of existing users")
+	}
+}
+
+func TestNewUserStore_RejectsSymlinkUsersFile(t *testing.T) {
+	dir := t.TempDir()
+	targetFile := filepath.Join(dir, "real-users.json")
+	symlinkFile := filepath.Join(dir, "users.json")
+
+	if err := os.WriteFile(targetFile, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to write target users file: %v", err)
+	}
+	if err := os.Symlink(targetFile, symlinkFile); err != nil {
+		t.Fatalf("failed to create symlink users file: %v", err)
+	}
+
+	_, _, err := NewUserStore(symlinkFile)
+	if !errors.Is(err, errUserStoreSymlink) {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+}
+
+func TestNewUserStore_RejectsSymlinkPasswordFileAndRollsBackAdmin(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	targetPasswordFile := filepath.Join(dir, "real-initial-password.txt")
+	symlinkPasswordFile := filepath.Join(dir, "initial-password.txt")
+
+	if err := os.WriteFile(targetPasswordFile, []byte("stale"), 0600); err != nil {
+		t.Fatalf("failed to write target password file: %v", err)
+	}
+	if err := os.Symlink(targetPasswordFile, symlinkPasswordFile); err != nil {
+		t.Fatalf("failed to create password symlink: %v", err)
+	}
+
+	_, _, err := NewUserStore(usersFile)
+	if !errors.Is(err, errPasswordFileSymlink) {
+		t.Fatalf("expected password symlink error, got %v", err)
+	}
+
+	content, readErr := os.ReadFile(usersFile)
+	if readErr != nil {
+		t.Fatalf("failed to read rolled back users file: %v", readErr)
+	}
+	if strings.Contains(string(content), "\"admin\"") {
+		t.Fatalf("expected rolled back users file to omit default admin, got %s", string(content))
 	}
 }
 

@@ -1800,6 +1800,13 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsInternalError(t *testing.
 	if errorPayload["message"] != "internal server error" {
 		t.Fatalf("expected generic message, got %v", errorPayload["message"])
 	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
+	}
 }
 
 func TestDownloadShare_EmptyFileConsumesAccessCount(t *testing.T) {
@@ -2066,6 +2073,13 @@ func TestDownloadShareFile_FirstResponseWriteFailureReturnsInternalError(t *test
 	}
 	if errorPayload["message"] != "internal server error" {
 		t.Fatalf("expected generic message, got %v", errorPayload["message"])
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
 	}
 }
 
@@ -2659,6 +2673,58 @@ func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
 	}
 	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
 		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
+	}
+}
+
+func TestListShareItems_FirstResponseWriteFailureDoesNotConsumeAccessCount(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/a.txt", Name: "a.txt", Size: 12, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	writer := &failFirstWriteResponseWriter{}
+
+	handler.ListShareItems(writer, req)
+
+	if writer.status != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", writer.status)
+	}
+	payload := decodeResponseBytes(t, writer.body.Bytes())
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
+		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
 	}
 }
 

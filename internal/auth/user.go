@@ -63,12 +63,14 @@ func cloneUser(user *User) *User {
 
 // Errors
 var (
-	ErrUserNotFound       = errors.New("user not found")
-	ErrUserExists         = errors.New("user already exists")
-	ErrUserDisabled       = errors.New("user is disabled")
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrPasswordTooShort   = errors.New("password must be at least 8 characters")
-	ErrLastAdmin          = errors.New("cannot delete last admin user")
+	ErrUserNotFound        = errors.New("user not found")
+	ErrUserExists          = errors.New("user already exists")
+	ErrUserDisabled        = errors.New("user is disabled")
+	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrPasswordTooShort    = errors.New("password must be at least 8 characters")
+	ErrLastAdmin           = errors.New("cannot delete last admin user")
+	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
+	errPasswordFileSymlink = errors.New("initial password file path must not be a symlink")
 )
 
 // NewUserStore creates a new user store
@@ -96,6 +98,9 @@ func NewUserStore(filePath string) (*UserStore, string, error) {
 }
 
 func (s *UserStore) load() error {
+	if err := validateAuthFilePath(s.filePath, errUserStoreSymlink); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(s.filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -128,19 +133,68 @@ func (s *UserStore) save() error {
 		return fmt.Errorf("failed to serialize users: %w", err)
 	}
 
-	dir := filepath.Dir(s.filePath)
+	if err := writeAuthFileAtomically(s.filePath, data, errUserStoreSymlink, ".users-*.tmp", "users"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateAuthFilePath(path string, symlinkErr error) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat secure file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return symlinkErr
+	}
+	return nil
+}
+
+func writeAuthFileAtomically(path string, data []byte, symlinkErr error, pattern, label string) error {
+	if err := validateAuthFilePath(path, symlinkErr); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	tmpFile := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	tmpFile, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to create temp %s file: %w", label, err)
 	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	if err := os.Rename(tmpFile, s.filePath); err != nil {
-		return fmt.Errorf("failed to rename temp file: %w", err)
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to set temp %s permissions: %w", label, err)
 	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write %s file: %w", label, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync %s file: %w", label, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp %s file: %w", label, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to replace %s file: %w", label, err)
+	}
+	cleanup = false
 
 	return nil
 }
@@ -163,13 +217,6 @@ func (s *UserStore) createDefaultAdmin() (string, error) {
 	}
 	admin.PasswordHash = string(hash)
 
-	s.users[admin.ID] = admin
-	s.byName[normalizeUsername(admin.Username)] = admin
-
-	if err := s.save(); err != nil {
-		return "", err
-	}
-
 	// Write password to a secure file for user to retrieve
 	passwordFile := filepath.Join(filepath.Dir(s.filePath), "initial-password.txt")
 	passwordContent := fmt.Sprintf(`MnemoNAS Initial Admin Password
@@ -181,7 +228,21 @@ Please change this password after first login!
 This file will be automatically deleted after you login.
 `, password)
 
-	if err := os.WriteFile(passwordFile, []byte(passwordContent), 0600); err != nil {
+	s.users[admin.ID] = admin
+	s.byName[normalizeUsername(admin.Username)] = admin
+
+	if err := s.save(); err != nil {
+		delete(s.users, admin.ID)
+		delete(s.byName, normalizeUsername(admin.Username))
+		return "", err
+	}
+
+	if err := writeAuthFileAtomically(passwordFile, []byte(passwordContent), errPasswordFileSymlink, ".initial-password-*.tmp", "initial password"); err != nil {
+		delete(s.users, admin.ID)
+		delete(s.byName, normalizeUsername(admin.Username))
+		if rollbackErr := s.save(); rollbackErr != nil {
+			return "", fmt.Errorf("failed to write initial password file: %w (also failed to roll back default admin: %v)", err, rollbackErr)
+		}
 		return "", fmt.Errorf("failed to write initial password file: %w", err)
 	}
 
