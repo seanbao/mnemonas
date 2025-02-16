@@ -266,6 +266,10 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 				writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 				return
 			}
+			if errors.Is(err, storage.ErrNotDir) {
+				writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+				return
+			}
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
 			return
 		}
@@ -694,6 +698,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 			return
 		}
+		if errors.Is(err, storage.ErrNotDir) {
+			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+			return
+		}
 		if errors.Is(err, storage.ErrIsDir) {
 			writeShareError(w, http.StatusBadRequest, "shared resource is a directory", "INVALID_SHARE_TYPE")
 			return
@@ -859,8 +867,11 @@ func (w *downloadResponseWriter) WriteHeader(statusCode int) {
 }
 
 func (w *downloadResponseWriter) Write(p []byte) (int, error) {
-	w.started = true
-	return w.ResponseWriter.Write(p)
+	n, err := w.ResponseWriter.Write(p)
+	if err == nil || n > 0 {
+		w.started = true
+	}
+	return n, err
 }
 
 // ListShareItems lists items within a shared folder.
@@ -977,6 +988,10 @@ func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareIn
 
 func (h *Handler) writePublicShareInfoError(w http.ResponseWriter, share *Share, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+		return
+	}
+	if share.Type == ShareTypeFile && errors.Is(err, storage.ErrNotDir) {
 		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 		return
 	}

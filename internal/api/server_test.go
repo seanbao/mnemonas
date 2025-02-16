@@ -1807,6 +1807,32 @@ func TestServer_MoveFile_ReturnsConflictWhenDestinationParentIsFile(t *testing.T
 	}
 }
 
+func TestServer_MoveFile_ReturnsConflictWhenSourceParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	body := `{"from":"/move-parent-file/child.txt","to":"/move-dest.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("move file source parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/move-dest.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
+	}
+}
+
 func TestServer_MoveFile_ReturnsConflictWhenSourceAndDestinationMatch(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -1888,6 +1914,32 @@ func TestServer_CopyFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("copy file conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestServer_CopyFile_ReturnsConflictWhenSourceAndDestinationMatch(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-same.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	body := `{"from":"/copy-same.txt","to":"/copy-same.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("copy same-path status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "source and destination must differ") {
+		t.Fatalf("expected same-path conflict message, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/copy-same.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected copy, got %v", err)
 	}
 }
 
