@@ -133,6 +133,42 @@ func TestHandler_MKCOL_RejectsUnknownLengthBody(t *testing.T) {
 	}
 }
 
+func TestHandler_MKCOL_ExistingDirectoryReturnsMethodNotAllowed(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/testdir"); err != nil {
+		t.Fatalf("Mkdir(testdir) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MKCOL", "/dav/testdir", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("MKCOL existing directory status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandler_MKCOL_ExistingFileReturnsMethodNotAllowed(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/existing.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(existing.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MKCOL", "/dav/existing.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("MKCOL existing file status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
 func TestHandler_PUT_GET(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 
@@ -226,6 +262,30 @@ func TestHandler_PUT_ToExistingDirectoryReturnsConflict(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("PUT to directory status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestHandler_PUT_ReturnsConflictWhenParentChainContainsFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/files/blocked", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(blocked) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/blocked/child/file.txt", strings.NewReader("content"))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("PUT nested under file status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory message, got %q", w.Body.String())
 	}
 }
 
@@ -822,8 +882,8 @@ func TestHandler_COPY_SameSourceAndDestinationRejected(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("COPY same source/destination status = %d, want %d", w.Code, http.StatusConflict)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("COPY same source/destination status = %d, want %d", w.Code, http.StatusForbidden)
 	}
 
 	f, err := fs.OpenFile(ctx, "/src/file.txt")
@@ -1025,8 +1085,8 @@ func TestHandler_MOVE_SameSourceAndDestinationRejected(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("MOVE same source/destination status = %d, want %d", w.Code, http.StatusConflict)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("MOVE same source/destination status = %d, want %d", w.Code, http.StatusForbidden)
 	}
 
 	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {

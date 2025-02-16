@@ -307,6 +307,9 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
 		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 
@@ -325,6 +328,9 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
 		}
 		return err
 	}
@@ -384,6 +390,9 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
 		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 
@@ -393,6 +402,9 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 
 	// Ensure destination parent exists
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
 		return err
 	}
 

@@ -217,6 +217,20 @@ func TestWorkspace_Delete_NotFound(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Delete_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/parent-file", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(parent-file) error: %v", err)
+	}
+
+	err := w.Delete(ctx, "/parent-file/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("Delete() error = %v, want ErrNotDir", err)
+	}
+}
+
 func TestWorkspace_DeleteAll(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -234,6 +248,20 @@ func TestWorkspace_DeleteAll(t *testing.T) {
 	_, err = w.Stat(ctx, "/parentdir")
 	if err != ErrNotFound {
 		t.Error("Directory should not exist after DeleteAll")
+	}
+}
+
+func TestWorkspace_DeleteAll_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/parent-file", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(parent-file) error: %v", err)
+	}
+
+	err := w.DeleteAll(ctx, "/parent-file/child")
+	if err != ErrNotDir {
+		t.Fatalf("DeleteAll() error = %v, want ErrNotDir", err)
 	}
 }
 
@@ -278,6 +306,37 @@ func TestWorkspace_Copy(t *testing.T) {
 	got, _ := w.ReadFile(ctx, "/dest.txt")
 	if string(got) != string(original) {
 		t.Errorf("Copied content = %q, want %q", got, original)
+	}
+}
+
+func TestWorkspace_Copy_ReturnsErrNotDirWhenSourceParentIsFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/parent-file", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(parent-file) error: %v", err)
+	}
+
+	err := w.Copy(ctx, "/parent-file/child.txt", "/dest.txt")
+	if err != ErrNotDir {
+		t.Fatalf("Copy() error = %v, want ErrNotDir", err)
+	}
+}
+
+func TestWorkspace_Copy_ReturnsErrNotDirWhenDestinationParentIsFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/source.txt", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/parent-file", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(parent-file) error: %v", err)
+	}
+
+	err := w.Copy(ctx, "/source.txt", "/parent-file/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("Copy() error = %v, want ErrNotDir", err)
 	}
 }
 
@@ -471,7 +530,6 @@ func TestWorkspace_AtomicWrite(t *testing.T) {
 		t.Error("Temp file should not exist after successful write")
 	}
 }
-
 
 func TestWorkspace_OpenFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	w := setupWorkspace(t)
