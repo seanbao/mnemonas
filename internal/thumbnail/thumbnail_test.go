@@ -3,6 +3,7 @@ package thumbnail
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -227,6 +228,45 @@ func TestGetThumbnail_Caching(t *testing.T) {
 	}
 }
 
+func TestGetThumbnail_RejectsSymlinkCachePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cacheKey := svc.cacheKey("/test/image.png", SizeSmall)
+	cachePath := svc.cachePath(cacheKey)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatalf("MkdirAll(cache dir) failed: %v", err)
+	}
+	targetPath := filepath.Join(tmpDir, "real-thumb.jpg")
+	if err := os.WriteFile(targetPath, []byte("old-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(real-thumb.jpg) failed: %v", err)
+	}
+	if err := os.Symlink(targetPath, cachePath); err != nil {
+		t.Fatalf("Symlink(cachePath) failed: %v", err)
+	}
+
+	_, err = svc.loadFromCache(cachePath)
+	if !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+
+	err = svc.saveToCache(cachePath, []byte("new-thumb"))
+	if !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("expected symlink rejection on save, got %v", err)
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile(real-thumb.jpg) failed: %v", err)
+	}
+	if string(data) != "old-thumb" {
+		t.Fatalf("expected target cache file unchanged, got %q", string(data))
+	}
+}
+
 func TestGetThumbnail_DifferentSizes(t *testing.T) {
 	// Use os.MkdirTemp instead of t.TempDir to avoid cleanup race with async cache save
 	tmpDir, err := os.MkdirTemp("", "thumbnail-test-*")
@@ -385,6 +425,30 @@ func TestCleanCache(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected count=0 after clean, got %d", count)
+	}
+}
+
+func TestSaveToCache_ReplacesFileAtomically(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cachePath := svc.cachePath(svc.cacheKey("/test/atomic.png", SizeSmall))
+	if err := svc.saveToCache(cachePath, []byte("first")); err != nil {
+		t.Fatalf("saveToCache(first) failed: %v", err)
+	}
+	if err := svc.saveToCache(cachePath, []byte("second")); err != nil {
+		t.Fatalf("saveToCache(second) failed: %v", err)
+	}
+
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("ReadFile(cachePath) failed: %v", err)
+	}
+	if string(data) != "second" {
+		t.Fatalf("expected replaced cache content, got %q", string(data))
 	}
 }
 

@@ -25,14 +25,15 @@ import (
 
 // Common errors
 var (
-	ErrNotFound        = errors.New("not found")
-	ErrIsDir           = errors.New("path is a directory")
-	ErrNotDir          = errors.New("path is not a directory")
-	ErrDirNotEmpty     = errors.New("directory not empty")
-	ErrAlreadyExists   = errors.New("already exists")
-	ErrFileLocked      = errors.New("file is locked")
-	ErrFileTooLarge    = errors.New("file too large")
-	ErrVersionNotFound = errors.New("version not found")
+	ErrNotFound           = errors.New("not found")
+	ErrIsDir              = errors.New("path is a directory")
+	ErrNotDir             = errors.New("path is not a directory")
+	ErrDirNotEmpty        = errors.New("directory not empty")
+	ErrAlreadyExists      = errors.New("already exists")
+	ErrFileLocked         = errors.New("file is locked")
+	ErrFileTooLarge       = errors.New("file too large")
+	ErrVersionNotFound    = errors.New("version not found")
+	errStoragePathSymlink = errors.New("storage path contains symlink")
 )
 
 const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
@@ -165,6 +166,13 @@ func (fs *FileSystem) RunRetentionSweep(ctx context.Context) error {
 func New(cfg *Config) (*FileSystem, error) {
 	if cfg.Dataplane == nil {
 		return nil, errors.New("dataplane client is required")
+	}
+
+	if err := validateStoragePath(cfg.InternalRoot); err != nil {
+		return nil, fmt.Errorf("failed to validate internal root: %w", err)
+	}
+	if err := validateStoragePath(cfg.TrashRoot); err != nil {
+		return nil, fmt.Errorf("failed to validate trash root: %w", err)
 	}
 
 	// Create workspace for native file operations
@@ -353,6 +361,15 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	var rollbackVersionObjectCreated bool
 
 	fullPath := fs.workspace.FullPath(name)
+	if err := validateStoragePath(fullPath); err != nil {
+		if errors.Is(err, errStoragePathSymlink) {
+			return ErrNotFound
+		}
+		if isPathNotDirError(err) {
+			return ErrNotDir
+		}
+		return fmt.Errorf("failed to validate path: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		if isPathNotDirError(err) {
 			return ErrNotDir
@@ -360,10 +377,15 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	tmpPath := fullPath + ".tmp"
-	f, err := os.Create(tmpPath)
+	f, err := os.CreateTemp(filepath.Dir(fullPath), ".storage-*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := f.Name()
+	if err := f.Chmod(0644); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to set temp file permissions: %w", err)
 	}
 
 	hasher := blake3.New()
@@ -1509,7 +1531,62 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
+func validateStoragePath(target string) error {
+	cleaned := filepath.Clean(target)
+	if !filepath.IsAbs(cleaned) {
+		absPath, err := filepath.Abs(cleaned)
+		if err != nil {
+			return err
+		}
+		cleaned = absPath
+	}
+
+	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(cleaned, root)
+	if trimmed == "" {
+		info, err := os.Lstat(cleaned)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errStoragePathSymlink
+		}
+		return nil
+	}
+
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errStoragePathSymlink
+		}
+	}
+
+	return nil
+}
+
 func copyFile(src, dst string) error {
+	if err := validateStoragePath(src); err != nil {
+		return err
+	}
+	if err := validateStoragePath(dst); err != nil {
+		return err
+	}
+
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -1525,21 +1602,33 @@ func copyFile(src, dst string) error {
 		return err
 	}
 
-	dstFile, err := os.Create(dst)
+	dstFile, err := os.CreateTemp(path.Dir(dst), ".storage-copy-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
+	tmpPath := dstFile.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+	if err := dstFile.Chmod(srcInfo.Mode().Perm()); err != nil {
+		dstFile.Close()
+		return err
+	}
 
 	_, err = io.Copy(dstFile, srcFile)
 	if err != nil {
+		dstFile.Close()
 		return err
 	}
-	if err := dstFile.Chmod(srcInfo.Mode().Perm()); err != nil {
+	if err := dstFile.Sync(); err != nil {
+		dstFile.Close()
+		return err
+	}
+	if err := dstFile.Close(); err != nil {
 		return err
 	}
 
-	return dstFile.Sync()
+	return os.Rename(tmpPath, dst)
 }
 
 func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name string) ([]byte, bool, error) {
@@ -1609,6 +1698,13 @@ func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
 }
 
 func movePath(src, dst string) error {
+	if err := validateStoragePath(src); err != nil {
+		return err
+	}
+	if err := validateStoragePath(dst); err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(path.Dir(dst), 0755); err != nil {
 		return err
 	}
@@ -1648,6 +1744,13 @@ func isPathNotDirError(err error) bool {
 }
 
 func copyDir(src, dst string) error {
+	if err := validateStoragePath(src); err != nil {
+		return err
+	}
+	if err := validateStoragePath(dst); err != nil {
+		return err
+	}
+
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err

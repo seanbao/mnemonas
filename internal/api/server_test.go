@@ -3403,8 +3403,19 @@ func TestServer_AcknowledgeSetup_InternalErrorUsesStructuredAPIError(t *testing.
 		t.Fatalf("failed to save secrets: %v", err)
 	}
 	secretsPath := path.Join(tmpDir, config.SecretsFile)
-	if err := os.Chmod(secretsPath, 0400); err != nil {
-		t.Fatalf("failed to chmod secrets file: %v", err)
+	targetSecretsPath := path.Join(tmpDir, "target-secrets.json")
+	secretsData, err := os.ReadFile(secretsPath)
+	if err != nil {
+		t.Fatalf("failed to read saved secrets: %v", err)
+	}
+	if err := os.WriteFile(targetSecretsPath, secretsData, 0600); err != nil {
+		t.Fatalf("failed to write target secrets file: %v", err)
+	}
+	if err := os.Remove(secretsPath); err != nil {
+		t.Fatalf("failed to remove original secrets file: %v", err)
+	}
+	if err := os.Symlink(targetSecretsPath, secretsPath); err != nil {
+		t.Fatalf("failed to create secrets symlink: %v", err)
 	}
 
 	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)

@@ -30,6 +30,23 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsSymlinkRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	realRoot := filepath.Join(tmpDir, "real-root")
+	if err := os.MkdirAll(realRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-root) error: %v", err)
+	}
+	rootLink := filepath.Join(tmpDir, "root-link")
+	if err := os.Symlink(realRoot, rootLink); err != nil {
+		t.Fatalf("Symlink(root-link) error: %v", err)
+	}
+
+	_, err := New(rootLink)
+	if !errors.Is(err, errWorkspaceRootSymlink) {
+		t.Fatalf("expected symlink root rejection, got %v", err)
+	}
+}
+
 func TestCleanPath(t *testing.T) {
 	tests := []struct {
 		input string
@@ -562,6 +579,47 @@ func TestWorkspace_ReadFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	}
 	if data != nil {
 		t.Fatal("expected no data for parent-not-directory path")
+	}
+}
+
+func TestWorkspace_ReadFile_RejectsSymlinkPath(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	targetPath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(targetPath, []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside) error: %v", err)
+	}
+	linkPath := filepath.Join(w.Root(), "linked.txt")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Fatalf("Symlink(linked.txt) error: %v", err)
+	}
+
+	data, err := w.ReadFile(ctx, "/linked.txt")
+	if err != ErrNotFound {
+		t.Fatalf("ReadFile() error = %v, want ErrNotFound", err)
+	}
+	if data != nil {
+		t.Fatal("expected no data for symlink-backed path")
+	}
+}
+
+func TestWorkspace_WriteFile_RejectsSymlinkParent(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	outsideDir := t.TempDir()
+	linkPath := filepath.Join(w.Root(), "linked")
+	if err := os.Symlink(outsideDir, linkPath); err != nil {
+		t.Fatalf("Symlink(linked) error: %v", err)
+	}
+
+	err := w.WriteFile(ctx, "/linked/child.txt", []byte("blocked"))
+	if err != ErrNotFound {
+		t.Fatalf("WriteFile() error = %v, want ErrNotFound", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "child.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected symlink target file to remain absent, got %v", statErr)
 	}
 }
 
