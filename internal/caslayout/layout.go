@@ -12,6 +12,8 @@ import (
 	"strings"
 )
 
+var errCASPathSymlink = errors.New("CAS storage path must not traverse a symlink")
+
 // Layout defines the directory layout strategy for CAS storage
 type Layout interface {
 	// HashToPath converts hash to storage path (relative path)
@@ -98,6 +100,10 @@ func NewStore(root string, layout Layout) (*Store, error) {
 		layout = NewShardedLayout(2, 2) // default 2 levels, 2 chars each
 	}
 
+	if err := validateCASPath(root, root); err != nil {
+		return nil, err
+	}
+
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
@@ -112,18 +118,24 @@ func NewStore(root string, layout Layout) (*Store, error) {
 func (s *Store) Put(hash string, data []byte) error {
 	path := s.layout.FullPath(s.root, hash)
 	dir := filepath.Dir(path)
+	if err := validateCASPath(s.root, path); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
+	if err := validateCASPath(s.root, dir); err != nil {
+		return err
+	}
 
 	// I1 fix: Atomic write with proper fsync
 	// Step 1: Write to temp file
-	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath)
+	f, err := os.CreateTemp(dir, ".cas-*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
+	tmpPath := f.Name()
 
 	_, writeErr := f.Write(data)
 	syncErr := f.Sync() // fsync data before rename
@@ -161,6 +173,9 @@ func (s *Store) Put(hash string, data []byte) error {
 // Get reads data
 func (s *Store) Get(hash string) ([]byte, error) {
 	path := s.layout.FullPath(s.root, hash)
+	if err := validateCASPath(s.root, path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -174,6 +189,9 @@ func (s *Store) Get(hash string) ([]byte, error) {
 // Has checks if data exists
 func (s *Store) Has(hash string) bool {
 	path := s.layout.FullPath(s.root, hash)
+	if err := validateCASPath(s.root, path); err != nil {
+		return false
+	}
 	_, err := os.Stat(path)
 	return err == nil
 }
@@ -181,6 +199,9 @@ func (s *Store) Has(hash string) bool {
 // Delete removes data
 func (s *Store) Delete(hash string) error {
 	path := s.layout.FullPath(s.root, hash)
+	if err := validateCASPath(s.root, path); err != nil {
+		return err
+	}
 	err := os.Remove(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to delete file: %w", err)
@@ -191,6 +212,9 @@ func (s *Store) Delete(hash string) error {
 // Size gets data size
 func (s *Store) Size(hash string) (int64, error) {
 	path := s.layout.FullPath(s.root, hash)
+	if err := validateCASPath(s.root, path); err != nil {
+		return 0, err
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -210,6 +234,9 @@ type ReadSeekCloser interface {
 // Reader returns a data reader with seek support for Range requests
 func (s *Store) Reader(hash string) (ReadSeekCloser, error) {
 	path := s.layout.FullPath(s.root, hash)
+	if err := validateCASPath(s.root, path); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -218,6 +245,47 @@ func (s *Store) Reader(hash string) (ReadSeekCloser, error) {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 	return f, nil
+}
+
+func validateCASPath(root, path string) error {
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(cleanRoot, cleanPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve CAS path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("CAS path escapes storage root: %s", cleanPath)
+	}
+
+	current := cleanRoot
+	if err := rejectCASPathSymlink(current); err != nil {
+		return err
+	}
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		if err := rejectCASPathSymlink(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectCASPathSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat CAS path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errCASPathSymlink
+	}
+	return nil
 }
 
 // Walk iterates over all stored hashes

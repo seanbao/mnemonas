@@ -192,6 +192,68 @@ func TestFileSystem_WriteFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	}
 }
 
+func TestFileSystem_WriteFile_RejectsSymlinkParent(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(fs.workspace.Root(), "escape")); err != nil {
+		t.Fatalf("Symlink(escape) error: %v", err)
+	}
+
+	err := fs.WriteFile(ctx, "/escape/payload.txt", bytes.NewReader([]byte("payload")))
+	if err != ErrNotFound {
+		t.Fatalf("WriteFile() error = %v, want ErrNotFound", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "payload.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no file outside workspace, got %v", statErr)
+	}
+}
+
+func TestFileSystem_WriteFile_DoesNotFollowTempSymlink(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0600); err != nil {
+		t.Fatalf("WriteFile(outside) error: %v", err)
+	}
+
+	tmpLink := filepath.Join(fs.workspace.Root(), "safe.txt.tmp")
+	if err := os.Symlink(outsidePath, tmpLink); err != nil {
+		t.Fatalf("Symlink(safe.txt.tmp) error: %v", err)
+	}
+
+	if err := fs.WriteFile(ctx, "/safe.txt", bytes.NewReader([]byte("workspace"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	outsideData, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFile(outside) error: %v", err)
+	}
+	if string(outsideData) != "outside" {
+		t.Fatalf("expected outside file to remain unchanged, got %q", string(outsideData))
+	}
+
+	info, err := os.Lstat(filepath.Join(fs.workspace.Root(), "safe.txt"))
+	if err != nil {
+		t.Fatalf("Lstat(safe.txt) error: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("expected written file to be a regular file, got symlink")
+	}
+
+	data, err := os.ReadFile(filepath.Join(fs.workspace.Root(), "safe.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(safe.txt) error: %v", err)
+	}
+	if string(data) != "workspace" {
+		t.Fatalf("expected workspace content to be written, got %q", string(data))
+	}
+}
+
 func TestFileSystem_Delete_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2285,6 +2347,67 @@ func TestMovePath_PreservesDirectoryAndFileModes(t *testing.T) {
 	}
 	if fileInfo.Mode().Perm() != 0600 {
 		t.Fatalf("Expected file mode 0600, got %#o", fileInfo.Mode().Perm())
+	}
+}
+
+func TestCopyFile_RejectsSymlinkDestination(t *testing.T) {
+	tempDir := t.TempDir()
+	src := filepath.Join(tempDir, "src.txt")
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	outsidePath := filepath.Join(tempDir, "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0600); err != nil {
+		t.Fatalf("WriteFile(outside) error: %v", err)
+	}
+
+	dst := filepath.Join(tempDir, "dst.txt")
+	if err := os.Symlink(outsidePath, dst); err != nil {
+		t.Fatalf("Symlink(dst) error: %v", err)
+	}
+
+	err := copyFile(src, dst)
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("copyFile() error = %v, want errStoragePathSymlink", err)
+	}
+
+	outsideData, readErr := os.ReadFile(outsidePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(outside) error: %v", readErr)
+	}
+	if string(outsideData) != "outside" {
+		t.Fatalf("expected outside file to remain unchanged, got %q", string(outsideData))
+	}
+}
+
+func TestMovePath_RejectsSymlinkDestinationParent(t *testing.T) {
+	tempDir := t.TempDir()
+	src := filepath.Join(tempDir, "src.txt")
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	outsideDir := filepath.Join(tempDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+
+	escapeDir := filepath.Join(tempDir, "escape")
+	if err := os.Symlink(outsideDir, escapeDir); err != nil {
+		t.Fatalf("Symlink(escape) error: %v", err)
+	}
+
+	err := movePath(src, filepath.Join(escapeDir, "dst.txt"))
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("movePath() error = %v, want errStoragePathSymlink", err)
+	}
+
+	if _, statErr := os.Stat(src); statErr != nil {
+		t.Fatalf("expected source file to remain in place, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "dst.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no file outside managed path, got %v", statErr)
 	}
 }
 

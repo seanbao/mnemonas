@@ -1363,7 +1363,12 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 	// Mark scrub as started
 	var scrubRecord *maintenance.ScrubResult
 	if s.maintenance != nil {
-		scrubRecord = s.maintenance.StartScrub()
+		var err error
+		scrubRecord, err = s.maintenance.StartScrub()
+		if err != nil {
+			s.respondInternalError(w, "persist scrub start", err)
+			return
+		}
 	}
 
 	// Scrub may take a long time, extend timeout
