@@ -225,6 +225,26 @@ func TestNewHistoryStore_RejectsSymlinkHistoryFile(t *testing.T) {
 	}
 }
 
+func TestNewHistoryStore_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-history")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real history dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "last_scrub.json"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("failed to seed history file: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked-history")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create history dir symlink: %v", err)
+	}
+
+	_, err := NewHistoryStore(linkedDir)
+	if !errors.Is(err, errHistoryFileSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+}
+
 func TestHistoryStore_StartScrubRejectsSymlinkHistoryFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewHistoryStore(tmpDir)

@@ -333,6 +333,10 @@ func Load(path string) (*Config, error) {
 
 // Save saves configuration to file
 func (c *Config) Save(path string) error {
+	if err := validateManagedFilePath(path, errConfigFileSymlink, "config file"); err != nil {
+		return err
+	}
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
@@ -351,16 +355,54 @@ func (c *Config) Save(path string) error {
 }
 
 func validateConfigFilePath(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	return validateManagedFilePath(path, errConfigFileSymlink, "config file")
+}
+
+func validateManagedFilePath(path string, symlinkErr error, label string) error {
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		absPath, err := filepath.Abs(cleaned)
+		if err != nil {
+			return fmt.Errorf("failed to resolve %s path: %w", label, err)
 		}
-		return fmt.Errorf("failed to stat config file: %w", err)
+		cleaned = absPath
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errConfigFileSymlink
+
+	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(cleaned, root)
+	if trimmed == "" {
+		info, err := os.Lstat(cleaned)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat %s: %w", label, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkErr
+		}
+		return nil
 	}
+
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat %s: %w", label, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkErr
+		}
+	}
+
 	return nil
 }
 

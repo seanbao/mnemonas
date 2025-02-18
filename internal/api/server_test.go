@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/rs/zerolog"
 	"github.com/seanbao/mnemonas/internal/activity"
@@ -119,6 +120,23 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	}
 
 	return server, fs, tmpDir
+}
+
+func setStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName string, fn T) {
+	t.Helper()
+	field := reflect.ValueOf(fs).Elem().FieldByName(fieldName)
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fn))
+}
+
+func setVersionStoreObjectClient(t *testing.T, fs *storage.FileSystem, client *dataplane.Client) {
+	t.Helper()
+	fsValue := reflect.ValueOf(fs).Elem()
+	versionsField := fsValue.FieldByName("versions")
+	versionsValue := reflect.NewAt(versionsField.Type(), unsafe.Pointer(versionsField.UnsafeAddr())).Elem()
+	objectsField := versionsValue.Elem().FieldByName("objects")
+	objectsValue := reflect.NewAt(objectsField.Type(), unsafe.Pointer(objectsField.UnsafeAddr())).Elem()
+	clientField := objectsValue.Elem().FieldByName("client")
+	reflect.NewAt(clientField.Type(), unsafe.Pointer(clientField.UnsafeAddr())).Elem().Set(reflect.ValueOf(client))
 }
 
 func TestNewServer_InitializesFavoritesWhenDisabledIfStoreConfigured(t *testing.T) {
@@ -306,6 +324,7 @@ func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string
 
 	server, err := NewServer(logger, &ServerConfig{
 		FileSystem:     fs,
+		ActivityRoot:   path.Join(internalRoot, "activity"),
 		Config:         settings,
 		ConfigPath:     configPath,
 		ShareEnabled:   shareEnabled,
@@ -847,6 +866,38 @@ func TestServer_CreateShare_UsesBaseURL(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteShare_LogsUnshareActivity(t *testing.T) {
+	server, shareID := setupShareServer(t)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+shareID, nil)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{
+		UserID:   "tester",
+		Username: "tester",
+		Role:     auth.RoleUser,
+	}))
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete share status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionUnshare, "")
+	if total != 1 {
+		t.Fatalf("expected one unshare activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed unshare activity entry, got %d", len(entries))
+	}
+	if entries[0].User != "tester" {
+		t.Fatalf("expected unshare activity user tester, got %q", entries[0].User)
+	}
+}
+
 func TestServer_UpdateSettings_UpdatesRunningShareBaseURL(t *testing.T) {
 	server, _ := setupShareServerWithBaseURL(t, "https://old.example.com/")
 
@@ -886,6 +937,49 @@ func TestServer_UpdateSettings_UpdatesRunningShareBaseURL(t *testing.T) {
 	}
 	if !strings.HasPrefix(urlValue, "https://new.example.com/base/s/") {
 		t.Fatalf("expected updated running share base URL, got %q", urlValue)
+	}
+}
+
+func TestServer_UpdateSettings_SaveFailureDoesNotUpdateRunningShareBaseURL(t *testing.T) {
+	server, _ := setupShareServerWithBaseURL(t, "https://old.example.com/")
+	server.configPath = t.TempDir()
+
+	updateBody := `{"share":{"base_url":"https://new.example.com/base/"}}`
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusInternalServerError {
+		t.Fatalf("update settings share base url save failure status = %d, want %d", updateRec.Code, http.StatusInternalServerError)
+	}
+
+	createBody := `{"path":"/docs/a.txt","type":"file"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(createBody))
+	createRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d, want %d", createRec.Code, http.StatusCreated)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected response envelope data")
+	}
+	urlValue, ok := data["url"].(string)
+	if !ok {
+		t.Fatalf("expected url in response")
+	}
+	if !strings.HasPrefix(urlValue, "https://old.example.com/s/") {
+		t.Fatalf("expected old running share base URL after save failure, got %q", urlValue)
 	}
 }
 
@@ -1123,6 +1217,48 @@ func TestServer_DownloadVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t 
 	}
 }
 
+func TestServer_DownloadVersion_ReturnsServiceUnavailableWhenVersionStorageUnavailable(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/unavailable.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/unavailable.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/unavailable.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	setVersionStoreObjectClient(t, fs, &dataplane.Client{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/unavailable.txt?version="+historicalHash, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("download unavailable version status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(w.Body.String(), "version storage unavailable") {
+		t.Fatalf("expected unavailable message, got %s", w.Body.String())
+	}
+}
+
 func TestServer_RestoreVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -1175,6 +1311,48 @@ func TestServer_RestoreVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t *
 	}
 	if string(data) != "b-current" {
 		t.Fatalf("expected b.txt content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestServer_RestoreVersion_ReturnsServiceUnavailableWhenVersionStorageUnavailable(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/restore-unavailable.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/restore-unavailable.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/restore-unavailable.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	setVersionStoreObjectClient(t, fs, &dataplane.Client{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+historicalHash+"/restore?path=/versions/restore-unavailable.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("restore unavailable version status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(w.Body.String(), "version storage unavailable") {
+		t.Fatalf("expected unavailable message, got %s", w.Body.String())
 	}
 }
 
@@ -1272,11 +1450,14 @@ func TestStreamAPIResponse_ReturnsErrorBeforeResponseStarts(t *testing.T) {
 	}
 }
 
-func TestStreamAPIResponse_IgnoresErrorAfterResponseStarts(t *testing.T) {
+func TestStreamAPIResponse_ReturnsErrorAfterResponseStarts(t *testing.T) {
 	rec := httptest.NewRecorder()
 	err := streamAPIResponse(rec, io.MultiReader(strings.NewReader("partial"), errReader{}))
-	if err != nil {
-		t.Fatalf("expected streamAPIResponse to suppress post-write stream error, got %v", err)
+	if err == nil {
+		t.Fatal("expected streamAPIResponse to return post-write stream error")
+	}
+	if !apiStreamResponseStarted(err) {
+		t.Fatalf("expected post-write stream error to record started response, got %v", err)
 	}
 	if rec.Body.String() != "partial" {
 		t.Fatalf("expected partial body to remain written, got %q", rec.Body.String())
@@ -2317,6 +2498,77 @@ func TestServer_Trash_Empty(t *testing.T) {
 	}
 }
 
+func TestServer_Trash_EmptyPartialSuccessReturnsDeletedCount(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/trash-empty-partial"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-empty-partial/file1.txt", bytes.NewReader([]byte("1"))); err != nil {
+		t.Fatalf("WriteFile(file1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-empty-partial/file2.txt", bytes.NewReader([]byte("2"))); err != nil {
+		t.Fatalf("WriteFile(file2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-empty-partial/file1.txt"); err != nil {
+		t.Fatalf("Delete(file1) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-empty-partial/file2.txt"); err != nil {
+		t.Fatalf("Delete(file2) error: %v", err)
+	}
+
+	deleteCalls := 0
+	setStorageHook(t, fs, "removeTrashPath", func(path string) error {
+		deleteCalls++
+		if deleteCalls == 2 {
+			return errors.New("trash delete failed")
+		}
+		return os.RemoveAll(path)
+	})
+
+	req := httptest.NewRequest("DELETE", "/api/v1/trash/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("EmptyTrash partial status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DeletedCount int  `json:"deleted_count"`
+			Partial      bool `json:"partial"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if !payload.Success {
+		t.Fatal("expected success response for partial trash empty")
+	}
+	if payload.Data.DeletedCount != 1 {
+		t.Fatalf("expected deleted_count 1, got %d", payload.Data.DeletedCount)
+	}
+	if !payload.Data.Partial {
+		t.Fatal("expected partial=true in response")
+	}
+	if payload.Message != "trash emptied partially" {
+		t.Fatalf("expected partial message, got %q", payload.Message)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after partial empty error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item to remain after partial empty, got %d", len(items))
+	}
+}
+
 func TestServer_Scrub_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -3061,6 +3313,27 @@ func TestServer_UpdateSettings_InvalidAlertsWebhookMethodRejected(t *testing.T) 
 	}
 	if server.config.Alerts.WebhookMethod != originalMethod {
 		t.Fatalf("expected invalid webhook method to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_InvalidAlertsWebhookMethodDoesNotUpdateAlertMonitor(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"alerts":{"webhook_method":"PATCH"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid alerts webhook method status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if monitor.updateCount != 0 {
+		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
 	}
 }
 

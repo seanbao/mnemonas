@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { TrashPage } from './Trash'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
@@ -46,6 +49,7 @@ const mockEmptyTrash = vi.mocked(emptyTrash)
 describe('TrashPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockBatchExecute.mockClear()
     mockBatchResult = {
       succeeded: 1,
@@ -271,7 +275,7 @@ describe('TrashPage', () => {
 
     it('empties trash on confirm', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockEmptyTrash.mockResolvedValue(2)
+      mockEmptyTrash.mockResolvedValue({ deletedCount: 2, partial: false })
       
       render(<TrashPage />)
       
@@ -294,6 +298,40 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockEmptyTrash).toHaveBeenCalled()
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '已清空回收站，删除 2 项', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when empty trash partially succeeds', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockResolvedValue({ deletedCount: 1, partial: true })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('清空回收站'))
+
+      await waitFor(() => {
+        const buttons = screen.getAllByText('清空回收站')
+        const confirmBtn = buttons.find(btn => btn.closest('[class*="ModalFooter"], footer'))
+        if (confirmBtn) {
+          return user.click(confirmBtn)
+        }
+        return user.click(buttons[buttons.length - 1])
+      })
+
+      await waitFor(() => {
+        expect(mockEmptyTrash).toHaveBeenCalled()
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已部分清空，删除 1 项', color: 'warning' })
       })
     })
   })

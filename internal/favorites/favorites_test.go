@@ -195,6 +195,27 @@ func TestStore_RejectsSymlinkPathOnLoad(t *testing.T) {
 	}
 }
 
+func TestStore_RejectsSymlinkParentDirectoryOnLoad(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-favorites")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real favorites dir: %v", err)
+	}
+	targetPath := filepath.Join(realDir, "favorites.json")
+	if err := os.WriteFile(targetPath, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to seed favorites store: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked-favorites")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create favorites dir symlink: %v", err)
+	}
+
+	_, err := NewStore(filepath.Join(linkedDir, "favorites.json"))
+	if !errors.Is(err, errFavoritesStoreSymlink) {
+		t.Fatalf("expected parent-directory symlink error, got %v", err)
+	}
+}
+
 func TestStore_ReturnedFavoritesAreDetachedCopies(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")

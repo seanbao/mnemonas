@@ -89,6 +89,26 @@ func TestNewStore_RejectsSymlinkLogFile(t *testing.T) {
 	}
 }
 
+func TestNewStore_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realRoot := filepath.Join(tmpDir, "real-activity-root")
+	if err := os.MkdirAll(realRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-root) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realRoot, "activity.json"), []byte("[]"), 0640); err != nil {
+		t.Fatalf("WriteFile(activity.json) error: %v", err)
+	}
+	linkedRoot := filepath.Join(tmpDir, "linked-activity-root")
+	if err := os.Symlink(realRoot, linkedRoot); err != nil {
+		t.Fatalf("Symlink(linked-root) error: %v", err)
+	}
+
+	_, err := NewStore(linkedRoot)
+	if !errors.Is(err, errActivityLogSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+}
+
 func TestLogAndList(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)

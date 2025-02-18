@@ -278,15 +278,47 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 }
 
 func validateThumbnailCachePath(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		absPath, err := filepath.Abs(cleaned)
+		if err != nil {
+			return fmt.Errorf("failed to resolve thumbnail cache path: %w", err)
 		}
-		return err
+		cleaned = absPath
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errThumbnailCacheSymlink
+
+	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(cleaned, root)
+	if trimmed == "" {
+		info, err := os.Lstat(cleaned)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errThumbnailCacheSymlink
+		}
+		return nil
+	}
+
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errThumbnailCacheSymlink
+		}
 	}
 	return nil
 }

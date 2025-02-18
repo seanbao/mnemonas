@@ -233,6 +233,27 @@ func TestShareStore_RejectsSymlinkPathOnLoad(t *testing.T) {
 	}
 }
 
+func TestShareStore_RejectsSymlinkParentDirectoryOnLoad(t *testing.T) {
+	tempDir := t.TempDir()
+	realDir := filepath.Join(tempDir, "real-shares")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real share dir: %v", err)
+	}
+	targetPath := filepath.Join(realDir, "shares.json")
+	if err := os.WriteFile(targetPath, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to seed share store: %v", err)
+	}
+	linkedDir := filepath.Join(tempDir, "linked-shares")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create share dir symlink: %v", err)
+	}
+
+	_, err := NewShareStore(filepath.Join(linkedDir, "shares.json"))
+	if !errors.Is(err, errShareStoreSymlink) {
+		t.Fatalf("expected parent-directory symlink error, got %v", err)
+	}
+}
+
 func TestShare_IsExpired(t *testing.T) {
 	future := time.Now().Add(24 * time.Hour)
 	share := &Share{ExpiresAt: &future}

@@ -30,6 +30,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
+	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 const maxObjectsCursorLength = 256
@@ -834,6 +835,10 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 		reader, err := s.fs.GetVersion(r.Context(), filePath, versionHash)
 		if err != nil {
+			if errors.Is(err, versionstore.ErrUnavailable) {
+				ServiceUnavailable(w, "version storage unavailable")
+				return
+			}
 			if errors.Is(err, storage.ErrIsDir) {
 				BadRequest(w, "cannot download directory")
 				return
@@ -856,6 +861,9 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		if err := streamAPIResponse(w, reader); err != nil {
+			if apiStreamResponseStarted(err) {
+				return
+			}
 			s.respondInternalError(w, "download file version", err)
 			return
 		}
@@ -1152,6 +1160,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
+		if errors.Is(err, versionstore.ErrUnavailable) {
+			ServiceUnavailable(w, "version storage unavailable")
+			return
+		}
 		if errors.Is(err, storage.ErrIsDir) {
 			BadRequest(w, "cannot restore version for directory")
 			return
@@ -1729,10 +1741,28 @@ func formatAttachmentHeader(filename string) string {
 func streamAPIResponse(w http.ResponseWriter, reader io.Reader) error {
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 	_, err := io.Copy(trackingWriter, reader)
-	if err != nil && !trackingWriter.started {
-		return err
+	if err != nil {
+		return &apiStreamResponseError{err: err, responseStarted: trackingWriter.started}
 	}
 	return nil
+}
+
+type apiStreamResponseError struct {
+	err             error
+	responseStarted bool
+}
+
+func (e *apiStreamResponseError) Error() string {
+	return e.err.Error()
+}
+
+func (e *apiStreamResponseError) Unwrap() error {
+	return e.err
+}
+
+func apiStreamResponseStarted(err error) bool {
+	var streamErr *apiStreamResponseError
+	return errors.As(err, &streamErr) && streamErr.responseStarted
 }
 
 type apiDownloadResponseWriter struct {
@@ -2005,6 +2035,17 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 
 	count, err := s.fs.EmptyTrash(r.Context())
 	if err != nil {
+		if count > 0 {
+			s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{
+				"count":   strconv.Itoa(count),
+				"partial": "true",
+			})
+			NewAPIResponse(map[string]any{
+				"deleted_count": count,
+				"partial":       true,
+			}).WithMessage("trash emptied partially").Write(w, http.StatusOK)
+			return
+		}
 		s.respondInternalError(w, "empty trash", err)
 		return
 	}
@@ -2014,6 +2055,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 
 	NewAPIResponse(map[string]any{
 		"deleted_count": count,
+		"partial":       false,
 	}).WithMessage("trash emptied successfully").Write(w, http.StatusOK)
 }
 
@@ -2501,20 +2543,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Storage.Retention.GCInterval = d
 		}
-		if s.retentionMonitor != nil {
-			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
-				MaxVersions:   updatedConfig.Storage.Retention.MaxVersions,
-				MaxVersionAge: updatedConfig.Storage.Retention.MaxAge,
-				MinFreeSpace:  updatedConfig.Storage.Retention.MinFreeSpace,
-				SweepInterval: updatedConfig.Storage.Retention.GCInterval,
-			})
-		} else if s.fs != nil {
-			s.fs.UpdateRetentionSettings(
-				updatedConfig.Storage.Retention.MaxVersions,
-				updatedConfig.Storage.Retention.MaxAge,
-				updatedConfig.Storage.Retention.MinFreeSpace,
-			)
-		}
 	}
 
 	if req.Versioning != nil {
@@ -2567,13 +2595,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Storage.Trash.MaxSize = *req.Trash.MaxSize
 		}
-		if s.fs != nil {
-			s.fs.UpdateTrashSettings(
-				updatedConfig.Storage.Trash.Enabled,
-				updatedConfig.Storage.Trash.RetentionDays,
-				updatedConfig.Storage.Trash.MaxSize,
-			)
-		}
 	}
 
 	if req.DataPlane != nil {
@@ -2603,9 +2624,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Share.BaseURL != nil {
 			updatedConfig.Share.BaseURL = *req.Share.BaseURL
-			if s.shareHandler != nil {
-				s.shareHandler.SetBaseURL(updatedConfig.Share.BaseURL)
-			}
 		}
 	}
 
@@ -2661,19 +2679,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Alerts.WebhookHeaders = cleaned
 		}
-		if s.alertMonitor != nil {
-			s.alertMonitor.UpdateConfig(alerts.Config{
-				Enabled:        updatedConfig.Alerts.Enabled,
-				CheckInterval:  updatedConfig.Alerts.CheckInterval,
-				ThresholdPct:   updatedConfig.Alerts.ThresholdPct,
-				CriticalPct:    updatedConfig.Alerts.CriticalPct,
-				MinFreeBytes:   updatedConfig.Alerts.MinFreeBytes,
-				CooldownPeriod: updatedConfig.Alerts.CooldownPeriod,
-				WebhookURL:     updatedConfig.Alerts.WebhookURL,
-				WebhookMethod:  updatedConfig.Alerts.WebhookMethod,
-				WebhookHeaders: updatedConfig.Alerts.WebhookHeaders,
-			})
-		}
 	}
 
 	if req.CDC != nil {
@@ -2724,10 +2729,56 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	*s.config = updatedConfig
+	s.applyRuntimeSettings(req, updatedConfig)
 
 	s.logger.Info().Msg("settings updated and saved")
 
 	NewAPIResponse(nil).WithMessage("settings updated, some changes may require restart").Write(w, http.StatusOK)
+}
+
+func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Config) {
+	if req.Retention != nil {
+		if s.retentionMonitor != nil {
+			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
+				MaxVersions:   cfg.Storage.Retention.MaxVersions,
+				MaxVersionAge: cfg.Storage.Retention.MaxAge,
+				MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
+				SweepInterval: cfg.Storage.Retention.GCInterval,
+			})
+		} else if s.fs != nil {
+			s.fs.UpdateRetentionSettings(
+				cfg.Storage.Retention.MaxVersions,
+				cfg.Storage.Retention.MaxAge,
+				cfg.Storage.Retention.MinFreeSpace,
+			)
+		}
+	}
+
+	if req.Trash != nil && s.fs != nil {
+		s.fs.UpdateTrashSettings(
+			cfg.Storage.Trash.Enabled,
+			cfg.Storage.Trash.RetentionDays,
+			cfg.Storage.Trash.MaxSize,
+		)
+	}
+
+	if req.Share != nil && req.Share.BaseURL != nil && s.shareHandler != nil {
+		s.shareHandler.SetBaseURL(cfg.Share.BaseURL)
+	}
+
+	if req.Alerts != nil && s.alertMonitor != nil {
+		s.alertMonitor.UpdateConfig(alerts.Config{
+			Enabled:        cfg.Alerts.Enabled,
+			CheckInterval:  cfg.Alerts.CheckInterval,
+			ThresholdPct:   cfg.Alerts.ThresholdPct,
+			CriticalPct:    cfg.Alerts.CriticalPct,
+			MinFreeBytes:   cfg.Alerts.MinFreeBytes,
+			CooldownPeriod: cfg.Alerts.CooldownPeriod,
+			WebhookURL:     cfg.Alerts.WebhookURL,
+			WebhookMethod:  cfg.Alerts.WebhookMethod,
+			WebhookHeaders: cfg.Alerts.WebhookHeaders,
+		})
+	}
 }
 
 // WebDAVCredentialsResponse represents WebDAV credentials for authenticated users
@@ -3004,8 +3055,8 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 	s.shareHandler.DeleteShare(rec, r)
 
-	// If share was deleted (status 204), log the activity
-	if rec.statusCode == http.StatusNoContent && s.activity != nil {
+	// Log successful share deletions regardless of whether the handler responds 200 or 204.
+	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices && s.activity != nil {
 		user := "unknown"
 		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
 			user = claims.Username

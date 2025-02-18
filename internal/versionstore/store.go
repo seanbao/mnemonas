@@ -21,6 +21,7 @@ var (
 	ErrAlreadyExists = errors.New("already exists")
 	ErrFileLocked    = errors.New("file is locked")
 	ErrLockExpired   = errors.New("lock has expired")
+	ErrUnavailable   = errors.New("version object store unavailable")
 )
 
 // LockType defines the type of lock
@@ -324,6 +325,19 @@ func (s *Store) GetAllVersionHashes(ctx context.Context) ([]string, error) {
 	}
 
 	return hashes, rows.Err()
+}
+
+// HasVersionReference reports whether any version metadata still references the hash.
+func (s *Store) HasVersionReference(ctx context.Context, hash string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM versions WHERE hash = ? LIMIT 1`, hash).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // ListVersionPaths returns all file paths that have historical versions.

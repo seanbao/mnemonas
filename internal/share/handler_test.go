@@ -35,6 +35,10 @@ type failingReadCloser struct {
 	err error
 }
 
+type partialFailingReadCloser struct {
+	reader io.Reader
+}
+
 type failFirstWriteResponseWriter struct {
 	header   http.Header
 	status   int
@@ -43,11 +47,28 @@ type failFirstWriteResponseWriter struct {
 	writeErr error
 }
 
+type failPartialWriteResponseWriter struct {
+	header   http.Header
+	status   int
+	body     bytes.Buffer
+	failed   bool
+	writeErr error
+	limit    int
+}
+
 func (f *failingReadCloser) Read(p []byte) (int, error) {
 	return 0, f.err
 }
 
 func (f *failingReadCloser) Close() error {
+	return nil
+}
+
+func (p *partialFailingReadCloser) Read(buf []byte) (int, error) {
+	return p.reader.Read(buf)
+}
+
+func (p *partialFailingReadCloser) Close() error {
 	return nil
 }
 
@@ -74,6 +95,41 @@ func (w *failFirstWriteResponseWriter) Write(p []byte) (int, error) {
 	}
 	if w.status == 0 {
 		w.status = http.StatusOK
+	}
+	return w.body.Write(p)
+}
+
+func (w *failPartialWriteResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failPartialWriteResponseWriter) WriteHeader(statusCode int) {
+	if w.status == 0 {
+		w.status = statusCode
+	}
+}
+
+func (w *failPartialWriteResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if !w.failed {
+		w.failed = true
+		limit := w.limit
+		if limit <= 0 || limit > len(p) {
+			limit = len(p) / 2
+			if limit == 0 {
+				limit = 1
+			}
+		}
+		_, _ = w.body.Write(p[:limit])
+		if w.writeErr == nil {
+			w.writeErr = errors.New("client write failed")
+		}
+		return limit, w.writeErr
 	}
 	return w.body.Write(p)
 }
@@ -1809,6 +1865,49 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsInternalError(t *testing.
 	}
 }
 
+func TestDownloadShare_PartialStreamFailureRollsBackAccessWithoutAppendingError(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			"/docs/report.pdf": &partialFailingReadCloser{reader: io.MultiReader(strings.NewReader("partial"), &failingReadCloser{err: errors.New("stream failed")})},
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected started download to keep 200 status, got %d", recorder.Code)
+	}
+	if recorder.Body.String() != "partial" {
+		t.Fatalf("expected partial body without appended error payload, got %q", recorder.Body.String())
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected partial stream failure not to consume access count, got %d", current.AccessCount)
+	}
+}
+
 func TestDownloadShare_EmptyFileConsumesAccessCount(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -2725,6 +2824,56 @@ func TestListShareItems_FirstResponseWriteFailureDoesNotConsumeAccessCount(t *te
 	}
 	if current.AccessCount != 0 {
 		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
+	}
+}
+
+func TestListShareItems_PartialResponseWriteFailureDoesNotConsumeAccessCount(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/a.txt", Name: "a.txt", Size: 12, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	writer := &failPartialWriteResponseWriter{limit: 8}
+
+	handler.ListShareItems(writer, req)
+
+	if writer.status != http.StatusOK {
+		t.Fatalf("expected partial response write failure to keep 200 status, got %d", writer.status)
+	}
+	if writer.body.Len() == 0 {
+		t.Fatal("expected partial response body to remain written")
+	}
+	if strings.Contains(writer.body.String(), "LIST_SHARE_ITEMS_FAILED") {
+		t.Fatalf("expected no appended error payload, got %q", writer.body.String())
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected partial response write failure not to consume access count, got %d", current.AccessCount)
 	}
 }
 

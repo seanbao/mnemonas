@@ -532,7 +532,7 @@ describe('API: files', () => {
       it('empties trash and returns count', async () => {
         const mockResponse = {
           success: true,
-          data: { deleted_count: 5 },
+          data: { deleted_count: 5, partial: false },
           timestamp: '2024-01-01',
         }
 
@@ -542,7 +542,23 @@ describe('API: files', () => {
         })
 
         const result = await emptyTrash()
-        expect(result).toBe(5)
+        expect(result).toEqual({ deletedCount: 5, partial: false })
+      })
+
+      it('returns partial result when backend reports partial empty', async () => {
+        const mockResponse = {
+          success: true,
+          data: { deleted_count: 2, partial: true },
+          timestamp: '2024-01-01',
+        }
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockResponse),
+        })
+
+        const result = await emptyTrash()
+        expect(result).toEqual({ deletedCount: 2, partial: true })
       })
     })
   })
