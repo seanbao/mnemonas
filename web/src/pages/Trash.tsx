@@ -167,9 +167,13 @@ export function TrashPage() {
 
   const emptyMutation = useMutation({
     mutationFn: emptyTrash,
-    onSuccess: (count) => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['trash'] })
-      addToast({ title: `已清空回收站，删除 ${count} 项`, color: 'success' })
+      if (result.partial) {
+        addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
+      } else {
+        addToast({ title: `已清空回收站，删除 ${result.deletedCount} 项`, color: 'success' })
+      }
       onEmptyClose()
     },
     onError: (error) => {

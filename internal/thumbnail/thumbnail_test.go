@@ -267,6 +267,49 @@ func TestGetThumbnail_RejectsSymlinkCachePath(t *testing.T) {
 	}
 }
 
+func TestGetThumbnail_RejectsSymlinkCacheParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realCacheDir := filepath.Join(tmpDir, "real-cache")
+	if err := os.MkdirAll(realCacheDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-cache) failed: %v", err)
+	}
+	linkedCacheDir := filepath.Join(tmpDir, "linked-cache")
+	if err := os.Symlink(realCacheDir, linkedCacheDir); err != nil {
+		t.Fatalf("Symlink(linked-cache) failed: %v", err)
+	}
+
+	svc, err := NewService(linkedCacheDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cachePath := filepath.Join(linkedCacheDir, "ab", "thumb.jpg")
+	if err := os.MkdirAll(filepath.Join(realCacheDir, "ab"), 0755); err != nil {
+		t.Fatalf("MkdirAll(real-cache/ab) failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realCacheDir, "ab", "thumb.jpg"), []byte("old-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(real thumb) failed: %v", err)
+	}
+
+	_, err = svc.loadFromCache(cachePath)
+	if !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection on load, got %v", err)
+	}
+
+	err = svc.saveToCache(cachePath, []byte("new-thumb"))
+	if !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection on save, got %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(realCacheDir, "ab", "thumb.jpg"))
+	if err != nil {
+		t.Fatalf("ReadFile(real thumb) failed: %v", err)
+	}
+	if string(data) != "old-thumb" {
+		t.Fatalf("expected real cache file unchanged, got %q", string(data))
+	}
+}
+
 func TestGetThumbnail_DifferentSizes(t *testing.T) {
 	// Use os.MkdirTemp instead of t.TempDir to avoid cleanup race with async cache save
 	tmpDir, err := os.MkdirTemp("", "thumbnail-test-*")

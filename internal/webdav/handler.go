@@ -675,8 +675,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		}
 
 		if err := h.fs.PermanentDelete(ctx, backupPath); err != nil {
-			h.handleError(w, err)
-			return
+			// The namespace move is already committed at this point. Cleanup failure
+			// should leave behind maintenance work, not turn a successful MOVE into
+			// a false failure for clients.
 		}
 	} else {
 		if err := h.fs.Rename(ctx, srcPath, dst); err != nil {

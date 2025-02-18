@@ -2,6 +2,7 @@ package versionstore
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -23,8 +24,11 @@ func TestMapObjectGetError(t *testing.T) {
 		if errors.Is(err, ErrNotFound) {
 			t.Fatalf("mapObjectGetError() incorrectly mapped unavailable error to ErrNotFound")
 		}
-		if !errors.Is(err, grpcErr) {
-			t.Fatalf("mapObjectGetError() = %v, want wrapped original error %v", err, grpcErr)
+		if !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("mapObjectGetError() = %v, want ErrUnavailable", err)
+		}
+		if got := err.Error(); got == grpcErr.Error() || !strings.Contains(got, grpcErr.Error()) {
+			t.Fatalf("mapObjectGetError() message = %q, want to include %q", got, grpcErr.Error())
 		}
 	})
 }

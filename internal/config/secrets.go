@@ -54,6 +54,9 @@ func LoadSecrets(dataDir string) (*Secrets, error) {
 // SaveSecrets saves secrets to file
 func SaveSecrets(dataDir string, secrets *Secrets) error {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
+	if err := validateSecretsFilePath(secretsPath); err != nil {
+		return err
+	}
 
 	// Ensure directory exists
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -143,17 +146,7 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 }
 
 func validateSecretsFilePath(secretsPath string) error {
-	info, err := os.Lstat(secretsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to stat secrets file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errSecretsFileSymlink
-	}
-	return nil
+	return validateManagedFilePath(secretsPath, errSecretsFileSymlink, "secrets file")
 }
 
 func writeSecretsFile(secretsPath string, data []byte) error {
