@@ -230,14 +230,14 @@ export function SettingsPage() {
             <>
               <Button
                 variant="bordered"
-                className="btn-secondary btn-md"
+                className="btn-secondary btn-md rounded-xl"
                 startContent={<RefreshCw size={16} />}
                 onPress={handleReset}
               >
                 重置
               </Button>
               <Button
-                className="btn-primary btn-md"
+                className="btn-primary btn-md rounded-xl"
                 startContent={<Save size={16} />}
                 isLoading={saveMutation.isPending}
                 onPress={handleSave}
@@ -307,7 +307,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, dataDir: v }))}
                       startContent={<Database size={16} className="text-default-500" />}
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                       }}
                     />
                   </div>
@@ -319,7 +319,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, metadataDir: v }))}
                       startContent={<Database size={16} className="text-default-500" />}
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                       }}
                     />
                   </div>
@@ -331,7 +331,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, tempDir: v }))}
                       startContent={<Folder size={16} className="text-default-500" />}
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                       }}
                     />
                   </div>
@@ -358,7 +358,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, maxVersions: parseInt(v) || 0 }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -372,7 +372,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, maxAge: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -386,7 +386,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, minFreeSpace: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -400,7 +400,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, gcInterval: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -443,7 +443,7 @@ export function SettingsPage() {
                       className="w-32"
                       isDisabled={!settings.webdavEnabled}
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -493,7 +493,7 @@ export function SettingsPage() {
                         isDisabled={!settings.webdavEnabled}
                         startContent={<User size={16} className="text-default-500" />}
                         classNames={{ 
-                          inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                         }}
                       />
                     </div>
@@ -507,7 +507,7 @@ export function SettingsPage() {
                         isDisabled={!settings.webdavEnabled}
                         startContent={<Lock size={16} className="text-default-500" />}
                         classNames={{ 
-                          inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                         }}
                       />
                     </div>
@@ -550,7 +550,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, minChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -564,7 +564,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, avgChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>
@@ -578,7 +578,7 @@ export function SettingsPage() {
                       onValueChange={(v) => setSettings(s => ({ ...s, maxChunkSize: v }))}
                       className="w-24"
                       classNames={{ 
-                        inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary h-9",
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
                   </SettingRow>

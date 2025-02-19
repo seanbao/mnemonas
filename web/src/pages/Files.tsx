@@ -34,17 +34,25 @@ import {
   Copy,
   FolderOpen,
   Upload,
+  FolderUp,
   CheckCircle2,
   AlertCircle,
   X,
   Link2,
+  Move,
+  Files,
 } from 'lucide-react'
 import { ShareDialog } from '@/components/share'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { ContextMenu, ContextMenuSection, ContextMenuItem } from '@/components/ui/ContextMenu'
+import { MoveDialog } from '@/components/file'
+import { PreviewModal, type PreviewFile } from '@/components/preview'
 import { useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
-import { listFiles, deleteFile, createDirectory, uploadFile, moveFile } from '@/api/files'
+import { useClipboardStore } from '@/stores/clipboard'
+import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
+import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 
@@ -63,7 +71,7 @@ function Breadcrumbs({
       <button
         onClick={() => onNavigate('/')}
         className={cn(
-          "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
+          "flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl transition-all max-w-[180px] truncate border border-transparent",
           segments.length === 0
             ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
             : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
@@ -83,7 +91,7 @@ function Breadcrumbs({
             <button
               onClick={() => onNavigate(segmentPath)}
               className={cn(
-                "px-2.5 py-1.5 rounded-lg transition-all max-w-[180px] truncate border border-transparent",
+                "px-2.5 py-1.5 rounded-xl transition-all max-w-[180px] truncate border border-transparent",
                 isLast 
                   ? "bg-content1/80 text-foreground font-medium border-divider shadow-[var(--shadow-soft)]" 
                   : "text-default-500 hover:text-foreground hover:bg-content1/60 hover:border-divider"
@@ -105,22 +113,26 @@ function FileRow({
   isFavorited,
   onSelect, 
   onOpen,
+  onClick,
   onRename,
   onDelete,
   onViewVersions,
   onShare,
   onToggleFavorite,
+  onContextMenu,
 }: { 
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
   onSelect: () => void
   onOpen: () => void
+  onClick: () => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
   onShare: () => void
   onToggleFavorite: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
     // Construct download URL
@@ -145,16 +157,14 @@ function FileRow({
         "hover:bg-content2/60",
         isSelected && "bg-accent-primary/10"
       )}
-      onClick={onOpen}
-      onContextMenu={(e) => {
-        e.preventDefault()
-        // Context menu is handled by the dropdown trigger
-      }}
+      onClick={onClick}
+      onDoubleClick={onOpen}
+      onContextMenu={onContextMenu}
     >
       <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
         <div 
           className={cn(
-            "w-5 h-5 border-2 rounded-md flex items-center justify-center transition-all duration-150",
+            "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 cursor-pointer",
             isSelected 
               ? "bg-accent-primary border-accent-primary" 
               : "border-default-400 group-hover:border-accent-primary"
@@ -289,11 +299,11 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
           <FileIcon name={file.name} isDir={file.isDir} size={88} variant="tile" />
         </div>
         <h3 className="font-semibold text-base text-foreground mb-1 truncate px-2">{file.name}</h3>
-        <p className="text-[13px] text-default-600">一段珍贵的记忆</p>
+        <p className="text-[13px] text-default-600">{file.isDir ? '文件夹' : file.name.split('.').pop()?.toUpperCase() || '文件'}</p>
       </div>
 
       <div className="bg-content1 rounded-xl p-4 relative z-10 border border-divider">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">记忆详情</div>
+        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">详情</div>
         <div className="grid grid-cols-2 gap-4">
           <div className="text-center">
             <div className="text-lg font-semibold text-foreground">
@@ -311,17 +321,12 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
       </div>
 
       <div className="flex-1 relative z-10">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">时光回溯</div>
+        <div className="text-[10px] font-semibold uppercase tracking-widest text-default-500 mb-3.5">时间线</div>
         <div className="relative pl-6 border-l border-divider">
           <div className="relative pb-5 last:pb-0">
             <div className="absolute -left-[20px] top-0 w-3 h-3 rounded-full bg-content1 border border-divider" />
-            <div className="text-[13px] font-medium text-foreground">现在 <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded bg-accent-primary/15 text-accent-primary font-medium">当前</span></div>
-            <div className="text-[11px] text-default-500 mt-1">{formatDate(file.modTime)} 修改</div>
-          </div>
-          <div className="relative pb-5 last:pb-0">
-            <div className="absolute -left-[20px] top-0 w-3 h-3 rounded-full bg-content1 border border-divider" />
-            <div className="text-[13px] font-medium text-foreground">昨日记忆</div>
-            <div className="text-[11px] text-default-500 mt-1">昨天 09:15 保存</div>
+            <div className="text-[13px] font-medium text-foreground">最后修改</div>
+            <div className="text-[11px] text-default-500 mt-1">{formatDate(file.modTime)}</div>
           </div>
         </div>
       </div>
@@ -336,22 +341,26 @@ function FileCard({
   isFavorited,
   onSelect,
   onOpen,
+  onClick,
   onRename,
   onDelete,
   onViewVersions,
   onShare,
   onToggleFavorite,
+  onContextMenu,
 }: {
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
   onSelect: () => void
   onOpen: () => void
+  onClick: () => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
   onShare: () => void
   onToggleFavorite: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
     const downloadUrl = `/api/v1/files${file.path}?download=true`
@@ -375,7 +384,9 @@ function FileCard({
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
         isSelected && "border-accent-primary bg-accent-primary/5"
       )}
-      onClick={onOpen}
+      onClick={onClick}
+      onDoubleClick={onOpen}
+      onContextMenu={onContextMenu}
     >
       {/* Selection checkbox */}
       <div 
@@ -384,7 +395,7 @@ function FileCard({
       >
         <div
           className={cn(
-            "w-5 h-5 border-2 rounded-md flex items-center justify-center transition-all duration-150 bg-content1/80 backdrop-blur-sm",
+            "w-5 h-5 border-2 rounded-lg flex items-center justify-center transition-all duration-150 bg-content1/80 backdrop-blur-sm cursor-pointer",
             isSelected
               ? "bg-accent-primary border-accent-primary"
               : "border-default-400 opacity-0 group-hover:opacity-100"
@@ -504,8 +515,19 @@ function FileCard({
 export function FilesPage() {
   const parentRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  
+  // Context menu state
+  const contextMenu = useContextMenu()
+  const [contextMenuFile, setContextMenuFile] = useState<FileItem | null>(null)
+  
+  // Clipboard state
+  const clipboard = useClipboardStore()
+  
+  // Track focused file index for keyboard navigation
+  const [focusedIndex, setFocusedIndex] = useState<number>(-1)
   
   // Modal states
   const { isOpen: isNewFolderOpen, onOpen: onNewFolderOpen, onClose: onNewFolderClose } = useDisclosure()
@@ -514,6 +536,15 @@ export function FilesPage() {
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
   const { isOpen: isShareOpen, onOpen: onShareOpen, onClose: onShareClose } = useDisclosure()
   const [shareFile, setShareFile] = useState<FileItem | null>(null)
+  
+  // Move/Copy dialog state
+  const { isOpen: isMoveOpen, onOpen: onMoveOpen, onClose: onMoveClose } = useDisclosure()
+  const [moveMode, setMoveMode] = useState<'move' | 'copy'>('move')
+  const [moveFiles, setMoveFiles] = useState<FileItem[]>([])
+  
+  // Preview modal state
+  const { isOpen: isPreviewOpen, onOpen: onPreviewOpen, onClose: onPreviewClose } = useDisclosure()
+  const [previewFile, setPreviewFile] = useState<PreviewFile | null>(null)
   
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
@@ -524,7 +555,7 @@ export function FilesPage() {
   const dragCountRef = useRef(0)
   
   // Multi-file upload state
-  const [uploadQueue, setUploadQueue] = useState<{file: File, progress: number, status: 'pending' | 'uploading' | 'done' | 'error', error?: string}[]>([])
+  const [uploadQueue, setUploadQueue] = useState<{file: File, relativePath?: string, progress: number, status: 'pending' | 'uploading' | 'done' | 'error', error?: string}[]>([])
   const [isUploading, setIsUploading] = useState(false)
   
   const { 
@@ -633,17 +664,37 @@ export function FilesPage() {
     overscan: 10,
   })
 
-  const handleFileOpen = useCallback((file: FileItem) => {
+  // Active file for preview panel (not selection)
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null)
+
+  // Handle single click - open folder directly, show preview for files
+  const handleFileClick = useCallback((file: FileItem) => {
     if (file.isDir) {
+      // Single click on folder -> enter it directly
       setCurrentPath(file.path)
+      setActiveFilePath(null)
     } else {
-      // Select for preview instead of opening immediately
-      if (!selectedFiles.has(file.path)) {
-        clearSelection()
-        toggleFileSelection(file.path)
-      }
+      // Single click on file -> show preview panel & open preview modal
+      setActiveFilePath(file.path)
+      setPreviewFile({ path: file.path, name: file.name })
+      onPreviewOpen()
     }
-  }, [setCurrentPath, selectedFiles, clearSelection, toggleFileSelection])
+  }, [setCurrentPath, onPreviewOpen])
+
+  // Handle double click - download file (folders are handled by single click)
+  const handleFileOpen = useCallback((file: FileItem) => {
+    if (!file.isDir) {
+      // Double click on file -> download it
+      const downloadUrl = `/api/v1/files${file.path}?download=true`
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      link.download = file.name
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+    }
+    // Double click on folder is ignored since single click already enters
+  }, [])
 
   const handleSelectAll = useCallback(() => {
     if (selectedFiles.size === sortedFiles.length) {
@@ -694,28 +745,121 @@ export function FilesPage() {
     onShareOpen()
   }, [onShareOpen])
 
-  // Enhanced upload handler with queue support
+  // Move/Copy handlers
+  const handleOpenMoveModal = useCallback((files: FileItem[]) => {
+    setMoveFiles(files)
+    setMoveMode('move')
+    onMoveOpen()
+  }, [onMoveOpen])
+
+  const handleOpenCopyModal = useCallback((files: FileItem[]) => {
+    setMoveFiles(files)
+    setMoveMode('copy')
+    onMoveOpen()
+  }, [onMoveOpen])
+
+  // Context menu handler
+  const handleContextMenu = useCallback((file: FileItem, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenuFile(file)
+    contextMenu.show(file.path, e.clientX, e.clientY)
+  }, [contextMenu])
+
+  // Context menu actions
+  const handleContextMenuDownload = useCallback(() => {
+    if (!contextMenuFile || contextMenuFile.isDir) return
+    const downloadUrl = `/api/v1/files${contextMenuFile.path}?download=true`
+    const link = document.createElement('a')
+    link.href = downloadUrl
+    link.download = contextMenuFile.name
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    contextMenu.hide()
+  }, [contextMenuFile, contextMenu])
+
+  const handleContextMenuCopyPath = useCallback(() => {
+    if (!contextMenuFile) return
+    navigator.clipboard.writeText(contextMenuFile.path)
+    addToast({ title: '路径已复制', color: 'success' })
+    contextMenu.hide()
+  }, [contextMenuFile, contextMenu])
+
+  // Track created directories to avoid duplicate MKCOL calls
+  const createdDirsRef = useRef<Set<string>>(new Set())
+
+  // Ensure a directory path exists (create parent directories recursively)
+  const ensureDirectoryExists = useCallback(async (dirPath: string) => {
+    if (dirPath === '/' || createdDirsRef.current.has(dirPath)) return
+    
+    // Get parent path
+    const parentPath = dirPath.substring(0, dirPath.lastIndexOf('/')) || '/'
+    
+    // Ensure parent exists first
+    await ensureDirectoryExists(parentPath)
+    
+    // Create this directory if not already created
+    if (!createdDirsRef.current.has(dirPath)) {
+      try {
+        await createDirectory(dirPath)
+        createdDirsRef.current.add(dirPath)
+      } catch {
+        // Directory might already exist, mark as created
+        createdDirsRef.current.add(dirPath)
+      }
+    }
+  }, [])
+
+  // Enhanced upload handler with queue support and folder support
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
     
     const fileArray = Array.from(files)
-    const queue = fileArray.map(file => ({
-      file,
-      progress: 0,
-      status: 'pending' as const,
-    }))
+    
+    // Check if this is a folder upload (files have webkitRelativePath)
+    const isFolderUpload = fileArray.some(f => (f as File & { webkitRelativePath?: string }).webkitRelativePath)
+    
+    // Reset created directories tracker
+    createdDirsRef.current.clear()
+    
+    const queue = fileArray.map(file => {
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      return {
+        file,
+        relativePath,
+        progress: 0,
+        status: 'pending' as const,
+      }
+    })
     
     setUploadQueue(queue)
     setIsUploading(true)
     
     for (let i = 0; i < fileArray.length; i++) {
       const file = fileArray[i]
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
+      
       setUploadQueue(prev => prev.map((item, j) => 
         j === i ? { ...item, status: 'uploading' as const } : item
       ))
       
       try {
-        await uploadFile(currentPath, file, (progress) => {
+        // For folder uploads, create parent directories first
+        if (relativePath && relativePath.includes('/')) {
+          const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
+          const targetDir = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
+          await ensureDirectoryExists(targetDir)
+        }
+        
+        // Calculate the target path for the file
+        let targetPath = currentPath
+        if (relativePath && relativePath.includes('/')) {
+          const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
+          targetPath = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
+        }
+        
+        await uploadFile(targetPath, file, (progress) => {
           setUploadQueue(prev => prev.map((item, j) => 
             j === i ? { ...item, progress } : item
           ))
@@ -733,11 +877,20 @@ export function FilesPage() {
     setIsUploading(false)
     queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
     
+    // Show summary toast for folder upload
+    if (isFolderUpload) {
+      addToast({ 
+        title: `文件夹上传完成`, 
+        description: `成功上传 ${fileArray.length} 个文件`,
+        color: 'success' 
+      })
+    }
+    
     // Auto-clear successful uploads after 3 seconds
     setTimeout(() => {
       setUploadQueue(prev => prev.filter(item => item.status === 'error'))
     }, 3000)
-  }, [currentPath, queryClient])
+  }, [currentPath, queryClient, ensureDirectoryExists])
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
@@ -819,12 +972,159 @@ export function FilesPage() {
     addToast({ title: `已开始下载 ${files.length} 个文件`, color: 'success' })
   }, [selectedFiles, sortedFiles])
 
-  // Determine active file for preview
-  const activeFile = useMemo(() => {
-    if (selectedFiles.size !== 1) return null
+  // Keyboard shortcuts handlers
+  const handleKeyboardCopy = useCallback(() => {
+    if (selectedFiles.size === 0) return
+    clipboard.copy(Array.from(selectedFiles), currentPath)
+    addToast({ title: `已复制 ${selectedFiles.size} 个项目`, color: 'success' })
+  }, [selectedFiles, currentPath, clipboard])
+
+  const handleKeyboardCut = useCallback(() => {
+    if (selectedFiles.size === 0) return
+    clipboard.cut(Array.from(selectedFiles), currentPath)
+    addToast({ title: `已剪切 ${selectedFiles.size} 个项目`, color: 'success' })
+  }, [selectedFiles, currentPath, clipboard])
+
+  const handleKeyboardPaste = useCallback(async () => {
+    if (!clipboard.hasPaths()) return
+    
+    const { paths, operation, sourcePath } = clipboard
+    if (!operation || !sourcePath) return
+    
+    let successCount = 0
+    let errorCount = 0
+    
+    for (const path of paths) {
+      const fileName = path.split('/').pop() || ''
+      const destPath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`
+      
+      try {
+        if (operation === 'cut') {
+          await moveFile(path, destPath)
+        } else {
+          await copyFile(path, destPath)
+        }
+        successCount++
+      } catch {
+        errorCount++
+      }
+    }
+    
+    if (operation === 'cut') {
+      clipboard.clear()
+    }
+    
+    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+    if (sourcePath !== currentPath) {
+      queryClient.invalidateQueries({ queryKey: ['files', sourcePath] })
+    }
+    
+    if (errorCount === 0) {
+      addToast({ title: `成功${operation === 'cut' ? '移动' : '复制'} ${successCount} 个文件`, color: 'success' })
+    } else {
+      addToast({ title: `${successCount} 成功，${errorCount} 失败`, color: 'warning' })
+    }
+  }, [clipboard, currentPath, queryClient])
+
+  const handleKeyboardDelete = useCallback(() => {
+    if (selectedFiles.size === 0) return
+    onBatchDeleteOpen()
+  }, [selectedFiles.size, onBatchDeleteOpen])
+
+  const handleKeyboardRename = useCallback(() => {
+    if (selectedFiles.size !== 1) return
     const path = Array.from(selectedFiles)[0]
-    return sortedFiles.find(f => f.path === path) || null
-  }, [selectedFiles, sortedFiles])
+    const file = sortedFiles.find(f => f.path === path)
+    if (file) {
+      handleOpenRenameModal(file)
+    }
+  }, [selectedFiles, sortedFiles, handleOpenRenameModal])
+
+  const handleKeyboardEnter = useCallback(() => {
+    // If there's a focused file, open it
+    if (focusedIndex >= 0 && focusedIndex < sortedFiles.length) {
+      const file = sortedFiles[focusedIndex]
+      handleFileClick(file)
+      return
+    }
+    
+    // Otherwise, if single selection, open that file
+    if (selectedFiles.size === 1) {
+      const path = Array.from(selectedFiles)[0]
+      const file = sortedFiles.find(f => f.path === path)
+      if (file) {
+        handleFileClick(file)
+      }
+    }
+  }, [focusedIndex, sortedFiles, selectedFiles, handleFileClick])
+
+  const handleKeyboardArrowDown = useCallback(() => {
+    if (sortedFiles.length === 0) return
+    
+    const newIndex = focusedIndex < 0 ? 0 : Math.min(focusedIndex + 1, sortedFiles.length - 1)
+    setFocusedIndex(newIndex)
+    
+    // Update selection
+    const file = sortedFiles[newIndex]
+    if (file) {
+      clearSelection()
+      toggleFileSelection(file.path)
+    }
+  }, [focusedIndex, sortedFiles, clearSelection, toggleFileSelection])
+
+  const handleKeyboardArrowUp = useCallback(() => {
+    if (sortedFiles.length === 0) return
+    
+    const newIndex = focusedIndex <= 0 ? 0 : focusedIndex - 1
+    setFocusedIndex(newIndex)
+    
+    // Update selection
+    const file = sortedFiles[newIndex]
+    if (file) {
+      clearSelection()
+      toggleFileSelection(file.path)
+    }
+  }, [focusedIndex, sortedFiles, clearSelection, toggleFileSelection])
+
+  const handleKeyboardRefresh = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+    addToast({ title: '刷新成功', color: 'success' })
+  }, [queryClient, currentPath])
+
+  // Register keyboard shortcuts
+  useKeyboardShortcuts({
+    onDelete: handleKeyboardDelete,
+    onSelectAll: handleSelectAll,
+    onEscape: clearSelection,
+    onCopy: handleKeyboardCopy,
+    onCut: handleKeyboardCut,
+    onPaste: handleKeyboardPaste,
+    onRename: handleKeyboardRename,
+    onEnter: handleKeyboardEnter,
+    onArrowDown: handleKeyboardArrowDown,
+    onArrowUp: handleKeyboardArrowUp,
+    onRefresh: handleKeyboardRefresh,
+    onNewFolder: onNewFolderOpen,
+  })
+
+  // Determine active file for preview (prioritize activeFilePath, then single selection)
+  const activeFile = useMemo(() => {
+    if (activeFilePath) {
+      return sortedFiles.find(f => f.path === activeFilePath) || null
+    }
+    if (selectedFiles.size === 1) {
+      const path = Array.from(selectedFiles)[0]
+      return sortedFiles.find(f => f.path === path) || null
+    }
+    return null
+  }, [activeFilePath, selectedFiles, sortedFiles])
+
+  // Previewable files for navigation in preview modal (non-directory files)
+  const previewFiles = useMemo<PreviewFile[]>(() => {
+    return sortedFiles
+      .filter(f => !f.isDir)
+      .map(f => ({ path: f.path, name: f.name }))
+  }, [sortedFiles])
 
   if (isLoading) {
     return (
@@ -883,7 +1183,9 @@ export function FilesPage() {
                   {(item.status === 'pending' || item.status === 'uploading') && (
                     <div className="w-3.5 h-3.5 border-2 border-accent-primary border-t-transparent rounded-full animate-spin" />
                   )}
-                  <span className="text-sm truncate flex-1">{item.file.name}</span>
+                  <span className="text-sm truncate flex-1" title={item.relativePath || item.file.name}>
+                    {item.relativePath || item.file.name}
+                  </span>
                 </div>
                 {item.status === 'uploading' && (
                   <Progress 
@@ -906,6 +1208,8 @@ export function FilesPage() {
 
       <div className="flex-1 flex flex-col min-w-0 p-7">
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
+        {/* @ts-expect-error - webkitdirectory is a non-standard attribute */}
+        <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
         
         {/* Breadcrumbs */}
         <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
@@ -917,7 +1221,7 @@ export function FilesPage() {
               <>
                 <Button 
                   variant="bordered" 
-                  className="btn-secondary btn-sm"
+                  className="btn-secondary btn-sm rounded-xl"
                   startContent={<X size={16} />}
                   onPress={clearSelection}
                 >
@@ -925,7 +1229,7 @@ export function FilesPage() {
                 </Button>
                 <Button 
                   variant="bordered" 
-                  className="btn-secondary btn-sm"
+                  className="btn-secondary btn-sm rounded-xl"
                   startContent={<Download size={16} />}
                   onPress={handleBatchDownload}
                 >
@@ -934,6 +1238,7 @@ export function FilesPage() {
                 <Button 
                   color="danger"
                   variant="flat"
+                  className="rounded-xl"
                   startContent={<Trash2 size={16} />}
                   onPress={onBatchDeleteOpen}
                 >
@@ -943,7 +1248,7 @@ export function FilesPage() {
             ) : (
               <>
                 <Button 
-                  className="btn-primary btn-md border-none font-medium"
+                  className="btn-primary btn-md border-none font-medium rounded-xl"
                   startContent={<Star size={16} className="fill-current" />}
                   onPress={() => fileInputRef.current?.click()}
                   isLoading={isUploading}
@@ -952,7 +1257,17 @@ export function FilesPage() {
                 </Button>
                 <Button 
                   variant="bordered" 
-                  className="btn-secondary btn-md"
+                  className="btn-secondary btn-md rounded-xl"
+                  startContent={<FolderUp size={16} />}
+                  onPress={() => folderInputRef.current?.click()}
+                  isLoading={isUploading}
+                  isDisabled={isUploading}
+                >
+                  上传文件夹
+                </Button>
+                <Button 
+                  variant="bordered" 
+                  className="btn-secondary btn-md rounded-xl"
                   startContent={<FolderPlus size={16} />}
                   onPress={onNewFolderOpen}
                 >
@@ -962,15 +1277,15 @@ export function FilesPage() {
             )}
           </div>
           
-          <div className="flex bg-content1 border border-divider rounded-[10px] p-0.5 shadow-[var(--shadow-soft)]">
+          <div className="flex bg-content1 border border-divider rounded-xl p-0.5 shadow-[var(--shadow-soft)]">
             <button 
-              className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+              className={cn("p-2 rounded-[10px] transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
               onClick={() => setViewMode('list')}
             >
               <List size={16} />
             </button>
             <button 
-              className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+              className={cn("p-2 rounded-[10px] transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
               onClick={() => setViewMode('grid')}
             >
               <Grid size={16} />
@@ -986,7 +1301,7 @@ export function FilesPage() {
               <div className="flex items-center justify-center">
                 <div 
                   className={cn(
-                    "w-5 h-5 border-2 rounded-md cursor-pointer transition-colors",
+                    "w-5 h-5 border-2 rounded-lg cursor-pointer transition-colors",
                     selectedFiles.size === sortedFiles.length && sortedFiles.length > 0 ? "bg-accent-primary border-accent-primary" : "border-default-400 hover:border-accent-primary"
                   )}
                   onClick={handleSelectAll}
@@ -1023,6 +1338,7 @@ export function FilesPage() {
                         isFavorited={favoritesData?.[file.path] ?? false}
                         onSelect={() => toggleFileSelection(file.path)}
                         onOpen={() => handleFileOpen(file)}
+                        onClick={() => handleFileClick(file)}
                         onRename={() => handleOpenRenameModal(file)}
                         onDelete={() => handleOpenDeleteModal(file)}
                         onViewVersions={() => handleViewVersions(file)}
@@ -1031,6 +1347,7 @@ export function FilesPage() {
                           path: file.path, 
                           isFavorited: favoritesData?.[file.path] ?? false 
                         })}
+                        onContextMenu={(e) => handleContextMenu(file, e)}
                       />
                     </div>
                   )
@@ -1071,6 +1388,7 @@ export function FilesPage() {
                     isFavorited={favoritesData?.[file.path] ?? false}
                     onSelect={() => toggleFileSelection(file.path)}
                     onOpen={() => handleFileOpen(file)}
+                    onClick={() => handleFileClick(file)}
                     onRename={() => handleOpenRenameModal(file)}
                     onDelete={() => handleOpenDeleteModal(file)}
                     onViewVersions={() => handleViewVersions(file)}
@@ -1079,6 +1397,7 @@ export function FilesPage() {
                       path: file.path, 
                       isFavorited: favoritesData?.[file.path] ?? false 
                     })}
+                    onContextMenu={(e) => handleContextMenu(file, e)}
                   />
                 ))}
               </div>
@@ -1094,46 +1413,47 @@ export function FilesPage() {
       <Modal
         isOpen={isNewFolderOpen}
         onClose={onNewFolderClose}
-        size="sm"
+        placement="center"
+        size="md"
         classNames={{
-          base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden",
-          closeButton: "text-default-500 hover:text-foreground",
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-accent-primary flex items-center justify-center">
-                <FolderPlus size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">新建文件夹</div>
-                <div className="text-xs text-default-500 mt-1">创建一个新的空间用于整理文件</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+              <FolderPlus size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">新建文件夹</h3>
+              <p className="text-xs text-default-500 font-normal">创建一个新的空间用于整理文件</p>
             </div>
           </ModalHeader>
-          <ModalBody className="pt-3 gap-4">
-              <div>
-                <label className="text-sm font-medium text-default-600 mb-1.5 block">文件夹名称</label>
-                <Input
-                  placeholder="请输入文件夹名称"
-                  value={newFolderName}
-                  onValueChange={setNewFolderName}
-                  autoFocus
-                  radius="lg"
-                  classNames={{
-                    inputWrapper: "input-shell bg-content2/80 border-divider/80 hover:bg-content2 focus-within:!border-accent-primary shadow-[var(--shadow-soft)]",
-                  }}
-                />
-              </div>
-              <div className="flex items-center justify-between text-xs text-default-500">
-                <span>支持中文与英文名称</span>
+          <ModalBody className="px-6 py-4">
+            <div>
+              <Input
+                placeholder="请输入文件夹名称"
+                value={newFolderName}
+                onValueChange={setNewFolderName}
+                autoFocus
+                size="lg"
+                variant="bordered"
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+              <div className="flex items-center justify-between text-xs mt-2">
+                <span className="text-default-500">支持中文与英文名称</span>
                 <span className="text-default-400">建议 2-24 个字符</span>
               </div>
+            </div>
           </ModalBody>
-          <ModalFooter className="pt-1">
-              <Button variant="light" onPress={onNewFolderClose} className="text-default-600">取消</Button>
-            <Button className="bg-accent-primary text-white shadow-[var(--shadow-soft)]" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()}>创建</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onNewFolderClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()} className="rounded-xl">创建</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1141,35 +1461,43 @@ export function FilesPage() {
       <Modal
         isOpen={isRenameOpen}
         onClose={onRenameClose}
-        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-accent-primary flex items-center justify-center">
-                <Pencil size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">重命名</div>
-                <div className="text-xs text-default-500 mt-1">为项目设置新的名称</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+              <Pencil size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">重命名</h3>
+              <p className="text-xs text-default-500 font-normal">为项目设置新的名称</p>
             </div>
           </ModalHeader>
-          <ModalBody>
-              <div>
-                <label className="text-sm font-medium text-default-600 mb-1.5 block">新名称</label>
-                <Input
-                  placeholder="请输入新名称"
-                  value={renameValue}
-                  onValueChange={setRenameValue}
-                  autoFocus
-                  classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
-                />
-              </div>
+          <ModalBody className="px-6 py-4">
+            <div>
+              <Input
+                placeholder="请输入新名称"
+                value={renameValue}
+                onValueChange={setRenameValue}
+                autoFocus
+                size="lg"
+                variant="bordered"
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+            </div>
           </ModalBody>
-          <ModalFooter>
-              <Button variant="light" onPress={onRenameClose} className="text-default-600">取消</Button>
-            <Button className="bg-accent-primary text-white" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name}>确定</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onRenameClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue === actionFile?.name} className="rounded-xl">确定</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1177,27 +1505,31 @@ export function FilesPage() {
       <Modal
         isOpen={isDeleteOpen}
         onClose={onDeleteClose}
-        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-danger flex items-center justify-center">
-                <AlertCircle size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">确认删除</div>
-                <div className="text-xs text-default-500 mt-1">文件将被移入回收站</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <AlertCircle size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">确认删除</h3>
+              <p className="text-xs text-default-500 font-normal">文件将被移入回收站</p>
             </div>
           </ModalHeader>
-          <ModalBody>
-              <p className="text-default-600">确定要删除 <strong className="text-foreground">{actionFile?.name}</strong> 吗？</p>
-              <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
+          <ModalBody className="px-6 py-4">
+            <p className="text-default-600">确定要删除 <strong className="text-foreground">{actionFile?.name}</strong> 吗？</p>
+            <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
-          <ModalFooter>
-              <Button variant="light" onPress={onDeleteClose} className="text-default-600">取消</Button>
-            <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending}>删除</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onDeleteClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending} className="rounded-xl">删除</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1205,27 +1537,31 @@ export function FilesPage() {
       <Modal
         isOpen={isBatchDeleteOpen}
         onClose={onBatchDeleteClose}
-        classNames={{ base: "card-meridian border border-divider shadow-2xl rounded-2xl overflow-hidden" }}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="modal-header-gradient text-foreground px-6 pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl glass text-danger flex items-center justify-center">
-                <Trash2 size={18} />
-              </div>
-              <div>
-                <div className="text-base font-semibold">批量删除</div>
-                <div className="text-xs text-default-500 mt-1">选中文件将被移入回收站</div>
-              </div>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <Trash2 size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">批量删除</h3>
+              <p className="text-xs text-default-500 font-normal">选中文件将被移入回收站</p>
             </div>
           </ModalHeader>
-          <ModalBody>
-              <p className="text-default-600">确定要删除选中的 <strong className="text-foreground">{selectedFiles.size}</strong> 个文件吗？</p>
-              <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
+          <ModalBody className="px-6 py-4">
+            <p className="text-default-600">确定要删除选中的 <strong className="text-foreground">{selectedFiles.size}</strong> 个文件吗？</p>
+            <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在 30 天内恢复。</p>
           </ModalBody>
-          <ModalFooter>
-              <Button variant="light" onPress={onBatchDeleteClose} className="text-default-600">取消</Button>
-            <Button color="danger" onPress={handleBatchDelete}>删除全部</Button>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onBatchDeleteClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="danger" onPress={handleBatchDelete} className="rounded-xl">删除全部</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1239,6 +1575,143 @@ export function FilesPage() {
         }}
         filePath={shareFile?.path || ''}
       />
+
+      {/* Move/Copy Dialog */}
+      <MoveDialog
+        isOpen={isMoveOpen}
+        onClose={() => {
+          onMoveClose()
+          setMoveFiles([])
+        }}
+        files={moveFiles}
+        currentPath={currentPath}
+        mode={moveMode}
+      />
+
+      {/* File Preview Modal */}
+      <PreviewModal
+        isOpen={isPreviewOpen}
+        onClose={() => {
+          onPreviewClose()
+          setPreviewFile(null)
+        }}
+        file={previewFile}
+        files={previewFiles}
+        onFileChange={(file) => {
+          setPreviewFile(file)
+          setActiveFilePath(file.path)
+        }}
+      />
+
+      {/* Context Menu */}
+      <ContextMenu
+        isOpen={contextMenu.state.isOpen}
+        position={contextMenu.state.position}
+        onClose={contextMenu.hide}
+      >
+        {contextMenuFile && (
+          <>
+            <ContextMenuSection title="操作" showDivider>
+              {contextMenuFile.isDir ? (
+                <ContextMenuItem
+                  icon={<FolderOpen size={16} />}
+                  onClick={() => {
+                    setCurrentPath(contextMenuFile.path)
+                    contextMenu.hide()
+                  }}
+                >
+                  打开文件夹
+                </ContextMenuItem>
+              ) : (
+                <ContextMenuItem
+                  icon={<Download size={16} />}
+                  onClick={handleContextMenuDownload}
+                >
+                  下载
+                </ContextMenuItem>
+              )}
+              <ContextMenuItem
+                icon={<Pencil size={16} />}
+                onClick={() => {
+                  handleOpenRenameModal(contextMenuFile)
+                  contextMenu.hide()
+                }}
+              >
+                重命名
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Move size={16} />}
+                onClick={() => {
+                  handleOpenMoveModal([contextMenuFile])
+                  contextMenu.hide()
+                }}
+              >
+                移动到...
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Files size={16} />}
+                onClick={() => {
+                  handleOpenCopyModal([contextMenuFile])
+                  contextMenu.hide()
+                }}
+              >
+                复制到...
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Copy size={16} />}
+                onClick={handleContextMenuCopyPath}
+              >
+                复制路径
+              </ContextMenuItem>
+            </ContextMenuSection>
+            <ContextMenuSection title="分享" showDivider>
+              <ContextMenuItem
+                icon={<Star size={16} className={favoritesData?.[contextMenuFile.path] ? "fill-accent-primary text-accent-primary" : ""} />}
+                onClick={() => {
+                  favoriteMutation.mutate({ 
+                    path: contextMenuFile.path, 
+                    isFavorited: favoritesData?.[contextMenuFile.path] ?? false 
+                  })
+                  contextMenu.hide()
+                }}
+              >
+                {favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏'}
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<Link2 size={16} />}
+                onClick={() => {
+                  handleOpenShareModal(contextMenuFile)
+                  contextMenu.hide()
+                }}
+                disabled={contextMenuFile.isDir}
+              >
+                创建分享链接
+              </ContextMenuItem>
+              <ContextMenuItem
+                icon={<History size={16} />}
+                onClick={() => {
+                  handleViewVersions(contextMenuFile)
+                  contextMenu.hide()
+                }}
+              >
+                查看版本历史
+              </ContextMenuItem>
+            </ContextMenuSection>
+            <ContextMenuSection>
+              <ContextMenuItem
+                icon={<Trash2 size={16} />}
+                danger
+                onClick={() => {
+                  handleOpenDeleteModal(contextMenuFile)
+                  contextMenu.hide()
+                }}
+              >
+                删除
+              </ContextMenuItem>
+            </ContextMenuSection>
+          </>
+        )}
+      </ContextMenu>
     </div>
   )
 }

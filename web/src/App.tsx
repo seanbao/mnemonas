@@ -8,6 +8,7 @@ import {
   AlbumPage, 
   VersionsPage, 
   TrashPage,
+  FavoritesPage,
   StoragePage,
   HealthPage,
   MaintenancePage,
@@ -50,6 +51,7 @@ function App() {
           <Route path="album" element={<AlbumPage />} />
           <Route path="versions/*" element={<VersionsPage />} />
           <Route path="trash" element={<TrashPage />} />
+          <Route path="favorites" element={<FavoritesPage />} />
           <Route path="storage" element={<StoragePage />} />
           <Route path="health" element={<HealthPage />} />
           <Route path="maintenance" element={<MaintenancePage />} />

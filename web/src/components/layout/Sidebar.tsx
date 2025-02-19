@@ -13,6 +13,7 @@ import {
   Users,
   FileText,
   X,
+  Star,
 } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
 import { getStorageStats } from '@/api/files'
@@ -36,6 +37,7 @@ const navSections: NavSection[] = [
     items: [
       { icon: Folder, label: '文件', path: '/files' },
       { icon: Image, label: '相册', path: '/album' },
+      { icon: Star, label: '收藏', path: '/favorites' },
       { icon: History, label: '时光回溯', path: '/versions', badge: '核心', badgeColor: 'bg-accent-primary/15 text-accent-primary' },
     ]
   },
@@ -109,7 +111,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
         {onClose && (
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-content2 transition-colors lg:hidden"
+            className="p-2 rounded-xl hover:bg-content2 transition-colors lg:hidden"
             aria-label="关闭导航菜单"
           >
             <X size={20} className="text-default-500" />

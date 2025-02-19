@@ -95,6 +95,7 @@ function TrashRow({
           color="success"
           onPress={onRestore}
           title="恢复"
+          className="rounded-xl"
         >
           <RotateCcw size={16} />
         </Button>
@@ -105,6 +106,7 @@ function TrashRow({
           color="danger"
           onPress={onDelete}
           title="永久删除"
+          className="rounded-xl"
         >
           <Trash2 size={16} />
         </Button>
@@ -252,6 +254,7 @@ export function TrashPage() {
             <Button
               color="danger"
               variant="flat"
+              className="rounded-xl"
               startContent={<Trash2 size={16} />}
               onPress={onEmptyOpen}
             >
@@ -269,7 +272,7 @@ export function TrashPage() {
           </div>
           <span className="text-sm font-medium">已选择 {selectedItems.size} 项</span>
           <div className="flex-1" />
-          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())}>
+          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-xl">
             取消选择
           </Button>
           <Button
@@ -279,6 +282,7 @@ export function TrashPage() {
             startContent={<RotateCcw size={14} />}
             onPress={handleBatchRestore}
             isLoading={isBatchRestoring}
+            className="rounded-xl"
           >
             恢复
           </Button>
@@ -289,6 +293,7 @@ export function TrashPage() {
             startContent={<Trash2 size={14} />}
             onPress={handleBatchDelete}
             isLoading={isBatchDeleting}
+            className="rounded-xl"
           >
             永久删除
           </Button>
@@ -347,26 +352,42 @@ export function TrashPage() {
       </div>
 
       {/* Delete Confirmation Modal */}
-      <Modal isOpen={isDeleteOpen} onClose={onDeleteClose} classNames={{ base: "card-meridian" }}>
+      <Modal 
+        isOpen={isDeleteOpen} 
+        onClose={onDeleteClose}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
+      >
         <ModalContent>
-          <ModalHeader className="flex items-center gap-2">
-            <AlertTriangle size={20} className="text-danger" />
-            永久删除
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <AlertTriangle size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">永久删除</h3>
+              <p className="text-xs text-default-500 font-normal">此操作无法撤销</p>
+            </div>
           </ModalHeader>
-          <ModalBody>
-            <p>确定要永久删除 <strong>{actionItem?.name}</strong> 吗？</p>
-            <p className="text-sm text-danger mt-2">
-              此操作无法撤销，文件将被彻底删除。
+          <ModalBody className="px-6 py-4">
+            <p className="text-foreground">确定要永久删除 <strong>{actionItem?.name}</strong> 吗？</p>
+            <p className="text-xs text-default-500 mt-2">
+              文件将被彻底删除，无法找回。
             </p>
           </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={onDeleteClose}>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onDeleteClose} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button
               color="danger"
               onPress={handleConfirmDelete}
               isLoading={deleteMutation.isPending}
+              className="rounded-xl"
             >
               永久删除
             </Button>
@@ -375,29 +396,45 @@ export function TrashPage() {
       </Modal>
 
       {/* Empty Trash Confirmation Modal */}
-      <Modal isOpen={isEmptyOpen} onClose={onEmptyClose} classNames={{ base: "card-meridian" }}>
+      <Modal 
+        isOpen={isEmptyOpen} 
+        onClose={onEmptyClose}
+        placement="center"
+        size="md"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
+      >
         <ModalContent>
-          <ModalHeader className="flex items-center gap-2">
-            <AlertTriangle size={20} className="text-danger" />
-            清空回收站
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <AlertTriangle size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">清空回收站</h3>
+              <p className="text-xs text-default-500 font-normal">删除所有文件</p>
+            </div>
           </ModalHeader>
-          <ModalBody>
-            <p>确定要清空回收站吗？</p>
-            <p className="text-sm text-default-500 mt-2">
+          <ModalBody className="px-6 py-4">
+            <p className="text-foreground">确定要清空回收站吗？</p>
+            <p className="text-sm text-default-600 mt-2">
               将永久删除 {itemCount} 项，共 {formatBytes(totalSize)}。
             </p>
-            <p className="text-sm text-danger mt-2">
-              此操作无法撤销，所有文件将被彻底删除。
+            <p className="text-xs text-danger mt-2 bg-danger/10 p-2 rounded-lg">
+              警告：此操作无法撤销，所有文件将被彻底删除。
             </p>
           </ModalBody>
-          <ModalFooter>
-            <Button variant="light" onPress={onEmptyClose}>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={onEmptyClose} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button
               color="danger"
               onPress={() => emptyMutation.mutate()}
               isLoading={emptyMutation.isPending}
+              className="rounded-xl"
             >
               清空回收站
             </Button>

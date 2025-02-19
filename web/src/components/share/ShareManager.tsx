@@ -146,6 +146,7 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
           variant="flat"
           size="sm"
           onPress={loadShares}
+          className="rounded-xl"
         >
           <RefreshCw size={16} />
         </Button>
@@ -168,29 +169,45 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
       <Modal 
         isOpen={!!deleteTarget} 
         onClose={() => setDeleteTarget(null)}
+        placement="center"
+        size="md"
         classNames={{
-          base: "bg-content1 border border-divider",
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
-          <ModalHeader>确认删除</ModalHeader>
-          <ModalBody>
-            <p>确定要删除此分享链接吗？已分享的链接将失效。</p>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <Trash2 size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">删除分享</h3>
+              <p className="text-xs text-default-500 font-normal">已分享的链接将失效</p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4">
+            <p className="text-default-600">确定要删除此分享链接吗？</p>
             {deleteTarget && (
-              <div className="p-3 bg-content2 rounded-lg mt-2">
-                <div className="text-sm text-default-500">分享路径</div>
-                <div className="font-medium truncate">{deleteTarget.path}</div>
+              <div className="p-3 bg-content2 rounded-xl mt-3 border border-divider">
+                <div className="text-xs text-default-500 mb-1">分享路径</div>
+                <div className="font-medium truncate text-foreground flex items-center gap-2">
+                  <FileIcon name={deleteTarget.path} isDir={deleteTarget.type === 'folder'} size={16} />
+                  <span className="truncate">{deleteTarget.path}</span>
+                </div>
               </div>
             )}
           </ModalBody>
-          <ModalFooter>
-            <Button variant="flat" onPress={() => setDeleteTarget(null)}>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button variant="flat" onPress={() => setDeleteTarget(null)} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button 
               color="danger" 
               onPress={handleDelete}
               isLoading={isDeleting}
+              className="rounded-xl"
             >
               删除
             </Button>
@@ -270,13 +287,14 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
               variant="flat"
               size="sm"
               onPress={onCopy}
+              className="rounded-xl"
             >
               <Copy size={16} />
             </Button>
             
             <Dropdown>
               <DropdownTrigger>
-                <Button isIconOnly variant="flat" size="sm">
+                <Button isIconOnly variant="flat" size="sm" className="rounded-xl">
                   <MoreVertical size={16} />
                 </Button>
               </DropdownTrigger>

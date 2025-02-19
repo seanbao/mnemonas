@@ -464,10 +464,11 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(files))
 	for _, f := range files {
 		item := map[string]any{
-			"name":     f.Path,
-			"is_dir":   f.IsDir,
-			"size":     f.Size,
-			"mod_time": f.ModTime.Format(time.RFC3339),
+			"name":    path.Base(f.Path),
+			"path":    f.Path,
+			"isDir":   f.IsDir,
+			"size":    f.Size,
+			"modTime": f.ModTime.Format(time.RFC3339),
 		}
 		if !f.IsDir && f.ContentHash != "" {
 			item["hash"] = f.ContentHash
@@ -666,11 +667,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(results))
 	for _, r := range results {
 		item := map[string]any{
-			"name":     r.Name,
-			"path":     r.Path,
-			"is_dir":   r.IsDir,
-			"size":     r.Size,
-			"mod_time": r.ModTime.Format(time.RFC3339),
+			"name":    r.Name,
+			"path":    r.Path,
+			"isDir":   r.IsDir,
+			"size":    r.Size,
+			"modTime": r.ModTime.Format(time.RFC3339),
 		}
 		if r.ContentHash != "" {
 			item["hash"] = r.ContentHash
@@ -1237,12 +1238,12 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 	apiItems := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		apiItem := map[string]any{
-			"id":            item.ID,
-			"original_path": item.OriginalPath,
-			"deleted_at":    item.DeletedAt.Format(time.RFC3339),
-			"name":          path.Base(item.OriginalPath),
-			"is_dir":        item.FileInfo.IsDir,
-			"size":          item.FileInfo.Size,
+			"id":           item.ID,
+			"originalPath": item.OriginalPath,
+			"deletedAt":    item.DeletedAt.Format(time.RFC3339),
+			"name":         path.Base(item.OriginalPath),
+			"isDir":        item.FileInfo.IsDir,
+			"size":         item.FileInfo.Size,
 		}
 		if !item.FileInfo.IsDir && item.FileInfo.ContentHash != "" {
 			apiItem["hash"] = item.FileInfo.ContentHash
@@ -1252,9 +1253,9 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(map[string]any{
-		"items":      apiItems,
-		"count":      count,
-		"total_size": totalSize,
+		"items":     apiItems,
+		"count":     count,
+		"totalSize": totalSize,
 	}).Write(w, http.StatusOK)
 }
 
@@ -1277,14 +1278,14 @@ func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(map[string]any{
-		"id":            item.ID,
-		"original_path": item.OriginalPath,
-		"deleted_at":    item.DeletedAt.Format(time.RFC3339),
-		"name":          path.Base(item.OriginalPath),
-		"is_dir":        item.FileInfo.IsDir,
-		"size":          item.FileInfo.Size,
-		"hash":          item.FileInfo.ContentHash,
-		"versions":      len(item.FileInfo.Versions) + 1,
+		"id":           item.ID,
+		"originalPath": item.OriginalPath,
+		"deletedAt":    item.DeletedAt.Format(time.RFC3339),
+		"name":         path.Base(item.OriginalPath),
+		"isDir":        item.FileInfo.IsDir,
+		"size":         item.FileInfo.Size,
+		"hash":         item.FileInfo.ContentHash,
+		"versions":     len(item.FileInfo.Versions) + 1,
 	}).Write(w, http.StatusOK)
 }
 

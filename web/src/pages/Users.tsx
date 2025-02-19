@@ -111,7 +111,7 @@ function UserCard({
                 isIconOnly
                 variant="light"
                 size="sm"
-                className="text-default-500"
+                className="text-default-500 rounded-xl"
               >
                 <MoreVertical size={16} />
               </Button>
@@ -288,12 +288,12 @@ export function UsersPage() {
               startContent={<RefreshCw size={16} />}
               onPress={() => refetch()}
               isLoading={isLoading}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               刷新
             </Button>
             <Button
-              className="bg-accent-primary text-white"
+              className="bg-accent-primary text-white rounded-xl"
               startContent={<UserPlus size={16} />}
               onPress={onCreateOpen}
             >
@@ -366,57 +366,85 @@ export function UsersPage() {
           onCreateClose()
           resetCreateForm()
         }}
-        classNames={{ base: "bg-content1 border border-divider" }}
+        size="md"
+        placement="center"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="text-foreground">添加用户</ModalHeader>
-          <ModalBody className="space-y-4">
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+              <UserPlus size={20} />
+            </div>
             <div>
-              <label className="text-sm font-medium text-default-600 mb-1.5 block">用户名</label>
+              <h3 className="text-lg font-semibold text-foreground">添加用户</h3>
+              <p className="text-xs text-default-500 font-normal">创建新的系统用户</p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4 space-y-4">
+            <div>
               <Input
+                label="用户名"
                 placeholder="请输入用户名"
                 value={newUsername}
                 onValueChange={setNewUsername}
                 autoFocus
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
                 classNames={{
-                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
                 }}
               />
             </div>
             <div>
-              <label className="text-sm font-medium text-default-600 mb-1.5 block">密码</label>
               <Input
                 type="password"
+                label="密码"
                 placeholder="请输入密码（至少 8 位）"
                 value={newPassword}
                 onValueChange={setNewPassword}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
                 classNames={{
-                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
                 }}
               />
             </div>
             <div>
-              <label className="text-sm font-medium text-default-600 mb-1.5 block">邮箱（可选）</label>
               <Input
                 type="email"
+                label="邮箱（可选）"
                 placeholder="请输入邮箱"
                 value={newEmail}
                 onValueChange={setNewEmail}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
                 classNames={{
-                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
                 }}
               />
             </div>
             <div>
-              <label className="text-sm font-medium text-default-600 mb-1.5 block">角色</label>
+              <label className="text-sm font-medium text-foreground mb-2 block">角色</label>
               <Select
                 selectedKeys={[newRole]}
                 onSelectionChange={(keys) => {
                   const value = Array.from(keys)[0] as 'admin' | 'user' | 'guest'
                   if (value) setNewRole(value)
                 }}
+                size="lg"
+                variant="bordered"
                 classNames={{
-                  trigger: "bg-content2 border-divider data-[hover=true]:border-accent-primary",
+                  trigger: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
                 }}
               >
                 <SelectItem key="admin" startContent={<Shield size={16} />}>
@@ -431,22 +459,23 @@ export function UsersPage() {
               </Select>
             </div>
           </ModalBody>
-          <ModalFooter>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
-              variant="light"
+              variant="flat"
               onPress={() => {
                 onCreateClose()
                 resetCreateForm()
               }}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               取消
             </Button>
             <Button
-              className="bg-accent-primary text-white"
+              color="primary"
               onPress={handleCreate}
               isLoading={createMutation.isPending}
               isDisabled={!newUsername.trim() || !newPassword.trim() || newPassword.length < 8}
+              className="rounded-xl"
             >
               创建
             </Button>
@@ -461,11 +490,25 @@ export function UsersPage() {
           onDeleteClose()
           setActionUser(null)
         }}
-        classNames={{ base: "bg-content1 border border-divider" }}
+        size="md"
+        placement="center"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="text-foreground">确认删除</ModalHeader>
-          <ModalBody>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+              <Trash2 size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">确认删除</h3>
+              <p className="text-xs text-default-500 font-normal">此操作不可恢复</p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4">
             <p className="text-default-600">
               确定要删除用户 <strong className="text-foreground">{actionUser?.username}</strong> 吗？
             </p>
@@ -473,14 +516,14 @@ export function UsersPage() {
               此操作不可逆，该用户的所有数据将被保留但无法访问。
             </p>
           </ModalBody>
-          <ModalFooter>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
-              variant="light"
+              variant="flat"
               onPress={() => {
                 onDeleteClose()
                 setActionUser(null)
               }}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               取消
             </Button>
@@ -488,6 +531,7 @@ export function UsersPage() {
               color="danger"
               onPress={handleDelete}
               isLoading={deleteMutation.isPending}
+              className="rounded-xl"
             >
               删除
             </Button>
@@ -503,45 +547,61 @@ export function UsersPage() {
           setActionUser(null)
           setResetPassword('')
         }}
-        classNames={{ base: "bg-content1 border border-divider" }}
+        size="md"
+        placement="center"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
       >
         <ModalContent>
-          <ModalHeader className="text-foreground">重置密码</ModalHeader>
-          <ModalBody>
-            <p className="text-default-600 mb-4">
-              为用户 <strong className="text-foreground">{actionUser?.username}</strong> 设置新密码
-            </p>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+              <KeyRound size={20} />
+            </div>
             <div>
-              <label className="text-sm font-medium text-default-600 mb-1.5 block">新密码</label>
+              <h3 className="text-lg font-semibold text-foreground">重置密码</h3>
+              <p className="text-xs text-default-500 font-normal">为用户 <strong>{actionUser?.username}</strong> 设置新密码</p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4">
+            <div>
               <Input
                 type="password"
+                label="新密码"
                 placeholder="请输入新密码（至少 8 位）"
                 value={resetPassword}
                 onValueChange={setResetPassword}
                 autoFocus
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
                 classNames={{
-                  inputWrapper: "bg-content2 border-divider group-data-[focus=true]:border-accent-primary",
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
                 }}
               />
             </div>
           </ModalBody>
-          <ModalFooter>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
-              variant="light"
+              variant="flat"
               onPress={() => {
                 onResetClose()
                 setActionUser(null)
                 setResetPassword('')
               }}
-              className="text-default-600"
+              className="text-default-600 rounded-xl"
             >
               取消
             </Button>
             <Button
-              className="bg-accent-primary text-white"
+              color="primary"
               onPress={handleResetPassword}
               isLoading={resetPasswordMutation.isPending}
               isDisabled={!resetPassword.trim() || resetPassword.length < 8}
+              className="rounded-xl"
             >
               确认重置
             </Button>

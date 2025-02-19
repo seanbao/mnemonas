@@ -65,7 +65,7 @@ describe('FilesPage', () => {
     it('shows loading state initially', () => {
       mockListFiles.mockImplementation(() => new Promise(() => {})) // Never resolves
       render(<FilesPage />)
-      expect(screen.getByText(/loading/i)).toBeTruthy()
+      expect(screen.getByText('加载记忆中...')).toBeTruthy()
     })
 
     it('calls listFiles API on mount', async () => {
@@ -308,7 +308,7 @@ describe('FilesPage', () => {
       mockListFiles.mockImplementation(() => new Promise(() => {})) // Never resolves
       render(<FilesPage />)
       
-      expect(screen.getByText(/loading/i)).toBeTruthy()
+      expect(screen.getByText('加载记忆中...')).toBeTruthy()
     })
 
     it('retries on API failure', async () => {

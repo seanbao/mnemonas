@@ -102,7 +102,7 @@ export function SearchPage() {
           isIconOnly
           variant="light"
           onPress={() => navigate(-1)}
-          className="text-default-500"
+          className="text-default-500 rounded-xl"
         >
           <ArrowLeft size={20} />
         </Button>

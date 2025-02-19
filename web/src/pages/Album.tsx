@@ -308,7 +308,7 @@ function ImagePreview({
           <Button
             isIconOnly
             variant="light"
-            className="absolute top-4 right-4 z-50 text-white"
+            className="absolute top-4 right-4 z-50 text-white rounded-xl"
             onPress={onClose}
           >
             <X size={24} />
@@ -318,7 +318,7 @@ function ImagePreview({
           <Button
             isIconOnly
             variant="light"
-            className="absolute left-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex"
+            className="absolute left-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-xl"
             onPress={handlePrev}
           >
             <ChevronLeft size={32} />
@@ -327,7 +327,7 @@ function ImagePreview({
           <Button
             isIconOnly
             variant="light"
-            className="absolute right-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex"
+            className="absolute right-4 top-1/2 -translate-y-1/2 z-50 text-white hidden md:flex rounded-xl"
             onPress={handleNext}
           >
             <ChevronRight size={32} />
@@ -374,7 +374,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
-                  className="text-white"
+                  className="text-white rounded-xl"
                   onPress={() => setZoom(z => Math.max(0.5, z - 0.25))}
                 >
                   <ZoomOut size={18} />
@@ -383,7 +383,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
-                  className="text-white"
+                  className="text-white rounded-xl"
                   onPress={() => setZoom(z => Math.min(3, z + 0.25))}
                 >
                   <ZoomIn size={18} />
@@ -392,7 +392,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
-                  className="text-white"
+                  className="text-white rounded-xl"
                   onPress={() => setRotation(r => (r + 90) % 360)}
                 >
                   <RotateCw size={18} />
@@ -401,7 +401,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
-                  className="text-white"
+                  className="text-white rounded-xl"
                   onPress={() => setShowInfo(!showInfo)}
                 >
                   <Info size={18} />
@@ -410,7 +410,7 @@ function ImagePreview({
                   isIconOnly
                   size="sm"
                   variant="light"
-                  className="text-white"
+                  className="text-white rounded-xl"
                   onPress={() => currentImage && window.open(getDownloadUrl(currentImage.path), '_blank')}
                 >
                   <Download size={18} />
