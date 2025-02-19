@@ -20,13 +20,6 @@ import {
 } from '@heroui/react'
 import { 
   Folder, 
-  File, 
-  Image, 
-  Video, 
-  Music,
-  FileText,
-  FileCode,
-  Archive,
   Grid,
   List,
   FolderPlus,
@@ -834,7 +827,14 @@ export function FilesPage() {
   }, [selectedFiles, sortedFiles])
 
   if (isLoading) {
-    return <div className="p-6 text-default-500">Loading memories...</div>
+    return (
+      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+        <div className="text-center">
+          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-default-500">加载记忆中...</p>
+        </div>
+      </div>
+    )
   }
 
   const hasSelection = selectedFiles.size > 0
@@ -1113,19 +1113,19 @@ export function FilesPage() {
             </div>
           </ModalHeader>
           <ModalBody className="pt-3 gap-4">
-              <Input
-                label="文件夹名称"
-                placeholder="请输入文件夹名称"
-                value={newFolderName}
-                onValueChange={setNewFolderName}
-                autoFocus
-                radius="lg"
-                classNames={{
-                  base: "gap-1",
-                  inputWrapper: "input-shell bg-content2/80 border-divider/80 hover:bg-content2 focus-within:!border-accent-primary shadow-[var(--shadow-soft)]",
-                  label: "text-default-500",
-                }}
-              />
+              <div>
+                <label className="text-sm font-medium text-default-600 mb-1.5 block">文件夹名称</label>
+                <Input
+                  placeholder="请输入文件夹名称"
+                  value={newFolderName}
+                  onValueChange={setNewFolderName}
+                  autoFocus
+                  radius="lg"
+                  classNames={{
+                    inputWrapper: "input-shell bg-content2/80 border-divider/80 hover:bg-content2 focus-within:!border-accent-primary shadow-[var(--shadow-soft)]",
+                  }}
+                />
+              </div>
               <div className="flex items-center justify-between text-xs text-default-500">
                 <span>支持中文与英文名称</span>
                 <span className="text-default-400">建议 2-24 个字符</span>
@@ -1156,14 +1156,16 @@ export function FilesPage() {
             </div>
           </ModalHeader>
           <ModalBody>
-              <Input
-                label="新名称"
-                placeholder="请输入新名称"
-                value={renameValue}
-                onValueChange={setRenameValue}
-                autoFocus
-                classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
-              />
+              <div>
+                <label className="text-sm font-medium text-default-600 mb-1.5 block">新名称</label>
+                <Input
+                  placeholder="请输入新名称"
+                  value={renameValue}
+                  onValueChange={setRenameValue}
+                  autoFocus
+                  classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary" }}
+                />
+              </div>
           </ModalBody>
           <ModalFooter>
               <Button variant="light" onPress={onRenameClose} className="text-default-600">取消</Button>

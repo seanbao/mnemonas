@@ -12,6 +12,7 @@ import {
   Archive,
   Users,
   FileText,
+  X,
 } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
 import { getStorageStats } from '@/api/files'
@@ -59,9 +60,10 @@ const navSections: NavSection[] = [
 
 interface SidebarProps {
   collapsed?: boolean
+  onClose?: () => void
 }
 
-export function Sidebar({ collapsed = false }: SidebarProps) {
+export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const location = useLocation()
   
   // Fetch storage stats for the sidebar indicator
@@ -80,29 +82,43 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
   return (
     <aside 
       className={cn(
-        "h-screen border-r border-divider flex flex-col transition-all duration-300 relative overflow-hidden sidebar-surface glass-strong",
+        "h-screen flex flex-col transition-all duration-300 relative overflow-hidden glass-strong",
         collapsed ? "w-16" : "w-[248px]"
       )}
     >
       {/* Logo */}
-      <div className="p-5 flex items-center gap-3 border-b border-divider relative z-10">
-        <div className="w-10 h-10 rounded-xl gradient-meridian flex items-center justify-center logo-glow flex-shrink-0">
-          <Archive size={20} className="text-white" />
-        </div>
-        {!collapsed && (
-          <div>
-            <div className="font-semibold text-base tracking-tight text-gradient-meridian">
-              MnemoNAS
+      <div className="p-5 flex items-center justify-between border-b border-divider relative z-10">
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <div className="w-10 h-10 rounded-xl gradient-meridian flex items-center justify-center logo-glow flex-shrink-0">
+              <Archive size={20} className="text-white" />
             </div>
-            <div className="text-[10px] text-default-500 tracking-widest uppercase mt-0.5">
-              Memory Palace
-            </div>
+            <div className="live-indicator absolute -right-0.5 -bottom-0.5 w-2.5 h-2.5" />
           </div>
+          {!collapsed && (
+            <div>
+              <div className="font-semibold text-base tracking-tight text-gradient-meridian">
+                MnemoNAS
+              </div>
+              <div className="text-[10px] text-default-500 tracking-widest uppercase mt-0.5">
+                Memory Palace
+              </div>
+            </div>
+          )}
+        </div>
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg hover:bg-content2 transition-colors lg:hidden"
+            aria-label="关闭导航菜单"
+          >
+            <X size={20} className="text-default-500" />
+          </button>
         )}
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 py-4 px-3 overflow-y-auto relative z-10 custom-scrollbar">
+      <nav className="flex-1 py-4 px-3 overflow-y-auto relative z-10 custom-scrollbar" aria-label="主导航">
         {navSections.map((section) => (
           <div key={section.title} className={cn("mb-7", collapsed && "mb-4")}>
             {!collapsed && (
@@ -119,6 +135,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                   <li key={item.path}>
                     <Link
                       to={item.path}
+                      onClick={onClose}
                       className={cn(
                         "flex items-center gap-3 px-3 py-2.5 rounded-[10px] transition-all duration-200 group",
                         isActive 
@@ -158,26 +175,40 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         ))}
       </nav>
 
-      {/* Storage Status */}
+      {/* Storage Status - 存储状态底栏 */}
       {!collapsed && (
-        <div className="p-4 border-t border-divider glass relative z-10">
-          <div className="flex items-center justify-between text-xs mb-2">
-            <span className="text-default-500">存储空间</span>
-            <span className="text-accent-light font-medium">
-              {storageStats ? formatBytes(usedBytes) : '--'}
-            </span>
-          </div>
-          <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
-            <div 
-              className="h-full bg-accent-primary rounded-full transition-all duration-500" 
-              style={{ width: `${Math.max(5, usagePercent)}%` }}
-            />
-          </div>
-          {storageStats && storageStats.dedupRatio > 1 && (
-            <div className="mt-1.5 text-[10px] text-default-500">
-              去重率 {((1 - 1 / storageStats.dedupRatio) * 100).toFixed(1)}%
+        <div className="p-4 border-t border-divider relative z-10">
+          <div className="gradient-meridian-subtle rounded-xl p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <HardDrive size={16} className="text-accent-primary" />
+              <span className="text-sm font-medium">存储空间</span>
             </div>
-          )}
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-default-500">已使用</span>
+                <span className="data-value text-accent-light font-medium">
+                  {storageStats ? formatBytes(usedBytes) : '--'}
+                </span>
+              </div>
+              <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-accent-primary rounded-full transition-all duration-500 flow-line" 
+                  style={{ width: `${Math.max(5, usagePercent)}%` }}
+                />
+              </div>
+              {storageStats && storageStats.dedupRatio > 1 && (
+                <div className="flex items-center gap-2">
+                  <div className="live-indicator scale-75" />
+                  <span className="text-default-500">
+                    去重率 {((1 - 1 / storageStats.dedupRatio) * 100).toFixed(1)}%
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+          <p className="text-default-500 text-center text-[10px] mt-3">
+            MnemoNAS v0.1.0
+          </p>
         </div>
       )}
     </aside>

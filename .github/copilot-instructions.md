@@ -47,7 +47,7 @@
 | 占位标记（for test/临时/先这样） | 正式、可复用的描述 |
 | 引导式语句（接下来我们…） | 系统行为/接口约束/返回结构 |
 
-### 格式要求
+### 结构维护
 
 - 中文和英文之间添加空格（如 `使用 Rust 编写`）
 - 修改标题后校验目录锚点与章节标题一致性
@@ -57,14 +57,54 @@
 
 ### Commit Message
 
-格式：`<type>(<scope>): <subject>`
+基于 [Conventional Commits](https://www.conventionalcommits.org/) 规范。
 
-常用 type：
-- `feat`: 新功能
-- `fix`: 修复
-- `docs`: 文档变更
-- `refactor`: 重构
-- `test`: 测试相关
+**格式**：
+
+```
+<type>(<scope>): <subject>
+
+[body]
+
+[footer]
+```
+
+- `scope` 可选，取值为模块名或文件名
+- `subject` 使用祈使语气（动词原形），首字母小写，结尾不加句号
+- 破坏性变更在 type 后加 `!`，如 `feat!:` 或 `feat(api)!:`
+
+**常用 type**：
+
+| type | 说明 |
+|------|------|
+| `feat` | 新功能 |
+| `fix` | 修复 |
+| `docs` | 文档变更 |
+| `refactor` | 重构（不影响功能） |
+| `perf` | 性能优化 |
+| `test` | 测试相关 |
+| `chore` | 构建/工具/依赖 |
+| `style` | 代码格式（不影响逻辑） |
+
+**原则**：
+
+- 精简准确，避免冗余
+- 简单修改无需 body，复杂变更补充详情
+- 关联 issue 在 footer 标注：`Closes #123`
+
+**示例**：
+
+```
+feat(parser): add support for arrays
+
+fix: resolve memory leak in cache module
+
+docs: update API reference
+
+refactor(auth)!: change token format
+
+BREAKING CHANGE: token format changed from JWT to opaque
+```
 
 ---
 

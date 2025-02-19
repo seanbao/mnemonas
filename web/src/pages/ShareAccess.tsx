@@ -5,7 +5,6 @@ import {
   CardBody,
   Button,
   Input,
-  Spinner,
   addToast,
 } from '@heroui/react'
 import {
@@ -102,8 +101,11 @@ export function ShareAccessPage() {
   // Loading state
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-content2 flex items-center justify-center app-shell">
-        <Spinner size="lg" />
+      <div className="min-h-screen bg-background flex items-center justify-center app-shell">
+        <div className="text-center">
+          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-default-500">加载分享信息...</p>
+        </div>
       </div>
     )
   }
@@ -154,20 +156,21 @@ export function ShareAccessPage() {
             </div>
 
             <form onSubmit={handlePasswordSubmit} className="space-y-4">
-              <Input
-                type="password"
-                label="访问密码"
-                placeholder="请输入密码"
-                value={password}
-                onValueChange={setPassword}
-                isDisabled={isVerifying}
-                variant="bordered"
-                radius="lg"
-                classNames={{
-                  inputWrapper: "bg-default-100/50 hover:bg-default-200/50 border-transparent focus-within:!border-primary transition-colors",
-                  label: "text-default-500",
-                }}
-              />
+              <div>
+                <label className="text-sm font-medium text-default-600 mb-1.5 block">访问密码</label>
+                <Input
+                  type="password"
+                  placeholder="请输入密码"
+                  value={password}
+                  onValueChange={setPassword}
+                  isDisabled={isVerifying}
+                  variant="bordered"
+                  radius="lg"
+                  classNames={{
+                    inputWrapper: "bg-default-100/50 hover:bg-default-200/50 border-transparent focus-within:!border-primary transition-colors",
+                  }}
+                />
+              </div>
               <Button
                 type="submit"
                 className="w-full font-medium shadow-lg shadow-primary/20"

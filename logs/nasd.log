@@ -1,23 +1,30 @@
-15:26:01 INF cmd/nasd/main.go:297 > loading config file path=/home/seanbao/.config/mnemonas/config.toml
-15:26:01 INF cmd/nasd/main.go:79 > starting MnemoNAS address=0.0.0.0:8080 data_dir=/home/seanbao/.mnemonas/data version=dev
-15:26:01 WRN cmd/nasd/main.go:87 > ⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!
-15:26:01 WRN cmd/nasd/main.go:88 >    Set [webdav].auth_type = "basic" to enable WebDAV authentication
-15:26:01 WRN cmd/nasd/main.go:91 > ⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!
-15:26:01 WRN cmd/nasd/main.go:92 >    Set [server.tls].enabled = true for secure connections
-15:26:01 INF internal/api/server.go:109 > Connected to data plane addr=127.0.0.1:9090
-15:26:01 INF internal/api/server.go:129 > Thumbnail service initialized cache=/home/seanbao/.mnemonas/thumbnails
-15:26:01 INF internal/api/server.go:140 > Maintenance history store initialized path=/home/seanbao/.mnemonas/maintenance
-15:26:01 INF internal/api/server.go:151 > Activity store initialized path=/home/seanbao/.mnemonas/activity
-15:26:01 INF internal/api/server.go:181 > Authentication enabled
-15:26:01 INF internal/api/server.go:208 > Favorites feature enabled
-15:26:01 INF cmd/nasd/main.go:165 > WebDAV enabled auth=none prefix=/dav
-15:26:01 INF cmd/nasd/main.go:255 > server started (HTTP) address=0.0.0.0:8080
-15:26:02 INF internal/api/server.go:1211 > request bytes=138 duration=1.080671 method=GET path=/health remote=127.0.0.1:49402 status=200
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.042131 method=GET path=/api/v1/auth/me remote=127.0.0.1:49418 status=404
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.038417 method=GET path=/api/v1/auth/me remote=127.0.0.1:49430 status=404
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.1053 method=GET path=/api/v1/auth/me remote=127.0.0.1:49446 status=404
-15:26:04 INF internal/api/server.go:1211 > request bytes=19 duration=0.068844 method=GET path=/api/v1/auth/me remote=127.0.0.1:49462 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.03708 method=GET path=/api/v1/auth/me remote=127.0.0.1:49474 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.019616 method=GET path=/api/v1/auth/me remote=127.0.0.1:49484 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.035395 method=GET path=/api/v1/auth/me remote=127.0.0.1:49490 status=404
-15:26:06 INF internal/api/server.go:1211 > request bytes=19 duration=0.021481 method=GET path=/api/v1/auth/me remote=127.0.0.1:49494 status=404
+16:24:51 INF cmd/nasd/main.go:297 > loading config file path=/home/seanbao/.config/mnemonas/config.toml
+16:24:51 INF cmd/nasd/main.go:79 > starting MnemoNAS address=0.0.0.0:8080 data_dir=/home/seanbao/.mnemonas/data version=dev
+16:24:51 WRN cmd/nasd/main.go:87 > ⚠️  WebDAV authentication is DISABLED - WebDAV access is unprotected!
+16:24:51 WRN cmd/nasd/main.go:88 >    Set [webdav].auth_type = "basic" to enable WebDAV authentication
+16:24:51 WRN cmd/nasd/main.go:91 > ⚠️  TLS/HTTPS is DISABLED - data transmitted in plain text!
+16:24:51 WRN cmd/nasd/main.go:92 >    Set [server.tls].enabled = true for secure connections
+16:24:51 INF internal/api/server.go:109 > Connected to data plane addr=127.0.0.1:9090
+16:24:51 INF internal/api/server.go:129 > Thumbnail service initialized cache=/home/seanbao/.mnemonas/thumbnails
+16:24:51 INF internal/api/server.go:140 > Maintenance history store initialized path=/home/seanbao/.mnemonas/maintenance
+16:24:51 INF internal/api/server.go:151 > Activity store initialized path=/home/seanbao/.mnemonas/activity
+16:24:51 INF internal/api/server.go:181 > Authentication enabled
+16:24:51 INF internal/api/server.go:208 > Favorites feature enabled
+16:24:51 INF cmd/nasd/main.go:165 > WebDAV enabled auth=none prefix=/dav
+16:24:51 INF cmd/nasd/main.go:255 > server started (HTTP) address=0.0.0.0:8080
+16:24:51 INF internal/api/server.go:1211 > request bytes=138 duration=1.629592 method=GET path=/health remote=127.0.0.1:56350 status=200
+16:25:27 INF internal/api/server.go:1211 > request bytes=19 duration=0.059518 method=GET path=/api/v1/auth/me remote=127.0.0.1:33012 status=404
+16:25:27 INF internal/api/server.go:1211 > request bytes=19 duration=0.047796 method=GET path=/api/v1/auth/me remote=127.0.0.1:33020 status=404
+16:25:27 INF internal/api/server.go:1211 > request bytes=19 duration=0.043097 method=GET path=/api/v1/auth/me remote=127.0.0.1:33026 status=404
+16:25:27 INF internal/api/server.go:1211 > request bytes=19 duration=0.036485 method=GET path=/api/v1/auth/me remote=127.0.0.1:33036 status=404
+16:26:19 INF internal/api/server.go:1211 > request bytes=19 duration=0.090017 method=GET path=/api/v1/auth/me remote=127.0.0.1:57534 status=404
+16:26:19 INF internal/api/server.go:1211 > request bytes=19 duration=0.064817 method=GET path=/api/v1/auth/me remote=127.0.0.1:57550 status=404
+16:26:19 INF internal/api/server.go:1211 > request bytes=19 duration=0.049999 method=GET path=/api/v1/auth/me remote=127.0.0.1:57558 status=404
+16:26:19 INF internal/api/server.go:1211 > request bytes=19 duration=0.046552 method=GET path=/api/v1/auth/me remote=127.0.0.1:57570 status=404
+16:26:21 INF internal/api/server.go:1211 > request bytes=901 duration=48.70699 method=POST path=/api/v1/auth/login remote=127.0.0.1:57578 status=200
+16:26:21 INF internal/api/server.go:1211 > request bytes=141 duration=0.246484 method=GET path=/health remote=127.0.0.1:57582 status=200
+16:26:21 INF internal/api/server.go:1211 > request bytes=82 duration=0.623064 method=GET path=/api/v1/stats remote=127.0.0.1:57580 status=200
+16:26:21 INF internal/api/server.go:1211 > request bytes=784 duration=0.337288 method=GET path=/api/v1/activity/ remote=127.0.0.1:57592 status=200
+16:26:21 INF internal/api/server.go:1211 > request bytes=82 duration=0.403902 method=GET path=/api/v1/stats remote=127.0.0.1:57602 status=200
+16:26:23 INF internal/api/server.go:1211 > request bytes=341 duration=0.232314 method=GET path=/api/v1/trash/ remote=127.0.0.1:57618 status=200
+16:26:25 INF internal/api/server.go:1211 > request bytes=1709 duration=0.547746 method=GET path=/api/v1/files/ remote=127.0.0.1:57624 status=200

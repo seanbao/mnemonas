@@ -1,8 +1,10 @@
 import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Avatar, Dropdown, DropdownTrigger, DropdownMenu, DropdownItem, addToast } from '@heroui/react'
-import { Search, Bell, Menu, ChevronRight } from 'lucide-react'
+import { Search, Bell, Menu, RefreshCw } from 'lucide-react'
 import { useAuthStore, useUser } from '@/stores/auth'
+import { useQueryClient } from '@tanstack/react-query'
+import { ThemeToggle } from '@/components/ThemeToggle'
 
 interface HeaderProps {
   onMenuClick?: () => void
@@ -12,7 +14,9 @@ export function Header({ onMenuClick }: HeaderProps) {
   const navigate = useNavigate()
   const user = useUser()
   const logout = useAuthStore((state) => state.logout)
+  const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
+  const [isRefreshing, setIsRefreshing] = useState(false)
 
   const handleLogout = async () => {
     await logout()
@@ -22,6 +26,12 @@ export function Header({ onMenuClick }: HeaderProps) {
 
   const handleSettings = () => {
     navigate('/settings')
+  }
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true)
+    await queryClient.invalidateQueries()
+    setTimeout(() => setIsRefreshing(false), 500)
   }
 
   const handleSearch = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -47,32 +57,30 @@ export function Header({ onMenuClick }: HeaderProps) {
   const displayEmail = user?.email || 'guest@local'
 
   return (
-    <header className="h-[56px] border-b border-divider flex items-center justify-between px-6 sticky top-0 z-40 header-surface glass-strong">
+    <header className="h-16 border-b border-divider flex items-center justify-between px-4 lg:px-8 sticky top-0 z-40 glass">
       {/* Left section */}
-      <div className="flex items-center gap-3">
-        <Button
-          isIconOnly
-          variant="light"
-          className="lg:hidden text-default-600"
-          onPress={onMenuClick}
+      <div className="flex items-center gap-4">
+        <button
+          onClick={onMenuClick}
+          className="p-2 rounded-lg hover:bg-content2 lg:hidden"
+          aria-label="打开导航菜单"
         >
-          <Menu size={20} />
-        </Button>
-        <div className="hidden md:flex items-center gap-2 text-sm">
-          <span className="text-foreground font-medium">MnemoNAS</span>
-          <ChevronRight size={14} className="text-default-500" />
-          <span className="text-default-600">控制台</span>
+          <Menu size={20} className="text-default-600" />
+        </button>
+        <div className="hidden sm:block">
+          <h1 className="text-lg font-semibold">私有云存储</h1>
+          <p className="text-muted-foreground text-xs">数据在自己手里，体验不输云服务</p>
         </div>
       </div>
 
       {/* Right section: Search & Actions */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2">
         {/* Search - Mnemosyne Style */}
         <div 
-          className="hidden sm:flex items-center gap-2 px-3 py-2 glass rounded-[10px] w-[240px] focus-within:border-accent-primary focus-within:ring-1 focus-within:ring-accent-primary/15 transition-all duration-200 cursor-pointer"
+          className="hidden sm:flex items-center gap-2 px-3 py-2 glass rounded-xl w-[240px] focus-within:border-accent-primary focus-within:ring-2 focus-within:ring-accent-primary/15 transition-all duration-200 cursor-pointer border border-transparent"
           onClick={handleSearchClick}
         >
-          <Search size={16} className="text-default-500" />
+          <Search size={16} className="text-default-500 shrink-0" />
           <input 
             type="text" 
             placeholder="搜索文件与记忆" 
@@ -84,13 +92,26 @@ export function Header({ onMenuClick }: HeaderProps) {
           />
         </div>
 
-        <Button isIconOnly variant="light" className="w-[36px] h-[36px] min-w-[36px] rounded-[10px] border border-divider glass text-default-600 hover:text-foreground">
+        <Button
+          isIconOnly
+          variant="light"
+          size="sm"
+          onPress={handleRefresh}
+          isLoading={isRefreshing}
+          aria-label="刷新数据"
+        >
+          <RefreshCw size={18} className={isRefreshing ? 'animate-spin' : ''} />
+        </Button>
+
+        <Button isIconOnly variant="light" size="sm" aria-label="通知">
           <Bell size={18} />
         </Button>
 
+        <ThemeToggle />
+
         <Dropdown placement="bottom-end">
           <DropdownTrigger>
-            <button className="w-[38px] h-[38px] rounded-[10px] border border-divider glass p-0.5 hover:border-accent-primary/50 transition-colors overflow-hidden">
+            <button className="w-9 h-9 rounded-xl border border-divider glass p-0.5 hover:border-accent-primary/50 transition-colors overflow-hidden">
               <Avatar
                 src={avatarUrl}
                 className="w-full h-full rounded-lg"

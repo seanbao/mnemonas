@@ -172,7 +172,7 @@ export default function Maintenance() {
       />
       
       {/* Scrub Card */}
-      <Card className="glass-card">
+      <Card className="card-meridian">
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-accent-primary/15 flex items-center justify-center">
@@ -269,7 +269,7 @@ export default function Maintenance() {
       </Card>
       
       {/* Info Card */}
-      <Card className="glass-card">
+      <Card className="card-meridian">
         <CardBody className="text-sm text-default-600">
           <h4 className="font-medium mb-2">关于数据校验</h4>
           <ul className="list-disc list-inside space-y-1">

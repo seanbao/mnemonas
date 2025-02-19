@@ -174,8 +174,82 @@ body {
     radial-gradient(900px 700px at 20% 95%, rgba(240, 210, 122, 0.12), transparent 70%);
 }
 
+/* ========================================
+   Ambient Background - 环境背景动画
+   沉浸式体验，数据流动的视觉隐喻
+   ======================================== */
+.ambient-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ambient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.4;
+  animation: ambient-float 20s ease-in-out infinite;
+}
+
+.ambient-orb-1 {
+  width: 400px;
+  height: 400px;
+  top: -100px;
+  left: -100px;
+  background: rgba(124, 140, 248, 0.35);
+}
+
+.ambient-orb-2 {
+  width: 350px;
+  height: 350px;
+  top: 30%;
+  right: -100px;
+  background: rgba(91, 210, 233, 0.3);
+  animation-delay: -7s;
+}
+
+.ambient-orb-3 {
+  width: 300px;
+  height: 300px;
+  bottom: -50px;
+  left: 30%;
+  background: rgba(240, 210, 122, 0.25);
+  animation-delay: -14s;
+}
+
+@keyframes ambient-float {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(30px, -30px) scale(1.05);
+  }
+  66% {
+    transform: translate(-20px, 20px) scale(0.95);
+  }
+}
+
+/* Dark mode ambient enhancement */
+.dark .ambient-orb {
+  opacity: 0.35;
+}
+
 .gradient-meridian {
+  background: linear-gradient(135deg, #7c8cf8 0%, #5bd2e9 50%, #9d8cf8 100%);
+}
+
+/* Subtle gradient for cards and backgrounds */
+.gradient-meridian-subtle {
   background: linear-gradient(135deg, rgba(124, 140, 248, 0.2) 0%, rgba(91, 210, 233, 0.18) 50%, rgba(240, 210, 122, 0.14) 100%);
+}
+
+/* Strong gradient for hero sections */
+.gradient-meridian-hero {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 35%, #a78bfa 70%, #7dd3fc 100%);
 }
 
 .text-gradient-meridian {
@@ -323,25 +397,6 @@ label {
   text-decoration-line: none !important;
 }
 
-/* Fix Input startContent positioning */
-[data-slot="input-wrapper"] {
-  display: flex !important;
-  align-items: center !important;
-  gap: 0.5rem !important;
-}
-
-[data-slot="inner-wrapper"] {
-  display: flex !important;
-  align-items: center !important;
-  gap: 0.5rem !important;
-  width: 100% !important;
-}
-
-[data-slot="input"] {
-  flex: 1 !important;
-  min-width: 0 !important;
-}
-
 /* Logo Glow */
 .logo-glow {
   box-shadow: 
@@ -461,6 +516,164 @@ label {
 .card-hover:hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-medium);
+}
+
+/* ========================================
+   Stat Card - 数据统计卡片增强
+   ======================================== */
+.stat-card {
+  @apply rounded-2xl p-5 backdrop-blur-xl transition-all duration-300;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(247, 248, 251, 0.88) 100%);
+  border: 1px solid var(--color-divider);
+  box-shadow:
+    0 0 0 1px var(--color-divider),
+    var(--shadow-soft);
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 120px;
+  height: 120px;
+  background: radial-gradient(circle at top right, rgba(124, 140, 248, 0.12) 0%, transparent 70%);
+}
+
+.dark .stat-card {
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.88) 0%, rgba(15, 23, 42, 0.92) 100%);
+}
+
+/* ========================================
+   Status Indicators - 状态指示器
+   ======================================== */
+.status-online {
+  background: var(--color-success, #10b981);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.status-offline {
+  background: rgba(107, 114, 128, 0.4);
+}
+
+.status-warning {
+  background: var(--color-starlight);
+  box-shadow: 0 0 8px rgba(240, 210, 122, 0.5);
+}
+
+.status-error {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+  animation: status-blink 1s ease-in-out infinite;
+}
+
+@keyframes status-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* ========================================
+   Live Indicator - 实时指示器
+   ======================================== */
+.live-indicator {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-success, #10b981);
+}
+
+.live-indicator::before,
+.live-indicator::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(16, 185, 129, 0.5);
+}
+
+.live-indicator::before {
+  animation: pulse-ring 2s ease-out infinite;
+}
+
+.live-indicator::after {
+  animation: pulse-ring 2s ease-out infinite 1s;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.95);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+/* ========================================
+   Data Value Display - 数据展示
+   ======================================== */
+.data-value {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.data-value-large {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  @apply text-3xl font-bold;
+  background: linear-gradient(135deg, var(--color-text-primary) 0%, var(--color-text-muted) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.data-unit {
+  @apply ml-1 text-sm;
+  color: var(--color-text-muted);
+}
+
+/* ========================================
+   Flow Animation - 流动动画
+   ======================================== */
+.flow-line {
+  position: relative;
+  overflow: hidden;
+}
+
+.flow-line::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(91, 210, 233, 0.3) 50%,
+    transparent 100%
+  );
+  animation: flow 2s ease-in-out infinite;
+}
+
+@keyframes flow {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
 }
 
 /* Table rhythm */

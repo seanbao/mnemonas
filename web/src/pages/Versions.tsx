@@ -170,7 +170,7 @@ export function VersionsPage() {
       />
 
       {/* Search */}
-      <div className="glass-card rounded-xl p-4 shadow-[var(--shadow-soft)]">
+      <div className="card-meridian rounded-xl p-4">
         <div className="flex items-center gap-4">
           <Input
             placeholder="输入文件路径，例如: /documents/report.pdf"
@@ -196,7 +196,7 @@ export function VersionsPage() {
 
       {/* Version List */}
       {selectedPath && (
-        <div className="glass-card rounded-xl p-6 space-y-4 shadow-[var(--shadow-soft)]">
+        <div className="card-meridian rounded-xl p-6 space-y-4">
           <div className="flex items-center gap-2 text-default-400">
             <History size={18} />
             <span>文件路径:</span>
