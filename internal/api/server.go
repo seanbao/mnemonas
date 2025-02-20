@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1955,6 +1956,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	// Check if custom restore path is provided
 	newPath := r.URL.Query().Get("path")
+	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
 
 	var err error
 	if newPath != "" {
@@ -1964,6 +1966,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 			badRequestInvalidPath(w)
 			return
 		}
+		activityPath = newPath
 		err = s.fs.RestoreFromTrashTo(r.Context(), id, newPath)
 	} else {
 		// Restore to original path
@@ -1988,7 +1991,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionTrashRestore, id, nil)
+	s.LogActivity(r, activity.ActionTrashRestore, activityPath, nil)
 
 	NewAPIResponse(map[string]any{
 		"id":       id,
@@ -2007,6 +2010,7 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "id is required")
 		return
 	}
+	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
 		if isStorageNotFound(err) {
@@ -2019,12 +2023,30 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionTrashDelete, id, nil)
+	s.LogActivity(r, activity.ActionTrashDelete, activityPath, nil)
 
 	NewAPIResponse(map[string]any{
 		"id":      id,
 		"deleted": true,
 	}).WithMessage("item permanently deleted").Write(w, http.StatusOK)
+}
+
+func (s *Server) lookupTrashOriginalPath(ctx context.Context, id string) string {
+	if s.fs == nil || id == "" {
+		return ""
+	}
+
+	items, err := s.fs.ListTrash(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return item.OriginalPath
+		}
+	}
+
+	return ""
 }
 
 func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
@@ -2239,6 +2261,15 @@ func (s *Server) LogActivity(r *http.Request, action activity.ActionType, path s
 
 // handleLoginWithActivity wraps auth login to log activity
 func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request) {
+	user := "unknown"
+	if s.activity != nil {
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
+			user = claims.Username
+		} else if loginUser, err := readLoginUsername(r); err == nil && loginUser != "" {
+			user = loginUser
+		}
+	}
+
 	// Create a response recorder to capture the response
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 
@@ -2247,16 +2278,29 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 
 	// If login was successful (status 200), log the activity
 	if rec.statusCode == http.StatusOK && s.activity != nil {
-		// Try to extract username from request (best effort)
-		user := "unknown"
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
-			user = claims.Username
-		}
-
 		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionLogin, "", user, ip, nil)
 	}
+}
+
+func readLoginUsername(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var req auth.LoginRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(req.Username), nil
 }
 
 // handleLogoutWithActivity wraps auth logout to log activity
@@ -3034,6 +3078,13 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	sharePath := ""
+	if s.activity != nil {
+		if parsedPath, err := readCreateSharePath(r); err == nil {
+			sharePath = parsedPath
+		}
+	}
+
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 	s.shareHandler.CreateShare(rec, r)
 
@@ -3046,12 +3097,19 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 
 		ip := requestip.ClientIP(r)
 
-		s.activity.Log(activity.ActionShare, "", user, ip, nil)
+		s.activity.Log(activity.ActionShare, sharePath, user, ip, nil)
 	}
 }
 
 // handleDeleteShareWithActivity wraps share deletion to log activity
 func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Request) {
+	sharePath := ""
+	if s.shareStore != nil {
+		if shareInfo, err := s.shareStore.Get(chi.URLParam(r, "id")); err == nil {
+			sharePath = shareInfo.Path
+		}
+	}
+
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 	s.shareHandler.DeleteShare(rec, r)
 
@@ -3064,6 +3122,30 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 
 		ip := requestip.ClientIP(r)
 
-		s.activity.Log(activity.ActionUnshare, "", user, ip, nil)
+		s.activity.Log(activity.ActionUnshare, sharePath, user, ip, nil)
 	}
+}
+
+func readCreateSharePath(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var req share.CreateShareRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", err
+	}
+
+	cleanPath := strings.TrimSpace(req.Path)
+	if cleanPath == "" {
+		return "", nil
+	}
+
+	return path.Clean("/" + cleanPath), nil
 }

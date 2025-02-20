@@ -28,6 +28,12 @@ func setDeleteVersionObjectHook(t *testing.T, fs *storage.FileSystem, fn func(st
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fn))
 }
 
+func setStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName string, fn T) {
+	t.Helper()
+	field := reflect.ValueOf(fs).Elem().FieldByName(fieldName)
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fn))
+}
+
 // testDataplaneAddr is the address of the test dataplane server
 func testDataplaneAddr() string {
 	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
@@ -815,6 +821,52 @@ func TestHandler_COPY_DirectoryRollbackOnChildCopyFailure(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/dst/copied-dir"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected partial destination tree to be removed, got %v", err)
+	}
+}
+
+func TestHandler_COPY_DirectoryRequestRollsBackPartialTreeOnWriteFailure(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/srcdir/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/nested/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	updateFileIndexField := reflect.ValueOf(fs).Elem().FieldByName("updateFileIndex")
+	originalUpdateFileIndex := reflect.NewAt(updateFileIndexField.Type(), unsafe.Pointer(updateFileIndexField.UnsafeAddr())).Elem().Interface().(func(context.Context, string, int64, time.Time, string) error)
+	setStorageHook(t, fs, "updateFileIndex", func(ctx context.Context, name string, size int64, modTime time.Time, hash string) error {
+		if name == "/dst/copied-dir/nested/child.txt" {
+			return errors.New("index update failed")
+		}
+		return originalUpdateFileIndex(ctx, name, size, modTime, hash)
+	})
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied-dir")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("COPY directory failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/dst/copied-dir"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected failed COPY request to rollback destination tree, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/srcdir"); err != nil {
+		t.Fatalf("expected source directory preserved after failed COPY, got %v", err)
 	}
 }
 
