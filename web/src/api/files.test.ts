@@ -17,8 +17,6 @@ import {
   getThumbnailUrl,
   versionToDisplayFormat,
   getDiagnostics,
-  scrubData,
-  runGC,
   getScrubResult,
   runScrub,
 } from './files'
@@ -477,47 +475,6 @@ describe('API: files', () => {
     })
   })
 
-  describe('scrubData', () => {
-    it('starts data scrubbing', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-      })
-
-      await expect(scrubData()).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/scrub', { method: 'POST', headers: {} })
-    })
-
-    it('throws ApiError on failure', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 500,
-        statusText: 'Internal Server Error',
-      })
-
-      await expect(scrubData()).rejects.toThrow(ApiError)
-    })
-  })
-
-  describe('runGC', () => {
-    it('runs garbage collection with dry run', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-      })
-
-      await expect(runGC(true)).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/gc?dry_run=true', { method: 'POST', headers: {} })
-    })
-
-    it('runs garbage collection without dry run', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-      })
-
-      await expect(runGC(false)).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/gc?dry_run=false', { method: 'POST', headers: {} })
-    })
-  })
-
   describe('getScrubResult', () => {
     it('fetches last scrub result', async () => {
       const mockResponse = {
@@ -585,7 +542,7 @@ describe('API: files', () => {
       const hashes = ['hash1', 'hash2']
       await runScrub(hashes)
       
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/scrub', {
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/maintenance/scrub', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hashes }),

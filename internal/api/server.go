@@ -61,9 +61,7 @@ type ServerConfig struct {
 	DataplaneAddr string
 	// New storage configuration
 	FileSystem *storage.FileSystem
-	// Legacy fields (for compatibility)
-	CASRoot         string
-	MetadataRoot    string
+	// Storage service roots
 	ThumbnailRoot   string
 	MaintenanceRoot string
 	ActivityRoot    string
@@ -116,7 +114,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		}
 	}
 
-	// Initialize filesystem (from pre-created instance or legacy config)
+	// Initialize filesystem (from pre-created instance)
 	if cfg != nil && cfg.FileSystem != nil {
 		s.fs = cfg.FileSystem
 	}
@@ -355,6 +353,8 @@ func (s *Server) setupRoutes() {
 		// System info
 		r.Get("/stats", s.handleStats)
 		r.Get("/diagnostics", s.handleDiagnostics)
+		r.Get("/diagnostics-export", s.handleDiagnosticsExport)
+		r.Get("/metrics", s.handleMetrics)
 
 		// Search
 		r.Get("/search", s.handleSearch)
@@ -387,13 +387,6 @@ func (s *Server) setupRoutes() {
 			r.Post("/gc", s.handleGC)
 		})
 
-		// Keep old routes for backward compatibility
-		r.Get("/scrub", s.handleGetScrubResult)
-		r.Post("/scrub", s.handleScrub)
-		r.Get("/objects", s.handleListObjects)
-		r.Post("/gc", s.handleGC)
-		r.Get("/diagnostics-export", s.handleDiagnosticsExport)
-		r.Get("/metrics", s.handleMetrics)
 	})
 }
 
