@@ -550,14 +550,12 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 		return nil
 	}
 
-	prev := copyShare(share)
 	share.AccessCount--
 	if share.LastAccess != nil && share.LastAccess.Equal(reservation.currentLastAccess) {
 		share.LastAccess = cloneTimePtr(reservation.previousLastAccess)
 	}
 
 	if err := s.save(); err != nil {
-		*share = *prev
 		return err
 	}
 

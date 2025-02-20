@@ -245,6 +245,7 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 		FileSystem:     fs,
 		Config:         settings,
 		ConfigPath:     configPath,
+		ActivityRoot:   path.Join(tmpDir, "activity"),
 		AuthEnabled:    true,
 		AuthUsersFile:  usersFile,
 		AuthJWTSecret:  "test-secret",
@@ -778,7 +779,6 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	if len(cookies) == 0 {
 		t.Fatal("expected download session cookie")
 	}
-
 	downloadReq := httptest.NewRequest("GET", "/api/v1/download/auth/file.txt", nil)
 	downloadReq.AddCookie(cookies[0])
 	downloadRec := httptest.NewRecorder()
@@ -789,6 +789,34 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	}
 	if !strings.Contains(downloadRec.Body.String(), "secure") {
 		t.Error("downloaded content mismatch")
+	}
+}
+
+func TestServer_Login_LogsActivityWithUsername(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	loginBody := fmt.Sprintf(`{"username":" %s ","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionLogin, "")
+	if total != 1 {
+		t.Fatalf("expected one login activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed login activity entry, got %d", len(entries))
+	}
+	if entries[0].User != username {
+		t.Fatalf("expected login activity user %q, got %q", username, entries[0].User)
 	}
 }
 
@@ -866,6 +894,39 @@ func TestServer_CreateShare_UsesBaseURL(t *testing.T) {
 	}
 }
 
+func TestServer_CreateShare_LogsShareActivityPath(t *testing.T) {
+	server, _ := setupShareServer(t)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	body := `{"path":" docs/a.txt ","type":"file"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{
+		UserID:   "tester",
+		Username: "tester",
+		Role:     auth.RoleUser,
+	}))
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionShare, "")
+	if total != 1 {
+		t.Fatalf("expected one share activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed share activity entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected share activity path %q, got %q", "/docs/a.txt", entries[0].Path)
+	}
+}
+
 func TestServer_DeleteShare_LogsUnshareActivity(t *testing.T) {
 	server, shareID := setupShareServer(t)
 	if server.activity == nil {
@@ -895,6 +956,9 @@ func TestServer_DeleteShare_LogsUnshareActivity(t *testing.T) {
 	}
 	if entries[0].User != "tester" {
 		t.Fatalf("expected unshare activity user tester, got %q", entries[0].User)
+	}
+	if entries[0].Path != "/docs" {
+		t.Fatalf("expected unshare activity path %q, got %q", "/docs", entries[0].Path)
 	}
 }
 
@@ -2340,7 +2404,6 @@ func TestServer_Trash_Restore(t *testing.T) {
 	if len(items) == 0 {
 		t.Skip("No items in trash")
 	}
-
 	t.Run("RestoreToOriginal", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/v1/trash/"+items[0].ID+"/restore", nil)
 		w := httptest.NewRecorder()
@@ -2470,6 +2533,92 @@ func TestServer_Trash_Delete(t *testing.T) {
 			t.Errorf("DeleteFromTrash status = %d, want %d", w.Code, http.StatusNotFound)
 		}
 	})
+}
+
+func TestServer_Trash_Restore_LogsOriginalPath(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/trash-restore-activity"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-activity/file.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-restore-activity/file.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected at least one trash item")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("RestoreFromTrash status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionTrashRestore, "")
+	if total != 1 {
+		t.Fatalf("expected one trash restore activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed trash restore activity entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/trash-restore-activity/file.txt" {
+		t.Fatalf("expected trash restore activity path %q, got %q", "/trash-restore-activity/file.txt", entries[0].Path)
+	}
+}
+
+func TestServer_DeleteFromTrash_LogsOriginalPath(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/trash-delete-activity"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-delete-activity/file.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-delete-activity/file.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected at least one trash item")
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/"+items[0].ID, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("DeleteFromTrash status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionTrashDelete, "")
+	if total != 1 {
+		t.Fatalf("expected one trash delete activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed trash delete activity entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/trash-delete-activity/file.txt" {
+		t.Fatalf("expected trash delete activity path %q, got %q", "/trash-delete-activity/file.txt", entries[0].Path)
+	}
 }
 
 func TestServer_Trash_Empty(t *testing.T) {

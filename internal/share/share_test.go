@@ -775,6 +775,56 @@ func TestShareStore_RollbackAuthorizedAccess_PreservesNewerLastAccess(t *testing
 	}
 }
 
+func TestShareStore_RollbackAuthorizedAccess_PreservesRollbackStateWhenSaveFails(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	_, reservation, err := store.reserveAuthorizedAccess(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reserve authorized access: %v", err)
+	}
+	if reservation == nil {
+		t.Fatal("expected access reservation")
+	}
+
+	if err := os.Chmod(tempDir, 0500); err != nil {
+		t.Fatalf("failed to set dir permissions: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(tempDir, 0700)
+	}()
+
+	rollbackErr := store.rollbackAuthorizedAccess(reservation)
+	if rollbackErr == nil {
+		t.Fatal("expected rollbackAuthorizedAccess to fail when save fails")
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if loaded.AccessCount != 0 {
+		t.Fatalf("expected rollback state to remain in memory despite save failure, got access_count %d", loaded.AccessCount)
+	}
+	if loaded.LastAccess != nil {
+		t.Fatalf("expected last_access to roll back to nil despite save failure, got %v", loaded.LastAccess)
+	}
+}
+
 func TestShareStore_DeleteRollbackOnSaveFailure(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

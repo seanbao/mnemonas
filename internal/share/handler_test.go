@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1862,6 +1863,53 @@ func TestDownloadShare_FirstResponseWriteFailureReturnsInternalError(t *testing.
 	}
 	if current.AccessCount != 0 {
 		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
+	}
+}
+
+func TestDownloadShare_FirstResponseWriteFailureDoesNotConsumeAccessCountWhenRollbackSaveFails(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := os.Chmod(tempDir, 0500); err != nil {
+		t.Fatalf("failed to set dir permissions: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(tempDir, 0700)
+	}()
+
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			"/docs/report.pdf": io.NopCloser(strings.NewReader("download body")),
+		},
+	})
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	writer := &failFirstWriteResponseWriter{}
+
+	handler.DownloadShare(writer, req)
+
+	if writer.status != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", writer.status)
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected rollback save failure not to leave consumed access count in memory, got %d", current.AccessCount)
 	}
 }
 
