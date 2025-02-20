@@ -247,7 +247,7 @@ docker compose up -d
 | 配置段 | 关键设置 |
 |---------|-------------|
 | `[server]` | `host`, `port`, timeouts |
-| `[storage]` | `data_dir`, `metadata_dir`, retention policy |
+| `[storage]` | `root`, retention policy |
 | `[dataplane.cdc]` | `min/avg/max_chunk_size` (affects dedup ratio) |
 | `[webdav]` | `enabled`、`prefix`（默认 `/dav`）、`auth_type` |
 

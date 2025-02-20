@@ -1175,9 +1175,7 @@ GET /api/v1/settings
       "port": 8080
     },
     "storage": {
-      "data_dir": "~/.mnemonas/.mnemonas/objects",
-      "metadata_dir": "~/.mnemonas/.mnemonas",
-      "temp_dir": "~/.mnemonas/.mnemonas/tmp"
+      "root": "~/.mnemonas"
     },
     "retention": {
       "max_versions": 50,
