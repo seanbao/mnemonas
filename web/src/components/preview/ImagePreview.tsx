@@ -3,7 +3,7 @@ import { Spinner, Button } from '@heroui/react'
 import { ZoomIn, ZoomOut, RotateCw, Maximize2, AlertCircle } from 'lucide-react'
 import { buildPreviewUrl } from '@/lib/preview-utils'
 import { cn } from '@/lib/utils'
-import { getAuthHeaders } from '@/api/auth'
+import { authFetch } from '@/api/auth'
 
 export interface ImagePreviewProps {
   path: string
@@ -37,9 +37,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
       setBlobUrl(null)
       
       try {
-        const response = await fetch(imageUrl, {
-          headers: getAuthHeaders(),
-        })
+        const response = await authFetch(imageUrl)
         
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`)
