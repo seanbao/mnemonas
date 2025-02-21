@@ -18,6 +18,7 @@ import {
   Info,
   AlertCircle,
 } from 'lucide-react'
+import { refreshAuthSession } from '@/api/auth'
 import { listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
 import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -27,6 +28,11 @@ import { EmptyState } from '@/components/ui/EmptyState'
 const MAX_DEPTH = 5 // Maximum directory depth to traverse
 const MAX_IMAGES = 1000 // Maximum images to collect
 const CONCURRENCY_LIMIT = 3 // Maximum concurrent directory requests
+
+function withSessionRetryParam(url: string): string {
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}session_retry=1`
+}
 
 interface AlbumFetchErrorState {
   hadPartialError: boolean
@@ -106,14 +112,23 @@ function ImageThumbnail({
 }) {
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState(false)
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
+  const [hasRetried, setHasRetried] = useState(false)
   const imgRef = useRef<HTMLImageElement>(null)
+
+  useEffect(() => {
+    setLoaded(false)
+    setError(false)
+    setThumbnailUrl(null)
+    setHasRetried(false)
+  }, [file.path])
 
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting && imgRef.current) {
+        if (entry.isIntersecting) {
           // Use thumbnail API instead of original image
-          imgRef.current.src = getThumbnailUrl(file.path, 'medium')
+          setThumbnailUrl(getThumbnailUrl(file.path, 'medium'))
           observer.disconnect()
         }
       },
@@ -148,13 +163,30 @@ function ImageThumbnail({
       <img
         ref={imgRef}
         alt={file.name}
+        src={thumbnailUrl ?? undefined}
         className={cn(
           "w-full h-full object-cover transition-transform duration-300",
           "group-hover:scale-105",
           loaded ? "opacity-100" : "opacity-0"
         )}
         onLoad={() => setLoaded(true)}
-        onError={() => setError(true)}
+        onError={() => {
+          if (!hasRetried && thumbnailUrl) {
+            void (async () => {
+              const refreshed = await refreshAuthSession()
+              if (refreshed) {
+                setHasRetried(true)
+                setError(false)
+                setLoaded(false)
+                setThumbnailUrl(withSessionRetryParam(getThumbnailUrl(file.path, 'medium')))
+                return
+              }
+              setError(true)
+            })()
+            return
+          }
+          setError(true)
+        }}
       />
       
       {error && (
@@ -194,6 +226,8 @@ function ImagePreview({
   const [rotation, setRotation] = useState(0)
   const [showInfo, setShowInfo] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [imageUrl, setImageUrl] = useState('')
+  const [hasRetried, setHasRetried] = useState(false)
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null)
   
   const currentImage = images[currentIndex]
@@ -213,6 +247,18 @@ function ImagePreview({
     setRotation(0)
     setLoading(true)
   }, [currentIndex, images.length, onNavigate])
+
+  useEffect(() => {
+    if (!currentImage?.path) {
+      setImageUrl('')
+      setHasRetried(false)
+      return
+    }
+
+    setImageUrl(getDownloadUrl(currentImage.path))
+    setHasRetried(false)
+    setLoading(true)
+  }, [currentImage?.path])
 
   // Preload adjacent images
   useEffect(() => {
@@ -361,7 +407,7 @@ function ImagePreview({
           {currentImage && (
           <div className="relative max-w-[90vw] max-h-[90vh] overflow-hidden">
             <img
-              src={getDownloadUrl(currentImage.path)}
+              src={imageUrl}
               alt={currentImage.name}
               className={cn(
                 "max-w-full max-h-[90vh] object-contain transition-all duration-200",
@@ -371,7 +417,22 @@ function ImagePreview({
                 transform: `scale(${zoom}) rotate(${rotation}deg)`,
               }}
               onLoad={() => setLoading(false)}
-              onError={() => setLoading(false)}
+              onError={() => {
+                if (!hasRetried && currentImage?.path) {
+                  void (async () => {
+                    const refreshed = await refreshAuthSession()
+                    if (refreshed) {
+                      setHasRetried(true)
+                      setLoading(true)
+                      setImageUrl(withSessionRetryParam(getDownloadUrl(currentImage.path)))
+                      return
+                    }
+                    setLoading(false)
+                  })()
+                  return
+                }
+                setLoading(false)
+              }}
             />
           </div>
           )}

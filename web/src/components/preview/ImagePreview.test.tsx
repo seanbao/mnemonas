@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { authFetch } from '@/api/auth'
 import { ImagePreview } from './ImagePreview'
+
+vi.mock('@/api/auth', () => ({
+  authFetch: vi.fn(),
+}))
 
 // Mock HeroUI components
 vi.mock('@heroui/react', () => ({
@@ -13,6 +18,8 @@ vi.mock('@heroui/react', () => ({
 }))
 
 describe('ImagePreview', () => {
+  const mockAuthFetch = vi.mocked(authFetch)
+
   const renderImage = async (path: string, filename: string, className?: string) => {
     let view: ReturnType<typeof render> | null = null
     await act(async () => {
@@ -36,11 +43,10 @@ describe('ImagePreview', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    global.fetch = vi.fn().mockResolvedValue({
+    mockAuthFetch.mockResolvedValue({
       ok: true,
       blob: () => Promise.resolve(new Blob(['fake'], { type: 'image/png' })),
-    })
-    localStorage.removeItem('mnemonas_token')
+    } as Response)
   })
 
   it('renders with loading state', async () => {
@@ -74,10 +80,21 @@ describe('ImagePreview', () => {
     await renderImage('/documents/photo.jpg', 'photo.jpg')
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        '/api/v1/download/documents/photo.jpg',
-        { headers: {} }
-      )
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/documents/photo.jpg')
+    })
+  })
+
+  it('shows error when authenticated preview request fails', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+    } as Response)
+
+    await renderImage('/private.png', 'private.png')
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载图片')).toBeInTheDocument()
     })
   })
 

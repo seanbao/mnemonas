@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { fireEvent } from '@testing-library/react'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import { refreshAuthSession } from '@/api/auth'
 import { AlbumPage } from './Album'
+
+vi.mock('@/api/auth', () => ({
+  refreshAuthSession: vi.fn(),
+}))
 
 // Mock API
 vi.mock('@/api/files', () => ({
@@ -16,6 +22,34 @@ import { listFiles } from '@/api/files'
 const mockListFiles = listFiles as ReturnType<typeof vi.fn>
 
 describe('AlbumPage', () => {
+  const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
+  const observeMock = vi.fn()
+
+  class MockIntersectionObserver {
+    private callback: IntersectionObserverCallback
+
+    constructor(callback: IntersectionObserverCallback) {
+      this.callback = callback
+    }
+
+    observe = (element: Element) => {
+      observeMock(element)
+      this.callback([
+        {
+          isIntersecting: true,
+          target: element,
+        } as IntersectionObserverEntry,
+      ], this as unknown as IntersectionObserver)
+    }
+
+    disconnect = vi.fn()
+    unobserve = vi.fn()
+    takeRecords = vi.fn(() => [])
+    root = null
+    rootMargin = '0px'
+    thresholds = []
+  }
+
   const mockImageFiles = [
     { name: 'photo1.jpg', path: '/photos/photo1.jpg', isDir: false, size: 1024000, modTime: '2024-01-01T00:00:00Z' },
     { name: 'photo2.png', path: '/photos/photo2.png', isDir: false, size: 2048000, modTime: '2024-01-02T00:00:00Z' },
@@ -31,6 +65,8 @@ describe('AlbumPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver as unknown as typeof IntersectionObserver)
+    mockRefreshAuthSession.mockResolvedValue(false)
     mockListFiles.mockResolvedValue({
       files: mockImageFiles,
       path: '/',
@@ -227,6 +263,42 @@ describe('AlbumPage', () => {
   })
 
   describe('image preview boundary cases', () => {
+    it('retries thumbnail loading once after refreshing the auth session', async () => {
+      mockRefreshAuthSession.mockResolvedValueOnce(true)
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      fireEvent.error(thumbnail)
+
+      await waitFor(() => {
+        expect(mockRefreshAuthSession).toHaveBeenCalledTimes(1)
+        expect(thumbnail).toHaveAttribute('src', '/api/v1/thumbnails/photos/photo1.jpg?size=medium&session_retry=1')
+      })
+    })
+
+    it('retries fullscreen image loading once after refreshing the auth session', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRefreshAuthSession.mockResolvedValueOnce(true)
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      await user.click(thumbnail)
+
+      await waitFor(() => {
+        expect(screen.getAllByRole('img', { name: 'photo1.jpg' }).length).toBeGreaterThan(1)
+      })
+
+      const previewImage = screen.getAllByRole('img', { name: 'photo1.jpg' }).at(-1)
+      expect(previewImage).toBeTruthy()
+      fireEvent.error(previewImage)
+
+      await waitFor(() => {
+        expect(previewImage).toHaveAttribute('src', '/api/v1/download/photos/photo1.jpg?download=true&session_retry=1')
+      })
+    })
+
     it('exposes accessible labels for preview controls', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<AlbumPage />)
