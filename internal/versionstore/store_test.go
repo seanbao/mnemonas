@@ -199,6 +199,58 @@ func TestStore_DeleteOldVersions(t *testing.T) {
 	}
 }
 
+func TestStore_GetVersions_UsesIDTieBreakerWhenCreatedAtMatches(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	for _, hash := range []string{"hash1", "hash2", "hash3"} {
+		if err := s.AddVersion(ctx, "/same-second.txt", hash, 100, ""); err != nil {
+			t.Fatalf("AddVersion(%s) error: %v", hash, err)
+		}
+	}
+
+	versions, err := s.GetVersions(ctx, "/same-second.txt")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) != 3 {
+		t.Fatalf("GetVersions() returned %d versions, want 3", len(versions))
+	}
+	if versions[0].Hash != "hash3" || versions[1].Hash != "hash2" || versions[2].Hash != "hash1" {
+		t.Fatalf("unexpected same-second order: [%s %s %s]", versions[0].Hash, versions[1].Hash, versions[2].Hash)
+	}
+}
+
+func TestStore_DeleteOldVersions_UsesIDTieBreakerWhenCreatedAtMatches(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	for _, hash := range []string{"hash1", "hash2", "hash3"} {
+		if err := s.AddVersion(ctx, "/same-second-retention.txt", hash, 100, ""); err != nil {
+			t.Fatalf("AddVersion(%s) error: %v", hash, err)
+		}
+	}
+
+	hashes, err := s.DeleteOldVersions(ctx, "/same-second-retention.txt", 1, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("DeleteOldVersions() error: %v", err)
+	}
+	if len(hashes) != 2 {
+		t.Fatalf("DeleteOldVersions() deleted %d hashes, want 2", len(hashes))
+	}
+
+	versions, err := s.GetVersions(ctx, "/same-second-retention.txt")
+	if err != nil {
+		t.Fatalf("GetVersions() after cleanup error: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("expected 1 retained version after cleanup, got %d", len(versions))
+	}
+	if versions[0].Hash != "hash3" {
+		t.Fatalf("expected newest inserted hash3 to be retained, got %s", versions[0].Hash)
+	}
+}
+
 func TestStore_GetAllVersionHashes(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

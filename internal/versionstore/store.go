@@ -214,7 +214,7 @@ func (s *Store) AddVersion(ctx context.Context, path, hash string, size int64, c
 func (s *Store) GetVersions(ctx context.Context, path string) ([]Version, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, path, hash, size, created_at, COALESCE(comment, '') 
-		 FROM versions WHERE path = ? ORDER BY created_at DESC`,
+		 FROM versions WHERE path = ? ORDER BY created_at DESC, id DESC`,
 		path)
 	if err != nil {
 		return nil, err
@@ -275,7 +275,7 @@ func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT hash FROM versions WHERE path = ? AND (
 			created_at < ? OR 
-			id NOT IN (SELECT id FROM versions WHERE path = ? ORDER BY created_at DESC LIMIT ?)
+			id NOT IN (SELECT id FROM versions WHERE path = ? ORDER BY created_at DESC, id DESC LIMIT ?)
 		)`,
 		path, cutoff, path, maxCount)
 	if err != nil {
@@ -300,7 +300,7 @@ func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int
 	_, err = s.db.ExecContext(ctx,
 		`DELETE FROM versions WHERE path = ? AND (
 			created_at < ? OR 
-			id NOT IN (SELECT id FROM versions WHERE path = ? ORDER BY created_at DESC LIMIT ?)
+			id NOT IN (SELECT id FROM versions WHERE path = ? ORDER BY created_at DESC, id DESC LIMIT ?)
 		)`,
 		path, cutoff, path, maxCount)
 
