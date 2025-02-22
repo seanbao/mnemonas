@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -347,6 +348,80 @@ func TestClearRollsBackWhenSaveFails(t *testing.T) {
 	}
 	if reloaded.Count() != 1 {
 		t.Fatalf("Expected persisted activity log to remain unchanged after failed clear, got %d", reloaded.Count())
+	}
+}
+
+func TestListDoesNotBlockWhileLogPersists(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalWriter := activityLogWriter
+	writerStarted := make(chan struct{})
+	writerRelease := make(chan struct{})
+	var once sync.Once
+	var releaseOnce sync.Once
+	activityLogWriter = func(path string, data []byte) error {
+		once.Do(func() {
+			close(writerStarted)
+		})
+		<-writerRelease
+		return originalWriter(path, data)
+	}
+	t.Cleanup(func() {
+		activityLogWriter = originalWriter
+		releaseOnce.Do(func() {
+			close(writerRelease)
+		})
+	})
+
+	logDone := make(chan error, 1)
+	go func() {
+		logDone <- store.Log(ActionUpload, "/slow.txt", "user", "127.0.0.1", nil)
+	}()
+
+	select {
+	case <-writerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for activity log write to start")
+	}
+
+	listDone := make(chan struct{})
+	go func() {
+		entries, total := store.List(10, 0, "", "")
+		if total != 0 || len(entries) != 0 {
+			t.Errorf("expected reads during pending persist to observe committed state only, got total=%d len=%d", total, len(entries))
+		}
+		close(listDone)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(time.Second):
+		t.Fatal("List() blocked on an in-flight activity log save")
+	}
+
+	releaseOnce.Do(func() {
+		close(writerRelease)
+	})
+
+	select {
+	case err := <-logDone:
+		if err != nil {
+			t.Fatalf("Log() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Log() did not finish after releasing writer")
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected committed entry after save, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].Path != "/slow.txt" {
+		t.Fatalf("expected /slow.txt after save, got %s", entries[0].Path)
 	}
 }
 

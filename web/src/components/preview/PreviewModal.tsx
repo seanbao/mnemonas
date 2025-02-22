@@ -37,13 +37,6 @@ function useRetryableMediaUrl(baseUrl: string, errorMessage: string) {
   const [isLoading, setIsLoading] = useState(true)
   const [hasRetried, setHasRetried] = useState(false)
 
-  useEffect(() => {
-    setMediaUrl(baseUrl)
-    setError(null)
-    setIsLoading(true)
-    setHasRetried(false)
-  }, [baseUrl])
-
   const handleLoaded = useCallback(() => {
     setIsLoading(false)
     setError(null)
