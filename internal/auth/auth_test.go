@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -232,6 +233,100 @@ func TestUserStore(t *testing.T) {
 		}
 		if user.Email != "p@example.com" {
 			t.Errorf("expected email p@example.com, got %s", user.Email)
+		}
+	})
+
+	t.Run("get by username stays responsive during login persistence", func(t *testing.T) {
+		storeDir := t.TempDir()
+		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		user, err := store.Create("slowlogin", "password123", "slow@login.test", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		originalWriter := userStoreWriter
+		writerStarted := make(chan struct{})
+		writerRelease := make(chan struct{})
+		var startOnce sync.Once
+		var releaseOnce sync.Once
+		userStoreWriter = func(path string, data []byte) error {
+			startOnce.Do(func() {
+				close(writerStarted)
+			})
+			<-writerRelease
+			return originalWriter(path, data)
+		}
+		t.Cleanup(func() {
+			userStoreWriter = originalWriter
+			releaseOnce.Do(func() {
+				close(writerRelease)
+			})
+		})
+
+		authDone := make(chan struct {
+			user *User
+			err  error
+		}, 1)
+		go func() {
+			authUser, authErr := store.Authenticate("slowlogin", "password123")
+			authDone <- struct {
+				user *User
+				err  error
+			}{user: authUser, err: authErr}
+		}()
+
+		select {
+		case <-writerStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for user store write to start")
+		}
+
+		lookupDone := make(chan struct{})
+		go func() {
+			loaded, lookupErr := store.GetByUsername("slowlogin")
+			if lookupErr != nil {
+				t.Errorf("GetByUsername() error during pending login persist: %v", lookupErr)
+			} else if loaded.LastLoginAt != nil {
+				t.Errorf("expected reads during pending login persist to observe committed LastLoginAt=nil, got %v", loaded.LastLoginAt)
+			}
+			close(lookupDone)
+		}()
+
+		select {
+		case <-lookupDone:
+		case <-time.After(time.Second):
+			t.Fatal("GetByUsername() blocked on an in-flight Authenticate() save")
+		}
+
+		releaseOnce.Do(func() {
+			close(writerRelease)
+		})
+
+		select {
+		case result := <-authDone:
+			if result.err != nil {
+				t.Fatalf("Authenticate() error: %v", result.err)
+			}
+			if result.user == nil || result.user.ID != user.ID {
+				t.Fatalf("expected Authenticate() to return user %s, got %+v", user.ID, result.user)
+			}
+			if result.user.LastLoginAt == nil {
+				t.Fatal("expected Authenticate() result to include last_login_at after successful save")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Authenticate() did not finish after releasing writer")
+		}
+
+		loaded, err := store.GetByUsername("slowlogin")
+		if err != nil {
+			t.Fatalf("failed to reload user after authenticate: %v", err)
+		}
+		if loaded.LastLoginAt == nil {
+			t.Fatal("expected persisted last_login_at after authenticate")
 		}
 	})
 }

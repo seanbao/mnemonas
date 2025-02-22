@@ -55,6 +55,13 @@ func NewRequestMetrics() *RequestMetrics {
 
 // RecordRequest records a request with its duration and status
 func (m *RequestMetrics) RecordRequest(method, path string, status int, duration time.Duration, bytesIn, bytesOut int64) {
+	if bytesIn < 0 {
+		bytesIn = 0
+	}
+	if bytesOut < 0 {
+		bytesOut = 0
+	}
+
 	// Count by method
 	m.mu.Lock()
 	counter, ok := m.methodCounts[method]

@@ -108,6 +108,16 @@ type ShareStore struct {
 	shares   map[string]*Share
 	pathIdx  map[string][]string
 	filePath string
+	version  uint64
+}
+
+var shareStoreWriter = writeShareStoreFile
+
+type shareStoreSnapshot struct {
+	shares   map[string]*Share
+	pathIdx  map[string][]string
+	filePath string
+	version  uint64
 }
 
 type authorizedAccessReservation struct {
@@ -157,21 +167,76 @@ func (s *ShareStore) load() error {
 }
 
 func (s *ShareStore) save() error {
-	shares := make([]*Share, 0, len(s.shares))
-	for _, share := range s.shares {
-		shares = append(shares, share)
+	return saveShareState(s.filePath, s.shares)
+}
+
+func saveShareState(filePath string, shares map[string]*Share) error {
+	serializedShares := make([]*Share, 0, len(shares))
+	for _, share := range shares {
+		serializedShares = append(serializedShares, copyShare(share))
 	}
 
-	data, err := json.MarshalIndent(shares, "", "  ")
+	data, err := json.MarshalIndent(serializedShares, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize shares: %w", err)
 	}
 
-	if err := writeShareStoreFile(s.filePath, data); err != nil {
+	if err := shareStoreWriter(filePath, data); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func cloneShareMap(shares map[string]*Share) map[string]*Share {
+	cloned := make(map[string]*Share, len(shares))
+	for id, share := range shares {
+		cloned[id] = copyShare(share)
+	}
+	return cloned
+}
+
+func clonePathIndex(pathIdx map[string][]string) map[string][]string {
+	cloned := make(map[string][]string, len(pathIdx))
+	for path, ids := range pathIdx {
+		cloned[path] = append([]string(nil), ids...)
+	}
+	return cloned
+}
+
+func removeShareID(ids []string, id string) []string {
+	for i, currentID := range ids {
+		if currentID == id {
+			return append(ids[:i], ids[i+1:]...)
+		}
+	}
+	return ids
+}
+
+func (s *ShareStore) snapshotState() shareStoreSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return shareStoreSnapshot{
+		shares:   cloneShareMap(s.shares),
+		pathIdx:  clonePathIndex(s.pathIdx),
+		filePath: s.filePath,
+		version:  s.version,
+	}
+}
+
+func (s *ShareStore) commitSnapshot(snapshot shareStoreSnapshot) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.version != snapshot.version {
+		return false
+	}
+
+	s.shares = snapshot.shares
+	s.pathIdx = snapshot.pathIdx
+	s.version++
+	return true
 }
 
 func validateShareStorePath(path string) error {
@@ -279,20 +344,18 @@ type CreateShareOptions struct {
 
 // Create creates a new share
 func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	id, err := generateShareID()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate share ID: %w", err)
 	}
 
+	now := time.Now()
 	share := &Share{
 		ID:          id,
 		Path:        opts.Path,
 		Type:        opts.Type,
 		CreatedBy:   opts.CreatedBy,
-		CreatedAt:   time.Now(),
+		CreatedAt:   now,
 		Permission:  opts.Permission,
 		Enabled:     true,
 		MaxAccess:   opts.MaxAccess,
@@ -300,7 +363,7 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 	}
 
 	if opts.ExpiresIn != nil {
-		exp := time.Now().Add(*opts.ExpiresIn)
+		exp := now.Add(*opts.ExpiresIn)
 		share.ExpiresAt = &exp
 	}
 
@@ -316,25 +379,18 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 		share.Permission = PermissionRead
 	}
 
-	s.shares[id] = share
-	s.pathIdx[opts.Path] = append(s.pathIdx[opts.Path], id)
+	for {
+		snapshot := s.snapshotState()
+		snapshot.shares[id] = copyShare(share)
+		snapshot.pathIdx[opts.Path] = append(snapshot.pathIdx[opts.Path], id)
 
-	if err := s.save(); err != nil {
-		delete(s.shares, id)
-		ids := s.pathIdx[opts.Path]
-		for i, sid := range ids {
-			if sid == id {
-				s.pathIdx[opts.Path] = append(ids[:i], ids[i+1:]...)
-				break
-			}
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return nil, err
 		}
-		if len(s.pathIdx[opts.Path]) == 0 {
-			delete(s.pathIdx, opts.Path)
+		if s.commitSnapshot(snapshot) {
+			return copyShare(share), nil
 		}
-		return nil, err
 	}
-
-	return copyShare(share), nil
 }
 
 // Get retrieves a share by ID
@@ -397,96 +453,64 @@ func (s *ShareStore) ListAll() []*Share {
 
 // Update updates a share
 func (s *ShareStore) Update(id string, fn func(*Share) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	share, ok := s.shares[id]
-	if !ok {
-		return ErrShareNotFound
-	}
-
-	prev := copyShare(share)
-	updated := copyShare(share)
-	if err := fn(updated); err != nil {
-		return err
-	}
-
-	oldPath := prev.Path
-	newPath := updated.Path
-	prevOldIDs := append([]string(nil), s.pathIdx[oldPath]...)
-	prevNewIDs := append([]string(nil), s.pathIdx[newPath]...)
-	s.shares[id] = updated
-	if oldPath != newPath {
-		ids := s.pathIdx[oldPath]
-		for i, sid := range ids {
-			if sid == id {
-				s.pathIdx[oldPath] = append(ids[:i], ids[i+1:]...)
-				break
-			}
+	for {
+		snapshot := s.snapshotState()
+		share, ok := snapshot.shares[id]
+		if !ok {
+			return ErrShareNotFound
 		}
-		if len(s.pathIdx[oldPath]) == 0 {
-			delete(s.pathIdx, oldPath)
-		}
-		s.pathIdx[newPath] = append(s.pathIdx[newPath], id)
-	}
 
-	if err := s.save(); err != nil {
-		s.shares[id] = prev
+		updated := copyShare(share)
+		if err := fn(updated); err != nil {
+			return err
+		}
+
+		oldPath := share.Path
+		newPath := updated.Path
+		snapshot.shares[id] = updated
 		if oldPath != newPath {
-			if len(prevOldIDs) == 0 {
-				delete(s.pathIdx, oldPath)
+			ids := removeShareID(snapshot.pathIdx[oldPath], id)
+			if len(ids) == 0 {
+				delete(snapshot.pathIdx, oldPath)
 			} else {
-				s.pathIdx[oldPath] = prevOldIDs
+				snapshot.pathIdx[oldPath] = ids
 			}
-			if len(prevNewIDs) == 0 {
-				delete(s.pathIdx, newPath)
-			} else {
-				s.pathIdx[newPath] = prevNewIDs
-			}
+			snapshot.pathIdx[newPath] = append(snapshot.pathIdx[newPath], id)
 		}
-		return err
-	}
 
-	return nil
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
 }
 
 // Delete deletes a share
 func (s *ShareStore) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	share, ok := s.shares[id]
-	if !ok {
-		return ErrShareNotFound
-	}
-
-	prevShare := copyShare(share)
-	prevIDs := append([]string(nil), s.pathIdx[share.Path]...)
-
-	ids := s.pathIdx[share.Path]
-	for i, sid := range ids {
-		if sid == id {
-			s.pathIdx[share.Path] = append(ids[:i], ids[i+1:]...)
-			break
+	for {
+		snapshot := s.snapshotState()
+		share, ok := snapshot.shares[id]
+		if !ok {
+			return ErrShareNotFound
 		}
-	}
-	if len(s.pathIdx[share.Path]) == 0 {
-		delete(s.pathIdx, share.Path)
-	}
 
-	delete(s.shares, id)
-
-	if err := s.save(); err != nil {
-		s.shares[id] = prevShare
-		if len(prevIDs) == 0 {
-			delete(s.pathIdx, prevShare.Path)
+		ids := removeShareID(snapshot.pathIdx[share.Path], id)
+		if len(ids) == 0 {
+			delete(snapshot.pathIdx, share.Path)
 		} else {
-			s.pathIdx[prevShare.Path] = prevIDs
+			snapshot.pathIdx[share.Path] = ids
 		}
-		return err
-	}
+		delete(snapshot.shares, id)
 
-	return nil
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
 }
 
 // RecordAccess records an access to the share
@@ -505,33 +529,35 @@ func (s *ShareStore) RecordAuthorizedAccess(id string) (*Share, error) {
 }
 
 func (s *ShareStore) reserveAuthorizedAccess(id string) (*Share, *authorizedAccessReservation, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		share, ok := snapshot.shares[id]
+		if !ok {
+			return nil, nil, ErrShareNotFound
+		}
 
-	share, ok := s.shares[id]
-	if !ok {
-		return nil, nil, ErrShareNotFound
+		if err := share.CanAccess(); err != nil {
+			return nil, nil, err
+		}
+
+		prevLastAccess := cloneTimePtr(share.LastAccess)
+		updated := copyShare(share)
+		now := time.Now()
+		updated.AccessCount++
+		updated.LastAccess = &now
+		snapshot.shares[id] = updated
+
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return nil, nil, err
+		}
+		if s.commitSnapshot(snapshot) {
+			return copyShare(updated), &authorizedAccessReservation{
+				id:                 id,
+				currentLastAccess:  now,
+				previousLastAccess: prevLastAccess,
+			}, nil
+		}
 	}
-
-	if err := share.CanAccess(); err != nil {
-		return nil, nil, err
-	}
-
-	prev := copyShare(share)
-	share.AccessCount++
-	now := time.Now()
-	share.LastAccess = &now
-
-	if err := s.save(); err != nil {
-		*share = *prev
-		return nil, nil, err
-	}
-
-	return copyShare(share), &authorizedAccessReservation{
-		id:                 id,
-		currentLastAccess:  now,
-		previousLastAccess: cloneTimePtr(prev.LastAccess),
-	}, nil
 }
 
 func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReservation) error {
@@ -554,6 +580,7 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 	if share.LastAccess != nil && share.LastAccess.Equal(reservation.currentLastAccess) {
 		share.LastAccess = cloneTimePtr(reservation.previousLastAccess)
 	}
+	s.version++
 
 	if err := s.save(); err != nil {
 		return err
@@ -564,33 +591,34 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 
 // Access validates and records access to a share
 func (s *ShareStore) Access(id string, password string) (*Share, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		share, ok := snapshot.shares[id]
+		if !ok {
+			return nil, ErrShareNotFound
+		}
 
-	share, ok := s.shares[id]
-	if !ok {
-		return nil, ErrShareNotFound
+		if err := share.CanAccess(); err != nil {
+			return nil, err
+		}
+
+		if share.HasPassword() && !share.CheckPassword(password) {
+			return nil, ErrInvalidPassword
+		}
+
+		updated := copyShare(share)
+		now := time.Now()
+		updated.AccessCount++
+		updated.LastAccess = &now
+		snapshot.shares[id] = updated
+
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return nil, err
+		}
+		if s.commitSnapshot(snapshot) {
+			return copyShare(updated), nil
+		}
 	}
-
-	if err := share.CanAccess(); err != nil {
-		return nil, err
-	}
-
-	if share.HasPassword() && !share.CheckPassword(password) {
-		return nil, ErrInvalidPassword
-	}
-
-	prev := copyShare(share)
-	share.AccessCount++
-	now := time.Now()
-	share.LastAccess = &now
-
-	if err := s.save(); err != nil {
-		*share = *prev
-		return nil, err
-	}
-
-	return copyShare(share), nil
 }
 
 func copyShare(share *Share) *Share {

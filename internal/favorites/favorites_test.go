@@ -4,7 +4,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestStore(t *testing.T) {
@@ -303,5 +305,91 @@ func TestStore_AddRejectsSymlinkPath(t *testing.T) {
 	}
 	if store.Count("user1") != 0 {
 		t.Fatalf("expected failed add to roll back store state, got %d favorites", store.Count("user1"))
+	}
+}
+
+func TestStore_ListDoesNotBlockWhileAddPersists(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	originalWriter := favoritesStoreWriter
+	writerStarted := make(chan struct{})
+	writerRelease := make(chan struct{})
+	var startOnce sync.Once
+	var releaseOnce sync.Once
+	favoritesStoreWriter = func(path string, data []byte) error {
+		startOnce.Do(func() {
+			close(writerStarted)
+		})
+		<-writerRelease
+		return originalWriter(path, data)
+	}
+	t.Cleanup(func() {
+		favoritesStoreWriter = originalWriter
+		releaseOnce.Do(func() {
+			close(writerRelease)
+		})
+	})
+
+	addDone := make(chan struct {
+		fav *Favorite
+		err error
+	}, 1)
+	go func() {
+		fav, addErr := store.Add("user1", "/docs/slow.txt", "slow")
+		addDone <- struct {
+			fav *Favorite
+			err error
+		}{fav: fav, err: addErr}
+	}()
+
+	select {
+	case <-writerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for favorites store write to start")
+	}
+
+	listDone := make(chan struct{})
+	go func() {
+		listed := store.List("user1")
+		if len(listed) != 0 {
+			t.Errorf("expected reads during pending persist to observe committed empty favorites, got %d", len(listed))
+		}
+		close(listDone)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(time.Second):
+		t.Fatal("List() blocked on an in-flight favorites save")
+	}
+
+	releaseOnce.Do(func() {
+		close(writerRelease)
+	})
+
+	select {
+	case result := <-addDone:
+		if result.err != nil {
+			t.Fatalf("Add() error: %v", result.err)
+		}
+		if result.fav == nil || result.fav.Path != "/docs/slow.txt" {
+			t.Fatalf("expected added favorite for /docs/slow.txt, got %+v", result.fav)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Add() did not finish after releasing writer")
+	}
+
+	listed := store.List("user1")
+	if len(listed) != 1 {
+		t.Fatalf("expected 1 favorite after save, got %d", len(listed))
+	}
+	if listed[0].Path != "/docs/slow.txt" {
+		t.Fatalf("expected /docs/slow.txt after save, got %s", listed[0].Path)
 	}
 }

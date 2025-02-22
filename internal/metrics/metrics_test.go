@@ -130,6 +130,44 @@ func TestThroughput(t *testing.T) {
 	}
 }
 
+func TestRecordRequest_IgnoresUnknownByteCounts(t *testing.T) {
+	m := NewRequestMetrics()
+
+	m.RecordRequest("POST", "/upload", 200, time.Millisecond, -1, -1)
+
+	stats := m.GetStats()
+	if stats.BytesIn != 0 {
+		t.Errorf("BytesIn = %d, want 0 for unknown content length", stats.BytesIn)
+	}
+	if stats.BytesOut != 0 {
+		t.Errorf("BytesOut = %d, want 0 for unknown response size", stats.BytesOut)
+	}
+}
+
+func TestMetricsMiddleware_IgnoresUnknownRequestContentLength(t *testing.T) {
+	globalMetrics.Reset()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	wrapped := MetricsMiddleware(handler)
+	req := httptest.NewRequest("POST", "/upload", http.NoBody)
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+
+	wrapped.ServeHTTP(w, req)
+
+	stats := globalMetrics.GetStats()
+	if stats.BytesIn != 0 {
+		t.Errorf("BytesIn = %d, want 0 when ContentLength is unknown", stats.BytesIn)
+	}
+	if stats.BytesOut != 2 {
+		t.Errorf("BytesOut = %d, want 2", stats.BytesOut)
+	}
+}
+
 func TestReset(t *testing.T) {
 	m := NewRequestMetrics()
 

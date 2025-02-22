@@ -239,9 +239,6 @@ func (fs *FileSystem) Close() error {
 
 // Stat returns file info
 func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
 	name = workspace.CleanPath(name)
 
 	// Handle root directory
@@ -276,9 +273,8 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 	// Check if file has versioning
 	if !info.IsDir {
 		fileInfo.Versioned = fs.policy.ShouldVersion(ctx, name, info.Size)
-		// Compute hash for non-directory files
-		if data, err := fs.workspace.ReadFile(ctx, name); err == nil {
-			fileInfo.ContentHash = computeHash(data)
+		if contentHash, err := fs.hashWorkspaceFile(ctx, name); err == nil {
+			fileInfo.ContentHash = contentHash
 		}
 	}
 
@@ -823,9 +819,6 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 
 // ListVersions returns all versions of a file (including current)
 func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionRef, error) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
 	name = workspace.CleanPath(name)
 
 	// Get current file info
@@ -846,8 +839,10 @@ func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionR
 
 	// Current version
 	var currentHash string
-	if data, err := fs.workspace.ReadFile(ctx, name); err == nil {
-		currentHash = computeHash(data)
+	if contentHash, err := fs.hashWorkspaceFile(ctx, name); err == nil {
+		currentHash = contentHash
+	} else if errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotDir) || errors.Is(err, ErrIsDir) {
+		return nil, err
 	}
 
 	result := []VersionRef{{
@@ -875,11 +870,21 @@ func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionR
 	return result, nil
 }
 
+func mapWorkspaceOpenFileError(err error) error {
+	if errors.Is(err, workspace.ErrNotFound) {
+		return ErrNotFound
+	}
+	if errors.Is(err, workspace.ErrNotDir) {
+		return ErrNotDir
+	}
+	if errors.Is(err, workspace.ErrIsDir) {
+		return ErrIsDir
+	}
+	return err
+}
+
 // GetVersion reads a specific version of a file
 func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.ReadCloser, error) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
 	name = workspace.CleanPath(name)
 	info, err := fs.workspace.Stat(ctx, name)
 	if err != nil {
@@ -896,11 +901,11 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 	}
 
 	// Check if it's the current version
-	if data, err := fs.workspace.ReadFile(ctx, name); err == nil {
-		if computeHash(data) == hash {
+	if currentHash, err := fs.hashWorkspaceFile(ctx, name); err == nil {
+		if currentHash == hash {
 			f, err := fs.workspace.OpenFile(ctx, name)
 			if err != nil {
-				return nil, err
+				return nil, mapWorkspaceOpenFileError(err)
 			}
 			return f, nil
 		}
@@ -923,6 +928,21 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 	}
 
 	return io.NopCloser(strings.NewReader(string(data))), nil
+}
+
+func (fs *FileSystem) hashWorkspaceFile(ctx context.Context, name string) (string, error) {
+	reader, err := fs.workspace.OpenFile(ctx, name)
+	if err != nil {
+		return "", mapWorkspaceOpenFileError(err)
+	}
+	defer reader.Close()
+
+	hasher := blake3.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
 }
 
 // RestoreVersion restores a file to a specific version

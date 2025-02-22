@@ -48,6 +48,18 @@ type UserStore struct {
 	users    map[string]*User
 	byName   map[string]*User
 	filePath string
+	version  uint64
+}
+
+var userStoreWriter = func(path string, data []byte) error {
+	return writeAuthFileAtomically(path, data, errUserStoreSymlink, ".users-*.tmp", "users")
+}
+
+type userStoreSnapshot struct {
+	users    map[string]*User
+	byName   map[string]*User
+	filePath string
+	version  uint64
 }
 
 func cloneUser(user *User) *User {
@@ -124,21 +136,68 @@ func (s *UserStore) load() error {
 }
 
 func (s *UserStore) save() error {
-	users := make([]*User, 0, len(s.users))
-	for _, u := range s.users {
-		users = append(users, u)
+	return saveUserState(s.filePath, s.users)
+}
+
+func saveUserState(filePath string, users map[string]*User) error {
+	serializedUsers := make([]*User, 0, len(users))
+	for _, user := range users {
+		serializedUsers = append(serializedUsers, cloneUser(user))
 	}
 
-	data, err := json.MarshalIndent(users, "", "  ")
+	data, err := json.MarshalIndent(serializedUsers, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize users: %w", err)
 	}
 
-	if err := writeAuthFileAtomically(s.filePath, data, errUserStoreSymlink, ".users-*.tmp", "users"); err != nil {
+	if err := userStoreWriter(filePath, data); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func cloneUserMap(users map[string]*User) map[string]*User {
+	cloned := make(map[string]*User, len(users))
+	for id, user := range users {
+		cloned[id] = cloneUser(user)
+	}
+	return cloned
+}
+
+func buildUserNameIndex(users map[string]*User) map[string]*User {
+	byName := make(map[string]*User, len(users))
+	for _, user := range users {
+		byName[normalizeUsername(user.Username)] = user
+	}
+	return byName
+}
+
+func (s *UserStore) snapshotState() userStoreSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	users := cloneUserMap(s.users)
+	return userStoreSnapshot{
+		users:    users,
+		byName:   buildUserNameIndex(users),
+		filePath: s.filePath,
+		version:  s.version,
+	}
+}
+
+func (s *UserStore) commitSnapshot(snapshot userStoreSnapshot) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.version != snapshot.version {
+		return false
+	}
+
+	s.users = snapshot.users
+	s.byName = snapshot.byName
+	s.version++
+	return true
 }
 
 func validateAuthFilePath(path string, symlinkErr error) error {
@@ -322,52 +381,49 @@ func (s *UserStore) GetByUsername(username string) (*User, error) {
 
 // Authenticate verifies username and password
 func (s *UserStore) Authenticate(username, password string) (*User, error) {
-	s.mu.Lock()
-	user, ok := s.byName[normalizeUsername(username)]
-	if !ok {
-		s.mu.Unlock()
-		return nil, ErrInvalidCredentials
-	}
+	normalizedUsername := normalizeUsername(username)
+	var authenticatedUser *User
 
-	if user.Disabled {
-		s.mu.Unlock()
-		return nil, ErrUserDisabled
-	}
+	for {
+		snapshot := s.snapshotState()
+		user, ok := snapshot.byName[normalizedUsername]
+		if !ok {
+			return nil, ErrInvalidCredentials
+		}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		s.mu.Unlock()
-		return nil, ErrInvalidCredentials
-	}
+		if user.Disabled {
+			return nil, ErrUserDisabled
+		}
 
-	original := cloneUser(user)
-	updated := cloneUser(user)
-	now := time.Now()
-	updated.LastLoginAt = &now
-	s.users[user.ID] = updated
-	s.byName[normalizeUsername(updated.Username)] = updated
-	if err := s.save(); err != nil {
-		s.users[user.ID] = original
-		s.byName[normalizeUsername(original.Username)] = original
-		updated = original
+		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+			return nil, ErrInvalidCredentials
+		}
+
+		updated := cloneUser(user)
+		now := time.Now()
+		updated.LastLoginAt = &now
+		snapshot.users[user.ID] = updated
+		snapshot.byName[normalizedUsername] = updated
+
+		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			authenticatedUser = cloneUser(user)
+			break
+		}
+		if s.commitSnapshot(snapshot) {
+			authenticatedUser = cloneUser(updated)
+			break
+		}
 	}
-	s.mu.Unlock()
 
 	// Remove initial password file after successful login (if exists)
 	passwordFile := filepath.Join(filepath.Dir(s.filePath), "initial-password.txt")
 	os.Remove(passwordFile) // Ignore error - file may not exist
 
-	return cloneUser(updated), nil
+	return authenticatedUser, nil
 }
 
 // Create creates a new user
 func (s *UserStore) Create(username, password, email string, role Role) (*User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.byName[normalizeUsername(username)]; ok {
-		return nil, ErrUserExists
-	}
-
 	if len(password) < 8 {
 		return nil, ErrPasswordTooShort
 	}
@@ -387,60 +443,54 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
+	normalizedUsername := normalizeUsername(username)
 
-	s.users[user.ID] = user
-	s.byName[normalizeUsername(username)] = user
+	for {
+		snapshot := s.snapshotState()
+		if _, ok := snapshot.byName[normalizedUsername]; ok {
+			return nil, ErrUserExists
+		}
 
-	if err := s.save(); err != nil {
-		delete(s.users, user.ID)
-		delete(s.byName, normalizeUsername(username))
-		return nil, err
+		snapshot.users[user.ID] = cloneUser(user)
+		snapshot.byName[normalizedUsername] = snapshot.users[user.ID]
+
+		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			return nil, err
+		}
+		if s.commitSnapshot(snapshot) {
+			return cloneUser(user), nil
+		}
 	}
-
-	return cloneUser(user), nil
 }
 
 // Update updates user information
 func (s *UserStore) Update(user *User) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		existing, ok := snapshot.users[user.ID]
+		if !ok {
+			return ErrUserNotFound
+		}
 
-	existing, ok := s.users[user.ID]
-	if !ok {
-		return ErrUserNotFound
+		updated := cloneUser(user)
+		updated.UpdatedAt = time.Now()
+		oldName := normalizeUsername(existing.Username)
+		newName := normalizeUsername(updated.Username)
+		snapshot.users[user.ID] = updated
+		delete(snapshot.byName, oldName)
+		snapshot.byName[newName] = updated
+
+		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
 	}
-
-	updated := cloneUser(user)
-	updated.UpdatedAt = time.Now()
-	oldName := normalizeUsername(existing.Username)
-	newName := normalizeUsername(updated.Username)
-	s.users[user.ID] = updated
-	delete(s.byName, oldName)
-	s.byName[newName] = updated
-	if err := s.save(); err != nil {
-		s.users[user.ID] = existing
-		delete(s.byName, newName)
-		s.byName[oldName] = existing
-		return err
-	}
-
-	return nil
 }
 
 // ChangePassword changes a user's password
 func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user, ok := s.users[id]
-	if !ok {
-		return ErrUserNotFound
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)); err != nil {
-		return ErrInvalidCredentials
-	}
-
 	if len(newPassword) < 8 {
 		return ErrPasswordTooShort
 	}
@@ -450,31 +500,34 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	original := cloneUser(user)
-	updated := cloneUser(user)
-	updated.PasswordHash = string(hash)
-	updated.UpdatedAt = time.Now()
-	s.users[id] = updated
-	s.byName[normalizeUsername(updated.Username)] = updated
-	if err := s.save(); err != nil {
-		s.users[id] = original
-		s.byName[normalizeUsername(original.Username)] = original
-		return err
-	}
+	for {
+		snapshot := s.snapshotState()
+		user, ok := snapshot.users[id]
+		if !ok {
+			return ErrUserNotFound
+		}
 
-	return nil
+		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)); err != nil {
+			return ErrInvalidCredentials
+		}
+
+		updated := cloneUser(user)
+		updated.PasswordHash = string(hash)
+		updated.UpdatedAt = time.Now()
+		snapshot.users[id] = updated
+		snapshot.byName[normalizeUsername(updated.Username)] = updated
+
+		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
 }
 
 // ResetPassword resets a user's password (admin only)
 func (s *UserStore) ResetPassword(id, newPassword string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user, ok := s.users[id]
-	if !ok {
-		return ErrUserNotFound
-	}
-
 	if len(newPassword) < 8 {
 		return ErrPasswordTooShort
 	}
@@ -484,53 +537,59 @@ func (s *UserStore) ResetPassword(id, newPassword string) error {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	original := cloneUser(user)
-	updated := cloneUser(user)
-	updated.PasswordHash = string(hash)
-	updated.UpdatedAt = time.Now()
-	s.users[id] = updated
-	s.byName[normalizeUsername(updated.Username)] = updated
-	if err := s.save(); err != nil {
-		s.users[id] = original
-		s.byName[normalizeUsername(original.Username)] = original
-		return err
-	}
+	for {
+		snapshot := s.snapshotState()
+		user, ok := snapshot.users[id]
+		if !ok {
+			return ErrUserNotFound
+		}
 
-	return nil
+		updated := cloneUser(user)
+		updated.PasswordHash = string(hash)
+		updated.UpdatedAt = time.Now()
+		snapshot.users[id] = updated
+		snapshot.byName[normalizeUsername(updated.Username)] = updated
+
+		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
 }
 
 // Delete removes a user
 func (s *UserStore) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		user, ok := snapshot.users[id]
+		if !ok {
+			return ErrUserNotFound
+		}
 
-	user, ok := s.users[id]
-	if !ok {
-		return ErrUserNotFound
-	}
-
-	if user.Role == RoleAdmin {
-		adminCount := 0
-		for _, u := range s.users {
-			if u.Role == RoleAdmin && !u.Disabled {
-				adminCount++
+		if user.Role == RoleAdmin {
+			adminCount := 0
+			for _, candidate := range snapshot.users {
+				if candidate.Role == RoleAdmin && !candidate.Disabled {
+					adminCount++
+				}
+			}
+			if adminCount <= 1 {
+				return ErrLastAdmin
 			}
 		}
-		if adminCount <= 1 {
-			return ErrLastAdmin
+
+		delete(snapshot.users, id)
+		delete(snapshot.byName, normalizeUsername(user.Username))
+
+		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
 		}
 	}
-
-	original := user
-	delete(s.users, id)
-	delete(s.byName, normalizeUsername(user.Username))
-	if err := s.save(); err != nil {
-		s.users[id] = original
-		s.byName[normalizeUsername(original.Username)] = original
-		return err
-	}
-
-	return nil
 }
 
 // List returns all users
