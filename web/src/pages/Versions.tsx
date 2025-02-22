@@ -31,7 +31,8 @@ import {
   AlertCircle,
   Sparkles
 } from 'lucide-react'
-import { getVersions, buildDownloadUrl, restoreVersion, type VersionInfo } from '@/api/files'
+import { getVersions, buildDownloadUrl, downloadFile, restoreVersion, type VersionInfo } from '@/api/files'
+import { useIsAdmin } from '@/stores/auth'
 import { formatBytes, formatDate } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -40,12 +41,13 @@ interface VersionRowProps {
   version: VersionInfo
   index: number
   isLatest: boolean
+  canRestore: boolean
   onPreview: () => void
   onRestore: () => void
   onDownload: () => void
 }
 
-function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload }: VersionRowProps) {
+function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore, onDownload }: VersionRowProps) {
   return (
     <TableRow key={version.hash} className="hover:bg-content2 transition-colors">
       <TableCell>
@@ -96,7 +98,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
           >
             <Download size={16} />
           </Button>
-          {!isLatest && (
+          {canRestore && !isLatest && (
             <Button
               isIconOnly
               size="sm"
@@ -116,6 +118,7 @@ function VersionRow({ version, index, isLatest, onPreview, onRestore, onDownload
 }
 
 export function VersionsPage() {
+  const isAdmin = useIsAdmin()
   const [searchParams, setSearchParams] = useSearchParams()
   const [searchPath, setSearchPath] = useState('')
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
@@ -140,6 +143,7 @@ export function VersionsPage() {
     mutationFn: async ({ path, hash }: { path: string; hash: string }) => {
       await restoreVersion(path, hash)
     },
+    retry: false,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['versions', selectedPath] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
@@ -170,14 +174,16 @@ export function VersionsPage() {
   }
 
   const handleDownload = (version: VersionInfo) => {
-    const url = buildDownloadUrl(selectedPath!, { version: version.hash, download: true })
-    window.open(url, '_blank')
+    void downloadFile(selectedPath!, { version: version.hash })
   }
 
   const handlePreview = (version: VersionInfo) => {
     if (!selectedPath) return
     const url = buildDownloadUrl(selectedPath, { version: version.hash })
-    window.open(url, '_blank')
+    const previewWindow = window.open(url, '_blank', 'noopener,noreferrer')
+    if (previewWindow) {
+      previewWindow.opener = null
+    }
   }
 
   return (
@@ -263,6 +269,7 @@ export function VersionsPage() {
                     version={version}
                     index={versions.length - index - 1}
                     isLatest={index === 0}
+                    canRestore={isAdmin}
                     onPreview={() => handlePreview(version)}
                     onRestore={() => handleRestore(version)}
                     onDownload={() => handleDownload(version)}
@@ -344,14 +351,16 @@ export function VersionsPage() {
             <Button variant="light" onPress={onClose} className="rounded-xl">
               取消
             </Button>
-            <Button 
-              color="warning" 
-              onPress={confirmRestore}
-              isLoading={restoreMutation.isPending}
-              className="rounded-xl"
-            >
-              确认恢复
-            </Button>
+            {isAdmin && (
+              <Button 
+                color="warning" 
+                onPress={confirmRestore}
+                isLoading={restoreMutation.isPending}
+                className="rounded-xl"
+              >
+                确认恢复
+              </Button>
+            )}
           </ModalFooter>
         </ModalContent>
       </Modal>

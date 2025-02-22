@@ -194,7 +194,7 @@ describe('ShareAccessPage', () => {
     await user.click(screen.getByText('下载文件'))
 
     expect(mockGetShareDownloadUrl).toHaveBeenCalledWith('abc123', 'secret')
-    expect(openSpy).toHaveBeenCalledWith('/s/abc123/download?password=secret', '_blank')
+    expect(openSpy).toHaveBeenCalledWith('/s/abc123/download?password=secret', '_blank', 'noopener,noreferrer')
 
     openSpy.mockRestore()
   })

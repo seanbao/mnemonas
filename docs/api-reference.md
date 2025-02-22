@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD022 MD031 MD032 MD036 MD040 MD060 -->
+
 # MnemoNAS API 参考文档
 
 本文档描述 MnemoNAS REST API 的所有端点、请求/响应格式和错误处理。
@@ -236,7 +238,7 @@ GET /api/v1/version
 
 ### 初始化状态
 
-获取首次启动的初始化状态与临时凭据。
+获取首次启动的初始化状态。
 
 ```
 GET /api/v1/setup/
@@ -248,18 +250,15 @@ GET /api/v1/setup/
   "success": true,
   "is_first_run": true,
   "auth_enabled": true,
-  "web_username": "admin",
-  "web_password": "***",
   "webdav_enabled": true,
-  "webdav_auth_type": "basic",
-  "webdav_username": "admin",
-  "webdav_password": "***"
+  "webdav_auth_type": "basic"
 }
 ```
 
 **说明**:
-- 仅在 `is_first_run = true` 时返回 `web_password` / `webdav_password` 等凭据
-- `POST /api/v1/setup/acknowledge` 后不再返回凭据
+- 该接口不再返回任何初始密码或用户名
+- 首次启动生成的初始密码仅写入启动日志和 `secrets.json`
+- `POST /api/v1/setup/acknowledge` 需要管理员登录后调用
 
 标记初始化已完成：
 
@@ -630,6 +629,10 @@ GET /api/v1/versions/{path}
 ### 恢复版本
 
 将文件恢复到指定的历史版本。
+
+**需要认证**: 是
+
+**权限要求**: 管理员
 
 ```
 POST /api/v1/versions/{hash}/restore

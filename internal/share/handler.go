@@ -503,6 +503,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
+	if reader == nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
 	defer reader.Close()
 
 	filename := path.Base(share.Path)
@@ -516,6 +520,13 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	filePath := chi.URLParam(r, "*")
 	password := r.URL.Query().Get("password")
+	if filePath == "" {
+		prefix := "/s/" + id + "/download/"
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			filePath = strings.TrimPrefix(r.URL.Path, prefix)
+		}
+	}
+	filePath = strings.TrimPrefix(filePath, "/")
 
 	share, err := h.store.Access(id, password)
 	if err != nil {
@@ -539,6 +550,11 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if filePath == "" || filePath == "." {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
 	fullPath := path.Join(share.Path, filePath)
 	if !isWithinSharePath(share.Path, fullPath) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
@@ -555,6 +571,10 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
+	if reader == nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
 	defer reader.Close()
 
 	filename := path.Base(fullPath)
@@ -567,7 +587,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	password := r.URL.Query().Get("password")
-	relPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	relPath := r.URL.Query().Get("path")
 	relPath = strings.TrimPrefix(relPath, "/")
 	if relPath == "." {
 		relPath = ""
@@ -622,7 +642,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]*PublicShareItem, 0, len(entries))
 	for _, entry := range entries {
-		relItemPath, relErr := path.Rel(share.Path, entry.Path)
+		relItemPath, relErr := shareRelativePath(share.Path, entry.Path)
 		if relErr != nil || relItemPath == "." {
 			relItemPath = entry.Name
 		}
@@ -669,6 +689,26 @@ func (h *Handler) buildShareURL(id string) string {
 		return h.baseURL + "/s/" + id
 	}
 	return "/s/" + id
+}
+
+func shareRelativePath(basePath, entryPath string) (string, error) {
+	cleanBase := path.Clean(basePath)
+	cleanEntry := path.Clean(entryPath)
+
+	if cleanEntry == cleanBase {
+		return ".", nil
+	}
+
+	prefix := cleanBase
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	if !strings.HasPrefix(cleanEntry, prefix) {
+		return "", errors.New("entry outside share path")
+	}
+
+	return strings.TrimPrefix(cleanEntry, prefix), nil
 }
 
 func isWithinSharePath(basePath, targetPath string) bool {

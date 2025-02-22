@@ -1,7 +1,9 @@
 /**
  * Setup API
- * Endpoints for first-run setup and credential display
+ * Endpoints for first-run status and onboarding acknowledgement
  */
+
+import { authFetch } from './auth'
 
 const API_BASE = '/api/v1/setup'
 
@@ -9,16 +11,12 @@ export interface SetupStatusResponse {
   success: boolean
   is_first_run: boolean
   auth_enabled: boolean
-  web_username?: string
-  web_password?: string
   webdav_enabled: boolean
   webdav_auth_type: string
-  webdav_username?: string
-  webdav_password?: string
 }
 
 /**
- * Get setup status and credentials (for first run)
+ * Get setup status for first run.
  */
 export async function getSetupStatus(): Promise<SetupStatusResponse> {
   const response = await fetch(`${API_BASE}/`)
@@ -32,10 +30,10 @@ export async function getSetupStatus(): Promise<SetupStatusResponse> {
 }
 
 /**
- * Acknowledge setup (mark as shown)
+ * Acknowledge setup after an authenticated admin signs in.
  */
 export async function acknowledgeSetup(): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/acknowledge`, {
+  const response = await authFetch(`${API_BASE}/acknowledge`, {
     method: 'POST',
   })
   

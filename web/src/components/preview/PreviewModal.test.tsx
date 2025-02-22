@@ -19,6 +19,14 @@ vi.mock('@/api/auth', () => ({
   getStoredToken: () => tokenValue,
 }))
 
+vi.mock('@/api/files', async () => {
+  const actual = await vi.importActual<typeof import('@/api/files')>('@/api/files')
+  return {
+    ...actual,
+    downloadFile: vi.fn(),
+  }
+})
+
 vi.mock('@/lib/preview-utils', async () => {
   const actual = await vi.importActual<typeof import('@/lib/preview-utils')>('@/lib/preview-utils')
   return {

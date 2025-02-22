@@ -69,7 +69,7 @@ describe('LoginPage', () => {
       renderLogin()
       
       expect(screen.getByText(/首次运行时默认管理员账号为/i)).toBeInTheDocument()
-      expect(screen.getByText(/初始密码请查看服务器启动日志/i)).toBeInTheDocument()
+      expect(screen.getByText(/初始密码请查看服务器启动日志，浏览器界面不显示初始密码/i)).toBeInTheDocument()
     })
 
     it('initializes auth on mount', () => {

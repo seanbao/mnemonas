@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
-import { buildDownloadUrl } from '@/api/files'
+import { buildDownloadUrl, downloadFile } from '@/api/files'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
@@ -100,13 +100,7 @@ export function PreviewModal({
 
   const handleDownload = useCallback(() => {
     if (!currentFile) return
-    const url = buildDownloadUrl(currentFile.path, { download: true })
-    const link = document.createElement('a')
-    link.href = url
-    link.download = currentFile.name
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    void downloadFile(currentFile.path, { filename: currentFile.name })
   }, [currentFile])
 
   const handleOpenExternal = useCallback(() => {
