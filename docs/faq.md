@@ -7,7 +7,7 @@
 **A:** MnemoNAS 支持以下平台：
 
 | 平台 | 支持状态 |
-|------|---------|
+| ---- | -------- |
 | Linux (x86_64) | ✅ 完全支持 |
 | Linux (ARM64) | ✅ 完全支持 |
 | macOS (Apple Silicon) | ✅ 完全支持 |
@@ -19,7 +19,7 @@
 **A:**
 
 | 方式 | 优点 | 缺点 |
-|------|------|------|
+| ---- | ---- | ---- |
 | **Docker** | 开箱即用、隔离性好、易于升级 | 需要 Docker 环境 |
 | **二进制** | 无依赖、性能略优 | 需手动管理进程 |
 
@@ -30,12 +30,14 @@
 **A:**
 
 Docker 方式：
+
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
 二进制方式：
+
 ```bash
 # 停止服务
 pkill nasd
@@ -143,6 +145,7 @@ server {
 4. 选择要恢复的版本 → **恢复**
 
 或通过 API：
+
 ```bash
 # 获取文件历史版本
 curl -H "Authorization: Bearer <access-token>" \
@@ -163,6 +166,7 @@ curl -X POST \
 3. **版本共享**：文件的不同版本共享未修改的块
 
 查看去重效果：
+
 ```bash
 curl http://localhost:9091/stats
 # 返回: {"dedup_ratio": 0.6, ...}  # 0.6 = 60% 去重率（节省 60% 存储）
@@ -180,6 +184,7 @@ max_versions = 10     # 每个文件保留最近 10 个版本
 ```
 
 手动触发 GC：
+
 ```bash
 curl -X POST \
    -H "Authorization: Bearer <access-token>" \
@@ -201,21 +206,24 @@ curl -X POST \
 
 ### Q: 如何监控服务状态？
 
-**A:** 
+**A:**
 
 健康检查：
+
 ```bash
 curl http://localhost:8080/health
 # {"status":"healthy","version":"0.1.0"}
 ```
 
 性能指标：
+
 ```bash
 curl -H "Authorization: Bearer <access-token>" http://localhost:8080/api/v1/metrics
 # 返回请求统计、延迟、吞吐量等
 ```
 
 存储统计：
+
 ```bash
 curl http://localhost:9091/stats
 # 返回 CAS 存储统计
@@ -240,9 +248,10 @@ curl -H "Authorization: Bearer <access-token>" \
 
 ### Q: 如何备份 MnemoNAS 数据？
 
-**A:** 
+**A:**
 
 1. **冷备份**：停止服务后复制数据目录
+
    ```bash
    docker compose stop
    cp -r ~/.mnemonas/files /backup/mnemonas-files
@@ -251,11 +260,13 @@ curl -H "Authorization: Bearer <access-token>" \
    ```
 
 2. **热备份**：使用 rsync 增量同步
+
    ```bash
    rsync -av ~/.mnemonas/ /backup/mnemonas/
    ```
 
 3. **远程备份**：使用 rclone 同步到云存储
+
    ```bash
    rclone sync ~/.mnemonas/ remote:mnemonas-backup/
    ```
@@ -269,18 +280,21 @@ curl -H "Authorization: Bearer <access-token>" \
 **A:** 检查清单：
 
 1. **端口占用**：
+
    ```bash
    lsof -i :8080  # 检查 8080 端口
    lsof -i :9090  # 检查 9090 端口
    ```
 
 2. **数据目录权限**：
+
    ```bash
    ls -la ~/.mnemonas/
    # 确保当前用户有读写权限
    ```
 
 3. **查看日志**：
+
    ```bash
    # Docker
    docker compose logs -f
@@ -294,11 +308,13 @@ curl -H "Authorization: Bearer <access-token>" \
 **A:** 控制面无法连接数据面（gRPC）：
 
 1. 确认数据面运行中：
+
    ```bash
    curl http://localhost:9091/health
    ```
 
 2. 检查配置中的数据面地址：
+
    ```toml
    [dataplane]
    grpc_address = "localhost:9090"

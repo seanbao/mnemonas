@@ -314,6 +314,9 @@ func TestNewUserStore_RejectsSymlinkPasswordFileAndRollsBackAdmin(t *testing.T) 
 	}
 
 	content, readErr := os.ReadFile(usersFile)
+	if os.IsNotExist(readErr) {
+		return
+	}
 	if readErr != nil {
 		t.Fatalf("failed to read rolled back users file: %v", readErr)
 	}

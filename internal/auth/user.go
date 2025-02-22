@@ -261,22 +261,20 @@ Please change this password after first login!
 This file will be automatically deleted after you login.
 `, password)
 
+	if err := writeAuthFileAtomically(passwordFile, []byte(passwordContent), errPasswordFileSymlink, ".initial-password-*.tmp", "initial password"); err != nil {
+		return "", fmt.Errorf("failed to write initial password file: %w", err)
+	}
+
 	s.users[admin.ID] = admin
 	s.byName[normalizeUsername(admin.Username)] = admin
 
 	if err := s.save(); err != nil {
 		delete(s.users, admin.ID)
 		delete(s.byName, normalizeUsername(admin.Username))
-		return "", err
-	}
-
-	if err := writeAuthFileAtomically(passwordFile, []byte(passwordContent), errPasswordFileSymlink, ".initial-password-*.tmp", "initial password"); err != nil {
-		delete(s.users, admin.ID)
-		delete(s.byName, normalizeUsername(admin.Username))
-		if rollbackErr := s.save(); rollbackErr != nil {
-			return "", fmt.Errorf("failed to write initial password file: %w (also failed to roll back default admin: %v)", err, rollbackErr)
+		if removeErr := os.Remove(passwordFile); removeErr != nil && !os.IsNotExist(removeErr) {
+			return "", fmt.Errorf("failed to save default admin: %w (also failed to remove initial password file: %v)", err, removeErr)
 		}
-		return "", fmt.Errorf("failed to write initial password file: %w", err)
+		return "", err
 	}
 
 	// Also print to terminal if running interactively (for convenience)

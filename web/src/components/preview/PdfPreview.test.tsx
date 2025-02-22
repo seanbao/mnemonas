@@ -1,3 +1,4 @@
+import type { AnchorHTMLAttributes, ReactNode } from 'react'
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { authFetch } from '@/api/auth'
@@ -11,7 +12,7 @@ vi.mock('@heroui/react', () => ({
   Spinner: ({ size }: { size: string }) => (
     <div data-testid="spinner" data-size={size}>Loading...</div>
   ),
-  Button: ({ children, ...props }: any) => (
+  Button: ({ children, ...props }: { children?: ReactNode } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
     <a {...props}>{children}</a>
   ),
 }))

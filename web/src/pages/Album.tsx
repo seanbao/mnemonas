@@ -117,13 +117,6 @@ function ImageThumbnail({
   const imgRef = useRef<HTMLImageElement>(null)
 
   useEffect(() => {
-    setLoaded(false)
-    setError(false)
-    setThumbnailUrl(null)
-    setHasRetried(false)
-  }, [file.path])
-
-  useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -222,43 +215,25 @@ function ImagePreview({
   onClose: () => void
   onNavigate: (index: number) => void
 }) {
+  const currentImage = images[currentIndex]
+
   const [zoom, setZoom] = useState(1)
   const [rotation, setRotation] = useState(0)
   const [showInfo, setShowInfo] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [imageUrl, setImageUrl] = useState('')
+  const [imageUrl, setImageUrl] = useState(() => currentImage?.path ? getDownloadUrl(currentImage.path) : '')
   const [hasRetried, setHasRetried] = useState(false)
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null)
-  
-  const currentImage = images[currentIndex]
   
   const handlePrev = useCallback(() => {
     if (images.length === 0) return
     onNavigate((currentIndex - 1 + images.length) % images.length)
-    setZoom(1)
-    setRotation(0)
-    setLoading(true)
   }, [currentIndex, images.length, onNavigate])
   
   const handleNext = useCallback(() => {
     if (images.length === 0) return
     onNavigate((currentIndex + 1) % images.length)
-    setZoom(1)
-    setRotation(0)
-    setLoading(true)
   }, [currentIndex, images.length, onNavigate])
-
-  useEffect(() => {
-    if (!currentImage?.path) {
-      setImageUrl('')
-      setHasRetried(false)
-      return
-    }
-
-    setImageUrl(getDownloadUrl(currentImage.path))
-    setHasRetried(false)
-    setLoading(true)
-  }, [currentImage?.path])
 
   // Preload adjacent images
   useEffect(() => {
@@ -651,11 +626,12 @@ export function AlbumPage() {
             </div>
 
             {/* Preview modal - only render when images exist */}
-            {images.length > 0 && (
+            {images.length > 0 && previewIndex !== null && (
               <ImagePreview
+                key={images[previewIndex]?.path ?? String(previewIndex)}
                 images={images}
-                currentIndex={previewIndex ?? 0}
-                isOpen={previewIndex !== null}
+                currentIndex={previewIndex}
+                isOpen={true}
                 onClose={handleClosePreview}
                 onNavigate={setPreviewIndex}
               />

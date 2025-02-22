@@ -8,14 +8,15 @@
 
 ## 🗄️ S3 兼容存储后端
 
-### 目标
+### S3 目标
 
 支持将 CAS 数据存储到 S3 兼容对象存储（AWS S3、MinIO、Cloudflare R2 等），实现：
+
 - 无限扩展存储容量
 - 跨地域备份
 - 冷热数据分层
 
-### 接口设计
+### S3 接口设计
 
 ```go
 // internal/storage/backend.go
@@ -54,7 +55,7 @@ type S3Backend struct {
 }
 ```
 
-### 配置草案
+### S3 配置草案
 
 ```toml
 [storage]
@@ -78,7 +79,7 @@ cold_backend = "s3"
 tier_policy = "age:30d"  # 30 天后迁移到冷存储
 ```
 
-### MVP 预留
+### S3 MVP 预留
 
 当前 `internal/caslayout` 的 `Store` 接口已可扩展：
 
@@ -93,6 +94,7 @@ type Store interface {
 ```
 
 v0.2.0 需要：
+
 1. 添加 `context.Context` 参数
 2. 改用 `io.Reader/io.ReadCloser` 支持流式传输
 3. 实现 `S3Backend`
@@ -101,14 +103,15 @@ v0.2.0 需要：
 
 ## 🔌 插件系统
 
-### 目标
+### 插件目标
 
 支持通过插件扩展功能，无需修改核心代码：
+
 - 文件处理器（缩略图生成、元数据提取）
 - 通知集成（Webhook、邮件）
 - 自定义认证提供者
 
-### 接口设计
+### 插件接口设计
 
 ```go
 // internal/plugin/plugin.go
@@ -171,7 +174,7 @@ import (
 // 适合不信任的第三方插件
 ```
 
-### 配置草案
+### 插件配置草案
 
 ```toml
 [plugins]
@@ -187,7 +190,7 @@ events = ["file.created", "file.deleted"]
 secret = "..."
 ```
 
-### MVP 预留
+### 插件 MVP 预留
 
 在文件操作处添加钩子点：
 
@@ -205,16 +208,17 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, data []byte) e
 
 ## 🖥️ 远程 Runner（分布式处理）
 
-### 目标
+### Runner 目标
 
 将计算密集型任务（缩略图、转码、AI 标签）卸载到独立的 Runner 节点：
+
 - 避免阻塞主服务
 - 支持 GPU 加速
 - 水平扩展处理能力
 
 ### 架构
 
-```
+```text
 ┌─────────────────┐     任务队列      ┌───────────────┐
 │   MnemoNAS      │  ─────────────►  │   Runner 1    │
 │   (控制面)      │   Redis/NATS     │   (缩略图)    │
@@ -226,7 +230,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, data []byte) e
                                      └───────────────┘
 ```
 
-### 接口设计
+### Runner 接口设计
 
 ```protobuf
 // proto/runner.proto
@@ -260,7 +264,7 @@ message TaskResult {
 }
 ```
 
-### 配置草案
+### Runner 配置草案
 
 ```toml
 [runner]
@@ -275,7 +279,7 @@ thumbnail = { runners = 2, timeout = "30s" }
 transcode = { runners = 1, timeout = "5m", gpu = true }
 ```
 
-### MVP 预留
+### Runner MVP 预留
 
 任务系统骨架：
 

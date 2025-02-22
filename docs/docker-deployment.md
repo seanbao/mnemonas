@@ -9,6 +9,7 @@
 - 建议使用 SSD 存储（HDD 也可工作，但性能较低）
 
 检查 Docker 版本：
+
 ```bash
 docker --version
 docker compose version
@@ -19,6 +20,7 @@ docker compose version
 ## 🚀 快速开始
 
 ### 1. 克隆项目
+
 ```bash
 git clone https://github.com/seanbao/mnemonas.git
 cd mnemonas
@@ -32,6 +34,7 @@ cp mnemonas.example.toml ~/.mnemonas/config.toml
 ```
 
 编辑 `~/.mnemonas/config.toml`，至少修改：
+
 - `password` - WebDAV 认证密码
 
 ### 3. 启动服务
@@ -51,12 +54,15 @@ docker compose logs -f
 ```
 
 ---
+
 ## 🏠 家庭场景配置
 
 ### 场景一：家庭媒体服务器
+
 将 MnemoNAS 用作家庭照片/视频存储，外接大容量硬盘。
 
 **docker-compose.yml**:
+
 ```yaml
 services:
   mnemonas:
@@ -80,6 +86,7 @@ services:
 ```
 
 **~/.mnemonas/config.toml**:
+
 ```toml
 [server]
 host = "0.0.0.0"
@@ -108,6 +115,7 @@ level = "info"
 用于备份代码、文档等工作文件，需要更频繁的版本保留。
 
 **docker-compose.yml**:
+
 ```yaml
 services:
   mnemonas:
@@ -122,6 +130,7 @@ services:
 ```
 
 **~/.mnemonas/config.toml**:
+
 ```toml
 [server]
 host = "127.0.0.1"  # 仅本地访问
@@ -145,6 +154,7 @@ level = "debug"          # 开发时可用 debug
 支持家庭成员各有独立账号（未来功能，当前使用单一账号）。
 
 **docker-compose.yml**:
+
 ```yaml
 services:
   mnemonas:
@@ -174,6 +184,7 @@ services:
 ### 使用 HTTPS（Nginx 反向代理）
 
 **docker-compose.yml**:
+
 ```yaml
 services:
   mnemonas:
@@ -209,6 +220,7 @@ networks:
 ```
 
 **nginx.conf**:
+
 ```nginx
 events {
     worker_connections 1024;

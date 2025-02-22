@@ -15,6 +15,8 @@ import (
 
 var errHistoryFileSymlink = errors.New("maintenance history file path must not be a symlink")
 
+const interruptedScrubErrorMessage = "scrub interrupted before completion"
+
 // gcRunning tracks whether GC is currently running (atomic for thread-safety)
 var gcRunning atomic.Bool
 
@@ -71,10 +73,22 @@ func (s *HistoryStore) SaveScrubResult(result *ScrubResult) error {
 	previous := s.scrubResult
 	s.scrubResult = result
 	if err := s.persistScrubResult(result); err != nil {
-		s.scrubResult = previous
+		if !shouldPreserveTerminalScrubState(previous, result) {
+			s.scrubResult = previous
+		}
 		return err
 	}
 	return nil
+}
+
+func shouldPreserveTerminalScrubState(previous, current *ScrubResult) bool {
+	if previous == nil || current == nil {
+		return false
+	}
+	if previous.ID == "" || previous.ID != current.ID {
+		return false
+	}
+	return previous.Status == "running" && current.Status != "running"
 }
 
 // GetLastScrubResult returns the most recent scrub result
@@ -127,8 +141,30 @@ func (s *HistoryStore) loadLastScrubResult() error {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return err
 	}
+	recoverInterruptedScrubResult(&result, time.Now())
 	s.scrubResult = &result
 	return nil
+}
+
+func recoverInterruptedScrubResult(result *ScrubResult, now time.Time) {
+	if result == nil || result.Status != "running" {
+		return
+	}
+
+	result.Status = "failed"
+	if result.EndTime.IsZero() || (!result.StartTime.IsZero() && result.EndTime.Before(result.StartTime)) {
+		if !result.StartTime.IsZero() && now.Before(result.StartTime) {
+			result.EndTime = result.StartTime
+		} else {
+			result.EndTime = now
+		}
+	}
+	if result.ErrorMessage == "" {
+		result.ErrorMessage = interruptedScrubErrorMessage
+	}
+	if result.DurationMs == 0 && !result.StartTime.IsZero() && !result.EndTime.Before(result.StartTime) {
+		result.DurationMs = uint64(result.EndTime.Sub(result.StartTime).Milliseconds())
+	}
 }
 
 func (s *HistoryStore) lastScrubPath() string {
