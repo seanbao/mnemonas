@@ -1161,7 +1161,8 @@ func requestHost(r *http.Request) string {
 }
 
 func hasTraversalSegment(rawPath string) bool {
-	for _, segment := range strings.Split(rawPath, "/") {
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	for _, segment := range strings.Split(normalized, "/") {
 		if segment == ".." {
 			return true
 		}

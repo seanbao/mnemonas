@@ -173,15 +173,18 @@ func TestListObjectsNotConnected(t *testing.T) {
 }
 
 func TestConnectInvalidAddress(t *testing.T) {
-	// Test that Connect can be called without crashing
-	// The actual connection will fail later when used
 	client := NewClient("invalid-addr:99999")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	// Connect might succeed (gRPC is lazy) or fail, but shouldn't panic
-	_ = client.Connect(ctx)
+	err := client.Connect(ctx)
+	if err == nil {
+		t.Fatal("expected Connect to fail for invalid address")
+	}
+	if client.IsConnected() {
+		t.Fatal("expected client to remain disconnected after failed connect")
+	}
 }
 
 func TestWithTimeout(t *testing.T) {

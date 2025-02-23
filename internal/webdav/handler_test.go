@@ -2095,6 +2095,7 @@ func TestHandler_PathTraversal(t *testing.T) {
 		"/dav/../etc/passwd",
 		"/dav/test/../../etc/passwd",
 		"/dav/..%2F..%2Fetc/passwd",
+		"/dav/..%5Csecret.txt",
 	}
 
 	for _, path := range tests {

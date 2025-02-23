@@ -29,6 +29,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
+	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 // testDataplaneAddr is the address of the test dataplane server
@@ -137,6 +138,34 @@ func setVersionStoreObjectClient(t *testing.T, fs *storage.FileSystem, client *d
 	objectsValue := reflect.NewAt(objectsField.Type(), unsafe.Pointer(objectsField.UnsafeAddr())).Elem()
 	clientField := objectsValue.Elem().FieldByName("client")
 	reflect.NewAt(clientField.Type(), unsafe.Pointer(clientField.UnsafeAddr())).Elem().Set(reflect.ValueOf(client))
+}
+
+func getVersionStoreObjectClient(t *testing.T, fs *storage.FileSystem) *dataplane.Client {
+	t.Helper()
+	fsValue := reflect.ValueOf(fs).Elem()
+	versionsField := fsValue.FieldByName("versions")
+	versionsValue := reflect.NewAt(versionsField.Type(), unsafe.Pointer(versionsField.UnsafeAddr())).Elem()
+	objectsField := versionsValue.Elem().FieldByName("objects")
+	objectsValue := reflect.NewAt(objectsField.Type(), unsafe.Pointer(objectsField.UnsafeAddr())).Elem()
+	clientField := objectsValue.Elem().FieldByName("client")
+	clientValue := reflect.NewAt(clientField.Type(), unsafe.Pointer(clientField.UnsafeAddr())).Elem()
+	if clientValue.IsNil() {
+		return nil
+	}
+	client, _ := clientValue.Interface().(*dataplane.Client)
+	return client
+}
+
+func getVersioningPolicy(t *testing.T, fs *storage.FileSystem) *versionstore.VersioningPolicy {
+	t.Helper()
+	fsValue := reflect.ValueOf(fs).Elem()
+	policyField := fsValue.FieldByName("policy")
+	policyValue := reflect.NewAt(policyField.Type(), unsafe.Pointer(policyField.UnsafeAddr())).Elem()
+	if policyValue.IsNil() {
+		return nil
+	}
+	policy, _ := policyValue.Interface().(*versionstore.VersioningPolicy)
+	return policy
 }
 
 func TestNewServer_InitializesFavoritesWhenDisabledIfStoreConfigured(t *testing.T) {
@@ -396,6 +425,41 @@ func TestServer_Health_DataplaneFailureDoesNotExposeInternalError(t *testing.T) 
 	}
 	if !strings.Contains(body, "unavailable") {
 		t.Fatalf("expected health response to include generic dataplane status, got %q", body)
+	}
+}
+
+func TestServer_Health_ReconnectsDataplaneOnDemand(t *testing.T) {
+	probe := setupDataplaneClient(t)
+	if probe == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	server, err := NewServer(zerolog.Nop(), nil)
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	disconnected := dataplane.NewClient(testDataplaneAddr())
+	defer disconnected.Close()
+	server.dataplane = disconnected
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Health status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !server.dataplane.IsConnected() {
+		t.Fatal("expected health check to reconnect dataplane client")
+	}
+	body := w.Body.String()
+	if strings.Contains(body, `"status":"degraded"`) {
+		t.Fatalf("expected healthy dataplane after reconnect, got %q", body)
+	}
+	if !strings.Contains(body, `"dataplane":{"healthy":true`) {
+		t.Fatalf("expected health response to include dataplane health after reconnect, got %q", body)
 	}
 }
 
@@ -1889,6 +1953,8 @@ func TestValidatePath(t *testing.T) {
 		{"/nested/foo..txt", "/nested/foo..txt", false},
 		{"../etc/passwd", "", true},
 		{"/foo/../bar", "", true},
+		{"..\\etc\\passwd", "", true},
+		{"/safe\\..\\secret.txt", "", true},
 	}
 
 	for _, tt := range tests {
@@ -2111,6 +2177,28 @@ func TestServer_MoveFile_InvalidSourcePathIsSanitized(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_BackslashTraversalSourceIsSanitized(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	body := `{"from":"..\\etc\\passwd","to":"/safe.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("move file backslash traversal source status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid source path") {
+		t.Fatalf("expected invalid source path message, got %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "..") || strings.Contains(strings.ToLower(bodyStr), "traversal") {
+		t.Fatalf("expected sanitized invalid source path error, got %s", bodyStr)
+	}
+}
+
 func TestServer_MoveFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2157,6 +2245,32 @@ func TestServer_MoveFile_ReturnsConflictWhenDestinationParentIsFile(t *testing.T
 	}
 	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
 		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_MoveFile_ReturnsNotFoundWhenDestinationParentMissing(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	body := `{"from":"/move-source.txt","to":"/missing-parent/child.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("move file missing parent status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if _, err := fs.Stat(ctx, "/move-source.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected move, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/missing-parent/child.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
 	}
 }
 
@@ -2319,6 +2433,32 @@ func TestServer_CopyFile_ReturnsConflictWhenDestinationParentIsFile(t *testing.T
 	}
 	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
 		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_CopyFile_ReturnsNotFoundWhenDestinationParentMissing(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	body := `{"from":"/copy-source.txt","to":"/missing-parent/child.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("copy file missing parent status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if _, err := fs.Stat(ctx, "/copy-source.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected copy, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/missing-parent/child.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
 	}
 }
 
@@ -3654,6 +3794,57 @@ func TestServer_UpdateSettings_UpdatesTrashConfig(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_UpdatesRunningDataplaneClient(t *testing.T) {
+	probe := setupDataplaneClient(t)
+	if probe == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	oldClient := dataplane.NewClient("127.0.0.1:1")
+	server.dataplane = oldClient
+	setVersionStoreObjectClient(t, fs, oldClient)
+
+	body := fmt.Sprintf(`{"dataplane":{"grpc_address":%q}}`, testDataplaneAddr())
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings dataplane status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.dataplane == nil {
+		t.Fatal("expected running dataplane client to be initialized")
+	}
+	if server.dataplane == oldClient {
+		t.Fatal("expected running dataplane client to be replaced")
+	}
+	if got := server.dataplane.Addr(); got != testDataplaneAddr() {
+		t.Fatalf("running dataplane addr = %q, want %q", got, testDataplaneAddr())
+	}
+	if !server.dataplane.IsConnected() {
+		t.Fatal("expected replacement dataplane client to connect")
+	}
+
+	objectClient := getVersionStoreObjectClient(t, fs)
+	if objectClient == nil {
+		t.Fatal("expected version store object client to remain configured")
+	}
+	if objectClient == oldClient {
+		t.Fatal("expected version store object client to be replaced")
+	}
+	if got := objectClient.Addr(); got != testDataplaneAddr() {
+		t.Fatalf("version store dataplane addr = %q, want %q", got, testDataplaneAddr())
+	}
+	if !objectClient.IsConnected() {
+		t.Fatal("expected version store dataplane client to connect")
+	}
+}
+
 func TestServer_UpdateSettings_InvalidTrashSettingsRejected(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -3846,6 +4037,36 @@ func TestServer_UpdateSettings_UpdatesVersioningConfig(t *testing.T) {
 	}
 	if server.config.Storage.Versioning.MaxVersionedSize != 209715200 {
 		t.Fatalf("expected max versioned size 209715200, got %d", server.config.Storage.Versioning.MaxVersionedSize)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesRunningVersioningPolicy(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"versioning":{"auto_versioned_extensions":[".md"," .txt ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings versioning runtime status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	policy := getVersioningPolicy(t, fs)
+	if policy == nil {
+		t.Fatal("expected running versioning policy to remain configured")
+	}
+	if !reflect.DeepEqual(policy.AutoVersionedExtensions, []string{".md", ".txt"}) {
+		t.Fatalf("unexpected running versioning extensions: %#v", policy.AutoVersionedExtensions)
+	}
+	if !reflect.DeepEqual(policy.AutoVersionedFilenames, []string{"README", "Dockerfile"}) {
+		t.Fatalf("unexpected running versioning filenames: %#v", policy.AutoVersionedFilenames)
+	}
+	if policy.MaxVersionedSize != 209715200 {
+		t.Fatalf("expected running max versioned size 209715200, got %d", policy.MaxVersionedSize)
 	}
 }
 

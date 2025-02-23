@@ -10,6 +10,7 @@ import (
 
 	pb "github.com/seanbao/mnemonas/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -24,6 +25,13 @@ type Client struct {
 // NewClient creates a new data plane client
 func NewClient(addr string) *Client {
 	return &Client{addr: addr}
+}
+
+// Addr returns the configured data plane address.
+func (c *Client) Addr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.addr
 }
 
 // Connect establishes connection to data plane
@@ -48,9 +56,29 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to data plane: %w", err)
 	}
 
+	if err := waitForReady(ctx, conn); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("failed to connect to data plane: %w", err)
+	}
+
 	c.conn = conn
 	c.client = pb.NewDataPlaneClient(conn)
 	return nil
+}
+
+func waitForReady(ctx context.Context, conn *grpc.ClientConn) error {
+	for {
+		state := conn.GetState()
+		if state == connectivity.Idle {
+			conn.Connect()
+		}
+		if state == connectivity.Ready {
+			return nil
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			return ctx.Err()
+		}
+	}
 }
 
 // Close closes the connection

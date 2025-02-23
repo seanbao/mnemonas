@@ -115,6 +115,14 @@ func New(cfg Config) (*Store, error) {
 	return store, nil
 }
 
+// SetDataplaneClient swaps the dataplane client used by the backing object store.
+func (s *Store) SetDataplaneClient(client *dataplane.Client) {
+	if s == nil || s.objects == nil {
+		return
+	}
+	s.objects.SetClient(client)
+}
+
 func createTables(db *sql.DB) error {
 	schema := `
 	-- File index for fast lookups

@@ -301,6 +301,23 @@ func TestWorkspace_Rename(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Rename_ReturnsErrNotFoundWhenDestinationParentMissing(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/rename-source.txt", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(rename-source.txt) error: %v", err)
+	}
+
+	err := w.Rename(ctx, "/rename-source.txt", "/missing-parent/child.txt")
+	if err != ErrNotFound {
+		t.Fatalf("Rename() error = %v, want ErrNotFound", err)
+	}
+	if !w.Exists(ctx, "/rename-source.txt") {
+		t.Fatal("source should remain after rejected rename")
+	}
+}
+
 func TestWorkspace_Copy(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -323,6 +340,23 @@ func TestWorkspace_Copy(t *testing.T) {
 	got, _ := w.ReadFile(ctx, "/dest.txt")
 	if string(got) != string(original) {
 		t.Errorf("Copied content = %q, want %q", got, original)
+	}
+}
+
+func TestWorkspace_Copy_ReturnsErrNotFoundWhenDestinationParentMissing(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/copy-source.txt", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(copy-source.txt) error: %v", err)
+	}
+
+	err := w.Copy(ctx, "/copy-source.txt", "/missing-parent/child.txt")
+	if err != ErrNotFound {
+		t.Fatalf("Copy() error = %v, want ErrNotFound", err)
+	}
+	if w.Exists(ctx, "/missing-parent/child.txt") {
+		t.Fatal("destination should remain absent after rejected copy")
 	}
 }
 
