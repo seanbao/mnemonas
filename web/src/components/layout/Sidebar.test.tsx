@@ -101,7 +101,7 @@ describe('Sidebar', () => {
     it('has correct href for health', () => {
       render(<Sidebar />)
       const link = screen.getByText('健康').closest('a')
-      expect(link).toHaveAttribute('href', '/health')
+      expect(link).toHaveAttribute('href', '/system-health')
     })
 
     it('has correct href for settings', () => {

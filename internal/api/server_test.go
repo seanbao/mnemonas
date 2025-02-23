@@ -1170,6 +1170,55 @@ func TestServer_UpdateSettings_DisablesPublicShareAccessWithoutRestart(t *testin
 	}
 }
 
+func TestServer_UpdateSettings_DisablesAuthenticatedShareManagementWithoutRestart(t *testing.T) {
+	server, shareID := setupShareServerWithOptions(t, true, "")
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"share":{"enabled":false}}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("disable share feature status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+
+	tests := []struct {
+		name   string
+		method string
+		url    string
+		body   string
+	}{
+		{name: "list shares", method: http.MethodGet, url: "/api/v1/shares"},
+		{name: "get share", method: http.MethodGet, url: "/api/v1/shares/" + shareID},
+		{name: "update share", method: http.MethodPut, url: "/api/v1/shares/" + shareID, body: `{"description":"updated"}`},
+		{name: "delete share", method: http.MethodDelete, url: "/api/v1/shares/" + shareID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body io.Reader
+			if tt.body != "" {
+				body = strings.NewReader(tt.body)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.url, body)
+			if tt.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+			}
+			if !strings.Contains(rec.Body.String(), "SHARE_FEATURE_DISABLED") {
+				t.Fatalf("expected SHARE_FEATURE_DISABLED response, got %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_UpdateSettings_EnablesFavoritesWithoutRestart(t *testing.T) {
 	server := setupFavoritesServerWithOptions(t, false)
 
