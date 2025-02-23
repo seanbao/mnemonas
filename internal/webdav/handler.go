@@ -1132,12 +1132,16 @@ func (h *Handler) getDestination(r *http.Request) string {
 	if u.Host != "" && !strings.EqualFold(u.Host, requestHost(r)) {
 		return ""
 	}
-	if hasTraversalSegment(u.Path) {
+	decodedPath, err := url.PathUnescape(u.EscapedPath())
+	if err != nil {
+		return ""
+	}
+	if hasTraversalSegment(decodedPath) {
 		return ""
 	}
 
 	// Get path and clean it
-	dstPath := path.Clean(u.Path)
+	dstPath := path.Clean(decodedPath)
 	if !path.IsAbs(dstPath) {
 		dstPath = "/" + dstPath
 	}

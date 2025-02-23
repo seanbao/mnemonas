@@ -22,9 +22,9 @@ describe('PdfPreview', () => {
 
   beforeAll(() => {
     if (!URL.createObjectURL) {
-      URL.createObjectURL = vi.fn(() => 'blob:mock-pdf')
+      URL.createObjectURL = vi.fn(() => 'about:blank#mock-pdf')
     } else {
-      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-pdf')
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('about:blank#mock-pdf')
     }
     if (!URL.revokeObjectURL) {
       URL.revokeObjectURL = vi.fn()

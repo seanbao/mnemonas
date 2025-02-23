@@ -400,6 +400,51 @@ func TestStore_Stats(t *testing.T) {
 	}
 }
 
+func TestStore_Stats_IgnoresInvalidObjectPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	validHash := "hash3333333333333333333333333333"
+	validData := []byte("valid-data")
+	if err := store.Put(validHash, validData); err != nil {
+		t.Fatalf("Put(validHash) error: %v", err)
+	}
+
+	strayPath := filepath.Join(tmpDir, "unexpected.bin")
+	if err := os.WriteFile(strayPath, []byte("stray-data"), 0644); err != nil {
+		t.Fatalf("WriteFile(strayPath) error: %v", err)
+	}
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+
+	if stats.TotalObjects != 1 {
+		t.Fatalf("Stats.TotalObjects = %d, want 1", stats.TotalObjects)
+	}
+	if stats.TotalSize != int64(len(validData)) {
+		t.Fatalf("Stats.TotalSize = %d, want %d", stats.TotalSize, len(validData))
+	}
+	var walked []string
+	if walkErr := store.Walk(func(hash string) error {
+		walked = append(walked, hash)
+		if hash != validHash {
+			t.Fatalf("unexpected hash from Walk(): %s", hash)
+		}
+		return nil
+	}); walkErr != nil {
+		t.Fatalf("Walk() error: %v", walkErr)
+	}
+	if len(walked) != 1 {
+		t.Fatalf("Walk() returned %d hashes, want 1", len(walked))
+	}
+}
+
 func TestStore_CleanupStaging(t *testing.T) {
 	tmpDir := t.TempDir()
 

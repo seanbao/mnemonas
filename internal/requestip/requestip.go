@@ -69,6 +69,11 @@ func ParseIP(value string) net.IP {
 	if trimmed == "" {
 		return nil
 	}
+	if host, _, err := net.SplitHostPort(trimmed); err == nil && host != "" {
+		trimmed = host
+	} else if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		trimmed = trimmed[1 : len(trimmed)-1]
+	}
 	if zoneIndex := strings.Index(trimmed, "%"); zoneIndex >= 0 {
 		trimmed = trimmed[:zoneIndex]
 	}

@@ -14,6 +14,19 @@ import (
 
 var errConfigFileSymlink = errors.New("config file path must not be a symlink")
 
+var durationFieldPaths = [][]string{
+	{"server", "read_timeout"},
+	{"server", "write_timeout"},
+	{"server", "idle_timeout"},
+	{"storage", "retention", "max_age"},
+	{"storage", "retention", "gc_interval"},
+	{"dataplane", "timeout"},
+	{"auth", "access_token_ttl"},
+	{"auth", "refresh_token_ttl"},
+	{"alerts", "check_interval"},
+	{"alerts", "cooldown_period"},
+}
+
 // Config is the main configuration structure for MnemoNAS
 type Config struct {
 	Server    ServerConfig    `toml:"server"`
@@ -317,7 +330,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	if err := toml.Unmarshal(data, cfg); err != nil {
+	normalizedData, err := normalizeDurationFields(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	if err := toml.Unmarshal(normalizedData, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
@@ -329,6 +347,65 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func normalizeDurationFields(data []byte) ([]byte, error) {
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	for _, fieldPath := range durationFieldPaths {
+		if err := normalizeDurationFieldValue(raw, fieldPath); err != nil {
+			return nil, err
+		}
+	}
+
+	normalizedData, err := toml.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize duration fields: %w", err)
+	}
+
+	return normalizedData, nil
+}
+
+func normalizeDurationFieldValue(raw map[string]any, fieldPath []string) error {
+	if len(fieldPath) < 2 {
+		return nil
+	}
+
+	current := raw
+	for depth, key := range fieldPath[:len(fieldPath)-1] {
+		value, ok := current[key]
+		if !ok {
+			return nil
+		}
+
+		next, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("invalid config structure at %s", strings.Join(fieldPath[:depth+1], "."))
+		}
+		current = next
+	}
+
+	leafKey := fieldPath[len(fieldPath)-1]
+	value, ok := current[leafKey]
+	if !ok {
+		return nil
+	}
+
+	durationText, ok := value.(string)
+	if !ok {
+		return nil
+	}
+
+	parsedDuration, err := time.ParseDuration(durationText)
+	if err != nil {
+		return fmt.Errorf("invalid %s duration %q: %w", strings.Join(fieldPath, "."), durationText, err)
+	}
+
+	current[leafKey] = int64(parsedDuration)
+	return nil
 }
 
 // Save saves configuration to file

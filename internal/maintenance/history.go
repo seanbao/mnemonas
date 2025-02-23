@@ -50,6 +50,17 @@ type HistoryStore struct {
 	scrubResult *ScrubResult // Most recent scrub result
 }
 
+func cloneScrubResult(result *ScrubResult) *ScrubResult {
+	if result == nil {
+		return nil
+	}
+	clone := *result
+	if len(result.Errors) > 0 {
+		clone.Errors = append([]ScrubError(nil), result.Errors...)
+	}
+	return &clone
+}
+
 // NewHistoryStore creates a new history store
 func NewHistoryStore(dataDir string) (*HistoryStore, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -70,10 +81,11 @@ func (s *HistoryStore) SaveScrubResult(result *ScrubResult) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	previous := s.scrubResult
-	s.scrubResult = result
-	if err := s.persistScrubResult(result); err != nil {
-		if !shouldPreserveTerminalScrubState(previous, result) {
+	previous := cloneScrubResult(s.scrubResult)
+	stored := cloneScrubResult(result)
+	s.scrubResult = stored
+	if err := s.persistScrubResult(stored); err != nil {
+		if !shouldPreserveTerminalScrubState(previous, stored) {
 			s.scrubResult = previous
 		}
 		return err
@@ -95,7 +107,7 @@ func shouldPreserveTerminalScrubState(previous, current *ScrubResult) bool {
 func (s *HistoryStore) GetLastScrubResult() *ScrubResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.scrubResult
+	return cloneScrubResult(s.scrubResult)
 }
 
 // ScrubIsRunning checks if a scrub is currently in progress
@@ -119,13 +131,13 @@ func (s *HistoryStore) StartScrub() (*ScrubResult, error) {
 		StartTime: time.Now(),
 		Status:    "running",
 	}
-	s.scrubResult = result
+	s.scrubResult = cloneScrubResult(result)
 	if err := s.persistScrubResult(result); err != nil {
 		s.scrubResult = previous
 		return nil, err
 	}
 
-	return result, nil
+	return cloneScrubResult(result), nil
 }
 
 func (s *HistoryStore) loadLastScrubResult() error {
@@ -142,7 +154,7 @@ func (s *HistoryStore) loadLastScrubResult() error {
 		return err
 	}
 	recoverInterruptedScrubResult(&result, time.Now())
-	s.scrubResult = &result
+	s.scrubResult = cloneScrubResult(&result)
 	return nil
 }
 

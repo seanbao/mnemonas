@@ -3217,9 +3217,9 @@ func TestFileSystem_AcquireGCLock_BlocksMutationsUntilReleased(t *testing.T) {
 
 	locked := make(chan struct{})
 	go func() {
-		fs.mu.Lock()
+		releaseMutation := fs.beginMutation()
 		close(locked)
-		fs.mu.Unlock()
+		releaseMutation()
 	}()
 
 	select {
@@ -3234,6 +3234,33 @@ func TestFileSystem_AcquireGCLock_BlocksMutationsUntilReleased(t *testing.T) {
 	case <-locked:
 	case <-time.After(time.Second):
 		t.Fatal("expected blocked mutation to proceed after GC lock release")
+	}
+}
+
+func TestFileSystem_AcquireGCLock_DoesNotBlockReaders(t *testing.T) {
+	fs := &FileSystem{
+		listReferencedHashes: func(ctx context.Context) ([]string, error) {
+			return []string{"hash1"}, nil
+		},
+	}
+
+	_, release, err := fs.AcquireGCLock(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireGCLock() error: %v", err)
+	}
+	defer release()
+
+	readLocked := make(chan struct{})
+	go func() {
+		fs.mu.RLock()
+		close(readLocked)
+		fs.mu.RUnlock()
+	}()
+
+	select {
+	case <-readLocked:
+	case <-time.After(time.Second):
+		t.Fatal("expected readers to proceed while GC gate is held")
 	}
 }
 
@@ -3254,9 +3281,9 @@ func TestFileSystem_AcquireGCLock_ReleasesLockOnSnapshotError(t *testing.T) {
 
 	locked := make(chan struct{})
 	go func() {
-		fs.mu.Lock()
+		releaseMutation := fs.beginMutation()
 		close(locked)
-		fs.mu.Unlock()
+		releaseMutation()
 	}()
 
 	select {

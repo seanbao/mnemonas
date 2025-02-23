@@ -56,6 +56,14 @@ npm run test:coverage
 # 首次运行需安装浏览器
 npx playwright install
 
+# 推荐先启动本地后端（前端 Vite 会代理到 localhost:8080）
+cd ..
+./scripts/dev.sh --backend
+
+# 如需运行受保护页面测试，提供管理员凭据
+export E2E_USERNAME=admin
+export E2E_PASSWORD='your-password'
+
 # 运行所有 E2E 测试
 npm run test:e2e
 
@@ -65,6 +73,12 @@ npm run test:e2e:ui
 # 更新截图基准
 npm run test:e2e:update
 ```
+
+说明：
+
+- 受保护页面测试会优先读取 `E2E_PASSWORD`，也支持通过 `E2E_PASSWORD_FILE` 指向初始密码文件。
+- 未设置 `E2E_PASSWORD_FILE` 时，Playwright 会尝试读取默认初始密码文件路径：`~/.mnemonas/.mnemonas/initial-password.txt`，兼容默认配置布局。
+- 如果当前环境没有可用管理员密码，受保护页面测试会自动跳过，而不会继续猜测默认密码并触发登录限流。
 
 ### 组件文档 (Storybook)
 
@@ -88,7 +102,7 @@ npm run test:visual:update
 
 ## 项目结构
 
-```
+```text
 src/
 ├── components/       # 可复用组件
 │   ├── layout/       # 布局组件（Sidebar, Header）

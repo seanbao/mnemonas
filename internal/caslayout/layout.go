@@ -301,6 +301,9 @@ func (s *Store) Walk(fn func(hash string) error) error {
 		if strings.HasSuffix(path, ".tmp") {
 			return nil
 		}
+		if !s.matchesLayoutPath(path) {
+			return nil
+		}
 
 		hash, err := s.layout.PathToHash(path)
 		if err != nil {
@@ -329,6 +332,10 @@ func (s *Store) Stats() (*Stats, error) {
 			return nil
 		}
 
+		if !s.matchesLayoutPath(path) {
+			return nil
+		}
+
 		info, err := d.Info()
 		if err != nil {
 			return nil // ignore files that cannot be read
@@ -340,6 +347,37 @@ func (s *Store) Stats() (*Stats, error) {
 	})
 
 	return stats, err
+}
+
+func (s *Store) matchesLayoutPath(path string) bool {
+	sharded, ok := s.layout.(*ShardedLayout)
+	if !ok {
+		return true
+	}
+
+	relPath, err := filepath.Rel(s.root, path)
+	if err != nil {
+		return false
+	}
+	if relPath == "." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) || relPath == ".." {
+		return false
+	}
+
+	hash := filepath.Base(relPath)
+	if len(hash) < sharded.Levels*sharded.ShardSize {
+		return filepath.Dir(relPath) == "."
+	}
+
+	current := filepath.Dir(relPath)
+	for level := sharded.Levels - 1; level >= 0; level-- {
+		expected := hash[level*sharded.ShardSize : (level+1)*sharded.ShardSize]
+		if filepath.Base(current) != expected {
+			return false
+		}
+		current = filepath.Dir(current)
+	}
+
+	return true
 }
 
 // CleanupStaging removes incomplete staging files (.tmp files)

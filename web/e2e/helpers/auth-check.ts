@@ -1,4 +1,5 @@
 import { Page, expect, test } from '@playwright/test'
+import { resolveE2ECredentials } from './credentials'
 
 /**
  * 检查页面是否被重定向到登录页
@@ -19,13 +20,15 @@ export async function isRedirectedToLogin(page: Page): Promise<boolean> {
  */
 export async function skipIfAuthRequired(page: Page, targetPath?: string): Promise<void> {
   if (!page.url().includes('/login')) {
-    // 不在登录页，无需处理
-    return
+    // ProtectedRoute may redirect after initial render, slightly later than networkidle.
+    await page.waitForTimeout(300)
+    if (!page.url().includes('/login')) {
+      return
+    }
   }
 
   // 在登录页，尝试自动登录
-  const username = process.env.E2E_USERNAME || 'admin'
-  const password = process.env.E2E_PASSWORD || 'changeme'
+  const { username, password } = resolveE2ECredentials()
 
   // 检查登录表单是否存在
   const loginButton = page.getByRole('button', { name: /登录|sign in|login/i })
@@ -33,6 +36,11 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
   
   if (!isLoginPage) {
     // 没有登录表单，可能 auth 被禁用或者页面出错
+    return
+  }
+
+  if (!password) {
+    test.skip(true, 'Skipped: no E2E password configured or initial password file found')
     return
   }
 
@@ -62,7 +70,7 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
     }
   } catch {
     // 登录失败
-    test.skip(true, 'Skipped: Auto-login failed (invalid credentials or backend error)')
+    test.skip(true, 'Skipped: auto-login failed (invalid credentials, rate limit, or backend error)')
   }
 }
 
@@ -73,6 +81,7 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
 export async function ensureAuthenticatedAt(page: Page, path: string): Promise<void> {
   await page.goto(path)
   await page.waitForLoadState('networkidle')
+  await page.waitForTimeout(300)
   await skipIfAuthRequired(page, path)
 }
 
