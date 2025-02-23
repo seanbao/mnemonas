@@ -155,6 +155,36 @@ func (fs *FileSystem) UpdateRetentionSettings(maxVersions int, maxVersionAge tim
 	fs.config.MinFreeSpace = minFreeSpace
 }
 
+// UpdateVersioningSettings applies versioning policy settings to the running filesystem.
+func (fs *FileSystem) UpdateVersioningSettings(extensions, filenames []string, maxVersionedSize int64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.config != nil {
+		fs.config.AutoVersionedExtensions = append([]string(nil), extensions...)
+		fs.config.AutoVersionedFilenames = append([]string(nil), filenames...)
+		fs.config.MaxVersionedSize = maxVersionedSize
+	}
+	if fs.policy != nil {
+		fs.policy.AutoVersionedExtensions = append([]string(nil), extensions...)
+		fs.policy.AutoVersionedFilenames = append([]string(nil), filenames...)
+		fs.policy.MaxVersionedSize = maxVersionedSize
+	}
+}
+
+// SetDataplaneClient swaps the dataplane client used by version storage operations.
+func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.config != nil {
+		fs.config.Dataplane = client
+	}
+	if fs.versions != nil {
+		fs.versions.SetDataplaneClient(client)
+	}
+}
+
 // RunRetentionSweep applies version retention rules across all versioned files.
 func (fs *FileSystem) RunRetentionSweep(ctx context.Context) error {
 	release := fs.beginMutation()

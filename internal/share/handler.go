@@ -199,6 +199,24 @@ type CreateShareRequest struct {
 	Description string `json:"description,omitempty"`
 }
 
+func normalizeShareAbsolutePath(rawPath string) (string, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	return path.Clean("/" + normalized), nil
+}
+
+func normalizeShareRelativePath(rawPath string) (string, error) {
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	normalized = strings.TrimPrefix(normalized, "/")
+	cleaned := path.Clean(normalized)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", errors.New("invalid path")
+	}
+	if cleaned == "." {
+		return "", nil
+	}
+	return cleaned, nil
+}
+
 // CreateShare creates a new share link
 func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	var req CreateShareRequest
@@ -212,7 +230,11 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
 		return
 	}
-	cleanPath = path.Clean("/" + cleanPath)
+	cleanPath, err := normalizeShareAbsolutePath(req.Path)
+	if err != nil {
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
 	if req.MaxAccess < 0 {
 		writeShareError(w, http.StatusBadRequest, "invalid max_access", "INVALID_MAX_ACCESS")
 		return
@@ -749,7 +771,12 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 			filePath = strings.TrimPrefix(r.URL.Path, prefix)
 		}
 	}
-	filePath = strings.TrimPrefix(filePath, "/")
+	var err error
+	filePath, err = normalizeShareRelativePath(filePath)
+	if err != nil {
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
 
 	share, err := h.authorizeShare(r, id)
 	if err != nil {
@@ -906,10 +933,11 @@ func (w *responseStartTrackingWriter) Write(p []byte) (int, error) {
 func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	relPath := r.URL.Query().Get("path")
-	relPath = strings.TrimPrefix(relPath, "/")
-	relPath = path.Clean(relPath)
-	if relPath == "." {
-		relPath = ""
+	var err error
+	relPath, err = normalizeShareRelativePath(relPath)
+	if err != nil {
+		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
 	}
 
 	share, err := h.authorizeShare(r, id)

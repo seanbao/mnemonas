@@ -143,12 +143,27 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		startTime: time.Now(),
 	}
 
+	// Store config early so runtime dataplane connection settings are available
+	// during initial client setup.
+	if cfg != nil && cfg.Config != nil {
+		s.config = cfg.Config
+		s.configPath = cfg.ConfigPath
+		s.activeWebDAV = WebDAVRuntimeConfig{
+			Enabled:  cfg.Config.WebDAV.Enabled,
+			Prefix:   cfg.Config.WebDAV.Prefix,
+			AuthType: cfg.Config.WebDAV.AuthType,
+			Username: cfg.Config.WebDAV.Username,
+			Password: cfg.Config.WebDAV.Password,
+		}
+	}
+	if cfg != nil && cfg.ActiveWebDAV != nil {
+		s.activeWebDAV = *cfg.ActiveWebDAV
+	}
+
 	// Initialize data plane client if address provided
 	if cfg != nil && cfg.DataplaneAddr != "" {
 		s.dataplane = dataplane.NewClient(cfg.DataplaneAddr)
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultDataplaneConnectTimeout*time.Second)
-		defer cancel()
-		if err := s.dataplane.Connect(ctx); err != nil {
+		if err := s.connectDataplaneClient(context.Background(), s.dataplane, DefaultDataplaneConnectTimeout*time.Second); err != nil {
 			logger.Warn().Err(err).Msg("Failed to connect to data plane, will retry later")
 		} else {
 			logger.Info().Str("addr", cfg.DataplaneAddr).Msg("Connected to data plane")
@@ -277,22 +292,6 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 				logger.Info().Msg("Favorites feature configured but currently disabled")
 			}
 		}
-	}
-
-	// Store config for settings API
-	if cfg != nil && cfg.Config != nil {
-		s.config = cfg.Config
-		s.configPath = cfg.ConfigPath
-		s.activeWebDAV = WebDAVRuntimeConfig{
-			Enabled:  cfg.Config.WebDAV.Enabled,
-			Prefix:   cfg.Config.WebDAV.Prefix,
-			AuthType: cfg.Config.WebDAV.AuthType,
-			Username: cfg.Config.WebDAV.Username,
-			Password: cfg.Config.WebDAV.Password,
-		}
-	}
-	if cfg != nil && cfg.ActiveWebDAV != nil {
-		s.activeWebDAV = *cfg.ActiveWebDAV
 	}
 
 	s.setupRoutes()
@@ -468,11 +467,13 @@ func (s *Server) Router() http.Handler {
 
 // validatePath validates and cleans a file path, preventing path traversal attacks.
 func validatePath(filePath string) (string, error) {
+	normalized := strings.ReplaceAll(filePath, "\\", "/")
+
 	// Clean the path first
-	cleaned := path.Clean("/" + filePath)
+	cleaned := path.Clean("/" + normalized)
 
 	// Reject any path with .. segments while allowing legal names like foo..txt.
-	if hasTraversalSegment(filePath) {
+	if hasTraversalSegment(normalized) {
 		return "", errors.New("invalid path")
 	}
 
@@ -539,6 +540,81 @@ func shouldSkipGCObjectByGrace(obj dataplane.ObjectInfo, graceCutoff time.Time) 
 	return obj.CreatedAt.After(graceCutoff)
 }
 
+func (s *Server) dataplaneConnectRetries() int {
+	if s.config == nil || s.config.DataPlane.MaxRetries < 0 {
+		return 0
+	}
+	return s.config.DataPlane.MaxRetries
+}
+
+func (s *Server) connectDataplaneClient(parent context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
+	if client == nil {
+		return fmt.Errorf("dataplane not configured")
+	}
+
+	totalCtx, cancelTotal := context.WithTimeout(parent, totalTimeout)
+	defer cancelTotal()
+
+	retries := s.dataplaneConnectRetries()
+	attempts := retries + 1
+	attemptBudget := totalTimeout
+	if attempts > 1 {
+		attemptBudget = totalTimeout / time.Duration(attempts)
+		if attemptBudget <= 0 {
+			attemptBudget = totalTimeout
+		}
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := totalCtx.Err(); err != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return err
+		}
+
+		budget := attemptBudget
+		if deadline, ok := totalCtx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
+			}
+			if budget > remaining {
+				budget = remaining
+			}
+		}
+
+		attemptCtx, cancelAttempt := context.WithTimeout(totalCtx, budget)
+		lastErr = client.Connect(attemptCtx)
+		cancelAttempt()
+		if lastErr == nil {
+			return nil
+		}
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+	return totalCtx.Err()
+}
+
+func (s *Server) ensureDataplaneConnected(ctx context.Context, timeout time.Duration) bool {
+	if s.dataplane == nil {
+		return false
+	}
+	if s.dataplane.IsConnected() {
+		return true
+	}
+
+	if err := s.connectDataplaneClient(ctx, s.dataplane, timeout); err != nil {
+		s.logger.Warn().Err(err).Msg("Failed to connect to data plane")
+		return false
+	}
+
+	return true
+}
+
 // === Handlers ===
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -550,7 +626,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Reflect dataplane availability in the overall health status when configured.
 	if s.dataplane != nil {
-		if !s.dataplane.IsConnected() {
+		if !s.ensureDataplaneConnected(r.Context(), DefaultHealthCheckTimeout*time.Second) {
 			health["status"] = "degraded"
 			health["dataplane"] = map[string]any{
 				"healthy": false,
@@ -1280,7 +1356,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get stats from data plane if connected
-	if s.dataplane != nil && s.dataplane.IsConnected() {
+	if s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second) {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		defer cancel()
 		if dpStats, err := s.dataplane.Stats(ctx); err == nil {
@@ -1295,6 +1371,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	dataplaneConnected := s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second)
+
 	// Collect diagnostic information
 	diag := map[string]any{
 		"timestamp":   time.Now().UTC().Format(time.RFC3339),
@@ -1310,7 +1388,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// System status
 	diag["system"] = map[string]any{
 		"filesystem_initialized":  s.fs != nil,
-		"dataplane_connected":     s.dataplane != nil && s.dataplane.IsConnected(),
+		"dataplane_connected":     dataplaneConnected,
 		"thumbnail_service_ready": s.thumbnail != nil,
 	}
 
@@ -1340,7 +1418,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Data plane stats
-	if s.dataplane != nil && s.dataplane.IsConnected() {
+	if dataplaneConnected {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		defer cancel()
 		if dpStats, err := s.dataplane.Stats(ctx); err == nil {
@@ -1378,7 +1456,7 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
+	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -1474,7 +1552,7 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
+	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -1518,7 +1596,7 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 		gracePeriod = time.Duration(hours) * time.Hour
 	}
 
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
+	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -1695,7 +1773,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Dataplane stats (sanitized)
-	if s.dataplane != nil && s.dataplane.IsConnected() {
+	if s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second) {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		dpInfo := map[string]any{"status": "connected"}
 		if dpHealth, err := s.dataplane.Health(ctx); err == nil {
@@ -2785,6 +2863,25 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Config) {
+	if req.DataPlane != nil && req.DataPlane.GRPCAddress != nil {
+		swapDataplane := s.dataplane == nil || s.dataplane.Addr() != cfg.DataPlane.GRPCAddress
+		if swapDataplane {
+			replacement := dataplane.NewClient(cfg.DataPlane.GRPCAddress)
+			if err := s.connectDataplaneClient(context.Background(), replacement, cfg.DataPlane.Timeout); err != nil {
+				s.logger.Warn().Err(err).Str("addr", cfg.DataPlane.GRPCAddress).Msg("Failed to connect updated data plane address")
+			}
+
+			previous := s.dataplane
+			s.dataplane = replacement
+			if s.fs != nil {
+				s.fs.SetDataplaneClient(replacement)
+			}
+			if previous != nil {
+				_ = previous.Close()
+			}
+		}
+	}
+
 	if req.Retention != nil {
 		if s.retentionMonitor != nil {
 			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
@@ -2807,6 +2904,14 @@ func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Conf
 			cfg.Storage.Trash.Enabled,
 			cfg.Storage.Trash.RetentionDays,
 			cfg.Storage.Trash.MaxSize,
+		)
+	}
+
+	if req.Versioning != nil && s.fs != nil {
+		s.fs.UpdateVersioningSettings(
+			cfg.Storage.Versioning.AutoVersionedExtensions,
+			cfg.Storage.Versioning.AutoVersionedFilenames,
+			cfg.Storage.Versioning.MaxVersionedSize,
 		)
 	}
 

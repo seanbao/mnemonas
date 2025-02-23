@@ -250,8 +250,8 @@ max_versioned_size = 104857600
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
 | `grpc_address` | string | `"127.0.0.1:9090"` | Rust 数据面 gRPC 地址 |
-| `timeout` | duration | `"30s"` | gRPC 调用超时时间 |
-| `max_retries` | int | `3` | gRPC 调用失败时的最大重试次数 |
+| `timeout` | duration | `"30s"` | 数据面连接与重连的总超时预算 |
+| `max_retries` | int | `3` | 数据面连接建立/重连时的最大重试次数 |
 
 **示例：**
 
