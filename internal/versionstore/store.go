@@ -915,9 +915,14 @@ func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
 		_ = s.db.QueryRowContext(ctx, `SELECT size FROM chunk_refs WHERE hash = ?`, hash).Scan(&size)
 
 		// Delete from CAS
+		objectDeleted := true
 		if err := s.deleteObjectFn(hash); err != nil {
-			gcErr = errors.Join(gcErr, fmt.Errorf("delete object %s: %w", hash, err))
-			continue
+			if errors.Is(err, ErrNotFound) {
+				objectDeleted = false
+			} else {
+				gcErr = errors.Join(gcErr, fmt.Errorf("delete object %s: %w", hash, err))
+				continue
+			}
 		}
 
 		// Delete reference record
@@ -926,8 +931,10 @@ func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
 			continue
 		}
 
-		deleted++
-		freedBytes += size
+		if objectDeleted {
+			deleted++
+			freedBytes += size
+		}
 	}
 
 	return deleted, freedBytes, gcErr

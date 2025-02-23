@@ -63,6 +63,17 @@ func mapObjectGetError(err error) error {
 	return fmt.Errorf("failed to get chunk: %w", err)
 }
 
+func mapObjectDeleteError(err error) error {
+	if status.Code(err) == codes.NotFound {
+		return ErrNotFound
+	}
+	if status.Code(err) == codes.Unavailable {
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	return fmt.Errorf("failed to delete chunk: %w", err)
+}
+
 // Has checks if an object exists via dataplane
 func (s *ObjectStore) Has(ctx context.Context, hash string) (bool, error) {
 	if !s.client.IsConnected() {
@@ -88,10 +99,7 @@ func (s *ObjectStore) Delete(ctx context.Context, hash string) error {
 
 	_, err := s.client.DeleteChunk(ctx, hash)
 	if err != nil {
-		if status.Code(err) == codes.Unavailable {
-			return fmt.Errorf("%w: %v", ErrUnavailable, err)
-		}
-		return fmt.Errorf("failed to delete chunk: %w", err)
+		return mapObjectDeleteError(err)
 	}
 
 	return nil

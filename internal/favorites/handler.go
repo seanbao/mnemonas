@@ -47,6 +47,10 @@ func getUserID(r *http.Request) string {
 	return "anonymous"
 }
 
+func normalizeFavoritePath(rawPath string) string {
+	return path.Clean("/" + strings.TrimSpace(rawPath))
+}
+
 // ListFavorites handles GET /api/v1/favorites
 func (h *Handler) ListFavorites(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
@@ -73,7 +77,7 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate path
-	cleanPath := path.Clean("/" + strings.TrimSpace(req.Path))
+	cleanPath := normalizeFavoritePath(req.Path)
 	if cleanPath == "/" {
 		h.error(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
 		return
@@ -104,7 +108,7 @@ func (h *Handler) RemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := path.Clean(favPath)
+	cleanPath := normalizeFavoritePath(favPath)
 
 	if err := h.store.Remove(userID, cleanPath); err != nil {
 		if err == ErrFavoriteNotFound {
@@ -129,7 +133,7 @@ func (h *Handler) CheckFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := path.Clean("/" + strings.TrimSpace(checkPath))
+	cleanPath := normalizeFavoritePath(checkPath)
 	if cleanPath == "/" {
 		h.error(w, http.StatusBadRequest, "path query parameter is required", "MISSING_PATH")
 		return
@@ -159,7 +163,7 @@ func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
 	// Clean paths
 	cleanPaths := make([]string, len(req.Paths))
 	for i, p := range req.Paths {
-		cleanPaths[i] = path.Clean("/" + strings.TrimSpace(p))
+		cleanPaths[i] = normalizeFavoritePath(p)
 		if cleanPaths[i] == "/" {
 			h.error(w, http.StatusBadRequest, "paths must not contain empty values", "MISSING_PATH")
 			return
@@ -184,7 +188,7 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := path.Clean(favPath)
+	cleanPath := normalizeFavoritePath(favPath)
 
 	var req struct {
 		Note string `json:"note"`

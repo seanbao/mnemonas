@@ -4,6 +4,7 @@ import {
   Folder, 
   Image, 
   History, 
+  Search,
   Trash2, 
   HardDrive, 
   ShieldCheck, 
@@ -36,6 +37,7 @@ const navSections: NavSection[] = [
     title: '浏览',
     items: [
       { icon: Folder, label: '文件', path: '/files' },
+      { icon: Search, label: '搜索', path: '/search' },
       { icon: Image, label: '相册', path: '/album' },
       { icon: Star, label: '收藏', path: '/favorites' },
       { icon: History, label: '时光回溯', path: '/versions', badge: '核心', badgeColor: 'bg-accent-primary/15 text-accent-primary' },

@@ -1,7 +1,5 @@
 import { test, expect } from '@playwright/test'
-
-const e2eUsername = process.env.E2E_USERNAME || 'admin'
-const e2ePassword = process.env.E2E_PASSWORD
+import { resolveE2ECredentials } from './helpers/credentials'
 
 test.use({
   storageState: { cookies: [], origins: [] },
@@ -30,16 +28,19 @@ test.describe('登录页面', () => {
   })
 
   test('错误密码应显示错误提示', async ({ page }) => {
-    await page.getByPlaceholder('请输入用户名').fill('admin')
+    await page.getByPlaceholder('请输入用户名').fill(`invalid-user-${Date.now()}`)
     await page.getByPlaceholder('请输入密码').fill('wrongpassword')
     await page.getByRole('button', { name: /登录/i }).click()
-    
-    // 等待错误提示出现
-    await expect(page.getByText(/错误|失败|invalid/i)).toBeVisible({ timeout: 5000 })
+
+    const alert = page.getByRole('alert')
+    await expect(alert).toBeVisible({ timeout: 5000 })
+    await expect(alert).toContainText(/.+/)
+    await expect(page).toHaveURL(/\/login/)
   })
 
   test('正确凭据应登录成功', async ({ page }) => {
-    test.skip(!e2ePassword, 'Skipped: E2E_PASSWORD is not configured')
+    const { username: e2eUsername, password: e2ePassword } = resolveE2ECredentials()
+    test.skip(!e2ePassword, 'Skipped: no E2E password configured or discoverable')
 
     await page.getByPlaceholder('请输入用户名').fill(e2eUsername)
     await page.getByPlaceholder('请输入密码').fill(e2ePassword)

@@ -23,7 +23,7 @@ test.describe('存储管理页面', () => {
   })
 
   test('应显示刷新按钮', async ({ page }) => {
-    const refreshBtn = page.getByRole('button', { name: /刷新/i })
+    const refreshBtn = page.getByRole('button', { name: '刷新', exact: true })
     await expect(refreshBtn).toBeVisible()
   })
 })
@@ -34,8 +34,11 @@ test.describe('存储空间概览', () => {
   })
 
   test('应显示存储使用进度条', async ({ page }) => {
-    const storageOverview = page.getByText(/存储空间使用|已使用/i)
+    const storageOverview = page.getByText('存储空间使用情况')
     await expect(storageOverview).toBeVisible()
+
+    const usageLabel = page.getByText('已用')
+    await expect(usageLabel).toBeVisible()
   })
 })
 
@@ -90,10 +93,12 @@ test.describe('存储管理刷新功能', () => {
   test('点击刷新按钮应更新数据', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/storage')
 
-    const refreshBtn = page.getByRole('button', { name: /刷新/i })
+    const refreshBtn = page.getByRole('button', { name: '刷新', exact: true })
     await expect(refreshBtn).toBeVisible()
     await refreshBtn.click()
-    await expect(page.locator('body')).toBeVisible()
+
+    const title = page.getByText('存储管理').first()
+    await expect(title).toBeVisible()
   })
 })
 
@@ -120,20 +125,17 @@ test.describe('存储管理页面响应式', () => {
 
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
-    await page.goto('/storage')
-    await page.waitForLoadState('networkidle')
+    await ensureAuthenticatedAt(page, '/storage')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    const title = page.getByText('存储管理').first()
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('桌面端卡片应水平排列', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 })
-    await page.goto('/storage')
-    await page.waitForLoadState('networkidle')
+    await ensureAuthenticatedAt(page, '/storage')
 
-    // 桌面端页面应正常渲染
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    const statsCards = page.getByText(/对象总数|存储大小|去重率|节省空间/i)
+    await expect(statsCards.first()).toBeVisible({ timeout: 5000 })
   })
 })
