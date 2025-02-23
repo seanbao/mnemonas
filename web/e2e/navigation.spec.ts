@@ -121,38 +121,27 @@ test.describe('侧边栏点击导航', () => {
 })
 
 test.describe('浏览器历史导航', () => {
-  // 这些测试在某些情况下会因为认证状态问题而失败
-  // 浏览器历史导航可能导致 SPA 状态丢失需要重新认证
-  
-  test.skip('后退按钮应正常工作', async ({ page }) => {
+  test('后退按钮应正常工作', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
     
     await page.goto('/search')
     await page.waitForLoadState('networkidle')
     
     await page.goBack()
-    await page.waitForTimeout(1000)
-    
-    const currentUrl = page.url()
-    console.log('Back navigation - url:', currentUrl)
-    expect(currentUrl).not.toMatch(/\/login/)
+    await expect(page).toHaveURL(/\/files/)
   })
 
-  test.skip('前进按钮应正常工作', async ({ page }) => {
+  test('前进按钮应正常工作', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
 
     await page.goto('/search')
     await page.waitForLoadState('networkidle')
     
     await page.goBack()
-    await page.waitForTimeout(1000)
+    await expect(page).toHaveURL(/\/files/)
     
     await page.goForward()
-    await page.waitForTimeout(1000)
-    
-    const currentUrl = page.url()
-    console.log('Forward navigation - url:', currentUrl)
-    expect(currentUrl).not.toMatch(/\/login/)
+    await expect(page).toHaveURL(/\/search/)
   })
 })
 

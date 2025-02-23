@@ -269,15 +269,26 @@ func (s *Store) DeleteVersion(ctx context.Context, path, hash string) error {
 
 // DeleteOldVersions deletes versions older than maxAge or exceeding maxCount
 func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int, maxAge time.Duration) ([]string, error) {
-	cutoff := time.Now().Add(-maxAge).Unix()
+	conditions := make([]string, 0, 2)
+	args := []any{path}
+
+	if maxAge > 0 {
+		conditions = append(conditions, "created_at < ?")
+		args = append(args, time.Now().Add(-maxAge).Unix())
+	}
+	if maxCount > 0 {
+		conditions = append(conditions, "id NOT IN (SELECT id FROM versions WHERE path = ? ORDER BY created_at DESC, id DESC LIMIT ?)")
+		args = append(args, path, maxCount)
+	}
+	if len(conditions) == 0 {
+		return nil, nil
+	}
+
+	whereClause := strings.Join(conditions, " OR ")
 
 	// Get hashes to delete
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT hash FROM versions WHERE path = ? AND (
-			created_at < ? OR 
-			id NOT IN (SELECT id FROM versions WHERE path = ? ORDER BY created_at DESC, id DESC LIMIT ?)
-		)`,
-		path, cutoff, path, maxCount)
+	selectQuery := fmt.Sprintf(`SELECT hash FROM versions WHERE path = ? AND (%s)`, whereClause)
+	rows, err := s.db.QueryContext(ctx, selectQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -297,12 +308,8 @@ func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int
 	}
 
 	// Delete the records
-	_, err = s.db.ExecContext(ctx,
-		`DELETE FROM versions WHERE path = ? AND (
-			created_at < ? OR 
-			id NOT IN (SELECT id FROM versions WHERE path = ? ORDER BY created_at DESC, id DESC LIMIT ?)
-		)`,
-		path, cutoff, path, maxCount)
+	deleteQuery := fmt.Sprintf(`DELETE FROM versions WHERE path = ? AND (%s)`, whereClause)
+	_, err = s.db.ExecContext(ctx, deleteQuery, args...)
 
 	return hashes, err
 }

@@ -53,7 +53,7 @@ function App() {
           <Route path="trash" element={<TrashPage />} />
           <Route path="favorites" element={<FavoritesPage />} />
           <Route path="storage" element={<StoragePage />} />
-          <Route path="health" element={<HealthPage />} />
+          <Route path="system-health" element={<HealthPage />} />
           <Route path="maintenance" element={<MaintenancePage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="search" element={<SearchPage />} />

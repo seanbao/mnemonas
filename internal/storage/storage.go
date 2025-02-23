@@ -326,16 +326,7 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string) (*os.File, erro
 
 	f, err := fs.workspace.OpenFile(ctx, name)
 	if err != nil {
-		if errors.Is(err, workspace.ErrNotFound) {
-			return nil, ErrNotFound
-		}
-		if errors.Is(err, workspace.ErrNotDir) {
-			return nil, ErrNotDir
-		}
-		if errors.Is(err, workspace.ErrIsDir) {
-			return nil, ErrIsDir
-		}
-		return nil, err
+		return nil, mapWorkspaceReadablePathError(err)
 	}
 
 	return f, nil
@@ -411,46 +402,45 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	shouldVersion := fs.policy.ShouldVersion(ctx, name, written)
 
 	// If versioning enabled and file exists, save old version first
-	if shouldVersion {
-		if oldData, err := fs.workspace.ReadFile(ctx, name); err == nil {
-			candidateHash := computeHash(oldData)
-			rollbackVersionHash = candidateHash
-			hasObject, err := fs.versions.HasObject(candidateHash)
-			if err != nil {
-				os.Remove(tmpPath)
-				return fmt.Errorf("failed to check existing version object: %w", err)
-			}
-			rollbackVersionObjectCreated = !hasObject
+	if shouldVersion && hadPreviousFile {
+		oldData := previousData
+		candidateHash := computeHash(oldData)
+		rollbackVersionHash = candidateHash
+		hasObject, err := fs.versions.HasObject(candidateHash)
+		if err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to check existing version object: %w", err)
+		}
+		rollbackVersionObjectCreated = !hasObject
 
-			_, versionErr := fs.versions.GetVersion(ctx, name, candidateHash)
-			versionAlreadyRecorded := versionErr == nil
-			if versionErr != nil && !errors.Is(versionErr, versionstore.ErrNotFound) {
-				os.Remove(tmpPath)
-				return fmt.Errorf("failed to check existing version: %w", versionErr)
-			}
+		_, versionErr := fs.versions.GetVersion(ctx, name, candidateHash)
+		versionAlreadyRecorded := versionErr == nil
+		if versionErr != nil && !errors.Is(versionErr, versionstore.ErrNotFound) {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to check existing version: %w", versionErr)
+		}
 
-			oldHash, err := fs.putVersionObject(oldData)
-			if err != nil {
-				os.Remove(tmpPath)
-				return fmt.Errorf("failed to store version: %w", err)
-			}
-			rollbackVersionHash = oldHash
+		oldHash, err := fs.putVersionObject(oldData)
+		if err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to store version: %w", err)
+		}
+		rollbackVersionHash = oldHash
 
-			if !versionAlreadyRecorded {
-				if err := fs.addFileVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
-					os.Remove(tmpPath)
-					if rollbackVersionObjectCreated {
-						if deleteErr := fs.deleteVersionObject(oldHash); deleteErr != nil {
-							return errors.Join(
-								fmt.Errorf("failed to record version: %w", err),
-								fmt.Errorf("failed to cleanup version object during rollback: %w", deleteErr),
-							)
-						}
+		if !versionAlreadyRecorded {
+			if err := fs.addFileVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
+				os.Remove(tmpPath)
+				if rollbackVersionObjectCreated {
+					if deleteErr := fs.deleteVersionObject(oldHash); deleteErr != nil {
+						return errors.Join(
+							fmt.Errorf("failed to record version: %w", err),
+							fmt.Errorf("failed to cleanup version object during rollback: %w", deleteErr),
+						)
 					}
-					return fmt.Errorf("failed to record version: %w", err)
 				}
-				rollbackVersionRecorded = true
+				return fmt.Errorf("failed to record version: %w", err)
 			}
+			rollbackVersionRecorded = true
 		}
 	}
 
@@ -664,7 +654,7 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 }
 
 func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSize int64) error {
-	if fs.config == nil || fs.config.MaxTrashSize <= 0 || incomingSize > fs.config.MaxTrashSize {
+	if fs.config == nil || fs.config.MaxTrashSize <= 0 {
 		return nil
 	}
 
@@ -870,7 +860,7 @@ func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionR
 	return result, nil
 }
 
-func mapWorkspaceOpenFileError(err error) error {
+func mapWorkspaceReadablePathError(err error) error {
 	if errors.Is(err, workspace.ErrNotFound) {
 		return ErrNotFound
 	}
@@ -881,6 +871,10 @@ func mapWorkspaceOpenFileError(err error) error {
 		return ErrIsDir
 	}
 	return err
+}
+
+func mapWorkspaceOpenFileError(err error) error {
+	return mapWorkspaceReadablePathError(err)
 }
 
 // GetVersion reads a specific version of a file
@@ -905,7 +899,7 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 		if currentHash == hash {
 			f, err := fs.workspace.OpenFile(ctx, name)
 			if err != nil {
-				return nil, mapWorkspaceOpenFileError(err)
+				return nil, mapWorkspaceReadablePathError(err)
 			}
 			return f, nil
 		}
@@ -933,7 +927,7 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 func (fs *FileSystem) hashWorkspaceFile(ctx context.Context, name string) (string, error) {
 	reader, err := fs.workspace.OpenFile(ctx, name)
 	if err != nil {
-		return "", mapWorkspaceOpenFileError(err)
+		return "", mapWorkspaceReadablePathError(err)
 	}
 	defer reader.Close()
 
@@ -1063,6 +1057,9 @@ func (fs *FileSystem) GetVersioningStatus(ctx context.Context, name string) (ena
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotFound) {
 			return false, "", ErrNotFound
+		}
+		if errors.Is(err, workspace.ErrNotDir) {
+			return false, "", ErrNotDir
 		}
 		return false, "", err
 	}
@@ -1493,14 +1490,7 @@ func (fs *FileSystem) CleanupStaging(ctx context.Context) (files int, bytes int6
 // cleanupVersions removes old versions based on retention policy
 func (fs *FileSystem) cleanupVersions(ctx context.Context, name string) error {
 	maxCount := fs.config.MaxVersions
-	if maxCount <= 0 {
-		maxCount = 50
-	}
-
 	maxAge := fs.config.MaxVersionAge
-	if maxAge <= 0 {
-		maxAge = 90 * 24 * time.Hour
-	}
 
 	hashes, err := fs.versions.DeleteOldVersions(ctx, name, maxCount, maxAge)
 	if err != nil {
@@ -1582,7 +1572,7 @@ func (fs *FileSystem) syncFileIndexFromWorkspace(ctx context.Context, name strin
 
 	data, err := fs.workspace.ReadFile(ctx, name)
 	if err != nil {
-		return err
+		return mapWorkspaceReadablePathError(err)
 	}
 
 	return fs.updateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(data))
@@ -1745,10 +1735,11 @@ func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name stri
 
 	data, err := fs.workspace.ReadFile(ctx, name)
 	if err != nil {
-		if errors.Is(err, workspace.ErrNotDir) || isPathNotDirError(err) {
+		mappedErr := mapWorkspaceReadablePathError(err)
+		if errors.Is(mappedErr, ErrNotDir) || isPathNotDirError(err) {
 			return nil, false, ErrNotDir
 		}
-		return nil, false, err
+		return nil, false, mappedErr
 	}
 	return data, true, nil
 }

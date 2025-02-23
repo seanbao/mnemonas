@@ -378,7 +378,7 @@ export function DashboardPage() {
             icon={Activity}
             label="系统健康"
             description="检查系统状态"
-            onClick={() => navigate('/health')}
+            onClick={() => navigate('/system-health')}
             gradient="from-violet-500/20 to-fuchsia-500/20"
           />
           <QuickAction

@@ -271,7 +271,7 @@ describe('DashboardPage', () => {
       })
 
       await user.click(screen.getByText('系统健康'))
-      expect(mockNavigate).toHaveBeenCalledWith('/health')
+      expect(mockNavigate).toHaveBeenCalledWith('/system-health')
     })
 
     it('navigates to versions on version history click', async () => {

@@ -6,6 +6,7 @@ package versionstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -196,6 +197,34 @@ func TestStore_DeleteOldVersions(t *testing.T) {
 	versions, _ := s.GetVersions(ctx, "/test.txt")
 	if len(versions) != 3 {
 		t.Errorf("After cleanup: %d versions, want 3", len(versions))
+	}
+}
+
+func TestStore_DeleteOldVersions_ZeroLimitsKeepAllVersions(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 55; i++ {
+		hash := fmt.Sprintf("hash-%02d", i)
+		if err := s.AddVersion(ctx, "/unlimited.txt", hash, int64(i+1), ""); err != nil {
+			t.Fatalf("AddVersion(%s) error: %v", hash, err)
+		}
+	}
+
+	hashes, err := s.DeleteOldVersions(ctx, "/unlimited.txt", 0, 0)
+	if err != nil {
+		t.Fatalf("DeleteOldVersions() error: %v", err)
+	}
+	if len(hashes) != 0 {
+		t.Fatalf("DeleteOldVersions() deleted %d hashes, want 0", len(hashes))
+	}
+
+	versions, err := s.GetVersions(ctx, "/unlimited.txt")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) != 55 {
+		t.Fatalf("GetVersions() returned %d versions, want 55", len(versions))
 	}
 }
 
