@@ -101,3 +101,29 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
   
   return response.json()
 }
+
+/**
+ * WebDAV credentials response
+ */
+export interface WebDAVCredentialsResponse {
+  success: boolean
+  enabled: boolean
+  url: string
+  auth_type: string
+  username?: string
+  password?: string
+}
+
+/**
+ * Get WebDAV credentials for authenticated users
+ */
+export async function getWebDAVCredentials(): Promise<WebDAVCredentialsResponse> {
+  const response = await authFetch(`${API_BASE}/webdav-credentials`)
+  
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.error || 'Failed to get WebDAV credentials')
+  }
+  
+  return response.json()
+}

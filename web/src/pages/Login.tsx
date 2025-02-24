@@ -124,7 +124,7 @@ export function LoginPage() {
       </div>
 
       {/* Right side - Login form */}
-      <div className="bg-background flex w-full items-center justify-center p-8 lg:w-1/2">
+      <div className="bg-white dark:bg-zinc-900 flex w-full items-center justify-center p-8 lg:w-1/2">
         <div className="w-full max-w-md">
           {/* Mobile logo */}
           <div className="mb-8 text-center lg:hidden">
