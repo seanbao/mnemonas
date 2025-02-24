@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/seanbao/mnemonas/internal/webdavcas"
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
 // PropfindCache caches PROPFIND results for large directories
@@ -149,7 +149,7 @@ func (c *PropfindCache) Stats() (size int, expired int) {
 
 // BuildPropfindResponses builds PROPFIND responses from file info
 // Helper function for caching
-func BuildPropfindResponses(prefix, filePath string, info *webdavcas.FileInfo, children []*webdavcas.FileInfo, depth string) []propfindResponse {
+func BuildPropfindResponses(prefix, filePath string, info *storage.FileInfo, children []*storage.FileInfo, depth string) []propfindResponse {
 	var responses []propfindResponse
 
 	// Add current resource
@@ -165,7 +165,7 @@ func BuildPropfindResponses(prefix, filePath string, info *webdavcas.FileInfo, c
 	return responses
 }
 
-func buildPropResponse(prefix, filePath string, info *webdavcas.FileInfo) propfindResponse {
+func buildPropResponse(prefix, filePath string, info *storage.FileInfo) propfindResponse {
 	href := filePath
 	if prefix != "" {
 		href = prefix + filePath

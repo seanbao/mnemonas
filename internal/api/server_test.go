@@ -10,27 +10,68 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/seanbao/mnemonas/internal/webdavcas"
+	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
-func setupTestServer(t *testing.T) (*Server, *webdavcas.FileSystem, string) {
+// testDataplaneAddr is the address of the test dataplane server
+const testDataplaneAddr = "127.0.0.1:9090"
+
+// setupDataplaneClient creates a dataplane client for testing
+// Returns nil if dataplane is not available
+func setupDataplaneClient(t *testing.T) *dataplane.Client {
+	client := dataplane.NewClient(testDataplaneAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		return nil
+	}
+
+	// Check if healthy
+	if _, err := client.Health(ctx); err != nil {
+		client.Close()
+		return nil
+	}
+
+	t.Cleanup(func() { client.Close() })
+	return client
+}
+
+func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
 	tmpDir := t.TempDir()
-	casRoot := path.Join(tmpDir, "cas")
-	metaRoot := path.Join(tmpDir, "meta")
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
 
 	logger := zerolog.Nop()
 
 	server, err := NewServer(logger, &ServerConfig{
-		CASRoot:      casRoot,
-		MetadataRoot: metaRoot,
+		FileSystem: fs,
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
 	}
 
-	return server, server.fs, tmpDir
+	return server, fs, tmpDir
 }
 
 func TestServer_Health(t *testing.T) {

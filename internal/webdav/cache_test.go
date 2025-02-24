@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/seanbao/mnemonas/internal/webdavcas"
+	"github.com/seanbao/mnemonas/internal/storage"
 )
 
 func TestPropfindCache_GetSet(t *testing.T) {
@@ -156,14 +156,14 @@ func TestPropfindCache_DepthKey(t *testing.T) {
 }
 
 func TestBuildPropfindResponses(t *testing.T) {
-	info := &webdavcas.FileInfo{
+	info := &storage.FileInfo{
 		Path:        "/testdir",
 		IsDir:       true,
 		ModTime:     time.Now(),
 		ContentHash: "",
 	}
 
-	children := []*webdavcas.FileInfo{
+	children := []*storage.FileInfo{
 		{Path: "/testdir/file1.txt", IsDir: false, Size: 100, ContentHash: "abc123"},
 		{Path: "/testdir/file2.txt", IsDir: false, Size: 200, ContentHash: "def456"},
 	}
@@ -186,12 +186,12 @@ func TestBuildPropfindResponses(t *testing.T) {
 }
 
 func TestBuildPropfindResponses_Depth0(t *testing.T) {
-	info := &webdavcas.FileInfo{
+	info := &storage.FileInfo{
 		Path:  "/testdir",
 		IsDir: true,
 	}
 
-	children := []*webdavcas.FileInfo{
+	children := []*storage.FileInfo{
 		{Path: "/testdir/file.txt"},
 	}
 
