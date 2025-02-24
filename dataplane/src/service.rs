@@ -10,7 +10,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, instrument};
 
 use crate::cas::{CasStore, CasConfig};
-use crate::cdc::{Chunker, ChunkerConfig, FileManifest};
+use crate::cdc::{Chunker, ChunkerConfig, FileManifest, ChunkRef, StreamingChunker};
 
 // Include generated protobuf code
 pub mod proto {
@@ -38,6 +38,16 @@ impl DataPlaneService {
             chunker: Arc::new(chunker),
             start_time: Instant::now(),
         })
+    }
+    
+    /// Create service with existing CAS store (shared instance)
+    pub fn with_cas(cas: Arc<CasStore>, chunker_config: ChunkerConfig) -> Self {
+        let chunker = Chunker::new(chunker_config);
+        Self {
+            cas,
+            chunker: Arc::new(chunker),
+            start_time: Instant::now(),
+        }
     }
     
     /// Get gRPC server
@@ -126,7 +136,7 @@ impl DataPlane for DataPlaneService {
         Ok(Response::new(DeleteChunkResponse { deleted }))
     }
     
-    /// Store file (streaming, CDC chunking)
+    /// Store file (streaming CDC - bounded memory usage)
     #[instrument(skip(self, request))]
     async fn put_file(
         &self,
@@ -134,28 +144,56 @@ impl DataPlane for DataPlaneService {
     ) -> Result<Response<PutFileResponse>, Status> {
         let mut stream = request.into_inner();
         
-        // Maximum file size limit (10GB) - C2 fix
-        const MAX_FILE_SIZE: usize = 10 * 1024 * 1024 * 1024;
+        // Maximum file size limit (10GB) - prevents infinite streams
+        const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
         
-        // Collect all data with size limit
-        let mut file_data = Vec::new();
+        // Create streaming chunker with bounded memory
+        let mut streaming_chunker = StreamingChunker::new(self.chunker.config().clone());
+        
         let mut metadata: Option<FileMetadata> = None;
+        let mut total_size: u64 = 0;
+        let mut chunk_refs: Vec<ChunkRef> = Vec::new();
+        let mut chunk_hashes: Vec<String> = Vec::new();
+        let mut unique_size: u64 = 0;
         
+        // Process stream incrementally
         while let Some(req) = stream.next().await {
             let req = req?;
             match req.payload {
                 Some(put_file_request::Payload::Metadata(m)) => {
                     metadata = Some(m);
                 }
-                Some(put_file_request::Payload::Chunk(chunk)) => {
-                    // Check accumulated size against limit
-                    if file_data.len() + chunk.len() > MAX_FILE_SIZE {
+                Some(put_file_request::Payload::Chunk(data)) => {
+                    // Check total size limit
+                    total_size += data.len() as u64;
+                    if total_size > MAX_FILE_SIZE {
                         return Err(Status::resource_exhausted(format!(
                             "File too large (max: {} bytes)",
                             MAX_FILE_SIZE
                         )));
                     }
-                    file_data.extend_from_slice(&chunk);
+                    
+                    // Feed data to streaming chunker
+                    let chunks = streaming_chunker.feed(&data);
+                    
+                    // Store completed chunks immediately
+                    for chunk in chunks {
+                        let deduplicated = self.cas.has(&chunk.hash);
+                        
+                        self.cas.put(&chunk.data).await
+                            .map_err(|e| Status::internal(e.to_string()))?;
+                        
+                        chunk_refs.push(ChunkRef {
+                            hash: chunk.hash.clone(),
+                            size: chunk.length,
+                            offset: chunk.offset,
+                        });
+                        chunk_hashes.push(chunk.hash);
+                        
+                        if !deduplicated {
+                            unique_size += chunk.length as u64;
+                        }
+                    }
                 }
                 None => {}
             }
@@ -163,27 +201,27 @@ impl DataPlane for DataPlaneService {
         
         // Log metadata if provided
         if let Some(ref m) = metadata {
-            info!(path = %m.path, actual_size = file_data.len(), "processing file upload");
+            info!(path = %m.path, total_size, "processing file upload");
         }
         
-        if file_data.is_empty() {
+        if total_size == 0 {
             return Err(Status::invalid_argument("No data provided"));
         }
         
-        // CDC chunking
-        let chunks = self.chunker.chunk(&file_data);
-        
-        // Store each chunk
-        let mut chunk_hashes = Vec::new();
-        let mut unique_size = 0u64;
-        
-        for chunk in &chunks {
+        // Process remaining data in buffer
+        let final_chunks = streaming_chunker.finish();
+        for chunk in final_chunks {
             let deduplicated = self.cas.has(&chunk.hash);
             
             self.cas.put(&chunk.data).await
                 .map_err(|e| Status::internal(e.to_string()))?;
             
-            chunk_hashes.push(chunk.hash.clone());
+            chunk_refs.push(ChunkRef {
+                hash: chunk.hash.clone(),
+                size: chunk.length,
+                offset: chunk.offset,
+            });
+            chunk_hashes.push(chunk.hash);
             
             if !deduplicated {
                 unique_size += chunk.length as u64;
@@ -191,7 +229,15 @@ impl DataPlane for DataPlaneService {
         }
         
         // Create and store manifest
-        let manifest = FileManifest::from_chunks(&chunks);
+        let manifest = FileManifest {
+            size: total_size,
+            chunks: chunk_refs,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        
         let manifest_json = manifest.to_json()
             .map_err(|e| Status::internal(e.to_string()))?;
         
@@ -204,16 +250,16 @@ impl DataPlane for DataPlaneService {
             manifest_hash = %manifest_hash,
             total_size = manifest.size,
             unique_size,
-            chunk_count = chunks.len(),
+            chunk_count = chunk_hashes.len(),
             dedup_ratio = format!("{:.1}%", dedup_ratio * 100.0),
-            "file storage complete"
+            "file storage complete (streaming)"
         );
         
         Ok(Response::new(PutFileResponse {
             manifest_hash,
-            chunk_hashes,
+            chunk_hashes: chunk_hashes.clone(),
             total_size: manifest.size,
-            chunk_count: chunks.len() as u32,
+            chunk_count: chunk_hashes.len() as u32,
             dedup_ratio,
         }))
     }
@@ -279,7 +325,7 @@ impl DataPlane for DataPlaneService {
         &self,
         _request: Request<StatsRequest>,
     ) -> Result<Response<StatsResponse>, Status> {
-        let (total_chunks, total_size, hits, misses) = self.cas.stats();
+        let (total_chunks, total_size, compressed_size, hits, misses) = self.cas.stats();
         
         // Simple estimate of dedup ratio
         let dedup_ratio = if hits + misses > 0 {
@@ -291,7 +337,7 @@ impl DataPlane for DataPlaneService {
         Ok(Response::new(StatsResponse {
             total_chunks,
             total_size,
-            unique_size: total_size, // Simplified: actual implementation needs reference counting
+            unique_size: compressed_size, // Report disk usage (compressed size)
             dedup_ratio,
         }))
     }

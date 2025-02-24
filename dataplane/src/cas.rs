@@ -1,5 +1,6 @@
 //! CAS (Content-Addressable Storage) implementation
 //! Uses BLAKE3 as hash algorithm (10x faster than SHA256)
+//! Supports optional zstd compression for storage efficiency
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +22,9 @@ pub enum CasError {
     
     #[error("Hash mismatch: expected={expected}, actual={actual}")]
     HashMismatch { expected: String, actual: String },
+    
+    #[error("Compression error: {0}")]
+    Compression(String),
 }
 
 pub type Result<T> = std::result::Result<T, CasError>;
@@ -34,6 +38,12 @@ pub struct CasConfig {
     pub shard_levels: usize,
     /// Characters per shard level
     pub shard_size: usize,
+    /// Enable zstd compression
+    pub compression_enabled: bool,
+    /// Compression level (1-22, default 3)
+    pub compression_level: i32,
+    /// Minimum size to compress (bytes, smaller files stored uncompressed)
+    pub min_compress_size: usize,
 }
 
 impl Default for CasConfig {
@@ -42,6 +52,9 @@ impl Default for CasConfig {
             root: PathBuf::from("/var/lib/mnemonas/cas"),
             shard_levels: 2,
             shard_size: 2,
+            compression_enabled: true,
+            compression_level: 3,
+            min_compress_size: 1024,  // 1KB
         }
     }
 }
@@ -49,7 +62,7 @@ impl Default for CasConfig {
 /// CAS storage
 pub struct CasStore {
     config: CasConfig,
-    /// Memory index for fast existence check
+    /// Memory index for fast existence check (hash -> original_size)
     index: DashMap<String, u64>,
     /// Statistics
     stats: CasStats,
@@ -60,6 +73,7 @@ pub struct CasStore {
 pub struct CasStats {
     pub total_chunks: AtomicU64,
     pub total_size: AtomicU64,
+    pub compressed_size: AtomicU64,
     pub hit_count: AtomicU64,
     pub miss_count: AtomicU64,
 }
@@ -92,7 +106,12 @@ impl CasStore {
         // Create root directory
         fs::create_dir_all(&config.root).await?;
         
-        info!(root = %config.root.display(), "initializing CAS storage");
+        info!(
+            root = %config.root.display(),
+            compression = config.compression_enabled,
+            compression_level = config.compression_level,
+            "initializing CAS storage"
+        );
         
         let store = Self {
             config,
@@ -110,6 +129,7 @@ impl CasStore {
     #[instrument(skip(self, data), fields(size = data.len()))]
     pub async fn put(&self, data: &[u8]) -> Result<String> {
         let hash = compute_hash(data);
+        let original_size = data.len() as u64;
         
         // Atomic check-and-insert using entry API (C3 fix - prevents TOCTOU race)
         use dashmap::mapref::entry::Entry;
@@ -121,8 +141,29 @@ impl CasStore {
                 return Ok(hash);
             }
             Entry::Vacant(entry) => {
-                // Write file first before inserting to index
-                let path = self.hash_to_path(&hash);
+                // Determine if we should compress
+                let should_compress = self.config.compression_enabled 
+                    && data.len() >= self.config.min_compress_size;
+                
+                // Prepare data to write (possibly compressed)
+                let (write_data, path) = if should_compress {
+                    let compressed = zstd::encode_all(
+                        std::io::Cursor::new(data),
+                        self.config.compression_level,
+                    ).map_err(|e| CasError::Compression(e.to_string()))?;
+                    
+                    // Only use compression if it actually saves space
+                    if compressed.len() < data.len() {
+                        let path = self.hash_to_path(&hash).with_extension("zst");
+                        (compressed, path)
+                    } else {
+                        (data.to_vec(), self.hash_to_path(&hash))
+                    }
+                } else {
+                    (data.to_vec(), self.hash_to_path(&hash))
+                };
+                
+                let disk_size = write_data.len() as u64;
                 
                 // Create directory
                 if let Some(parent) = path.parent() {
@@ -132,17 +173,23 @@ impl CasStore {
                 // Atomic write
                 let tmp_path = path.with_extension("tmp");
                 let mut file = fs::File::create(&tmp_path).await?;
-                file.write_all(data).await?;
+                file.write_all(&write_data).await?;
                 file.sync_all().await?;
                 fs::rename(&tmp_path, &path).await?;
                 
-                // Now insert to index
-                let size = data.len() as u64;
-                entry.insert(size);
+                // Update index and stats
+                entry.insert(original_size);
                 self.stats.total_chunks.fetch_add(1, Ordering::Relaxed);
-                self.stats.total_size.fetch_add(size, Ordering::Relaxed);
+                self.stats.total_size.fetch_add(original_size, Ordering::Relaxed);
+                self.stats.compressed_size.fetch_add(disk_size, Ordering::Relaxed);
                 
-                debug!(hash = %hash, size, "stored successfully");
+                debug!(
+                    hash = %hash,
+                    original_size,
+                    disk_size,
+                    compressed = path.extension().map(|e| e == "zst").unwrap_or(false),
+                    "stored successfully"
+                );
                 Ok(hash)
             }
         }
@@ -151,26 +198,37 @@ impl CasStore {
     /// Read data chunk
     #[instrument(skip(self))]
     pub async fn get(&self, hash: &str) -> Result<Vec<u8>> {
-        let path = self.hash_to_path(hash);
+        let base_path = self.hash_to_path(hash);
+        let compressed_path = base_path.with_extension("zst");
         
-        match fs::read(&path).await {
-            Ok(data) => {
-                // Verify hash
-                let actual_hash = compute_hash(&data);
-                if actual_hash != hash {
-                    return Err(CasError::HashMismatch {
-                        expected: hash.to_string(),
-                        actual: actual_hash,
-                    });
-                }
-                Ok(data)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.stats.miss_count.fetch_add(1, Ordering::Relaxed);
-                Err(CasError::NotFound(hash.to_string()))
-            }
-            Err(e) => Err(e.into()),
+        // Try compressed file first, then uncompressed
+        let (raw_data, is_compressed) = if compressed_path.exists() {
+            (fs::read(&compressed_path).await?, true)
+        } else if base_path.exists() {
+            (fs::read(&base_path).await?, false)
+        } else {
+            self.stats.miss_count.fetch_add(1, Ordering::Relaxed);
+            return Err(CasError::NotFound(hash.to_string()));
+        };
+        
+        // Decompress if needed
+        let data = if is_compressed {
+            zstd::decode_all(std::io::Cursor::new(&raw_data))
+                .map_err(|e| CasError::Compression(e.to_string()))?
+        } else {
+            raw_data
+        };
+        
+        // Verify hash
+        let actual_hash = compute_hash(&data);
+        if actual_hash != hash {
+            return Err(CasError::HashMismatch {
+                expected: hash.to_string(),
+                actual: actual_hash,
+            });
         }
+        
+        Ok(data)
     }
     
     /// Check if data chunk exists
@@ -178,7 +236,7 @@ impl CasStore {
         self.index.contains_key(hash)
     }
     
-    /// Get data chunk size
+    /// Get data chunk size (original uncompressed size)
     pub fn size(&self, hash: &str) -> Option<u64> {
         self.index.get(hash).map(|r| *r)
     }
@@ -186,31 +244,46 @@ impl CasStore {
     /// Delete data chunk
     #[instrument(skip(self))]
     pub async fn delete(&self, hash: &str) -> Result<bool> {
-        let path = self.hash_to_path(hash);
+        let base_path = self.hash_to_path(hash);
+        let compressed_path = base_path.with_extension("zst");
         
-        if let Some((_, size)) = self.index.remove(hash) {
-            match fs::remove_file(&path).await {
-                Ok(()) => {
-                    self.stats.total_chunks.fetch_sub(1, Ordering::Relaxed);
-                    self.stats.total_size.fetch_sub(size, Ordering::Relaxed);
-                    Ok(true)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e.into()),
+        if let Some((_, original_size)) = self.index.remove(hash) {
+            // Try to delete both possible files
+            let deleted_compressed = fs::remove_file(&compressed_path).await.is_ok();
+            let deleted_plain = fs::remove_file(&base_path).await.is_ok();
+            
+            if deleted_compressed || deleted_plain {
+                self.stats.total_chunks.fetch_sub(1, Ordering::Relaxed);
+                self.stats.total_size.fetch_sub(original_size, Ordering::Relaxed);
+                // Note: compressed_size tracking is approximate after delete
+                Ok(true)
+            } else {
+                Ok(false)
             }
         } else {
             Ok(false)
         }
     }
     
-    /// Get statistics
-    pub fn stats(&self) -> (u64, u64, u64, u64) {
+    /// Get statistics (chunks, original_size, compressed_size, hits, misses)
+    pub fn stats(&self) -> (u64, u64, u64, u64, u64) {
         (
             self.stats.total_chunks.load(Ordering::Relaxed),
             self.stats.total_size.load(Ordering::Relaxed),
+            self.stats.compressed_size.load(Ordering::Relaxed),
             self.stats.hit_count.load(Ordering::Relaxed),
             self.stats.miss_count.load(Ordering::Relaxed),
         )
+    }
+    
+    /// Get compression ratio (0.0 - 1.0, lower is better)
+    pub fn compression_ratio(&self) -> f64 {
+        let original = self.stats.total_size.load(Ordering::Relaxed);
+        let compressed = self.stats.compressed_size.load(Ordering::Relaxed);
+        if original == 0 {
+            return 1.0;
+        }
+        compressed as f64 / original as f64
     }
     
     /// Run scrub to verify objects integrity
@@ -362,7 +435,9 @@ impl CasStore {
         info!("rebuilding CAS index...");
         
         let mut count = 0u64;
-        let mut size = 0u64;
+        let mut original_size = 0u64;
+        let mut disk_size = 0u64;
+        let mut compressed_count = 0u64;
         
         let mut stack = vec![self.config.root.clone()];
         
@@ -384,20 +459,79 @@ impl CasStore {
                         .unwrap_or_default();
                     
                     // Skip temp files
-                    if !file_name.ends_with(".tmp") {
-                        let file_size = metadata.len();
-                        self.index.insert(file_name.to_string(), file_size);
+                    if file_name.ends_with(".tmp") {
+                        continue;
+                    }
+                    
+                    let file_size = metadata.len();
+                    disk_size += file_size;
+                    
+                    // Handle compressed vs uncompressed files
+                    if file_name.ends_with(".zst") {
+                        // Extract hash from filename (remove .zst extension)
+                        let hash = file_name.strip_suffix(".zst").unwrap_or(file_name);
+                        
+                        // Try to get original size from zstd frame header
+                        match std::fs::read(&path) {
+                            Ok(data) => {
+                                // zstd::decode_all gives us the original data
+                                match zstd::decode_all(std::io::Cursor::new(&data)) {
+                                    Ok(decompressed) => {
+                                        let orig_size = decompressed.len() as u64;
+                                        self.index.insert(hash.to_string(), orig_size);
+                                        original_size += orig_size;
+                                        compressed_count += 1;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            path = %path.display(),
+                                            error = %e,
+                                            "failed to decompress file during index rebuild"
+                                        );
+                                        // Store file size as fallback
+                                        self.index.insert(hash.to_string(), file_size);
+                                        original_size += file_size;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    error = %e,
+                                    "failed to read file during index rebuild"
+                                );
+                                continue;
+                            }
+                        }
                         count += 1;
-                        size += file_size;
+                    } else {
+                        // Uncompressed file
+                        self.index.insert(file_name.to_string(), file_size);
+                        original_size += file_size;
+                        count += 1;
                     }
                 }
             }
         }
         
         self.stats.total_chunks.store(count, Ordering::Relaxed);
-        self.stats.total_size.store(size, Ordering::Relaxed);
+        self.stats.total_size.store(original_size, Ordering::Relaxed);
+        self.stats.compressed_size.store(disk_size, Ordering::Relaxed);
         
-        info!(chunks = count, size, "index rebuild complete");
+        let ratio = if original_size > 0 {
+            disk_size as f64 / original_size as f64
+        } else {
+            1.0
+        };
+        
+        info!(
+            chunks = count,
+            original_size,
+            disk_size,
+            compressed_count,
+            compression_ratio = format!("{:.1}%", ratio * 100.0),
+            "index rebuild complete"
+        );
         Ok(())
     }
 }
@@ -422,7 +556,7 @@ mod tests {
         
         let store = CasStore::new(config).await.unwrap();
         
-        // Store
+        // Store (data is small, won't be compressed by default)
         let data = b"Hello, MnemoNAS!";
         let hash = store.put(data).await.unwrap();
         
@@ -437,7 +571,7 @@ mod tests {
         let hash2 = store.put(data).await.unwrap();
         assert_eq!(hash, hash2);
         
-        let (chunks, size, hits, _) = store.stats();
+        let (chunks, size, _compressed, hits, _) = store.stats();
         assert_eq!(chunks, 1);
         assert_eq!(size, data.len() as u64);
         assert_eq!(hits, 1); // Second put hits dedup
@@ -445,5 +579,79 @@ mod tests {
         // Delete
         assert!(store.delete(&hash).await.unwrap());
         assert!(!store.has(&hash));
+    }
+    
+    #[tokio::test]
+    async fn test_cas_compression() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: true,
+            compression_level: 3,
+            min_compress_size: 100,  // Lower threshold for testing
+            ..Default::default()
+        };
+        
+        let store = CasStore::new(config).await.unwrap();
+        
+        // Create compressible data (repeating pattern)
+        let mut data = Vec::new();
+        for _ in 0..1000 {
+            data.extend_from_slice(b"This is a repeating pattern for compression testing. ");
+        }
+        
+        let hash = store.put(&data).await.unwrap();
+        
+        // Verify data can be retrieved correctly
+        let retrieved = store.get(&hash).await.unwrap();
+        assert_eq!(retrieved, data);
+        
+        // Check compression stats
+        let (chunks, original_size, compressed_size, _, _) = store.stats();
+        assert_eq!(chunks, 1);
+        assert_eq!(original_size, data.len() as u64);
+        
+        // Compressed size should be significantly smaller for repetitive data
+        assert!(compressed_size < original_size, 
+            "Expected compression: original={}, compressed={}", 
+            original_size, compressed_size);
+        
+        println!(
+            "Compression test: original={}, compressed={}, ratio={:.1}%",
+            original_size, 
+            compressed_size,
+            (compressed_size as f64 / original_size as f64) * 100.0
+        );
+    }
+    
+    #[tokio::test]
+    async fn test_cas_no_compression() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+        
+        let store = CasStore::new(config).await.unwrap();
+        
+        // Store data
+        let data = b"Test data without compression";
+        let hash = store.put(data).await.unwrap();
+        
+        // Verify file is stored uncompressed
+        let path = dir.path()
+            .join(&hash[0..2])
+            .join(&hash[2..4])
+            .join(&hash);
+        assert!(path.exists(), "Uncompressed file should exist at {:?}", path);
+        
+        // No .zst file should exist
+        let compressed_path = path.with_extension("zst");
+        assert!(!compressed_path.exists(), "No .zst file should exist");
+        
+        // Verify retrieval
+        let retrieved = store.get(&hash).await.unwrap();
+        assert_eq!(retrieved, data);
     }
 }

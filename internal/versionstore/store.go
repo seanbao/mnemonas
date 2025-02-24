@@ -132,6 +132,26 @@ func createTables(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_versions_path ON versions(path);
 	CREATE INDEX IF NOT EXISTS idx_versions_created ON versions(created_at);
 
+	-- Chunk reference counting for GC
+	-- Each version's manifest_hash is stored in versions.hash
+	-- The actual chunk hashes are stored in this table
+	CREATE TABLE IF NOT EXISTS chunk_refs (
+		hash TEXT PRIMARY KEY,
+		ref_count INTEGER NOT NULL DEFAULT 1,
+		size INTEGER NOT NULL,
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_chunk_refs_count ON chunk_refs(ref_count);
+
+	-- Mapping from version to its chunks (for GC reference counting)
+	CREATE TABLE IF NOT EXISTS version_chunks (
+		version_id INTEGER NOT NULL,
+		chunk_hash TEXT NOT NULL,
+		PRIMARY KEY (version_id, chunk_hash),
+		FOREIGN KEY (version_id) REFERENCES versions(id) ON DELETE CASCADE,
+		FOREIGN KEY (chunk_hash) REFERENCES chunk_refs(hash)
+	);
+
 	-- Trash
 	CREATE TABLE IF NOT EXISTS trash (
 		id TEXT PRIMARY KEY,
@@ -619,4 +639,129 @@ func (s *Store) HasObject(hash string) bool {
 // DeleteObject removes an object
 func (s *Store) DeleteObject(hash string) error {
 	return s.objects.Delete(context.Background(), hash)
+}
+
+// ============================================================================
+// Chunk Reference Counting (for GC)
+// ============================================================================
+
+// AddChunkRef increments reference count for a chunk
+// If the chunk doesn't exist in the reference table, creates it with count 1
+func (s *Store) AddChunkRef(ctx context.Context, chunkHash string, size int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO chunk_refs (hash, ref_count, size, created_at)
+		VALUES (?, 1, ?, ?)
+		ON CONFLICT(hash) DO UPDATE SET ref_count = ref_count + 1
+	`, chunkHash, size, time.Now().Unix())
+	return err
+}
+
+// RemoveChunkRef decrements reference count for a chunk
+// Returns true if the chunk reference count reaches 0 (can be garbage collected)
+func (s *Store) RemoveChunkRef(ctx context.Context, chunkHash string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE chunk_refs SET ref_count = ref_count - 1 WHERE hash = ?
+	`, chunkHash)
+	if err != nil {
+		return false, err
+	}
+
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return false, nil // Chunk not found
+	}
+
+	// Check if ref_count is now 0
+	var refCount int
+	err = s.db.QueryRowContext(ctx, `SELECT ref_count FROM chunk_refs WHERE hash = ?`, chunkHash).Scan(&refCount)
+	if err != nil {
+		return false, err
+	}
+
+	return refCount <= 0, nil
+}
+
+// LinkVersionChunks records chunk references for a version
+func (s *Store) LinkVersionChunks(ctx context.Context, versionID int64, chunkHashes []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO version_chunks (version_id, chunk_hash) VALUES (?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, hash := range chunkHashes {
+		if _, err := stmt.ExecContext(ctx, versionID, hash); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetOrphanedChunks returns chunks with ref_count <= 0
+func (s *Store) GetOrphanedChunks(ctx context.Context, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT hash FROM chunk_refs WHERE ref_count <= 0 LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hashes []string
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, hash)
+	}
+
+	return hashes, rows.Err()
+}
+
+// DeleteChunkRef removes a chunk reference record (after GC)
+func (s *Store) DeleteChunkRef(ctx context.Context, chunkHash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM chunk_refs WHERE hash = ?`, chunkHash)
+	return err
+}
+
+// RunGC performs garbage collection of orphaned chunks
+// Returns the number of chunks deleted and total bytes freed
+func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
+	orphans, err := s.GetOrphanedChunks(ctx, batchSize)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var deleted int
+	var freedBytes int64
+
+	for _, hash := range orphans {
+		// Get size before deleting
+		var size int64
+		_ = s.db.QueryRowContext(ctx, `SELECT size FROM chunk_refs WHERE hash = ?`, hash).Scan(&size)
+
+		// Delete from CAS
+		if err := s.DeleteObject(hash); err != nil {
+			// Log but continue
+			continue
+		}
+
+		// Delete reference record
+		if err := s.DeleteChunkRef(ctx, hash); err != nil {
+			continue
+		}
+
+		deleted++
+		freedBytes += size
+	}
+
+	return deleted, freedBytes, nil
 }
