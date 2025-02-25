@@ -60,6 +60,16 @@ func (m *fakeRetentionMonitor) UpdateConfig(cfg storage.RetentionMonitorConfig) 
 	m.lastConfig = cfg
 }
 
+type fakeWebDAVUpdater struct {
+	updateCount int
+	lastConfig  WebDAVRuntimeConfig
+}
+
+func (u *fakeWebDAVUpdater) UpdateConfig(cfg WebDAVRuntimeConfig) {
+	u.updateCount++
+	u.lastConfig = cfg
+}
+
 // setupDataplaneClient creates a dataplane client for testing
 // Returns nil if dataplane is not available
 func setupDataplaneClient(t *testing.T) *dataplane.Client {
@@ -3436,25 +3446,29 @@ func TestServer_WebDAVCredentials_URLNormalized(t *testing.T) {
 	}
 }
 
-func TestServer_WebDAVCredentials_StayOnRunningConfigAfterSettingsUpdate(t *testing.T) {
+func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	server.config.Storage.Root = tmpDir
+	webdavUpdater := &fakeWebDAVUpdater{}
+	server.updateWebDAV = webdavUpdater.UpdateConfig
 	server.config.WebDAV.Enabled = true
 	server.config.WebDAV.Prefix = "/dav"
+	server.config.WebDAV.ReadOnly = false
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Username = "runtime-user"
 	server.config.WebDAV.Password = "runtime-pass"
 	server.activeWebDAV = WebDAVRuntimeConfig{
 		Enabled:             true,
 		Prefix:              "/dav",
+		ReadOnly:            false,
 		AuthType:            "basic",
 		Username:            "runtime-user",
 		Password:            "runtime-pass",
 		PasswordIsGenerated: true,
 	}
 
-	body := `{"webdav":{"enabled":true,"prefix":"/new-dav","auth_type":"basic","username":"saved-user","password":"saved-pass"}}`
+	body := `{"webdav":{"enabled":true,"prefix":"/new-dav","read_only":true,"auth_type":"basic","username":"saved-user","password":"saved-pass"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -3483,17 +3497,38 @@ func TestServer_WebDAVCredentials_StayOnRunningConfigAfterSettingsUpdate(t *test
 	if err := json.Unmarshal(credsRec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to parse response JSON: %v", err)
 	}
-	if payload.Data.URL != "/dav/" {
-		t.Fatalf("expected running webdav url /dav/, got %q", payload.Data.URL)
+	if payload.Data.URL != "/new-dav/" {
+		t.Fatalf("expected running webdav url /new-dav/, got %q", payload.Data.URL)
 	}
-	if payload.Data.Username != "runtime-user" {
-		t.Fatalf("expected running webdav username runtime-user, got %q", payload.Data.Username)
+	if payload.Data.Username != "saved-user" {
+		t.Fatalf("expected running webdav username saved-user, got %q", payload.Data.Username)
 	}
-	if payload.Data.Password != "runtime-pass" {
-		t.Fatalf("expected running webdav password runtime-pass, got %q", payload.Data.Password)
+	if payload.Data.Password != "" {
+		t.Fatalf("expected custom WebDAV password to remain hidden, got %q", payload.Data.Password)
 	}
 	if server.config.WebDAV.Prefix != "/new-dav" {
 		t.Fatalf("expected saved config prefix /new-dav, got %q", server.config.WebDAV.Prefix)
+	}
+	if server.activeWebDAV.Prefix != "/new-dav" {
+		t.Fatalf("expected active WebDAV prefix /new-dav, got %q", server.activeWebDAV.Prefix)
+	}
+	if !server.activeWebDAV.ReadOnly {
+		t.Fatalf("expected active WebDAV read-only mode to update")
+	}
+	if server.activeWebDAV.Password != "saved-pass" {
+		t.Fatalf("expected active WebDAV password to update, got %q", server.activeWebDAV.Password)
+	}
+	if server.activeWebDAV.PasswordIsGenerated {
+		t.Fatalf("expected active WebDAV password to be marked custom")
+	}
+	if webdavUpdater.updateCount != 1 {
+		t.Fatalf("expected WebDAV updater to be called once, got %d", webdavUpdater.updateCount)
+	}
+	if webdavUpdater.lastConfig.Prefix != "/new-dav" {
+		t.Fatalf("expected WebDAV updater prefix /new-dav, got %q", webdavUpdater.lastConfig.Prefix)
+	}
+	if !webdavUpdater.lastConfig.ReadOnly {
+		t.Fatalf("expected WebDAV updater to receive read-only=true")
 	}
 }
 
@@ -4133,6 +4168,20 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 }
 
+func TestServer_SetupStatus_WithoutConfigReturnsServiceUnavailable(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/setup/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup status without config = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
 func TestServer_AcknowledgeSetup_RequiresAuthentication(t *testing.T) {
 	server, _, _, _, _ := setupAuthServer(t)
 
@@ -4143,6 +4192,225 @@ func TestServer_AcknowledgeSetup_RequiresAuthentication(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("acknowledge setup status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestServer_ClearActivity_RequiresAdminRoleWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	login := func(t *testing.T, user, pass string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, user, pass)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("login status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var payload struct {
+			Data auth.LoginResponse `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to parse login response: %v", err)
+		}
+		return payload.Data.AccessToken
+	}
+
+	userToken := login(t, username, password)
+	userReq := httptest.NewRequest(http.MethodDelete, "/api/v1/activity/", nil)
+	userReq.Header.Set("Authorization", "Bearer "+userToken)
+	userRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(userRec, userReq)
+
+	if userRec.Code != http.StatusForbidden {
+		t.Fatalf("clear activity as non-admin status = %d, want %d", userRec.Code, http.StatusForbidden)
+	}
+
+	adminUsername := "activity-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	adminToken := login(t, adminUsername, adminPassword)
+	adminReq := httptest.NewRequest(http.MethodDelete, "/api/v1/activity/", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+adminToken)
+	adminRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(adminRec, adminReq)
+
+	if adminRec.Code != http.StatusOK {
+		t.Fatalf("clear activity as admin status = %d, want %d", adminRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(adminRec.Body.String(), "Activity log cleared") {
+		t.Fatalf("expected success message when admin clears activity, got %s", adminRec.Body.String())
+	}
+}
+
+func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	login := func(t *testing.T, user, pass string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, user, pass)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("login status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var payload struct {
+			Data auth.LoginResponse `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to parse login response: %v", err)
+		}
+		return payload.Data.AccessToken
+	}
+
+	adminUsername := "activity-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/users/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log own activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionDelete, "/users/admin.txt", adminUsername, "127.0.0.2", nil); err != nil {
+		t.Fatalf("log admin activity error: %v", err)
+	}
+
+	userToken := login(t, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/?user="+adminUsername, nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity as non-admin status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Items []activity.Entry `json:"items"`
+			Total int              `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse list activity response: %v", err)
+	}
+	if payload.Data.Total != 1 {
+		t.Fatalf("non-admin activity total = %d, want 1", payload.Data.Total)
+	}
+	if len(payload.Data.Items) != 1 {
+		t.Fatalf("non-admin activity items = %d, want 1", len(payload.Data.Items))
+	}
+	if payload.Data.Items[0].User != username {
+		t.Fatalf("non-admin saw user %q, want %q", payload.Data.Items[0].User, username)
+	}
+	if payload.Data.Items[0].Path != "/users/own.txt" {
+		t.Fatalf("non-admin saw path %q, want own path", payload.Data.Items[0].Path)
+	}
+}
+
+func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	if _, err := server.userStore.Create("stats-admin", "adminpass123", "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/users/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log own activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionDelete, "/users/admin.txt", "stats-admin", "127.0.0.2", nil); err != nil {
+		t.Fatalf("log admin activity error: %v", err)
+	}
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
+	statsReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	statsRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(statsRec, statsReq)
+
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("activity stats as non-admin status = %d, want %d", statsRec.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Total    int            `json:"total"`
+			Today    int            `json:"today"`
+			ByUser   map[string]int `json:"by_user"`
+			ByAction map[string]int `json:"by_action"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(statsRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse activity stats response: %v", err)
+	}
+	if payload.Data.Total != 1 {
+		t.Fatalf("non-admin activity stats total = %d, want 1", payload.Data.Total)
+	}
+	if payload.Data.Today != 1 {
+		t.Fatalf("non-admin activity stats today = %d, want 1", payload.Data.Today)
+	}
+	if payload.Data.ByUser[username] != 1 {
+		t.Fatalf("expected own user count = 1, got %d", payload.Data.ByUser[username])
+	}
+	if payload.Data.ByUser["stats-admin"] != 0 {
+		t.Fatalf("expected admin user count to be hidden, got %d", payload.Data.ByUser["stats-admin"])
+	}
+	if payload.Data.ByAction[string(activity.ActionUpload)] != 1 {
+		t.Fatalf("expected own upload count = 1, got %d", payload.Data.ByAction[string(activity.ActionUpload)])
+	}
+	if payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
+		t.Fatalf("expected admin delete count to be hidden, got %d", payload.Data.ByAction[string(activity.ActionDelete)])
+	}
+}
+
+func TestServer_AcknowledgeSetup_WithoutAuthMarksSetupShown(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	secrets := &config.Secrets{SetupShown: false}
+	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
+	server.config.Storage.Root = tmpDir
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("acknowledge setup without auth status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	updatedSecrets, err := config.LoadSecrets(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to reload secrets: %v", err)
+	}
+	if updatedSecrets == nil || !updatedSecrets.SetupShown {
+		t.Fatalf("expected setup to be marked shown after acknowledge without auth")
 	}
 }
 
@@ -4314,6 +4582,38 @@ func TestServer_RestoreVersion_RequiresAdmin(t *testing.T) {
 
 	if restoreRec.Code != http.StatusForbidden {
 		t.Fatalf("restore status = %d, want %d", restoreRec.Code, http.StatusForbidden)
+	}
+}
+
+func TestServer_RestoreVersion_RejectsNonAdminBeforeValidation(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/versions/not-a-valid-hash/restore?path=/restore-version/file.txt", nil)
+	restoreReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+
+	if restoreRec.Code != http.StatusForbidden {
+		t.Fatalf("restore invalid hash as non-admin status = %d, want %d", restoreRec.Code, http.StatusForbidden)
+	}
+	if strings.Contains(strings.ToLower(restoreRec.Body.String()), "invalid hash") {
+		t.Fatalf("expected auth guard to run before validation, got %s", restoreRec.Body.String())
 	}
 }
 

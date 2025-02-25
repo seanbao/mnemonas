@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,54 @@ var (
 	commit    = "none"
 	buildTime = "unknown"
 )
+
+type switchableWebDAVHandler struct {
+	mu      sync.RWMutex
+	prefix  string
+	handler http.Handler
+}
+
+func newSwitchableWebDAVHandler(prefix string, handler http.Handler) *switchableWebDAVHandler {
+	s := &switchableWebDAVHandler{}
+	s.Update(prefix, handler)
+	return s
+}
+
+func (s *switchableWebDAVHandler) Update(prefix string, handler http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prefix = prefix
+	s.handler = handler
+}
+
+func (s *switchableWebDAVHandler) ServeIfMatches(w http.ResponseWriter, r *http.Request) bool {
+	s.mu.RLock()
+	prefix := s.prefix
+	handler := s.handler
+	s.mu.RUnlock()
+
+	if handler == nil || !matchesWebDAVPrefix(prefix, r.URL.Path) {
+		return false
+	}
+
+	handler.ServeHTTP(w, r)
+	return true
+}
+
+func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (string, http.Handler) {
+	if !cfg.Enabled {
+		return "", nil
+	}
+
+	return cfg.Prefix, webdav.NewHandler(webdav.Config{
+		FileSystem: fs,
+		Prefix:     cfg.Prefix,
+		ReadOnly:   cfg.ReadOnly,
+		AuthType:   cfg.AuthType,
+		Username:   cfg.Username,
+		Password:   cfg.Password,
+	})
+}
 
 func main() {
 	// Command line arguments
@@ -187,6 +236,18 @@ func main() {
 	}
 
 	// Mount API with data plane connection
+	activeWebDAV := api.WebDAVRuntimeConfig{
+		Enabled:             cfg.WebDAV.Enabled,
+		Prefix:              cfg.WebDAV.Prefix,
+		ReadOnly:            cfg.WebDAV.ReadOnly,
+		AuthType:            cfg.WebDAV.AuthType,
+		Username:            cfg.WebDAV.Username,
+		Password:            cfg.WebDAV.Password,
+		PasswordIsGenerated: webdavPasswordGenerated,
+	}
+	webdavPrefix, webdavHandler := buildWebDAVHandler(fs, activeWebDAV)
+	runtimeWebDAV := newSwitchableWebDAVHandler(webdavPrefix, webdavHandler)
+
 	apiServer, err := api.NewServer(log.Logger, &api.ServerConfig{
 		DataplaneAddr:   cfg.DataPlane.Address(),
 		FileSystem:      fs, // Pass the new storage filesystem
@@ -209,15 +270,21 @@ func main() {
 		FavoritesEnabled:   cfg.Favorites.Enabled,
 		FavoritesStoreFile: cfg.Favorites.StoreFile,
 		// Config for settings API
-		Config:     cfg,
-		ConfigPath: path,
-		ActiveWebDAV: &api.WebDAVRuntimeConfig{
-			Enabled:             cfg.WebDAV.Enabled,
-			Prefix:              cfg.WebDAV.Prefix,
-			AuthType:            cfg.WebDAV.AuthType,
-			Username:            cfg.WebDAV.Username,
-			Password:            cfg.WebDAV.Password,
-			PasswordIsGenerated: webdavPasswordGenerated,
+		Config:       cfg,
+		ConfigPath:   path,
+		ActiveWebDAV: &activeWebDAV,
+		UpdateWebDAV: func(runtimeCfg api.WebDAVRuntimeConfig) {
+			prefix, handler := buildWebDAVHandler(fs, runtimeCfg)
+			runtimeWebDAV.Update(prefix, handler)
+			if runtimeCfg.Enabled {
+				log.Info().
+					Str("prefix", runtimeCfg.Prefix).
+					Str("auth", runtimeCfg.AuthType).
+					Bool("read_only", runtimeCfg.ReadOnly).
+					Msg("WebDAV runtime configuration updated")
+				return
+			}
+			log.Info().Msg("WebDAV disabled at runtime")
 		},
 	})
 	if err != nil {
@@ -227,26 +294,13 @@ func main() {
 
 	// Create final handler - WebDAV needs to be handled before chi router
 	// because chi doesn't support WebDAV methods (PROPFIND, MKCOL, etc.)
-	var handler http.Handler = router
-	if cfg.WebDAV.Enabled {
-		davHandler := webdav.NewHandler(webdav.Config{
-			FileSystem: fs,
-			Prefix:     cfg.WebDAV.Prefix,
-			ReadOnly:   cfg.WebDAV.ReadOnly,
-			AuthType:   cfg.WebDAV.AuthType,
-			Username:   cfg.WebDAV.Username,
-			Password:   cfg.WebDAV.Password,
-		})
-		// Wrap handler to route WebDAV requests
-		prefix := cfg.WebDAV.Prefix
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Route to WebDAV handler if path matches prefix
-			if matchesWebDAVPrefix(prefix, r.URL.Path) {
-				davHandler.ServeHTTP(w, r)
-				return
-			}
-			router.ServeHTTP(w, r)
-		})
+	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if runtimeWebDAV.ServeIfMatches(w, r) {
+			return
+		}
+		router.ServeHTTP(w, r)
+	})
+	if activeWebDAV.Enabled {
 		log.Info().Str("prefix", cfg.WebDAV.Prefix).Str("auth", cfg.WebDAV.AuthType).Msg("WebDAV enabled")
 	}
 

@@ -1,8 +1,22 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@/test/utils'
 import { Sidebar } from './Sidebar'
 
+const useIsAdminMock = vi.fn(() => true)
+
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useIsAdmin: () => useIsAdminMock(),
+  }
+})
+
 describe('Sidebar', () => {
+  beforeEach(() => {
+    useIsAdminMock.mockReturnValue(true)
+  })
+
   describe('rendering', () => {
     it('renders logo', () => {
       render(<Sidebar />)
@@ -154,5 +168,15 @@ describe('Sidebar', () => {
       render(<Sidebar collapsed={true} />)
       expect(screen.queryByText('存储空间')).toBeFalsy()
     })
+  })
+
+  it('hides admin-only navigation for non-admin users', () => {
+    useIsAdminMock.mockReturnValue(false)
+    render(<Sidebar />)
+
+    expect(screen.queryByText('守护')).toBeFalsy()
+    expect(screen.queryByText('用户')).toBeFalsy()
+    expect(screen.queryByText('设置')).toBeFalsy()
+    expect(screen.getByText('活动')).toBeTruthy()
   })
 })

@@ -5,7 +5,7 @@ const API_BASE = '/api/v1'
 
 // Share types
 export type ShareType = 'file' | 'folder'
-export type Permission = 'read' | 'read_write'
+export type Permission = 'read'
 
 export interface Share {
   id: string

@@ -30,8 +30,8 @@ func ClientIP(r *http.Request) string {
 func ForwardedClientIP(r *http.Request) string {
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
 		parts := strings.Split(forwarded, ",")
-		for _, part := range parts {
-			if parsed := ParseIP(strings.TrimSpace(part)); parsed != nil {
+		for i := len(parts) - 1; i >= 0; i-- {
+			if parsed := ParseIP(strings.TrimSpace(parts[i])); parsed != nil {
 				return parsed.String()
 			}
 		}

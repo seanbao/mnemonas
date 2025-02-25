@@ -274,8 +274,6 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		opts.Permission = PermissionRead
 	case "read":
 		opts.Permission = PermissionRead
-	case "read_write":
-		opts.Permission = PermissionReadWrite
 	default:
 		writeShareError(w, http.StatusBadRequest, "invalid permission", "INVALID_PERMISSION")
 		return
@@ -445,8 +443,6 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 				s.Permission = PermissionRead
 			case "read":
 				s.Permission = PermissionRead
-			case "read_write":
-				s.Permission = PermissionReadWrite
 			default:
 				return errInvalidSharePermission
 			}

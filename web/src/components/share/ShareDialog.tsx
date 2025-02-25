@@ -19,7 +19,6 @@ import {
   Lock,
   Clock,
   Eye,
-  Users,
   CheckCircle,
 } from 'lucide-react'
 import { createShare, copyShareUrl, type Share, type CreateShareRequest } from '@/api/share'
@@ -43,7 +42,6 @@ const EXPIRATION_OPTIONS = [
 
 const PERMISSION_OPTIONS = [
   { value: 'read', label: '仅查看', icon: Eye },
-  { value: 'read_write', label: '可编辑', icon: Users },
 ]
 
 export function ShareDialog({ 
@@ -60,7 +58,7 @@ export function ShareDialog({
   const [usePassword, setUsePassword] = useState(false)
   const [password, setPassword] = useState('')
   const [expiresIn, setExpiresIn] = useState('')
-  const [permission, setPermission] = useState<'read' | 'read_write'>('read')
+  const [permission, setPermission] = useState<'read'>('read')
   const [maxAccess, setMaxAccess] = useState('')
   const [description, setDescription] = useState('')
 
@@ -253,7 +251,7 @@ export function ShareDialog({
                 </div>
                 <Select
                   selectedKeys={[permission]}
-                  onSelectionChange={(keys) => setPermission([...keys][0] as 'read' | 'read_write' || 'read')}
+                  onSelectionChange={(keys) => setPermission([...keys][0] as 'read' || 'read')}
                   classNames={{
                     trigger: "bg-content2 border-divider",
                   }}

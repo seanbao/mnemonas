@@ -359,6 +359,7 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 
 	// Invalidate cache for parent directory
 	h.propCache.Invalidate(parent)
+	h.propCache.Invalidate(filePath)
 
 	// Return new ETag
 	newInfo, _ := h.fs.Stat(ctx, filePath)
@@ -378,6 +379,26 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 		return
 	}
 
+	info, err := h.fs.Stat(ctx, filePath)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	etag := fmt.Sprintf(`"%s"`, info.ContentHash)
+	if im := r.Header.Get("If-Match"); im != "" {
+		if !h.matchETag(im, etag) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return
+		}
+	}
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		if h.matchETag(inm, etag) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return
+		}
+	}
+
 	// Acquire write lock for exclusive access
 	h.pathLock.Lock(filePath)
 	defer h.pathLock.Unlock(filePath)
@@ -389,6 +410,7 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 
 	// Invalidate cache for parent directory
 	h.propCache.Invalidate(path.Dir(filePath))
+	h.propCache.Invalidate(filePath)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -421,6 +443,7 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 
 	// Invalidate cache for parent directory
 	h.propCache.Invalidate(path.Dir(filePath))
+	h.propCache.Invalidate(filePath)
 
 	w.WriteHeader(http.StatusCreated)
 }
@@ -454,7 +477,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "source and destination must differ", http.StatusForbidden)
 		return
 	}
-	if !h.authorizeWriteLock(w, r, srcPath, dst) {
+	if !h.authorizeWriteLock(w, r, dst) {
 		return
 	}
 
@@ -691,7 +714,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 
 	// Invalidate cache for both source and destination parents
 	h.propCache.Invalidate(path.Dir(srcPath))
+	h.propCache.Invalidate(srcPath)
 	h.propCache.Invalidate(path.Dir(dst))
+	h.propCache.Invalidate(dst)
 
 	if dstExists {
 		w.WriteHeader(http.StatusNoContent)
@@ -1041,18 +1066,58 @@ func extractLockTokens(r *http.Request) []string {
 
 	ifHeader := r.Header.Get("If")
 	for {
-		start := strings.IndexByte(ifHeader, '<')
+		start := strings.IndexByte(ifHeader, '(')
 		if start == -1 {
 			break
 		}
 		ifHeader = ifHeader[start+1:]
 
-		end := strings.IndexByte(ifHeader, '>')
+		end := strings.IndexByte(ifHeader, ')')
 		if end == -1 {
 			break
 		}
 
-		appendToken(ifHeader[:end])
+		stateList := ifHeader[:end]
+		for {
+			stateList = strings.TrimSpace(stateList)
+			if stateList == "" {
+				break
+			}
+
+			negated := false
+			if len(stateList) >= 3 && strings.EqualFold(stateList[:3], "Not") {
+				remainder := strings.TrimSpace(stateList[3:])
+				if remainder != stateList[3:] || len(stateList) == 3 {
+					negated = true
+					stateList = remainder
+				}
+			}
+			if stateList == "" {
+				break
+			}
+
+			switch stateList[0] {
+			case '<':
+				tokenEnd := strings.IndexByte(stateList, '>')
+				if tokenEnd == -1 {
+					stateList = ""
+					break
+				}
+				if !negated {
+					appendToken(stateList[1:tokenEnd])
+				}
+				stateList = stateList[tokenEnd+1:]
+			case '[':
+				etagEnd := strings.IndexByte(stateList, ']')
+				if etagEnd == -1 {
+					stateList = ""
+					break
+				}
+				stateList = stateList[etagEnd+1:]
+			default:
+				stateList = stateList[1:]
+			}
+		}
 		ifHeader = ifHeader[end+1:]
 	}
 

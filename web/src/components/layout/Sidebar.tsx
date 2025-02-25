@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { useIsAdmin } from '@/stores/auth'
 import { 
   Folder, 
   Image, 
@@ -25,6 +26,7 @@ interface NavItem {
   path: string
   badge?: string
   badgeColor?: string
+  adminOnly?: boolean
 }
 
 interface NavSection {
@@ -48,8 +50,8 @@ const navSections: NavSection[] = [
     items: [
       { icon: Trash2, label: '回收站', path: '/trash' },
       { icon: HardDrive, label: '存储', path: '/storage' },
-      { icon: ShieldCheck, label: '守护', path: '/maintenance' },
-      { icon: Users, label: '用户', path: '/users' },
+      { icon: ShieldCheck, label: '守护', path: '/maintenance', adminOnly: true },
+      { icon: Users, label: '用户', path: '/users', adminOnly: true },
     ]
   },
   {
@@ -57,7 +59,7 @@ const navSections: NavSection[] = [
     items: [
       { icon: Activity, label: '健康', path: '/system-health' },
       { icon: FileText, label: '活动', path: '/activity' },
-      { icon: Settings, label: '设置', path: '/settings' },
+      { icon: Settings, label: '设置', path: '/settings', adminOnly: true },
     ]
   }
 ]
@@ -69,6 +71,7 @@ interface SidebarProps {
 
 export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const location = useLocation()
+  const isAdmin = useIsAdmin()
   
   // Fetch storage stats for the sidebar indicator
   const { data: storageStats } = useQuery({
@@ -121,7 +124,13 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="flex-1 py-4 px-3 overflow-y-auto relative z-10 custom-scrollbar" aria-label="主导航">
-        {navSections.map((section) => (
+        {navSections
+          .map((section) => ({
+            ...section,
+            items: section.items.filter((item) => !item.adminOnly || isAdmin),
+          }))
+          .filter((section) => section.items.length > 0)
+          .map((section) => (
           <div key={section.title} className={cn("mb-7", collapsed && "mb-4")}>
             {!collapsed && (
               <div className="px-3.5 mb-2 text-[10px] font-semibold uppercase tracking-widest text-default-500">
