@@ -1,16 +1,18 @@
 import { Navigate, useLocation } from 'react-router-dom'
-import { useAuthStore, useIsAuthenticated } from '@/stores/auth'
+import { useAuthStore, useIsAdmin, useIsAuthenticated } from '@/stores/auth'
 
 interface ProtectedRouteProps {
   children: React.ReactNode
+  adminOnly?: boolean
 }
 
 /**
  * Route guard that redirects to login if not authenticated.
  * Preserves the attempted location for redirect after login.
  */
-export function ProtectedRoute({ children }: ProtectedRouteProps) {
+export function ProtectedRoute({ children, adminOnly = false }: ProtectedRouteProps) {
   const isAuthenticated = useIsAuthenticated()
+  const isAdmin = useIsAdmin()
   const { isLoading, authEnabled } = useAuthStore()
   const location = useLocation()
 
@@ -35,6 +37,10 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
   if (!isAuthenticated) {
     const attemptedPath = `${location.pathname}${location.search}${location.hash}`
     return <Navigate to="/login" state={{ from: attemptedPath }} replace />
+  }
+
+  if (adminOnly && !isAdmin) {
+    return <Navigate to="/" replace />
   }
 
   return <>{children}</>

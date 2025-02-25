@@ -67,11 +67,13 @@ type Server struct {
 	config       *config.Config
 	configPath   string
 	activeWebDAV WebDAVRuntimeConfig
+	updateWebDAV func(WebDAVRuntimeConfig)
 }
 
 type WebDAVRuntimeConfig struct {
 	Enabled             bool
 	Prefix              string
+	ReadOnly            bool
 	AuthType            string
 	Username            string
 	Password            string
@@ -91,6 +93,42 @@ func formatSettingsDuration(d time.Duration) string {
 		return "0"
 	}
 	return d.String()
+}
+
+func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConfig {
+	runtimeCfg := WebDAVRuntimeConfig{
+		Enabled:  cfg.WebDAV.Enabled,
+		Prefix:   cfg.WebDAV.Prefix,
+		ReadOnly: cfg.WebDAV.ReadOnly,
+		AuthType: cfg.WebDAV.AuthType,
+		Username: cfg.WebDAV.Username,
+		Password: cfg.WebDAV.Password,
+	}
+
+	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
+		return runtimeCfg
+	}
+
+	if strings.TrimSpace(runtimeCfg.Username) == "" {
+		runtimeCfg.Username = "admin"
+	}
+
+	if strings.TrimSpace(runtimeCfg.Password) != "" || cfg.Storage.Root == "" {
+		return runtimeCfg
+	}
+
+	secrets, err := config.LoadSecrets(cfg.Storage.Root)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to load secrets for WebDAV runtime config")
+		return runtimeCfg
+	}
+	if secrets == nil || strings.TrimSpace(secrets.WebDAVPassword) == "" {
+		return runtimeCfg
+	}
+
+	runtimeCfg.Password = secrets.WebDAVPassword
+	runtimeCfg.PasswordIsGenerated = true
+	return runtimeCfg
 }
 
 // ServerConfig holds server configuration
@@ -121,6 +159,7 @@ type ServerConfig struct {
 	Config       *config.Config
 	ConfigPath   string
 	ActiveWebDAV *WebDAVRuntimeConfig
+	UpdateWebDAV func(WebDAVRuntimeConfig)
 }
 
 // NewServer creates a new API server
@@ -142,19 +181,16 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		logger:    logger,
 		startTime: time.Now(),
 	}
+	if cfg != nil {
+		s.updateWebDAV = cfg.UpdateWebDAV
+	}
 
 	// Store config early so runtime dataplane connection settings are available
 	// during initial client setup.
 	if cfg != nil && cfg.Config != nil {
 		s.config = cfg.Config
 		s.configPath = cfg.ConfigPath
-		s.activeWebDAV = WebDAVRuntimeConfig{
-			Enabled:  cfg.Config.WebDAV.Enabled,
-			Prefix:   cfg.Config.WebDAV.Prefix,
-			AuthType: cfg.Config.WebDAV.AuthType,
-			Username: cfg.Config.WebDAV.Username,
-			Password: cfg.Config.WebDAV.Password,
-		}
+		s.activeWebDAV = s.resolveWebDAVRuntimeConfig(*cfg.Config)
 	}
 	if cfg != nil && cfg.ActiveWebDAV != nil {
 		s.activeWebDAV = *cfg.ActiveWebDAV
@@ -308,7 +344,9 @@ func (s *Server) setupRoutes() {
 		r.Get("/", s.handleGetSetupStatus)
 		if s.authEnabled {
 			r.With(s.authMw.RequireAuth, s.authMw.RequireRole(auth.RoleAdmin)).Post("/acknowledge", s.handleAcknowledgeSetup)
+			return
 		}
+		r.Post("/acknowledge", s.handleAcknowledgeSetup)
 	})
 
 	// Auth endpoints (public)
@@ -408,6 +446,10 @@ func (s *Server) setupRoutes() {
 		// Version history
 		r.Route("/versions", func(r chi.Router) {
 			r.Get("/*", s.handleListVersions)
+			if s.authEnabled {
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Post("/{hash}/restore", s.handleRestoreVersion)
+				return
+			}
 			r.Post("/{hash}/restore", s.handleRestoreVersion)
 		})
 
@@ -433,7 +475,11 @@ func (s *Server) setupRoutes() {
 		r.Route("/activity", func(r chi.Router) {
 			r.Get("/", s.handleListActivity)
 			r.Get("/stats", s.handleActivityStats)
-			r.Delete("/", s.handleClearActivity) // Admin only in production
+			if s.authEnabled {
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Delete("/", s.handleClearActivity)
+				return
+			}
+			r.Delete("/", s.handleClearActivity)
 		})
 
 		// Settings (admin only when auth enabled)
@@ -2245,6 +2291,9 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	offsetStr := r.URL.Query().Get("offset")
 	actionFilter := r.URL.Query().Get("action")
 	userFilter := r.URL.Query().Get("user")
+	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
+		userFilter = currentUserFilter
+	}
 
 	limit := 50
 	if limitStr != "" {
@@ -2298,8 +2347,53 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
+		entries, _ := s.activity.List(s.activity.Count(), 0, "", currentUserFilter)
+		NewAPIResponse(buildActivityStats(entries)).Write(w, http.StatusOK)
+		return
+	}
+
 	stats := s.activity.Statistics()
 	NewAPIResponse(stats).Write(w, http.StatusOK)
+}
+
+func (s *Server) currentActivityUserFilter(r *http.Request) string {
+	if !s.authEnabled || auth.IsAdmin(r.Context()) {
+		return ""
+	}
+	claims := auth.GetClaimsFromContext(r.Context())
+	if claims == nil {
+		return ""
+	}
+	return claims.Username
+}
+
+func buildActivityStats(entries []activity.Entry) map[string]any {
+	stats := map[string]any{
+		"total":     len(entries),
+		"by_action": map[activity.ActionType]int{},
+		"by_user":   map[string]int{},
+	}
+
+	actionCounts := make(map[activity.ActionType]int)
+	userCounts := make(map[string]int)
+	today := time.Now().Truncate(24 * time.Hour)
+	todayCount := 0
+
+	for _, entry := range entries {
+		actionCounts[entry.Action]++
+		if entry.User != "" {
+			userCounts[entry.User]++
+		}
+		if entry.Timestamp.After(today) {
+			todayCount++
+		}
+	}
+
+	stats["today"] = todayCount
+	stats["by_action"] = actionCounts
+	stats["by_user"] = userCounts
+	return stats
 }
 
 // handleClearActivity clears all activity log entries
@@ -2919,6 +3013,14 @@ func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Conf
 		s.shareHandler.SetBaseURL(cfg.Share.BaseURL)
 	}
 
+	if req.WebDAV != nil {
+		runtimeCfg := s.resolveWebDAVRuntimeConfig(cfg)
+		s.activeWebDAV = runtimeCfg
+		if s.updateWebDAV != nil {
+			s.updateWebDAV(runtimeCfg)
+		}
+	}
+
 	if req.Alerts != nil && s.alertMonitor != nil {
 		s.alertMonitor.UpdateConfig(alerts.Config{
 			Enabled:        cfg.Alerts.Enabled,
@@ -2997,6 +3099,11 @@ type SetupStatusResponse struct {
 // handleGetSetupStatus returns setup status for first run.
 // Initial credentials are intentionally only exposed through server-side logs.
 func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		ServiceUnavailable(w, "configuration not available")
+		return
+	}
+
 	secrets, err := config.LoadSecrets(s.config.Storage.Root)
 	if err != nil {
 		// Error reading secrets file

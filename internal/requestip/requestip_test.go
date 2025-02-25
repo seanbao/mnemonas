@@ -18,10 +18,10 @@ func TestClientIP_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *testing.T
 	}
 }
 
-func TestClientIP_UsesForwardedHeadersFromTrustedProxy(t *testing.T) {
+func TestClientIP_UsesLastForwardedAddressFromTrustedProxy(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
-	req.Header.Set("X-Forwarded-For", "198.51.100.20, 127.0.0.1")
+	req.Header.Set("X-Forwarded-For", "198.51.100.99, 198.51.100.20")
 
 	if got := ClientIP(req); got != "198.51.100.20" {
 		t.Fatalf("ClientIP() = %q, want %q", got, "198.51.100.20")
@@ -67,7 +67,17 @@ func TestParseIP_AllowsCommonForwardedHeaderAddressForms(t *testing.T) {
 func TestClientIP_UsesForwardedHeadersWithPortsFromTrustedProxy(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
-	req.Header.Set("X-Forwarded-For", "198.51.100.20:443, 127.0.0.1")
+	req.Header.Set("X-Forwarded-For", "198.51.100.99:8443, 198.51.100.20:443")
+
+	if got := ClientIP(req); got != "198.51.100.20" {
+		t.Fatalf("ClientIP() = %q, want %q", got, "198.51.100.20")
+	}
+}
+
+func TestClientIP_IgnoresSpoofedLeadingForwardedEntriesFromTrustedProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:8080"
+	req.Header.Set("X-Forwarded-For", "203.0.113.250, 198.51.100.20")
 
 	if got := ClientIP(req); got != "198.51.100.20" {
 		t.Fatalf("ClientIP() = %q, want %q", got, "198.51.100.20")

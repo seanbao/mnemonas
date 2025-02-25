@@ -889,7 +889,7 @@ POST /api/v1/shares
 
 **字段说明**:
 - `type`: `file` | `folder`
-- `permission`: `read` | `read_write`
+- `permission`: `read`
 
 **响应示例**:
 ```json
@@ -1208,6 +1208,9 @@ PATCH /api/v1/favorites/{path}
 
 获取用户操作日志。
 
+**说明**:
+- 启用认证时，管理员可查看全量活动日志；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
+
 ```
 GET /api/v1/activity
 ```
@@ -1245,6 +1248,9 @@ GET /api/v1/activity
 ```
 
 ### 活动统计
+
+**说明**:
+- 启用认证时，管理员可查看全局统计；普通用户仅返回当前账号自己的活动统计
 
 ```
 GET /api/v1/activity/stats
@@ -1472,7 +1478,7 @@ PUT /api/v1/settings
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
 - 请求中的 `trash.retention_days` 不能为负数，`trash.max_size` 必须是正整数
 - 请求中的 `versioning.max_versioned_size` 必须是正整数，`versioning.auto_versioned_extensions` 每项必须以 `.` 开头，`versioning.auto_versioned_filenames` 不能包含空项
-- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`，保存后用于后续重启启动的新 WebDAV 配置
+- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
@@ -1502,7 +1508,7 @@ GET /api/v1/settings/webdav-credentials
 ```
 
 **说明**:
-- 该端点返回当前运行中的 WebDAV 服务凭据，而不是最近一次保存到配置文件但尚未重启生效的值
+- 该端点返回当前运行中的 WebDAV 服务凭据，并与最近一次成功应用到运行态的 WebDAV 配置保持一致
 - `password` 仅在使用自动生成密码时可返回
 
 ---

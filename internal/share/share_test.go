@@ -1,6 +1,7 @@
 package share
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -66,6 +67,41 @@ func TestShareStore_CreateWithExpiration(t *testing.T) {
 	}
 	if !share.ExpiresAt.After(time.Now()) {
 		t.Error("expiration should be in the future")
+	}
+}
+
+func TestShareStore_Load_NormalizesUnsupportedPermissionToRead(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	legacy := []*Share{{
+		ID:         "share-1",
+		Path:       "/test/file.txt",
+		Type:       ShareTypeFile,
+		CreatedBy:  "user1",
+		CreatedAt:  time.Now(),
+		Permission: PermissionReadWrite,
+		Enabled:    true,
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("Marshal(legacy shares) error: %v", err)
+	}
+	if err := os.WriteFile(storePath, data, 0600); err != nil {
+		t.Fatalf("WriteFile(shares.json) error: %v", err)
+	}
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+
+	share, err := store.Get("share-1")
+	if err != nil {
+		t.Fatalf("Get(share-1) error: %v", err)
+	}
+	if share.Permission != PermissionRead {
+		t.Fatalf("expected legacy unsupported permission to normalize to read, got %q", share.Permission)
 	}
 }
 
