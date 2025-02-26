@@ -160,6 +160,14 @@ export function useIsAdmin() {
   return useAuthStore((state) => state.user?.role === 'admin')
 }
 
+export function useIsGuest() {
+  return useAuthStore((state) => state.user?.role === 'guest')
+}
+
+export function useCanWrite() {
+  return useAuthStore((state) => !state.authEnabled || state.user?.role === 'admin' || state.user?.role === 'user')
+}
+
 export function useAuthLoading() {
   return useAuthStore((state) => state.isLoading)
 }

@@ -5,6 +5,7 @@ import { TrashPage } from './Trash'
 import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
+const useCanWriteMock = vi.fn(() => true)
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
@@ -39,6 +40,14 @@ vi.mock('@/lib/useBatchOperation', () => ({
   }),
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useCanWrite: () => useCanWriteMock(),
+  }
+})
+
 import { listTrash, restoreFromTrash, deleteFromTrash, emptyTrash } from '@/api/files'
 
 const mockListTrash = vi.mocked(listTrash)
@@ -49,6 +58,7 @@ const mockEmptyTrash = vi.mocked(emptyTrash)
 describe('TrashPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useCanWriteMock.mockReturnValue(true)
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockBatchExecute.mockClear()
     mockBatchResult = {
@@ -138,6 +148,21 @@ describe('TrashPage', () => {
         // 1 hour ago
         expect(screen.getByText(/小时前|分钟前|刚刚/)).toBeTruthy()
       })
+    })
+
+    it('hides guest write controls on trash page', async () => {
+      useCanWriteMock.mockReturnValue(false)
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      expect(screen.queryByText('清空回收站')).toBeNull()
+      expect(screen.queryByRole('button', { name: '恢复 deleted-file.txt' })).toBeNull()
+      expect(screen.queryByRole('button', { name: '永久删除 deleted-file.txt' })).toBeNull()
+      expect(screen.queryByText(/已选择.*项/)).toBeNull()
     })
   })
 

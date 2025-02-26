@@ -17,6 +17,7 @@ import { getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { useIsAdmin } from '@/stores/auth'
 
 // Action card for maintenance operations
 function MaintenanceCard({
@@ -83,6 +84,7 @@ function MaintenanceCard({
 
 export function StoragePage() {
   const navigate = useNavigate()
+  const isAdmin = useIsAdmin()
   const { data: stats, isLoading, error, refetch } = useQuery({
     queryKey: ['stats'],
     queryFn: getStorageStats,
@@ -259,9 +261,10 @@ export function StoragePage() {
           gradient="from-emerald-500/20 to-cyan-500/20"
           lastRun="在系统维护中执行"
           estimate="支持随时启动"
-          buttonText="打开维护工具"
+          buttonText={isAdmin ? '打开维护工具' : '仅管理员可用'}
           buttonColor="success"
           onPress={() => navigate('/maintenance')}
+          isDisabled={!isAdmin}
         />
         
         <MaintenanceCard
@@ -271,9 +274,10 @@ export function StoragePage() {
           gradient="from-amber-500/20 to-orange-500/20"
           lastRun="在系统维护中执行"
           estimate="支持干运行与保护期"
-          buttonText="打开维护工具"
+          buttonText={isAdmin ? '打开维护工具' : '仅管理员可用'}
           buttonColor="warning"
           onPress={() => navigate('/maintenance')}
+          isDisabled={!isAdmin}
         />
       </div>
     </div>

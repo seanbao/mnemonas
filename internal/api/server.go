@@ -398,14 +398,28 @@ func (s *Server) setupRoutes() {
 			})
 		}
 
+		var requireWriteAccess func(http.Handler) http.Handler
+		if s.authEnabled {
+			requireWriteAccess = s.authMw.RequireRole(auth.RoleAdmin, auth.RoleUser)
+		}
+
 		// Share endpoints (require auth)
 		if s.shareHandler != nil {
 			r.Route("/shares", func(r chi.Router) {
 				r.Get("/", s.handleListShares)
-				r.Post("/", s.handleCreateShareWithActivity)
+				if s.authEnabled {
+					r.With(requireWriteAccess).Post("/", s.handleCreateShareWithActivity)
+				} else {
+					r.Post("/", s.handleCreateShareWithActivity)
+				}
 				r.Get("/{id}", s.handleGetShare)
-				r.Put("/{id}", s.handleUpdateShare)
-				r.Delete("/{id}", s.handleDeleteShareWithActivity)
+				if s.authEnabled {
+					r.With(requireWriteAccess).Put("/{id}", s.handleUpdateShare)
+					r.With(requireWriteAccess).Delete("/{id}", s.handleDeleteShareWithActivity)
+				} else {
+					r.Put("/{id}", s.handleUpdateShare)
+					r.Delete("/{id}", s.handleDeleteShareWithActivity)
+				}
 			})
 		}
 
@@ -413,31 +427,54 @@ func (s *Server) setupRoutes() {
 		if s.favoritesHandler != nil {
 			r.Route("/favorites", func(r chi.Router) {
 				r.Get("/", s.handleListFavorites)
-				r.Post("/", s.handleAddFavorite)
+				if s.authEnabled {
+					r.With(requireWriteAccess).Post("/", s.handleAddFavorite)
+				} else {
+					r.Post("/", s.handleAddFavorite)
+				}
 				r.Get("/check", s.handleCheckFavorite)
 				r.Post("/check-batch", s.handleCheckFavorites)
-				r.Delete("/*", s.handleRemoveFavorite)
-				r.Patch("/*", s.handleUpdateFavoriteNote)
+				if s.authEnabled {
+					r.With(requireWriteAccess).Delete("/*", s.handleRemoveFavorite)
+					r.With(requireWriteAccess).Patch("/*", s.handleUpdateFavoriteNote)
+				} else {
+					r.Delete("/*", s.handleRemoveFavorite)
+					r.Patch("/*", s.handleUpdateFavoriteNote)
+				}
 			})
 		}
 
 		// File operations
 		r.Route("/files", func(r chi.Router) {
 			r.Get("/*", s.handleListFiles)
-			r.Post("/*", s.handleUploadFile)
-			r.Delete("/*", s.handleDeleteFile)
+			if s.authEnabled {
+				r.With(requireWriteAccess).Post("/*", s.handleUploadFile)
+				r.With(requireWriteAccess).Delete("/*", s.handleDeleteFile)
+			} else {
+				r.Post("/*", s.handleUploadFile)
+				r.Delete("/*", s.handleDeleteFile)
+			}
 		})
 
 		// File operations requiring bodies
-		r.Post("/files-move", s.handleMoveFile)
-		r.Post("/files-copy", s.handleCopyFile)
+		if s.authEnabled {
+			r.With(requireWriteAccess).Post("/files-move", s.handleMoveFile)
+			r.With(requireWriteAccess).Post("/files-copy", s.handleCopyFile)
+		} else {
+			r.Post("/files-move", s.handleMoveFile)
+			r.Post("/files-copy", s.handleCopyFile)
+		}
 
 		// File download/preview (authenticated, no Basic Auth popup)
 		r.Get("/download/*", s.handleDownloadFile)
 
 		// Directory operations
 		r.Route("/directories", func(r chi.Router) {
-			r.Post("/*", s.handleCreateDirectory)
+			if s.authEnabled {
+				r.With(requireWriteAccess).Post("/*", s.handleCreateDirectory)
+			} else {
+				r.Post("/*", s.handleCreateDirectory)
+			}
 		})
 
 		// Thumbnail operations
@@ -456,10 +493,16 @@ func (s *Server) setupRoutes() {
 		// Trash/Recycle bin operations
 		r.Route("/trash", func(r chi.Router) {
 			r.Get("/", s.handleListTrash)
-			r.Delete("/", s.handleEmptyTrash)
 			r.Get("/{id}", s.handleGetTrashItem)
-			r.Post("/{id}/restore", s.handleRestoreFromTrash)
-			r.Delete("/{id}", s.handleDeleteFromTrash)
+			if s.authEnabled {
+				r.With(requireWriteAccess).Delete("/", s.handleEmptyTrash)
+				r.With(requireWriteAccess).Post("/{id}/restore", s.handleRestoreFromTrash)
+				r.With(requireWriteAccess).Delete("/{id}", s.handleDeleteFromTrash)
+			} else {
+				r.Delete("/", s.handleEmptyTrash)
+				r.Post("/{id}/restore", s.handleRestoreFromTrash)
+				r.Delete("/{id}", s.handleDeleteFromTrash)
+			}
 		})
 
 		// System info
