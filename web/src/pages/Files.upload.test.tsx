@@ -4,6 +4,7 @@ import React from 'react'
 import { FilesPage } from './Files'
 
 const mockAddToast = vi.fn()
+const useCanWriteMock = vi.fn(() => true)
 
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: ({ count }: { count: number }) => ({
@@ -122,6 +123,14 @@ vi.mock('@/stores/files', () => ({
   }),
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useCanWrite: () => useCanWriteMock(),
+  }
+})
+
 import { listFiles, uploadFile, createDirectory } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
@@ -132,6 +141,7 @@ describe('FilesPage upload queue', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
+    useCanWriteMock.mockReturnValue(true)
     mockListFiles.mockResolvedValue({
       files: [],
       path: '/',

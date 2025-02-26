@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Avatar, Dropdown, DropdownTrigger, DropdownMenu, DropdownItem, addToast } from '@heroui/react'
 import { Search, Bell, Menu, RefreshCw } from 'lucide-react'
-import { useAuthStore, useUser } from '@/stores/auth'
+import { useAuthStore, useIsAdmin, useUser } from '@/stores/auth'
 import { useQueryClient } from '@tanstack/react-query'
 import { ThemeToggle } from '@/components/ThemeToggle'
 
@@ -13,6 +13,7 @@ interface HeaderProps {
 export function Header({ onMenuClick }: HeaderProps) {
   const navigate = useNavigate()
   const user = useUser()
+  const isAdmin = useIsAdmin()
   const logout = useAuthStore((state) => state.logout)
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
@@ -145,7 +146,7 @@ export function Header({ onMenuClick }: HeaderProps) {
                 </div>
               </div>
             </DropdownItem>
-            <DropdownItem key="settings">设置</DropdownItem>
+            {isAdmin && <DropdownItem key="settings">设置</DropdownItem>}
             <DropdownItem key="help">帮助文档</DropdownItem>
             <DropdownItem key="logout" className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10">
               退出登录

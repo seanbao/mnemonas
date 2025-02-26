@@ -298,6 +298,83 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 	return server, fs, tmpDir, username, password
 }
 
+func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bool) (*Server, *storage.FileSystem, string, string, string) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a"))); err != nil {
+		t.Fatalf("WriteFile(docs/a.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/trash.txt", bytes.NewReader([]byte("trash me"))); err != nil {
+		t.Fatalf("WriteFile(docs/trash.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/docs/trash.txt"); err != nil {
+		t.Fatalf("Delete(docs/trash.txt) error: %v", err)
+	}
+
+	usersFile := path.Join(tmpDir, "users.json")
+	userStore, _, err := auth.NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	username := "tester"
+	password := "password123"
+	if _, err := userStore.Create(username, password, "", auth.RoleUser); err != nil {
+		t.Fatalf("create user error: %v", err)
+	}
+
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	settings.Share.Enabled = shareEnabled
+	settings.Favorites.Enabled = favoritesEnabled
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		FileSystem:         fs,
+		Config:             settings,
+		ConfigPath:         configPath,
+		ActivityRoot:       path.Join(tmpDir, "activity"),
+		AuthEnabled:        true,
+		AuthUsersFile:      usersFile,
+		AuthJWTSecret:      "test-secret",
+		AuthAccessTTL:      15 * time.Minute,
+		AuthRefreshTTL:     24 * time.Hour,
+		ShareEnabled:       shareEnabled,
+		ShareStoreFile:     path.Join(tmpDir, "shares.json"),
+		FavoritesEnabled:   favoritesEnabled,
+		FavoritesStoreFile: path.Join(tmpDir, "favorites.json"),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	return server, fs, tmpDir, username, password
+}
+
 func setupShareServer(t *testing.T) (*Server, string) {
 	return setupShareServerWithOptions(t, true, "")
 }
@@ -4614,6 +4691,83 @@ func TestServer_RestoreVersion_RejectsNonAdminBeforeValidation(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(restoreRec.Body.String()), "invalid hash") {
 		t.Fatalf("expected auth guard to run before validation, got %s", restoreRec.Body.String())
+	}
+}
+
+func TestServer_GuestRole_IsReadOnlyForMutatingRoutes(t *testing.T) {
+	server, _, _, _, _ := setupAuthServerWithFeatures(t, true, true)
+
+	guestUsername := "guest-reader"
+	guestPassword := "guestpass123"
+	if _, err := server.userStore.Create(guestUsername, guestPassword, "", auth.RoleGuest); err != nil {
+		t.Fatalf("create guest user error: %v", err)
+	}
+
+	login := func(t *testing.T, user, pass string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, user, pass)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("login status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var payload struct {
+			Data auth.LoginResponse `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to parse login response: %v", err)
+		}
+		return payload.Data.AccessToken
+	}
+
+	guestToken := login(t, guestUsername, guestPassword)
+
+	tests := []struct {
+		name        string
+		method      string
+		url         string
+		body        string
+		contentType string
+	}{
+		{name: "upload file", method: http.MethodPost, url: "/api/v1/files/guest-write.txt", body: "content", contentType: "text/plain"},
+		{name: "move file", method: http.MethodPost, url: "/api/v1/files-move", body: `{"source":"/docs/a.txt","destination":"/docs/moved.txt"}`, contentType: "application/json"},
+		{name: "create share", method: http.MethodPost, url: "/api/v1/shares", body: `{"path":"/docs/a.txt","type":"file"}`, contentType: "application/json"},
+		{name: "add favorite", method: http.MethodPost, url: "/api/v1/favorites", body: `{"path":"/docs/a.txt"}`, contentType: "application/json"},
+		{name: "empty trash", method: http.MethodDelete, url: "/api/v1/trash/"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body io.Reader
+			if tt.body != "" {
+				body = strings.NewReader(tt.body)
+			}
+			req := httptest.NewRequest(tt.method, tt.url, body)
+			req.Header.Set("Authorization", "Bearer "+guestToken)
+			if tt.contentType != "" {
+				req.Header.Set("Content-Type", tt.contentType)
+			}
+			w := httptest.NewRecorder()
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("guest %s status = %d, want %d", tt.name, w.Code, http.StatusForbidden)
+			}
+			if !strings.Contains(w.Body.String(), "INSUFFICIENT_PERMISSIONS") {
+				t.Fatalf("expected insufficient permissions error, got %s", w.Body.String())
+			}
+		})
+	}
+
+	checkReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/docs/a.txt"]}`))
+	checkReq.Header.Set("Authorization", "Bearer "+guestToken)
+	checkReq.Header.Set("Content-Type", "application/json")
+	checkRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(checkRec, checkReq)
+
+	if checkRec.Code != http.StatusOK {
+		t.Fatalf("guest favorites check-batch status = %d, want %d", checkRec.Code, http.StatusOK)
 	}
 }
 

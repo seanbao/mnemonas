@@ -5,6 +5,7 @@ import { FilesPage } from './Files'
 import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
+const useCanWriteMock = vi.fn(() => true)
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
@@ -65,6 +66,18 @@ vi.mock('@/stores/clipboard', () => ({
   useClipboardStore: () => mockClipboardState,
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useCanWrite: () => useCanWriteMock(),
+  }
+})
+
+vi.mock('@/components/share', () => ({
+  ShareDialog: () => null,
+}))
+
 import { listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
 import { downloadFile } from '@/api/files'
 
@@ -78,6 +91,7 @@ const mockDownloadFile = vi.mocked(downloadFile)
 describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useCanWriteMock.mockReturnValue(true)
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockFilesStoreState.selectedFiles = new Set<string>()
     mockFilesStoreState.currentPath = '/'
@@ -194,6 +208,23 @@ describe('FilesPage', () => {
         const buttons = document.querySelectorAll('button')
         expect(buttons.length).toBeGreaterThan(2)
       })
+    })
+
+    it('hides guest write actions from the selection toolbar but keeps batch download', async () => {
+      useCanWriteMock.mockReturnValue(false)
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+      })
+
+      expect(screen.queryByText('批量移动')).toBeNull()
+      expect(screen.queryByText('批量复制')).toBeNull()
+      expect(screen.queryByText('批量删除')).toBeNull()
+      expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+      expect(screen.getByText('访客账户为只读，仅可查看和下载')).toBeTruthy()
     })
   })
 

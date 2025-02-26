@@ -31,6 +31,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { useCanWrite } from '@/stores/auth'
 
 // Calculate days until auto-delete based on retention config
 function daysUntilDelete(deletedAt: string, retentionDays: number): number | null {
@@ -51,7 +52,8 @@ function TrashRow({
   onRestore,
   onDelete,
   retentionDays,
-  retentionEnabled
+  retentionEnabled,
+  canWrite,
 }: {
   item: TrashItem
   isSelected: boolean
@@ -60,6 +62,7 @@ function TrashRow({
   onDelete: () => void
   retentionDays: number
   retentionEnabled: boolean
+  canWrite: boolean
 }) {
   const daysLeft = retentionEnabled ? daysUntilDelete(item.deletedAt, retentionDays) : null
   
@@ -70,10 +73,14 @@ function TrashRow({
         isSelected && "bg-accent-primary/10"
       )}
     >
-      <Checkbox
-        isSelected={isSelected}
-        onValueChange={onSelect}
-      />
+      {canWrite ? (
+        <Checkbox
+          isSelected={isSelected}
+          onValueChange={onSelect}
+        />
+      ) : (
+        <div className="w-6 shrink-0" />
+      )}
       <div className="w-8 flex items-center justify-center">
         <FileIcon name={item.name} isDir={item.isDir} size={24} variant="bare" />
       </div>
@@ -96,30 +103,34 @@ function TrashRow({
         )}
       </div>
       <div className="w-20 flex items-center justify-end gap-1">
-        <Button
-          isIconOnly
-          size="sm"
-          variant="light"
-          color="success"
-          aria-label={`恢复 ${item.name}`}
-          onPress={onRestore}
-          title="恢复"
-          className="rounded-xl"
-        >
-          <RotateCcw size={16} />
-        </Button>
-        <Button
-          isIconOnly
-          size="sm"
-          variant="light"
-          color="danger"
-          aria-label={`永久删除 ${item.name}`}
-          onPress={onDelete}
-          title="永久删除"
-          className="rounded-xl"
-        >
-          <Trash2 size={16} />
-        </Button>
+        {canWrite && (
+          <>
+            <Button
+              isIconOnly
+              size="sm"
+              variant="light"
+              color="success"
+              aria-label={`恢复 ${item.name}`}
+              onPress={onRestore}
+              title="恢复"
+              className="rounded-xl"
+            >
+              <RotateCcw size={16} />
+            </Button>
+            <Button
+              isIconOnly
+              size="sm"
+              variant="light"
+              color="danger"
+              aria-label={`永久删除 ${item.name}`}
+              onPress={onDelete}
+              title="永久删除"
+              className="rounded-xl"
+            >
+              <Trash2 size={16} />
+            </Button>
+          </>
+        )}
       </div>
     </div>
   )
@@ -127,6 +138,7 @@ function TrashRow({
 
 export function TrashPage() {
   const queryClient = useQueryClient()
+  const canWrite = useCanWrite()
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
 
@@ -182,13 +194,14 @@ export function TrashPage() {
   })
 
   const handleSelectAll = useCallback(() => {
+    if (!canWrite) return
     if (!data?.items) return
     if (selectedItems.size === data.items.length) {
       setSelectedItems(new Set())
     } else {
       setSelectedItems(new Set(data.items.map(item => item.id)))
     }
-  }, [data, selectedItems.size])
+  }, [canWrite, data, selectedItems.size])
 
   // Batch restore using custom hook
   const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation({
@@ -206,10 +219,11 @@ export function TrashPage() {
   })
 
   const handleBatchRestore = useCallback(async () => {
+    if (!canWrite) return
     const ids = Array.from(selectedItems)
     if (ids.length === 0) return
     await executeBatchRestore(ids)
-  }, [selectedItems, executeBatchRestore])
+  }, [canWrite, selectedItems, executeBatchRestore])
 
   // Batch delete using custom hook
   const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation({
@@ -226,22 +240,25 @@ export function TrashPage() {
   })
 
   const handleBatchDelete = useCallback(async () => {
+    if (!canWrite) return
     const ids = Array.from(selectedItems)
     if (ids.length === 0) return
     await executeBatchDelete(ids)
     onBatchDeleteClose()
-  }, [selectedItems, executeBatchDelete, onBatchDeleteClose])
+  }, [canWrite, selectedItems, executeBatchDelete, onBatchDeleteClose])
 
   const handleDeleteClick = useCallback((item: TrashItem) => {
+    if (!canWrite) return
     setActionItem(item)
     onDeleteOpen()
-  }, [onDeleteOpen])
+  }, [canWrite, onDeleteOpen])
 
   const handleConfirmDelete = useCallback(() => {
+    if (!canWrite) return
     if (actionItem) {
       deleteMutation.mutate(actionItem.id)
     }
-  }, [actionItem, deleteMutation])
+  }, [canWrite, actionItem, deleteMutation])
 
   if (isLoading) {
     return (
@@ -295,7 +312,7 @@ export function TrashPage() {
         subtitle={`${itemCount} 项 · ${formatBytes(totalSize)} · ${retentionLabel}`}
         icon={Trash2}
         actions={
-          itemCount > 0 ? (
+          canWrite && itemCount > 0 ? (
             <Button
               color="danger"
               variant="flat"
@@ -310,7 +327,7 @@ export function TrashPage() {
       />
 
       {/* Selection bar */}
-      {selectedItems.size > 0 && (
+      {canWrite && selectedItems.size > 0 && (
         <div className="flex items-center gap-4 px-4 py-2.5 bg-accent-primary/10 backdrop-blur-sm rounded-xl border border-divider shadow-[var(--shadow-soft)]">
           <div className="w-8 h-8 rounded-full bg-accent-primary/15 flex items-center justify-center">
             <span className="text-sm font-bold text-accent-primary">{selectedItems.size}</span>
@@ -348,14 +365,18 @@ export function TrashPage() {
       {/* List header */}
       {items.length > 0 && (
         <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
-          <Checkbox
-            isSelected={selectedItems.size === items.length && items.length > 0}
-            isIndeterminate={selectedItems.size > 0 && selectedItems.size < items.length}
-            onValueChange={handleSelectAll}
-            classNames={{
-              wrapper: "before:border-divider",
-            }}
-          />
+          {canWrite ? (
+            <Checkbox
+              isSelected={selectedItems.size === items.length && items.length > 0}
+              isIndeterminate={selectedItems.size > 0 && selectedItems.size < items.length}
+              onValueChange={handleSelectAll}
+              classNames={{
+                wrapper: "before:border-divider",
+              }}
+            />
+          ) : (
+            <div className="w-6 shrink-0" />
+          )}
           <div className="w-8" />
           <div className="flex-1">名称</div>
           <div className="w-24 text-right">大小</div>
@@ -374,7 +395,9 @@ export function TrashPage() {
               isSelected={selectedItems.has(item.id)}
               retentionDays={retentionDays}
               retentionEnabled={retentionEnabled}
+              canWrite={canWrite}
               onSelect={() => {
+                if (!canWrite) return
                 const newSet = new Set(selectedItems)
                 if (newSet.has(item.id)) {
                   newSet.delete(item.id)
@@ -383,7 +406,10 @@ export function TrashPage() {
                 }
                 setSelectedItems(newSet)
               }}
-              onRestore={() => restoreMutation.mutate(item.id)}
+              onRestore={() => {
+                if (!canWrite) return
+                restoreMutation.mutate(item.id)
+              }}
               onDelete={() => handleDeleteClick(item)}
             />
           ))

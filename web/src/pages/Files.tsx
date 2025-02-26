@@ -52,6 +52,7 @@ import { PreviewModal, type PreviewFile } from '@/components/preview'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { useClipboardStore } from '@/stores/clipboard'
+import { useCanWrite } from '@/stores/auth'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
 import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile, ApiError } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
@@ -117,6 +118,7 @@ function FileRow({
   isSelected, 
   isFavorited,
   isMultiSelection,
+  canWrite,
   onSelect, 
   onOpen,
   onClick,
@@ -131,6 +133,7 @@ function FileRow({
   isSelected: boolean
   isFavorited: boolean
   isMultiSelection: boolean
+  canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
   onClick: (e: React.MouseEvent) => void
@@ -246,13 +249,15 @@ function FileRow({
                     下载
                   </DropdownItem>
                 )}
-                <DropdownItem 
-                  key="rename" 
-                  startContent={<Pencil size={16} />}
-                  onPress={onRename}
-                >
-                  重命名
-                </DropdownItem>
+                {canWrite && (
+                  <DropdownItem 
+                    key="rename" 
+                    startContent={<Pencil size={16} />}
+                    onPress={onRename}
+                  >
+                    重命名
+                  </DropdownItem>
+                )}
                 <DropdownItem 
                   key="copy-path" 
                   startContent={<Copy size={16} />}
@@ -261,21 +266,25 @@ function FileRow({
                   复制路径
                 </DropdownItem>
               </DropdownSection>
-              <DropdownSection title="分享">
-                <DropdownItem 
-                  key="favorite" 
-                  startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
-                  onPress={onToggleFavorite}
-                >
-                  {isFavorited ? '取消收藏' : '添加收藏'}
-                </DropdownItem>
-                <DropdownItem 
-                  key="share" 
-                  startContent={<Link2 size={16} />}
-                  onPress={onShare}
-                >
-                  创建分享链接
-                </DropdownItem>
+              {canWrite && (
+                <DropdownSection title="分享">
+                  <DropdownItem 
+                    key="favorite" 
+                    startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
+                    onPress={onToggleFavorite}
+                  >
+                    {isFavorited ? '取消收藏' : '添加收藏'}
+                  </DropdownItem>
+                  <DropdownItem 
+                    key="share" 
+                    startContent={<Link2 size={16} />}
+                    onPress={onShare}
+                  >
+                    创建分享链接
+                  </DropdownItem>
+                </DropdownSection>
+              )}
+              <DropdownSection title="历史">
                 <DropdownItem 
                   key="versions" 
                   startContent={<History size={16} />}
@@ -285,16 +294,18 @@ function FileRow({
                   查看版本历史
                 </DropdownItem>
               </DropdownSection>
-              <DropdownSection>
-                <DropdownItem 
-                  key="delete" 
-                  startContent={<Trash2 size={16} />}
-                  className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10"
-                  onPress={onDelete}
-                >
-                  删除
-                </DropdownItem>
-              </DropdownSection>
+              {canWrite && (
+                <DropdownSection>
+                  <DropdownItem 
+                    key="delete" 
+                    startContent={<Trash2 size={16} />}
+                    className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10"
+                    onPress={onDelete}
+                  >
+                    删除
+                  </DropdownItem>
+                </DropdownSection>
+              )}
             </DropdownMenu>
           </Dropdown>
         )}
@@ -355,6 +366,7 @@ function FileCard({
   isSelected,
   isFavorited,
   isMultiSelection,
+  canWrite,
   onSelect,
   onOpen,
   onClick,
@@ -369,6 +381,7 @@ function FileCard({
   isSelected: boolean
   isFavorited: boolean
   isMultiSelection: boolean
+  canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
   onClick: (e: React.MouseEvent) => void
@@ -469,13 +482,15 @@ function FileCard({
                     下载
                   </DropdownItem>
                 )}
-                <DropdownItem 
-                  key="rename" 
-                  startContent={<Pencil size={16} />}
-                  onPress={onRename}
-                >
-                  重命名
-                </DropdownItem>
+                {canWrite && (
+                  <DropdownItem 
+                    key="rename" 
+                    startContent={<Pencil size={16} />}
+                    onPress={onRename}
+                  >
+                    重命名
+                  </DropdownItem>
+                )}
                 <DropdownItem 
                   key="copy-path" 
                   startContent={<Copy size={16} />}
@@ -484,22 +499,24 @@ function FileCard({
                   复制路径
                 </DropdownItem>
               </DropdownSection>
-              <DropdownSection title="分享" showDivider>
-                <DropdownItem 
-                  key="favorite" 
-                  startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
-                  onPress={onToggleFavorite}
-                >
-                  {isFavorited ? '取消收藏' : '添加收藏'}
-                </DropdownItem>
-                <DropdownItem 
-                  key="share" 
-                  startContent={<Link2 size={16} />}
-                  onPress={onShare}
-                >
-                  创建分享链接
-                </DropdownItem>
-              </DropdownSection>
+              {canWrite && (
+                <DropdownSection title="分享" showDivider>
+                  <DropdownItem 
+                    key="favorite" 
+                    startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
+                    onPress={onToggleFavorite}
+                  >
+                    {isFavorited ? '取消收藏' : '添加收藏'}
+                  </DropdownItem>
+                  <DropdownItem 
+                    key="share" 
+                    startContent={<Link2 size={16} />}
+                    onPress={onShare}
+                  >
+                    创建分享链接
+                  </DropdownItem>
+                </DropdownSection>
+              )}
               <DropdownSection title="历史">
                 <DropdownItem 
                   key="versions" 
@@ -510,16 +527,18 @@ function FileCard({
                   查看版本历史
                 </DropdownItem>
               </DropdownSection>
-              <DropdownSection>
-                <DropdownItem 
-                  key="delete" 
-                  startContent={<Trash2 size={16} />}
-                  className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10"
-                  onPress={onDelete}
-                >
-                  删除
-                </DropdownItem>
-              </DropdownSection>
+              {canWrite && (
+                <DropdownSection>
+                  <DropdownItem 
+                    key="delete" 
+                    startContent={<Trash2 size={16} />}
+                    className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10"
+                    onPress={onDelete}
+                  >
+                    删除
+                  </DropdownItem>
+                </DropdownSection>
+              )}
             </DropdownMenu>
           </Dropdown>
         )}
@@ -557,6 +576,7 @@ export function FilesPage() {
   
   // Clipboard state
   const clipboard = useClipboardStore()
+  const canWrite = useCanWrite()
   
   // Track focused file index for keyboard navigation
   const [focusedIndex, setFocusedIndex] = useState<number>(-1)
@@ -836,39 +856,44 @@ export function FilesPage() {
   }, [sortedFiles, selectedFiles.size, selectAll, clearSelection])
 
   const handleCreateFolder = useCallback(() => {
+    if (!canWrite) return
     const trimmedFolderName = newFolderName.trim()
     if (!trimmedFolderName) return
     const path = currentPath === '/' ? `/${trimmedFolderName}` : `${currentPath}/${trimmedFolderName}`
     createFolderMutation.mutate(path)
-  }, [newFolderName, currentPath, createFolderMutation])
+  }, [canWrite, newFolderName, currentPath, createFolderMutation])
 
   const handleRename = useCallback(() => {
+    if (!canWrite) return
     const trimmedRenameValue = renameValue.trim()
     if (!actionFile || !trimmedRenameValue) return
     if (trimmedRenameValue === actionFile.name) return
     const parentPath = actionFile.path.substring(0, actionFile.path.lastIndexOf('/')) || '/'
     const newPath = parentPath === '/' ? `/${trimmedRenameValue}` : `${parentPath}/${trimmedRenameValue}`
     renameMutation.mutate({ from: actionFile.path, to: newPath })
-  }, [actionFile, renameValue, renameMutation])
+  }, [canWrite, actionFile, renameValue, renameMutation])
 
   const handleDelete = useCallback(() => {
+    if (!canWrite) return
     if (!actionFile) return
     deleteMutation.mutate(actionFile.path)
     onDeleteClose()
     setActionFile(null)
-  }, [actionFile, deleteMutation, onDeleteClose])
+  }, [canWrite, actionFile, deleteMutation, onDeleteClose])
 
   // Action handlers for context menu
   const handleOpenRenameModal = useCallback((file: FileItem) => {
+    if (!canWrite) return
     setActionFile(file)
     setRenameValue(file.name)
     onRenameOpen()
-  }, [onRenameOpen])
+  }, [canWrite, onRenameOpen])
 
   const handleOpenDeleteModal = useCallback((file: FileItem) => {
+    if (!canWrite) return
     setActionFile(file)
     onDeleteOpen()
-  }, [onDeleteOpen])
+  }, [canWrite, onDeleteOpen])
 
   const handleViewVersions = useCallback((file: FileItem) => {
     if (file.isDir) return
@@ -876,22 +901,25 @@ export function FilesPage() {
   }, [navigate])
 
   const handleOpenShareModal = useCallback((file: FileItem) => {
+    if (!canWrite) return
     setShareFile(file)
     onShareOpen()
-  }, [onShareOpen])
+  }, [canWrite, onShareOpen])
 
   // Move/Copy handlers
   const handleOpenMoveModal = useCallback((files: FileItem[]) => {
+    if (!canWrite) return
     setMoveFiles(files)
     setMoveMode('move')
     onMoveOpen()
-  }, [onMoveOpen])
+  }, [canWrite, onMoveOpen])
 
   const handleOpenCopyModal = useCallback((files: FileItem[]) => {
+    if (!canWrite) return
     setMoveFiles(files)
     setMoveMode('copy')
     onMoveOpen()
-  }, [onMoveOpen])
+  }, [canWrite, onMoveOpen])
 
   // Context menu handler
   const handleContextMenu = useCallback((file: FileItem, e: React.MouseEvent) => {
@@ -966,6 +994,7 @@ export function FilesPage() {
 
   // Enhanced upload handler with queue support and folder support
   const handleUpload = useCallback(async (files: FileList | null) => {
+    if (!canWrite) return
     if (!files || files.length === 0) return
 
     if (uploadClearTimeoutRef.current) {
@@ -1069,7 +1098,7 @@ export function FilesPage() {
       setUploadQueue(prev => prev.filter(item => item.status === 'error'))
       uploadClearTimeoutRef.current = null
     }, 3000)
-  }, [currentPath, queryClient, ensureDirectoryExists])
+  }, [canWrite, currentPath, queryClient, ensureDirectoryExists])
 
   useEffect(() => {
     return () => {
@@ -1086,29 +1115,33 @@ export function FilesPage() {
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (!canWrite) return
     e.preventDefault()
     e.stopPropagation()
     dragCountRef.current++
     if (e.dataTransfer.types.includes('Files')) {
       setIsDragging(true)
     }
-  }, [])
+  }, [canWrite])
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
+    if (!canWrite) return
     e.preventDefault()
     e.stopPropagation()
     dragCountRef.current--
     if (dragCountRef.current === 0) {
       setIsDragging(false)
     }
-  }, [])
+  }, [canWrite])
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!canWrite) return
     e.preventDefault()
     e.stopPropagation()
-  }, [])
+  }, [canWrite])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
+    if (!canWrite) return
     e.preventDefault()
     e.stopPropagation()
     dragCountRef.current = 0
@@ -1118,10 +1151,11 @@ export function FilesPage() {
     if (files.length > 0) {
       handleUpload(files)
     }
-  }, [handleUpload])
+  }, [canWrite, handleUpload])
 
   // Batch delete handler
   const handleBatchDelete = useCallback(async () => {
+    if (!canWrite) return
     const paths = Array.from(selectedFiles)
     let successCount = 0
     let errorCount = 0
@@ -1154,7 +1188,7 @@ export function FilesPage() {
     }
 
     addToast({ title: '批量删除部分完成', description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
-  }, [selectedFiles, queryClient, currentPath, clearSelection, onBatchDeleteClose, setSelection])
+  }, [canWrite, selectedFiles, queryClient, currentPath, clearSelection, onBatchDeleteClose, setSelection])
 
   // Batch download handler
   const handleBatchDownload = useCallback(async () => {
@@ -1185,18 +1219,21 @@ export function FilesPage() {
 
   // Keyboard shortcuts handlers
   const handleKeyboardCopy = useCallback(() => {
+    if (!canWrite) return
     if (selectedFiles.size === 0) return
     clipboard.copy(Array.from(selectedFiles), currentPath)
     addToast({ title: `已复制 ${selectedFiles.size} 个项目`, color: 'success' })
-  }, [selectedFiles, currentPath, clipboard])
+  }, [canWrite, selectedFiles, currentPath, clipboard])
 
   const handleKeyboardCut = useCallback(() => {
+    if (!canWrite) return
     if (selectedFiles.size === 0) return
     clipboard.cut(Array.from(selectedFiles), currentPath)
     addToast({ title: `已剪切 ${selectedFiles.size} 个项目`, color: 'success' })
-  }, [selectedFiles, currentPath, clipboard])
+  }, [canWrite, selectedFiles, currentPath, clipboard])
 
   const handleKeyboardPaste = useCallback(async () => {
+    if (!canWrite) return
     if (!clipboard.hasPaths()) return
     
     const { paths, operation, sourcePath } = clipboard
@@ -1247,21 +1284,23 @@ export function FilesPage() {
     }
 
     addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
-  }, [clipboard, currentPath, queryClient])
+  }, [canWrite, clipboard, currentPath, queryClient])
 
   const handleKeyboardDelete = useCallback(() => {
+    if (!canWrite) return
     if (selectedFiles.size === 0) return
     onBatchDeleteOpen()
-  }, [selectedFiles.size, onBatchDeleteOpen])
+  }, [canWrite, selectedFiles.size, onBatchDeleteOpen])
 
   const handleKeyboardRename = useCallback(() => {
+    if (!canWrite) return
     if (selectedFiles.size !== 1) return
     const path = Array.from(selectedFiles)[0]
     const file = sortedFiles.find(f => f.path === path)
     if (file) {
       handleOpenRenameModal(file)
     }
-  }, [selectedFiles, sortedFiles, handleOpenRenameModal])
+  }, [canWrite, selectedFiles, sortedFiles, handleOpenRenameModal])
 
   const handleKeyboardEnter = useCallback(() => {
     // If there's a focused file, open it
@@ -1329,18 +1368,18 @@ export function FilesPage() {
 
   // Register keyboard shortcuts
   useKeyboardShortcuts({
-    onDelete: handleKeyboardDelete,
+    onDelete: canWrite ? handleKeyboardDelete : undefined,
     onSelectAll: handleSelectAll,
     onEscape: clearSelection,
-    onCopy: handleKeyboardCopy,
-    onCut: handleKeyboardCut,
-    onPaste: handleKeyboardPaste,
-    onRename: handleKeyboardRename,
+    onCopy: canWrite ? handleKeyboardCopy : undefined,
+    onCut: canWrite ? handleKeyboardCut : undefined,
+    onPaste: canWrite ? handleKeyboardPaste : undefined,
+    onRename: canWrite ? handleKeyboardRename : undefined,
     onEnter: handleKeyboardEnter,
     onArrowDown: handleKeyboardArrowDown,
     onArrowUp: handleKeyboardArrowUp,
     onRefresh: handleKeyboardRefresh,
-    onNewFolder: onNewFolderOpen,
+    onNewFolder: canWrite ? onNewFolderOpen : undefined,
   })
 
   // Determine active file for preview (prioritize activeFilePath, then single selection)
@@ -1676,33 +1715,42 @@ export function FilesPage() {
                 <span className="text-xs text-default-500">
                   可下载 {selectedCounts.files} 个
                 </span>
-                <Button 
-                  variant="bordered" 
-                  className="btn-secondary btn-sm rounded-xl text-default-500"
-                  startContent={<Move size={16} />}
-                  onPress={() => handleOpenMoveModal(selectedFileItems)}
-                >
-                  批量移动
-                </Button>
-                <Button 
-                  variant="bordered" 
-                  className="btn-secondary btn-sm rounded-xl text-default-500"
-                  startContent={<Files size={16} />}
-                  onPress={() => handleOpenCopyModal(selectedFileItems)}
-                >
-                  批量复制
-                </Button>
-                <Button 
-                  color="danger"
-                  variant="flat"
-                  className="rounded-xl"
-                  startContent={<Trash2 size={16} />}
-                  onPress={onBatchDeleteOpen}
-                >
-                  批量删除
-                </Button>
+                {canWrite && (
+                  <Button 
+                    variant="bordered" 
+                    className="btn-secondary btn-sm rounded-xl text-default-500"
+                    startContent={<Move size={16} />}
+                    onPress={() => handleOpenMoveModal(selectedFileItems)}
+                  >
+                    批量移动
+                  </Button>
+                )}
+                {canWrite && (
+                  <Button 
+                    variant="bordered" 
+                    className="btn-secondary btn-sm rounded-xl text-default-500"
+                    startContent={<Files size={16} />}
+                    onPress={() => handleOpenCopyModal(selectedFileItems)}
+                  >
+                    批量复制
+                  </Button>
+                )}
+                {canWrite && (
+                  <Button 
+                    color="danger"
+                    variant="flat"
+                    className="rounded-xl"
+                    startContent={<Trash2 size={16} />}
+                    onPress={onBatchDeleteOpen}
+                  >
+                    批量删除
+                  </Button>
+                )}
                 <div className="flex flex-col gap-0.5">
                   <span className="text-xs text-default-400">删除将进入回收站</span>
+                  {!canWrite && (
+                    <span className="text-xs text-default-400">访客账户为只读，仅可查看和下载</span>
+                  )}
                   {!hasDownloadableSelection && selectedCounts.files > 0 && selectedCounts.folders > 0 && (
                     <span className="text-xs text-default-400 flex items-center gap-1">
                       <Folder size={12} />
@@ -1713,32 +1761,40 @@ export function FilesPage() {
               </>
             ) : (
               <>
-                <Button 
-                  className="btn-primary btn-md border-none font-medium rounded-xl"
-                  startContent={<Upload size={16} />}
-                  onPress={() => fileInputRef.current?.click()}
-                  isLoading={isUploading}
-                >
-                  {isUploading ? '上传中...' : '上传文件'}
-                </Button>
-                <Button 
-                  variant="bordered" 
-                  className="btn-secondary btn-md rounded-xl"
-                  startContent={<FolderUp size={16} />}
-                  onPress={() => folderInputRef.current?.click()}
-                  isLoading={isUploading}
-                  isDisabled={isUploading}
-                >
-                  上传文件夹
-                </Button>
-                <Button 
-                  variant="bordered" 
-                  className="btn-secondary btn-md rounded-xl"
-                  startContent={<FolderPlus size={16} />}
-                  onPress={onNewFolderOpen}
-                >
-                  新建空间
-                </Button>
+                {canWrite ? (
+                  <>
+                    <Button 
+                      className="btn-primary btn-md border-none font-medium rounded-xl"
+                      startContent={<Upload size={16} />}
+                      onPress={() => fileInputRef.current?.click()}
+                      isLoading={isUploading}
+                    >
+                      {isUploading ? '上传中...' : '上传文件'}
+                    </Button>
+                    <Button 
+                      variant="bordered" 
+                      className="btn-secondary btn-md rounded-xl"
+                      startContent={<FolderUp size={16} />}
+                      onPress={() => folderInputRef.current?.click()}
+                      isLoading={isUploading}
+                      isDisabled={isUploading}
+                    >
+                      上传文件夹
+                    </Button>
+                    <Button 
+                      variant="bordered" 
+                      className="btn-secondary btn-md rounded-xl"
+                      startContent={<FolderPlus size={16} />}
+                      onPress={onNewFolderOpen}
+                    >
+                      新建空间
+                    </Button>
+                  </>
+                ) : (
+                  <div className="rounded-xl border border-divider bg-content1 px-4 py-2 text-sm text-default-500">
+                    访客账户为只读，仅可查看、预览和下载文件
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -1860,6 +1916,7 @@ export function FilesPage() {
                         isSelected={selectedFiles.has(file.path)}
                         isFavorited={favoritesData?.[file.path] ?? false}
                         isMultiSelection={hasMultiSelection}
+                        canWrite={canWrite}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
                         onOpen={() => handleFileOpen(file)}
                         onClick={(e) => handleFileSelection(file, virtualItem.index, e)}
@@ -1937,6 +1994,7 @@ export function FilesPage() {
                     isSelected={selectedFiles.has(file.path)}
                     isFavorited={favoritesData?.[file.path] ?? false}
                     isMultiSelection={hasMultiSelection}
+                    canWrite={canWrite}
                     onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
                     onOpen={() => handleFileOpen(file)}
                     onClick={(e) => handleFileSelection(file, index, e)}
@@ -2214,36 +2272,42 @@ export function FilesPage() {
                 >
                   批量下载（仅文件）
                 </ContextMenuItem>
-                <ContextMenuItem
-                  icon={<Move size={16} />}
-                  onClick={() => {
-                    handleOpenMoveModal(selectedFileItems)
-                    contextMenu.hide()
-                  }}
-                  disabled={selectedFileItems.length === 0}
-                >
-                  批量移动{selectedFileItems.length === 0 ? '（无可移动项）' : ''}
-                </ContextMenuItem>
-                <ContextMenuItem
-                  icon={<Files size={16} />}
-                  onClick={() => {
-                    handleOpenCopyModal(selectedFileItems)
-                    contextMenu.hide()
-                  }}
-                  disabled={selectedFileItems.length === 0}
-                >
-                  批量复制{selectedFileItems.length === 0 ? '（无可复制项）' : ''}
-                </ContextMenuItem>
-                <ContextMenuItem
-                  icon={<Trash2 size={16} />}
-                  danger
-                  onClick={() => {
-                    onBatchDeleteOpen()
-                    contextMenu.hide()
-                  }}
-                >
-                  批量删除（进回收站）
-                </ContextMenuItem>
+                {canWrite && (
+                  <ContextMenuItem
+                    icon={<Move size={16} />}
+                    onClick={() => {
+                      handleOpenMoveModal(selectedFileItems)
+                      contextMenu.hide()
+                    }}
+                    disabled={selectedFileItems.length === 0}
+                  >
+                    批量移动{selectedFileItems.length === 0 ? '（无可移动项）' : ''}
+                  </ContextMenuItem>
+                )}
+                {canWrite && (
+                  <ContextMenuItem
+                    icon={<Files size={16} />}
+                    onClick={() => {
+                      handleOpenCopyModal(selectedFileItems)
+                      contextMenu.hide()
+                    }}
+                    disabled={selectedFileItems.length === 0}
+                  >
+                    批量复制{selectedFileItems.length === 0 ? '（无可复制项）' : ''}
+                  </ContextMenuItem>
+                )}
+                {canWrite && (
+                  <ContextMenuItem
+                    icon={<Trash2 size={16} />}
+                    danger
+                    onClick={() => {
+                      onBatchDeleteOpen()
+                      contextMenu.hide()
+                    }}
+                  >
+                    批量删除（进回收站）
+                  </ContextMenuItem>
+                )}
               </ContextMenuSection>
             ) : (
               <>
@@ -2266,33 +2330,39 @@ export function FilesPage() {
                       下载
                     </ContextMenuItem>
                   )}
-                  <ContextMenuItem
-                    icon={<Pencil size={16} />}
-                    onClick={() => {
-                      handleOpenRenameModal(contextMenuFile)
-                      contextMenu.hide()
-                    }}
-                  >
-                    重命名
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    icon={<Move size={16} />}
-                    onClick={() => {
-                      handleOpenMoveModal([contextMenuFile])
-                      contextMenu.hide()
-                    }}
-                  >
-                    移动到...
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    icon={<Files size={16} />}
-                    onClick={() => {
-                      handleOpenCopyModal([contextMenuFile])
-                      contextMenu.hide()
-                    }}
-                  >
-                    复制到...
-                  </ContextMenuItem>
+                  {canWrite && (
+                    <ContextMenuItem
+                      icon={<Pencil size={16} />}
+                      onClick={() => {
+                        handleOpenRenameModal(contextMenuFile)
+                        contextMenu.hide()
+                      }}
+                    >
+                      重命名
+                    </ContextMenuItem>
+                  )}
+                  {canWrite && (
+                    <ContextMenuItem
+                      icon={<Move size={16} />}
+                      onClick={() => {
+                        handleOpenMoveModal([contextMenuFile])
+                        contextMenu.hide()
+                      }}
+                    >
+                      移动到...
+                    </ContextMenuItem>
+                  )}
+                  {canWrite && (
+                    <ContextMenuItem
+                      icon={<Files size={16} />}
+                      onClick={() => {
+                        handleOpenCopyModal([contextMenuFile])
+                        contextMenu.hide()
+                      }}
+                    >
+                      复制到...
+                    </ContextMenuItem>
+                  )}
                   <ContextMenuItem
                     icon={<Copy size={16} />}
                     onClick={handleContextMenuCopyPath}
@@ -2300,28 +2370,32 @@ export function FilesPage() {
                     复制路径
                   </ContextMenuItem>
                 </ContextMenuSection>
-                <ContextMenuSection title="分享" showDivider>
-                  <ContextMenuItem
-                    icon={<Star size={16} className={favoritesData?.[contextMenuFile.path] ? "fill-accent-primary text-accent-primary" : ""} />}
-                    onClick={() => {
-                      favoriteMutation.mutate({ 
-                        path: contextMenuFile.path, 
-                        isFavorited: favoritesData?.[contextMenuFile.path] ?? false 
-                      })
-                      contextMenu.hide()
-                    }}
-                  >
-                    {favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏'}
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    icon={<Link2 size={16} />}
-                    onClick={() => {
-                      handleOpenShareModal(contextMenuFile)
-                      contextMenu.hide()
-                    }}
-                  >
-                    创建分享链接
-                  </ContextMenuItem>
+                <ContextMenuSection title={canWrite ? '分享' : '历史'} showDivider>
+                  {canWrite && (
+                    <ContextMenuItem
+                      icon={<Star size={16} className={favoritesData?.[contextMenuFile.path] ? "fill-accent-primary text-accent-primary" : ""} />}
+                      onClick={() => {
+                        favoriteMutation.mutate({ 
+                          path: contextMenuFile.path, 
+                          isFavorited: favoritesData?.[contextMenuFile.path] ?? false 
+                        })
+                        contextMenu.hide()
+                      }}
+                    >
+                      {favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏'}
+                    </ContextMenuItem>
+                  )}
+                  {canWrite && (
+                    <ContextMenuItem
+                      icon={<Link2 size={16} />}
+                      onClick={() => {
+                        handleOpenShareModal(contextMenuFile)
+                        contextMenu.hide()
+                      }}
+                    >
+                      创建分享链接
+                    </ContextMenuItem>
+                  )}
                   <ContextMenuItem
                     icon={<History size={16} />}
                     onClick={() => {
@@ -2333,18 +2407,20 @@ export function FilesPage() {
                     查看版本历史
                   </ContextMenuItem>
                 </ContextMenuSection>
-                <ContextMenuSection>
-                  <ContextMenuItem
-                    icon={<Trash2 size={16} />}
-                    danger
-                    onClick={() => {
-                      handleOpenDeleteModal(contextMenuFile)
-                      contextMenu.hide()
-                    }}
-                  >
-                    删除
-                  </ContextMenuItem>
-                </ContextMenuSection>
+                {canWrite && (
+                  <ContextMenuSection>
+                    <ContextMenuItem
+                      icon={<Trash2 size={16} />}
+                      danger
+                      onClick={() => {
+                        handleOpenDeleteModal(contextMenuFile)
+                        contextMenu.hide()
+                      }}
+                    >
+                      删除
+                    </ContextMenuItem>
+                  </ContextMenuSection>
+                )}
               </>
             )}
           </>

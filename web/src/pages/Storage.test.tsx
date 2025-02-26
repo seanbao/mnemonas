@@ -3,10 +3,20 @@ import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { StoragePage } from './Storage'
 
+const useIsAdminMock = vi.fn(() => true)
+
 // Mock API
 vi.mock('@/api/files', () => ({
   getStorageStats: vi.fn(),
 }))
+
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useIsAdmin: () => useIsAdminMock(),
+  }
+})
 
 import { getStorageStats } from '@/api/files'
 
@@ -21,6 +31,7 @@ describe('StoragePage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    useIsAdminMock.mockReturnValue(true)
     mockGetStorageStats.mockResolvedValue(mockStats)
   })
 
@@ -188,6 +199,17 @@ describe('StoragePage', () => {
 
       await waitFor(() => {
         expect(screen.getAllByText(/支持/).length).toBeGreaterThan(1)
+      })
+    })
+
+    it('disables maintenance actions for non-admin users', async () => {
+      useIsAdminMock.mockReturnValue(false)
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        const buttons = screen.getAllByRole('button', { name: '仅管理员可用' })
+        expect(buttons.length).toBe(2)
+        buttons.forEach((button) => expect(button).toBeDisabled())
       })
     })
   })
