@@ -388,6 +388,7 @@ export function UsersPage() {
             <div>
               <Input
                 label="用户名"
+                aria-label="用户名"
                 placeholder="请输入用户名"
                 value={newUsername}
                 onValueChange={setNewUsername}
@@ -405,6 +406,7 @@ export function UsersPage() {
               <Input
                 type="password"
                 label="密码"
+                aria-label="密码"
                 placeholder="请输入密码（至少 8 位）"
                 value={newPassword}
                 onValueChange={setNewPassword}
@@ -421,6 +423,7 @@ export function UsersPage() {
               <Input
                 type="email"
                 label="邮箱（可选）"
+                aria-label="邮箱"
                 placeholder="请输入邮箱"
                 value={newEmail}
                 onValueChange={setNewEmail}
@@ -436,6 +439,7 @@ export function UsersPage() {
             <div>
               <label className="text-sm font-medium text-foreground mb-2 block">角色</label>
               <Select
+                aria-label="角色"
                 selectedKeys={[newRole]}
                 onSelectionChange={(keys) => {
                   const value = Array.from(keys)[0] as 'admin' | 'user' | 'guest'
@@ -570,6 +574,7 @@ export function UsersPage() {
               <Input
                 type="password"
                 label="新密码"
+                aria-label="新密码"
                 placeholder="请输入新密码（至少 8 位）"
                 value={resetPassword}
                 onValueChange={setResetPassword}
