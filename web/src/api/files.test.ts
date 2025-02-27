@@ -241,8 +241,8 @@ describe('API: files', () => {
       })
 
       await expect(createDirectory('/new-folder')).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/dav/new-folder', {
-        method: 'MKCOL',
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/directories/new-folder', {
+        method: 'POST',
         headers: {},
       })
     })
@@ -255,11 +255,12 @@ describe('API: files', () => {
       })
 
       await expect(moveFile('/old.txt', '/new.txt')).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/dav/old.txt', {
-        method: 'MOVE',
+      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files-move', {
+        method: 'POST',
         headers: {
-          'Destination': '/dav/new.txt',
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ from: '/old.txt', to: '/new.txt' }),
       })
     })
   })
@@ -374,11 +375,11 @@ describe('API: files', () => {
   describe('URL helpers', () => {
     describe('getDownloadUrl', () => {
       it('generates correct download URL', () => {
-        expect(getDownloadUrl('/docs/file.pdf')).toBe('/dav/docs/file.pdf')
+        expect(getDownloadUrl('/docs/file.pdf')).toBe('/api/v1/download/docs/file.pdf')
       })
 
       it('handles special characters', () => {
-        expect(getDownloadUrl('/文档/测试.txt')).toBe('/dav/%E6%96%87%E6%A1%A3/%E6%B5%8B%E8%AF%95.txt')
+        expect(getDownloadUrl('/文档/测试.txt')).toBe('/api/v1/download/%E6%96%87%E6%A1%A3/%E6%B5%8B%E8%AF%95.txt')
       })
     })
 

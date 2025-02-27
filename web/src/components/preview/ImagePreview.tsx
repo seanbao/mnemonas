@@ -3,6 +3,7 @@ import { Spinner, Button } from '@heroui/react'
 import { ZoomIn, ZoomOut, RotateCw, Maximize2, AlertCircle } from 'lucide-react'
 import { buildPreviewUrl } from '@/lib/preview-utils'
 import { cn } from '@/lib/utils'
+import { getAuthHeaders } from '@/api/auth'
 
 export interface ImagePreviewProps {
   path: string
@@ -18,11 +19,54 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
   const [position, setPosition] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
+  const [blobUrl, setBlobUrl] = useState<string | null>(null)
   
   const containerRef = useRef<HTMLDivElement>(null)
   const imageRef = useRef<HTMLImageElement>(null)
 
   const imageUrl = buildPreviewUrl(path)
+
+  // Fetch image with auth token and create blob URL
+  useEffect(() => {
+    let cancelled = false
+    let currentBlobUrl: string | null = null
+    
+    const fetchImage = async () => {
+      setIsLoading(true)
+      setError(null)
+      setBlobUrl(null)
+      
+      try {
+        const response = await fetch(imageUrl, {
+          headers: getAuthHeaders(),
+        })
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        
+        const blob = await response.blob()
+        if (!cancelled) {
+          currentBlobUrl = URL.createObjectURL(blob)
+          setBlobUrl(currentBlobUrl)
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError('无法加载图片')
+          setIsLoading(false)
+        }
+      }
+    }
+    
+    fetchImage()
+    
+    return () => {
+      cancelled = true
+      if (currentBlobUrl) {
+        URL.revokeObjectURL(currentBlobUrl)
+      }
+    }
+  }, [imageUrl])
 
   const handleLoad = useCallback(() => {
     setIsLoading(false)
@@ -81,14 +125,21 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
     }
   }, [])
 
-  // Reset when path changes
+  // Reset transform when path changes
   useEffect(() => {
     setScale(1)
     setRotation(0)
     setPosition({ x: 0, y: 0 })
-    setIsLoading(true)
-    setError(null)
   }, [path])
+
+  // Cleanup blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl)
+      }
+    }
+  }, [blobUrl])
 
   return (
     <div className={cn("h-full flex flex-col bg-content1 rounded-xl overflow-hidden", className)}>
@@ -170,23 +221,25 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
           </div>
         )}
         
-        <img
-          ref={imageRef}
-          src={imageUrl}
-          alt={filename}
-          className={cn(
-            "max-w-full max-h-full object-contain transition-opacity",
-            isLoading && "opacity-0",
-            !isLoading && !error && "opacity-100"
-          )}
-          style={{
-            transform: `translate(${position.x}px, ${position.y}px) scale(${scale}) rotate(${rotation}deg)`,
-            transition: isDragging ? 'none' : 'transform 0.2s ease',
-          }}
-          onLoad={handleLoad}
-          onError={handleError}
-          draggable={false}
-        />
+        {blobUrl && (
+          <img
+            ref={imageRef}
+            src={blobUrl}
+            alt={filename}
+            className={cn(
+              "max-w-full max-h-full object-contain transition-opacity",
+              isLoading && "opacity-0",
+              !isLoading && !error && "opacity-100"
+            )}
+            style={{
+              transform: `translate(${position.x}px, ${position.y}px) scale(${scale}) rotate(${rotation}deg)`,
+              transition: isDragging ? 'none' : 'transform 0.2s ease',
+            }}
+            onLoad={handleLoad}
+            onError={handleError}
+            draggable={false}
+          />
+        )}
       </div>
     </div>
   )
