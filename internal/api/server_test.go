@@ -375,6 +375,27 @@ func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bo
 	return server, fs, tmpDir, username, password
 }
 
+func loginAndGetAccessToken(t *testing.T, server *Server, username, password string) string {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	return payload.Data.AccessToken
+}
+
 func setupShareServer(t *testing.T) (*Server, string) {
 	return setupShareServerWithOptions(t, true, "")
 }
@@ -1956,6 +1977,115 @@ func TestServer_Diagnostics(t *testing.T) {
 	}
 }
 
+func TestServer_Diagnostics_RequiresAdminWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	userToken := loginAndGetAccessToken(t, server, username, password)
+
+	userReq := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	userReq.Header.Set("Authorization", "Bearer "+userToken)
+	userRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(userRec, userReq)
+
+	if userRec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin diagnostics status = %d, want %d", userRec.Code, http.StatusForbidden)
+	}
+
+	adminUsername := "diagnostics-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+adminToken)
+	adminRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(adminRec, adminReq)
+
+	if adminRec.Code != http.StatusOK {
+		t.Fatalf("admin diagnostics status = %d, want %d", adminRec.Code, http.StatusOK)
+	}
+}
+
+func TestServer_ListFiles_EnforcesHomeDirForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "/api/v1/files/tester", nil)
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("own home list status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(allowedRec.Body.String(), "/tester/own.txt") {
+		t.Fatalf("expected own home file in response, got %s", allowedRec.Body.String())
+	}
+
+	forbiddenReq := httptest.NewRequest(http.MethodGet, "/api/v1/files/other", nil)
+	forbiddenReq.Header.Set("Authorization", "Bearer "+token)
+	forbiddenRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(forbiddenRec, forbiddenReq)
+
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("outside home list status = %d, want %d", forbiddenRec.Code, http.StatusForbidden)
+	}
+}
+
+func TestServer_Search_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/report.txt", bytes.NewReader([]byte("report"))); err != nil {
+		t.Fatalf("WriteFile(/tester/report.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=txt", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("search status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "/tester/report.txt") {
+		t.Fatalf("expected own home search result, got %s", body)
+	}
+	if strings.Contains(body, "/other/secret.txt") {
+		t.Fatalf("expected outside-home result to be filtered, got %s", body)
+	}
+}
+
 func TestServer_Metrics(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -3354,6 +3484,310 @@ func TestServer_DiagnosticsExport(t *testing.T) {
 	// Should return OK with zip content or service unavailable if maintenance not configured
 	if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
 		t.Errorf("DiagnosticsExport status = %d", w.Code)
+	}
+}
+
+func TestServer_DiagnosticsExport_RequiresAdminWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	userToken := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics-export", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin diagnostics export status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+func TestServer_ListTrash_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/deleted.txt", bytes.NewReader([]byte("deleted"))); err != nil {
+		t.Fatalf("WriteFile(/tester/deleted.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/tester/deleted.txt"); err != nil {
+		t.Fatalf("Delete(/tester/deleted.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/other/secret.txt"); err != nil {
+		t.Fatalf("Delete(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/trash/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("trash status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "/tester/deleted.txt") {
+		t.Fatalf("expected own home trash item, got %s", body)
+	}
+	if strings.Contains(body, "/other/secret.txt") {
+		t.Fatalf("expected outside-home trash item to be filtered, got %s", body)
+	}
+}
+
+func TestServer_CreateShare_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	forbiddenReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/other/secret.txt","type":"file"}`))
+	forbiddenReq.Header.Set("Authorization", "Bearer "+token)
+	forbiddenReq.Header.Set("Content-Type", "application/json")
+	forbiddenRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(forbiddenRec, forbiddenReq)
+
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("outside home share status = %d, want %d", forbiddenRec.Code, http.StatusForbidden)
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/tester/own.txt","type":"file"}`))
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedReq.Header.Set("Content-Type", "application/json")
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusCreated {
+		t.Fatalf("own home share status = %d, want %d", allowedRec.Code, http.StatusCreated)
+	}
+}
+
+func TestServer_PublicShareAccess_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
+	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	allowedShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create own-home share error: %v", err)
+	}
+	legacyShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/other/secret.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create outside-home share error: %v", err)
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "/s/"+allowedShare.ID, nil)
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("public own-home share access status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+
+	legacyReq := httptest.NewRequest(http.MethodGet, "/s/"+legacyShare.ID, nil)
+	legacyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(legacyRec, legacyReq)
+
+	if legacyRec.Code != http.StatusNotFound {
+		t.Fatalf("public outside-home share access status = %d, want %d", legacyRec.Code, http.StatusNotFound)
+	}
+}
+
+func TestServer_GetShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	allowedShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create own-home share error: %v", err)
+	}
+	legacyShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/other/secret.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create outside-home share error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "/api/v1/shares/"+allowedShare.ID, nil)
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("get own-home share status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+
+	legacyReq := httptest.NewRequest(http.MethodGet, "/api/v1/shares/"+legacyShare.ID, nil)
+	legacyReq.Header.Set("Authorization", "Bearer "+token)
+	legacyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(legacyRec, legacyReq)
+
+	if legacyRec.Code != http.StatusNotFound {
+		t.Fatalf("get outside-home share status = %d, want %d", legacyRec.Code, http.StatusNotFound)
+	}
+}
+
+func TestServer_CheckFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	forbiddenReq := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=/other/secret.txt", nil)
+	forbiddenReq.Header.Set("Authorization", "Bearer "+token)
+	forbiddenRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(forbiddenRec, forbiddenReq)
+
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("outside home favorite check status = %d, want %d", forbiddenRec.Code, http.StatusForbidden)
+	}
+
+	allowedAddReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/tester/own.txt"}`))
+	allowedAddReq.Header.Set("Authorization", "Bearer "+token)
+	allowedAddReq.Header.Set("Content-Type", "application/json")
+	allowedAddRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedAddRec, allowedAddReq)
+
+	if allowedAddRec.Code != http.StatusCreated {
+		t.Fatalf("add own home favorite status = %d, want %d", allowedAddRec.Code, http.StatusCreated)
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=/tester/own.txt", nil)
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("own home favorite check status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(allowedRec.Body.String(), `"is_favorite":true`) {
+		t.Fatalf("expected own home favorite to be reported, got %s", allowedRec.Body.String())
+	}
+}
+
+func TestServer_CheckFavorites_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	allowedAddReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/tester/own.txt"}`))
+	allowedAddReq.Header.Set("Authorization", "Bearer "+token)
+	allowedAddReq.Header.Set("Content-Type", "application/json")
+	allowedAddRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedAddRec, allowedAddReq)
+
+	if allowedAddRec.Code != http.StatusCreated {
+		t.Fatalf("add own home favorite status = %d, want %d", allowedAddRec.Code, http.StatusCreated)
+	}
+
+	forbiddenReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/tester/own.txt","/other/secret.txt"]}`))
+	forbiddenReq.Header.Set("Authorization", "Bearer "+token)
+	forbiddenReq.Header.Set("Content-Type", "application/json")
+	forbiddenRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(forbiddenRec, forbiddenReq)
+
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("outside home favorite batch check status = %d, want %d", forbiddenRec.Code, http.StatusForbidden)
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/tester/own.txt"]}`))
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedReq.Header.Set("Content-Type", "application/json")
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("own home favorite batch check status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(allowedRec.Body.String(), `"/tester/own.txt":true`) {
+		t.Fatalf("expected own home favorite batch result, got %s", allowedRec.Body.String())
+	}
+}
+
+func TestServer_ListFavorites_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/tester/own.txt", ""); err != nil {
+		t.Fatalf("Add own home favorite error: %v", err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/other/secret.txt", ""); err != nil {
+		t.Fatalf("Add outside-home favorite error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list favorites status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "/tester/own.txt") {
+		t.Fatalf("expected own home favorite, got %s", body)
+	}
+	if strings.Contains(body, "/other/secret.txt") {
+		t.Fatalf("expected outside-home favorite to be filtered, got %s", body)
 	}
 }
 

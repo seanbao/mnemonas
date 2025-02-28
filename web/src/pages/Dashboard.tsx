@@ -26,6 +26,7 @@ import { getHealth, getStorageStats } from '@/api/files'
 import { listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { useIsAdmin } from '@/stores/auth'
 
 interface QuickActionProps {
   icon: React.ComponentType<{ size?: number; className?: string }>
@@ -137,6 +138,7 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
 
 export function DashboardPage() {
   const navigate = useNavigate()
+  const isAdmin = useIsAdmin()
   
   const { data: health, isLoading: healthLoading, error: healthError, refetch: refetchHealth } = useQuery({
     queryKey: ['health'],
@@ -374,13 +376,15 @@ export function DashboardPage() {
             onClick={() => navigate('/storage')}
             gradient="from-emerald-500/20 to-cyan-500/20"
           />
-          <QuickAction
-            icon={Activity}
-            label="系统健康"
-            description="检查系统状态"
-            onClick={() => navigate('/system-health')}
-            gradient="from-violet-500/20 to-fuchsia-500/20"
-          />
+          {isAdmin && (
+            <QuickAction
+              icon={Activity}
+              label="系统健康"
+              description="检查系统状态"
+              onClick={() => navigate('/system-health')}
+              gradient="from-violet-500/20 to-fuchsia-500/20"
+            />
+          )}
           <QuickAction
             icon={Clock}
             label="版本历史"

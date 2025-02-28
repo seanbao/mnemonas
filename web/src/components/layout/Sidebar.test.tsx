@@ -176,6 +176,7 @@ describe('Sidebar', () => {
 
     expect(screen.queryByText('守护')).toBeFalsy()
     expect(screen.queryByText('用户')).toBeFalsy()
+    expect(screen.queryByText('健康')).toBeFalsy()
     expect(screen.queryByText('设置')).toBeFalsy()
     expect(screen.getByText('活动')).toBeTruthy()
   })

@@ -57,7 +57,7 @@ const navSections: NavSection[] = [
   {
     title: '系统',
     items: [
-      { icon: Activity, label: '健康', path: '/system-health' },
+      { icon: Activity, label: '健康', path: '/system-health', adminOnly: true },
       { icon: FileText, label: '活动', path: '/activity' },
       { icon: Settings, label: '设置', path: '/settings', adminOnly: true },
     ]
