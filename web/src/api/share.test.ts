@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { getPublicShareItems, getShareFileDownloadUrl } from './share'
+import { accessShareWithPassword, getPublicShareItems, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
 
 describe('Share API', () => {
   beforeEach(() => {
@@ -18,22 +18,26 @@ describe('Share API', () => {
     expect(url).toBe('/s/abc123/download/folder/sub/file.txt')
   })
 
-  it('adds encoded password query', () => {
-    const url = getShareFileDownloadUrl('abc123', '/folder/file.txt', 'p@ss word')
-    expect(url).toBe('/s/abc123/download/folder/file.txt?password=p%40ss%20word')
+  it('builds shared file download URL without password query', () => {
+    const url = getShareFileDownloadUrl('abc123', '/folder/file.txt')
+    expect(url).toBe('/s/abc123/download/folder/file.txt')
+  })
+
+  it('builds shared root download URL without password query', () => {
+    expect(getShareDownloadUrl('abc123')).toBe('/s/abc123/download')
   })
   })
 
   describe('getPublicShareItems', () => {
-    it('requests items with path and password', async () => {
+    it('requests items with path only', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ path: 'docs', items: [] }),
       })
 
-      await getPublicShareItems('share-1', { path: 'docs', password: 'secret' })
+      await getPublicShareItems('share-1', { path: 'docs' })
 
-      expect(global.fetch).toHaveBeenCalledWith('/s/share-1/items?path=docs&password=secret')
+      expect(global.fetch).toHaveBeenCalledWith('/s/share-1/items?path=docs')
     })
 
     it('throws ShareError on failure', async () => {
@@ -47,6 +51,22 @@ describe('Share API', () => {
         message: '分享不存在',
         status: 404,
       })
+    })
+  })
+
+  describe('accessShareWithPassword', () => {
+    it('uses same-origin credentials so browser stores access cookie', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ id: 'share-1', type: 'file', has_password: true, permission: 'read' }),
+      })
+
+      await accessShareWithPassword('share-1', 'secret')
+
+      expect(global.fetch).toHaveBeenCalledWith('/s/share-1', expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+      }))
     })
   })
 })
