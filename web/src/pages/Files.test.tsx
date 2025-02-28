@@ -6,6 +6,7 @@ import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
+const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' }
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
@@ -71,6 +72,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   return {
     ...actual,
     useCanWrite: () => useCanWriteMock(),
+    useUser: () => mockUser,
   }
 })
 
@@ -92,6 +94,11 @@ describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockFilesStoreState.selectedFiles = new Set<string>()
     mockFilesStoreState.currentPath = '/'
@@ -180,6 +187,21 @@ describe('FilesPage', () => {
 
       expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: true })
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/')
+    })
+
+    it('redirects non-admin root browsing to the assigned home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = '/tester'
+      mockFilesStoreState.currentPath = '/'
+      mockLocationPathname = '/files'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/tester')
+      })
     })
   })
 

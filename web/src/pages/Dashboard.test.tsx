@@ -3,6 +3,8 @@ import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { DashboardPage } from './Dashboard'
 
+const useIsAdminMock = vi.fn(() => true)
+
 // Mock the API functions
 vi.mock('@/api/files', () => ({
   getHealth: vi.fn().mockResolvedValue({
@@ -43,6 +45,14 @@ vi.mock('react-router-dom', async () => {
   }
 })
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useIsAdmin: () => useIsAdminMock(),
+  }
+})
+
 import { getHealth, getStorageStats } from '@/api/files'
 import { listActivity } from '@/api/activity'
 
@@ -53,6 +63,7 @@ const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 describe('DashboardPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useIsAdminMock.mockReturnValue(true)
     mockNavigate.mockClear()
     // Reset mocks to default values (vi.clearAllMocks clears mockResolvedValue)
     mockGetHealth.mockResolvedValue({
@@ -272,6 +283,17 @@ describe('DashboardPage', () => {
 
       await user.click(screen.getByText('系统健康'))
       expect(mockNavigate).toHaveBeenCalledWith('/system-health')
+    })
+
+    it('hides system health quick action for non-admin users', async () => {
+      useIsAdminMock.mockReturnValue(false)
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('文件管理')).toBeTruthy()
+      })
+
+      expect(screen.queryByText('系统健康')).toBeNull()
     })
 
     it('navigates to versions on version history click', async () => {

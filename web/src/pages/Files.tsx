@@ -52,7 +52,7 @@ import { PreviewModal, type PreviewFile } from '@/components/preview'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { useClipboardStore } from '@/stores/clipboard'
-import { useCanWrite } from '@/stores/auth'
+import { useCanWrite, useUser } from '@/stores/auth'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
 import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile, ApiError } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
@@ -577,6 +577,7 @@ export function FilesPage() {
   // Clipboard state
   const clipboard = useClipboardStore()
   const canWrite = useCanWrite()
+  const user = useUser()
   
   // Track focused file index for keyboard navigation
   const [focusedIndex, setFocusedIndex] = useState<number>(-1)
@@ -655,6 +656,12 @@ export function FilesPage() {
       setCurrentPath(finalPath)
     }
   }, [location.pathname, currentPath, navigate, setCurrentPath])
+
+  useEffect(() => {
+    if (!user || user.role === 'admin' || user.homeDir === '/') return
+    if (location.pathname !== '/files' || currentPath !== '/') return
+    setCurrentPath(user.homeDir)
+  }, [user, location.pathname, currentPath, setCurrentPath])
 
   useEffect(() => {
     const encodedPath = currentPath === '/' ? '' : encodeURI(currentPath)

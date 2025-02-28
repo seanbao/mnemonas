@@ -507,8 +507,13 @@ func (s *Server) setupRoutes() {
 
 		// System info
 		r.Get("/stats", s.handleStats)
-		r.Get("/diagnostics", s.handleDiagnostics)
-		r.Get("/diagnostics-export", s.handleDiagnosticsExport)
+		if s.authEnabled {
+			r.With(s.authMw.RequireRole(auth.RoleAdmin)).Get("/diagnostics", s.handleDiagnostics)
+			r.With(s.authMw.RequireRole(auth.RoleAdmin)).Get("/diagnostics-export", s.handleDiagnosticsExport)
+		} else {
+			r.Get("/diagnostics", s.handleDiagnostics)
+			r.Get("/diagnostics-export", s.handleDiagnosticsExport)
+		}
 		r.Get("/metrics", s.handleMetrics)
 
 		// Search
@@ -592,6 +597,103 @@ func pathContainsDescendant(basePath, targetPath string) bool {
 	return strings.HasPrefix(targetPath, basePath+"/")
 }
 
+var errPathOutsideHomeDir = errors.New("path outside user home directory")
+
+func pathWithinBase(basePath, targetPath string) bool {
+	basePath = path.Clean(basePath)
+	targetPath = path.Clean(targetPath)
+	if basePath == "/" {
+		return strings.HasPrefix(targetPath, "/")
+	}
+	return targetPath == basePath || strings.HasPrefix(targetPath, basePath+"/")
+}
+
+func (s *Server) currentUserHomeDir(ctx context.Context) (string, bool, error) {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return "", false, nil
+	}
+
+	user := auth.GetUserFromContext(ctx)
+	if user == nil {
+		return "", false, nil
+	}
+
+	homeDir, err := validatePath(user.HomeDir)
+	if err != nil {
+		return "", true, errPathOutsideHomeDir
+	}
+
+	return homeDir, true, nil
+}
+
+func (s *Server) authorizeUserPath(ctx context.Context, targetPath string) error {
+	homeDir, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return err
+	}
+	if !scoped {
+		return nil
+	}
+	if !pathWithinBase(homeDir, targetPath) {
+		return errPathOutsideHomeDir
+	}
+	return nil
+}
+
+func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*storage.SearchResult) ([]*storage.SearchResult, error) {
+	homeDir, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return results, nil
+	}
+
+	filtered := make([]*storage.SearchResult, 0, len(results))
+	for _, result := range results {
+		if result != nil && pathWithinBase(homeDir, result.Path) {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *Server) filterTrashItemsByHomeDir(ctx context.Context, items []*storage.TrashItem) ([]*storage.TrashItem, error) {
+	homeDir, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return items, nil
+	}
+
+	filtered := make([]*storage.TrashItem, 0, len(items))
+	for _, item := range items {
+		if item != nil && pathWithinBase(homeDir, item.OriginalPath) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *Server) filterFavoritesByHomeDir(ctx context.Context, items []*favorites.Favorite) ([]*favorites.Favorite, error) {
+	homeDir, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return items, nil
+	}
+
+	filtered := make([]*favorites.Favorite, 0, len(items))
+	for _, item := range items {
+		if item != nil && pathWithinBase(homeDir, item.Path) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
 // validateHash validates a BLAKE3 hash string (64 hex characters).
 func validateHash(hash string) error {
 	if len(hash) != 64 {
@@ -619,6 +721,10 @@ func badRequestInvalidSourcePath(w http.ResponseWriter) {
 
 func badRequestInvalidDestinationPath(w http.ResponseWriter) {
 	BadRequest(w, "invalid destination path")
+}
+
+func forbiddenPathOutsideHome(w http.ResponseWriter) {
+	Forbidden(w, "path is outside the assigned home directory")
 }
 
 func shouldSkipGCObjectByGrace(obj dataplane.ObjectInfo, graceCutoff time.Time) bool {
@@ -805,6 +911,10 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
+	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
 
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
@@ -859,6 +969,10 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
+	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
 
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
@@ -901,6 +1015,10 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	dirPath, err := validatePath(dirPath)
 	if err != nil {
 		badRequestInvalidPath(w)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), dirPath); err != nil {
+		forbiddenPathOutsideHome(w)
 		return
 	}
 
@@ -959,6 +1077,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
+	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
 
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
@@ -998,6 +1120,10 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	filePath, err := validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+		forbiddenPathOutsideHome(w)
 		return
 	}
 
@@ -1111,10 +1237,18 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidSourcePath(w)
 		return
 	}
+	if err := s.authorizeUserPath(r.Context(), fromPath); err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
 
 	toPath, err := validatePath(req.To)
 	if err != nil {
 		badRequestInvalidDestinationPath(w)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), toPath); err != nil {
+		forbiddenPathOutsideHome(w)
 		return
 	}
 	if fromPath == toPath {
@@ -1183,10 +1317,18 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidSourcePath(w)
 		return
 	}
+	if err := s.authorizeUserPath(r.Context(), fromPath); err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
 
 	toPath, err := validatePath(req.To)
 	if err != nil {
 		badRequestInvalidDestinationPath(w)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), toPath); err != nil {
+		forbiddenPathOutsideHome(w)
 		return
 	}
 	if fromPath == toPath {
@@ -1260,6 +1402,10 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 	filePath, err := validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+		forbiddenPathOutsideHome(w)
 		return
 	}
 
@@ -1403,6 +1549,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	results, err := s.fs.Search(r.Context(), query, limit)
 	if err != nil {
 		s.respondInternalError(w, "search files", err)
+		return
+	}
+	results, err = s.filterSearchResultsByHomeDir(r.Context(), results)
+	if err != nil {
+		forbiddenPathOutsideHome(w)
 		return
 	}
 
@@ -2059,9 +2210,17 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "list trash", err)
 		return
 	}
+	items, err = s.filterTrashItemsByHomeDir(r.Context(), items)
+	if err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
 
-	// Get stats
-	count, totalSize, _ := s.fs.GetTrashStats(r.Context())
+	count := len(items)
+	var totalSize int64
+	for _, item := range items {
+		totalSize += item.Size
+	}
 
 	// Convert to API response format
 	apiItems := make([]map[string]any, 0, len(items))
@@ -2113,6 +2272,10 @@ func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "get trash item", err)
 		return
 	}
+	if err := s.authorizeUserPath(r.Context(), item.OriginalPath); err != nil {
+		s.respondNotFound(w, "get trash item", storage.ErrNotFound)
+		return
+	}
 
 	NewAPIResponse(map[string]any{
 		"id":           item.ID,
@@ -2136,17 +2299,34 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		BadRequest(w, "id is required")
 		return
 	}
+	item, err := s.fs.GetTrashItem(r.Context(), id)
+	if err != nil {
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "restore from trash", err)
+			return
+		}
+
+		s.respondInternalError(w, "restore from trash", err)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), item.OriginalPath); err != nil {
+		s.respondNotFound(w, "restore from trash", storage.ErrNotFound)
+		return
+	}
 
 	// Check if custom restore path is provided
 	newPath := r.URL.Query().Get("path")
 	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
 
-	var err error
 	if newPath != "" {
 		// Restore to custom path
 		newPath, err = validatePath(newPath)
 		if err != nil {
 			badRequestInvalidPath(w)
+			return
+		}
+		if err := s.authorizeUserPath(r.Context(), newPath); err != nil {
+			forbiddenPathOutsideHome(w)
 			return
 		}
 		activityPath = newPath
@@ -2193,6 +2373,20 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "id is required")
 		return
 	}
+	item, err := s.fs.GetTrashItem(r.Context(), id)
+	if err != nil {
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "delete from trash", err)
+			return
+		}
+
+		s.respondInternalError(w, "delete from trash", err)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), item.OriginalPath); err != nil {
+		s.respondNotFound(w, "delete from trash", storage.ErrNotFound)
+		return
+	}
 	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
@@ -2235,6 +2429,48 @@ func (s *Server) lookupTrashOriginalPath(ctx context.Context, id string) string 
 func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+	homeDir, scoped, err := s.currentUserHomeDir(r.Context())
+	if err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
+	if scoped {
+		items, err := s.fs.ListTrash(r.Context())
+		if err != nil {
+			s.respondInternalError(w, "empty trash", err)
+			return
+		}
+
+		deletedCount := 0
+		for _, item := range items {
+			if item == nil || !pathWithinBase(homeDir, item.OriginalPath) {
+				continue
+			}
+			if err := s.fs.DeleteFromTrash(r.Context(), item.ID); err != nil {
+				if deletedCount > 0 {
+					s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{
+						"count":   strconv.Itoa(deletedCount),
+						"partial": "true",
+					})
+					NewAPIResponse(map[string]any{
+						"deleted_count": deletedCount,
+						"partial":       true,
+					}).WithMessage("trash emptied partially").Write(w, http.StatusOK)
+					return
+				}
+				s.respondInternalError(w, "empty trash", err)
+				return
+			}
+			deletedCount++
+		}
+
+		s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(deletedCount)})
+		NewAPIResponse(map[string]any{
+			"deleted_count": deletedCount,
+			"partial":       false,
+		}).WithMessage("trash emptied successfully").Write(w, http.StatusOK)
 		return
 	}
 
@@ -2283,6 +2519,10 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	filePath, err := validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
+		return
+	}
+	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+		forbiddenPathOutsideHome(w)
 		return
 	}
 
@@ -3246,9 +3486,53 @@ func (s *Server) writeShareFeatureDisabled(w http.ResponseWriter, status int) {
 	writeShareErrorResponse(w, status, "share feature disabled", "SHARE_FEATURE_DISABLED")
 }
 
+func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
+	if s.shareStore == nil {
+		return nil, share.ErrShareNotFound
+	}
+
+	shareInfo, err := s.shareStore.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	if !s.authEnabled || s.userStore == nil {
+		return shareInfo, nil
+	}
+
+	owner, err := s.userStore.GetByID(shareInfo.CreatedBy)
+	if err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			return nil, share.ErrShareNotFound
+		}
+		return nil, err
+	}
+	if owner.Role == auth.RoleAdmin {
+		return shareInfo, nil
+	}
+
+	homeDir, err := validatePath(owner.HomeDir)
+	if err != nil {
+		return nil, err
+	}
+	if !pathWithinBase(homeDir, shareInfo.Path) {
+		return nil, share.ErrShareNotFound
+	}
+
+	return shareInfo, nil
+}
+
 func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
+		return
+	}
+	if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		s.respondInternalError(w, "authorize public share access", err)
 		return
 	}
 	s.shareHandler.AccessShare(w, r)
@@ -3259,12 +3543,28 @@ func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Re
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
 	}
+	if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		s.respondInternalError(w, "authorize public share access", err)
+		return
+	}
 	s.shareHandler.AccessShareWithPassword(w, r)
 }
 
 func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
+		return
+	}
+	if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		s.respondInternalError(w, "authorize public share download", err)
 		return
 	}
 	s.shareHandler.DownloadShare(w, r)
@@ -3275,12 +3575,28 @@ func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request)
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
 	}
+	if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		s.respondInternalError(w, "authorize public share download", err)
+		return
+	}
 	s.shareHandler.DownloadShareFile(w, r)
 }
 
 func (s *Server) handleListShareItems(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
+		return
+	}
+	if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
+		s.respondInternalError(w, "authorize public share listing", err)
 		return
 	}
 	s.shareHandler.ListShareItems(w, r)
@@ -3299,6 +3615,16 @@ func (s *Server) handleGetShare(w http.ResponseWriter, r *http.Request) {
 		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
 		return
 	}
+	if !auth.IsAdmin(r.Context()) {
+		if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+			if errors.Is(err, share.ErrShareNotFound) {
+				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+				return
+			}
+			s.respondInternalError(w, "authorize share access", err)
+			return
+		}
+	}
 	s.shareHandler.GetShare(w, r)
 }
 
@@ -3306,6 +3632,16 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
 		return
+	}
+	if !auth.IsAdmin(r.Context()) {
+		if _, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err != nil {
+			if errors.Is(err, share.ErrShareNotFound) {
+				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+				return
+			}
+			s.respondInternalError(w, "authorize share update", err)
+			return
+		}
 	}
 	s.shareHandler.UpdateShare(w, r)
 }
@@ -3315,13 +3651,42 @@ func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
-	s.favoritesHandler.ListFavorites(w, r)
+	if s.favoritesStore == nil {
+		s.favoritesHandler.ListFavorites(w, r)
+		return
+	}
+
+	userID := "anonymous"
+	if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
+		userID = claims.UserID
+	}
+
+	favoritesList := s.favoritesStore.List(userID)
+	if s.authEnabled {
+		var err error
+		favoritesList, err = s.filterFavoritesByHomeDir(r.Context(), favoritesList)
+		if err != nil {
+			s.respondInternalError(w, "filter favorites by home directory", err)
+			return
+		}
+	}
+
+	NewAPIResponse(map[string]any{
+		"favorites": favoritesList,
+		"count":     len(favoritesList),
+	}).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 	if !s.isFavoritesFeatureEnabled() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
+	}
+	if favoritePath, err := readFavoriteBodyPath(r); err == nil && favoritePath != "" {
+		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+			forbiddenPathOutsideHome(w)
+			return
+		}
 	}
 	s.favoritesHandler.AddFavorite(w, r)
 }
@@ -3331,6 +3696,12 @@ func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
+	if favoritePath := readFavoriteQueryPath(r); favoritePath != "" {
+		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+			forbiddenPathOutsideHome(w)
+			return
+		}
+	}
 	s.favoritesHandler.CheckFavorite(w, r)
 }
 
@@ -3338,6 +3709,14 @@ func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
 	if !s.isFavoritesFeatureEnabled() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
+	}
+	if favoritePaths, err := readFavoriteBatchPaths(r); err == nil {
+		for _, favoritePath := range favoritePaths {
+			if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+				forbiddenPathOutsideHome(w)
+				return
+			}
+		}
 	}
 	s.favoritesHandler.CheckFavorites(w, r)
 }
@@ -3347,6 +3726,12 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
+	if favoritePath := readFavoriteRoutePath(r); favoritePath != "" {
+		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+			forbiddenPathOutsideHome(w)
+			return
+		}
+	}
 	s.favoritesHandler.RemoveFavorite(w, r)
 }
 
@@ -3354,6 +3739,12 @@ func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request
 	if !s.isFavoritesFeatureEnabled() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
+	}
+	if favoritePath := readFavoriteRoutePath(r); favoritePath != "" {
+		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+			forbiddenPathOutsideHome(w)
+			return
+		}
 	}
 	s.favoritesHandler.UpdateNote(w, r)
 }
@@ -3366,9 +3757,13 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 	}
 
 	sharePath := ""
-	if s.activity != nil {
-		if parsedPath, err := readCreateSharePath(r); err == nil {
-			sharePath = parsedPath
+	if parsedPath, err := readCreateSharePath(r); err == nil {
+		sharePath = parsedPath
+	}
+	if sharePath != "" {
+		if err := s.authorizeUserPath(r.Context(), sharePath); err != nil {
+			forbiddenPathOutsideHome(w)
+			return
 		}
 	}
 
@@ -3397,8 +3792,15 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 
 	sharePath := ""
 	if s.shareStore != nil {
-		if shareInfo, err := s.shareStore.Get(chi.URLParam(r, "id")); err == nil {
+		if shareInfo, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err == nil {
 			sharePath = shareInfo.Path
+		} else if !auth.IsAdmin(r.Context()) {
+			if errors.Is(err, share.ErrShareNotFound) {
+				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+				return
+			}
+			s.respondInternalError(w, "authorize share delete", err)
+			return
 		}
 	}
 
@@ -3440,4 +3842,76 @@ func readCreateSharePath(r *http.Request) (string, error) {
 	}
 
 	return path.Clean("/" + cleanPath), nil
+}
+
+func readFavoriteBodyPath(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", err
+	}
+
+	cleanPath := strings.TrimSpace(req.Path)
+	if cleanPath == "" {
+		return "", nil
+	}
+
+	return path.Clean("/" + cleanPath), nil
+}
+
+func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+
+	cleanPaths := make([]string, 0, len(req.Paths))
+	for _, favoritePath := range req.Paths {
+		trimmedPath := strings.TrimSpace(favoritePath)
+		if trimmedPath == "" {
+			continue
+		}
+		cleanPaths = append(cleanPaths, path.Clean("/"+trimmedPath))
+	}
+
+	return cleanPaths, nil
+}
+
+func readFavoriteQueryPath(r *http.Request) string {
+	cleanPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if cleanPath == "" {
+		return ""
+	}
+	return path.Clean("/" + cleanPath)
+}
+
+func readFavoriteRoutePath(r *http.Request) string {
+	cleanPath := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/favorites"))
+	if cleanPath == "" || cleanPath == "/" {
+		return ""
+	}
+	return path.Clean("/" + cleanPath)
 }
