@@ -38,6 +38,19 @@ export class FavoritesError extends Error {
   }
 }
 
+function createFavoritesError(response: Response, fallback: string): Promise<FavoritesError> {
+  return (async () => {
+    let message = fallback
+    try {
+      const body: FavoritesApiResponse<never> = await response.json()
+      message = getFavoritesErrorMessage(body, message)
+    } catch {
+      // Keep fallback when the error body cannot be parsed.
+    }
+    return new FavoritesError(message, response.status)
+  })()
+}
+
 interface FavoritesApiError {
   code?: string
   message: string
@@ -144,7 +157,7 @@ export async function checkFavorite(path: string): Promise<boolean> {
   const response = await authFetch(`${API_BASE}/favorites/check?path=${encodeURIComponent(normalizedPath)}`)
   
   if (!response.ok) {
-    return false
+    throw await createFavoritesError(response, '获取收藏状态失败')
   }
   
   const body: FavoritesApiResponse<{ path: string; is_favorite: boolean }> = await response.json()
@@ -176,9 +189,9 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
   if (!response.ok) {
     if (response.status === 404) {
       batchCheckSupported = false
+      return Object.fromEntries(paths.map(p => [p, false]))
     }
-    // Return all false on error
-    return Object.fromEntries(paths.map(p => [p, false]))
+    throw await createFavoritesError(response, '获取收藏状态失败')
   }
   batchCheckSupported = true
   const body: FavoritesApiResponse<CheckPathsResponse> = await response.json()

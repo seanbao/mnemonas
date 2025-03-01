@@ -285,12 +285,31 @@ describe('HealthPage', () => {
     it('handles missing optional data', async () => {
       mockGetDiagnostics.mockResolvedValue({
         system: { filesystemInitialized: true },
+        dataplane: {},
       })
       mockGetStorageStats.mockResolvedValue({})
       render(<HealthPage />)
 
       await waitFor(() => {
         expect(screen.getByText('系统健康')).toBeTruthy()
+        expect(screen.getAllByText('--').length).toBeGreaterThan(0)
+        expect(screen.getByText('未知')).toBeTruthy()
+      })
+    })
+
+    it('renders zero uptime values instead of treating them as unknown', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        uptimeSecs: 0,
+        dataplane: {
+          ...mockDiagnostics.dataplane,
+          uptimeSec: 0,
+        },
+      })
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('0分钟').length).toBeGreaterThan(0)
       })
     })
   })

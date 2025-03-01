@@ -5,9 +5,25 @@ import userEvent from '@testing-library/user-event'
 import { refreshAuthSession } from '@/api/auth'
 import { AlbumPage } from './Album'
 
-vi.mock('@/api/auth', () => ({
-  refreshAuthSession: vi.fn(),
+const { mockUser } = vi.hoisted(() => ({
+  mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
 }))
+
+vi.mock('@/api/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/auth')>()
+  return {
+    ...actual,
+    refreshAuthSession: vi.fn(),
+  }
+})
+
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useUser: () => mockUser,
+  }
+})
 
 // Mock API
 vi.mock('@/api/files', () => ({
@@ -65,6 +81,11 @@ describe('AlbumPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver as unknown as typeof IntersectionObserver)
     mockRefreshAuthSession.mockResolvedValue(false)
     mockListFiles.mockResolvedValue({
@@ -104,6 +125,26 @@ describe('AlbumPage', () => {
 
       await waitFor(() => {
         expect(mockListFiles).toHaveBeenCalledWith('/')
+      })
+    })
+
+    it('uses the assigned home directory for non-admin album scans', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = '/tester'
+      mockListFiles.mockResolvedValueOnce({
+        files: mockImageFiles.map((file) => ({
+          ...file,
+          path: `/tester${file.path}`,
+        })),
+        path: '/tester',
+      })
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalledWith('/tester')
       })
     })
   })

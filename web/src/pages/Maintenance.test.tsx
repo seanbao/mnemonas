@@ -72,6 +72,13 @@ describe('MaintenancePage', () => {
     has_result: false,
   }
 
+  const mockIncompleteResult = {
+    has_result: true,
+    status: 'completed',
+    id: 'scrub-126',
+    errors: [],
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetScrubResult.mockResolvedValue(mockCompletedResult)
@@ -167,6 +174,16 @@ describe('MaintenancePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText(/任务 ID/)).toBeTruthy()
+      })
+    })
+
+    it('shows unknown summary values when scrub metrics are missing', async () => {
+      mockGetScrubResult.mockResolvedValue(mockIncompleteResult)
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('总对象数')).toBeTruthy()
+        expect(screen.getAllByText('--').length).toBeGreaterThan(0)
       })
     })
   })

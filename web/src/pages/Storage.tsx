@@ -19,6 +19,14 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useIsAdmin } from '@/stores/auth'
 
+function formatStorageSize(value: number | undefined): string {
+  return value === undefined ? '--' : formatBytes(value)
+}
+
+function formatCount(value: number | undefined): string {
+  return value === undefined ? '--' : value.toLocaleString()
+}
+
 // Action card for maintenance operations
 function MaintenanceCard({
   title,
@@ -148,33 +156,36 @@ export function StoragePage() {
     )
   }
 
-  const usedBytes = stats?.totalSize || 0
-  const hasUsage = usedBytes > 0
+  const usedBytes = stats?.totalSize
+  const hasUsage = usedBytes !== undefined && usedBytes > 0
+  const storageKnown = stats?.totalSize !== undefined || stats?.totalObjects !== undefined || stats?.dedupRatio !== undefined
   const uniqueBytes = stats?.uniqueSize ?? 0
-  const savedBytes = stats?.uniqueSize ? Math.max(0, usedBytes - uniqueBytes) : 0
+  const savedBytes = usedBytes !== undefined && stats?.uniqueSize !== undefined
+    ? Math.max(0, usedBytes - uniqueBytes)
+    : undefined
 
   const statsCards = [
     {
       title: '对象总数',
-      value: stats?.totalObjects?.toLocaleString() || '0',
+      value: formatCount(stats?.totalObjects),
       icon: Database,
       gradient: 'from-blue-500/20 to-violet-500/20',
     },
     {
       title: '存储大小',
-      value: formatBytes(stats?.totalSize || 0),
+      value: formatStorageSize(stats?.totalSize),
       icon: HardDrive,
       gradient: 'from-emerald-500/20 to-cyan-500/20',
     },
     {
       title: '去重率',
-      value: `${((stats?.dedupRatio || 0) * 100).toFixed(1)}%`,
+      value: stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--',
       icon: Sparkles,
       gradient: 'from-violet-500/20 to-fuchsia-500/20',
     },
     {
       title: '节省空间',
-      value: formatBytes(savedBytes),
+      value: formatStorageSize(savedBytes),
       icon: TrendingUp,
       gradient: 'from-amber-500/20 to-orange-500/20',
     },
@@ -209,7 +220,7 @@ export function StoragePage() {
             <div>
               <span className="font-semibold">存储空间使用情况</span>
               <p className="text-default-500 text-xs">
-                {formatBytes(usedBytes)} 已使用 · 容量未知
+                {usedBytes !== undefined ? `${formatBytes(usedBytes)} 已使用 · 容量未知` : '统计不可用'}
               </p>
             </div>
           </div>
@@ -223,8 +234,8 @@ export function StoragePage() {
               />
             </div>
             <div className="flex justify-between text-sm text-default-500">
-              <span>已用</span>
-              <span>容量未知</span>
+              <span>{usedBytes !== undefined ? '已用' : '统计不可用'}</span>
+              <span>{storageKnown ? '容量未知' : '--'}</span>
             </div>
           </div>
         </CardBody>
