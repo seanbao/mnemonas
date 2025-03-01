@@ -710,11 +710,43 @@ describe('API: files', () => {
       })
 
       const result = await getDiagnostics()
-      expect(result.uptimeSecs).toBe(0)
-      expect(result.goroutines).toBe(0)
+      expect(result.uptimeSecs).toBeUndefined()
+      expect(result.system).toBeUndefined()
+      expect(result.memory).toBeUndefined()
+      expect(result.goroutines).toBeUndefined()
       expect(result.filesystem).toBeUndefined()
       expect(result.storage).toBeUndefined()
       expect(result.dataplane).toBeUndefined()
+    })
+
+    it('preserves unknown nested diagnostics fields instead of coercing defaults', async () => {
+      const mockResponse = {
+        success: true,
+        data: {
+          timestamp: '2024-01-15T10:00:00Z',
+          uptime: '1h30m',
+          uptime_secs: 0,
+          version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
+          system: {},
+          memory: {},
+          filesystem: {},
+          storage: {},
+          dataplane: {},
+        },
+      }
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      })
+
+      const result = await getDiagnostics()
+      expect(result.uptimeSecs).toBe(0)
+      expect(result.system?.filesystemInitialized).toBeUndefined()
+      expect(result.memory?.allocMb).toBeUndefined()
+      expect(result.filesystem?.trashItems).toBeUndefined()
+      expect(result.storage?.dedupRatio).toBeUndefined()
+      expect(result.dataplane?.healthy).toBeUndefined()
     })
 
     it('rejects invalid wrapped response for diagnostics', async () => {

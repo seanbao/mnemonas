@@ -236,15 +236,17 @@ describe('Favorites API', () => {
       expect(result).toBe(false)
     })
 
-    it('returns false on error', async () => {
+    it('throws FavoritesError on error', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
         status: 500,
+        json: () => Promise.resolve({ success: false, error: { message: '收藏服务不可用' } }),
       })
 
-      const result = await checkFavorite('/file.txt')
-
-      expect(result).toBe(false)
+      await expect(checkFavorite('/file.txt')).rejects.toMatchObject({
+        message: '收藏服务不可用',
+        status: 500,
+      })
     })
   })
 
@@ -277,10 +279,24 @@ describe('Favorites API', () => {
       })
     })
 
-    it('returns all false on error', async () => {
+    it('throws FavoritesError on non-404 errors', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
         status: 500,
+        json: () => Promise.resolve({ success: false, error: { message: '收藏状态查询失败' } }),
+      })
+
+      await expect(checkFavorites(['/file1.txt', '/file2.txt'])).rejects.toMatchObject({
+        message: '收藏状态查询失败',
+        status: 500,
+      })
+    })
+
+    it('falls back to all false when batch check is unsupported', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ success: false, error: { message: 'not found' } }),
       })
 
       const result = await checkFavorites(['/file1.txt', '/file2.txt'])

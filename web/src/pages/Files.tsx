@@ -124,6 +124,7 @@ function FileRow({
   file, 
   isSelected, 
   isFavorited,
+  favoriteActionsAvailable,
   isMultiSelection,
   canWrite,
   onSelect, 
@@ -139,6 +140,7 @@ function FileRow({
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
+  favoriteActionsAvailable: boolean
   isMultiSelection: boolean
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
@@ -278,9 +280,10 @@ function FileRow({
                   <DropdownItem 
                     key="favorite" 
                     startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
+                    isDisabled={!favoriteActionsAvailable}
                     onPress={onToggleFavorite}
                   >
-                    {isFavorited ? '取消收藏' : '添加收藏'}
+                    {favoriteActionsAvailable ? (isFavorited ? '取消收藏' : '添加收藏') : '收藏状态不可用'}
                   </DropdownItem>
                   <DropdownItem 
                     key="share" 
@@ -372,6 +375,7 @@ function FileCard({
   file,
   isSelected,
   isFavorited,
+  favoriteActionsAvailable,
   isMultiSelection,
   canWrite,
   onSelect,
@@ -387,6 +391,7 @@ function FileCard({
   file: FileItem
   isSelected: boolean
   isFavorited: boolean
+  favoriteActionsAvailable: boolean
   isMultiSelection: boolean
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
@@ -511,9 +516,10 @@ function FileCard({
                   <DropdownItem 
                     key="favorite" 
                     startContent={<Star size={16} className={isFavorited ? "fill-accent-primary text-accent-primary" : ""} />}
+                    isDisabled={!favoriteActionsAvailable}
                     onPress={onToggleFavorite}
                   >
-                    {isFavorited ? '取消收藏' : '添加收藏'}
+                    {favoriteActionsAvailable ? (isFavorited ? '取消收藏' : '添加收藏') : '收藏状态不可用'}
                   </DropdownItem>
                   <DropdownItem 
                     key="share" 
@@ -792,12 +798,17 @@ export function FilesPage() {
 
   // Favorites query
   const filePaths = useMemo(() => sortedFiles.map(f => f.path), [sortedFiles])
-  const { data: favoritesData } = useQuery({
+  const {
+    data: favoritesData,
+    error: favoritesError,
+    refetch: refetchFavorites,
+  } = useQuery({
     queryKey: ['favorites-check', filePaths],
     queryFn: () => checkFavorites(filePaths),
     enabled: filePaths.length > 0,
     staleTime: 30000, // Cache for 30 seconds
   })
+  const favoriteActionsAvailable = !favoritesError
 
   const favoriteMutation = useMutation({
     mutationFn: ({ path, isFavorited }: { path: string; isFavorited: boolean }) => 
@@ -1866,6 +1877,19 @@ export function FilesPage() {
         </div>
 
         {/* File List / Grid */}
+        {canWrite && favoritesError && (
+          <div className="mb-4 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+            <div className="flex-1">
+              <p className="font-medium">收藏状态加载失败</p>
+              <p className="text-default-600">{(favoritesError as Error).message || '请稍后重试'}</p>
+            </div>
+            <Button size="sm" variant="bordered" className="rounded-xl" onPress={() => refetchFavorites()}>
+              重新加载收藏状态
+            </Button>
+          </div>
+        )}
+
         {viewMode === 'list' ? (
           <div className="flex-1 surface-card overflow-hidden flex flex-col">
             {/* Header */}
@@ -1943,6 +1967,7 @@ export function FilesPage() {
                         file={file}
                         isSelected={selectedFiles.has(file.path)}
                         isFavorited={favoritesData?.[file.path] ?? false}
+                        favoriteActionsAvailable={favoriteActionsAvailable}
                         isMultiSelection={hasMultiSelection}
                         canWrite={canWrite}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
@@ -2021,6 +2046,7 @@ export function FilesPage() {
                     file={file}
                     isSelected={selectedFiles.has(file.path)}
                     isFavorited={favoritesData?.[file.path] ?? false}
+                    favoriteActionsAvailable={favoriteActionsAvailable}
                     isMultiSelection={hasMultiSelection}
                     canWrite={canWrite}
                     onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
@@ -2402,6 +2428,7 @@ export function FilesPage() {
                   {canWrite && (
                     <ContextMenuItem
                       icon={<Star size={16} className={favoritesData?.[contextMenuFile.path] ? "fill-accent-primary text-accent-primary" : ""} />}
+                      disabled={!favoriteActionsAvailable}
                       onClick={() => {
                         favoriteMutation.mutate({ 
                           path: contextMenuFile.path, 
@@ -2410,7 +2437,7 @@ export function FilesPage() {
                         contextMenu.hide()
                       }}
                     >
-                      {favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏'}
+                      {favoriteActionsAvailable ? (favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏') : '收藏状态不可用'}
                     </ContextMenuItem>
                   )}
                   {canWrite && (

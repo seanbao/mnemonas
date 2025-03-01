@@ -18,9 +18,11 @@ import {
   ChevronDown,
   Home,
   FolderPlus,
+  AlertCircle,
 } from 'lucide-react'
 import { listFiles, createDirectory, type FileItem } from '@/api/files'
-import { cn } from '@/lib/utils'
+import { useUser } from '@/stores/auth'
+import { cn, normalizePath } from '@/lib/utils'
 
 export interface DirectoryPickerProps {
   isOpen: boolean
@@ -39,6 +41,13 @@ interface TreeNodeData {
   isExpanded: boolean
   children: TreeNodeData[]
   isLoaded: boolean
+}
+
+function pathWithinBase(basePath: string, targetPath: string): boolean {
+  if (basePath === '/') {
+    return targetPath.startsWith('/')
+  }
+  return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
 }
 
 function TreeNode({
@@ -131,8 +140,16 @@ export function DirectoryPicker({
   initialPath = '/',
   allowCreateFolder = true,
 }: DirectoryPickerProps) {
-  const [selectedPath, setSelectedPath] = useState(initialPath)
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['/']))
+  const user = useUser()
+  const rootPath = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : '/'
+  const rootLabel = rootPath === '/' ? '根目录' : '主目录'
+  const normalizeInitialPath = useCallback((path: string) => {
+    const normalized = normalizePath(path || rootPath)
+    return pathWithinBase(rootPath, normalized) ? normalized : rootPath
+  }, [rootPath])
+
+  const [selectedPath, setSelectedPath] = useState(() => normalizeInitialPath(initialPath))
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set([rootPath]))
   const [loadedPaths, setLoadedPaths] = useState<Set<string>>(new Set())
   const [folderContents, setFolderContents] = useState<Map<string, FileItem[]>>(new Map())
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
@@ -141,19 +158,19 @@ export function DirectoryPicker({
 
   useEffect(() => {
     if (!isOpen) return
-    setSelectedPath(initialPath)
-    setExpandedPaths(new Set(['/']))
+    setSelectedPath(normalizeInitialPath(initialPath))
+    setExpandedPaths(new Set([rootPath]))
     setLoadedPaths(new Set())
     setFolderContents(new Map())
     setIsCreatingFolder(false)
     setNewFolderName('')
-  }, [isOpen, initialPath])
+  }, [isOpen, initialPath, normalizeInitialPath, rootPath])
 
   
   // Load root directory
-  const { data: rootData, isLoading: isLoadingRoot } = useQuery({
-    queryKey: ['files', '/'],
-    queryFn: () => listFiles('/'),
+  const { data: rootData, error: rootError, isLoading: isLoadingRoot, refetch: refetchRoot } = useQuery({
+    queryKey: ['files', rootPath],
+    queryFn: () => listFiles(rootPath),
     enabled: isOpen,
   })
 
@@ -278,7 +295,7 @@ export function DirectoryPicker({
           <div className="flex items-center gap-2 mb-4 p-2 bg-content2 rounded-lg">
             <Home size={14} className="text-default-500" />
             <span className="text-sm text-default-600 truncate">
-              {selectedPath === '/' ? '根目录' : selectedPath}
+              {selectedPath === rootPath ? rootLabel : selectedPath}
             </span>
           </div>
           
@@ -288,20 +305,31 @@ export function DirectoryPicker({
               <div className="flex items-center justify-center h-32">
                 <Spinner size="sm" />
               </div>
+            ) : rootError ? (
+              <div className="flex h-32 flex-col items-center justify-center gap-3 text-center">
+                <AlertCircle size={20} className="text-danger" />
+                <div>
+                  <p className="text-sm font-medium text-foreground">加载目录失败</p>
+                  <p className="text-xs text-default-500">{(rootError as Error).message || '请稍后重试'}</p>
+                </div>
+                <Button size="sm" variant="bordered" className="rounded-lg" onPress={() => refetchRoot()}>
+                  重新加载
+                </Button>
+              </div>
             ) : (
               <>
                 {/* Root selector */}
                 <div
                   className={cn(
                     "flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors",
-                    selectedPath === '/' && "bg-accent-primary/10 text-accent-primary",
-                    selectedPath !== '/' && "hover:bg-content2"
+                    selectedPath === rootPath && "bg-accent-primary/10 text-accent-primary",
+                    selectedPath !== rootPath && "hover:bg-content2"
                   )}
-                  onClick={() => setSelectedPath('/')}
+                  onClick={() => setSelectedPath(rootPath)}
                 >
                   <div className="w-5 h-5" />
-                  <Home size={18} className={selectedPath === '/' ? "text-accent-primary" : "text-default-500"} />
-                  <span className="text-sm">根目录</span>
+                  <Home size={18} className={selectedPath === rootPath ? "text-accent-primary" : "text-default-500"} />
+                  <span className="text-sm">{rootLabel}</span>
                 </div>
                 
                 {/* Folder tree */}

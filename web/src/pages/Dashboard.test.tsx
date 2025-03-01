@@ -345,9 +345,9 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('系统概览')).toBeTruthy()
       })
-      
-      // Should show default values
-      expect(screen.getAllByText('0').length).toBeGreaterThan(0)
+
+      expect(screen.getAllByText('统计不可用').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('--').length).toBeGreaterThan(0)
     })
 
     it('handles missing health data gracefully', async () => {
@@ -358,6 +358,8 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('系统概览')).toBeTruthy()
       })
+
+      expect(screen.getByText('状态未知')).toBeTruthy()
     })
 
     it('shows a partial-data warning when overview queries fail', async () => {

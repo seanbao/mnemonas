@@ -82,6 +82,14 @@ function ActionIcon({ action }: { action: ActionType }) {
   return <Icon size={14} />
 }
 
+function formatStorageSize(value: number | undefined): string {
+  return value === undefined ? '--' : formatBytes(value)
+}
+
+function formatCount(value: number | undefined): string {
+  return value === undefined ? '--' : value.toLocaleString()
+}
+
 // Recent activity item
 function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
   const colorMap: Record<string, string> = {
@@ -199,22 +207,27 @@ export function DashboardPage() {
     )
   }
 
-  const isHealthy = health?.status === 'healthy'
-  const hasStorageData = (stats?.totalSize || 0) > 0
+  const healthStatus = health?.status === 'healthy'
+    ? 'healthy'
+    : health?.status
+      ? 'unhealthy'
+      : 'unknown'
+  const hasStorageData = stats?.totalSize !== undefined && stats.totalSize > 0
+  const storageStatsKnown = stats?.totalSize !== undefined || stats?.totalObjects !== undefined || stats?.dedupRatio !== undefined
 
   const statsCards = [
     {
       title: '存储使用',
-      value: formatBytes(stats?.totalSize || 0),
+      value: formatStorageSize(stats?.totalSize),
       icon: HardDrive,
-      trend: '实时监控中',
+      trend: storageStatsKnown ? '实时监控中' : '统计不可用',
       gradient: 'from-blue-500/20 to-violet-500/20',
     },
     {
       title: '文件对象',
-      value: stats?.totalObjects?.toLocaleString() || '0',
+      value: formatCount(stats?.totalObjects),
       icon: FileBox,
-      trend: '总计存储对象',
+      trend: storageStatsKnown ? '总计存储对象' : '统计不可用',
       gradient: 'from-emerald-500/20 to-cyan-500/20',
     },
     {
@@ -228,9 +241,9 @@ export function DashboardPage() {
     },
     {
       title: '运行时间',
-      value: health?.uptime || '-',
+      value: health?.uptime ?? '--',
       icon: Clock,
-      trend: '稳定运行',
+      trend: health ? '稳定运行' : '状态未知',
       gradient: 'from-amber-500/20 to-orange-500/20',
     },
   ]
@@ -246,19 +259,26 @@ export function DashboardPage() {
         <div className="flex items-center gap-2 text-sm">
           <div className={cn(
             "flex items-center gap-2 px-3 py-1.5 rounded-full",
-            isHealthy 
-              ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" 
-              : "bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400"
+            healthStatus === 'healthy'
+              ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              : healthStatus === 'unhealthy'
+                ? "bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400"
+                : "bg-default-100 text-default-600 dark:bg-default-100/10 dark:text-default-400"
           )}>
-            {isHealthy ? (
+            {healthStatus === 'healthy' ? (
               <>
                 <div className="live-indicator scale-75" />
                 <span>运行正常</span>
               </>
-            ) : (
+            ) : healthStatus === 'unhealthy' ? (
               <>
                 <AlertCircle size={14} />
                 <span>异常</span>
+              </>
+            ) : (
+              <>
+                <AlertCircle size={14} />
+                <span>状态未知</span>
               </>
             )}
           </div>
@@ -328,7 +348,7 @@ export function DashboardPage() {
           <div className="space-y-2 mb-5">
             <div className="flex justify-between text-sm">
               <span className="text-default-600">已用空间</span>
-              <span className="data-value">{formatBytes(stats?.totalSize || 0)}</span>
+              <span className="data-value">{formatStorageSize(stats?.totalSize)}</span>
             </div>
             <div className="h-2 rounded-full bg-content2 overflow-hidden">
               {hasStorageData ? (
@@ -338,16 +358,20 @@ export function DashboardPage() {
               )}
             </div>
             <div className="text-xs text-default-400">
-              {hasStorageData ? '总容量未配置，无法计算占用比例' : '暂无存储数据'}
+              {hasStorageData
+                ? '总容量未配置，无法计算占用比例'
+                : storageStatsKnown
+                  ? '暂无存储数据'
+                  : '统计不可用'}
             </div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
-              { label: '总对象数', value: stats?.totalObjects?.toLocaleString() || '0' },
-              { label: '总大小', value: formatBytes(stats?.totalSize || 0) },
+              { label: '总对象数', value: formatCount(stats?.totalObjects) },
+              { label: '总大小', value: formatStorageSize(stats?.totalSize) },
               { label: '去重率', value: stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--' },
-              { label: '版本', value: health?.version || '-' },
+              { label: '版本', value: health?.version ?? '--' },
             ].map((item, i) => (
               <div key={i} className="p-3 rounded-lg bg-content2/50 text-center">
                 <p className="text-2xl font-medium text-foreground data-value">{item.value}</p>

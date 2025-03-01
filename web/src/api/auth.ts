@@ -353,9 +353,17 @@ export async function getCurrentUser(): Promise<User | null> {
     }
     return null
   }
-  
-  const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
+
+  let body: AuthApiResponse<{ user: ApiUser }>
+  try {
+    body = await response.json()
+  } catch {
+    clearTokens()
+    return null
+  }
+
   if (!body.data) {
+    clearTokens()
     return null
   }
   await syncDownloadSession()

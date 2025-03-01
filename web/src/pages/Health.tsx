@@ -66,6 +66,10 @@ function formatUptime(seconds: number): string {
   return `${minutes}分钟`
 }
 
+function formatMetricWithUnit(value: number | undefined, unit: string): string {
+  return value === undefined ? '--' : `${value} ${unit}`
+}
+
 export function HealthPage() {
   const { data: diagnostics, isLoading: diagLoading, error: diagError, refetch: refetchDiag } = useQuery({
     queryKey: ['diagnostics'],
@@ -96,14 +100,14 @@ export function HealthPage() {
     {
       icon: Clock,
       title: '运行时间',
-      value: diagnostics?.uptimeSecs ? formatUptime(diagnostics.uptimeSecs) : '--',
+      value: diagnostics?.uptimeSecs !== undefined ? formatUptime(diagnostics.uptimeSecs) : '--',
       gradient: 'from-blue-500/20 to-violet-500/20',
     },
     {
       icon: Cpu,
       title: '内存使用',
-      value: diagnostics?.memory ? `${diagnostics.memory.allocMb} MB` : '--',
-      subtitle: diagnostics?.memory ? `系统: ${diagnostics.memory.sysMb} MB` : undefined,
+      value: diagnostics?.memory?.allocMb !== undefined ? `${diagnostics.memory.allocMb} MB` : '--',
+      subtitle: diagnostics?.memory?.sysMb !== undefined ? `系统: ${diagnostics.memory.sysMb} MB` : undefined,
       gradient: 'from-violet-500/20 to-fuchsia-500/20',
     },
     {
@@ -326,9 +330,9 @@ export function HealthPage() {
         <CardBody>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { label: '当前分配', value: `${diagnostics?.memory?.allocMb ?? '--'} MB` },
-              { label: '累计分配', value: `${diagnostics?.memory?.totalAllocMb ?? '--'} MB` },
-              { label: '系统内存', value: `${diagnostics?.memory?.sysMb ?? '--'} MB` },
+              { label: '当前分配', value: formatMetricWithUnit(diagnostics?.memory?.allocMb, 'MB') },
+              { label: '累计分配', value: formatMetricWithUnit(diagnostics?.memory?.totalAllocMb, 'MB') },
+              { label: '系统内存', value: formatMetricWithUnit(diagnostics?.memory?.sysMb, 'MB') },
               { label: 'GC 次数', value: diagnostics?.memory?.numGc ?? '--' },
             ].map((item) => (
               <div key={item.label} className="text-center p-3 rounded-lg bg-content2/50">
@@ -350,9 +354,21 @@ export function HealthPage() {
             {diagnostics?.dataplane && (
               <>
                 <div className="text-center p-3 rounded-lg bg-content2/50">
-                  <div className={`inline-flex items-center gap-1 ${diagnostics.dataplane.healthy ? 'text-success' : 'text-danger'}`}>
-                    {diagnostics.dataplane.healthy ? <div className="live-indicator scale-75" /> : <XCircle size={14} />}
-                    <span className="text-lg font-semibold">{diagnostics.dataplane.healthy ? '健康' : '异常'}</span>
+                  <div className={`inline-flex items-center gap-1 ${
+                    diagnostics.dataplane.healthy === true
+                      ? 'text-success'
+                      : diagnostics.dataplane.healthy === false
+                        ? 'text-danger'
+                        : 'text-default-500'
+                  }`}>
+                    {diagnostics.dataplane.healthy === true ? <div className="live-indicator scale-75" /> : <AlertCircle size={14} />}
+                    <span className="text-lg font-semibold">
+                      {diagnostics.dataplane.healthy === true
+                        ? '健康'
+                        : diagnostics.dataplane.healthy === false
+                          ? '异常'
+                          : '未知'}
+                    </span>
                   </div>
                   <p className="text-default-400 text-xs">数据面状态</p>
                 </div>
@@ -364,7 +380,7 @@ export function HealthPage() {
                 </div>
                 <div className="text-center p-3 rounded-lg bg-content2/50">
                   <p className="text-2xl font-semibold data-value">
-                    {diagnostics.dataplane.uptimeSec 
+                    {diagnostics.dataplane.uptimeSec !== undefined
                       ? formatUptime(diagnostics.dataplane.uptimeSec) 
                       : '--'}
                   </p>

@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { FilesPage } from './Files'
 import * as HeroUI from '@heroui/react'
+import * as favoritesApi from '@/api/favorites'
 
 const mockAddToast = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
@@ -17,6 +18,11 @@ vi.mock('@/api/files', () => ({
   moveFile: vi.fn(),
   copyFile: vi.fn(),
   downloadFile: vi.fn(),
+}))
+
+vi.mock('@/api/favorites', () => ({
+  checkFavorites: vi.fn(),
+  toggleFavorite: vi.fn(),
 }))
 
 // Mock navigation
@@ -82,6 +88,7 @@ vi.mock('@/components/share', () => ({
 
 import { listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
 import { downloadFile } from '@/api/files'
+import { checkFavorites, toggleFavorite } from '@/api/favorites'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
@@ -89,6 +96,8 @@ const mockDeleteFile = vi.mocked(deleteFile)
 const mockMoveFile = vi.mocked(moveFile)
 const mockCopyFile = vi.mocked(copyFile)
 const mockDownloadFile = vi.mocked(downloadFile)
+const mockCheckFavorites = vi.mocked(checkFavorites)
+const mockToggleFavorite = vi.mocked(toggleFavorite)
 
 describe('FilesPage', () => {
   beforeEach(() => {
@@ -114,6 +123,12 @@ describe('FilesPage', () => {
     mockClipboardState.clear.mockClear()
     mockClipboardState.hasPaths.mockReturnValue(false)
     mockDownloadFile.mockResolvedValue(undefined)
+    mockCheckFavorites.mockResolvedValue({
+      '/documents': false,
+      '/photo.jpg': false,
+      '/video.mp4': false,
+    })
+    mockToggleFavorite.mockResolvedValue(true)
     // Default mock response
     mockListFiles.mockResolvedValue({
       files: [
@@ -770,6 +785,31 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockListFiles).toHaveBeenCalledTimes(1)
         expect(screen.getByText('这里空空如也')).toBeTruthy()
+      })
+    })
+
+    it('shows a retryable warning when favorites status fails to load', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCheckFavorites
+        .mockRejectedValueOnce(new Error('favorites unavailable'))
+        .mockResolvedValueOnce({
+          '/documents': false,
+          '/photo.jpg': true,
+          '/video.mp4': false,
+        })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('收藏状态加载失败')).toBeTruthy()
+        expect(screen.getByText('favorites unavailable')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载收藏状态' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载收藏状态' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('收藏状态加载失败')).toBeNull()
       })
     })
   })

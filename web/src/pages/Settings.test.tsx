@@ -9,9 +9,11 @@ const mockAddToast = vi.fn()
 
 import { getSettings } from '@/api/settings'
 import { updateSettings } from '@/api/settings'
+import { getWebDAVCredentials } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
 const mockUpdateSettings = vi.mocked(updateSettings)
+const mockGetWebDAVCredentials = vi.mocked(getWebDAVCredentials)
 
 const { defaultSettingsResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
@@ -101,6 +103,13 @@ describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
+    mockGetWebDAVCredentials.mockResolvedValue({
+      enabled: true,
+      url: '/dav/',
+      auth_type: 'basic',
+      username: 'admin',
+      password: 'secret',
+    })
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
   })
 
@@ -770,6 +779,37 @@ describe('SettingsPage', () => {
       await user.click(showPasswordText.closest('button') as HTMLButtonElement)
 
       expect(screen.getByText('隐藏 WebDAV 密码')).toBeTruthy()
+    })
+
+    it('shows a retryable warning when WebDAV credentials fail to load', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetWebDAVCredentials
+        .mockRejectedValueOnce(new Error('webdav credentials unavailable'))
+        .mockResolvedValueOnce({
+          enabled: true,
+          url: '/dav/',
+          auth_type: 'basic',
+          username: 'admin',
+          password: 'secret',
+        })
+
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 凭据加载失败')).toBeTruthy()
+        expect(screen.getByText('webdav credentials unavailable')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载凭据' })).toBeTruthy()
+        expect(screen.getByText('WebDAV 服务')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载凭据' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('WebDAV 凭据加载失败')).toBeNull()
+        expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
+      })
     })
   })
 

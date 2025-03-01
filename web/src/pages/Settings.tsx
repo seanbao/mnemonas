@@ -157,7 +157,12 @@ export function SettingsPage() {
   })
 
   // Fetch WebDAV credentials
-  const { data: webdavCredentials } = useQuery({
+  const {
+    data: webdavCredentials,
+    error: webdavCredentialsError,
+    refetch: refetchWebDAVCredentials,
+    isRefetching: isRefetchingWebDAVCredentials,
+  } = useQuery({
     queryKey: ['webdav-credentials'],
     queryFn: getWebDAVCredentials,
     enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
@@ -943,6 +948,25 @@ export function SettingsPage() {
 
           <Tab key="webdav" title="WebDAV">
             <div className="space-y-6 mt-6">
+              {webdavCredentialsError && (
+                <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+                  <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+                  <div className="flex-1">
+                    <p className="font-medium">WebDAV 凭据加载失败</p>
+                    <p className="text-default-600">{(webdavCredentialsError as Error).message || '请稍后重试'}</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="bordered"
+                    className="rounded-xl"
+                    onPress={() => refetchWebDAVCredentials()}
+                    isLoading={isRefetchingWebDAVCredentials}
+                  >
+                    重新加载凭据
+                  </Button>
+                </div>
+              )}
+
               {/* WebDAV Credentials Card */}
               {webdavCredentials?.enabled && webdavCredentials?.auth_type === 'basic' && (
                 <SettingsSection

@@ -20,7 +20,8 @@ import {
 } from 'lucide-react'
 import { refreshAuthSession } from '@/api/auth'
 import { listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
-import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
+import { useUser } from '@/stores/auth'
+import { formatBytes, formatDate, isImageFile, cn, normalizePath } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 
@@ -509,15 +510,17 @@ function ImagePreview({
 export function AlbumPage() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const user = useUser()
+  const rootPath = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : '/'
   
   const { data, isLoading, error, refetch } = useQuery<AlbumQueryResult>({
-    queryKey: ['album-images'],
+    queryKey: ['album-images', rootPath],
     queryFn: async () => {
       // Cancel previous request if any
       abortControllerRef.current?.abort()
       abortControllerRef.current = new AbortController()
       const errorState = { hadPartialError: false }
-      const images = await fetchAllImages('/', 0, abortControllerRef.current.signal, { count: 0 }, errorState)
+      const images = await fetchAllImages(rootPath, 0, abortControllerRef.current.signal, { count: 0 }, errorState)
       return {
         images,
         hadPartialError: errorState.hadPartialError,
