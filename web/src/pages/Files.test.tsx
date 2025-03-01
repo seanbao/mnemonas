@@ -203,6 +203,28 @@ describe('FilesPage', () => {
         expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/tester')
       })
     })
+
+    it('redirects non-admin out-of-home file routes back to the assigned home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = '/tester'
+      mockFilesStoreState.currentPath = '/'
+      mockLocationPathname = '/files/shared'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '仅可访问主目录内的文件',
+          color: 'warning',
+        }))
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/tester')
+      })
+
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/shared')
+      expect(mockListFiles).not.toHaveBeenCalled()
+    })
   })
 
   describe('toolbar', () => {

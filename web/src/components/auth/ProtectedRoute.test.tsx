@@ -43,7 +43,7 @@ describe('ProtectedRoute', () => {
     expect(screen.getByText('/files/report?view=grid#preview')).toBeInTheDocument()
   })
 
-  it('redirects non-admin users away from admin-only routes', () => {
+  it('shows an explicit access denied state for non-admin admin-only route access', () => {
     useAuthStoreMock.mockReturnValue({ isLoading: false, authEnabled: true })
     useIsAuthenticatedMock.mockReturnValue(true)
     useIsAdminMock.mockReturnValue(false)
@@ -51,7 +51,6 @@ describe('ProtectedRoute', () => {
     render(
       <MemoryRouter initialEntries={["/settings"]}>
         <Routes>
-          <Route path="/" element={<div>home</div>} />
           <Route
             path="/settings"
             element={
@@ -64,7 +63,9 @@ describe('ProtectedRoute', () => {
       </MemoryRouter>
     )
 
-    expect(screen.getByText('home')).toBeInTheDocument()
+    expect(screen.getByText('访问被拒绝')).toBeInTheDocument()
+    expect(screen.getByText('当前账户没有访问此页面的权限。')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '返回首页' })).toHaveAttribute('href', '/')
     expect(screen.queryByText('settings')).not.toBeInTheDocument()
   })
 })

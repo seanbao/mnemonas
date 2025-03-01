@@ -6,6 +6,7 @@ import * as HeroUI from '@heroui/react'
 const mockAddToast = vi.fn()
 
 const mockUseIsAdmin = vi.fn(() => true)
+const mockUseUser = vi.fn(() => ({ id: 'admin', username: 'admin', role: 'admin', email: '', homeDir: '/' }))
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
@@ -18,6 +19,7 @@ vi.mock('@/api/files', () => ({
 
 vi.mock('@/stores/auth', () => ({
   useIsAdmin: () => mockUseIsAdmin(),
+  useUser: () => mockUseUser(),
 }))
 
 import { VersionsPage } from './Versions'
@@ -33,6 +35,7 @@ describe('VersionsPage', () => {
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     window.history.pushState({}, '', '/')
     mockUseIsAdmin.mockReturnValue(true)
+    mockUseUser.mockReturnValue({ id: 'admin', username: 'admin', role: 'admin', email: '', homeDir: '/' })
     mockGetVersions.mockResolvedValue([
       { version: 3, hash: 'hash3', size: 3000, timestamp: '2024-01-03T00:00:00Z' },
       { version: 2, hash: 'hash2', size: 2000, timestamp: '2024-01-02T00:00:00Z' },
@@ -60,6 +63,16 @@ describe('VersionsPage', () => {
     it('shows empty state before search', () => {
       render(<VersionsPage />)
       expect(screen.getByText('查看文件版本历史')).toBeTruthy()
+    })
+
+    it('uses read-only subtitle and description for non-admin users', () => {
+      mockUseIsAdmin.mockReturnValue(false)
+      mockUseUser.mockReturnValue({ id: 'tester', username: 'tester', role: 'user', email: '', homeDir: '/tester' })
+
+      render(<VersionsPage />)
+
+      expect(screen.getByText('查看文件历史版本')).toBeTruthy()
+      expect(screen.getByText('MnemoNAS 自动保留主目录内文件的历史版本。输入文件路径即可查看历史版本，支持预览和下载。')).toBeTruthy()
     })
   })
 
@@ -113,6 +126,26 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
       })
+    })
+
+    it('blocks non-admin searches outside the assigned home directory', async () => {
+      mockUseIsAdmin.mockReturnValue(false)
+      mockUseUser.mockReturnValue({ id: 'tester', username: 'tester', role: 'user', email: '', homeDir: '/tester' })
+
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/other/secret.txt{enter}')
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '仅可查看主目录内文件的版本历史',
+          color: 'warning',
+        })
+      })
+      expect(mockGetVersions).not.toHaveBeenCalled()
+      expect(input).toHaveValue('/tester')
     })
   })
 

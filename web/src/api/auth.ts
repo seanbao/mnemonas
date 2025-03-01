@@ -79,6 +79,11 @@ interface AuthApiResponse<T> {
   error?: AuthApiError
 }
 
+export interface AuthClearedDetail {
+  message?: string
+  reason?: 'expired' | 'disabled'
+}
+
 export class AuthError extends Error {
   status: number
   code?: string
@@ -105,6 +110,29 @@ const REFRESH_TOKEN_KEY = 'mnemonas_refresh_token'
 const USER_KEY = 'mnemonas_user'
 export const AUTH_CLEARED_EVENT = 'mnemonas:auth-cleared'
 let refreshPromise: Promise<boolean> | null = null
+
+function getSessionEndedMessage(responseMessage?: string): string {
+  return responseMessage || '账户已被禁用，请联系管理员'
+}
+
+async function handleForbiddenSessionResponse(response: Response): Promise<void> {
+  if (response.status !== 403) {
+    return
+  }
+
+  try {
+    const bodySource = typeof response.clone === 'function' ? response.clone() : response
+    const body: AuthApiResponse<never> = await bodySource.json()
+    if (body.error?.code === 'USER_DISABLED') {
+      clearTokens({
+        reason: 'disabled',
+        message: getSessionEndedMessage(body.error.message),
+      })
+    }
+  } catch {
+    // Ignore invalid error payloads and let callers handle the response body.
+  }
+}
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -140,13 +168,13 @@ export function storeTokens(accessToken: string, refreshToken: string, user: Use
   localStorage.setItem(USER_KEY, JSON.stringify(user))
 }
 
-export function clearTokens(): void {
+export function clearTokens(detail?: AuthClearedDetail): void {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
   localStorage.removeItem(USER_KEY)
 
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new Event(AUTH_CLEARED_EVENT))
+    window.dispatchEvent(new CustomEvent<AuthClearedDetail>(AUTH_CLEARED_EVENT, { detail }))
   }
 }
 
@@ -214,6 +242,8 @@ export async function authFetch(url: string, options: RequestInit = {}, retryCou
       return authFetch(url, options, retryCount + 1)
     }
   }
+
+  await handleForbiddenSessionResponse(response)
   
   return response
 }

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
@@ -33,10 +33,17 @@ import {
   Sparkles
 } from 'lucide-react'
 import { getVersions, buildDownloadUrl, downloadFile, restoreVersion, type VersionInfo } from '@/api/files'
-import { useIsAdmin } from '@/stores/auth'
-import { formatBytes, formatDate, openUrlInNewTab } from '@/lib/utils'
+import { useIsAdmin, useUser } from '@/stores/auth'
+import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+
+function pathWithinBase(basePath: string, targetPath: string): boolean {
+  if (basePath === '/') {
+    return targetPath.startsWith('/')
+  }
+  return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
+}
 
 interface VersionRowProps {
   version: VersionInfo
@@ -123,6 +130,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
 
 export function VersionsPage() {
   const isAdmin = useIsAdmin()
+  const user = useUser()
   const [searchParams, setSearchParams] = useSearchParams()
   const initialPath = (searchParams.get('path') || '').trim()
   const normalizedInitialPath = initialPath ? (initialPath.startsWith('/') ? initialPath : `/${initialPath}`) : ''
@@ -131,12 +139,28 @@ export function VersionsPage() {
   const [selectedVersion, setSelectedVersion] = useState<VersionInfo | null>(null)
   const { isOpen, onOpen, onClose } = useDisclosure()
   const queryClient = useQueryClient()
+  const scopedHomeDir = !isAdmin && user?.homeDir && user.homeDir !== '/' ? normalizePath(user.homeDir) : ''
+  const selectedPathAllowed = !selectedPath || !scopedHomeDir || pathWithinBase(scopedHomeDir, selectedPath)
 
   const { data: versions, isLoading, error, refetch } = useQuery({
     queryKey: ['versions', selectedPath],
     queryFn: () => getVersions(selectedPath!),
-    enabled: !!selectedPath,
+    enabled: !!selectedPath && selectedPathAllowed,
   })
+
+  useEffect(() => {
+    if (!selectedPath || !scopedHomeDir || selectedPathAllowed) {
+      return
+    }
+
+    addToast({
+      title: '仅可查看主目录内文件的版本历史',
+      color: 'warning',
+    })
+    setSelectedPath(null)
+    setSearchPath(scopedHomeDir)
+    setSearchParams({})
+  }, [scopedHomeDir, selectedPath, selectedPathAllowed, setSearchParams])
 
   const restoreMutation = useMutation({
     mutationFn: async ({ path, hash }: { path: string; hash: string }) => {
@@ -153,7 +177,21 @@ export function VersionsPage() {
   const handleSearch = () => {
     const trimmedPath = searchPath.trim()
     if (trimmedPath) {
-      const normalizedPath = trimmedPath.startsWith('/') ? trimmedPath : `/${trimmedPath}`
+      let normalizedPath: string
+      try {
+        normalizedPath = normalizePath(trimmedPath)
+      } catch {
+        addToast({ title: '文件路径无效', color: 'danger' })
+        return
+      }
+      if (scopedHomeDir && !pathWithinBase(scopedHomeDir, normalizedPath)) {
+        addToast({
+          title: '仅可查看主目录内文件的版本历史',
+          color: 'warning',
+        })
+        setSearchPath(scopedHomeDir)
+        return
+      }
       setSelectedPath(normalizedPath)
       setSearchParams({ path: normalizedPath })
     } else {
@@ -191,7 +229,7 @@ export function VersionsPage() {
       {/* Header */}
       <PageHeader
         title="版本历史"
-        subtitle="查看和恢复文件历史版本"
+        subtitle={isAdmin ? '查看和恢复文件历史版本' : '查看文件历史版本'}
         icon={History}
       />
 
@@ -296,7 +334,9 @@ export function VersionsPage() {
         <EmptyState
           icon={Sparkles}
           title="查看文件版本历史"
-          description="MnemoNAS 自动保留每个文件的历史版本。输入文件路径即可查看所有历史版本，支持预览、下载和一键回滚。"
+          description={isAdmin
+            ? 'MnemoNAS 自动保留每个文件的历史版本。输入文件路径即可查看所有历史版本，支持预览、下载和一键回滚。'
+            : 'MnemoNAS 自动保留主目录内文件的历史版本。输入文件路径即可查看历史版本，支持预览和下载。'}
           action={
             <div className="flex items-center gap-2 text-sm text-default-500 bg-content2/50 px-4 py-2 rounded-lg">
               <span>提示: 也可以在文件管理器中右键点击文件</span>
