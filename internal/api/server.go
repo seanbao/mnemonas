@@ -598,6 +598,7 @@ func pathContainsDescendant(basePath, targetPath string) bool {
 }
 
 var errPathOutsideHomeDir = errors.New("path outside user home directory")
+var errWebDAVUsernameMatchesNonAdmin = errors.New("webdav.username must not match a non-admin user when auth is enabled")
 
 func pathWithinBase(basePath, targetPath string) bool {
 	basePath = path.Clean(basePath)
@@ -686,6 +687,24 @@ func (s *Server) filterFavoritesByHomeDir(ctx context.Context, items []*favorite
 	}
 
 	filtered := make([]*favorites.Favorite, 0, len(items))
+	for _, item := range items {
+		if item != nil && pathWithinBase(homeDir, item.Path) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *Server) filterSharesByHomeDir(ctx context.Context, items []*share.Share) ([]*share.Share, error) {
+	homeDir, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return items, nil
+	}
+
+	filtered := make([]*share.Share, 0, len(items))
 	for _, item := range items {
 		if item != nil && pathWithinBase(homeDir, item.Path) {
 			filtered = append(filtered, item)
@@ -2953,6 +2972,30 @@ type CDCSettingsUpdate struct {
 	MaxChunkSize *uint32 `json:"max_chunk_size,omitempty"`
 }
 
+func (s *Server) validateWebDAVIdentity(cfg config.Config) error {
+	if !s.authEnabled || s.userStore == nil || !cfg.WebDAV.Enabled || !strings.EqualFold(cfg.WebDAV.AuthType, "basic") {
+		return nil
+	}
+
+	username := strings.TrimSpace(cfg.WebDAV.Username)
+	if username == "" {
+		return nil
+	}
+
+	user, err := s.userStore.GetByUsername(username)
+	if err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			return nil
+		}
+		return err
+	}
+	if user.Role != auth.RoleAdmin {
+		return errWebDAVUsernameMatchesNonAdmin
+	}
+
+	return nil
+}
+
 // handleUpdateSettings updates settings
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if s.config == nil || s.configPath == "" {
@@ -3224,6 +3267,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "invalid configuration")
 		return
 	}
+	if err := s.validateWebDAVIdentity(updatedConfig); err != nil {
+		if errors.Is(err, errWebDAVUsernameMatchesNonAdmin) {
+			BadRequest(w, err.Error())
+			return
+		}
+		s.respondInternalError(w, "validate webdav identity", err)
+		return
+	}
 
 	// Save to file
 	if err := updatedConfig.Save(s.configPath); err != nil {
@@ -3319,7 +3370,7 @@ func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Conf
 	}
 }
 
-// WebDAVCredentialsResponse represents WebDAV credentials for authenticated users
+// WebDAVCredentialsResponse represents WebDAV credentials for admin users.
 type WebDAVCredentialsResponse struct {
 	Enabled  bool   `json:"enabled"`
 	URL      string `json:"url"`
@@ -3328,7 +3379,7 @@ type WebDAVCredentialsResponse struct {
 	Password string `json:"password,omitempty"`
 }
 
-// handleGetWebDAVCredentials returns WebDAV credentials for authenticated users
+// handleGetWebDAVCredentials returns WebDAV credentials for admin users.
 func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Request) {
 	if s.config == nil {
 		ServiceUnavailable(w, "configuration not available")
@@ -3486,6 +3537,17 @@ func (s *Server) writeShareFeatureDisabled(w http.ResponseWriter, status int) {
 	writeShareErrorResponse(w, status, "share feature disabled", "SHARE_FEATURE_DISABLED")
 }
 
+func (s *Server) buildShareURL(id string) string {
+	baseURL := ""
+	if s.config != nil {
+		baseURL = strings.TrimRight(strings.TrimSpace(s.config.Share.BaseURL), "/")
+	}
+	if baseURL != "" {
+		return baseURL + "/s/" + id
+	}
+	return "/s/" + id
+}
+
 func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
 	if s.shareStore == nil {
 		return nil, share.ErrShareNotFound
@@ -3607,7 +3669,39 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
 		return
 	}
-	s.shareHandler.ListShares(w, r)
+	if s.shareStore == nil {
+		s.shareHandler.ListShares(w, r)
+		return
+	}
+
+	userID := "anonymous"
+	if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
+		userID = claims.UserID
+	}
+
+	var sharesList []*share.Share
+	if auth.IsAdmin(r.Context()) && r.URL.Query().Get("all") == "true" {
+		sharesList = s.shareStore.ListAll()
+	} else {
+		sharesList = s.shareStore.ListByUser(userID)
+	}
+
+	if s.authEnabled {
+		var err error
+		sharesList, err = s.filterSharesByHomeDir(r.Context(), sharesList)
+		if err != nil {
+			s.respondInternalError(w, "filter shares by home directory", err)
+			return
+		}
+	}
+
+	infos := make([]*share.ShareInfo, len(sharesList))
+	for i, item := range sharesList {
+		infos[i] = item.ToInfo()
+		infos[i].URL = s.buildShareURL(item.ID)
+	}
+
+	NewAPIResponse(infos).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleGetShare(w http.ResponseWriter, r *http.Request) {

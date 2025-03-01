@@ -26,6 +26,7 @@ import {
   Clock,
   Eye,
   RefreshCw,
+  AlertCircle,
 } from 'lucide-react'
 import { 
   listShares, 
@@ -45,17 +46,21 @@ interface ShareManagerProps {
 export function ShareManager({ showAllShares = false }: ShareManagerProps) {
   const [shares, setShares] = useState<Share[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Share | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
 
   const loadShares = useCallback(async () => {
     setIsLoading(true)
+    setLoadError(null)
     try {
       const data = await listShares(showAllShares)
       setShares(data)
     } catch (err) {
+      const message = err instanceof Error ? err.message : '加载分享列表失败'
+      setLoadError(message)
       addToast({ 
-        title: err instanceof Error ? err.message : '加载分享列表失败', 
+        title: message,
         color: 'danger' 
       })
     } finally {
@@ -120,6 +125,22 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
           <p className="text-default-500 text-sm">加载分享列表...</p>
         </div>
       </div>
+    )
+  }
+
+  if (loadError && shares.length === 0) {
+    return (
+      <EmptyState
+        icon={AlertCircle}
+        title="加载分享列表失败"
+        description={loadError}
+        action={
+          <Button variant="bordered" className="rounded-xl" onPress={() => loadShares()}>
+            重新加载
+          </Button>
+        }
+        className="py-12"
+      />
     )
   }
 

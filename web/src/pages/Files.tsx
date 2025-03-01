@@ -56,10 +56,17 @@ import { useCanWrite, useUser } from '@/stores/auth'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
 import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile, ApiError } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
-import { copyTextToClipboard, formatBytes, formatDate, cn } from '@/lib/utils'
+import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409
+}
+
+function pathWithinBase(basePath: string, targetPath: string): boolean {
+  if (basePath === '/') {
+    return targetPath.startsWith('/')
+  }
+  return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
 }
 
 // Breadcrumb navigation component
@@ -578,6 +585,7 @@ export function FilesPage() {
   const clipboard = useClipboardStore()
   const canWrite = useCanWrite()
   const user = useUser()
+  const scopedHomeDir = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : null
   
   // Track focused file index for keyboard navigation
   const [focusedIndex, setFocusedIndex] = useState<number>(-1)
@@ -652,16 +660,28 @@ export function FilesPage() {
     }
     const normalizedPath = decodedPath.startsWith('/') ? decodedPath : `/${decodedPath}`
     const finalPath = normalizedPath === '' ? '/' : normalizedPath
+    if (scopedHomeDir && scopedHomeDir !== '/' && !pathWithinBase(scopedHomeDir, finalPath)) {
+      addToast({
+        title: '仅可访问主目录内的文件',
+        color: 'warning',
+      })
+      if (currentPath !== scopedHomeDir) {
+        setCurrentPath(scopedHomeDir)
+      }
+      return
+    }
     if (finalPath !== currentPath) {
       setCurrentPath(finalPath)
     }
-  }, [location.pathname, currentPath, navigate, setCurrentPath])
+  }, [location.pathname, currentPath, navigate, scopedHomeDir, setCurrentPath])
 
   useEffect(() => {
     if (!user || user.role === 'admin' || user.homeDir === '/') return
     if (location.pathname !== '/files' || currentPath !== '/') return
     setCurrentPath(user.homeDir)
   }, [user, location.pathname, currentPath, setCurrentPath])
+
+  const currentPathAllowed = !scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath)
 
   useEffect(() => {
     const encodedPath = currentPath === '/' ? '' : encodeURI(currentPath)
@@ -681,6 +701,7 @@ export function FilesPage() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['files', currentPath],
     queryFn: () => listFiles(currentPath),
+    enabled: currentPathAllowed,
   })
 
   // Mutations (omitted for brevity, same as before)

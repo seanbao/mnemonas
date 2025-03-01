@@ -2009,6 +2009,38 @@ func TestServer_Diagnostics_RequiresAdminWhenAuthEnabled(t *testing.T) {
 	}
 }
 
+func TestServer_WebDAVCredentials_RequiresAdminWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	userToken := loginAndGetAccessToken(t, server, username, password)
+
+	userReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings/webdav-credentials", nil)
+	userReq.Header.Set("Authorization", "Bearer "+userToken)
+	userRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(userRec, userReq)
+
+	if userRec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin webdav credentials status = %d, want %d", userRec.Code, http.StatusForbidden)
+	}
+
+	adminUsername := "webdav-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings/webdav-credentials", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+adminToken)
+	adminRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(adminRec, adminReq)
+
+	if adminRec.Code != http.StatusOK {
+		t.Fatalf("admin webdav credentials status = %d, want %d", adminRec.Code, http.StatusOK)
+	}
+}
+
 func TestServer_ListFiles_EnforcesHomeDirForNonAdmin(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 
@@ -3682,6 +3714,53 @@ func TestServer_GetShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.
 	}
 }
 
+func TestServer_ListShares_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	if _, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID}); err != nil {
+		t.Fatalf("Create own-home share error: %v", err)
+	}
+	if _, err := server.shareStore.Create(share.CreateShareOptions{Path: "/other/secret.txt", Type: share.ShareTypeFile, CreatedBy: user.ID}); err != nil {
+		t.Fatalf("Create outside-home share error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list shares status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "/tester/own.txt") {
+		t.Fatalf("expected own-home share in list, got %s", body)
+	}
+	if strings.Contains(body, "/other/secret.txt") {
+		t.Fatalf("expected outside-home share to be filtered, got %s", body)
+	}
+}
+
 func TestServer_CheckFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 
@@ -4059,6 +4138,35 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 	if server.config.WebDAV.Prefix != "/dav" {
 		t.Fatalf("expected prefix normalized to /dav, got %q", server.config.WebDAV.Prefix)
+	}
+}
+
+func TestServer_UpdateSettings_RejectsWebDAVUsernameMatchingNonAdminUser(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	adminUsername := "settings-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+
+	body := fmt.Sprintf(`{"webdav":{"enabled":true,"auth_type":"basic","username":"%s","password":"shared-pass"}}`, username)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings with non-admin webdav username status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "webdav.username must not match a non-admin user") {
+		t.Fatalf("expected non-admin webdav username validation message, got %s", w.Body.String())
+	}
+	if server.config.WebDAV.Username == username {
+		t.Fatalf("expected live config to remain unchanged after rejected settings update")
 	}
 }
 
