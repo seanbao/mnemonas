@@ -38,6 +38,14 @@ const maxObjectsCursorLength = 256
 
 const scrubFailurePublicMessage = "scrub failed; check server logs for details"
 
+var saveScrubResult = func(store *maintenance.HistoryStore, result *maintenance.ScrubResult) error {
+	return store.SaveScrubResult(result)
+}
+
+var deleteGCChunk = func(client *dataplane.Client, ctx context.Context, hash string) (bool, error) {
+	return client.DeleteChunk(ctx, hash)
+}
+
 type prependReadCloser struct {
 	io.Reader
 	io.Closer
@@ -1806,7 +1814,9 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 			scrubRecord.EndTime = time.Now()
 			scrubRecord.ErrorMessage = scrubFailurePublicMessage
 			scrubRecord.DurationMs = uint64(time.Since(scrubRecord.StartTime).Milliseconds())
-			_ = s.maintenance.SaveScrubResult(scrubRecord)
+			if saveErr := saveScrubResult(s.maintenance, scrubRecord); saveErr != nil {
+				s.logger.Error().Err(saveErr).Msg("failed to persist failed scrub result")
+			}
 		}
 		s.respondInternalError(w, "run scrub", err)
 		return
@@ -1839,7 +1849,10 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		scrubRecord.TotalSize = result.TotalSize
 		scrubRecord.DurationMs = result.DurationMs
 		scrubRecord.Errors = maintErrors
-		_ = s.maintenance.SaveScrubResult(scrubRecord)
+		if err := saveScrubResult(s.maintenance, scrubRecord); err != nil {
+			s.respondInternalError(w, "persist scrub result", err)
+			return
+		}
 	}
 
 	NewAPIResponse(map[string]any{
@@ -1985,11 +1998,16 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	dryRun := r.URL.Query().Get("dry_run") != "false"
 
 	var deletedCount int
+	deleteFailures := make([]map[string]any, 0)
 	if !dryRun {
 		for _, hash := range unreferenced {
-			deleted, err := s.dataplane.DeleteChunk(ctx, hash)
+			deleted, err := deleteGCChunk(s.dataplane, ctx, hash)
 			if err != nil {
 				s.logger.Warn().Err(err).Str("hash", hash).Msg("failed to delete chunk")
+				deleteFailures = append(deleteFailures, map[string]any{
+					"hash":    hash,
+					"message": "failed to delete chunk",
+				})
 				continue
 			}
 			if deleted {
@@ -1998,7 +2016,7 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	NewAPIResponse(map[string]any{
+	resp := map[string]any{
 		"dry_run":            dryRun,
 		"grace_period_hours": int(gracePeriod.Hours()),
 		"total_objects":      len(allObjects),
@@ -2006,8 +2024,14 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 		"unreferenced":       len(unreferenced),
 		"unreferenced_size":  unreferencedSize,
 		"skipped_by_grace":   skippedByGrace,
-		"deleted":            deletedCount,
-	}).Write(w, http.StatusOK)
+		"deleted_count":      deletedCount,
+	}
+	if !dryRun {
+		resp["failed_count"] = len(deleteFailures)
+		resp["delete_failures"] = deleteFailures
+	}
+
+	NewAPIResponse(resp).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleGetScrubResult(w http.ResponseWriter, r *http.Request) {
@@ -2223,9 +2247,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // === Helper functions ===
 
 func (s *Server) json(w http.ResponseWriter, status int, data any) {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_, _ = w.Write(payload)
 }
 
 func parseUint32(s string) (uint32, error) {
@@ -3333,6 +3363,19 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	preparedDataplane, err := s.prepareDataplaneReplacement(req, updatedConfig)
+	if err != nil {
+		ServiceUnavailable(w, "unable to connect to configured dataplane")
+		return
+	}
+	if preparedDataplane != nil {
+		defer func() {
+			if preparedDataplane != nil {
+				_ = preparedDataplane.Close()
+			}
+		}()
+	}
+
 	// Save to file
 	if err := updatedConfig.Save(s.configPath); err != nil {
 		s.respondInternalError(w, "save settings", err)
@@ -3340,20 +3383,43 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	*s.config = updatedConfig
-	s.applyRuntimeSettings(req, updatedConfig)
+	s.applyRuntimeSettings(req, updatedConfig, preparedDataplane)
+	preparedDataplane = nil
 
 	s.logger.Info().Msg("settings updated and saved")
 
 	NewAPIResponse(nil).WithMessage("settings updated, some changes may require restart").Write(w, http.StatusOK)
 }
 
-func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Config) {
+func (s *Server) prepareDataplaneReplacement(req UpdateSettingsRequest, cfg config.Config) (*dataplane.Client, error) {
+	if req.DataPlane == nil || req.DataPlane.GRPCAddress == nil {
+		return nil, nil
+	}
+	if s.dataplane != nil && s.dataplane.Addr() == cfg.DataPlane.GRPCAddress {
+		return nil, nil
+	}
+
+	replacement := dataplane.NewClient(cfg.DataPlane.GRPCAddress)
+	if err := s.connectDataplaneClient(context.Background(), replacement, cfg.DataPlane.Timeout); err != nil {
+		_ = replacement.Close()
+		return nil, err
+	}
+
+	return replacement, nil
+}
+
+func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client) {
 	if req.DataPlane != nil && req.DataPlane.GRPCAddress != nil {
 		swapDataplane := s.dataplane == nil || s.dataplane.Addr() != cfg.DataPlane.GRPCAddress
 		if swapDataplane {
-			replacement := dataplane.NewClient(cfg.DataPlane.GRPCAddress)
-			if err := s.connectDataplaneClient(context.Background(), replacement, cfg.DataPlane.Timeout); err != nil {
-				s.logger.Warn().Err(err).Str("addr", cfg.DataPlane.GRPCAddress).Msg("Failed to connect updated data plane address")
+			replacement := preparedDataplane
+			if replacement == nil {
+				replacement = dataplane.NewClient(cfg.DataPlane.GRPCAddress)
+				if err := s.connectDataplaneClient(context.Background(), replacement, cfg.DataPlane.Timeout); err != nil {
+					s.logger.Warn().Err(err).Str("addr", cfg.DataPlane.GRPCAddress).Msg("Failed to connect updated data plane address")
+					_ = replacement.Close()
+					return
+				}
 			}
 
 			previous := s.dataplane
@@ -3499,8 +3565,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Error reading secrets file
 		s.logger.Error().Err(err).Msg("failed to load secrets")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SetupStatusResponse{
+		s.json(w, http.StatusOK, SetupStatusResponse{
 			Success:    true,
 			IsFirstRun: false,
 		})
@@ -3509,8 +3574,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 
 	// No secrets file means not first run or something went wrong
 	if secrets == nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SetupStatusResponse{
+		s.json(w, http.StatusOK, SetupStatusResponse{
 			Success:    true,
 			IsFirstRun: false,
 		})
@@ -3525,8 +3589,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 		WebDAVAuthType: s.config.WebDAV.AuthType,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	s.json(w, http.StatusOK, resp)
 }
 
 // handleAcknowledgeSetup marks the setup as shown
@@ -3540,8 +3603,7 @@ func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	s.json(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"message": "setup acknowledged",
 	})
@@ -3559,9 +3621,7 @@ func (r *responseRecorder) WriteHeader(code int) {
 }
 
 func writeShareErrorResponse(w http.ResponseWriter, status int, message, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeRawJSON(w, status, map[string]any{
 		"success": false,
 		"error": map[string]string{
 			"code":    code,
@@ -3571,15 +3631,25 @@ func writeShareErrorResponse(w http.ResponseWriter, status int, message, code st
 }
 
 func writeFavoritesErrorResponse(w http.ResponseWriter, status int, message, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeRawJSON(w, status, map[string]any{
 		"success": false,
 		"error": map[string]string{
 			"code":    code,
 			"message": message,
 		},
 	})
+}
+
+func writeRawJSON(w http.ResponseWriter, status int, data any) {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(payload)
 }
 
 func (s *Server) isShareFeatureEnabled() bool {

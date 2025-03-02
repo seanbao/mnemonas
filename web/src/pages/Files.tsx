@@ -54,7 +54,18 @@ import { useFilesStore, type FileItem } from '@/stores/files'
 import { useClipboardStore } from '@/stores/clipboard'
 import { useCanWrite, useUser } from '@/stores/auth'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
-import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile, ApiError } from '@/api/files'
+import {
+  listFiles,
+  deleteFile,
+  createDirectory,
+  uploadFile,
+  moveFile,
+  copyFile,
+  downloadFile,
+  ApiError,
+  MAX_UPLOAD_FILE_SIZE_BYTES,
+  MAX_UPLOAD_FILE_SIZE_LABEL,
+} from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 
@@ -67,6 +78,10 @@ function pathWithinBase(basePath: string, targetPath: string): boolean {
     return targetPath.startsWith('/')
   }
   return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
+}
+
+function getUploadSizeError(relativePath: string | undefined, file: File): string {
+  return `${relativePath || file.name} 超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`
 }
 
 // Breadcrumb navigation component
@@ -1051,27 +1066,48 @@ export function FilesPage() {
     
     const queue = fileArray.map(file => {
       const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      const isOversized = file.size > MAX_UPLOAD_FILE_SIZE_BYTES
       return {
         file,
         relativePath,
         progress: 0,
-        status: 'pending' as const,
+        status: isOversized ? 'error' as const : 'pending' as const,
+        error: isOversized ? getUploadSizeError(relativePath, file) : undefined,
       }
     })
+
+    const uploadableEntries = queue
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item.status === 'pending')
+    const rejectedEntries = queue.filter((item) => item.status === 'error')
     
     setUploadQueue(queue)
-    setIsUploading(true)
+    setIsUploading(uploadableEntries.length > 0)
     setShowUploadPanel(true)  // Auto show upload panel when upload starts
 
+    if (rejectedEntries.length > 0) {
+      addToast({
+        title: rejectedEntries.length === queue.length ? '上传失败' : '部分文件未上传',
+        description: rejectedEntries.length === 1
+          ? rejectedEntries[0].error
+          : `${rejectedEntries.length} 个文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`,
+        color: rejectedEntries.length === queue.length ? 'danger' : 'warning',
+      })
+    }
+
+    if (uploadableEntries.length === 0) {
+      return
+    }
+
     let successCount = 0
-    let errorCount = 0
+    let errorCount = rejectedEntries.length
     
-    for (let i = 0; i < fileArray.length; i++) {
-      const file = fileArray[i]
+    for (const { item, index } of uploadableEntries) {
+      const file = item.file
       const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
       
       setUploadQueue(prev => prev.map((item, j) => 
-        j === i ? { ...item, status: 'uploading' as const } : item
+        j === index ? { ...item, status: 'uploading' as const } : item
       ))
       
       try {
@@ -1091,17 +1127,17 @@ export function FilesPage() {
         
         await uploadFile(targetPath, file, (progress) => {
           setUploadQueue(prev => prev.map((item, j) => 
-            j === i ? { ...item, progress } : item
+            j === index ? { ...item, progress } : item
           ))
         })
         successCount++
         setUploadQueue(prev => prev.map((item, j) => 
-          j === i ? { ...item, status: 'done' as const, progress: 100 } : item
+          j === index ? { ...item, status: 'done' as const, progress: 100 } : item
         ))
       } catch (error) {
         errorCount++
         setUploadQueue(prev => prev.map((item, j) => 
-          j === i ? { ...item, status: 'error' as const, error: error instanceof Error ? error.message : '上传失败' } : item
+          j === index ? { ...item, status: 'error' as const, error: error instanceof Error ? error.message : '上传失败' } : item
         ))
       }
     }

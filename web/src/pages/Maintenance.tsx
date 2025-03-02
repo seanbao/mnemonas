@@ -142,9 +142,11 @@ export default function Maintenance() {
   // Run scrub mutation
   const scrubMutation = useMutation({
     mutationFn: () => runScrub(),
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['scrub-result'] })
-      addToast({ title: '数据校验已启动', color: 'success' })
+
+      const title = result.status === 'running' ? '数据校验已启动' : '数据校验已完成'
+      addToast({ title, color: 'success' })
     },
     onError: (error: Error) => {
       addToast({

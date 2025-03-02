@@ -50,9 +50,15 @@ func (e *APIError) WithRequestID(id string) *APIError {
 
 // Write writes the error as JSON response
 func (e *APIError) Write(w http.ResponseWriter, status int) error {
+	payload, err := json.Marshal(e)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return err
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(e); err != nil {
+	if _, err := w.Write(payload); err != nil {
 		return err
 	}
 	return nil
@@ -119,9 +125,15 @@ func (r *APIResponse) WithRequestID(id string) *APIResponse {
 
 // Write writes the response as JSON
 func (r *APIResponse) Write(w http.ResponseWriter, status int) error {
+	payload, err := json.Marshal(r)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return err
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(r); err != nil {
+	if _, err := w.Write(payload); err != nil {
 		return err
 	}
 	return nil

@@ -593,8 +593,9 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(info)
+			if !writePublicShareInfo(w, info) {
+				return
+			}
 			return
 		}
 
@@ -606,8 +607,9 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 			Description: share.Description,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(info)
+		if !writePublicShareInfo(w, info) {
+			return
+		}
 		return
 	}
 
@@ -629,8 +631,9 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	if !writePublicShareInfo(w, info) {
+		return
+	}
 }
 
 // AccessShareRequest is the request for password-protected share access
@@ -693,11 +696,14 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		h.writePublicShareInfoError(w, share, err)
 		return
 	}
+	payload, err := marshalShareJSON(info)
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
+		return
+	}
 
 	h.setShareAccessCookie(w, r, share)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	writeShareJSONPayload(w, http.StatusOK, payload)
 }
 
 func sharePasswordAttemptKey(id string, r *http.Request) string {
@@ -1170,10 +1176,40 @@ func requestIsHTTPS(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+func marshalShareJSON(data any) ([]byte, error) {
+	return json.Marshal(data)
+}
+
+func writeShareJSONPayload(w http.ResponseWriter, status int, payload []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(responseEnvelope{
+	_, _ = w.Write(payload)
+}
+
+func writeShareJSON(w http.ResponseWriter, status int, data any) bool {
+	payload, err := marshalShareJSON(data)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return false
+	}
+
+	writeShareJSONPayload(w, status, payload)
+	return true
+}
+
+func writePublicShareInfo(w http.ResponseWriter, info *PublicShareInfo) bool {
+	payload, err := marshalShareJSON(info)
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
+		return false
+	}
+
+	writeShareJSONPayload(w, http.StatusOK, payload)
+	return true
+}
+
+func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	writeShareJSON(w, status, responseEnvelope{
 		Success: true,
 		Data:    data,
 		Message: message,
@@ -1181,9 +1217,7 @@ func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, mess
 }
 
 func writeShareError(w http.ResponseWriter, status int, message, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(responseEnvelope{
+	writeShareJSON(w, status, responseEnvelope{
 		Success: false,
 		Error: &errorDetail{
 			Code:    code,

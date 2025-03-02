@@ -6,6 +6,9 @@ export type { FileItem }
 
 const API_BASE = '/api/v1'
 
+export const MAX_UPLOAD_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024
+export const MAX_UPLOAD_FILE_SIZE_LABEL = '10 GB'
+
 export interface FileListResponse {
   files: FileItem[]
   path: string
@@ -181,6 +184,183 @@ interface ApiResponseWrapper<T> {
   timestamp: string
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isDiagnosticsVersionShape(value: unknown): value is DiagnosticsInfo['version'] {
+  return isRecord(value)
+    && typeof value.name === 'string'
+    && typeof value.version === 'string'
+    && typeof value.go === 'string'
+}
+
+function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === 'boolean'
+}
+
+function isNumberOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || typeof value === 'number'
+}
+
+function isStringOrUndefined(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === 'string'
+}
+
+function isDiagnosticsShape(value: unknown): value is {
+  timestamp: string
+  uptime: string
+  uptime_secs?: number
+  version: DiagnosticsInfo['version']
+  system?: {
+    filesystem_initialized?: boolean
+    dataplane_connected?: boolean
+    thumbnail_service_ready?: boolean
+  }
+  memory?: {
+    alloc_mb?: number
+    total_alloc_mb?: number
+    sys_mb?: number
+    num_gc?: number
+  }
+  goroutines?: number
+  filesystem?: {
+    trash_items?: number
+    trash_size?: number
+  }
+  storage?: {
+    total_chunks?: number
+    total_size?: number
+    unique_size?: number
+    dedup_ratio?: number
+  }
+  dataplane?: {
+    healthy?: boolean
+    version?: string
+    uptime_sec?: number
+  }
+} {
+  if (!isRecord(value) || typeof value.timestamp !== 'string' || typeof value.uptime !== 'string' || !isDiagnosticsVersionShape(value.version)) {
+    return false
+  }
+
+  if (!isNumberOrUndefined(value.uptime_secs) || !isNumberOrUndefined(value.goroutines)) {
+    return false
+  }
+
+  if (value.system !== undefined) {
+    if (!isRecord(value.system)
+      || !isBooleanOrUndefined(value.system.filesystem_initialized)
+      || !isBooleanOrUndefined(value.system.dataplane_connected)
+      || !isBooleanOrUndefined(value.system.thumbnail_service_ready)) {
+      return false
+    }
+  }
+
+  if (value.memory !== undefined) {
+    if (!isRecord(value.memory)
+      || !isNumberOrUndefined(value.memory.alloc_mb)
+      || !isNumberOrUndefined(value.memory.total_alloc_mb)
+      || !isNumberOrUndefined(value.memory.sys_mb)
+      || !isNumberOrUndefined(value.memory.num_gc)) {
+      return false
+    }
+  }
+
+  if (value.filesystem !== undefined) {
+    if (!isRecord(value.filesystem)
+      || !isNumberOrUndefined(value.filesystem.trash_items)
+      || !isNumberOrUndefined(value.filesystem.trash_size)) {
+      return false
+    }
+  }
+
+  if (value.storage !== undefined) {
+    if (!isRecord(value.storage)
+      || !isNumberOrUndefined(value.storage.total_chunks)
+      || !isNumberOrUndefined(value.storage.total_size)
+      || !isNumberOrUndefined(value.storage.unique_size)
+      || !isNumberOrUndefined(value.storage.dedup_ratio)) {
+      return false
+    }
+  }
+
+  if (value.dataplane !== undefined) {
+    if (!isRecord(value.dataplane)
+      || !isBooleanOrUndefined(value.dataplane.healthy)
+      || !isStringOrUndefined(value.dataplane.version)
+      || !isNumberOrUndefined(value.dataplane.uptime_sec)) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function isScrubErrorShape(value: unknown): value is ScrubError {
+  return isRecord(value)
+    && typeof value.hash === 'string'
+    && typeof value.error_type === 'string'
+    && typeof value.message === 'string'
+}
+
+function isScrubResultShape(value: unknown): value is ScrubResult {
+  if (!isRecord(value) || typeof value.has_result !== 'boolean') {
+    return false
+  }
+
+  if (value.message !== undefined && typeof value.message !== 'string') {
+    return false
+  }
+  if (value.id !== undefined && typeof value.id !== 'string') {
+    return false
+  }
+  if (value.start_time !== undefined && typeof value.start_time !== 'string') {
+    return false
+  }
+  if (value.end_time !== undefined && typeof value.end_time !== 'string') {
+    return false
+  }
+  if (value.status !== undefined && value.status !== 'running' && value.status !== 'completed' && value.status !== 'failed') {
+    return false
+  }
+
+  const numericKeys = [
+    'total_objects',
+    'valid_objects',
+    'corrupted_objects',
+    'missing_objects',
+    'total_size',
+    'duration_ms',
+  ] as const
+  for (const key of numericKeys) {
+    if (value[key] !== undefined && typeof value[key] !== 'number') {
+      return false
+    }
+  }
+
+  if (value.error_message !== undefined && typeof value.error_message !== 'string') {
+    return false
+  }
+  if (value.errors !== undefined && (!Array.isArray(value.errors) || !value.errors.every(isScrubErrorShape))) {
+    return false
+  }
+
+  return true
+}
+
+function isRunScrubResponseShape(value: unknown): value is Omit<ScrubResult, 'has_result'> {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const candidate: ScrubResult = {
+    has_result: true,
+    ...value,
+  }
+  return isScrubResultShape(candidate)
+}
+
 // List files in a directory
 export async function listFiles(path: string): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
@@ -260,39 +440,10 @@ export async function getHealth(): Promise<HealthStatus> {
 // Get diagnostics info (direct response, not wrapped)
 export async function getDiagnostics(): Promise<DiagnosticsInfo> {
   const response = await authFetch(`${API_BASE}/diagnostics`)
-  const data = await handleWrappedResponse<{
-    timestamp: string
-    uptime: string
-    uptime_secs?: number
-    version: DiagnosticsInfo['version']
-    system?: {
-      filesystem_initialized?: boolean
-      dataplane_connected?: boolean
-      thumbnail_service_ready?: boolean
-    }
-    memory?: {
-      alloc_mb?: number
-      total_alloc_mb?: number
-      sys_mb?: number
-      num_gc?: number
-    }
-    goroutines?: number
-    filesystem?: {
-      trash_items?: number
-      trash_size?: number
-    }
-    storage?: {
-      total_chunks?: number
-      total_size?: number
-      unique_size?: number
-      dedup_ratio?: number
-    }
-    dataplane?: {
-      healthy?: boolean
-      version?: string
-      uptime_sec?: number
-    }
-  }>(response, '获取诊断信息失败')
+  const data = await handleWrappedResponse<unknown>(response, '获取诊断信息失败')
+  if (!isDiagnosticsShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
   return {
     timestamp: data.timestamp,
     uptime: data.uptime,
@@ -381,6 +532,11 @@ export async function uploadFile(
           }
           return
         }
+      }
+
+      if (xhr.status === 413) {
+        reject(new ApiError(`文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`, xhr.status, xhr.statusText))
+        return
       }
 
       reject(new ApiError('上传失败', xhr.status, xhr.statusText))
@@ -476,7 +632,7 @@ export async function downloadFile(
   const response = await authFetch(url)
 
   if (!response.ok) {
-    throw new ApiError('下载文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '下载文件失败')
   }
 
   const fallbackFilename = options?.filename ?? normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
@@ -682,7 +838,11 @@ export interface ScrubResult {
 // Get last scrub result
 export async function getScrubResult(): Promise<ScrubResult> {
   const response = await authFetch(`${API_BASE}/maintenance/scrub`)
-  return handleWrappedResponse<ScrubResult>(response, '获取校验结果失败')
+  const data = await handleWrappedResponse<unknown>(response, '获取校验结果失败')
+  if (!isScrubResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
 }
 
 // Run scrub operation
@@ -692,28 +852,31 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,
   })
-  const data = await handleWrappedResponse<Omit<ScrubResult, 'has_result'>>(response, '执行数据校验失败')
-  return {
+  const data = await handleWrappedResponse<unknown>(response, '执行数据校验失败')
+  if (!isRunScrubResponseShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  const result: ScrubResult = {
     has_result: true,
     ...data,
   }
+  if (!result.status) {
+    result.status = 'completed'
+  }
+  return result
 }
 
 // Download diagnostics export
 export async function downloadDiagnosticsExport(): Promise<void> {
   const response = await authFetch(`${API_BASE}/diagnostics-export`)
   if (!response.ok) {
-    throw new ApiError('导出诊断信息失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '导出诊断信息失败')
   }
-  
-  // Get filename from Content-Disposition header or generate one
-  const contentDisposition = response.headers.get('Content-Disposition')
-  let filename = `mnemonas-diagnostics-${new Date().toISOString().slice(0, 10)}.json`
-  if (contentDisposition) {
-    const match = contentDisposition.match(/filename=(.+)/)
-    if (match) filename = match[1]
-  }
-  
+
+  const fallbackFilename = `mnemonas-diagnostics-${new Date().toISOString().slice(0, 10)}.json`
+  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)
 }

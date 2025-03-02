@@ -82,7 +82,7 @@ describe('MaintenancePage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetScrubResult.mockResolvedValue(mockCompletedResult)
-    mockRunScrub.mockResolvedValue(mockRunningResult)
+    mockRunScrub.mockResolvedValue(mockCompletedResult)
     mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
   })
 
@@ -280,7 +280,7 @@ describe('MaintenancePage', () => {
       })
 
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '数据校验已启动',
+        title: '数据校验已完成',
         color: 'success',
       })
     })

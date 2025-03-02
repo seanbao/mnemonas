@@ -65,6 +65,22 @@ func TestHandler_ListFavorites_WrapsResponse(t *testing.T) {
 	}
 }
 
+func TestHandler_JSON_InvalidPayloadReturnsInternalServerError(t *testing.T) {
+	handler := &Handler{}
+	rec := httptest.NewRecorder()
+
+	handler.json(rec, http.StatusOK, map[string]any{
+		"bad": make(chan int),
+	})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+	if rec.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", rec.Body.String())
+	}
+}
+
 func TestHandler_AddFavorite_WrapsConflictError(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
 	if err != nil {

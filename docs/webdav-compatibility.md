@@ -4,6 +4,8 @@
 
 本文档记录 MnemoNAS WebDAV 服务与各客户端的兼容性状态。
 
+说明：本文档描述的是 WebDAV 协议能力。REST API `/api/v1/files-copy` 当前仅支持复制文件，不支持目录复制。
+
 ## 协议实现状态
 
 ### 已实现 (RFC 4918)
