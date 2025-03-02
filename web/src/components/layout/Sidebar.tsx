@@ -84,8 +84,9 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
     refetchInterval: 1000 * 60 * 5, // Refresh every 5 minutes
   })
 
-  const usedBytes = storageStats?.totalSize ?? 0
-  const hasUsage = usedBytes > 0
+  const usedBytes = storageStats?.totalSize
+  const hasUsage = usedBytes !== undefined && usedBytes > 0
+  const storageStatsKnown = storageStats?.totalSize !== undefined || storageStats?.dedupRatio !== undefined
 
   return (
     <aside 
@@ -222,7 +223,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
                 <div className="flex items-center justify-between">
                   <span className="text-default-500">已使用</span>
                   <span className="data-value text-accent-light font-medium">
-                    {storageStats ? formatBytes(usedBytes) : '--'}
+                    {usedBytes !== undefined ? formatBytes(usedBytes) : '--'}
                   </span>
                 </div>
                 <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
@@ -234,12 +235,12 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
                     style={{ width: hasUsage ? '100%' : '0%' }}
                   />
                 </div>
-                <div className="text-[11px] text-default-400">容量未知</div>
-                  {storageStats && storageStats.dedupRatio > 0 && (
+                <div className="text-[11px] text-default-400">{storageStatsKnown ? '容量未知' : '统计不可用'}</div>
+                {storageStats?.dedupRatio !== undefined && storageStats.dedupRatio > 0 && (
                   <div className="flex items-center gap-2">
                     <div className="live-indicator scale-75" />
-                      <span className="text-default-400">
-                        去重率 {(storageStats.dedupRatio * 100).toFixed(1)}%
+                    <span className="text-default-400">
+                      去重率 {(storageStats.dedupRatio * 100).toFixed(1)}%
                     </span>
                   </div>
                 )}

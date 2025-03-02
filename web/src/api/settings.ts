@@ -173,6 +173,21 @@ async function parseSettingsError(response: Response, fallback: string): Promise
   }
 }
 
+async function parseSettingsSuccess<T>(response: Response, invalidMessage: string): Promise<SettingsApiResponse<T>> {
+  let body: SettingsApiResponse<T>
+  try {
+    body = await response.json() as SettingsApiResponse<T>
+  } catch {
+    throw new Error(invalidMessage)
+  }
+
+  if (!body || body.success !== true) {
+    throw new Error(invalidMessage)
+  }
+
+  return body
+}
+
 /**
  * Get current settings
  */
@@ -183,7 +198,7 @@ export async function getSettings(): Promise<SettingsResponse> {
     throw await parseSettingsError(response, 'Failed to get settings')
   }
 
-  const body = await response.json() as SettingsApiResponse<SettingsData>
+  const body = await parseSettingsSuccess<SettingsData>(response, 'Invalid settings response')
   if (!body.data) {
     throw new Error('Invalid settings response')
   }
@@ -209,9 +224,9 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
     throw await parseSettingsError(response, 'Failed to update settings')
   }
 
-  const body = await response.json() as SettingsApiResponse<null>
+  const body = await parseSettingsSuccess<null>(response, 'Invalid update settings response')
   return {
-    success: body.success,
+    success: true,
     message: body.message || '',
   }
 }
@@ -237,7 +252,7 @@ export async function getWebDAVCredentials(): Promise<WebDAVCredentialsResponse>
     throw await parseSettingsError(response, 'Failed to get WebDAV credentials')
   }
 
-  const body = await response.json() as SettingsApiResponse<WebDAVCredentialsResponse>
+  const body = await parseSettingsSuccess<WebDAVCredentialsResponse>(response, 'Invalid WebDAV credentials response')
   if (!body.data) {
     throw new Error('Invalid WebDAV credentials response')
   }

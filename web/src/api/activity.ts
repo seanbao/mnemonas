@@ -29,7 +29,7 @@ interface ApiResponseWrapper<T> {
 }
 
 // Handle API response
-async function handleResponse<T>(response: Response, errorMessage: string): Promise<T> {
+async function handleResponse<T>(response: Response, errorMessage: string, invalidMessage = '服务器返回了无效的数据'): Promise<T> {
   if (!response.ok) {
     let message = errorMessage
     try {
@@ -44,7 +44,19 @@ async function handleResponse<T>(response: Response, errorMessage: string): Prom
     } catch { /* ignore */ }
     throw new ApiError(message, response.status, response.statusText)
   }
-  return response.json()
+
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new Error(invalidMessage)
+  }
+
+  if (!body || typeof body !== 'object' || (body as ApiResponseWrapper<T>).success !== true || !('data' in body)) {
+    throw new Error(invalidMessage)
+  }
+
+  return body as T
 }
 
 // Activity action types
@@ -110,17 +122,21 @@ export async function listActivity(options?: {
 
   const response = await authFetch(url)
   const result = await handleResponse<ApiResponseWrapper<{
-    items: ActivityEntry[]
-    total: number
-    limit: number
-    offset: number
+    items?: ActivityEntry[]
+    total?: number
+    limit?: number
+    offset?: number
   }>>(response, '获取活动日志失败')
 
+  const items = Array.isArray(result.data.items) ? result.data.items : []
+  const limit = result.data.limit ?? options?.limit ?? items.length
+  const offset = result.data.offset ?? options?.offset ?? 0
+
   return {
-    items: result.data.items || [],
-    total: result.data.total,
-    limit: result.data.limit,
-    offset: result.data.offset,
+    items,
+    total: result.data.total ?? items.length,
+    limit,
+    offset,
   }
 }
 
@@ -128,6 +144,20 @@ export async function listActivity(options?: {
 export async function getActivityStats(): Promise<ActivityStats> {
   const response = await authFetch(`${API_BASE}/activity/stats`)
   const result = await handleResponse<ApiResponseWrapper<ActivityStats>>(response, '获取活动统计失败')
+
+  if (
+    typeof result.data.total !== 'number' ||
+    typeof result.data.today !== 'number' ||
+    !result.data.by_action ||
+    typeof result.data.by_action !== 'object' ||
+    Array.isArray(result.data.by_action) ||
+    !result.data.by_user ||
+    typeof result.data.by_user !== 'object' ||
+    Array.isArray(result.data.by_user)
+  ) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
   return result.data
 }
 
@@ -138,7 +168,10 @@ export async function clearActivity(): Promise<void> {
   })
   if (!response.ok) {
     await handleResponse(response, '清除活动日志失败')
+    return
   }
+
+  await handleResponse<ApiResponseWrapper<Record<string, never>>>(response, '清除活动日志失败')
 }
 
 // Get action label in Chinese

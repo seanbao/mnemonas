@@ -76,6 +76,14 @@ function getFavoritesErrorMessage(body: FavoritesApiResponse<never>, fallback: s
   return fallback
 }
 
+async function readFavoritesSuccessData<T>(response: Response, invalidMessage: string): Promise<T> {
+  const body: FavoritesApiResponse<T> = await response.json()
+  if (body.success !== true || body.data === undefined) {
+    throw new FavoritesError(invalidMessage, response.status)
+  }
+  return body.data
+}
+
 /**
  * List user's favorites
  */
@@ -91,11 +99,7 @@ export async function listFavorites(): Promise<Favorite[]> {
     throw new FavoritesError(message, response.status)
   }
 
-  const body: FavoritesApiResponse<FavoritesResponse> = await response.json()
-  if (!body.data) {
-    throw new FavoritesError('获取收藏列表响应无效', response.status)
-  }
-  const data = body.data
+  const data = await readFavoritesSuccessData<FavoritesResponse>(response, '获取收藏列表响应无效')
   return data.favorites
 }
 
@@ -122,11 +126,7 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
     throw new FavoritesError(message, response.status)
   }
 
-  const body: FavoritesApiResponse<Favorite> = await response.json()
-  if (!body.data) {
-    throw new FavoritesError('添加收藏响应无效', response.status)
-  }
-  return body.data
+  return readFavoritesSuccessData<Favorite>(response, '添加收藏响应无效')
 }
 
 /**
@@ -147,6 +147,8 @@ export async function removeFavorite(path: string): Promise<void> {
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
+
+  await readFavoritesSuccessData<null>(response, '移除收藏响应无效')
 }
 
 /**
@@ -160,11 +162,11 @@ export async function checkFavorite(path: string): Promise<boolean> {
     throw await createFavoritesError(response, '获取收藏状态失败')
   }
   
-  const body: FavoritesApiResponse<{ path: string; is_favorite: boolean }> = await response.json()
-  if (!body.data) {
-    return false
+  const data = await readFavoritesSuccessData<{ path: string; is_favorite: boolean }>(response, '获取收藏状态响应无效')
+  if (typeof data.is_favorite !== 'boolean') {
+    throw new FavoritesError('获取收藏状态响应无效', response.status)
   }
-  return body.data.is_favorite
+  return data.is_favorite
 }
 
 /**
@@ -194,11 +196,14 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
     throw await createFavoritesError(response, '获取收藏状态失败')
   }
   batchCheckSupported = true
-  const body: FavoritesApiResponse<CheckPathsResponse> = await response.json()
-  if (!body.data) {
-    return Object.fromEntries(paths.map(p => [p, false]))
+  const data = await readFavoritesSuccessData<CheckPathsResponse>(response, '获取收藏状态响应无效')
+  if (
+    !data.favorites ||
+    typeof data.favorites !== 'object' ||
+    Array.isArray(data.favorites)
+  ) {
+    throw new FavoritesError('获取收藏状态响应无效', response.status)
   }
-  const data = body.data
   const mapped: Record<string, boolean> = {}
   for (const [normalized, isFavorite] of Object.entries(data.favorites)) {
     const original = normalizedMap.get(normalized)
@@ -229,6 +234,8 @@ export async function updateFavoriteNote(path: string, note: string): Promise<vo
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
+
+  await readFavoritesSuccessData<null>(response, '更新备注响应无效')
 }
 
 /**

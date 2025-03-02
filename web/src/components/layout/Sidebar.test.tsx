@@ -177,6 +177,16 @@ describe('Sidebar', () => {
 
       expect(await screen.findByText('2 KB')).toBeTruthy()
     })
+
+    it('shows unknown storage values when stats payload is incomplete', async () => {
+      mockGetStorageStats.mockResolvedValueOnce({})
+
+      render(<Sidebar />)
+
+      expect(await screen.findByText('统计不可用')).toBeTruthy()
+      expect(screen.getByText('--')).toBeTruthy()
+      expect(screen.queryByText(/去重率/)).toBeFalsy()
+    })
   })
 
   describe('collapsed mode', () => {

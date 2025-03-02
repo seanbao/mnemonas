@@ -184,13 +184,14 @@ export function ActivityPage() {
   }
 
   const entries = data?.items ?? []
+  const totalEntries = data?.total ?? entries.length
 
   return (
     <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
       {/* Header */}
       <PageHeader
         title="活动日志"
-        subtitle={`共 ${data?.total ?? 0} 条记录`}
+        subtitle={`共 ${totalEntries} 条记录`}
         icon={Activity}
         actions={
           <>
