@@ -1479,6 +1479,21 @@ func TestAuthHandler(t *testing.T) {
 	})
 }
 
+func TestWriteSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	writeSuccess(rec, http.StatusOK, map[string]interface{}{
+		"bad": make(chan int),
+	}, "ok")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+	if rec.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", rec.Body.String())
+	}
+}
+
 func TestLoginAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {
 	tracker := newLoginAttemptTracker()
 	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)

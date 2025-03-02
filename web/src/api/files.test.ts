@@ -22,6 +22,7 @@ import {
   getScrubResult,
   runScrub,
   uploadFile,
+  downloadDiagnosticsExport,
 } from './files'
 
 // Type declaration for global (Node.js environment in Vitest)
@@ -202,6 +203,15 @@ describe('API: files', () => {
       expect(MockXMLHttpRequest.instances).toHaveLength(1)
       expect(localStorage.getItem('mnemonas_token')).toBeNull()
       expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    })
+
+    it('surfaces a clear error when the backend rejects oversized uploads', async () => {
+      MockXMLHttpRequest.queuedResults.push({ type: 'load', status: 413, statusText: 'Request Entity Too Large' })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toMatchObject({
+        message: '文件超过 10 GB 上传限制',
+        status: 413,
+      })
     })
   })
 
@@ -774,6 +784,59 @@ describe('API: files', () => {
         expect(createdLink?.download).toBe('custom.txt')
         createElementSpy.mockRestore()
       })
+
+      it('surfaces structured backend errors', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          json: () => Promise.resolve({ error: { message: '父路径不是目录' } }),
+        })
+
+        await expect(downloadFile('/docs/report.txt')).rejects.toThrow('父路径不是目录')
+      })
+    })
+
+    describe('downloadDiagnosticsExport', () => {
+      it('uses content-disposition filename when provided', async () => {
+        const blob = new Blob(['{}'], { type: 'application/json' })
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:diagnostics')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'Content-Disposition': 'attachment; filename="diagnostics.json"' }),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadDiagnosticsExport()
+
+        expect(createdLink?.download).toBe('diagnostics.json')
+        createElementSpy.mockRestore()
+      })
+
+      it('surfaces structured backend errors', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+          json: () => Promise.resolve({ error: { message: 'admin access required' } }),
+        })
+
+        await expect(downloadDiagnosticsExport()).rejects.toThrow('admin access required')
+      })
     })
 
     describe('getThumbnailUrl', () => {
@@ -898,6 +961,22 @@ describe('API: files', () => {
 
       await expect(getDiagnostics()).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it('rejects malformed successful diagnostics payloads', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            timestamp: '2024-01-15T10:00:00Z',
+            uptime: '1h30m',
+            version: { name: 'MnemoNAS', version: '0.1.0' },
+          },
+        }),
+      })
+
+      await expect(getDiagnostics()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getScrubResult', () => {
@@ -947,9 +1026,13 @@ describe('API: files', () => {
       const mockResponse = {
         success: true,
         data: {
-          id: 'scrub-456',
-          status: 'running',
-          message: 'Scrub started',
+          total_objects: 100,
+          valid_objects: 99,
+          corrupted_objects: 1,
+          missing_objects: 0,
+          total_size: 2048,
+          duration_ms: 500,
+          errors: [],
         },
         timestamp: '2024-01-01',
       }
@@ -961,15 +1044,21 @@ describe('API: files', () => {
 
       const result = await runScrub()
       expect(result.has_result).toBe(true)
-      expect(result.status).toBe('running')
+      expect(result.status).toBe('completed')
+      expect(result.corrupted_objects).toBe(1)
     })
 
     it('runs scrub for specific hashes', async () => {
       const mockResponse = {
         success: true,
         data: {
-          id: 'scrub-789',
-          status: 'running',
+          total_objects: 2,
+          valid_objects: 2,
+          corrupted_objects: 0,
+          missing_objects: 0,
+          total_size: 128,
+          duration_ms: 10,
+          errors: [],
         },
         timestamp: '2024-01-01',
       }
@@ -987,6 +1076,20 @@ describe('API: files', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hashes }),
       })
+    })
+
+    it('rejects malformed successful scrub-run responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            errors: 'invalid',
+          },
+        }),
+      })
+
+      await expect(runScrub()).rejects.toThrow('服务器返回了无效的数据')
     })
   })
 

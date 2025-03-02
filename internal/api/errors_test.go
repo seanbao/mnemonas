@@ -104,6 +104,22 @@ func TestAPIError_Write_ReturnsEncodingError(t *testing.T) {
 	}
 }
 
+func TestAPIError_Write_InvalidDetailsFailsClosed(t *testing.T) {
+	w := httptest.NewRecorder()
+	err := NewAPIError("TEST_CODE", "test message").WithDetails(map[string]any{"bad": make(chan int)})
+
+	writeErr := err.Write(w, http.StatusBadRequest)
+	if writeErr == nil {
+		t.Fatal("expected marshal error")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if w.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", w.Body.String())
+	}
+}
+
 func TestBadRequest(t *testing.T) {
 	w := httptest.NewRecorder()
 	BadRequest(w, "invalid input")
@@ -270,6 +286,22 @@ func TestAPIResponse_Write_ReturnsEncodingError(t *testing.T) {
 	writeErr := resp.Write(w, http.StatusCreated)
 	if writeErr == nil {
 		t.Fatal("expected write error")
+	}
+}
+
+func TestAPIResponse_Write_InvalidDataFailsClosed(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := NewAPIResponse(map[string]any{"bad": make(chan int)})
+
+	writeErr := resp.Write(w, http.StatusCreated)
+	if writeErr == nil {
+		t.Fatal("expected marshal error")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if w.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", w.Body.String())
 	}
 }
 

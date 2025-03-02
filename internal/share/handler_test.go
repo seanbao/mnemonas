@@ -1268,6 +1268,21 @@ func TestAccessShareWithPassword_BackendFailureReturnsInternalServerErrorWithout
 	}
 }
 
+func TestWriteShareSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
+	recorder := httptest.NewRecorder()
+
+	writeShareSuccess(recorder, http.StatusOK, map[string]any{
+		"bad": make(chan int),
+	}, "ok")
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", recorder.Code)
+	}
+	if recorder.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", recorder.Body.String())
+	}
+}
+
 func TestAccessShareWithPassword_IgnoresSpoofedForwardedProtoForCookie(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

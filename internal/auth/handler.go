@@ -727,9 +727,7 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 }
 
 func writeError(w http.ResponseWriter, status int, message, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(ResponseEnvelope{
+	writeEnvelope(w, status, ResponseEnvelope{
 		Success: false,
 		Error: &ErrorDetail{
 			Code:    code,
@@ -739,11 +737,21 @@ func writeError(w http.ResponseWriter, status int, message, code string) {
 }
 
 func writeSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(ResponseEnvelope{
+	writeEnvelope(w, status, ResponseEnvelope{
 		Success: true,
 		Data:    data,
 		Message: message,
 	})
+}
+
+func writeEnvelope(w http.ResponseWriter, status int, envelope ResponseEnvelope) {
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }

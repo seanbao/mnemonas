@@ -233,9 +233,15 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) json(w http.ResponseWriter, status int, data any) {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_, _ = w.Write(payload)
 }
 
 func (h *Handler) success(w http.ResponseWriter, status int, data any, message string) {

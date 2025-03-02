@@ -900,7 +900,7 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="自动版本化"
-                description="配置默认自动版本化规则；保存后需重启服务才能影响运行中的版本策略"
+                description="配置默认自动版本化规则；保存后会立即影响后续新写入文件的版本策略"
                 icon={Folder}
               >
                 <div className="space-y-4">
@@ -971,7 +971,7 @@ export function SettingsPage() {
               {webdavCredentials?.enabled && webdavCredentials?.auth_type === 'basic' && (
                 <SettingsSection
                   title="WebDAV 访问凭据"
-                  description="用于挂载当前运行中的 WebDAV 服务；保存后的 WebDAV 配置需重启后这里才会更新"
+                  description="用于挂载当前运行中的 WebDAV 服务；保存成功后这里会显示最新的运行配置"
                   icon={Key}
                 >
                   <div className="space-y-4">
@@ -1100,7 +1100,7 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="WebDAV 服务"
-                description="配置 WebDAV 协议接入；保存后需重启服务才能切换运行中的 WebDAV 配置"
+                description="配置 WebDAV 协议接入；保存后会立即更新运行中的 WebDAV 配置"
                 icon={Globe}
               >
                 <div className="space-y-4">
@@ -1156,7 +1156,7 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="WebDAV 认证"
-                description="配置访问凭据；保存后需重启服务才能作用到运行中的 WebDAV 服务"
+                description="配置访问凭据；保存后会立即作用到运行中的 WebDAV 服务"
                 icon={Shield}
               >
                 <div className="space-y-4">
@@ -1217,7 +1217,7 @@ export function SettingsPage() {
             <div className="space-y-6 mt-6">
               <SettingsSection
                 title="CDC 分块参数"
-                description="配置内容定义分块算法"
+                description="配置内容定义分块算法；保存后需重启数据面服务，且仅影响后续新写入数据"
                 icon={Zap}
               >
                 <div className="space-y-4">
@@ -1283,7 +1283,7 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="数据面连接"
-                description="配置与 Rust 数据面的 gRPC 连接；保存后需重启服务才能重建运行中的数据面连接"
+                description="配置与 Rust 数据面的 gRPC 连接；地址变更会立即校验并切换，超时与重试设置用于后续连接建立"
                 icon={Zap}
               >
                 <div className="space-y-4">

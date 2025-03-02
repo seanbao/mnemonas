@@ -592,6 +592,8 @@ POST /api/v1/files-move
 POST /api/v1/files-copy
 ```
 
+说明：当前 REST 端点仅支持复制单个文件。目录复制请使用 WebDAV `COPY`。
+
 **请求体**:
 ```json
 {
@@ -1559,7 +1561,7 @@ GET /api/v1/maintenance/scrub
 
 ### 执行数据校验
 
-启动数据完整性校验任务。
+执行数据完整性校验，并在当前请求内返回本次校验结果摘要。
 
 ```
 POST /api/v1/maintenance/scrub
@@ -1573,6 +1575,33 @@ POST /api/v1/maintenance/scrub
 ```
 
 如果不提供 `hashes`，将校验所有对象。
+
+**说明**:
+- 此接口为同步执行，不会先返回 `running` 再异步完成
+- 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "total_objects": 1000,
+    "valid_objects": 998,
+    "corrupted_objects": 1,
+    "missing_objects": 1,
+    "total_size": 5368709120,
+    "duration_ms": 5000,
+    "errors": [
+      {
+        "hash": "abc123...",
+        "error_type": "corrupted",
+        "message": "Hash mismatch"
+      }
+    ]
+  },
+  "timestamp": "2024-01-15T10:00:05Z"
+}
+```
 
 ### 列出存储对象
 
@@ -1624,6 +1653,8 @@ POST /api/v1/maintenance/gc
 - GC 会跳过 grace period 内的新对象，避免删除正在上传或刚写入的数据块
 - 当对象缺少可用时间戳时，也会按保守策略计入 `skipped_by_grace`，不会直接进入删除集合
 - dataplane 会优先使用对象创建时间，无法获取时回退到修改时间
+- `deleted_count` 表示实际删除成功的对象数量
+- 当 `dry_run=false` 且存在部分失败时，响应会额外返回 `failed_count` 和 `delete_failures`
 
 **响应示例**:
 ```json
@@ -1637,7 +1668,33 @@ POST /api/v1/maintenance/gc
     "unreferenced": 100,
     "unreferenced_size": 104857600,
     "skipped_by_grace": 5,
-    "deleted": 0
+    "deleted_count": 0
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
+
+执行删除时，如果存在部分失败：
+
+```json
+{
+  "success": true,
+  "data": {
+    "dry_run": false,
+    "grace_period_hours": 0,
+    "total_objects": 1000,
+    "referenced": 900,
+    "unreferenced": 100,
+    "unreferenced_size": 104857600,
+    "skipped_by_grace": 0,
+    "deleted_count": 99,
+    "failed_count": 1,
+    "delete_failures": [
+      {
+        "hash": "abc123...",
+        "message": "failed to delete chunk"
+      }
+    ]
   },
   "timestamp": "2024-01-15T10:00:00Z"
 }

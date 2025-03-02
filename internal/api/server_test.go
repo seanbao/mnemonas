@@ -3300,6 +3300,44 @@ func TestServer_Scrub_ChunkedInvalidBodyDoesNotBypassValidation(t *testing.T) {
 	}
 }
 
+func TestServer_Scrub_SaveCompletedResultFailureReturnsInternalServerError(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	if server.maintenance == nil {
+		t.Skip("maintenance history not available")
+	}
+
+	originalSaveScrubResult := saveScrubResult
+	callCount := 0
+	saveScrubResult = func(store *maintenance.HistoryStore, result *maintenance.ScrubResult) error {
+		callCount++
+		if callCount == 2 {
+			return errors.New("disk offline")
+		}
+		return originalSaveScrubResult(store, result)
+	}
+	defer func() {
+		saveScrubResult = originalSaveScrubResult
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("scrub save failure status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "internal server error") {
+		t.Fatalf("expected generic internal error message, got %s", w.Body.String())
+	}
+	if callCount != 2 {
+		t.Fatalf("expected saveScrubResult to be called twice, got %d", callCount)
+	}
+	if result := server.maintenance.GetLastScrubResult(); result == nil || result.Status != "running" {
+		t.Fatalf("expected persisted scrub state to remain pre-completion after save failure, got %#v", result)
+	}
+}
+
 func TestServer_ClearActivity_DoesNotExposeInternalDetails(t *testing.T) {
 	client := setupDataplaneClient(t)
 	if client == nil {
@@ -3384,6 +3422,84 @@ func TestServer_GC_InvalidGracePeriodReturnsBadRequest(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "grace_period_hours must be a non-negative integer") {
 		t.Fatalf("expected invalid grace period error, got %s", w.Body.String())
+	}
+}
+
+func TestServer_GC_ReportsDeleteFailures(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	chunk, err := server.dataplane.PutChunk(ctx, []byte("gc orphan chunk"))
+	if err != nil {
+		t.Fatalf("PutChunk() error: %v", err)
+	}
+
+	originalDeleteGCChunk := deleteGCChunk
+	deleteGCChunk = func(client *dataplane.Client, ctx context.Context, hash string) (bool, error) {
+		if hash == chunk.Hash {
+			return false, errors.New("dataplane delete failed")
+		}
+		return originalDeleteGCChunk(client, ctx, hash)
+	}
+	defer func() {
+		deleteGCChunk = originalDeleteGCChunk
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/gc?dry_run=false&grace_period_hours=0", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GC delete failure status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DeletedCount   int `json:"deleted_count"`
+			FailedCount    int `json:"failed_count"`
+			DeleteFailures []struct {
+				Hash    string `json:"hash"`
+				Message string `json:"message"`
+			} `json:"delete_failures"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse GC response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if payload.Data.DeletedCount != 0 {
+		t.Fatalf("expected deleted_count 0, got %d", payload.Data.DeletedCount)
+	}
+	if payload.Data.FailedCount != 1 {
+		t.Fatalf("expected failed_count 1, got %d", payload.Data.FailedCount)
+	}
+	if len(payload.Data.DeleteFailures) != 1 {
+		t.Fatalf("expected one delete failure, got %d", len(payload.Data.DeleteFailures))
+	}
+	if payload.Data.DeleteFailures[0].Hash != chunk.Hash {
+		t.Fatalf("expected failed hash %q, got %q", chunk.Hash, payload.Data.DeleteFailures[0].Hash)
+	}
+	if payload.Data.DeleteFailures[0].Message != "failed to delete chunk" {
+		t.Fatalf("expected generic delete failure message, got %q", payload.Data.DeleteFailures[0].Message)
+	}
+
+	objects, err := server.dataplane.ListObjects(ctx, "", 100)
+	if err != nil {
+		t.Fatalf("ListObjects() error: %v", err)
+	}
+	found := false
+	for _, obj := range objects.Objects {
+		if obj.Hash == chunk.Hash {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected failed-delete chunk %q to remain present", chunk.Hash)
 	}
 }
 
@@ -4574,6 +4690,65 @@ func TestServer_UpdateSettings_UpdatesRunningDataplaneClient(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_UnreachableDataplaneRejectedBeforeSave(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	if err := server.config.Save(server.configPath); err != nil {
+		t.Fatalf("save baseline config error: %v", err)
+	}
+	baselineConfig, err := os.ReadFile(server.configPath)
+	if err != nil {
+		t.Fatalf("read baseline config error: %v", err)
+	}
+
+	oldClient := dataplane.NewClient("127.0.0.1:2")
+	server.dataplane = oldClient
+	setVersionStoreObjectClient(t, fs, oldClient)
+
+	body := `{"dataplane":{"grpc_address":"127.0.0.1:1"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("update settings unreachable dataplane status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "unable to connect to configured dataplane" {
+		t.Fatalf("expected dataplane connectivity error message, got %q", payload.Message)
+	}
+	if server.dataplane != oldClient {
+		t.Fatal("expected running dataplane client to remain unchanged")
+	}
+	if got := server.config.DataPlane.GRPCAddress; got == "127.0.0.1:1" {
+		t.Fatalf("expected in-memory config to remain unchanged, got %q", got)
+	}
+	if objectClient := getVersionStoreObjectClient(t, fs); objectClient != oldClient {
+		t.Fatal("expected version store object client to remain unchanged")
+	}
+
+	persistedConfig, err := os.ReadFile(server.configPath)
+	if err != nil {
+		t.Fatalf("read persisted config error: %v", err)
+	}
+	if !bytes.Equal(persistedConfig, baselineConfig) {
+		t.Fatalf("expected persisted config to stay unchanged, got %s", string(persistedConfig))
+	}
+	if bytes.Contains(persistedConfig, []byte("127.0.0.1:1")) {
+		t.Fatalf("expected unreachable dataplane address not to be persisted, got %s", string(persistedConfig))
+	}
+	_ = oldClient.Close()
+}
+
 func TestServer_UpdateSettings_InvalidTrashSettingsRejected(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -5186,6 +5361,22 @@ func TestServer_AcknowledgeSetup_InternalErrorUsesStructuredAPIError(t *testing.
 	}
 	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
 		t.Fatalf("expected internal file error details to stay hidden, got %s", w.Body.String())
+	}
+}
+
+func TestServer_JSON_InvalidPayloadReturnsInternalServerError(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	w := httptest.NewRecorder()
+
+	server.json(w, http.StatusOK, map[string]any{
+		"bad": make(chan int),
+	})
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("json helper status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if w.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", w.Body.String())
 	}
 }
 
