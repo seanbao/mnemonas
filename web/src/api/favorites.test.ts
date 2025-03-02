@@ -33,7 +33,7 @@ describe('Favorites API', () => {
 
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ favorites: mockFavorites, count: 2 }),
+        json: () => Promise.resolve({ success: true, data: { favorites: mockFavorites, count: 2 } }),
       })
 
       const result = await listFavorites()
@@ -45,7 +45,7 @@ describe('Favorites API', () => {
     it('returns empty array when no favorites', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ favorites: [], count: 0 }),
+        json: () => Promise.resolve({ success: true, data: { favorites: [], count: 0 } }),
       })
 
       const result = await listFavorites()
@@ -57,10 +57,22 @@ describe('Favorites API', () => {
       mockAuthFetch.mockResolvedValue({
         ok: false,
         status: 500,
-        json: () => Promise.resolve({ error: '服务器错误' }),
+        json: () => Promise.resolve({ success: false, error: { message: '服务器错误' } }),
       })
 
       await expect(listFavorites()).rejects.toThrow(FavoritesError)
+    })
+
+    it('reads legacy string error responses', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ success: false, error: '旧格式错误' }),
+      })
+
+      await expect(listFavorites()).rejects.toMatchObject({
+        message: '旧格式错误',
+      })
     })
 
     it('uses default message when error parsing fails', async () => {
@@ -86,7 +98,7 @@ describe('Favorites API', () => {
 
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve(mockFavorite),
+        json: () => Promise.resolve({ success: true, data: mockFavorite }),
       })
 
       const result = await addFavorite('/file.txt')
@@ -102,7 +114,7 @@ describe('Favorites API', () => {
     it('adds favorite with note', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({ success: true, data: {} }),
       })
 
       await addFavorite('/file.txt', '重要文件')
@@ -117,7 +129,7 @@ describe('Favorites API', () => {
     it('normalizes path before adding', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({ success: true, data: {} }),
       })
 
       await addFavorite('file.txt') // Without leading slash
@@ -146,7 +158,7 @@ describe('Favorites API', () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
         status: 500,
-        json: () => Promise.resolve({ error: '服务器错误' }),
+        json: () => Promise.resolve({ success: false, error: { message: '服务器错误' } }),
       })
 
       await expect(addFavorite('/file.txt')).rejects.toThrow(FavoritesError)
@@ -179,10 +191,22 @@ describe('Favorites API', () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
         status: 404,
-        json: () => Promise.resolve({ error: '收藏不存在' }),
+        json: () => Promise.resolve({ success: false, error: { message: '收藏不存在' } }),
       })
 
       await expect(removeFavorite('/file.txt')).rejects.toThrow(FavoritesError)
+    })
+
+    it('uses legacy message field for remove failures', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ success: false, message: '删除收藏失败' }),
+      })
+
+      await expect(removeFavorite('/file.txt')).rejects.toMatchObject({
+        message: '删除收藏失败',
+      })
     })
   })
 
@@ -190,7 +214,7 @@ describe('Favorites API', () => {
     it('returns true when favorited', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ is_favorite: true }),
+        json: () => Promise.resolve({ success: true, data: { is_favorite: true } }),
       })
 
       const result = await checkFavorite('/file.txt')
@@ -204,7 +228,7 @@ describe('Favorites API', () => {
     it('returns false when not favorited', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ is_favorite: false }),
+        json: () => Promise.resolve({ success: true, data: { is_favorite: false } }),
       })
 
       const result = await checkFavorite('/file.txt')
@@ -230,9 +254,12 @@ describe('Favorites API', () => {
         ok: true,
         json: () =>
           Promise.resolve({
-            favorites: {
-              '/file1.txt': true,
-              '/file2.txt': false,
+            success: true,
+            data: {
+              favorites: {
+                '/file1.txt': true,
+                '/file2.txt': false,
+              },
             },
           }),
       })
@@ -282,7 +309,7 @@ describe('Favorites API', () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
         status: 404,
-        json: () => Promise.resolve({ error: '收藏不存在' }),
+        json: () => Promise.resolve({ success: false, error: { message: '收藏不存在' } }),
       })
 
       await expect(updateFavoriteNote('/file.txt', 'note')).rejects.toThrow(
@@ -306,7 +333,7 @@ describe('Favorites API', () => {
     it('adds favorite when not currently favorited', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({ success: true, data: {} }),
       })
 
       const result = await toggleFavorite('/file.txt', false)

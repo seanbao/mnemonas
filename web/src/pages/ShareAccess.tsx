@@ -27,7 +27,11 @@ import {
 } from '@/api/share'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
-import { formatBytes, formatDate } from '@/lib/utils'
+import { formatBytes, formatDate, openUrlInNewTab } from '@/lib/utils'
+
+function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
+  return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
+}
 
 export function ShareAccessPage() {
   const { id } = useParams<{ id: string }>()
@@ -61,10 +65,11 @@ export function ShareAccessPage() {
       setShareInfo(info)
       setFolderItems([])
       setListError(null)
+      const hasAccess = !info.has_password || hasAuthorizedShareContent(info)
       if (info.type === 'folder') {
         setFolderPath('')
       }
-      if (info.has_password) {
+      if (!hasAccess) {
         setNeedsPassword(true)
       } else {
         setIsAuthenticated(true)
@@ -117,13 +122,17 @@ export function ShareAccessPage() {
   const handleDownload = () => {
     if (!id) return
     const url = getShareDownloadUrl(id)
-    window.open(url, '_blank', 'noopener,noreferrer')
+    if (!openUrlInNewTab(url)) {
+      addToast({ title: '浏览器拦截了下载窗口，请允许弹窗后重试', color: 'warning' })
+    }
   }
 
   const handleDownloadItem = (itemPath: string) => {
     if (!id) return
     const url = getShareFileDownloadUrl(id, itemPath)
-    window.open(url, '_blank', 'noopener,noreferrer')
+    if (!openUrlInNewTab(url)) {
+      addToast({ title: '浏览器拦截了下载窗口，请允许弹窗后重试', color: 'warning' })
+    }
   }
 
   const handleEnterFolder = (item: PublicShareItem) => {

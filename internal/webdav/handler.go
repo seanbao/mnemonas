@@ -573,7 +573,7 @@ func (h *Handler) handleError(w http.ResponseWriter, err error) {
 		http.Error(w, "resource already exists", http.StatusConflict)
 		return
 	}
-	http.Error(w, err.Error(), http.StatusInternalServerError)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 func isReadMethod(method string) bool {

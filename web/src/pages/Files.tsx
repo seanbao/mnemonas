@@ -53,9 +53,13 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { useClipboardStore } from '@/stores/clipboard'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
-import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile } from '@/api/files'
+import { listFiles, deleteFile, createDirectory, uploadFile, moveFile, copyFile, downloadFile, ApiError } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
-import { formatBytes, formatDate, cn } from '@/lib/utils'
+import { copyTextToClipboard, formatBytes, formatDate, cn } from '@/lib/utils'
+
+function isDirectoryAlreadyExistsError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409
+}
 
 // Breadcrumb navigation component
 function Breadcrumbs({ 
@@ -144,7 +148,7 @@ function FileRow({
   }, [file.path, file.name])
 
   const handleCopyPath = useCallback(() => {
-    navigator.clipboard.writeText(file.path)
+    copyTextToClipboard(file.path)
       .then(() => {
         addToast({ title: '路径已复制', color: 'success' })
       })
@@ -378,8 +382,13 @@ function FileCard({
   }, [file.path, file.name])
 
   const handleCopyPath = useCallback(() => {
-    navigator.clipboard.writeText(file.path)
-    addToast({ title: '路径已复制', color: 'success' })
+    copyTextToClipboard(file.path)
+      .then(() => {
+        addToast({ title: '路径已复制', color: 'success' })
+      })
+      .catch(() => {
+        addToast({ title: '复制失败', color: 'danger' })
+      })
   }, [file.path])
 
   return (
@@ -888,9 +897,16 @@ export function FilesPage() {
 
   const handleContextMenuCopyPath = useCallback(() => {
     if (!contextMenuFile) return
-    navigator.clipboard.writeText(contextMenuFile.path)
-    addToast({ title: '路径已复制', color: 'success' })
-    contextMenu.hide()
+    copyTextToClipboard(contextMenuFile.path)
+      .then(() => {
+        addToast({ title: '路径已复制', color: 'success' })
+      })
+      .catch(() => {
+        addToast({ title: '复制失败', color: 'danger' })
+      })
+      .finally(() => {
+        contextMenu.hide()
+      })
   }, [contextMenuFile, contextMenu])
 
   // Track created directories to avoid duplicate MKCOL calls
@@ -911,9 +927,12 @@ export function FilesPage() {
       try {
         await createDirectory(dirPath)
         createdDirsRef.current.add(dirPath)
-      } catch {
-        // Directory might already exist, mark as created
-        createdDirsRef.current.add(dirPath)
+      } catch (error) {
+        if (isDirectoryAlreadyExistsError(error)) {
+          createdDirsRef.current.add(dirPath)
+          return
+        }
+        throw error
       }
     }
   }, [])
@@ -948,6 +967,9 @@ export function FilesPage() {
     setUploadQueue(queue)
     setIsUploading(true)
     setShowUploadPanel(true)  // Auto show upload panel when upload starts
+
+    let successCount = 0
+    let errorCount = 0
     
     for (let i = 0; i < fileArray.length; i++) {
       const file = fileArray[i]
@@ -977,10 +999,12 @@ export function FilesPage() {
             j === i ? { ...item, progress } : item
           ))
         })
+        successCount++
         setUploadQueue(prev => prev.map((item, j) => 
           j === i ? { ...item, status: 'done' as const, progress: 100 } : item
         ))
       } catch (error) {
+        errorCount++
         setUploadQueue(prev => prev.map((item, j) => 
           j === i ? { ...item, status: 'error' as const, error: error instanceof Error ? error.message : '上传失败' } : item
         ))
@@ -992,11 +1016,25 @@ export function FilesPage() {
     
     // Show summary toast for folder upload
     if (isFolderUpload) {
-      addToast({ 
-        title: `文件夹上传完成`, 
-        description: `成功上传 ${fileArray.length} 个文件`,
-        color: 'success' 
-      })
+      if (errorCount === 0) {
+        addToast({ 
+          title: '文件夹上传完成', 
+          description: `成功上传 ${successCount} 个文件`,
+          color: 'success' 
+        })
+      } else if (successCount === 0) {
+        addToast({ 
+          title: '文件夹上传失败', 
+          description: `共 ${errorCount} 个文件上传失败`,
+          color: 'danger' 
+        })
+      } else {
+        addToast({ 
+          title: '文件夹上传部分完成', 
+          description: `成功上传 ${successCount} 个文件，失败 ${errorCount} 个`,
+          color: 'warning' 
+        })
+      }
     }
     
     // Auto-clear successful uploads after 3 seconds
@@ -1060,6 +1098,7 @@ export function FilesPage() {
     const paths = Array.from(selectedFiles)
     let successCount = 0
     let errorCount = 0
+    const failedPaths: string[] = []
     
     for (const path of paths) {
       try {
@@ -1067,22 +1106,31 @@ export function FilesPage() {
         successCount++
       } catch {
         errorCount++
+        failedPaths.push(path)
       }
     }
     
     queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-    clearSelection()
     onBatchDeleteClose()
-    
+
     if (errorCount === 0) {
+      clearSelection()
       addToast({ title: `成功删除 ${successCount} 个文件`, color: 'success' })
-    } else {
-      addToast({ title: `删除完成：${successCount} 成功，${errorCount} 失败`, color: 'warning' })
+      return
     }
-  }, [selectedFiles, queryClient, currentPath, clearSelection, onBatchDeleteClose])
+
+    setSelection(failedPaths)
+
+    if (successCount === 0) {
+      addToast({ title: '批量删除失败', description: `共 ${errorCount} 个项目删除失败`, color: 'danger' })
+      return
+    }
+
+    addToast({ title: '批量删除部分完成', description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
+  }, [selectedFiles, queryClient, currentPath, clearSelection, onBatchDeleteClose, setSelection])
 
   // Batch download handler
-  const handleBatchDownload = useCallback(() => {
+  const handleBatchDownload = useCallback(async () => {
     const paths = Array.from(selectedFiles)
     const files = sortedFiles.filter(f => paths.includes(f.path) && !f.isDir)
 
@@ -1091,14 +1139,21 @@ export function FilesPage() {
       return
     }
 
-    void Promise.allSettled(files.map((file) => downloadFile(file.path, { filename: file.name }))).then((results) => {
-      const failed = results.filter((result) => result.status === 'rejected').length
-      if (failed > 0) {
-        addToast({ title: '部分文件下载失败', description: `失败 ${failed} 个`, color: 'warning' })
-      }
-    })
-    
-    addToast({ title: `已开始下载 ${files.length} 个文件`, color: 'success' })
+    const results = await Promise.allSettled(files.map((file) => downloadFile(file.path, { filename: file.name })))
+    const failed = results.filter((result) => result.status === 'rejected').length
+    const succeeded = files.length - failed
+
+    if (failed === 0) {
+      addToast({ title: `已开始下载 ${succeeded} 个文件`, color: 'success' })
+      return
+    }
+
+    if (succeeded === 0) {
+      addToast({ title: '批量下载失败', description: `共 ${failed} 个文件下载失败`, color: 'danger' })
+      return
+    }
+
+    addToast({ title: '部分文件开始下载', description: `已开始 ${succeeded} 个，失败 ${failed} 个`, color: 'warning' })
   }, [selectedFiles, sortedFiles])
 
   // Keyboard shortcuts handlers
@@ -1122,6 +1177,7 @@ export function FilesPage() {
     
     let successCount = 0
     let errorCount = 0
+    const failedPaths: string[] = []
     
     for (const path of paths) {
       const fileName = path.split('/').pop() || ''
@@ -1136,11 +1192,16 @@ export function FilesPage() {
         successCount++
       } catch {
         errorCount++
+        failedPaths.push(path)
       }
     }
     
     if (operation === 'cut') {
-      clipboard.clear()
+      if (failedPaths.length === 0) {
+        clipboard.clear()
+      } else {
+        clipboard.cut(failedPaths, sourcePath)
+      }
     }
     
     queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
@@ -1150,9 +1211,15 @@ export function FilesPage() {
     
     if (errorCount === 0) {
       addToast({ title: `成功${operation === 'cut' ? '移动' : '复制'} ${successCount} 个文件`, color: 'success' })
-    } else {
-      addToast({ title: `${successCount} 成功，${errorCount} 失败`, color: 'warning' })
+      return
     }
+
+    if (successCount === 0) {
+      addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}失败`, description: `共 ${errorCount} 个项目失败`, color: 'danger' })
+      return
+    }
+
+    addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
   }, [clipboard, currentPath, queryClient])
 
   const handleKeyboardDelete = useCallback(() => {

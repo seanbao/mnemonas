@@ -5,6 +5,18 @@
 
 import { authFetch } from './auth'
 
+interface SearchApiError {
+  code?: string
+  message?: string
+}
+
+interface SearchApiResponse<T> {
+  success?: boolean
+  data?: T
+  message?: string
+  error?: string | SearchApiError
+}
+
 export interface SearchResult {
   name: string
   path: string
@@ -34,11 +46,21 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
   const response = await authFetch(`/api/v1/search?${params}`)
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Search failed')
+    try {
+      const body = await response.json() as SearchApiResponse<never>
+      const message = typeof body.error === 'string'
+        ? body.error
+        : body.error?.message || body.message || 'Search failed'
+      throw new Error(message)
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error
+      }
+      throw new Error('Search failed')
+    }
   }
 
-  const result = await response.json()
+  const result = await response.json() as SearchApiResponse<SearchResponse> & SearchResponse
   const data = result.data ?? result
   return {
     query: data.query,

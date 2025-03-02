@@ -29,6 +29,8 @@ import (
 	"github.com/seanbao/mnemonas/internal/thumbnail"
 )
 
+const maxObjectsCursorLength = 256
+
 // Server is the API server
 type Server struct {
 	router      *chi.Mux
@@ -470,6 +472,24 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	}).Write(w, http.StatusOK)
 }
 
+func isStorageNotFound(err error) bool {
+	return errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrVersionNotFound)
+}
+
+func isStorageConflict(err error) bool {
+	return errors.Is(err, storage.ErrAlreadyExists)
+}
+
+func (s *Server) respondNotFound(w http.ResponseWriter, operation string, err error) {
+	s.logger.Debug().Err(err).Str("operation", operation).Msg("resource not found")
+	NotFound(w, "resource not found")
+}
+
+func (s *Server) respondInternalError(w http.ResponseWriter, operation string, err error) {
+	s.logger.Error().Err(err).Str("operation", operation).Msg("request failed")
+	InternalError(w, "internal server error")
+}
+
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	filePath := chi.URLParam(r, "*")
 	if filePath == "" {
@@ -491,7 +511,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	// Get directory listing
 	files, err := s.fs.ReadDir(r.Context(), filePath)
 	if err != nil {
-		NotFound(w, err.Error())
+		s.respondNotFound(w, "list files", err)
 		return
 	}
 
@@ -537,7 +557,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxUploadSize)
 
 	if err := s.fs.WriteFile(r.Context(), filePath, r.Body); err != nil {
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "upload file", err)
 		return
 	}
 
@@ -566,14 +586,14 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.fs.Mkdir(r.Context(), dirPath); err != nil {
 		// Check if already exists
-		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "exist") {
+		if isStorageConflict(err) {
 			// Return success for idempotent behavior
 			NewAPIResponse(map[string]any{
 				"path": dirPath,
 			}).WithMessage("directory already exists").Write(w, http.StatusOK)
 			return
 		}
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "create directory", err)
 		return
 	}
 
@@ -602,11 +622,11 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.fs.Delete(r.Context(), filePath); err != nil {
 		// Check if it's a "not found" error
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, err.Error())
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "delete file", err)
 			return
 		}
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "delete file", err)
 		return
 	}
 
@@ -644,11 +664,11 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 		reader, err := s.fs.GetVersion(r.Context(), filePath, versionHash)
 		if err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				NotFound(w, err.Error())
+			if isStorageNotFound(err) {
+				s.respondNotFound(w, "download file version", err)
 				return
 			}
-			InternalError(w, err.Error())
+			s.respondInternalError(w, "download file version", err)
 			return
 		}
 		defer reader.Close()
@@ -665,11 +685,11 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	// Get file info
 	info, err := s.fs.Stat(r.Context(), filePath)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, err.Error())
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "stat file", err)
 			return
 		}
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "stat file", err)
 		return
 	}
 
@@ -681,7 +701,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	// Open file
 	file, err := s.fs.OpenFile(r.Context(), filePath)
 	if err != nil {
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "open file", err)
 		return
 	}
 	defer file.Close()
@@ -730,11 +750,11 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.Rename(r.Context(), fromPath, toPath); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, err.Error())
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "move file", err)
 			return
 		}
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "move file", err)
 		return
 	}
 
@@ -780,18 +800,18 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 	// Open source file
 	reader, err := s.fs.OpenFile(r.Context(), fromPath)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, err.Error())
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "copy file", err)
 			return
 		}
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "copy file", err)
 		return
 	}
 	defer reader.Close()
 
 	// Write to destination
 	if err := s.fs.WriteFile(r.Context(), toPath, reader); err != nil {
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "copy file", err)
 		return
 	}
 
@@ -821,7 +841,11 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 
 	versions, err := s.fs.ListVersions(r.Context(), filePath)
 	if err != nil {
-		NotFound(w, err.Error())
+		if errors.Is(err, storage.ErrIsDir) {
+			BadRequest(w, "cannot list versions for directory")
+			return
+		}
+		s.respondNotFound(w, "list versions", err)
 		return
 	}
 
@@ -880,11 +904,11 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
-		if errors.Is(err, storage.ErrVersionNotFound) {
-			NotFound(w, err.Error())
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "restore version", err)
 			return
 		}
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "restore version", err)
 		return
 	}
 
@@ -925,7 +949,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.fs.Search(r.Context(), query, limit)
 	if err != nil {
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "search files", err)
 		return
 	}
 
@@ -1097,7 +1121,7 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 			scrubRecord.DurationMs = uint64(time.Since(scrubRecord.StartTime).Milliseconds())
 			_ = s.maintenance.SaveScrubResult(scrubRecord)
 		}
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "run scrub", err)
 		return
 	}
 
@@ -1150,6 +1174,10 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 
 	// Parse pagination parameters
 	cursor := r.URL.Query().Get("cursor")
+	if len(cursor) > maxObjectsCursorLength {
+		BadRequest(w, fmt.Sprintf("cursor exceeds maximum length (%d bytes)", maxObjectsCursorLength))
+		return
+	}
 	limitStr := r.URL.Query().Get("limit")
 	var limit uint32 = 1000
 	if limitStr != "" {
@@ -1163,7 +1191,7 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.dataplane.ListObjects(ctx, cursor, limit)
 	if err != nil {
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "list objects", err)
 		return
 	}
 
@@ -1220,7 +1248,7 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Get all referenced hashes from metadata
 	referencedHashes, err := s.fs.GetAllReferencedHashes(ctx)
 	if err != nil {
-		InternalError(w, "failed to get referenced hashes: "+err.Error())
+		s.respondInternalError(w, "gc referenced hashes", err)
 		return
 	}
 
@@ -1230,7 +1258,7 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	for {
 		result, err := s.dataplane.ListObjects(ctx, cursor, 1000)
 		if err != nil {
-			InternalError(w, "failed to list objects: "+err.Error())
+			s.respondInternalError(w, "gc list objects", err)
 			return
 		}
 		allObjects = append(allObjects, result.Objects...)
@@ -1507,7 +1535,7 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 
 	items, err := s.fs.ListTrash(r.Context())
 	if err != nil {
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "list trash", err)
 		return
 	}
 
@@ -1556,7 +1584,7 @@ func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
 
 	item, err := s.fs.GetTrashItem(r.Context(), id)
 	if err != nil {
-		NotFound(w, err.Error())
+		s.respondNotFound(w, "get trash item", err)
 		return
 	}
 
@@ -1601,13 +1629,15 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err != nil {
-		// Check if it's a conflict error
-		if strings.Contains(err.Error(), "already exists") ||
-			strings.Contains(err.Error(), "does not exist") {
-			Conflict(w, err.Error())
+		if isStorageConflict(err) {
+			Conflict(w, "resource already exists")
 			return
 		}
-		InternalError(w, err.Error())
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "restore from trash", err)
+			return
+		}
+		s.respondInternalError(w, "restore from trash", err)
 		return
 	}
 
@@ -1633,7 +1663,7 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
-		NotFound(w, err.Error())
+		s.respondNotFound(w, "delete from trash", err)
 		return
 	}
 
@@ -1654,7 +1684,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 
 	count, err := s.fs.EmptyTrash(r.Context())
 	if err != nil {
-		InternalError(w, err.Error())
+		s.respondInternalError(w, "empty trash", err)
 		return
 	}
 
@@ -1709,7 +1739,11 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Open original file
 	reader, err := s.fs.OpenFile(r.Context(), filePath)
 	if err != nil {
-		NotFound(w, err.Error())
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "thumbnail open file", err)
+			return
+		}
+		s.respondInternalError(w, "thumbnail open file", err)
 		return
 	}
 	defer reader.Close()
@@ -1875,21 +1909,10 @@ func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request
 	s.authHandler.HandleLogout(w, r)
 }
 
-// SettingsResponse represents the settings response
-type SettingsResponse struct {
-	Success bool                   `json:"success"`
-	Data    map[string]interface{} `json:"data"`
-}
-
 // handleGetSettings returns current settings
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if s.config == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "settings not available",
-		})
+		ServiceUnavailable(w, "settings not available")
 		return
 	}
 
@@ -1926,11 +1949,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(SettingsResponse{
-		Success: true,
-		Data:    settings,
-	})
+	NewAPIResponse(settings).Write(w, http.StatusOK)
 }
 
 // UpdateSettingsRequest represents settings update request
@@ -1971,23 +1990,13 @@ type CDCSettingsUpdate struct {
 // handleUpdateSettings updates settings
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if s.config == nil || s.configPath == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "settings not available or no config file path",
-		})
+		ServiceUnavailable(w, "settings not available or no config file path")
 		return
 	}
 
 	var req UpdateSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "invalid request body",
-		})
+		BadRequest(w, "invalid request body")
 		return
 	}
 
@@ -2056,39 +2065,24 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Validate config
 	if err := s.config.Validate(); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "invalid configuration: " + err.Error(),
-		})
+		BadRequest(w, "invalid configuration: "+err.Error())
 		return
 	}
 
 	// Save to file
 	if err := s.config.Save(s.configPath); err != nil {
 		s.logger.Error().Err(err).Msg("failed to save config")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "failed to save settings",
-		})
+		InternalError(w, "failed to save settings")
 		return
 	}
 
 	s.logger.Info().Msg("settings updated and saved")
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "settings updated, some changes may require restart",
-	})
+	NewAPIResponse(nil).WithMessage("settings updated, some changes may require restart").Write(w, http.StatusOK)
 }
 
 // WebDAVCredentialsResponse represents WebDAV credentials for authenticated users
 type WebDAVCredentialsResponse struct {
-	Success  bool   `json:"success"`
 	Enabled  bool   `json:"enabled"`
 	URL      string `json:"url"`
 	AuthType string `json:"auth_type"`
@@ -2099,17 +2093,11 @@ type WebDAVCredentialsResponse struct {
 // handleGetWebDAVCredentials returns WebDAV credentials for authenticated users
 func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Request) {
 	if s.config == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "configuration not available",
-		})
+		ServiceUnavailable(w, "configuration not available")
 		return
 	}
 
 	resp := WebDAVCredentialsResponse{
-		Success:  true,
 		Enabled:  s.config.WebDAV.Enabled,
 		URL:      formatWebDAVPrefix(s.config.WebDAV.Prefix),
 		AuthType: s.config.WebDAV.AuthType,
@@ -2130,8 +2118,7 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	NewAPIResponse(resp).Write(w, http.StatusOK)
 }
 
 func formatWebDAVPrefix(prefix string) string {

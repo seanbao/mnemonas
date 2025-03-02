@@ -8,6 +8,8 @@ export interface BatchOperationResult {
   succeeded: number
   failed: number
   total: number
+  succeededItems: unknown[]
+  failedItems: unknown[]
 }
 
 /**
@@ -71,6 +73,8 @@ export function useBatchOperation<T, R = void>(
         const succeeded = results.filter((r) => r.status === 'fulfilled').length
         const failed = results.filter((r) => r.status === 'rejected').length
         const total = items.length
+        const succeededItems = items.filter((_, index) => results[index]?.status === 'fulfilled')
+        const failedItems = items.filter((_, index) => results[index]?.status === 'rejected')
 
         // Show appropriate toast
         if (failed === 0) {
@@ -92,7 +96,7 @@ export function useBatchOperation<T, R = void>(
           })
         }
 
-        const result = { succeeded, failed, total }
+        const result = { succeeded, failed, total, succeededItems, failedItems }
         onComplete?.(result)
         return result
       } finally {

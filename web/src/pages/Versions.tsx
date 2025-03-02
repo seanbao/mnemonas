@@ -17,7 +17,8 @@ import {
   ModalBody,
   ModalFooter,
   useDisclosure,
-  Skeleton
+  Skeleton,
+  addToast,
 } from '@heroui/react'
 import { 
   History, 
@@ -33,7 +34,7 @@ import {
 } from 'lucide-react'
 import { getVersions, buildDownloadUrl, downloadFile, restoreVersion, type VersionInfo } from '@/api/files'
 import { useIsAdmin } from '@/stores/auth'
-import { formatBytes, formatDate } from '@/lib/utils'
+import { formatBytes, formatDate, openUrlInNewTab } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 
@@ -180,9 +181,8 @@ export function VersionsPage() {
   const handlePreview = (version: VersionInfo) => {
     if (!selectedPath) return
     const url = buildDownloadUrl(selectedPath, { version: version.hash })
-    const previewWindow = window.open(url, '_blank', 'noopener,noreferrer')
-    if (previewWindow) {
-      previewWindow.opener = null
+    if (!openUrlInNewTab(url)) {
+      addToast({ title: '浏览器拦截了新标签页，请允许弹窗后重试', color: 'warning' })
     }
   }
 

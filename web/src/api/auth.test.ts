@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { getCurrentUser, login } from './auth'
+import { authFetch, getCurrentUser, getStoredUser, login } from './auth'
 
 const fetchMock = vi.fn()
 
@@ -16,16 +16,20 @@ describe('auth API', () => {
         ok: true,
         json: () => Promise.resolve({
           success: true,
-          access_token: 'access-1',
-          refresh_token: 'refresh-1',
-          expires_at: '2026-03-13T00:00:00Z',
-          token_type: 'Bearer',
-          user: { id: 'u1', username: 'admin', role: 'admin', homeDir: '/' },
+          data: {
+            access_token: 'access-1',
+            refresh_token: 'refresh-1',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
         }),
       })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
 
     await login('admin', 'password')
+
+    expect(getStoredUser()).toMatchObject({ homeDir: '/' })
 
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
       method: 'POST',
@@ -41,7 +45,9 @@ describe('auth API', () => {
         status: 200,
         json: () => Promise.resolve({
           success: true,
-          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          data: {
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
         }),
       })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
@@ -52,5 +58,160 @@ describe('auth API', () => {
       method: 'POST',
       headers: { Authorization: 'Bearer access-1' },
     }))
+  })
+
+  it('retries once after refreshing token', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.ok).toBe(true)
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/files', expect.objectContaining({
+      headers: expect.any(Headers),
+    }))
+    expect((fetchMock.mock.calls[0]?.[1]?.headers as Headers).get('Authorization')).toBe('Bearer access-1')
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/refresh', expect.objectContaining({
+      method: 'POST',
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/v1/auth/download-session', expect.objectContaining({
+      method: 'POST',
+      headers: { Authorization: 'Bearer access-2' },
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(4, '/api/v1/files', expect.objectContaining({
+      headers: expect.any(Headers),
+    }))
+    expect((fetchMock.mock.calls[3]?.[1]?.headers as Headers).get('Authorization')).toBe('Bearer access-2')
+  })
+
+  it('does not retry refresh endpoint after 401', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+    })
+
+    const response = await authFetch('/api/v1/auth/refresh', { method: 'POST' })
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops after one retry when retried request is still unauthorized', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
+      .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('normalizes legacy stored user payloads', () => {
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '/legacy',
+    }))
+
+    expect(getStoredUser()).toMatchObject({ homeDir: '/legacy' })
+  })
+
+  it('preserves Headers instances and custom headers across retry', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+    fetchMock
+      .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
+
+    const customHeaders = new Headers({
+      'Content-Type': 'application/json',
+      'X-Trace-Id': 'trace-1',
+    })
+
+    await authFetch('/api/v1/files', {
+      method: 'POST',
+      headers: customHeaders,
+      body: JSON.stringify({ name: 'demo' }),
+    })
+
+    const firstRequestHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Headers
+    const retriedRequestHeaders = fetchMock.mock.calls[3]?.[1]?.headers as Headers
+
+    expect(firstRequestHeaders).toBeInstanceOf(Headers)
+    expect(firstRequestHeaders.get('Authorization')).toBe('Bearer access-1')
+    expect(firstRequestHeaders.get('Content-Type')).toBe('application/json')
+    expect(firstRequestHeaders.get('X-Trace-Id')).toBe('trace-1')
+
+    expect(retriedRequestHeaders).toBeInstanceOf(Headers)
+    expect(retriedRequestHeaders.get('Authorization')).toBe('Bearer access-2')
+    expect(retriedRequestHeaders.get('Content-Type')).toBe('application/json')
+    expect(retriedRequestHeaders.get('X-Trace-Id')).toBe('trace-1')
   })
 })

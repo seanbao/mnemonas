@@ -15,26 +15,22 @@ test.describe('侧边栏导航', () => {
   test('应显示侧边栏', async ({ page }) => {
     await expect(page).not.toHaveURL(/\/login/)
     const sidebar = page.locator('aside, nav, [class*="sidebar"]').first()
-    const isVisible = await sidebar.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(sidebar).toBeVisible({ timeout: 5000 })
   })
 
   test('侧边栏应包含文件导航链接', async ({ page }) => {
     const filesLink = page.getByRole('link', { name: /文件|Files/i })
-    const isVisible = await filesLink.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(filesLink).toBeVisible({ timeout: 5000 })
   })
 
   test('侧边栏应包含搜索链接', async ({ page }) => {
     const searchLink = page.getByRole('link', { name: /搜索|Search/i })
-    const isVisible = await searchLink.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(searchLink).toBeVisible({ timeout: 5000 })
   })
 
   test('侧边栏应包含设置链接', async ({ page }) => {
     const settingsLink = page.getByRole('link', { name: /设置|Settings/i })
-    const isVisible = await settingsLink.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(settingsLink).toBeVisible({ timeout: 5000 })
   })
 })
 
@@ -97,33 +93,30 @@ test.describe('侧边栏点击导航', () => {
     await ensureAuthenticatedAt(page, '/')
 
     const filesLink = page.getByRole('link', { name: /文件|Files/i })
-    if (await filesLink.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await filesLink.click()
-      await page.waitForTimeout(500)
-      expect(page.url()).toMatch(/files/)
-    }
+    await expect(filesLink).toBeVisible({ timeout: 2000 })
+    await filesLink.click()
+    await page.waitForTimeout(500)
+    expect(page.url()).toMatch(/files/)
   })
 
   test('点击搜索链接应导航到搜索页面', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/')
 
     const searchLink = page.getByRole('link', { name: /搜索|Search/i })
-    if (await searchLink.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await searchLink.click()
-      await page.waitForTimeout(500)
-      expect(page.url()).toMatch(/search/)
-    }
+    await expect(searchLink).toBeVisible({ timeout: 2000 })
+    await searchLink.click()
+    await page.waitForTimeout(500)
+    expect(page.url()).toMatch(/search/)
   })
 
   test('点击设置链接应导航到设置页面', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/')
 
     const settingsLink = page.getByRole('link', { name: /设置|Settings/i })
-    if (await settingsLink.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await settingsLink.click()
-      await page.waitForTimeout(500)
-      expect(page.url()).toMatch(/settings/)
-    }
+    await expect(settingsLink).toBeVisible({ timeout: 2000 })
+    await settingsLink.click()
+    await page.waitForTimeout(500)
+    expect(page.url()).toMatch(/settings/)
   })
 })
 
@@ -175,7 +168,7 @@ test.describe('响应式侧边栏', () => {
     const hasHamburger = await hamburger.isVisible({ timeout: 2000 }).catch(() => false)
     const sidebarVisible = await sidebar.isVisible({ timeout: 1000 }).catch(() => false)
     
-    // 移动端应该是汉堡菜单或者侧边栏不可见
-    expect(hasHamburger || !sidebarVisible || sidebarVisible).toBe(true)
+    // 移动端至少应存在一种导航入口
+    expect(hasHamburger || sidebarVisible).toBe(true)
   })
 })

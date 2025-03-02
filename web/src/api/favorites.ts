@@ -38,6 +38,31 @@ export class FavoritesError extends Error {
   }
 }
 
+interface FavoritesApiError {
+  code?: string
+  message: string
+}
+
+interface FavoritesApiResponse<T> {
+  success: boolean
+  data?: T
+  message?: string
+  error?: FavoritesApiError | string
+}
+
+function getFavoritesErrorMessage(body: FavoritesApiResponse<never>, fallback: string): string {
+  if (typeof body.error === 'string' && body.error) {
+    return body.error
+  }
+  if (body.error && typeof body.error === 'object' && body.error.message) {
+    return body.error.message
+  }
+  if (body.message) {
+    return body.message
+  }
+  return fallback
+}
+
 /**
  * List user's favorites
  */
@@ -47,13 +72,17 @@ export async function listFavorites(): Promise<Favorite[]> {
   if (!response.ok) {
     let message = '获取收藏列表失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: FavoritesApiResponse<never> = await response.json()
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
-  
-  const data: FavoritesResponse = await response.json()
+
+  const body: FavoritesApiResponse<FavoritesResponse> = await response.json()
+  if (!body.data) {
+    throw new FavoritesError('获取收藏列表响应无效', response.status)
+  }
+  const data = body.data
   return data.favorites
 }
 
@@ -74,13 +103,17 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
       message = '已经收藏过了'
     }
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: FavoritesApiResponse<never> = await response.json()
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
-  
-  return response.json()
+
+  const body: FavoritesApiResponse<Favorite> = await response.json()
+  if (!body.data) {
+    throw new FavoritesError('添加收藏响应无效', response.status)
+  }
+  return body.data
 }
 
 /**
@@ -96,8 +129,8 @@ export async function removeFavorite(path: string): Promise<void> {
   if (!response.ok) {
     let message = '移除收藏失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: FavoritesApiResponse<never> = await response.json()
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }
@@ -114,8 +147,11 @@ export async function checkFavorite(path: string): Promise<boolean> {
     return false
   }
   
-  const data = await response.json()
-  return data.is_favorite
+  const body: FavoritesApiResponse<{ path: string; is_favorite: boolean }> = await response.json()
+  if (!body.data) {
+    return false
+  }
+  return body.data.is_favorite
 }
 
 /**
@@ -145,7 +181,11 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
     return Object.fromEntries(paths.map(p => [p, false]))
   }
   batchCheckSupported = true
-  const data: CheckPathsResponse = await response.json()
+  const body: FavoritesApiResponse<CheckPathsResponse> = await response.json()
+  if (!body.data) {
+    return Object.fromEntries(paths.map(p => [p, false]))
+  }
+  const data = body.data
   const mapped: Record<string, boolean> = {}
   for (const [normalized, isFavorite] of Object.entries(data.favorites)) {
     const original = normalizedMap.get(normalized)
@@ -171,8 +211,8 @@ export async function updateFavoriteNote(path: string, note: string): Promise<vo
   if (!response.ok) {
     let message = '更新备注失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: FavoritesApiResponse<never> = await response.json()
+      message = getFavoritesErrorMessage(body, message)
     } catch { /* ignore */ }
     throw new FavoritesError(message, response.status)
   }

@@ -121,8 +121,10 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
     let message = errorPrefix
     try {
       const body = await response.json()
-      if (body.error) {
+      if (typeof body.error === 'string') {
         message = body.error
+      } else if (body.error?.message) {
+        message = body.error.message
       } else if (body.message) {
         message = body.message
       }
@@ -138,6 +140,14 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
   } catch {
     throw new Error('服务器返回了无效的数据')
   }
+}
+
+async function handleWrappedResponse<T>(response: Response, errorPrefix: string): Promise<T> {
+  const body = await handleResponse<ApiResponseWrapper<T>>(response, errorPrefix)
+  if (!body || typeof body !== 'object' || !('data' in body)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return body.data
 }
 
 // API Response wrapper from backend
@@ -181,11 +191,12 @@ export async function deleteFile(path: string): Promise<void> {
 // Get storage stats (direct response, not wrapped)
 export async function getStorageStats(): Promise<StorageStats> {
   const response = await authFetch(`${API_BASE}/stats`)
-  if (!response.ok) {
-    throw new ApiError('获取存储统计失败', response.status, response.statusText)
-  }
-  const result = await response.json()
-  const data = result.data ?? result
+  const data = await handleWrappedResponse<{
+    total_size: number
+    total_chunks: number
+    unique_size: number
+    dedup_ratio: number
+  }>(response, '获取存储统计失败')
   return {
     totalSize: data.total_size || 0,
     totalObjects: data.total_chunks || 0,
@@ -206,11 +217,39 @@ export async function getHealth(): Promise<HealthStatus> {
 // Get diagnostics info (direct response, not wrapped)
 export async function getDiagnostics(): Promise<DiagnosticsInfo> {
   const response = await authFetch(`${API_BASE}/diagnostics`)
-  if (!response.ok) {
-    throw new ApiError('获取诊断信息失败', response.status, response.statusText)
-  }
-  const result = await response.json()
-  const data = result.data ?? result
+  const data = await handleWrappedResponse<{
+    timestamp: string
+    uptime: string
+    uptime_secs?: number
+    version: DiagnosticsInfo['version']
+    system?: {
+      filesystem_initialized?: boolean
+      dataplane_connected?: boolean
+      thumbnail_service_ready?: boolean
+    }
+    memory?: {
+      alloc_mb?: number
+      total_alloc_mb?: number
+      sys_mb?: number
+      num_gc?: number
+    }
+    goroutines?: number
+    filesystem?: {
+      trash_items?: number
+      trash_size?: number
+    }
+    storage?: {
+      total_chunks?: number
+      total_size?: number
+      unique_size?: number
+      dedup_ratio?: number
+    }
+    dataplane?: {
+      healthy?: boolean
+      version?: string
+      uptime_sec?: number
+    }
+  }>(response, '获取诊断信息失败')
   return {
     timestamp: data.timestamp,
     uptime: data.uptime,

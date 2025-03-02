@@ -2,8 +2,10 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -379,5 +381,31 @@ func TestWorkspace_AtomicWrite(t *testing.T) {
 	tmpPath := filepath.Join(w.Root(), "large.bin.tmp")
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
 		t.Error("Temp file should not exist after successful write")
+	}
+}
+
+func TestCleanupTempPath_ReturnsJoinedErrorWhenCleanupFails(t *testing.T) {
+	root := t.TempDir()
+	tmpPath := filepath.Join(root, "stuck.tmp")
+	if err := os.Mkdir(tmpPath, 0755); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpPath, "child"), []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	operationErr := errors.New("write failed")
+	err := cleanupTempPath(tmpPath, operationErr)
+	if err == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("expected original error in joined error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup temp file") {
+		t.Fatalf("expected cleanup context in joined error, got %v", err)
+	}
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("expected errors.Is to match original error, got %v", err)
 	}
 }

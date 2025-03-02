@@ -8,27 +8,34 @@ export interface User {
   homeDir: string
 }
 
+interface ApiUser {
+  id: string
+  username: string
+  email?: string
+  role: 'admin' | 'user' | 'guest'
+  home_dir?: string
+  homeDir?: string
+}
+
 export interface LoginRequest {
   username: string
   password: string
 }
 
 export interface LoginResponse {
-  success: boolean
   access_token: string
   refresh_token: string
   expires_at: string
   token_type: string
-  user: User
+  user: ApiUser
 }
 
 export interface RefreshResponse {
-  success: boolean
   access_token: string
   refresh_token: string
   expires_at: string
   token_type: string
-  user: User
+  user: ApiUser
 }
 
 export interface ChangePasswordRequest {
@@ -44,7 +51,6 @@ export interface CreateUserRequest {
 }
 
 export interface UserListResponse {
-  success: boolean
   users: Array<{
     id: string
     username: string
@@ -59,6 +65,18 @@ export interface UserListResponse {
     last_login_at?: string
   }>
   total: number
+}
+
+interface AuthApiError {
+  code?: string
+  message: string
+}
+
+interface AuthApiResponse<T> {
+  success: boolean
+  data?: T
+  message?: string
+  error?: AuthApiError
 }
 
 export class AuthError extends Error {
@@ -98,9 +116,19 @@ export function getStoredUser(): User | null {
   const data = localStorage.getItem(USER_KEY)
   if (!data) return null
   try {
-    return JSON.parse(data)
+    return normalizeUser(JSON.parse(data) as ApiUser)
   } catch {
     return null
+  }
+}
+
+function normalizeUser(user: ApiUser): User {
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    homeDir: user.homeDir ?? user.home_dir ?? '/',
   }
 }
 
@@ -141,25 +169,43 @@ export function getAuthHeaders(): HeadersInit {
   }
 }
 
-// Fetch with auth
-export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const headers = {
-    ...getAuthHeaders(),
-    ...options.headers,
+function mergeAuthHeaders(headers?: HeadersInit): Headers {
+  const merged = new Headers(headers)
+  const token = getStoredToken()
+  if (token && !merged.has('Authorization')) {
+    merged.set('Authorization', `Bearer ${token}`)
   }
+  return merged
+}
+
+function getRequestPath(url: string): string {
+  try {
+    return new URL(url, 'http://localhost').pathname
+  } catch {
+    return url
+  }
+}
+
+function shouldRefreshToken(url: string, retryCount: number): boolean {
+  if (retryCount > 0) {
+    return false
+  }
+
+  const pathname = getRequestPath(url)
+  return pathname !== `${API_BASE}/auth/login` && pathname !== `${API_BASE}/auth/refresh`
+}
+
+// Fetch with auth
+export async function authFetch(url: string, options: RequestInit = {}, retryCount = 0): Promise<Response> {
+  const headers = mergeAuthHeaders(options.headers)
   
   const response = await fetch(url, { ...options, headers })
   
   // If unauthorized, try to refresh token
-  if (response.status === 401) {
+  if (response.status === 401 && shouldRefreshToken(url, retryCount)) {
     const refreshed = await tryRefreshToken()
     if (refreshed) {
-      // Retry with new token
-      const newHeaders = {
-        ...getAuthHeaders(),
-        ...options.headers,
-      }
-      return fetch(url, { ...options, headers: newHeaders })
+      return authFetch(url, options, retryCount + 1)
     }
   }
   
@@ -183,8 +229,13 @@ async function tryRefreshToken(): Promise<boolean> {
       return false
     }
     
-    const data: RefreshResponse = await response.json()
-    storeTokens(data.access_token, data.refresh_token, data.user)
+    const body: AuthApiResponse<RefreshResponse> = await response.json()
+    if (!body.data) {
+      clearTokens()
+      return false
+    }
+    const data = body.data
+    storeTokens(data.access_token, data.refresh_token, normalizeUser(data.user))
     await syncDownloadSession()
     return true
   } catch {
@@ -205,17 +256,22 @@ export async function login(username: string, password: string): Promise<User> {
     let message = '登录失败'
     let code: string | undefined
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
-      if (body.code) code = body.code
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) message = body.error.message
+      if (body.error?.code) code = body.error.code
     } catch { /* ignore */ }
     throw new AuthError(message, response.status, code)
   }
   
-  const data: LoginResponse = await response.json()
-  storeTokens(data.access_token, data.refresh_token, data.user)
+  const body: AuthApiResponse<LoginResponse> = await response.json()
+  if (!body.data) {
+    throw new AuthError('登录响应无效', response.status)
+  }
+  const data = body.data
+  const user = normalizeUser(data.user)
+  storeTokens(data.access_token, data.refresh_token, user)
   await syncDownloadSession()
-  return data.user
+  return user
 }
 
 // Logout
@@ -248,9 +304,12 @@ export async function getCurrentUser(): Promise<User | null> {
     return null
   }
   
-  const data = await response.json()
+  const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
+  if (!body.data) {
+    return null
+  }
   await syncDownloadSession()
-  return data.user
+  return normalizeUser(body.data.user)
 }
 
 // Change password
@@ -267,8 +326,8 @@ export async function changePassword(oldPassword: string, newPassword: string): 
   if (!response.ok) {
     let message = '修改密码失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) message = body.error.message
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
   }
@@ -283,13 +342,17 @@ export async function listUsers(): Promise<UserListResponse['users']> {
   if (!response.ok) {
     let message = '获取用户列表失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) message = body.error.message
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
   }
   
-  const data: UserListResponse = await response.json()
+  const body: AuthApiResponse<UserListResponse> = await response.json()
+  if (!body.data) {
+    throw new AuthError('获取用户列表响应无效', response.status)
+  }
+  const data = body.data
   return data.users
 }
 
@@ -304,14 +367,17 @@ export async function createUser(req: CreateUserRequest): Promise<User> {
   if (!response.ok) {
     let message = '创建用户失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) message = body.error.message
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
   }
   
-  const data = await response.json()
-  return data.user
+  const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
+  if (!body.data) {
+    throw new AuthError('创建用户响应无效', response.status)
+  }
+  return normalizeUser(body.data.user)
 }
 
 // Delete user (admin only)
@@ -323,8 +389,8 @@ export async function deleteUser(userId: string): Promise<void> {
   if (!response.ok) {
     let message = '删除用户失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) message = body.error.message
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
   }
@@ -341,8 +407,8 @@ export async function resetUserPassword(userId: string, newPassword: string): Pr
   if (!response.ok) {
     let message = '重置密码失败'
     try {
-      const body = await response.json()
-      if (body.error) message = body.error
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) message = body.error.message
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
   }
