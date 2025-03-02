@@ -2,6 +2,8 @@ package favorites
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -51,6 +53,24 @@ func normalizeFavoritePath(rawPath string) string {
 	return path.Clean("/" + strings.TrimSpace(rawPath))
 }
 
+func decodeJSONBodyStrict(r *http.Request, dst any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing data")
+		}
+		return err
+	}
+
+	return nil
+}
+
 // ListFavorites handles GET /api/v1/favorites
 func (h *Handler) ListFavorites(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
@@ -71,7 +91,7 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 		Note string `json:"note"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		h.error(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -155,7 +175,7 @@ func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
 		Paths []string `json:"paths"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		h.error(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -194,7 +214,7 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		Note string `json:"note"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		h.error(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
