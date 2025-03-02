@@ -288,6 +288,41 @@ func TestCreateShare_InvalidNegativeExpiresInReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestCreateShare_RejectsUnknownFields(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		statInfo: &storage.FileInfo{Path: "/docs/report.pdf", Name: "report.pdf", Size: 256},
+	})
+	body := []byte(`{"path":"/docs/report.pdf","type":"file","unexpected":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_REQUEST" {
+		t.Fatalf("expected INVALID_REQUEST code, got %v", errorPayload["code"])
+	}
+	if len(store.ListAll()) != 0 {
+		t.Fatal("expected share creation to be rejected before persistence")
+	}
+}
+
 func TestCreateShare_NegativeMaxAccessReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1143,6 +1178,51 @@ func TestAccessShareWithPassword_FolderInfo(t *testing.T) {
 	}
 	if len(recorder.Result().Cookies()) != 1 {
 		t.Fatalf("expected access cookie to be set")
+	}
+}
+
+func TestAccessShareWithPassword_RejectsUnknownFields(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItems: []*storage.FileInfo{{Path: "/docs/a.txt", Name: "a.txt"}},
+	})
+
+	body := []byte(`{"password":"secret","unexpected":true}`)
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	recorder := httptest.NewRecorder()
+
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_REQUEST" {
+		t.Fatalf("expected INVALID_REQUEST code, got %v", errorPayload["code"])
+	}
+	if len(recorder.Result().Cookies()) != 0 {
+		t.Fatal("expected no access cookie on rejected request")
 	}
 }
 

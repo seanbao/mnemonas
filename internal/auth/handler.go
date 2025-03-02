@@ -2,6 +2,8 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -114,6 +116,24 @@ func NewHandler(us *UserStore, tm *TokenManager) *Handler {
 	}
 }
 
+func decodeJSONBodyStrict(r *http.Request, dst any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing data")
+		}
+		return err
+	}
+
+	return nil
+}
+
 // LoginRequest is the login request body
 type LoginRequest struct {
 	Username string `json:"username"`
@@ -163,7 +183,7 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -243,7 +263,7 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -424,7 +444,7 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ChangePasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -515,7 +535,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -610,7 +630,7 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 	var req struct {
 		NewPassword string `json:"new_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -653,7 +673,7 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 	var req struct {
 		Disabled *bool `json:"disabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}

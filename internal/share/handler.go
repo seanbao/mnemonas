@@ -217,10 +217,28 @@ func normalizeShareRelativePath(rawPath string) (string, error) {
 	return cleaned, nil
 }
 
+func decodeJSONBodyStrict(r *http.Request, dst any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing data")
+		}
+		return err
+	}
+
+	return nil
+}
+
 // CreateShare creates a new share link
 func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	var req CreateShareRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -378,7 +396,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var req UpdateShareRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -625,7 +643,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	id := chi.URLParam(r, "id")
 
 	var req AccessShareRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}

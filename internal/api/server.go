@@ -38,6 +38,11 @@ const maxObjectsCursorLength = 256
 
 const scrubFailurePublicMessage = "scrub failed; check server logs for details"
 
+type prependReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
 // Server is the API server
 type Server struct {
 	router      *chi.Mux
@@ -93,6 +98,53 @@ func formatSettingsDuration(d time.Duration) string {
 		return "0"
 	}
 	return d.String()
+}
+
+func decodeJSONBody(r *http.Request, dst any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing data")
+		}
+		return err
+	}
+
+	return nil
+}
+
+func requestHasBody(r *http.Request) (bool, error) {
+	if r.Body == nil {
+		return false, nil
+	}
+	if r.ContentLength > 0 {
+		return true, nil
+	}
+	if r.ContentLength == 0 {
+		return false, nil
+	}
+
+	var firstByte [1]byte
+	n, err := r.Body.Read(firstByte[:])
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	originalBody := r.Body
+	r.Body = &prependReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(firstByte[:n]), originalBody),
+		Closer: originalBody,
+	}
+
+	return true, nil
 }
 
 func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConfig {
@@ -1246,7 +1298,7 @@ type MoveRequest struct {
 
 func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 	var req MoveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		BadRequest(w, "invalid request body")
 		return
 	}
@@ -1326,7 +1378,7 @@ type CopyRequest struct {
 
 func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 	var req CopyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		BadRequest(w, "invalid request body")
 		return
 	}
@@ -1708,8 +1760,13 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Hashes []string `json:"hashes,omitempty"`
 	}
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	hasBody, err := requestHasBody(r)
+	if err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+	if hasBody {
+		if err := decodeJSONBody(r, &req); err != nil {
 			BadRequest(w, "invalid request body")
 			return
 		}
@@ -3004,7 +3061,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req UpdateSettingsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		BadRequest(w, "invalid request body")
 		return
 	}

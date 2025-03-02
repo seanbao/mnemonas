@@ -9,6 +9,7 @@
 - **Base URL**: `http://localhost:8080` (默认)
 - **Content-Type**: `application/json` (除文件上传外)
 - **认证**: 支持 JWT Token 认证（可通过配置启用/禁用）
+- JSON 请求体采用严格解析：写接口会拒绝未知字段和拼接的多个 JSON 值，并返回 `400 invalid request body`
 
 ### 认证方式
 

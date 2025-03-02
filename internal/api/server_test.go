@@ -2448,6 +2448,35 @@ func TestServer_MoveFile_BackslashTraversalSourceIsSanitized(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_RejectsUnknownJSONFields(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	body := `{"from":"/move-source.txt","to":"/move-dest.txt","unexpected":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("move file unknown field status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid request body") {
+		t.Fatalf("expected invalid request body message, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/move-source.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected move, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/move-dest.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
+	}
+}
+
 func TestServer_MoveFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -3239,6 +3268,28 @@ func TestServer_Scrub_InvalidBodyDoesNotExposeParserDetails(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("Scrub invalid body status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	body := w.Body.String()
+	if strings.Contains(strings.ToLower(body), "unexpected eof") || strings.Contains(strings.ToLower(body), "invalid character") {
+		t.Fatalf("expected sanitized scrub parse error, got %s", body)
+	}
+	if !strings.Contains(body, "invalid request body") {
+		t.Fatalf("expected generic invalid request body message, got %s", body)
+	}
+}
+
+func TestServer_Scrub_ChunkedInvalidBodyDoesNotBypassValidation(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/scrub", strings.NewReader(`{"hashes":`))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("chunked scrub invalid body status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 	body := w.Body.String()
 	if strings.Contains(strings.ToLower(body), "unexpected eof") || strings.Contains(strings.ToLower(body), "invalid character") {
@@ -4196,6 +4247,30 @@ func TestServer_UpdateSettings_InvalidConfigDoesNotLeakOrMutate(t *testing.T) {
 	}
 	if server.config.DataPlane.CDC.MinChunkSize != originalMin || server.config.DataPlane.CDC.AvgChunkSize != originalAvg || server.config.DataPlane.CDC.MaxChunkSize != originalMax {
 		t.Fatalf("expected invalid settings update to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_RejectsUnknownFields(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalMaxAge := server.config.Storage.Retention.MaxAge
+
+	body := `{"retention":{"max_age":"24h","unexpected":true}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings unknown field status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid request body") {
+		t.Fatalf("expected invalid request body message, got %s", bodyStr)
+	}
+	if server.config.Storage.Retention.MaxAge != originalMaxAge {
+		t.Fatalf("expected unknown-field update to leave in-memory config unchanged")
 	}
 }
 
