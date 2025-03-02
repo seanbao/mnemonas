@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { accessShareWithPassword, copyShareUrl, createShare, downloadShare, getPublicShare, getPublicShareItems, listShares, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
+import { accessShareWithPassword, copyShareUrl, createShare, downloadShare, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
 
 const mockCopyTextToClipboard = vi.fn()
 
@@ -126,6 +126,19 @@ describe('Share API', () => {
         code: 'SHARE_PASSWORD_RATE_LIMITED',
       })
     })
+
+    it('rejects malformed successful folder item responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ path: 'docs' }),
+      })
+
+      await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
+        message: '分享文件夹响应无效',
+        status: 200,
+      })
+    })
   })
 
   describe('getPublicShare', () => {
@@ -139,6 +152,19 @@ describe('Share API', () => {
       await expect(getPublicShare('missing')).rejects.toMatchObject({
         message: 'share missing',
         status: 404,
+      })
+    })
+
+    it('rejects malformed successful public share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(null),
+      })
+
+      await expect(getPublicShare('share-1')).rejects.toMatchObject({
+        message: '分享信息无效',
+        status: 200,
       })
     })
   })
@@ -187,6 +213,71 @@ describe('Share API', () => {
       await expect(listShares()).rejects.toMatchObject({
         message: 'forbidden',
         status: 403,
+      })
+    })
+
+    it('rejects malformed successful share list responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: [{}] }),
+      })
+
+      await expect(listShares()).rejects.toMatchObject({
+        message: '获取分享列表响应无效',
+        status: 200,
+      })
+    })
+
+    it('rejects false-success share list responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: false, data: [] }),
+      })
+
+      await expect(listShares()).rejects.toMatchObject({
+        message: '获取分享列表响应无效',
+        status: 200,
+      })
+    })
+
+    it('rejects malformed successful share detail responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: { id: 'share-1' } }),
+      })
+
+      await expect(getShare('share-1')).rejects.toMatchObject({
+        message: '获取分享详情响应无效',
+        status: 200,
+      })
+    })
+
+    it('rejects malformed successful create share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ success: true, data: { id: 'share-2' } }),
+      })
+
+      await expect(createShare({ path: '/docs/b.txt' })).rejects.toMatchObject({
+        message: '创建分享响应无效',
+        status: 201,
+      })
+    })
+
+    it('rejects false-success create share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ success: false, data: { id: 'share-2' } }),
+      })
+
+      await expect(createShare({ path: '/docs/b.txt' })).rejects.toMatchObject({
+        message: '创建分享响应无效',
+        status: 201,
       })
     })
 
@@ -249,6 +340,19 @@ describe('Share API', () => {
         message: 'too many attempts, try later',
         status: 429,
         code: 'SHARE_PASSWORD_RATE_LIMITED',
+      })
+    })
+
+    it('rejects malformed successful password access responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+      })
+
+      await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({
+        message: '分享信息无效',
+        status: 200,
       })
     })
   })

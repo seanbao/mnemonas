@@ -35,6 +35,15 @@ describe('Settings API', () => {
     expect(result.data.server.port).toBe(8080)
   })
 
+  it('rejects malformed successful settings responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true }),
+    })
+
+    await expect(getSettings()).rejects.toThrow('Invalid settings response')
+  })
+
   it('uses structured api error message when settings request fails', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -56,6 +65,15 @@ describe('Settings API', () => {
     expect(result.message).toContain('require restart')
   })
 
+  it('rejects malformed successful update responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ message: 'settings updated' }),
+    })
+
+    await expect(updateSettings({ server: { port: 8081 } })).rejects.toThrow('Invalid update settings response')
+  })
+
   it('unwraps webdav credentials payload', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -74,6 +92,15 @@ describe('Settings API', () => {
     const result = await getWebDAVCredentials()
 
     expect(result.password).toBe('secret')
+  })
+
+  it('rejects malformed successful webdav credentials responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true }),
+    })
+
+    await expect(getWebDAVCredentials()).rejects.toThrow('Invalid WebDAV credentials response')
   })
 
   it('uses wrapped error message for webdav credentials failures', async () => {

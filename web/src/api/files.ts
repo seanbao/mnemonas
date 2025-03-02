@@ -28,10 +28,10 @@ export function versionToDisplayFormat(v: VersionInfo): { modTime: string; size:
 }
 
 export interface StorageStats {
-  totalSize: number
-  totalObjects: number
-  uniqueSize: number
-  dedupRatio: number
+  totalSize?: number
+  totalObjects?: number
+  uniqueSize?: number
+  dedupRatio?: number
 }
 
 export interface HealthStatus {
@@ -144,10 +144,33 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
 
 async function handleWrappedResponse<T>(response: Response, errorPrefix: string): Promise<T> {
   const body = await handleResponse<ApiResponseWrapper<T>>(response, errorPrefix)
-  if (!body || typeof body !== 'object' || !('data' in body)) {
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    body.success !== true ||
+    !('data' in body)
+  ) {
     throw new Error('服务器返回了无效的数据')
   }
   return body.data
+}
+
+async function throwApiErrorFromResponse(response: Response, fallback: string): Promise<never> {
+  let message = fallback
+  try {
+    const body = await response.json() as { error?: string | { message?: string }; message?: string }
+    if (typeof body.error === 'string') {
+      message = body.error || fallback
+    } else if (body.error?.message) {
+      message = body.error.message
+    } else if (body.message) {
+      message = body.message
+    }
+  } catch {
+    // Keep the fallback message when the body is missing or invalid.
+  }
+
+  throw new ApiError(message, response.status, response.statusText)
 }
 
 // API Response wrapper from backend
@@ -163,8 +186,7 @@ export async function listFiles(path: string): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/files${encodedPath}`)
-  const result = await handleResponse<ApiResponseWrapper<FileListResponse>>(response, '获取文件列表失败')
-  return result.data
+  return handleWrappedResponse<FileListResponse>(response, '获取文件列表失败')
 }
 
 // Get file versions
@@ -172,8 +194,8 @@ export async function getVersions(path: string): Promise<VersionInfo[]> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/versions${encodedPath}`)
-  const result = await handleResponse<ApiResponseWrapper<{path: string, versions: VersionInfo[]}>>(response, '获取版本历史失败')
-  return result.data.versions
+  const data = await handleWrappedResponse<{path: string, versions: VersionInfo[]}>(response, '获取版本历史失败')
+  return data.versions
 }
 
 // Delete a file (soft delete)
@@ -184,7 +206,7 @@ export async function deleteFile(path: string): Promise<void> {
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError('删除文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '删除文件失败')
   }
 }
 
@@ -192,16 +214,16 @@ export async function deleteFile(path: string): Promise<void> {
 export async function getStorageStats(): Promise<StorageStats> {
   const response = await authFetch(`${API_BASE}/stats`)
   const data = await handleWrappedResponse<{
-    total_size: number
-    total_chunks: number
-    unique_size: number
-    dedup_ratio: number
+    total_size?: number
+    total_chunks?: number
+    unique_size?: number
+    dedup_ratio?: number
   }>(response, '获取存储统计失败')
   return {
-    totalSize: data.total_size || 0,
-    totalObjects: data.total_chunks || 0,
-    uniqueSize: data.unique_size || 0,
-    dedupRatio: data.dedup_ratio || 0,
+    totalSize: data.total_size,
+    totalObjects: data.total_chunks,
+    uniqueSize: data.unique_size,
+    dedupRatio: data.dedup_ratio,
   }
 }
 
@@ -211,7 +233,28 @@ export async function getHealth(): Promise<HealthStatus> {
   if (!response.ok) {
     throw new ApiError('获取健康状态失败', response.status, response.statusText)
   }
-  return response.json()
+
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    typeof (body as HealthStatus).status !== 'string' ||
+    typeof (body as HealthStatus).version !== 'string' ||
+    typeof (body as HealthStatus).uptime !== 'string' ||
+    !(body as HealthStatus).storage ||
+    typeof (body as HealthStatus).storage.dataDir !== 'string' ||
+    typeof (body as HealthStatus).storage.writable !== 'boolean'
+  ) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  return body as HealthStatus
 }
 
 // Get diagnostics info (direct response, not wrapped)
@@ -293,7 +336,7 @@ export async function createDirectory(path: string): Promise<void> {
     method: 'POST',
   })
   if (!response.ok) {
-    throw new ApiError('创建文件夹失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '创建文件夹失败')
   }
 }
 
@@ -468,7 +511,7 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
     }),
   })
   if (!response.ok) {
-    throw new ApiError('移动文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '移动文件失败')
   }
 }
 
@@ -488,7 +531,7 @@ export async function copyFile(fromPath: string, toPath: string): Promise<void> 
     }),
   })
   if (!response.ok) {
-    throw new ApiError('复制文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '复制文件失败')
   }
 }
 
@@ -500,7 +543,7 @@ export async function restoreVersion(path: string, hash: string): Promise<void> 
     method: 'POST',
   })
   if (!response.ok) {
-    throw new ApiError('恢复版本失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '恢复版本失败')
   }
 }
 
@@ -534,8 +577,8 @@ export interface TrashListResponse {
 // List trash items
 export async function listTrash(): Promise<TrashListResponse> {
   const response = await authFetch(`${API_BASE}/trash/`)
-  const result = await handleResponse<ApiResponseWrapper<{
-    items: Array<{
+  const data = await handleWrappedResponse<{
+    items?: Array<{
       id: string
       originalPath: string
       deletedAt: string
@@ -545,15 +588,15 @@ export async function listTrash(): Promise<TrashListResponse> {
       hash?: string
       hadVersions?: boolean
     }>
-    count: number
-    totalSize: number
+    count?: number
+    totalSize?: number
     retentionDays?: number
     retentionEnabled?: boolean
     retentionMaxSize?: number
-  }>>(response, '获取回收站列表失败')
-  
-  return {
-    items: result.data.items.map(item => ({
+  }>(response, '获取回收站列表失败')
+
+  const items = Array.isArray(data.items)
+    ? data.items.map(item => ({
       id: item.id,
       originalPath: item.originalPath,
       deletedAt: item.deletedAt,
@@ -562,12 +605,16 @@ export async function listTrash(): Promise<TrashListResponse> {
       size: item.size,
       hash: item.hash,
       versions: item.hadVersions ? 1 : 0,
-    })),
-    count: result.data.count,
-    totalSize: result.data.totalSize,
-    retentionDays: result.data.retentionDays,
-    retentionEnabled: result.data.retentionEnabled,
-    retentionMaxSize: result.data.retentionMaxSize,
+    }))
+    : []
+  
+  return {
+    items,
+    count: data.count ?? items.length,
+    totalSize: data.totalSize ?? items.reduce((sum, item) => sum + item.size, 0),
+    retentionDays: data.retentionDays,
+    retentionEnabled: data.retentionEnabled,
+    retentionMaxSize: data.retentionMaxSize,
   }
 }
 
@@ -581,12 +628,7 @@ export async function restoreFromTrash(id: string, newPath?: string): Promise<vo
     method: 'POST',
   })
   if (!response.ok) {
-    let message = '恢复文件失败'
-    try {
-      const body = await response.json()
-      if (body.message) message = body.message
-    } catch { /* ignore */ }
-    throw new ApiError(message, response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '恢复文件失败')
   }
 }
 
@@ -596,7 +638,7 @@ export async function deleteFromTrash(id: string): Promise<void> {
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError('永久删除失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '永久删除失败')
   }
 }
 
@@ -605,10 +647,10 @@ export async function emptyTrash(): Promise<EmptyTrashResult> {
   const response = await authFetch(`${API_BASE}/trash/`, {
     method: 'DELETE',
   })
-  const result = await handleResponse<ApiResponseWrapper<{deleted_count: number, partial?: boolean}>>(response, '清空回收站失败')
+  const data = await handleWrappedResponse<{deleted_count: number, partial?: boolean}>(response, '清空回收站失败')
   return {
-    deletedCount: result.data.deleted_count,
-    partial: !!result.data.partial,
+    deletedCount: data.deleted_count,
+    partial: !!data.partial,
   }
 }
 
@@ -640,8 +682,7 @@ export interface ScrubResult {
 // Get last scrub result
 export async function getScrubResult(): Promise<ScrubResult> {
   const response = await authFetch(`${API_BASE}/maintenance/scrub`)
-  const result = await handleResponse<ApiResponseWrapper<ScrubResult>>(response, '获取校验结果失败')
-  return result.data
+  return handleWrappedResponse<ScrubResult>(response, '获取校验结果失败')
 }
 
 // Run scrub operation
@@ -651,10 +692,10 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,
   })
-  const result = await handleResponse<ApiResponseWrapper<Omit<ScrubResult, 'has_result'>>>(response, '执行数据校验失败')
+  const data = await handleWrappedResponse<Omit<ScrubResult, 'has_result'>>(response, '执行数据校验失败')
   return {
     has_result: true,
-    ...result.data,
+    ...data,
   }
 }
 

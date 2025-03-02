@@ -79,9 +79,15 @@ interface AuthApiResponse<T> {
   error?: AuthApiError
 }
 
+interface AuthSessionData {
+  accessToken: string
+  refreshToken: string
+  user: User
+}
+
 export interface AuthClearedDetail {
   message?: string
-  reason?: 'expired' | 'disabled'
+  reason?: 'expired' | 'disabled' | 'missing'
 }
 
 export class AuthError extends Error {
@@ -113,6 +119,64 @@ let refreshPromise: Promise<boolean> | null = null
 
 function getSessionEndedMessage(responseMessage?: string): string {
   return responseMessage || '账户已被禁用，请联系管理员'
+}
+
+function getMissingUserMessage(responseMessage?: string): string {
+  return responseMessage || '账户不存在或已被删除，请重新登录'
+}
+
+function hasStoredAuthState(): boolean {
+  return Boolean(getStoredToken() || getStoredRefreshToken() || localStorage.getItem(USER_KEY))
+}
+
+function isUserRole(role: unknown): role is User['role'] {
+  return role === 'admin' || role === 'user' || role === 'guest'
+}
+
+function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined): AuthSessionData {
+  if (!data || typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string') {
+    throw new Error('invalid auth session data')
+  }
+
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    user: normalizeUser(data.user),
+  }
+}
+
+function readAuthSuccessData<T>(body: AuthApiResponse<T> | undefined): T {
+  if (!body || body.success !== true || body.data === undefined) {
+    throw new Error('invalid auth response data')
+  }
+
+  return body.data
+}
+
+async function handleUnauthorizedSessionResponse(response: Response): Promise<void> {
+  if (response.status !== 401 || !hasStoredAuthState()) {
+    return
+  }
+
+  let detail: AuthClearedDetail = {
+    reason: 'expired',
+    message: '登录已过期，请重新登录',
+  }
+
+  try {
+    const bodySource = typeof response.clone === 'function' ? response.clone() : response
+    const body: AuthApiResponse<never> = await bodySource.json()
+    if (body.error?.code === 'USER_NOT_FOUND') {
+      detail = {
+        reason: 'missing',
+        message: getMissingUserMessage(body.error.message),
+      }
+    }
+  } catch {
+    // Keep the generic expired-session detail when the error payload is invalid.
+  }
+
+  clearTokens(detail)
 }
 
 async function handleForbiddenSessionResponse(response: Response): Promise<void> {
@@ -148,17 +212,31 @@ export function getStoredUser(): User | null {
   try {
     return normalizeUser(JSON.parse(data) as ApiUser)
   } catch {
+    localStorage.removeItem(USER_KEY)
     return null
   }
 }
 
 function normalizeUser(user: ApiUser): User {
+  const homeDir = user.homeDir ?? user.home_dir
+
+  if (
+    typeof user.id !== 'string' ||
+    typeof user.username !== 'string' ||
+    !isUserRole(user.role) ||
+    typeof homeDir !== 'string' ||
+    homeDir.length === 0 ||
+    (user.email !== undefined && typeof user.email !== 'string')
+  ) {
+    throw new Error('invalid user payload')
+  }
+
   return {
     id: user.id,
     username: user.username,
     email: user.email,
     role: user.role,
-    homeDir: user.homeDir ?? user.home_dir ?? '/',
+    homeDir,
   }
 }
 
@@ -243,6 +321,8 @@ export async function authFetch(url: string, options: RequestInit = {}, retryCou
     }
   }
 
+  await handleUnauthorizedSessionResponse(response)
+
   await handleForbiddenSessionResponse(response)
   
   return response
@@ -275,12 +355,8 @@ async function tryRefreshToken(): Promise<boolean> {
       }
 
       const body: AuthApiResponse<RefreshResponse> = await response.json()
-      if (!body.data) {
-        clearTokens()
-        return false
-      }
-      const data = body.data
-      storeTokens(data.access_token, data.refresh_token, normalizeUser(data.user))
+      const data = parseAuthSessionData(readAuthSuccessData(body))
+      storeTokens(data.accessToken, data.refreshToken, data.user)
       await syncDownloadSession()
       return true
     } catch {
@@ -313,15 +389,17 @@ export async function login(username: string, password: string): Promise<User> {
     throw new AuthError(message, response.status, code)
   }
   
-  const body: AuthApiResponse<LoginResponse> = await response.json()
-  if (!body.data) {
+  let data: AuthSessionData
+  try {
+    const body: AuthApiResponse<LoginResponse> = await response.json()
+    data = parseAuthSessionData(readAuthSuccessData(body))
+  } catch {
     throw new AuthError('登录响应无效', response.status)
   }
-  const data = body.data
-  const user = normalizeUser(data.user)
-  storeTokens(data.access_token, data.refresh_token, user)
+
+  storeTokens(data.accessToken, data.refreshToken, data.user)
   await syncDownloadSession()
-  return user
+  return data.user
 }
 
 // Logout
@@ -362,12 +440,24 @@ export async function getCurrentUser(): Promise<User | null> {
     return null
   }
 
-  if (!body.data) {
+  let data: { user: ApiUser }
+  try {
+    data = readAuthSuccessData(body)
+  } catch {
     clearTokens()
     return null
   }
+
+  let user: User
+  try {
+    user = normalizeUser(data.user)
+  } catch {
+    clearTokens()
+    return null
+  }
+
   await syncDownloadSession()
-  return normalizeUser(body.data.user)
+  return user
 }
 
 // Change password
@@ -407,10 +497,12 @@ export async function listUsers(): Promise<UserListResponse['users']> {
   }
   
   const body: AuthApiResponse<UserListResponse> = await response.json()
-  if (!body.data) {
+  let data: UserListResponse
+  try {
+    data = readAuthSuccessData(body)
+  } catch {
     throw new AuthError('获取用户列表响应无效', response.status)
   }
-  const data = body.data
   return data.users
 }
 
@@ -431,11 +523,13 @@ export async function createUser(req: CreateUserRequest): Promise<User> {
     throw new AuthError(message, response.status)
   }
   
-  const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
-  if (!body.data) {
+  try {
+    const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
+    const data = readAuthSuccessData(body)
+    return normalizeUser(data.user)
+  } catch {
     throw new AuthError('创建用户响应无效', response.status)
   }
-  return normalizeUser(body.data.user)
 }
 
 // Delete user (admin only)
@@ -451,6 +545,13 @@ export async function deleteUser(userId: string): Promise<void> {
       if (body.error?.message) message = body.error.message
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
+  }
+
+  try {
+    const body: AuthApiResponse<null> = await response.json()
+    readAuthSuccessData(body)
+  } catch {
+    throw new AuthError('删除用户响应无效', response.status)
   }
 }
 
@@ -469,5 +570,12 @@ export async function resetUserPassword(userId: string, newPassword: string): Pr
       if (body.error?.message) message = body.error.message
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
+  }
+
+  try {
+    const body: AuthApiResponse<null> = await response.json()
+    readAuthSuccessData(body)
+  } catch {
+    throw new AuthError('重置密码响应无效', response.status)
   }
 }

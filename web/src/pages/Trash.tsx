@@ -296,13 +296,16 @@ export function TrashPage() {
   }
 
   const items = data?.items ?? []
-  const totalSize = data?.totalSize ?? 0
-  const itemCount = data?.count ?? 0
-  const retentionDays = data?.retentionDays ?? 0
-  const retentionEnabled = data?.retentionEnabled ?? retentionDays > 0
-  const retentionLabel = retentionEnabled && retentionDays > 0
-    ? `${retentionDays} 天后自动清理`
-    : '自动清理未启用'
+  const totalSize = data?.totalSize ?? items.reduce((sum, item) => sum + item.size, 0)
+  const itemCount = data?.count ?? items.length
+  const retentionDays = data?.retentionDays
+  const retentionEnabled = data?.retentionEnabled
+  const retentionKnown = retentionEnabled !== undefined || retentionDays !== undefined
+  const retentionLabel = !retentionKnown
+    ? '自动清理设置未知'
+    : retentionEnabled && retentionDays !== undefined && retentionDays > 0
+      ? `${retentionDays} 天后自动清理`
+      : '自动清理未启用'
 
   return (
     <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
@@ -393,8 +396,8 @@ export function TrashPage() {
               key={item.id}
               item={item}
               isSelected={selectedItems.has(item.id)}
-              retentionDays={retentionDays}
-              retentionEnabled={retentionEnabled}
+              retentionDays={retentionDays ?? 0}
+              retentionEnabled={retentionEnabled ?? false}
               canWrite={canWrite}
               onSelect={() => {
                 if (!canWrite) return

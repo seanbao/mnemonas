@@ -487,7 +487,7 @@ function ImagePreview({
                   </div>
                   <div>
                     <span className="text-white/60">大小</span>
-                    <p>{formatBytes(currentImage?.size ?? 0)}</p>
+                    <p>{currentImage?.size !== undefined ? formatBytes(currentImage.size) : '--'}</p>
                   </div>
                   <div>
                     <span className="text-white/60">修改时间</span>

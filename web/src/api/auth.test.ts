@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { AUTH_CLEARED_EVENT, authFetch, getCurrentUser, getStoredUser, login } from './auth'
+import { AUTH_CLEARED_EVENT, authFetch, deleteUser, getCurrentUser, getStoredUser, login, resetUserPassword } from './auth'
 
 const fetchMock = vi.fn()
 
@@ -37,6 +37,57 @@ describe('auth API', () => {
     }))
   })
 
+  it('rejects malformed successful login responses instead of storing fake session state', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          access_token: 'access-1',
+          refresh_token: 'refresh-1',
+          expires_at: '2026-03-13T00:00:00Z',
+          token_type: 'Bearer',
+          user: { id: 'u1', username: 'admin', role: 'admin' },
+        },
+      }),
+    })
+
+    await expect(login('admin', 'password')).rejects.toMatchObject({
+      message: '登录响应无效',
+      status: 200,
+    })
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects false-success login responses instead of storing fake session state', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: false,
+        data: {
+          access_token: 'access-1',
+          refresh_token: 'refresh-1',
+          expires_at: '2026-03-13T00:00:00Z',
+          token_type: 'Bearer',
+          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+        },
+      }),
+    })
+
+    await expect(login('admin', 'password')).rejects.toMatchObject({
+      message: '登录响应无效',
+      status: 200,
+    })
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
   it('syncs download session after loading current user', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
     fetchMock
@@ -58,6 +109,33 @@ describe('auth API', () => {
       method: 'POST',
       headers: { Authorization: 'Bearer access-1' },
     }))
+  })
+
+  it('clears local auth state when current user payload is malformed', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '/',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'admin', role: 'admin' },
+        },
+      }),
+    })
+
+    await expect(getCurrentUser()).resolves.toBeNull()
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
   it('retries once after refreshing token', async () => {
@@ -156,6 +234,86 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4)
   })
 
+  it('clears auth state when refresh returns a malformed success payload', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '/',
+    }))
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin' },
+          },
+        }),
+      })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(401)
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears auth state when refresh returns a false-success payload', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '/',
+    }))
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: false,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(401)
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('normalizes legacy stored user payloads', () => {
     localStorage.setItem('mnemonas_user', JSON.stringify({
       id: 'u1',
@@ -165,6 +323,13 @@ describe('auth API', () => {
     }))
 
     expect(getStoredUser()).toMatchObject({ homeDir: '/legacy' })
+  })
+
+  it('clears corrupted stored user payloads', () => {
+    localStorage.setItem('mnemonas_user', '{invalid-json')
+
+    expect(getStoredUser()).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
   it('preserves Headers instances and custom headers across retry', async () => {
@@ -293,6 +458,136 @@ describe('auth API', () => {
     expect(authCleared).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('clears local auth state when an authenticated request reports USER_NOT_FOUND', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'user',
+      role: 'user',
+      home_dir: '/users/user',
+    }))
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'user', role: 'user', home_dir: '/users/user' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        json: () => Promise.resolve({
+          success: false,
+          error: {
+            code: 'USER_NOT_FOUND',
+            message: 'user not found',
+          },
+        }),
+      })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    const event = authCleared.mock.calls[0]?.[0] as CustomEvent<{ message?: string; reason?: string }>
+    expect(event.detail).toEqual({
+      reason: 'missing',
+      message: 'user not found',
+    })
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('clears local auth state on terminal unauthorized responses without a structured body', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'user',
+      role: 'user',
+      home_dir: '/users/user',
+    }))
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-2',
+            refresh_token: 'refresh-2',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'user', role: 'user', home_dir: '/users/user' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        json: () => Promise.reject(new Error('invalid json')),
+      })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(401)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    const event = authCleared.mock.calls[0]?.[0] as CustomEvent<{ message?: string; reason?: string }>
+    expect(event.detail).toEqual({
+      reason: 'expired',
+      message: '登录已过期，请重新登录',
+    })
 
     window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
@@ -426,5 +721,35 @@ describe('auth API', () => {
     expect(authCleared).toHaveBeenCalledTimes(1)
 
     window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('rejects false-success delete user responses', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ success: false, data: null }),
+    })
+
+    await expect(deleteUser('u1')).rejects.toMatchObject({
+      message: '删除用户响应无效',
+      status: 200,
+    })
+  })
+
+  it('rejects false-success reset password responses', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ success: false, data: null }),
+    })
+
+    await expect(resetUserPassword('u1', 'new-password')).rejects.toMatchObject({
+      message: '重置密码响应无效',
+      status: 200,
+    })
   })
 })
