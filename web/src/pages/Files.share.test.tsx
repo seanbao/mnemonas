@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@/test/utils'
 import React from 'react'
 import { act } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { FilesPage } from './Files'
 
 const useCanWriteMock = vi.fn(() => true)
@@ -56,8 +57,10 @@ vi.mock('@heroui/react', async () => {
 })
 
 vi.mock('@/components/share', () => ({
-  ShareDialog: ({ isOpen, isFolder }: { isOpen: boolean; isFolder?: boolean }) => (
-    <div data-testid="share-dialog" data-open={isOpen ? 'true' : 'false'} data-folder={isFolder ? 'true' : 'false'} />
+  ShareDialog: ({ isOpen, isFolder, onFeatureDisabled }: { isOpen: boolean; isFolder?: boolean; onFeatureDisabled?: () => void }) => (
+    <div data-testid="share-dialog" data-open={isOpen ? 'true' : 'false'} data-folder={isFolder ? 'true' : 'false'}>
+      {isOpen && <button onClick={onFeatureDisabled}>disable share feature</button>}
+    </div>
   ),
 }))
 
@@ -174,5 +177,25 @@ describe('FilesPage sharing behavior', () => {
     const dialog = await screen.findByTestId('share-dialog')
     expect(dialog.getAttribute('data-open')).toBe('true')
     expect(dialog.getAttribute('data-folder')).toBe('false')
+  })
+
+  it('disables share entry points after the dialog reports the feature is off', async () => {
+    const user = userEvent.setup()
+
+    await act(async () => {
+      render(<FilesPage />)
+      await Promise.resolve()
+    })
+
+    const shareButtons = await screen.findAllByText('创建分享链接')
+    await act(async () => {
+      shareButtons[0].click()
+      await Promise.resolve()
+    })
+
+    await user.click(screen.getByText('disable share feature'))
+
+    expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
+    expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
   })
 })

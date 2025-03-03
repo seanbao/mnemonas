@@ -63,6 +63,20 @@ describe('Favorites API', () => {
       await expect(listFavorites()).rejects.toThrow(FavoritesError)
     })
 
+  it('preserves machine-readable feature error codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, error: { code: 'FAVORITES_FEATURE_DISABLED', message: 'favorites feature disabled' } }),
+    })
+
+    await expect(listFavorites()).rejects.toMatchObject({
+      status: 503,
+      code: 'FAVORITES_FEATURE_DISABLED',
+      isFeatureDisabled: true,
+    })
+  })
+
     it('reads legacy string error responses', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,

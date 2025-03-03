@@ -5,6 +5,7 @@ import {
   deleteFile,
   getStorageStats,
   getHealth,
+  getAppVersion,
   createDirectory,
   moveFile,
   copyFile,
@@ -424,7 +425,30 @@ describe('API: files', () => {
   })
 
   describe('getHealth', () => {
-    it('fetches health status', async () => {
+    it('accepts the current backend health response shape', async () => {
+      const mockResponse = {
+        status: 'healthy',
+        timestamp: '2024-01-15T10:00:00Z',
+        uptime: '1h30m',
+        dataplane: {
+          healthy: true,
+          version: '0.3.0',
+          uptime: 3600,
+        },
+      }
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      })
+
+      const result = await getHealth()
+      expect(result.status).toBe('healthy')
+      expect(result.dataplane?.healthy).toBe(true)
+      expect(result.timestamp).toBe('2024-01-15T10:00:00Z')
+    })
+
+    it('keeps optional legacy fields when present', async () => {
       const mockResponse = {
         status: 'healthy',
         version: '0.1.0',
@@ -441,8 +465,8 @@ describe('API: files', () => {
       })
 
       const result = await getHealth()
-      expect(result.status).toBe('healthy')
-      expect(result.storage.writable).toBe(true)
+      expect(result.version).toBe('0.1.0')
+      expect(result.storage?.writable).toBe(true)
     })
 
     it('rejects malformed successful health responses', async () => {
@@ -452,6 +476,40 @@ describe('API: files', () => {
       })
 
       await expect(getHealth()).rejects.toThrow('服务器返回了无效的数据')
+    })
+  })
+
+  describe('getAppVersion', () => {
+    it('unwraps valid version responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            name: 'MnemoNAS',
+            version: '0.1.0',
+            go: 'go1.24.0',
+          },
+        }),
+      })
+
+      const result = await getAppVersion()
+      expect(result.version).toBe('0.1.0')
+      expect(result.go).toBe('go1.24.0')
+    })
+
+    it('rejects malformed successful version responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            version: '0.1.0',
+          },
+        }),
+      })
+
+      await expect(getAppVersion()).rejects.toThrow('服务器返回了无效的数据')
     })
   })
 
@@ -869,6 +927,9 @@ describe('API: files', () => {
             filesystem_initialized: true,
             dataplane_connected: true,
             thumbnail_service_ready: false,
+            maintenance_history_ready: true,
+            activity_log_ready: true,
+            favorites_store_ready: true,
           },
           memory: {
             alloc_mb: 50,
@@ -891,6 +952,9 @@ describe('API: files', () => {
       const result = await getDiagnostics()
       expect(result.uptimeSecs).toBe(5400)
       expect(result.system?.filesystemInitialized).toBe(true)
+      expect(result.system?.maintenanceHistoryReady).toBe(true)
+      expect(result.system?.activityLogReady).toBe(true)
+        expect(result.system?.favoritesStoreReady).toBe(true)
       expect(result.memory?.allocMb).toBe(50)
       expect(result.goroutines).toBe(25)
       expect(result.filesystem?.trashItems).toBe(5)
@@ -947,6 +1011,9 @@ describe('API: files', () => {
       const result = await getDiagnostics()
       expect(result.uptimeSecs).toBe(0)
       expect(result.system?.filesystemInitialized).toBeUndefined()
+      expect(result.system?.maintenanceHistoryReady).toBeUndefined()
+      expect(result.system?.activityLogReady).toBeUndefined()
+        expect(result.system?.favoritesStoreReady).toBeUndefined()
       expect(result.memory?.allocMb).toBeUndefined()
       expect(result.filesystem?.trashItems).toBeUndefined()
       expect(result.storage?.dedupRatio).toBeUndefined()

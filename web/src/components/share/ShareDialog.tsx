@@ -22,7 +22,7 @@ import {
   Users,
   CheckCircle,
 } from 'lucide-react'
-import { createShare, copyShareUrl, type Share, type CreateShareRequest } from '@/api/share'
+import { createShare, copyShareUrl, ShareError, type Share, type CreateShareRequest } from '@/api/share'
 
 interface ShareDialogProps {
   isOpen: boolean
@@ -30,6 +30,8 @@ interface ShareDialogProps {
   filePath: string
   isFolder?: boolean
   onShareCreated?: (share: Share) => void
+  featureEnabled?: boolean
+  onFeatureDisabled?: () => void
 }
 
 const EXPIRATION_OPTIONS = [
@@ -51,9 +53,12 @@ export function ShareDialog({
   filePath, 
   isFolder = false,
   onShareCreated,
+  featureEnabled = true,
+  onFeatureDisabled,
 }: ShareDialogProps) {
   const [isLoading, setIsLoading] = useState(false)
   const [createdShare, setCreatedShare] = useState<Share | null>(null)
+  const [featureDisabled, setFeatureDisabled] = useState(false)
   
   // Form state
   const [usePassword, setUsePassword] = useState(false)
@@ -78,6 +83,7 @@ export function ShareDialog({
     setMaxAccess('')
     setDescription('')
     setCreatedShare(null)
+    setFeatureDisabled(false)
   }, [])
 
   const handleClose = useCallback(() => {
@@ -86,6 +92,8 @@ export function ShareDialog({
   }, [onClose, resetForm])
 
   const handleCreate = async () => {
+    if (featureDisabled || !featureEnabled) return
+
     setIsLoading(true)
     try {
       const req: CreateShareRequest = {
@@ -113,6 +121,10 @@ export function ShareDialog({
       onShareCreated?.(share)
       addToast({ title: '分享链接已创建', color: 'success' })
     } catch (err) {
+      if (err instanceof ShareError && err.isFeatureDisabled) {
+        setFeatureDisabled(true)
+        onFeatureDisabled?.()
+      }
       addToast({ 
         title: err instanceof Error ? err.message : '创建分享失败', 
         color: 'danger' 
@@ -195,6 +207,17 @@ export function ShareDialog({
                   </div>
                 </div>
               )}
+            </div>
+          ) : featureDisabled || !featureEnabled ? (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 text-warning">
+                <Lock size={20} />
+                <span className="font-medium">分享功能已关闭</span>
+              </div>
+
+              <div className="p-4 bg-warning/10 border border-warning/30 rounded-lg text-sm text-default-700">
+                当前服务已关闭分享功能。重新启用后，才能为文件或文件夹创建分享链接。
+              </div>
             </div>
           ) : (
             /* Share form */
@@ -300,7 +323,7 @@ export function ShareDialog({
         </ModalBody>
 
         <ModalFooter>
-          {createdShare ? (
+          {createdShare || featureDisabled || !featureEnabled ? (
             <Button onPress={handleClose} className="rounded-xl">
               关闭
             </Button>

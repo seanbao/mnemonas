@@ -437,6 +437,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var updatedShare *Share
 	err = h.store.Update(id, func(s *Share) error {
 		if req.Enabled != nil {
 			s.Enabled = *req.Enabled
@@ -471,6 +472,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		if req.Description != nil {
 			s.Description = *req.Description
 		}
+		updatedShare = copyShare(s)
 		return nil
 	})
 
@@ -483,9 +485,12 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	share, _ = h.store.Get(id)
-	info := share.ToInfo()
-	info.URL = h.buildShareURL(share.ID)
+	if updatedShare == nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
+		return
+	}
+	info := updatedShare.ToInfo()
+	info.URL = h.buildShareURL(updatedShare.ID)
 
 	writeShareSuccess(w, http.StatusOK, info, "")
 }

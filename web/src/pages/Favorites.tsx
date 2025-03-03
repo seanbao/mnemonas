@@ -26,6 +26,7 @@ import {
   listFavorites,
   removeFavorite,
   updateFavoriteNote,
+  FavoritesError,
   type Favorite,
 } from '@/api/favorites'
 import { FileIcon } from '@/components/ui/FileIcon'
@@ -39,6 +40,19 @@ import { useCanWrite } from '@/stores/auth'
 function getFileName(path: string): string {
   const parts = path.split('/')
   return parts[parts.length - 1] || path
+}
+
+function getFavoritesFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
+  if (!(error instanceof FavoritesError)) {
+    return null
+  }
+  if (error.isFeatureDisabled) {
+    return 'disabled'
+  }
+  if (error.isUnavailable) {
+    return 'unavailable'
+  }
+  return null
 }
 
 // Get parent directory from path
@@ -175,6 +189,7 @@ export function FavoritesPage() {
   })
 
   const favoriteItems = useMemo(() => favorites ?? [], [favorites])
+  const featureState = getFavoritesFeatureState(error)
 
   // Remove mutation
   const removeMutation = useMutation({
@@ -273,6 +288,49 @@ export function FavoritesPage() {
   }
 
   if (error) {
+    if (featureState === 'disabled') {
+      return (
+        <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+          <PageHeader
+            title="收藏夹"
+            subtitle="功能已关闭"
+            icon={Star}
+          />
+          <div className="flex flex-1 items-center justify-center">
+            <EmptyState
+              icon={Star}
+              title="收藏功能已关闭"
+              description="当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。"
+            />
+          </div>
+        </div>
+      )
+    }
+
+    if (featureState === 'unavailable') {
+      return (
+        <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+          <PageHeader
+            title="收藏夹"
+            subtitle="暂不可用"
+            icon={Star}
+          />
+          <div className="flex flex-1 items-center justify-center">
+            <EmptyState
+              icon={AlertCircle}
+              title="收藏功能暂不可用"
+              description="收藏存储未成功初始化，请检查系统健康状态或稍后重试。"
+              action={
+                <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                  重新加载
+                </Button>
+              }
+            />
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
         <PageHeader

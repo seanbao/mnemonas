@@ -39,11 +39,17 @@ export interface StorageStats {
 
 export interface HealthStatus {
   status: string
-  version: string
   uptime: string
-  storage: {
-    dataDir: string
-    writable: boolean
+  timestamp?: string
+  version?: string
+  storage?: {
+    dataDir?: string
+    writable?: boolean
+  }
+  dataplane?: {
+    healthy?: boolean
+    version?: string
+    uptime?: number
   }
 }
 
@@ -60,6 +66,9 @@ export interface DiagnosticsInfo {
     filesystemInitialized?: boolean
     dataplaneConnected?: boolean
     thumbnailServiceReady?: boolean
+    maintenanceHistoryReady?: boolean
+    activityLogReady?: boolean
+     favoritesStoreReady?: boolean
   }
   memory?: {
     allocMb?: number
@@ -84,6 +93,8 @@ export interface DiagnosticsInfo {
     uptimeSec?: number
   }
 }
+
+export type AppVersionInfo = DiagnosticsInfo['version']
 
 // API Error class for better error handling
 export class ApiError extends Error {
@@ -195,6 +206,35 @@ function isDiagnosticsVersionShape(value: unknown): value is DiagnosticsInfo['ve
     && typeof value.go === 'string'
 }
 
+function isHealthShape(value: unknown): value is HealthStatus {
+  if (!isRecord(value) || typeof value.status !== 'string' || typeof value.uptime !== 'string') {
+    return false
+  }
+
+  if (!isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
+    return false
+  }
+
+  if (value.storage !== undefined) {
+    if (!isRecord(value.storage)
+      || !isStringOrUndefined(value.storage.dataDir)
+      || !isBooleanOrUndefined(value.storage.writable)) {
+      return false
+    }
+  }
+
+  if (value.dataplane !== undefined) {
+    if (!isRecord(value.dataplane)
+      || !isBooleanOrUndefined(value.dataplane.healthy)
+      || !isStringOrUndefined(value.dataplane.version)
+      || !isNumberOrUndefined(value.dataplane.uptime)) {
+      return false
+    }
+  }
+
+  return true
+}
+
 function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === 'boolean'
 }
@@ -216,6 +256,9 @@ function isDiagnosticsShape(value: unknown): value is {
     filesystem_initialized?: boolean
     dataplane_connected?: boolean
     thumbnail_service_ready?: boolean
+    maintenance_history_ready?: boolean
+    activity_log_ready?: boolean
+     favorites_store_ready?: boolean
   }
   memory?: {
     alloc_mb?: number
@@ -252,7 +295,10 @@ function isDiagnosticsShape(value: unknown): value is {
     if (!isRecord(value.system)
       || !isBooleanOrUndefined(value.system.filesystem_initialized)
       || !isBooleanOrUndefined(value.system.dataplane_connected)
-      || !isBooleanOrUndefined(value.system.thumbnail_service_ready)) {
+      || !isBooleanOrUndefined(value.system.thumbnail_service_ready)
+      || !isBooleanOrUndefined(value.system.maintenance_history_ready)
+      || !isBooleanOrUndefined(value.system.activity_log_ready)
+      || !isBooleanOrUndefined(value.system.favorites_store_ready)) {
       return false
     }
   }
@@ -421,20 +467,20 @@ export async function getHealth(): Promise<HealthStatus> {
     throw new Error('服务器返回了无效的数据')
   }
 
-  if (
-    !body ||
-    typeof body !== 'object' ||
-    typeof (body as HealthStatus).status !== 'string' ||
-    typeof (body as HealthStatus).version !== 'string' ||
-    typeof (body as HealthStatus).uptime !== 'string' ||
-    !(body as HealthStatus).storage ||
-    typeof (body as HealthStatus).storage.dataDir !== 'string' ||
-    typeof (body as HealthStatus).storage.writable !== 'boolean'
-  ) {
+  if (!isHealthShape(body)) {
     throw new Error('服务器返回了无效的数据')
   }
 
-  return body as HealthStatus
+  return body
+}
+
+export async function getAppVersion(): Promise<AppVersionInfo> {
+  const response = await authFetch(`${API_BASE}/version`)
+  const data = await handleWrappedResponse<unknown>(response, '获取版本信息失败')
+  if (!isDiagnosticsVersionShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
 }
 
 // Get diagnostics info (direct response, not wrapped)
@@ -453,6 +499,9 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
       filesystemInitialized: data.system.filesystem_initialized,
       dataplaneConnected: data.system.dataplane_connected,
       thumbnailServiceReady: data.system.thumbnail_service_ready,
+      maintenanceHistoryReady: data.system.maintenance_history_ready,
+      activityLogReady: data.system.activity_log_ready,
+      favoritesStoreReady: data.system.favorites_store_ready,
     } : undefined,
     memory: data.memory ? {
       allocMb: data.memory.alloc_mb,
