@@ -750,6 +750,72 @@ func TestUpdateShare_InvalidExpiresInReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestUpdateShare_ReturnsUpdatedShare(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:        "/docs/report.pdf",
+		Type:        ShareTypeFile,
+		CreatedBy:   "user1",
+		Description: "before",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"enabled":false,"description":"after"}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var payload struct {
+		Success bool      `json:"success"`
+		Data    ShareInfo `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", recorder.Body.String())
+	}
+	if payload.Data.ID != share.ID {
+		t.Fatalf("expected updated share id %q, got %q", share.ID, payload.Data.ID)
+	}
+	if payload.Data.Description != "after" {
+		t.Fatalf("expected updated description, got %q", payload.Data.Description)
+	}
+	if payload.Data.Enabled {
+		t.Fatal("expected updated share to be disabled")
+	}
+	if !strings.Contains(payload.Data.URL, share.ID) {
+		t.Fatalf("expected share url to include id %q, got %q", share.ID, payload.Data.URL)
+	}
+
+	reloaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if reloaded.Description != "after" {
+		t.Fatalf("expected stored description to be updated, got %q", reloaded.Description)
+	}
+	if reloaded.Enabled {
+		t.Fatal("expected stored share to be disabled")
+	}
+}
+
 func TestUpdateShare_InvalidPermissionReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

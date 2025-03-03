@@ -1547,7 +1547,7 @@ export function SettingsPage() {
                 description="管理所有已创建的分享链接"
                 icon={Link2}
               >
-                <ShareManager />
+                <ShareManager featureEnabled={settings.shareEnabled} />
               </SettingsSection>
             </div>
           </Tab>

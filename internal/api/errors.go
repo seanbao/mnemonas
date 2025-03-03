@@ -18,13 +18,14 @@ type APIError struct {
 
 // Error codes
 const (
-	ErrCodeBadRequest     = "BAD_REQUEST"
-	ErrCodeNotFound       = "NOT_FOUND"
-	ErrCodeConflict       = "CONFLICT"
-	ErrCodeInternal       = "INTERNAL_ERROR"
-	ErrCodeServiceUnavail = "SERVICE_UNAVAILABLE"
-	ErrCodeUnauthorized   = "UNAUTHORIZED"
-	ErrCodeForbidden      = "FORBIDDEN"
+	ErrCodeBadRequest      = "BAD_REQUEST"
+	ErrCodeNotFound        = "NOT_FOUND"
+	ErrCodeConflict        = "CONFLICT"
+	ErrCodePayloadTooLarge = "PAYLOAD_TOO_LARGE"
+	ErrCodeInternal        = "INTERNAL_ERROR"
+	ErrCodeServiceUnavail  = "SERVICE_UNAVAILABLE"
+	ErrCodeUnauthorized    = "UNAUTHORIZED"
+	ErrCodeForbidden       = "FORBIDDEN"
 )
 
 // NewAPIError creates a new API error

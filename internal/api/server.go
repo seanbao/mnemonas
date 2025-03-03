@@ -46,6 +46,14 @@ var deleteGCChunk = func(client *dataplane.Client, ctx context.Context, hash str
 	return client.DeleteChunk(ctx, hash)
 }
 
+var getTrashStats = func(fs *storage.FileSystem, ctx context.Context) (int, int64, error) {
+	return fs.GetTrashStats(ctx)
+}
+
+var getFileCount = func(fs *storage.FileSystem, ctx context.Context) (int, error) {
+	return fs.GetFileCount(ctx)
+}
+
 type prependReadCloser struct {
 	io.Reader
 	io.Closer
@@ -53,14 +61,17 @@ type prependReadCloser struct {
 
 // Server is the API server
 type Server struct {
-	router      *chi.Mux
-	logger      zerolog.Logger
-	dataplane   *dataplane.Client
-	fs          *storage.FileSystem
-	thumbnail   *thumbnail.Service
-	maintenance *maintenance.HistoryStore
-	activity    *activity.Store
-	startTime   time.Time
+	router                *chi.Mux
+	logger                zerolog.Logger
+	dataplane             *dataplane.Client
+	fs                    *storage.FileSystem
+	thumbnail             *thumbnail.Service
+	maintenance           *maintenance.HistoryStore
+	activity              *activity.Store
+	thumbnailConfigured   bool
+	maintenanceConfigured bool
+	activityConfigured    bool
+	startTime             time.Time
 	// Auth components
 	userStore          *auth.UserStore
 	tokenManager       *auth.TokenManager
@@ -74,8 +85,9 @@ type Server struct {
 	alertMonitor     AlertMonitor
 	retentionMonitor RetentionMonitor
 	// Favorites components
-	favoritesStore   *favorites.Store
-	favoritesHandler *favorites.Handler
+	favoritesStore      *favorites.Store
+	favoritesHandler    *favorites.Handler
+	favoritesConfigured bool
 	// Config
 	config       *config.Config
 	configPath   string
@@ -107,6 +119,12 @@ func formatSettingsDuration(d time.Duration) string {
 	}
 	return d.String()
 }
+
+const (
+	auditStatusHeaderName  = "X-Mnemonas-Audit-Status"
+	auditStatusFailedValue = "failed"
+	auditWarningHeader     = `199 MnemoNAS "activity log persistence failed"`
+)
 
 func decodeJSONBody(r *http.Request, dst any) error {
 	decoder := json.NewDecoder(r.Body)
@@ -277,6 +295,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 
 	// Initialize thumbnail service
 	if cfg != nil && cfg.ThumbnailRoot != "" {
+		s.thumbnailConfigured = true
 		thumb, err := thumbnail.NewService(cfg.ThumbnailRoot)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Failed to initialize thumbnail service")
@@ -288,6 +307,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 
 	// Initialize maintenance history store
 	if cfg != nil && cfg.MaintenanceRoot != "" {
+		s.maintenanceConfigured = true
 		maint, err := maintenance.NewHistoryStore(cfg.MaintenanceRoot)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Failed to initialize maintenance history store")
@@ -299,6 +319,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 
 	// Initialize activity log store
 	if cfg != nil && cfg.ActivityRoot != "" {
+		s.activityConfigured = true
 		actStore, err := activity.NewStore(cfg.ActivityRoot)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Failed to initialize activity store")
@@ -376,6 +397,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	// Initialize favorites handler whenever a store is configured so runtime
 	// settings can enable or disable the feature without rebuilding routes.
 	if cfg != nil && cfg.FavoritesStoreFile != "" {
+		s.favoritesConfigured = true
 		favStore, err := favorites.NewStore(cfg.FavoritesStoreFile)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Failed to initialize favorites store")
@@ -484,7 +506,7 @@ func (s *Server) setupRoutes() {
 		}
 
 		// Favorites endpoints
-		if s.favoritesHandler != nil {
+		if s.favoritesHandler != nil || s.favoritesConfigured || (s.config != nil && s.config.Favorites.Enabled) {
 			r.Route("/favorites", func(r chi.Router) {
 				r.Get("/", s.handleListFavorites)
 				if s.authEnabled {
@@ -929,6 +951,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if (s.thumbnailConfigured && s.thumbnail == nil) ||
+		(s.maintenanceConfigured && s.maintenance == nil) ||
+		(s.activityConfigured && s.activity == nil) ||
+		s.favoritesConfiguredButUnavailable() {
+		health["status"] = "degraded"
+	}
+
 	s.json(w, http.StatusOK, health)
 }
 
@@ -975,7 +1004,7 @@ func (s *Server) respondReadableOpenFileError(w http.ResponseWriter, operation s
 }
 
 func respondPayloadTooLarge(w http.ResponseWriter, message string) {
-	NewAPIError(ErrCodeBadRequest, message).Write(w, http.StatusRequestEntityTooLarge)
+	NewAPIError(ErrCodePayloadTooLarge, message).Write(w, http.StatusRequestEntityTooLarge)
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
@@ -1080,7 +1109,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionUpload, filePath, nil)
+	s.LogActivityWithWarning(w, r, activity.ActionUpload, filePath, nil)
 
 	NewAPIResponse(map[string]any{
 		"path": filePath,
@@ -1140,7 +1169,7 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionCreate, dirPath, map[string]string{"type": "directory"})
+	s.LogActivityWithWarning(w, r, activity.ActionCreate, dirPath, map[string]string{"type": "directory"})
 
 	NewAPIResponse(map[string]any{
 		"path": dirPath,
@@ -1185,7 +1214,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionDelete, filePath, nil)
+	s.LogActivityWithWarning(w, r, activity.ActionDelete, filePath, nil)
 
 	NewAPIResponse(map[string]any{
 		"path": filePath,
@@ -1370,7 +1399,7 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionMove, fromPath, map[string]string{"to": toPath})
+	s.LogActivityWithWarning(w, r, activity.ActionMove, fromPath, map[string]string{"to": toPath})
 
 	NewAPIResponse(map[string]any{
 		"from": fromPath,
@@ -1420,6 +1449,24 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	srcInfo, err := s.fs.Stat(r.Context(), fromPath)
+	if err != nil {
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "copy resource", err)
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
+		s.respondInternalError(w, "stat copy source", err)
+		return
+	}
+	if srcInfo.IsDir && pathContainsDescendant(fromPath, toPath) {
+		Conflict(w, "destination cannot be inside source directory")
+		return
+	}
+
 	if _, err := s.fs.Stat(r.Context(), toPath); err == nil {
 		Conflict(w, "resource already exists")
 		return
@@ -1430,29 +1477,19 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "stat copy destination", err)
 		return
 	}
-
-	// Open source file
-	reader, err := s.fs.OpenFile(r.Context(), fromPath)
-	if err != nil {
+	if err := s.ensureCopyDestinationParent(r.Context(), toPath); err != nil {
 		if isStorageNotFound(err) {
-			s.respondNotFound(w, "copy file", err)
+			s.respondNotFound(w, "copy resource", err)
 			return
 		}
 		if errors.Is(err, storage.ErrNotDir) {
 			Conflict(w, "parent path is not a directory")
 			return
 		}
-		if errors.Is(err, storage.ErrIsDir) {
-			BadRequest(w, "source path is a directory")
-			return
-		}
-		s.respondInternalError(w, "copy file", err)
+		s.respondInternalError(w, "stat copy destination parent", err)
 		return
 	}
-	defer reader.Close()
-
-	// Write to destination
-	if err := s.fs.WriteFile(r.Context(), toPath, reader); err != nil {
+	if err := s.copyResource(r.Context(), fromPath, toPath); err != nil {
 		if isStorageConflict(err) {
 			if errors.Is(err, storage.ErrNotDir) {
 				Conflict(w, "parent path is not a directory")
@@ -1461,17 +1498,95 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 			Conflict(w, "resource already exists")
 			return
 		}
-		s.respondInternalError(w, "copy file", err)
+		if isStorageNotFound(err) {
+			s.respondNotFound(w, "copy resource", err)
+			return
+		}
+		s.respondInternalError(w, "copy resource", err)
 		return
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionCopy, fromPath, map[string]string{"to": toPath})
+	s.LogActivityWithWarning(w, r, activity.ActionCopy, fromPath, map[string]string{"to": toPath})
 
 	NewAPIResponse(map[string]any{
 		"from": fromPath,
 		"to":   toPath,
-	}).WithMessage("file copied successfully").Write(w, http.StatusCreated)
+	}).WithMessage("resource copied successfully").Write(w, http.StatusCreated)
+}
+
+func (s *Server) ensureCopyDestinationParent(ctx context.Context, targetPath string) error {
+	parentPath := path.Dir(targetPath)
+	info, err := s.fs.Stat(ctx, parentPath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return storage.ErrNotDir
+	}
+	return nil
+}
+
+func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) error {
+	info, err := s.fs.Stat(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+
+	if info.IsDir {
+		if err := s.fs.Mkdir(ctx, dstPath); err != nil {
+			return err
+		}
+
+		children, err := s.fs.ReadDir(ctx, srcPath)
+		if err != nil {
+			return s.rollbackCopiedDirectory(dstPath, err)
+		}
+
+		for _, child := range children {
+			childName := path.Base(child.Path)
+			if err := s.copyResource(ctx, child.Path, path.Join(dstPath, childName)); err != nil {
+				return s.rollbackCopiedDirectory(dstPath, err)
+			}
+		}
+		return nil
+	}
+
+	reader, err := s.fs.OpenFile(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	return s.fs.WriteFile(ctx, dstPath, reader)
+}
+
+func (s *Server) rollbackCopiedDirectory(dstPath string, copyErr error) error {
+	if rollbackErr := s.removeCopiedTree(context.Background(), dstPath); rollbackErr != nil && !errors.Is(rollbackErr, storage.ErrNotFound) {
+		return errors.Join(copyErr, fmt.Errorf("rollback copied directory %s: %w", dstPath, rollbackErr))
+	}
+	return copyErr
+}
+
+func (s *Server) removeCopiedTree(ctx context.Context, targetPath string) error {
+	info, err := s.fs.Stat(ctx, targetPath)
+	if err != nil {
+		return err
+	}
+
+	if info.IsDir {
+		children, err := s.fs.ReadDir(ctx, targetPath)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := s.removeCopiedTree(ctx, child.Path); err != nil {
+				return err
+			}
+		}
+	}
+
+	return s.fs.PermanentDelete(ctx, targetPath)
 }
 
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
@@ -1588,7 +1703,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionRestore, filePath, map[string]string{"hash": hash})
+	s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{"hash": hash})
 
 	NewAPIResponse(map[string]any{
 		"path":     filePath,
@@ -1660,17 +1775,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats := map[string]any{
-		"total_files":  0,
-		"total_size":   0,
-		"unique_size":  0,
-		"dedup_ratio":  0.0,
-		"total_chunks": 0,
-	}
+	stats := map[string]any{}
 
 	if s.fs != nil {
-		if count, err := s.fs.GetFileCount(r.Context()); err == nil {
+		if count, err := getFileCount(s.fs, r.Context()); err == nil {
 			stats["total_files"] = count
+		} else {
+			s.logger.Warn().Err(err).Msg("failed to collect file count for stats")
 		}
 	}
 
@@ -1683,6 +1794,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			stats["total_size"] = dpStats.TotalSize
 			stats["unique_size"] = dpStats.UniqueSize
 			stats["dedup_ratio"] = dpStats.DedupRatio
+		} else {
+			s.logger.Warn().Err(err).Msg("failed to collect dataplane stats")
 		}
 	}
 
@@ -1705,11 +1818,17 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// System status
-	diag["system"] = map[string]any{
-		"filesystem_initialized":  s.fs != nil,
-		"dataplane_connected":     dataplaneConnected,
-		"thumbnail_service_ready": s.thumbnail != nil,
+	systemStatus := map[string]any{
+		"filesystem_initialized":    s.fs != nil,
+		"dataplane_connected":       dataplaneConnected,
+		"thumbnail_service_ready":   s.thumbnail != nil,
+		"maintenance_history_ready": s.maintenance != nil,
+		"activity_log_ready":        s.activity != nil,
 	}
+	if s.favoritesConfigured {
+		systemStatus["favorites_store_ready"] = !s.favoritesConfiguredButUnavailable()
+	}
+	diag["system"] = systemStatus
 
 	// Memory stats
 	var memStats runtime.MemStats
@@ -1729,9 +1848,12 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		fsStats := map[string]any{}
 
 		// Get trash stats
-		trashCount, trashSize, _ := s.fs.GetTrashStats(r.Context())
-		fsStats["trash_items"] = trashCount
-		fsStats["trash_size"] = trashSize
+		if trashCount, trashSize, err := getTrashStats(s.fs, r.Context()); err == nil {
+			fsStats["trash_items"] = trashCount
+			fsStats["trash_size"] = trashSize
+		} else {
+			s.logger.Warn().Err(err).Msg("failed to collect trash stats for diagnostics")
+		}
 
 		diag["filesystem"] = fsStats
 	}
@@ -2105,9 +2227,12 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 		fsStats := map[string]any{}
 
 		// Trash stats
-		trashCount, trashSize, _ := s.fs.GetTrashStats(r.Context())
-		fsStats["trash_count"] = trashCount
-		fsStats["trash_size"] = trashSize
+		if trashCount, trashSize, err := getTrashStats(s.fs, r.Context()); err == nil {
+			fsStats["trash_count"] = trashCount
+			fsStats["trash_size"] = trashSize
+		} else {
+			s.logger.Warn().Err(err).Msg("failed to collect trash stats for diagnostics export")
+		}
 
 		export["filesystem"] = fsStats
 	}
@@ -2460,7 +2585,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionTrashRestore, activityPath, nil)
+	s.LogActivityWithWarning(w, r, activity.ActionTrashRestore, activityPath, nil)
 
 	NewAPIResponse(map[string]any{
 		"id":       id,
@@ -2506,7 +2631,7 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionTrashDelete, activityPath, nil)
+	s.LogActivityWithWarning(w, r, activity.ActionTrashDelete, activityPath, nil)
 
 	NewAPIResponse(map[string]any{
 		"id":      id,
@@ -2556,7 +2681,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := s.fs.DeleteFromTrash(r.Context(), item.ID); err != nil {
 				if deletedCount > 0 {
-					s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{
+					s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
 						"count":   strconv.Itoa(deletedCount),
 						"partial": "true",
 					})
@@ -2572,7 +2697,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 			deletedCount++
 		}
 
-		s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(deletedCount)})
+		s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(deletedCount)})
 		NewAPIResponse(map[string]any{
 			"deleted_count": deletedCount,
 			"partial":       false,
@@ -2583,7 +2708,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 	count, err := s.fs.EmptyTrash(r.Context())
 	if err != nil {
 		if count > 0 {
-			s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{
+			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
 				"count":   strconv.Itoa(count),
 				"partial": "true",
 			})
@@ -2598,7 +2723,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(count)})
+	s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(count)})
 
 	NewAPIResponse(map[string]any{
 		"deleted_count": count,
@@ -2704,6 +2829,11 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		offset = o
 	}
 
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+
 	if s.activity == nil {
 		NewAPIResponse(map[string]any{
 			"items":  []any{},
@@ -2726,6 +2856,11 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 
 // handleActivityStats returns activity statistics
 func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+
 	if s.activity == nil {
 		NewAPIResponse(map[string]any{
 			"total":     0,
@@ -2785,8 +2920,17 @@ func buildActivityStats(entries []activity.Entry) map[string]any {
 	return stats
 }
 
+func (s *Server) activityConfiguredButUnavailable() bool {
+	return s.activity == nil && s.activityConfigured
+}
+
 // handleClearActivity clears all activity log entries
 func (s *Server) handleClearActivity(w http.ResponseWriter, r *http.Request) {
+	if s.activityConfiguredButUnavailable() {
+		ServiceUnavailable(w, "activity log unavailable")
+		return
+	}
+
 	if s.activity == nil {
 		NewAPIResponse(map[string]any{
 			"message": "Activity log not configured",
@@ -2806,10 +2950,19 @@ func (s *Server) handleClearActivity(w http.ResponseWriter, r *http.Request) {
 
 // LogActivity is a helper to log user activity
 func (s *Server) LogActivity(r *http.Request, action activity.ActionType, path string, details map[string]string) {
-	if s.activity == nil {
-		return
+	if err := s.logActivity(r, action, path, details); err != nil {
+		s.logger.Warn().Err(err).Msg("Failed to log activity")
 	}
+}
 
+func (s *Server) LogActivityWithWarning(w http.ResponseWriter, r *http.Request, action activity.ActionType, path string, details map[string]string) {
+	if err := s.logActivity(r, action, path, details); err != nil {
+		markAuditFailureHeaders(w)
+		s.logger.Warn().Err(err).Msg("Failed to log activity")
+	}
+}
+
+func (s *Server) logActivity(r *http.Request, action activity.ActionType, path string, details map[string]string) error {
 	user := "anonymous"
 	if s.authEnabled {
 		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
@@ -2818,10 +2971,30 @@ func (s *Server) LogActivity(r *http.Request, action activity.ActionType, path s
 	}
 
 	ip := requestip.ClientIP(r)
+	return s.logActivityEntry(action, path, user, ip, details)
+}
 
-	if err := s.activity.Log(action, path, user, ip, details); err != nil {
-		s.logger.Warn().Err(err).Msg("Failed to log activity")
+func (s *Server) logActivityEntry(action activity.ActionType, path, user, ip string, details map[string]string) error {
+	if s.activity == nil {
+		return nil
 	}
+	return s.activity.Log(action, path, user, ip, details)
+}
+
+func markAuditFailureHeaders(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	if headers.Get(auditStatusHeaderName) == "" {
+		headers.Set(auditStatusHeaderName, auditStatusFailedValue)
+	}
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == auditWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", auditWarningHeader)
 }
 
 // handleLoginWithActivity wraps auth login to log activity
@@ -2835,18 +3008,18 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Create a response recorder to capture the response
-	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
-
-	// Call the actual login handler
+	rec := newBufferedResponseRecorder()
 	s.authHandler.HandleLogin(rec, r)
 
-	// If login was successful (status 200), log the activity
 	if rec.statusCode == http.StatusOK && s.activity != nil {
 		ip := requestip.ClientIP(r)
-
-		s.activity.Log(activity.ActionLogin, "", user, ip, nil)
+		if err := s.logActivityEntry(activity.ActionLogin, "", user, ip, nil); err != nil {
+			markAuditFailureHeaders(rec)
+			s.logger.Warn().Err(err).Msg("Failed to log activity")
+		}
 	}
+
+	rec.FlushTo(w)
 }
 
 func readLoginUsername(r *http.Request) (string, error) {
@@ -2870,20 +3043,23 @@ func readLoginUsername(r *http.Request) (string, error) {
 
 // handleLogoutWithActivity wraps auth logout to log activity
 func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request) {
-	// Log activity before logout (while we still have the user context)
+	user := "unknown"
 	if s.activity != nil {
-		user := "unknown"
 		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
 			user = claims.Username
 		}
-
-		ip := requestip.ClientIP(r)
-
-		s.activity.Log(activity.ActionLogout, "", user, ip, nil)
 	}
+	ip := requestip.ClientIP(r)
 
-	// Call the actual logout handler
-	s.authHandler.HandleLogout(w, r)
+	rec := newBufferedResponseRecorder()
+	s.authHandler.HandleLogout(rec, r)
+	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices && s.activity != nil {
+		if err := s.logActivityEntry(activity.ActionLogout, "", user, ip, nil); err != nil {
+			markAuditFailureHeaders(rec)
+			s.logger.Warn().Err(err).Msg("Failed to log activity")
+		}
+	}
+	rec.FlushTo(w)
 }
 
 // handleGetSettings returns current settings
@@ -3609,15 +3785,48 @@ func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// responseRecorder wraps http.ResponseWriter to capture status code
-type responseRecorder struct {
-	http.ResponseWriter
-	statusCode int
+// bufferedResponseRecorder captures the response until callers decide to flush it.
+type bufferedResponseRecorder struct {
+	headers     http.Header
+	body        bytes.Buffer
+	statusCode  int
+	wroteHeader bool
 }
 
-func (r *responseRecorder) WriteHeader(code int) {
+func newBufferedResponseRecorder() *bufferedResponseRecorder {
+	return &bufferedResponseRecorder{
+		headers:    make(http.Header),
+		statusCode: http.StatusOK,
+	}
+}
+
+func (r *bufferedResponseRecorder) Header() http.Header {
+	return r.headers
+}
+
+func (r *bufferedResponseRecorder) Write(data []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.body.Write(data)
+}
+
+func (r *bufferedResponseRecorder) WriteHeader(code int) {
+	if r.wroteHeader {
+		return
+	}
 	r.statusCode = code
-	r.ResponseWriter.WriteHeader(code)
+	r.wroteHeader = true
+}
+
+func (r *bufferedResponseRecorder) FlushTo(w http.ResponseWriter) {
+	for key, values := range r.headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(r.statusCode)
+	_, _ = w.Write(r.body.Bytes())
 }
 
 func writeShareErrorResponse(w http.ResponseWriter, status int, message, code string) {
@@ -3658,6 +3867,10 @@ func (s *Server) isShareFeatureEnabled() bool {
 
 func (s *Server) isFavoritesFeatureEnabled() bool {
 	return s.config != nil && s.config.Favorites.Enabled
+}
+
+func (s *Server) favoritesConfiguredButUnavailable() bool {
+	return s.favoritesConfigured && (s.favoritesStore == nil || s.favoritesHandler == nil)
 }
 
 func (s *Server) writeShareFeatureDisabled(w http.ResponseWriter, status int) {
@@ -3872,6 +4085,10 @@ func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
+	if s.favoritesConfiguredButUnavailable() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
+		return
+	}
 	if s.favoritesStore == nil {
 		s.favoritesHandler.ListFavorites(w, r)
 		return
@@ -3903,6 +4120,10 @@ func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
+	if s.favoritesConfiguredButUnavailable() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
+		return
+	}
 	if favoritePath, err := readFavoriteBodyPath(r); err == nil && favoritePath != "" {
 		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
 			forbiddenPathOutsideHome(w)
@@ -3917,6 +4138,10 @@ func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
+	if s.favoritesConfiguredButUnavailable() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
+		return
+	}
 	if favoritePath := readFavoriteQueryPath(r); favoritePath != "" {
 		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
 			forbiddenPathOutsideHome(w)
@@ -3929,6 +4154,10 @@ func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
 	if !s.isFavoritesFeatureEnabled() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	if s.favoritesConfiguredButUnavailable() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
 	if favoritePaths, err := readFavoriteBatchPaths(r); err == nil {
@@ -3947,6 +4176,10 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
 		return
 	}
+	if s.favoritesConfiguredButUnavailable() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
+		return
+	}
 	if favoritePath := readFavoriteRoutePath(r); favoritePath != "" {
 		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
 			forbiddenPathOutsideHome(w)
@@ -3959,6 +4192,10 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request) {
 	if !s.isFavoritesFeatureEnabled() {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	if s.favoritesConfiguredButUnavailable() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
 	if favoritePath := readFavoriteRoutePath(r); favoritePath != "" {
@@ -3988,20 +4225,14 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+	rec := newBufferedResponseRecorder()
 	s.shareHandler.CreateShare(rec, r)
 
 	// If share was created (status 201), log the activity
-	if rec.statusCode == http.StatusCreated && s.activity != nil {
-		user := "unknown"
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
-			user = claims.Username
-		}
-
-		ip := requestip.ClientIP(r)
-
-		s.activity.Log(activity.ActionShare, sharePath, user, ip, nil)
+	if rec.statusCode == http.StatusCreated {
+		s.LogActivityWithWarning(rec, r, activity.ActionShare, sharePath, nil)
 	}
+	rec.FlushTo(w)
 }
 
 // handleDeleteShareWithActivity wraps share deletion to log activity
@@ -4025,20 +4256,14 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+	rec := newBufferedResponseRecorder()
 	s.shareHandler.DeleteShare(rec, r)
 
 	// Log successful share deletions regardless of whether the handler responds 200 or 204.
-	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices && s.activity != nil {
-		user := "unknown"
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
-			user = claims.Username
-		}
-
-		ip := requestip.ClientIP(r)
-
-		s.activity.Log(activity.ActionUnshare, sharePath, user, ip, nil)
+	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices {
+		s.LogActivityWithWarning(rec, r, activity.ActionUnshare, sharePath, nil)
 	}
+	rec.FlushTo(w)
 }
 
 func readCreateSharePath(r *http.Request) (string, error) {

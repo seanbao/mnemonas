@@ -1227,6 +1227,54 @@ func TestFileSystem_Delete_DirNotEmpty(t *testing.T) {
 	}
 }
 
+func TestFileSystem_GetVersion_PreservesBinaryHistoricalContent(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	originalContent := []byte{0xff, 0x00, 0xfe, 0x41, 0x80, 0x7f}
+	currentContent := []byte("current")
+
+	if err := fs.WriteFile(ctx, "/binary-history.txt", bytes.NewReader(originalContent)); err != nil {
+		t.Fatalf("WriteFile(original) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/binary-history.txt", bytes.NewReader(currentContent)); err != nil {
+		t.Fatalf("WriteFile(current) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/binary-history.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("expected current and historical version entries, got %d", len(versions))
+	}
+
+	currentHash := computeHash(currentContent)
+	historicalHash := ""
+	for _, version := range versions {
+		if version.Hash != currentHash {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected to find a historical version hash")
+	}
+
+	reader, err := fs.GetVersion(ctx, "/binary-history.txt", historicalHash)
+	if err != nil {
+		t.Fatalf("GetVersion(historical binary content) error: %v", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(historical binary content) error: %v", err)
+	}
+	if !bytes.Equal(data, originalContent) {
+		t.Fatalf("expected historical binary content %v, got %v", originalContent, data)
+	}
+}
+
 func TestFileSystem_Rename(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

@@ -297,6 +297,9 @@ GET /health
 }
 ```
 
+**说明**:
+- 当已配置的数据面、缩略图缓存、维护历史、活动日志或收藏存储子系统未能初始化时，`status` 会降级为 `degraded`
+
 ### 版本信息
 
 获取系统版本信息。
@@ -366,6 +369,7 @@ GET /api/v1/stats
 
 **说明**:
 - `total_files` 统计文件索引中的文件数量，不包含目录。
+- 当文件计数或数据面统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
 
 ### 诊断信息
 
@@ -391,7 +395,10 @@ GET /api/v1/diagnostics
     "system": {
       "filesystem_initialized": true,
       "dataplane_connected": true,
-      "thumbnail_service_ready": true
+      "thumbnail_service_ready": true,
+      "maintenance_history_ready": true,
+      "activity_log_ready": true,
+      "favorites_store_ready": true
     },
     "memory": {
       "alloc_mb": 50,
@@ -419,6 +426,9 @@ GET /api/v1/diagnostics
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
+
+**说明**:
+- 当回收站统计暂不可用时，`filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
 
 ### 指标信息
 
@@ -586,19 +596,28 @@ POST /api/v1/files-move
 }
 ```
 
-### 复制文件
+### 复制资源
 
 ```
 POST /api/v1/files-copy
 ```
 
-说明：当前 REST 端点仅支持复制单个文件。目录复制请使用 WebDAV `COPY`。
+说明：该 REST 端点支持复制单个文件或递归复制目录。目标路径必须不存在；如需 `Overwrite: T/F` 语义，请使用 WebDAV `COPY`。
 
 **请求体**:
 ```json
 {
   "from": "/documents/source.txt",
   "to": "/documents/copy.txt"
+}
+```
+
+目录复制示例：
+
+```json
+{
+  "from": "/projects/demo",
+  "to": "/projects/demo-copy"
 }
 ```
 
@@ -610,7 +629,7 @@ POST /api/v1/files-copy
     "from": "/documents/source.txt",
     "to": "/documents/copy.txt"
   },
-  "message": "file copied successfully",
+  "message": "resource copied successfully",
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
@@ -893,6 +912,8 @@ POST /api/v1/shares
 **字段说明**:
 - `type`: `file` | `folder`
 - `permission`: `read`
+- 响应中的 `url` 为动态生成字段：当 `share.base_url` 已配置时返回 `<base_url>/s/{id}`；未配置时返回相对路径 `/s/{id}`
+- `share.base_url` 配置错误不会破坏分享记录本身，但会让返回给前端/调用方的公开链接不可直接访问
 
 **响应示例**:
 ```json
@@ -957,11 +978,17 @@ GET /api/v1/shares
 GET /api/v1/shares/{id}
 ```
 
+**说明**:
+- 返回中的 `url` 字段遵循相同规则：优先使用 `share.base_url`，否则返回相对路径 `/s/{id}`
+
 ### 更新分享
 
 ```
 PUT /api/v1/shares/{id}
 ```
+
+**说明**:
+- 更新分享不会改变 `id`；响应中的 `url` 会根据当前运行时 `share.base_url` 重新生成
 
 **响应示例**:
 ```json
@@ -1213,6 +1240,8 @@ PATCH /api/v1/favorites/{path}
 
 **说明**:
 - 启用认证时，管理员可查看全量活动日志；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
+- 未配置活动日志时，接口返回空列表
+- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
 ```
 GET /api/v1/activity
@@ -1254,6 +1283,8 @@ GET /api/v1/activity
 
 **说明**:
 - 启用认证时，管理员可查看全局统计；普通用户仅返回当前账号自己的活动统计
+- 未配置活动日志时，接口返回零统计
+- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
 ```
 GET /api/v1/activity/stats
@@ -1294,6 +1325,9 @@ DELETE /api/v1/activity
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
+
+**说明**:
+- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`，而不是伪装成清理成功
 
 ---
 

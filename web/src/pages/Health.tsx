@@ -191,6 +191,20 @@ export function HealthPage() {
               status={diagnostics?.system?.thumbnailServiceReady ?? 'unknown'} 
               label="缩略图服务" 
             />
+            <StatusIndicator 
+              status={diagnostics?.system?.maintenanceHistoryReady ?? 'unknown'} 
+              label="维护历史" 
+            />
+            <StatusIndicator 
+              status={diagnostics?.system?.activityLogReady ?? 'unknown'} 
+              label="活动日志" 
+            />
+            {diagnostics?.system?.favoritesStoreReady !== undefined && (
+              <StatusIndicator 
+                status={diagnostics.system.favoritesStoreReady} 
+                label="收藏存储" 
+              />
+            )}
           </div>
 
           {diagnostics?.version && (

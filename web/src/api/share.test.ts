@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { accessShareWithPassword, copyShareUrl, createShare, downloadShare, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
+import { accessShareWithPassword, copyShareUrl, createShare, downloadShare, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl, ShareError } from './share'
 
 const mockCopyTextToClipboard = vi.fn()
 
@@ -216,6 +216,24 @@ describe('Share API', () => {
       })
     })
 
+    it('preserves machine-readable codes for disabled share features', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve({
+          success: false,
+          error: { code: 'SHARE_FEATURE_DISABLED', message: 'share feature disabled' },
+        }),
+      })
+
+      await expect(createShare({ path: '/docs/b.txt' })).rejects.toMatchObject({
+        message: 'share feature disabled',
+        status: 503,
+        code: 'SHARE_FEATURE_DISABLED',
+        isFeatureDisabled: true,
+      })
+    })
+
     it('rejects malformed successful share list responses', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -354,6 +372,14 @@ describe('Share API', () => {
         message: '分享信息无效',
         status: 200,
       })
+    })
+  })
+
+  describe('ShareError', () => {
+    it('reports feature-disabled state from code', () => {
+      const error = new ShareError('share feature disabled', 503, 'SHARE_FEATURE_DISABLED')
+
+      expect(error.isFeatureDisabled).toBe(true)
     })
   })
 })

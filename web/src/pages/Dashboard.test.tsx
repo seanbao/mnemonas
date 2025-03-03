@@ -9,12 +9,12 @@ const useIsAdminMock = vi.fn(() => true)
 vi.mock('@/api/files', () => ({
   getHealth: vi.fn().mockResolvedValue({
     status: 'healthy',
-    version: '0.1.0',
     uptime: '1h30m',
-    storage: {
-      dataDir: '/root/.mnemonas/.mnemonas/objects',
-      writable: true,
-    },
+  }),
+  getAppVersion: vi.fn().mockResolvedValue({
+    name: 'MnemoNAS',
+    version: '0.1.0',
+    go: 'go1.24.0',
   }),
   getStorageStats: vi.fn().mockResolvedValue({
     totalSize: 1073741824, // 1 GB
@@ -53,10 +53,11 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { getHealth, getStorageStats } from '@/api/files'
+import { getAppVersion, getHealth, getStorageStats } from '@/api/files'
 import { listActivity } from '@/api/activity'
 
 const mockGetHealth = getHealth as ReturnType<typeof vi.fn>
+const mockGetAppVersion = getAppVersion as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 
@@ -68,12 +69,12 @@ describe('DashboardPage', () => {
     // Reset mocks to default values (vi.clearAllMocks clears mockResolvedValue)
     mockGetHealth.mockResolvedValue({
       status: 'healthy',
-      version: '0.1.0',
       uptime: '1h30m',
-      storage: {
-        dataDir: '/root/.mnemonas/.mnemonas/objects',
-        writable: true,
-      },
+    })
+    mockGetAppVersion.mockResolvedValue({
+      name: 'MnemoNAS',
+      version: '0.1.0',
+      go: 'go1.24.0',
     })
     mockGetStorageStats.mockResolvedValue({
       totalSize: 1073741824, // 1 GB
@@ -127,7 +128,6 @@ describe('DashboardPage', () => {
     it('shows unhealthy status when system is not healthy', async () => {
       mockGetHealth.mockResolvedValueOnce({
         status: 'unhealthy',
-        version: '0.1.0',
         uptime: '1h30m',
       })
       
@@ -141,7 +141,6 @@ describe('DashboardPage', () => {
     it('shows unhealthy status when system is degraded', async () => {
       mockGetHealth.mockResolvedValueOnce({
         status: 'degraded',
-        version: '0.1.0',
         uptime: '1h30m',
       })
 
@@ -398,6 +397,7 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(mockGetHealth).toHaveBeenCalledTimes(2)
+        expect(mockGetAppVersion).toHaveBeenCalledTimes(2)
         expect(mockGetStorageStats).toHaveBeenCalledTimes(2)
       })
     })

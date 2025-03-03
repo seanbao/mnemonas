@@ -401,7 +401,7 @@ refresh_token_ttl = "168h"
 | ---- | ---- | ------ | ---- |
 | `enabled` | bool | `false` | 是否启用分享 |
 | `store_file` | string | `~/.mnemonas/.mnemonas/shares.json` | 分享数据文件路径 |
-| `base_url` | string | `""` | 分享链接基础 URL |
+| `base_url` | string | `""` | 分享链接基础 URL；用于生成分享响应中的 `url` 字段，留空时返回相对路径 `/s/{id}` |
 
 **示例：**
 
@@ -410,6 +410,8 @@ refresh_token_ttl = "168h"
 enabled = true
 base_url = "https://nas.example.com"
 ```
+
+`base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；配置错误时，分享记录仍然有效，但返回的公开链接会指向错误地址。
 
 ---
 

@@ -84,6 +84,36 @@ function getUploadSizeError(relativePath: string | undefined, file: File): strin
   return `${relativePath || file.name} 超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`
 }
 
+function getFavoritesBannerContent(error: unknown): { title: string; description: string } {
+  if (error && typeof error === 'object') {
+    const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
+    if (code === 'FAVORITES_FEATURE_DISABLED') {
+      return {
+        title: '收藏功能已关闭',
+        description: '当前服务已关闭收藏功能。启用后重新加载即可恢复收藏状态与相关操作。',
+      }
+    }
+    if (code === 'FAVORITES_UNAVAILABLE') {
+      return {
+        title: '收藏功能暂不可用',
+        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+      }
+    }
+  }
+
+  return {
+    title: '收藏状态加载失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+  }
+}
+
+function getShareBannerContent(): { title: string; description: string } {
+  return {
+    title: '分享功能已关闭',
+    description: '当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。',
+  }
+}
+
 // Breadcrumb navigation component
 function Breadcrumbs({ 
   path, 
@@ -140,6 +170,7 @@ function FileRow({
   isSelected, 
   isFavorited,
   favoriteActionsAvailable,
+  shareActionsAvailable,
   isMultiSelection,
   canWrite,
   onSelect, 
@@ -156,6 +187,7 @@ function FileRow({
   isSelected: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
+  shareActionsAvailable: boolean
   isMultiSelection: boolean
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
@@ -242,7 +274,6 @@ function FileRow({
         <span className="text-xs text-default-400">—</span>
       </div>
 
-      {/* Action Menu */}
       <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
@@ -303,9 +334,10 @@ function FileRow({
                   <DropdownItem 
                     key="share" 
                     startContent={<Link2 size={16} />}
+                    isDisabled={!shareActionsAvailable}
                     onPress={onShare}
                   >
-                    创建分享链接
+                    {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
                   </DropdownItem>
                 </DropdownSection>
               )}
@@ -391,6 +423,7 @@ function FileCard({
   isSelected,
   isFavorited,
   favoriteActionsAvailable,
+  shareActionsAvailable,
   isMultiSelection,
   canWrite,
   onSelect,
@@ -407,6 +440,7 @@ function FileCard({
   isSelected: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
+  shareActionsAvailable: boolean
   isMultiSelection: boolean
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
@@ -450,7 +484,6 @@ function FileCard({
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
     >
-      {/* Selection checkbox */}
       <div 
         className="absolute top-3 left-3 z-10"
         onClick={(e) => e.stopPropagation()}
@@ -475,7 +508,6 @@ function FileCard({
         </button>
       </div>
 
-      {/* Action menu */}
       <div 
         className="absolute top-3 right-3 z-10"
         onClick={(e) => e.stopPropagation()}
@@ -539,9 +571,10 @@ function FileCard({
                   <DropdownItem 
                     key="share" 
                     startContent={<Link2 size={16} />}
+                    isDisabled={!shareActionsAvailable}
                     onPress={onShare}
                   >
-                    创建分享链接
+                    {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
                   </DropdownItem>
                 </DropdownSection>
               )}
@@ -572,14 +605,12 @@ function FileCard({
         )}
       </div>
 
-      {/* Icon */}
       <div className="flex justify-center py-6">
         <div className="w-16 h-16 rounded-2xl flex items-center justify-center">
           <FileIcon name={file.name} isDir={file.isDir} size={64} variant="tile" />
         </div>
       </div>
 
-      {/* File info */}
       <div className="text-center">
         <div className="font-medium text-foreground truncate text-sm mb-1">{file.name}</div>
         <div className="text-xs text-default-500">
@@ -644,6 +675,7 @@ export function FilesPage() {
   const [isUploading, setIsUploading] = useState(false)
   const [showUploadPanel, setShowUploadPanel] = useState(false)
   const uploadClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [shareFeatureAvailable, setShareFeatureAvailable] = useState(true)
   
   const { 
     currentPath, 
@@ -824,6 +856,9 @@ export function FilesPage() {
     staleTime: 30000, // Cache for 30 seconds
   })
   const favoriteActionsAvailable = !favoritesError
+  const favoritesBanner = favoritesError ? getFavoritesBannerContent(favoritesError) : null
+  const shareActionsAvailable = shareFeatureAvailable
+  const shareBanner = shareActionsAvailable ? null : getShareBannerContent()
 
   const favoriteMutation = useMutation({
     mutationFn: ({ path, isFavorited }: { path: string; isFavorited: boolean }) => 
@@ -956,9 +991,13 @@ export function FilesPage() {
 
   const handleOpenShareModal = useCallback((file: FileItem) => {
     if (!canWrite) return
+    if (!shareActionsAvailable) {
+      addToast({ title: '分享功能已关闭', color: 'warning' })
+      return
+    }
     setShareFile(file)
     onShareOpen()
-  }, [canWrite, onShareOpen])
+  }, [canWrite, onShareOpen, shareActionsAvailable])
 
   // Move/Copy handlers
   const handleOpenMoveModal = useCallback((files: FileItem[]) => {
@@ -1917,12 +1956,22 @@ export function FilesPage() {
           <div className="mb-4 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
             <div className="flex-1">
-              <p className="font-medium">收藏状态加载失败</p>
-              <p className="text-default-600">{(favoritesError as Error).message || '请稍后重试'}</p>
+              <p className="font-medium">{favoritesBanner?.title ?? '收藏状态加载失败'}</p>
+              <p className="text-default-600">{favoritesBanner?.description ?? '请稍后重试'}</p>
             </div>
             <Button size="sm" variant="bordered" className="rounded-xl" onPress={() => refetchFavorites()}>
               重新加载收藏状态
             </Button>
+          </div>
+        )}
+
+        {canWrite && shareBanner && (
+          <div className="mb-4 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+            <div className="flex-1">
+              <p className="font-medium">{shareBanner.title}</p>
+              <p className="text-default-600">{shareBanner.description}</p>
+            </div>
           </div>
         )}
 
@@ -2004,6 +2053,7 @@ export function FilesPage() {
                         isSelected={selectedFiles.has(file.path)}
                         isFavorited={favoritesData?.[file.path] ?? false}
                         favoriteActionsAvailable={favoriteActionsAvailable}
+                        shareActionsAvailable={shareActionsAvailable}
                         isMultiSelection={hasMultiSelection}
                         canWrite={canWrite}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
@@ -2083,6 +2133,7 @@ export function FilesPage() {
                     isSelected={selectedFiles.has(file.path)}
                     isFavorited={favoritesData?.[file.path] ?? false}
                     favoriteActionsAvailable={favoriteActionsAvailable}
+                    shareActionsAvailable={shareActionsAvailable}
                     isMultiSelection={hasMultiSelection}
                     canWrite={canWrite}
                     onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
@@ -2275,6 +2326,8 @@ export function FilesPage() {
         }}
         filePath={shareFile?.path || ''}
         isFolder={shareFile?.isDir}
+        featureEnabled={shareActionsAvailable}
+        onFeatureDisabled={() => setShareFeatureAvailable(false)}
       />
 
       {/* Move/Copy Dialog */}
@@ -2479,12 +2532,13 @@ export function FilesPage() {
                   {canWrite && (
                     <ContextMenuItem
                       icon={<Link2 size={16} />}
+                      disabled={!shareActionsAvailable}
                       onClick={() => {
                         handleOpenShareModal(contextMenuFile)
                         contextMenu.hide()
                       }}
                     >
-                      创建分享链接
+                      {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
                     </ContextMenuItem>
                   )}
                   <ContextMenuItem
