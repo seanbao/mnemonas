@@ -402,6 +402,13 @@ format = "pretty"
 
 ## 测试
 
+统一入口：
+
+```bash
+# 运行全部测试（Go + Rust + 前端单测）
+make test
+```
+
 ### Go 测试
 
 ```bash
@@ -443,11 +450,26 @@ cargo tarpaulin --out Html
 ```bash
 cd web
 
+# 运行前端单元测试（一次性）
+npm run test:run
+
+# 运行前端单元测试（watch）
+npm run test
+
+# 覆盖率
+npm run test:coverage
+
 # ESLint 检查
 npm run lint
 
 # TypeScript 类型检查
 npx tsc --noEmit
+
+# Playwright E2E
+npm run test:e2e
+
+# Playwright E2E（UI）
+npm run test:e2e:ui
 ```
 
 ### 集成测试
