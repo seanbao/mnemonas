@@ -282,8 +282,7 @@ sudo zfs set recordsize=1M mnemonas
 **配置 MnemoNAS**：
 ```toml
 [storage]
-data_dir = "/srv/mnemonas/data"
-metadata_dir = "/srv/mnemonas/metadata"
+root = "/srv/mnemonas"
 ```
 
 **优点**：

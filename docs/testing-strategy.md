@@ -155,16 +155,16 @@ func TestCASIntegration_WriteReadVerify(t *testing.T) {
 ```bash
 # 场景：首次启动（认证启用）
 test_fresh_install_auth_enabled() {
-    rm -rf ~/.mnemonas
+    rm -rf ~/.mnemonas ~/.config/mnemonas
     echo '[auth]\nenabled = true' > mnemonas.toml
     ./bin/nasd &
     sleep 2
     
     # 验证密码文件创建
-    [ -f ~/.mnemonas/initial-password.txt ] || fail "Password file not created"
+    [ -f ~/.mnemonas/.mnemonas/initial-password.txt ] || fail "Password file not created"
     
     # 提取密码并登录
-    password=$(grep "密码:" ~/.mnemonas/initial-password.txt | awk '{print $2}')
+    password=$(grep "Password:" ~/.mnemonas/.mnemonas/initial-password.txt | awk '{print $2}')
     response=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
         -H "Content-Type: application/json" \
         -d "{\"username\":\"admin\",\"password\":\"$password\"}")
@@ -173,7 +173,7 @@ test_fresh_install_auth_enabled() {
     echo "$response" | grep -q '"success":true' || fail "Login failed"
     
     # 验证密码文件删除
-    [ ! -f ~/.mnemonas/initial-password.txt ] || fail "Password file not deleted after login"
+    [ ! -f ~/.mnemonas/.mnemonas/initial-password.txt ] || fail "Password file not deleted after login"
 }
 ```
 

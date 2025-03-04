@@ -33,7 +33,7 @@ test.describe('登录页面', () => {
 
   // 跳过需要真实凭据的测试 - 在 CI 环境中密码是随机生成的
   test.skip('正确凭据应登录成功', async ({ page }) => {
-    // 需要从 initial-password.txt 获取密码
+    // 需要从 <storage_root>/.mnemonas/initial-password.txt 获取密码
     // 此测试在手动测试时使用
     await page.getByLabel(/用户名/i).fill('admin')
     await page.getByLabel(/密码/i).fill('admin')
