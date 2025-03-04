@@ -16,16 +16,30 @@ cert_dir = ""                # 证书存放目录（默认 ~/.mnemonas/certs）
 
 [storage]
 # 存储根目录，默认 ~/.mnemonas（无需 root 权限）
-# 以下路径均相对于 root，通常无需单独配置
-data_dir = "~/.mnemonas/data"
-metadata_dir = "~/.mnemonas/metadata"
-temp_dir = "~/.mnemonas/tmp"
+root = "~/.mnemonas"
+# 兼容字段，通常无需单独配置
+data_dir = "~/.mnemonas/.mnemonas/objects"
+metadata_dir = "~/.mnemonas/.mnemonas"
+temp_dir = "~/.mnemonas/.mnemonas/tmp"
+thumbnail_dir = "~/.mnemonas/.mnemonas/thumbnails"
+maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
+activity_dir = "~/.mnemonas/.mnemonas/activity"
 
 [storage.retention]
 max_versions = 100           # 每个文件最多保留100个版本
 max_age = "8760h"            # 版本保留1年
 min_free_space = 10737418240 # 最少保留10GB空闲空间
 gc_interval = "24h"          # 每24小时运行GC
+
+[storage.versioning]
+auto_versioned_extensions = [".md", ".txt", ".go", ".rs", ".toml", ".yaml", ".json"]
+auto_versioned_filenames = ["README", "LICENSE", "CHANGELOG", "Dockerfile", "Makefile"]
+max_versioned_size = 104857600 # 100MB
+
+[storage.trash]
+enabled = true
+retention_days = 30
+max_size = 10737418240         # 10GB
 
 [dataplane]
 grpc_address = "127.0.0.1:9090"
@@ -46,7 +60,7 @@ username = "admin"           # Basic Auth 用户名（默认 admin）
 password = ""                # Basic Auth 密码（留空则首次启动时自动生成并显示）
 
 [auth]
-enabled = false              # 启用后所有 API 需要 JWT 认证
+enabled = true               # 启用后所有 API 需要 JWT 认证
 jwt_secret = ""              # JWT 签名密钥（留空则自动生成）
 access_token_ttl = "15m"     # Access Token 有效期
 refresh_token_ttl = "168h"   # Refresh Token 有效期（7天）

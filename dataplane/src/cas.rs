@@ -310,31 +310,35 @@ impl CasStore {
         // Iterate objects
         for (hash, expected_size) in hashes_to_check {
             summary.total_objects += 1;
-            
-            let path = self.hash_to_path(&hash);
-            
-            // Check file exists and read it
-            match fs::read(&path).await {
+
+            // Use CAS read path to handle compressed objects transparently
+            match self.get(&hash).await {
                 Ok(data) => {
-                    let actual_hash = compute_hash(&data);
                     let actual_size = data.len() as u64;
-                    
-                    if actual_hash == hash && actual_size == expected_size {
+
+                    if actual_size == expected_size {
                         summary.valid_objects += 1;
                         summary.total_size += actual_size;
                     } else {
                         summary.corrupted_objects += 1;
-                        let (error_type, message) = if actual_hash != hash {
-                            ("corrupted".to_string(), format!("hash mismatch: expected={}, actual={}", hash, actual_hash))
-                        } else {
-                            ("corrupted".to_string(), format!("size mismatch: expected={}, actual={}", expected_size, actual_size))
-                        };
-                        summary.errors.push((hash.clone(), error_type, message));
+                        summary.errors.push((
+                            hash.clone(),
+                            "corrupted".to_string(),
+                            format!("size mismatch: expected={}, actual={}", expected_size, actual_size),
+                        ));
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(CasError::NotFound(_)) => {
                     summary.missing_objects += 1;
                     summary.errors.push((hash.clone(), "missing".to_string(), "file not found".to_string()));
+                }
+                Err(CasError::HashMismatch { expected, actual }) => {
+                    summary.corrupted_objects += 1;
+                    summary.errors.push((
+                        hash.clone(),
+                        "corrupted".to_string(),
+                        format!("hash mismatch: expected={}, actual={}", expected, actual),
+                    ));
                 }
                 Err(e) => {
                     summary.corrupted_objects += 1;
@@ -394,10 +398,13 @@ impl CasStore {
     
     /// Get file creation time as Unix timestamp
     fn get_created_at(&self, hash: &str) -> Option<i64> {
-        let path = self.hash_to_path(hash);
-        std::fs::metadata(&path)
+        let base_path = self.hash_to_path(hash);
+        let compressed_path = base_path.with_extension("zst");
+
+        let metadata = std::fs::metadata(&compressed_path).or_else(|_| std::fs::metadata(&base_path)).ok()?;
+        metadata
+            .created()
             .ok()
-            .and_then(|m| m.created().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
     }

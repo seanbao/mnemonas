@@ -18,21 +18,49 @@ Authorization: Bearer <access_token>
 
 ## 通用响应格式
 
-### 成功响应
+### 成功响应（多数 /api/v1 端点）
 
 ```json
 {
+  "success": true,
   "data": { ... },
-  "message": "操作成功"
+  "message": "操作成功",
+  "request_id": "optional",
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
-### 错误响应
+### 错误响应（多数 /api/v1 端点）
 
 ```json
 {
+  "code": "BAD_REQUEST",
+  "message": "错误描述",
+  "details": { ... },
+  "request_id": "optional",
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
+
+### 认证端点响应（auth 模块）
+
+认证模块使用 `success` + `error` 结构返回错误：
+
+```json
+{
+  "success": false,
   "error": "错误描述",
   "code": "ERROR_CODE"
+}
+```
+
+### 分享/收藏端点响应
+
+分享与收藏端点返回原始 JSON 对象或数组，错误响应为：
+
+```json
+{
+  "error": "错误描述"
 }
 ```
 
@@ -71,15 +99,15 @@ POST /api/v1/auth/login
 ```json
 {
   "success": true,
-  "data": {
-    "access_token": "eyJ...",
-    "refresh_token": "eyJ...",
-    "expires_in": 900,
-    "user": {
-      "id": "user-123",
-      "username": "admin",
-      "role": "admin"
-    }
+  "access_token": "eyJ...",
+  "refresh_token": "eyJ...",
+  "expires_at": "2024-01-15T10:15:00Z",
+  "token_type": "Bearer",
+  "user": {
+    "id": "user-123",
+    "username": "admin",
+    "role": "admin",
+    "home_dir": "/"
   }
 }
 ```
@@ -187,12 +215,43 @@ GET /api/v1/version
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
     "name": "MnemoNAS",
-    "version": "0.3.0",
-    "go": "1.22.0"
-  }
+    "version": "0.1.0",
+    "go": "go1.22.0"
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
+```
+
+### 初始化状态
+
+获取首次启动的初始化状态与临时凭据。
+
+```
+GET /api/v1/setup/
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "is_first_run": true,
+  "auth_enabled": true,
+  "web_username": "admin",
+  "web_password": "***",
+  "webdav_enabled": true,
+  "webdav_auth_type": "basic",
+  "webdav_username": "admin",
+  "webdav_password": "***"
+}
+```
+
+标记初始化已完成：
+
+```
+POST /api/v1/setup/acknowledge
 ```
 
 ### 存储统计
@@ -206,11 +265,15 @@ GET /api/v1/stats
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
-    "totalObjects": 1234,
-    "totalSize": 5368709120,
-    "dedupRatio": 0.35
-  }
+    "total_files": 0,
+    "total_size": 5368709120,
+    "unique_size": 2147483648,
+    "dedup_ratio": 0.35,
+    "total_chunks": 1234
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -225,44 +288,83 @@ GET /api/v1/diagnostics
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
+    "timestamp": "2024-01-15T10:00:00Z",
+    "uptime": "24h30m15s",
+    "uptime_secs": 86400,
     "version": {
       "name": "MnemoNAS",
-      "version": "0.3.0",
-      "go": "1.22.0"
+      "version": "0.1.0",
+      "go": "go1.22.0"
     },
-    "uptimeSecs": 86400,
     "system": {
-      "filesystemInitialized": true,
-      "dataplaneConnected": true,
-      "thumbnailServiceReady": true
+      "filesystem_initialized": true,
+      "dataplane_connected": true,
+      "thumbnail_service_ready": true
     },
     "memory": {
-      "allocMb": 50,
-      "totalAllocMb": 100,
-      "sysMb": 150,
-      "numGc": 10
+      "alloc_mb": 50,
+      "total_alloc_mb": 100,
+      "sys_mb": 150,
+      "num_gc": 10
     },
     "goroutines": 25,
     "filesystem": {
-      "trashItems": 5,
-      "trashSize": 52428800
+      "trash_items": 5,
+      "trash_size": 52428800
+    },
+    "storage": {
+      "total_chunks": 1234,
+      "total_size": 5368709120,
+      "unique_size": 2147483648,
+      "dedup_ratio": 0.35
     },
     "dataplane": {
       "healthy": true,
       "version": "0.3.0",
-      "uptimeSec": 86000
+      "uptime_sec": 86000
     }
-  }
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
 ### 指标信息
 
-获取 Prometheus 格式的指标数据。
+获取 JSON 格式的指标数据。
 
 ```
 GET /api/v1/metrics
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "requests": {
+      "total": 100,
+      "by_method": {"GET": 90},
+      "count_2xx": 95,
+      "count_4xx": 3,
+      "count_5xx": 2,
+      "error_rate": 0.02
+    },
+    "latency": {
+      "avg_ms": 12,
+      "max_ms": 200
+    },
+    "throughput": {
+      "bytes_in": 1024,
+      "bytes_out": 2048,
+      "mb_per_s": 0.5
+    },
+    "uptime_secs": 3600,
+    "slow_requests": 0
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
+}
 ```
 
 ---
@@ -286,6 +388,7 @@ GET /api/v1/files/{path}
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
     "path": "/documents",
     "files": [
@@ -294,7 +397,9 @@ GET /api/v1/files/{path}
         "path": "/documents/report.pdf",
         "isDir": false,
         "size": 1048576,
-        "modTime": "2024-01-15T10:00:00Z"
+        "modTime": "2024-01-15T10:00:00Z",
+        "hash": "abc123...",
+        "versioned": true
       },
       {
         "name": "images",
@@ -304,7 +409,8 @@ GET /api/v1/files/{path}
         "modTime": "2024-01-14T15:30:00Z"
       }
     ]
-  }
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -316,25 +422,21 @@ GET /api/v1/files/{path}
 POST /api/v1/files/{path}
 ```
 
-**Content-Type**: `multipart/form-data`
-
-**表单字段**:
-- `file`: 要上传的文件
-- `mkdir`: 设置为 `true` 时创建目录而非上传文件
+**Content-Type**: `application/octet-stream`
 
 **限制**:
 - 单文件最大: 10GB
-- 请求超时: 30 分钟
+- 请求超时: 30 分钟（可通过 server 配置调整）
 
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
-    "path": "/documents/report.pdf",
-    "size": 1048576,
-    "hash": "abc123..."
+    "path": "/documents/report.pdf"
   },
-  "message": "文件上传成功"
+  "message": "file uploaded successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -349,7 +451,92 @@ DELETE /api/v1/files/{path}
 **响应示例**:
 ```json
 {
-  "message": "文件已移至回收站"
+  "success": true,
+  "data": {
+    "path": "/documents/report.pdf"
+  },
+  "message": "file deleted successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
+
+### 移动/重命名文件
+
+```
+POST /api/v1/files-move
+```
+
+**请求体**:
+```json
+{
+  "from": "/documents/old-name.txt",
+  "to": "/documents/new-name.txt"
+}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "from": "/documents/old-name.txt",
+    "to": "/documents/new-name.txt"
+  },
+  "message": "file moved successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
+
+### 复制文件
+
+```
+POST /api/v1/files-copy
+```
+
+**请求体**:
+```json
+{
+  "from": "/documents/source.txt",
+  "to": "/documents/copy.txt"
+}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "from": "/documents/source.txt",
+    "to": "/documents/copy.txt"
+  },
+  "message": "file copied successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
+
+### 下载文件（认证）
+
+```
+GET /api/v1/download/{path}
+```
+
+**响应**: 返回文件二进制数据，支持 Range 请求
+
+### 创建目录
+
+```
+POST /api/v1/directories/{path}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "path": "/documents/new-folder"
+  },
+  "message": "directory created successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -387,23 +574,27 @@ GET /api/v1/versions/{path}
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
     "path": "/documents/report.pdf",
     "versions": [
       {
+        "version": 1,
         "hash": "abc123...",
         "size": 1048576,
-        "modTime": "2024-01-15T10:00:00Z",
-        "current": true
+        "timestamp": "2024-01-15T10:00:00Z",
+        "comment": "(current)"
       },
       {
+        "version": 2,
         "hash": "def456...",
         "size": 1024000,
-        "modTime": "2024-01-14T15:00:00Z",
-        "current": false
+        "timestamp": "2024-01-14T15:00:00Z",
+        "comment": ""
       }
     ]
-  }
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -415,17 +606,19 @@ GET /api/v1/versions/{path}
 POST /api/v1/versions/{hash}/restore
 ```
 
-**请求体**:
-```json
-{
-  "path": "/documents/report.pdf"
-}
-```
+**请求参数**:
+- `path`: 文件路径（必填）
 
 **响应示例**:
 ```json
 {
-  "message": "版本恢复成功"
+  "success": true,
+  "data": {
+    "path": "/documents/report.pdf",
+    "restored": "abc123..."
+  },
+  "message": "version restored successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -444,18 +637,23 @@ GET /api/v1/trash
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
     "items": [
       {
         "id": "trash-123",
         "originalPath": "/documents/old-file.txt",
         "deletedAt": "2024-01-15T10:00:00Z",
+        "name": "old-file.txt",
+        "isDir": false,
         "size": 1024,
-        "expiresAt": "2024-02-14T10:00:00Z"
+        "hadVersions": true
       }
     ],
+    "count": 1,
     "totalSize": 52428800
-  }
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -478,10 +676,13 @@ POST /api/v1/trash/{id}/restore
 **响应示例**:
 ```json
 {
-  "message": "文件已恢复",
+  "success": true,
   "data": {
-    "restoredPath": "/documents/old-file.txt"
-  }
+    "id": "trash-123",
+    "restored": true
+  },
+  "message": "file restored successfully",
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -520,19 +721,21 @@ GET /api/v1/search?q={query}
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
     "query": "report",
     "results": [
       {
         "name": "report.pdf",
         "path": "/documents/report.pdf",
-        "is_dir": false,
+        "isDir": false,
         "size": 1048576,
-        "mod_time": "2024-01-15T10:00:00Z"
+        "modTime": "2024-01-15T10:00:00Z"
       }
     ],
     "count": 1
-  }
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -552,22 +755,32 @@ POST /api/v1/shares
 ```json
 {
   "path": "/documents/report.pdf",
+  "type": "file",
   "password": "optional_password",
-  "expires_at": "2024-02-15T00:00:00Z"
+  "expires_in": "72h",
+  "permission": "read",
+  "max_access": 0,
+  "description": ""
 }
 ```
 
 **响应示例**:
 ```json
 {
-  "data": {
-    "id": "share-abc123",
-    "path": "/documents/report.pdf",
-    "url": "http://localhost:8080/s/abc123",
-    "has_password": true,
-    "expires_at": "2024-02-15T00:00:00Z",
-    "created_at": "2024-01-15T10:00:00Z"
-  }
+  "id": "share-abc123",
+  "path": "/documents/report.pdf",
+  "type": "file",
+  "created_by": "user-123",
+  "created_at": "2024-01-15T10:00:00Z",
+  "expires_at": "2024-02-15T00:00:00Z",
+  "has_password": true,
+  "permission": "read",
+  "enabled": true,
+  "access_count": 0,
+  "max_access": 0,
+  "last_access": null,
+  "description": "",
+  "url": "http://localhost:8080/s/share-abc123"
 }
 ```
 
@@ -575,6 +788,28 @@ POST /api/v1/shares
 
 ```
 GET /api/v1/shares
+```
+
+**响应示例**:
+```json
+[
+  {
+    "id": "share-abc123",
+    "path": "/documents/report.pdf",
+    "type": "file",
+    "created_by": "user-123",
+    "created_at": "2024-01-15T10:00:00Z",
+    "expires_at": "2024-02-15T00:00:00Z",
+    "has_password": true,
+    "permission": "read",
+    "enabled": true,
+    "access_count": 0,
+    "max_access": 0,
+    "last_access": null,
+    "description": "",
+    "url": "http://localhost:8080/s/share-abc123"
+  }
+]
 ```
 
 ### 获取分享详情
@@ -589,11 +824,33 @@ GET /api/v1/shares/{id}
 PUT /api/v1/shares/{id}
 ```
 
+**响应示例**:
+```json
+{
+  "id": "share-abc123",
+  "path": "/documents/report.pdf",
+  "type": "file",
+  "created_by": "user-123",
+  "created_at": "2024-01-15T10:00:00Z",
+  "expires_at": null,
+  "has_password": false,
+  "permission": "read",
+  "enabled": true,
+  "access_count": 0,
+  "max_access": 0,
+  "last_access": null,
+  "description": "",
+  "url": "http://localhost:8080/s/share-abc123"
+}
+```
+
 ### 删除分享
 
 ```
 DELETE /api/v1/shares/{id}
 ```
+
+**响应**: `204 No Content`
 
 ### 访问分享链接（公开）
 
@@ -601,10 +858,36 @@ DELETE /api/v1/shares/{id}
 GET /s/{share_id}
 ```
 
-如果分享有密码保护，需要在查询参数中携带：
+如果分享有密码保护，需要 POST 并提供密码：
 
 ```
-GET /s/{share_id}?password=xxx
+POST /s/{share_id}
+```
+
+请求体：
+```json
+{ "password": "xxx" }
+```
+
+**公开访问响应示例**:
+```json
+{
+  "id": "share-abc123",
+  "type": "file",
+  "has_password": true,
+  "permission": "read",
+  "description": ""
+}
+```
+
+**下载文件**:
+```
+GET /s/{share_id}/download?password=xxx
+```
+
+**下载分享文件夹内文件**:
+```
+GET /s/{share_id}/download/{path}?password=xxx
 ```
 
 ---
@@ -615,6 +898,21 @@ GET /s/{share_id}?password=xxx
 
 ```
 GET /api/v1/favorites
+```
+
+**响应示例**:
+```json
+{
+  "favorites": [
+    {
+      "path": "/documents/important.pdf",
+      "user_id": "user-123",
+      "created_at": "2024-01-15T10:00:00Z",
+      "note": ""
+    }
+  ],
+  "count": 1
+}
 ```
 
 ### 添加收藏
@@ -631,10 +929,28 @@ POST /api/v1/favorites
 }
 ```
 
+**响应示例**:
+```json
+{
+  "path": "/documents/important.pdf",
+  "user_id": "user-123",
+  "created_at": "2024-01-15T10:00:00Z",
+  "note": "可选备注"
+}
+```
+
 ### 检查是否已收藏
 
 ```
 GET /api/v1/favorites/check?path=/documents/file.pdf
+```
+
+**响应示例**:
+```json
+{
+  "path": "/documents/file.pdf",
+  "is_favorite": true
+}
 ```
 
 ### 批量检查收藏状态
@@ -650,17 +966,31 @@ POST /api/v1/favorites/check-batch
 }
 ```
 
+**响应示例**:
+```json
+{
+  "favorites": {
+    "/file1.txt": true,
+    "/file2.pdf": false
+  }
+}
+```
+
 ### 取消收藏
 
 ```
 DELETE /api/v1/favorites/{path}
 ```
 
+**响应**: `204 No Content`
+
 ### 更新备注
 
 ```
 PATCH /api/v1/favorites/{path}
 ```
+
+**响应**: `204 No Content`
 
 ---
 
@@ -683,21 +1013,26 @@ GET /api/v1/activity
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
     "items": [
       {
         "id": "act-123",
+        "timestamp": "2024-01-15T10:00:00Z",
         "action": "upload",
         "path": "/documents/file.pdf",
         "user": "admin",
         "ip": "127.0.0.1",
-        "timestamp": "2024-01-15T10:00:00Z"
+        "details": {
+          "to": "/documents/new.pdf"
+        }
       }
     ],
     "total": 100,
     "limit": 50,
     "offset": 0
-  }
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
 
@@ -707,10 +1042,40 @@ GET /api/v1/activity
 GET /api/v1/activity/stats
 ```
 
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "total": 100,
+    "today": 10,
+    "by_action": {
+      "upload": 50,
+      "delete": 10
+    },
+    "by_user": {
+      "admin": 60
+    }
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
+
 ### 清空活动日志（管理员）
 
 ```
 DELETE /api/v1/activity
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "message": "Activity log cleared"
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
+}
 ```
 
 ---
@@ -724,6 +1089,47 @@ GET /api/v1/settings
 ```
 
 **需要管理员权限**
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "server": {
+      "host": "0.0.0.0",
+      "port": 8080
+    },
+    "storage": {
+      "data_dir": "~/.mnemonas/.mnemonas/objects",
+      "metadata_dir": "~/.mnemonas/.mnemonas",
+      "temp_dir": "~/.mnemonas/.mnemonas/tmp"
+    },
+    "retention": {
+      "max_versions": 50,
+      "max_age": "2160h",
+      "min_free_space": 10737418240,
+      "gc_interval": "24h"
+    },
+    "webdav": {
+      "enabled": true,
+      "prefix": "/dav",
+      "read_only": false,
+      "auth_type": "basic",
+      "username": "admin"
+    },
+    "dataplane": {
+      "grpc_address": "127.0.0.1:9090",
+      "timeout": "30s",
+      "max_retries": 3
+    },
+    "cdc": {
+      "min_chunk_size": 262144,
+      "avg_chunk_size": 1048576,
+      "max_chunk_size": 4194304
+    }
+  }
+}
+```
 
 ### 更新设置
 
@@ -745,6 +1151,32 @@ PUT /api/v1/settings
 }
 ```
 
+**响应示例**:
+```json
+{
+  "success": true,
+  "message": "settings updated, some changes may require restart"
+}
+```
+
+### 获取 WebDAV 凭据
+
+```
+GET /api/v1/settings/webdav-credentials
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "enabled": true,
+  "url": "/dav/",
+  "auth_type": "basic",
+  "username": "admin",
+  "password": "***"
+}
+```
+
 ---
 
 ## 维护操作
@@ -754,17 +1186,19 @@ PUT /api/v1/settings
 获取最近一次数据完整性校验（Scrub）的结果。
 
 ```
-GET /api/v1/scrub
+GET /api/v1/maintenance/scrub
 ```
 
 **响应示例**:
 ```json
 {
+  "success": true,
   "data": {
     "has_result": true,
     "status": "completed",
     "id": "scrub-20240115-100000",
     "start_time": "2024-01-15T10:00:00Z",
+    "end_time": "2024-01-15T10:00:05Z",
     "duration_ms": 5000,
     "total_objects": 1000,
     "valid_objects": 998,
@@ -777,7 +1211,8 @@ GET /api/v1/scrub
         "error_type": "corrupted",
         "message": "Hash mismatch"
       }
-    ]
+    ],
+    "error_message": ""
   }
 }
 ```
@@ -787,7 +1222,7 @@ GET /api/v1/scrub
 启动数据完整性校验任务。
 
 ```
-POST /api/v1/scrub
+POST /api/v1/maintenance/scrub
 ```
 
 **请求体** (可选):
@@ -804,19 +1239,59 @@ POST /api/v1/scrub
 列出 CAS 存储中的所有对象。
 
 ```
-GET /api/v1/objects
+GET /api/v1/maintenance/objects
 ```
 
 **查询参数**:
-- `limit`: 返回数量限制
-- `offset`: 分页偏移
+- `limit`: 返回数量限制（默认 1000）
+- `cursor`: 游标（从上一次返回的 `next_cursor` 开始）
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "objects": [
+      {
+        "hash": "abc123...",
+        "size": 1048576
+      }
+    ],
+    "count": 1,
+    "next_cursor": "abc123..."
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
 
 ### 执行垃圾回收
 
 启动垃圾回收，清理无引用的数据块。
 
 ```
-POST /api/v1/gc
+POST /api/v1/maintenance/gc
+```
+
+**查询参数**:
+- `dry_run`: 是否仅计算不删除（默认 `true`）
+- `grace_period_hours`: 跳过最近创建对象的小时数（默认 24）
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "dry_run": true,
+    "grace_period_hours": 24,
+    "total_objects": 1000,
+    "referenced": 900,
+    "unreferenced": 100,
+    "unreferenced_size": 104857600,
+    "skipped_by_grace": 5,
+    "deleted": 0
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
+}
 ```
 
 ### 导出诊断信息
