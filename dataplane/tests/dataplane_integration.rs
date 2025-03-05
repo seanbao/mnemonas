@@ -217,3 +217,101 @@ async fn test_put_file_without_data() {
 
     let _ = shutdown_tx.send(());
 }
+
+#[tokio::test]
+async fn test_put_file_requires_metadata_before_chunks() {
+    let (mut client, shutdown_tx) = setup_client().await;
+
+    let requests = vec![PutFileRequest {
+        payload: Some(Payload::Chunk(b"data without metadata".to_vec())),
+    }];
+
+    let err = client
+        .put_file(iter(requests))
+        .await
+        .expect_err("put_file without metadata should fail");
+
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_put_file_rejects_duplicate_metadata() {
+    let (mut client, shutdown_tx) = setup_client().await;
+
+    let requests = vec![
+        PutFileRequest {
+            payload: Some(Payload::Metadata(FileMetadata {
+                path: "/docs/file.txt".to_string(),
+                content_type: None,
+            })),
+        },
+        PutFileRequest {
+            payload: Some(Payload::Metadata(FileMetadata {
+                path: "/docs/other.txt".to_string(),
+                content_type: None,
+            })),
+        },
+        PutFileRequest {
+            payload: Some(Payload::Chunk(b"data".to_vec())),
+        },
+    ];
+
+    let err = client
+        .put_file(iter(requests))
+        .await
+        .expect_err("put_file with duplicate metadata should fail");
+
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_get_file_reports_missing_chunk() {
+    let (mut client, shutdown_tx) = setup_client().await;
+
+    let data = b"streaming file data".repeat(4096);
+    let requests = vec![
+        PutFileRequest {
+            payload: Some(Payload::Metadata(FileMetadata {
+                path: "/docs/file.txt".to_string(),
+                content_type: Some("text/plain".to_string()),
+            })),
+        },
+        PutFileRequest {
+            payload: Some(Payload::Chunk(data)),
+        },
+    ];
+
+    let response = client
+        .put_file(iter(requests))
+        .await
+        .expect("put file")
+        .into_inner();
+
+    client
+        .delete_chunk(DeleteChunkRequest {
+            hash: response.chunk_hashes[0].clone(),
+        })
+        .await
+        .expect("delete chunk");
+
+    let mut stream = client
+        .get_file(GetFileRequest {
+            manifest_hash: response.manifest_hash,
+        })
+        .await
+        .expect("get file stream")
+        .into_inner();
+
+    let err = stream
+        .message()
+        .await
+        .expect_err("missing chunk should surface as stream error");
+
+    assert_eq!(err.code(), Code::NotFound);
+
+    let _ = shutdown_tx.send(());
+}

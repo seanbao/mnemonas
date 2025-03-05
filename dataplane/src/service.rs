@@ -166,9 +166,25 @@ impl DataPlane for DataPlaneService {
             let req = req?;
             match req.payload {
                 Some(put_file_request::Payload::Metadata(m)) => {
+                    if metadata.is_some() {
+                        return Err(Status::invalid_argument(
+                            "File metadata must be provided exactly once",
+                        ));
+                    }
+                    if total_size > 0 {
+                        return Err(Status::invalid_argument(
+                            "File metadata must be sent before file chunks",
+                        ));
+                    }
                     metadata = Some(m);
                 }
                 Some(put_file_request::Payload::Chunk(data)) => {
+                    if metadata.is_none() {
+                        return Err(Status::invalid_argument(
+                            "File metadata must be sent before file chunks",
+                        ));
+                    }
+
                     // Check total size limit
                     total_size += data.len() as u64;
                     if total_size > MAX_FILE_SIZE {
@@ -209,6 +225,8 @@ impl DataPlane for DataPlaneService {
         // Log metadata if provided
         if let Some(ref m) = metadata {
             info!(path = %m.path, total_size, "processing file upload");
+        } else {
+            return Err(Status::invalid_argument("File metadata is required"));
         }
 
         if total_size == 0 {
@@ -292,7 +310,7 @@ impl DataPlane for DataPlaneService {
         })?;
 
         let manifest = FileManifest::from_json(&manifest_data)
-            .map_err(|e| Status::internal(format!("Failed to parse manifest: {}", e)))?;
+            .map_err(|e| Status::data_loss(format!("Failed to parse manifest: {}", e)))?;
 
         // Create streaming response
         let (tx, rx) = mpsc::channel(4);
@@ -307,7 +325,13 @@ impl DataPlane for DataPlaneService {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                        let status = match e {
+                            crate::cas::CasError::NotFound(_) => {
+                                Status::not_found("File chunk not found")
+                            }
+                            _ => Status::internal(e.to_string()),
+                        };
+                        let _ = tx.send(Err(status)).await;
                         break;
                     }
                 }
