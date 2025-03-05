@@ -95,6 +95,22 @@ interface SettingsApiResponse<T> {
   error?: SettingsApiError
 }
 
+export class SettingsError extends Error {
+  status: number
+  code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'SettingsError'
+    this.status = status
+    this.code = code
+  }
+
+  get isUnavailable(): boolean {
+    return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+  }
+}
+
 export interface UpdateSettingsRequest {
   server?: {
     host?: string
@@ -164,12 +180,12 @@ export interface UpdateSettingsRequest {
   }
 }
 
-async function parseSettingsError(response: Response, fallback: string): Promise<Error> {
+async function parseSettingsError(response: Response, fallback: string): Promise<SettingsError> {
   try {
     const body = await response.json() as SettingsApiResponse<never>
-    return new Error(body.error?.message || body.message || fallback)
+    return new SettingsError(body.error?.message || body.message || fallback, response.status, body.error?.code)
   } catch {
-    return new Error(fallback)
+    return new SettingsError(fallback, response.status)
   }
 }
 

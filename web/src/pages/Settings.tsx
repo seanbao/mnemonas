@@ -38,7 +38,7 @@ import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, formatWe
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
+import { SettingsError, getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
 
 // Settings section component
 function SettingsSection({ 
@@ -68,6 +68,60 @@ function SettingsSection({
       </CardBody>
     </Card>
   )
+}
+
+function getSettingsLoadErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof SettingsError && error.isUnavailable) {
+    return {
+      title: '设置服务暂不可用',
+      description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+    }
+  }
+
+  return {
+    title: '加载设置失败',
+    description: (error as Error).message,
+  }
+}
+
+function getWebDAVCredentialsErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof SettingsError && error.isUnavailable) {
+    return {
+      title: 'WebDAV 凭据暂不可用',
+      description: '当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。',
+    }
+  }
+
+  return {
+    title: 'WebDAV 凭据加载失败',
+    description: (error as Error).message || '请稍后重试',
+  }
+}
+
+function getSettingsActionErrorToast(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof SettingsError && error.isUnavailable) {
+    return {
+      title: titles.unavailable,
+      description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
 }
 
 // Setting row component
@@ -155,6 +209,7 @@ export function SettingsPage() {
     queryKey: ['settings'],
     queryFn: getSettings,
   })
+  const settingsLoadErrorPresentation = error ? getSettingsLoadErrorPresentation(error) : null
 
   // Fetch WebDAV credentials
   const {
@@ -167,6 +222,9 @@ export function SettingsPage() {
     queryFn: getWebDAVCredentials,
     enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
   })
+  const webdavCredentialsErrorPresentation = webdavCredentialsError
+    ? getWebDAVCredentialsErrorPresentation(webdavCredentialsError)
+    : null
 
   const webdavUrl = useMemo(() => {
     return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
@@ -250,11 +308,10 @@ export function SettingsPage() {
   const handleReset = async () => {
     const result = await refetch()
     if (result.error) {
-      addToast({
-        title: '重置失败',
-        description: result.error instanceof Error ? result.error.message : '请稍后重试',
-        color: 'danger',
-      })
+      addToast(getSettingsActionErrorToast(result.error, {
+        unavailable: '重置暂不可用',
+        failure: '重置失败',
+      }))
       return
     }
 
@@ -274,8 +331,11 @@ export function SettingsPage() {
       addToast({ title: '设置已保存', color: 'success' })
       queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
-    onError: (err: Error) => {
-      addToast({ title: '保存失败: ' + err.message, color: 'danger' })
+    onError: (err: unknown) => {
+      addToast(getSettingsActionErrorToast(err, {
+        unavailable: '保存设置暂不可用',
+        failure: '保存失败',
+      }))
     },
   })
 
@@ -561,8 +621,8 @@ export function SettingsPage() {
       <div className="h-full flex items-center justify-center p-6">
         <EmptyState
           icon={AlertCircle}
-          title="加载设置失败"
-          description={(error as Error).message}
+          title={settingsLoadErrorPresentation?.title}
+          description={settingsLoadErrorPresentation?.description}
           action={
             <Button variant="bordered" className="rounded-xl" onPress={() => refetch()} isLoading={isRefetching}>
               重新加载
@@ -952,8 +1012,8 @@ export function SettingsPage() {
                 <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
                   <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
                   <div className="flex-1">
-                    <p className="font-medium">WebDAV 凭据加载失败</p>
-                    <p className="text-default-600">{(webdavCredentialsError as Error).message || '请稍后重试'}</p>
+                    <p className="font-medium">{webdavCredentialsErrorPresentation?.title}</p>
+                    <p className="text-default-600">{webdavCredentialsErrorPresentation?.description}</p>
                   </div>
                   <Button
                     size="sm"

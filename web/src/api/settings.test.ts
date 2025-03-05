@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { getSettings, getWebDAVCredentials, updateSettings } from './settings'
+import { getSettings, getWebDAVCredentials, SettingsError, updateSettings } from './settings'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -52,6 +52,21 @@ describe('Settings API', () => {
     })
 
     await expect(getSettings()).rejects.toThrow('settings not available')
+  })
+
+  it('preserves service-unavailable settings error codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'settings not available' } }),
+    })
+
+    await expect(getSettings()).rejects.toMatchObject({
+      message: 'settings not available',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      isUnavailable: true,
+    })
   })
 
   it('returns update success message', async () => {
@@ -111,5 +126,26 @@ describe('Settings API', () => {
     })
 
     await expect(getWebDAVCredentials()).rejects.toThrow('webdav unavailable')
+  })
+
+  it('preserves service-unavailable webdav credentials error codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'webdav credentials unavailable' } }),
+    })
+
+    await expect(getWebDAVCredentials()).rejects.toMatchObject({
+      message: 'webdav credentials unavailable',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      isUnavailable: true,
+    })
+  })
+
+  it('marks SettingsError as unavailable for service-unavailable responses', () => {
+    const error = new SettingsError('settings not available', 503, 'SERVICE_UNAVAILABLE')
+
+    expect(error.isUnavailable).toBe(true)
   })
 })

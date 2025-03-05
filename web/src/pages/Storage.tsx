@@ -13,7 +13,7 @@ import {
   TrendingUp,
   AlertCircle,
 } from 'lucide-react'
-import { getStorageStats } from '@/api/files'
+import { ApiError, getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -25,6 +25,20 @@ function formatStorageSize(value: number | undefined): string {
 
 function formatCount(value: number | undefined): string {
   return value === undefined ? '--' : value.toLocaleString()
+}
+
+function getStorageErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '存储统计暂不可用',
+      description: '存储统计服务当前不可用，请检查系统健康状态或稍后重试。',
+    }
+  }
+
+  return {
+    title: '加载存储统计失败',
+    description: (error as Error).message || '请稍后重试',
+  }
 }
 
 // Action card for maintenance operations
@@ -97,6 +111,7 @@ export function StoragePage() {
     queryKey: ['stats'],
     queryFn: getStorageStats,
   })
+  const storageErrorPresentation = error ? getStorageErrorPresentation(error) : null
 
   if (isLoading) {
     return (
@@ -144,8 +159,8 @@ export function StoragePage() {
 
         <EmptyState
           icon={AlertCircle}
-          title="加载存储统计失败"
-          description={(error as Error).message || '请稍后重试'}
+          title={storageErrorPresentation?.title}
+          description={storageErrorPresentation?.description}
           action={
             <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
               重新加载

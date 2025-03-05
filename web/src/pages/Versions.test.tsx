@@ -10,10 +10,23 @@ const mockUseUser = vi.fn(() => ({ id: 'admin', username: 'admin', role: 'admin'
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getVersions: vi.fn(),
   buildDownloadUrl: vi.fn((path, options?: { version?: string }) => options?.version
     ? `/api/v1/download${path}?version=${options.version}`
     : `/api/v1/download${path}`),
+  downloadFile: vi.fn(),
   restoreVersion: vi.fn(),
 }))
 
@@ -24,9 +37,10 @@ vi.mock('@/stores/auth', () => ({
 
 import { VersionsPage } from './Versions'
 
-import { getVersions, restoreVersion } from '@/api/files'
+import { ApiError, downloadFile, getVersions, restoreVersion } from '@/api/files'
 
 const mockGetVersions = vi.mocked(getVersions)
+const mockDownloadFile = vi.mocked(downloadFile)
 const mockRestoreVersion = vi.mocked(restoreVersion)
 
 describe('VersionsPage', () => {
@@ -36,6 +50,7 @@ describe('VersionsPage', () => {
     window.history.pushState({}, '', '/')
     mockUseIsAdmin.mockReturnValue(true)
     mockUseUser.mockReturnValue({ id: 'admin', username: 'admin', role: 'admin', email: '', homeDir: '/' })
+    mockDownloadFile.mockResolvedValue(undefined)
     mockGetVersions.mockResolvedValue([
       { version: 3, hash: 'hash3', size: 3000, timestamp: '2024-01-03T00:00:00Z' },
       { version: 2, hash: 'hash2', size: 2000, timestamp: '2024-01-02T00:00:00Z' },
@@ -291,6 +306,35 @@ describe('VersionsPage', () => {
         expect(mockRestoreVersion).toHaveBeenCalled()
       })
     })
+
+    it('shows unavailable toast when restore fails because version storage is unavailable', async () => {
+      mockRestoreVersion.mockRejectedValue(new ApiError('version storage unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+
+      await waitFor(() => {
+        expect(screen.getByText('确认恢复')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('确认恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '恢复版本暂不可用',
+          description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
   })
 
   describe('download functionality', () => {
@@ -304,6 +348,33 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         const downloadButtons = screen.queryAllByTitle('下载此版本')
         expect(downloadButtons.length).toBeGreaterThan(0)
+      })
+    })
+
+    it('shows unavailable toast when version download is temporarily unavailable', async () => {
+      mockDownloadFile.mockRejectedValue(new ApiError('version storage unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('下载此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('下载此版本')[0])
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', { version: 'hash3' })
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '下载版本暂不可用',
+          description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+          color: 'warning',
+        })
       })
     })
 
@@ -346,6 +417,21 @@ describe('VersionsPage', () => {
   })
 
   describe('error handling', () => {
+    it('shows an unavailable state when version storage is temporarily unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetVersions.mockRejectedValue(new ApiError('version storage unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/unavailable.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.getByText('版本历史暂不可用')).toBeTruthy()
+        expect(screen.getByText('版本存储当前不可用，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('shows error message on API failure', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetVersions.mockRejectedValue(new Error('文件不存在'))

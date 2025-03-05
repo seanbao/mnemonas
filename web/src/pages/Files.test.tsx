@@ -11,6 +11,18 @@ const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: '
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   listFiles: vi.fn(),
   deleteFile: vi.fn(),
   createDirectory: vi.fn(),
@@ -86,7 +98,7 @@ vi.mock('@/components/share', () => ({
   ShareDialog: () => null,
 }))
 
-import { listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
+import { ApiError, listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
 import { downloadFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 
@@ -525,6 +537,62 @@ describe('FilesPage', () => {
       })
     })
 
+    it('shows unavailable toast when batch download fully fails due to unavailable filesystem', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile.mockRejectedValue(new ApiError('filesystem not initialized', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载（仅文件）'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量下载暂不可用',
+          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows unavailable toast when single-file download fails due to unavailable filesystem', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockDownloadFile.mockRejectedValue(new ApiError('filesystem not initialized', 503, 'SERVICE_UNAVAILABLE'))
+      mockFilesStoreState.viewMode = 'grid'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      const menuButton = screen.getByLabelText('photo.jpg 操作菜单')
+
+      await user.click(menuButton)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('下载').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByText('下载')[0])
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '下载暂不可用',
+          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('keeps failed items selected after partial batch delete failure', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
@@ -590,6 +658,39 @@ describe('FilesPage', () => {
         title: '批量删除失败',
         description: '共 2 个项目删除失败',
         color: 'danger',
+      })
+    })
+
+    it('shows unavailable toast and preserves selection when batch delete fully fails due to unavailable filesystem', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDeleteFile.mockRejectedValue(new ApiError('filesystem not initialized', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      mockFilesStoreState.clearSelection.mockClear()
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'])
+      })
+
+      expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '批量删除暂不可用',
+        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
       })
     })
 
@@ -810,6 +911,18 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(screen.queryByText('收藏状态加载失败')).toBeNull()
+      })
+    })
+
+    it('shows an unavailable state when the current directory returns service unavailable', async () => {
+      mockListFiles.mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('当前目录暂不可用')).toBeTruthy()
+        expect(screen.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
 

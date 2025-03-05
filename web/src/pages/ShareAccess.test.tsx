@@ -51,11 +51,16 @@ vi.mock('@/api/share', () => ({
   getPublicShareItems: (...args: unknown[]) => mockGetPublicShareItems(...args),
   ShareError: class ShareError extends Error {
     status: number
-    constructor(message: string, status: number) {
+    code?: string
+    constructor(message: string, status: number, code?: string) {
       super(message)
       this.status = status
+      this.code = code
     }
     get isUnauthorized() { return this.status === 401 }
+    get isFeatureDisabled() { return this.code === 'SHARE_FEATURE_DISABLED' }
+    get isExpired() { return this.status === 410 }
+    get isUnavailable() { return this.status === 503 && !this.isFeatureDisabled }
   }
 }))
 
@@ -100,6 +105,39 @@ describe('ShareAccessPage', () => {
     
     await waitFor(() => {
       expect(screen.getByText('无法访问分享')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a dedicated disabled state when public sharing is turned off', async () => {
+    mockGetPublicShare.mockRejectedValue(new ShareError('share feature disabled', 503, 'SHARE_FEATURE_DISABLED'))
+
+    renderWithRouter('disabled-share')
+
+    await waitFor(() => {
+      expect(screen.getByText('分享功能已关闭')).toBeInTheDocument()
+      expect(screen.getByText('当前服务已关闭分享功能，公开分享链接暂不可访问。')).toBeInTheDocument()
+    })
+  })
+
+  it('shows an expired-state title when the share has gone away', async () => {
+    mockGetPublicShare.mockRejectedValue(new ShareError('分享已过期、已禁用或访问次数已达上限', 410))
+
+    renderWithRouter('expired-share')
+
+    await waitFor(() => {
+      expect(screen.getByText('分享已失效')).toBeInTheDocument()
+      expect(screen.getByText('分享已过期、已禁用或访问次数已达上限')).toBeInTheDocument()
+    })
+  })
+
+  it('shows an unavailable state when shared content storage is temporarily unavailable', async () => {
+    mockGetPublicShare.mockRejectedValue(new ShareError('filesystem not available', 503, 'FILESYSTEM_UNAVAILABLE'))
+
+    renderWithRouter('unavailable-share')
+
+    await waitFor(() => {
+      expect(screen.getByText('分享内容暂不可用')).toBeInTheDocument()
+      expect(screen.getByText('分享内容当前不可访问，请检查系统状态或稍后重试。')).toBeInTheDocument()
     })
   })
 
@@ -165,6 +203,34 @@ describe('ShareAccessPage', () => {
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '请输入访问密码',
       color: 'warning',
+    })
+  })
+
+  it('shows unavailable toast when password verification is temporarily unavailable', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })
+    mockAccessShareWithPassword.mockRejectedValue(new ShareError('filesystem not available', 503, 'FILESYSTEM_UNAVAILABLE'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.click(screen.getByText('验证密码'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '验证暂不可用',
+        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 
@@ -261,6 +327,25 @@ describe('ShareAccessPage', () => {
     })
   })
 
+  it('shows an unavailable message when shared folder listing returns service unavailable', async () => {
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockRejectedValueOnce(new ShareError('filesystem not available', 503, 'FILESYSTEM_UNAVAILABLE'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('文件夹内容暂不可用')).toBeInTheDocument()
+      expect(screen.getByText('分享目录当前不可访问，请检查系统状态或稍后重试。')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument()
+    })
+  })
+
   it('downloads protected share via fetch/blob flow after password verification', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
@@ -325,6 +410,35 @@ describe('ShareAccessPage', () => {
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '访问凭证已失效，请重新输入密码',
       color: 'warning',
+    })
+  })
+
+  it('shows unavailable toast when file download is temporarily unavailable', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: false,
+      permission: 'read',
+      file_name: 'test.txt',
+      file_size: 10,
+    })
+    mockDownloadShare.mockRejectedValue(new ShareError('filesystem not available', 503, 'FILESYSTEM_UNAVAILABLE'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('下载文件'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '下载暂不可用',
+        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 

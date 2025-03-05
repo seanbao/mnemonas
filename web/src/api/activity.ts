@@ -8,12 +8,18 @@ const API_BASE = '/api/v1'
 export class ApiError extends Error {
   status: number
   statusText: string
+  code?: string
 
-  constructor(message: string, status: number, statusText: string) {
+  constructor(message: string, status: number, statusText: string, code?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.statusText = statusText
+    this.code = code
+  }
+
+  get isUnavailable(): boolean {
+    return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
   }
 }
 
@@ -32,17 +38,21 @@ interface ApiResponseWrapper<T> {
 async function handleResponse<T>(response: Response, errorMessage: string, invalidMessage = '服务器返回了无效的数据'): Promise<T> {
   if (!response.ok) {
     let message = errorMessage
+    let code: string | undefined
     try {
       const body = await response.json() as ApiResponseWrapper<never> | { error?: string; message?: string }
       if (typeof body.error === 'string') {
         message = body.error || errorMessage
       } else if (body.error && typeof body.error === 'object' && 'message' in body.error && typeof body.error.message === 'string') {
         message = body.error.message
+        if ('code' in body.error && typeof body.error.code === 'string') {
+          code = body.error.code
+        }
       } else if (body.message) {
         message = body.message
       }
     } catch { /* ignore */ }
-    throw new ApiError(message, response.status, response.statusText)
+    throw new ApiError(message, response.status, response.statusText, code)
   }
 
   let body: unknown

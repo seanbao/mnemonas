@@ -37,6 +37,7 @@ type MockXHRResult = {
   type: 'load' | 'error' | 'timeout'
   status?: number
   statusText?: string
+  responseText?: string
 }
 
 class MockXMLHttpRequest {
@@ -54,6 +55,7 @@ class MockXMLHttpRequest {
 
   status = 0
   statusText = ''
+  responseText = ''
   method = ''
   url = ''
   body: Document | XMLHttpRequestBodyInit | null = null
@@ -88,6 +90,7 @@ class MockXMLHttpRequest {
 
     this.status = next.status ?? 0
     this.statusText = next.statusText ?? ''
+    this.responseText = next.responseText ?? ''
     const listeners = this.listeners.get(next.type) ?? []
     for (const listener of listeners) {
       listener()
@@ -214,6 +217,26 @@ describe('API: files', () => {
         status: 413,
       })
     })
+
+    it('preserves structured unavailable upload errors from XHR responses', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 503,
+        statusText: 'Service Unavailable',
+        responseText: JSON.stringify({ error: { code: 'SERVICE_UNAVAILABLE', message: 'filesystem not initialized' } }),
+      })
+
+      try {
+        await uploadFile('/docs', new File(['content'], 'report.txt'))
+        throw new Error('Expected uploadFile to throw')
+      } catch (error) {
+        expect(error).toBeInstanceOf(ApiError)
+        expect((error as ApiError).message).toBe('filesystem not initialized')
+        expect((error as ApiError).status).toBe(503)
+        expect((error as ApiError).code).toBe('SERVICE_UNAVAILABLE')
+        expect((error as ApiError).isUnavailable).toBe(true)
+      }
+    })
   })
 
   describe('ApiError', () => {
@@ -315,6 +338,22 @@ describe('API: files', () => {
       await expect(listFiles('/nonexistent')).rejects.toThrow('目录不存在')
     })
 
+    it('preserves service-unavailable directory load error codes', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({ error: { code: 'SERVICE_UNAVAILABLE', message: 'filesystem not initialized' } }),
+      })
+
+      await expect(listFiles('/')).rejects.toMatchObject({
+        message: 'filesystem not initialized',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        isUnavailable: true,
+      })
+    })
+
     it('rejects wrapped file list responses when success is false', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -346,6 +385,22 @@ describe('API: files', () => {
       const result = await getVersions('/test.txt')
       expect(result).toHaveLength(1)
       expect(result[0].hash).toBe('abc123')
+    })
+
+    it('preserves service-unavailable version history error codes', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({ error: { code: 'SERVICE_UNAVAILABLE', message: 'version storage unavailable' } }),
+      })
+
+      await expect(getVersions('/test.txt')).rejects.toMatchObject({
+        message: 'version storage unavailable',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        isUnavailable: true,
+      })
     })
   })
 
@@ -421,6 +476,24 @@ describe('API: files', () => {
       expect(result.totalObjects).toBeUndefined()
       expect(result.uniqueSize).toBeUndefined()
       expect(result.dedupRatio).toBeUndefined()
+    })
+
+    it('preserves service-unavailable storage stats error codes', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({
+          error: { code: 'SERVICE_UNAVAILABLE', message: 'storage stats unavailable' },
+        }),
+      })
+
+      await expect(getStorageStats()).rejects.toMatchObject({
+        message: 'storage stats unavailable',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        isUnavailable: true,
+      })
     })
   })
 
@@ -709,6 +782,26 @@ describe('API: files', () => {
         })
 
         await expect(restoreFromTrash('item1')).rejects.toThrow('仅可恢复主目录内的文件')
+      })
+
+      it('preserves unavailable error codes for restore actions', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          json: () => Promise.resolve({ error: { code: 'SERVICE_UNAVAILABLE', message: 'filesystem not initialized' } }),
+        })
+
+        try {
+          await restoreFromTrash('item1')
+          throw new Error('Expected restoreFromTrash to throw')
+        } catch (error) {
+          expect(error).toBeInstanceOf(ApiError)
+          expect((error as ApiError).message).toBe('filesystem not initialized')
+          expect((error as ApiError).status).toBe(503)
+          expect((error as ApiError).code).toBe('SERVICE_UNAVAILABLE')
+          expect((error as ApiError).isUnavailable).toBe(true)
+        }
       })
     })
 

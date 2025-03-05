@@ -16,8 +16,43 @@ import {
 import { PageHeader } from '@/components/ui/PageHeader'
 import { StatCard } from '@/components/ui/StatCard'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { getScrubResult, runScrub, downloadDiagnosticsExport, type ScrubResult, type ScrubError } from '@/api/files'
+import { ApiError, getScrubResult, runScrub, downloadDiagnosticsExport, type ScrubResult, type ScrubError } from '@/api/files'
 import { formatBytes, formatDuration } from '@/lib/utils'
+
+function getMaintenanceLoadErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '校验结果暂不可用',
+      description: '维护历史或数据面当前不可用，请检查系统状态或稍后重试。',
+    }
+  }
+
+  return {
+    title: '加载校验结果失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+  }
+}
+
+function getMaintenanceActionErrorPresentation(
+  error: unknown,
+  fallbackTitle: string,
+  unavailableTitle: string,
+  unavailableDescription: string,
+): { title: string; description: string; color: 'warning' | 'danger' } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: unavailableTitle,
+      description: unavailableDescription,
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: fallbackTitle,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
 
 // Status chip component
 function StatusChip({ status }: { status?: string }) {
@@ -138,6 +173,7 @@ export default function Maintenance() {
       return data?.status === 'running' ? 2000 : false
     },
   })
+  const loadErrorPresentation = getMaintenanceLoadErrorPresentation(error)
   
   // Run scrub mutation
   const scrubMutation = useMutation({
@@ -148,11 +184,17 @@ export default function Maintenance() {
       const title = result.status === 'running' ? '数据校验已启动' : '数据校验已完成'
       addToast({ title, color: 'success' })
     },
-    onError: (error: Error) => {
+    onError: (error: unknown) => {
+      const errorPresentation = getMaintenanceActionErrorPresentation(
+        error,
+        '启动校验失败',
+        '数据校验暂不可用',
+        '数据面或维护服务当前不可用，请检查系统状态后重试。',
+      )
       addToast({
-        title: '启动校验失败',
-        description: error.message,
-        color: 'danger',
+        title: errorPresentation.title,
+        description: errorPresentation.description,
+        color: errorPresentation.color,
       })
     },
   })
@@ -164,10 +206,16 @@ export default function Maintenance() {
       await downloadDiagnosticsExport()
       addToast({ title: '诊断信息导出已开始', color: 'success' })
     } catch (error) {
+      const errorPresentation = getMaintenanceActionErrorPresentation(
+        error,
+        '导出诊断信息失败',
+        '诊断导出暂不可用',
+        '诊断导出服务当前不可用，请检查系统状态后重试。',
+      )
       addToast({
-        title: '导出诊断信息失败',
-        description: error instanceof Error ? error.message : '请稍后重试',
-        color: 'danger',
+        title: errorPresentation.title,
+        description: errorPresentation.description,
+        color: errorPresentation.color,
       })
     } finally {
       setIsExporting(false)
@@ -230,8 +278,8 @@ export default function Maintenance() {
             <div className="flex items-center justify-center py-8">
               <EmptyState
                 icon={AlertCircle}
-                title="加载校验结果失败"
-                description={error instanceof Error ? error.message : '请稍后重试'}
+                title={loadErrorPresentation.title}
+                description={loadErrorPresentation.description}
                 action={
                   <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
                     重新加载

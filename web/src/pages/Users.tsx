@@ -37,12 +37,57 @@ import {
   RefreshCw,
   AlertCircle,
 } from 'lucide-react'
-import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, type User } from '@/api/users'
+import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, UsersError, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
+
+const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
+
+function getUsersLoadErrorPresentation(error: unknown): {
+  title: string
+  description: string
+} {
+  if (error instanceof UsersError && error.isUnavailable) {
+    return {
+      title: '用户管理暂不可用',
+      description: usersUnavailableDescription,
+    }
+  }
+
+  return {
+    title: '加载用户列表失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+  }
+}
+
+function getUsersActionErrorPresentation(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof UsersError && error.isUnavailable) {
+    return {
+      title: titles.unavailable,
+      description: usersUnavailableDescription,
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
 
 // Role badge component
 function RoleBadge({ role }: { role: string }) {
@@ -213,8 +258,11 @@ export function UsersPage() {
       resetCreateForm()
       addToast({ title: '用户创建成功', color: 'success' })
     },
-    onError: (error: Error) => {
-      addToast({ title: '创建失败', description: error.message, color: 'danger' })
+    onError: (error) => {
+      addToast(getUsersActionErrorPresentation(error, {
+        unavailable: '创建用户暂不可用',
+        failure: '创建失败',
+      }))
     },
   })
 
@@ -226,8 +274,11 @@ export function UsersPage() {
       setActionUser(null)
       addToast({ title: '用户已删除', color: 'success' })
     },
-    onError: (error: Error) => {
-      addToast({ title: '删除失败', description: error.message, color: 'danger' })
+    onError: (error) => {
+      addToast(getUsersActionErrorPresentation(error, {
+        unavailable: '删除用户暂不可用',
+        failure: '删除失败',
+      }))
     },
   })
 
@@ -241,8 +292,11 @@ export function UsersPage() {
       setResetPassword('')
       addToast({ title: '密码已重置', color: 'success' })
     },
-    onError: (error: Error) => {
-      addToast({ title: '重置失败', description: error.message, color: 'danger' })
+    onError: (error) => {
+      addToast(getUsersActionErrorPresentation(error, {
+        unavailable: '重置密码暂不可用',
+        failure: '重置失败',
+      }))
     },
   })
 
@@ -253,8 +307,11 @@ export function UsersPage() {
       queryClient.invalidateQueries({ queryKey: ['users'] })
       addToast({ title: variables.disabled ? '用户已禁用' : '用户已启用', color: 'success' })
     },
-    onError: (error: Error) => {
-      addToast({ title: '状态更新失败', description: error.message, color: 'danger' })
+    onError: (error) => {
+      addToast(getUsersActionErrorPresentation(error, {
+        unavailable: '状态更新暂不可用',
+        failure: '状态更新失败',
+      }))
     },
   })
 
@@ -323,6 +380,7 @@ export function UsersPage() {
   const totalUsers = data?.total ?? users.length
   const adminCount = users.filter((user) => user.role === 'admin').length
   const activeUserCount = users.filter((user) => !user.disabled).length
+  const usersLoadError = error ? getUsersLoadErrorPresentation(error) : null
 
   return (
     <div className="h-full flex flex-col p-6">
@@ -393,8 +451,8 @@ export function UsersPage() {
             <div className="flex items-center justify-center h-40">
               <EmptyState
                 icon={AlertCircle}
-                title="加载用户列表失败"
-                description={(error as Error).message || '请稍后重试'}
+                title={usersLoadError?.title ?? '加载用户列表失败'}
+                description={usersLoadError?.description ?? '请稍后重试'}
                 action={
                   <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
                     重新加载
