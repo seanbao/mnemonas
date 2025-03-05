@@ -11,12 +11,32 @@ import {
 import {
   Search as SearchIcon,
   ArrowLeft,
+  AlertCircle,
 } from 'lucide-react'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { searchFiles, type SearchResult } from '@/api/search'
+import { searchFiles, SearchError, type SearchResult } from '@/api/search'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
+
+const searchUnavailableDescription = '文件系统当前不可用，请稍后重试'
+
+function getSearchErrorPresentation(error: unknown): {
+  title: string
+  description: string
+} {
+  if (error instanceof SearchError && error.isUnavailable) {
+    return {
+      title: '搜索暂不可用',
+      description: searchUnavailableDescription,
+    }
+  }
+
+  return {
+    title: '搜索失败',
+    description: error instanceof Error && error.message ? error.message : '请稍后重试',
+  }
+}
 
 // Search result item component
 function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: () => void }) {
@@ -59,7 +79,7 @@ export function SearchPage() {
   const trimmedQuery = query.trim()
   const trimmedDebouncedQuery = useDeferredValue(trimmedQuery)
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['search', trimmedDebouncedQuery],
     queryFn: () => searchFiles(trimmedDebouncedQuery),
     enabled: trimmedDebouncedQuery.length > 0,
@@ -154,9 +174,17 @@ export function SearchPage() {
               </div>
             </div>
           ) : error ? (
-            <div className="flex flex-col items-center justify-center h-40 text-rose-500">
-              <p>搜索失败</p>
-              <p className="text-sm text-default-500">{(error as Error).message}</p>
+            <div className="flex items-center justify-center h-40 p-6">
+              <EmptyState
+                icon={AlertCircle}
+                title={getSearchErrorPresentation(error).title}
+                description={getSearchErrorPresentation(error).description}
+                action={
+                  <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                    重试搜索
+                  </Button>
+                }
+              />
             </div>
           ) : !trimmedDebouncedQuery ? (
             <div className="flex items-center justify-center h-40">

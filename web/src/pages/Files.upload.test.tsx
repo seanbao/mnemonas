@@ -94,11 +94,17 @@ vi.mock('@/api/files', () => ({
   ApiError: class ApiError extends Error {
     status: number
     statusText: string
+    code?: string
 
-    constructor(message: string, status: number, statusText: string) {
+    constructor(message: string, status: number, statusText: string, code?: string) {
       super(message)
       this.status = status
       this.statusText = statusText
+      this.code = code
+    }
+
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
     }
   },
 }))
@@ -133,7 +139,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { listFiles, uploadFile, createDirectory, MAX_UPLOAD_FILE_SIZE_BYTES } from '@/api/files'
+import { ApiError, listFiles, uploadFile, createDirectory, MAX_UPLOAD_FILE_SIZE_BYTES } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockUploadFile = vi.mocked(uploadFile)
@@ -341,5 +347,32 @@ describe('FilesPage upload queue', () => {
       description: '成功上传 1 个文件，失败 1 个',
       color: 'warning',
     })
+  })
+
+  it('shows unavailable summary for folder uploads when filesystem is unavailable', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile.mockRejectedValue(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['bad'], 'only.txt', { type: 'text/plain' })
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/only.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传暂不可用',
+      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      color: 'warning',
+    })
+    expect(screen.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
   })
 })

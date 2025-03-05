@@ -155,6 +155,21 @@ describe('Share API', () => {
       })
     })
 
+    it('preserves machine-readable codes for disabled public shares', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: () => Promise.resolve({ success: false, error: { code: 'SHARE_FEATURE_DISABLED', message: 'share feature disabled' } }),
+      })
+
+      await expect(getPublicShare('missing')).rejects.toMatchObject({
+        message: 'share feature disabled',
+        status: 503,
+        code: 'SHARE_FEATURE_DISABLED',
+        isFeatureDisabled: true,
+      })
+    })
+
     it('rejects malformed successful public share responses', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,

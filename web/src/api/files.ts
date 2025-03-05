@@ -100,16 +100,19 @@ export type AppVersionInfo = DiagnosticsInfo['version']
 export class ApiError extends Error {
   status: number
   statusText: string
+  code?: string
   
   constructor(
     message: string,
     status: number,
-    statusText: string
+    statusText: string,
+    code?: string
   ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.statusText = statusText
+    this.code = code
   }
   
   get isNotFound(): boolean {
@@ -127,18 +130,26 @@ export class ApiError extends Error {
   get isServerError(): boolean {
     return this.status >= 500
   }
+
+  get isUnavailable(): boolean {
+    return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+  }
 }
 
 // Helper to handle API responses
 async function handleResponse<T>(response: Response, errorPrefix: string): Promise<T> {
   if (!response.ok) {
     let message = errorPrefix
+    let code: string | undefined
     try {
       const body = await response.json()
       if (typeof body.error === 'string') {
         message = body.error
       } else if (body.error?.message) {
         message = body.error.message
+        if (typeof body.error.code === 'string') {
+          code = body.error.code
+        }
       } else if (body.message) {
         message = body.message
       }
@@ -146,7 +157,7 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
       // Use status text if JSON parsing fails
       message = `${errorPrefix}: ${response.statusText}`
     }
-    throw new ApiError(message, response.status, response.statusText)
+    throw new ApiError(message, response.status, response.statusText, code)
   }
   
   try {
@@ -171,20 +182,69 @@ async function handleWrappedResponse<T>(response: Response, errorPrefix: string)
 
 async function throwApiErrorFromResponse(response: Response, fallback: string): Promise<never> {
   let message = fallback
+  let code: string | undefined
   try {
-    const body = await response.json() as { error?: string | { message?: string }; message?: string }
-    if (typeof body.error === 'string') {
-      message = body.error || fallback
-    } else if (body.error?.message) {
-      message = body.error.message
-    } else if (body.message) {
-      message = body.message
-    }
+    const details = extractApiErrorDetails(await response.json(), fallback)
+    message = details.message
+    code = details.code
   } catch {
     // Keep the fallback message when the body is missing or invalid.
   }
 
-  throw new ApiError(message, response.status, response.statusText)
+  throw new ApiError(message, response.status, response.statusText, code)
+}
+
+function extractApiErrorDetails(body: unknown, fallback: string): {
+  message: string
+  code?: string
+} {
+  if (!isRecord(body)) {
+    return { message: fallback }
+  }
+
+  if (typeof body.error === 'string' && body.error) {
+    return { message: body.error }
+  }
+
+  if (isRecord(body.error)) {
+    const message = typeof body.error.message === 'string' && body.error.message
+      ? body.error.message
+      : undefined
+    const code = typeof body.error.code === 'string' ? body.error.code : undefined
+
+    if (message) {
+      return { message, code }
+    }
+
+    if (typeof body.message === 'string' && body.message) {
+      return { message: body.message, code }
+    }
+
+    return { message: fallback, code }
+  }
+
+  if (typeof body.message === 'string' && body.message) {
+    return { message: body.message }
+  }
+
+  return { message: fallback }
+}
+
+function createApiErrorFromXhr(xhr: XMLHttpRequest, fallback: string): ApiError {
+  let message = fallback
+  let code: string | undefined
+
+  if (xhr.responseText) {
+    try {
+      const details = extractApiErrorDetails(JSON.parse(xhr.responseText), fallback)
+      message = details.message
+      code = details.code
+    } catch {
+      // Fall back to the provided message when the body is not valid JSON.
+    }
+  }
+
+  return new ApiError(message, xhr.status, xhr.statusText, code)
 }
 
 // API Response wrapper from backend
@@ -584,11 +644,11 @@ export async function uploadFile(
       }
 
       if (xhr.status === 413) {
-        reject(new ApiError(`文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`, xhr.status, xhr.statusText))
+        reject(createApiErrorFromXhr(xhr, `文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`))
         return
       }
 
-      reject(new ApiError('上传失败', xhr.status, xhr.statusText))
+      reject(createApiErrorFromXhr(xhr, '上传失败'))
     })
 
     xhr.addEventListener('error', () => {

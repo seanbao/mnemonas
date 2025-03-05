@@ -33,11 +33,99 @@ function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
   return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
 }
 
+function getShareAccessErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ShareError) {
+    if (error.isFeatureDisabled) {
+      return {
+        title: '分享功能已关闭',
+        description: '当前服务已关闭分享功能，公开分享链接暂不可访问。',
+      }
+    }
+
+    if (error.isExpired) {
+      return {
+        title: '分享已失效',
+        description: error.message,
+      }
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: '分享内容暂不可用',
+        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+      }
+    }
+  }
+
+  return {
+    title: '无法访问分享',
+    description: error instanceof Error ? error.message : '加载分享信息失败',
+  }
+}
+
+function getShareListErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ShareError && error.isUnavailable) {
+    return {
+      title: '文件夹内容暂不可用',
+      description: '分享目录当前不可访问，请检查系统状态或稍后重试。',
+    }
+  }
+
+  return {
+    title: '加载文件夹失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+  }
+}
+
+function getShareActionErrorToast(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description?: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof ShareError) {
+    if (error.isFeatureDisabled) {
+      return {
+        title: '分享功能已关闭',
+        description: '当前服务已关闭分享功能，公开分享链接暂不可访问。',
+        color: 'warning',
+      }
+    }
+
+    if (error.isExpired) {
+      return {
+        title: '分享已失效',
+        description: error.message,
+        color: 'warning',
+      }
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: titles.unavailable,
+        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
 export function ShareAccessPage() {
   const { id } = useParams<{ id: string }>()
   const [isLoading, setIsLoading] = useState(true)
   const [shareInfo, setShareInfo] = useState<PublicShareInfo | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown | null>(null)
   const [needsPassword, setNeedsPassword] = useState(false)
   const [password, setPassword] = useState('')
   const [isVerifying, setIsVerifying] = useState(false)
@@ -45,11 +133,13 @@ export function ShareAccessPage() {
   const [folderItems, setFolderItems] = useState<PublicShareItem[]>([])
   const [folderPath, setFolderPath] = useState('')
   const [isListing, setIsListing] = useState(false)
-  const [listError, setListError] = useState<string | null>(null)
+  const [listError, setListError] = useState<unknown | null>(null)
+  const errorPresentation = getShareAccessErrorPresentation(error)
+  const listErrorPresentation = getShareListErrorPresentation(listError)
 
   const loadShareInfo = useCallback(async () => {
     if (!id) {
-      setError('无效的分享链接')
+      setError(new Error('无效的分享链接'))
       setIsLoading(false)
       return
     }
@@ -76,9 +166,9 @@ export function ShareAccessPage() {
       }
     } catch (err) {
       if (err instanceof ShareError) {
-        setError(err.message)
+        setError(err)
       } else {
-        setError('加载分享信息失败')
+        setError(new Error('加载分享信息失败'))
       }
     } finally {
       setIsLoading(false)
@@ -111,10 +201,10 @@ export function ShareAccessPage() {
       if (err instanceof ShareError && err.isUnauthorized) {
         addToast({ title: '密码错误', color: 'danger' })
       } else {
-        addToast({ 
-          title: err instanceof Error ? err.message : '验证失败', 
-          color: 'danger' 
-        })
+        addToast(getShareActionErrorToast(err, {
+          unavailable: '验证暂不可用',
+          failure: '验证失败',
+        }))
       }
     } finally {
       setIsVerifying(false)
@@ -134,10 +224,10 @@ export function ShareAccessPage() {
         addToast({ title: '访问凭证已失效，请重新输入密码', color: 'warning' })
         return
       }
-      addToast({
-        title: err instanceof Error ? err.message : '下载失败',
-        color: 'danger',
-      })
+      addToast(getShareActionErrorToast(err, {
+        unavailable: '下载暂不可用',
+        failure: '下载失败',
+      }))
     }
   }
 
@@ -155,10 +245,10 @@ export function ShareAccessPage() {
         addToast({ title: '访问凭证已失效，请重新输入密码', color: 'warning' })
         return
       }
-      addToast({
-        title: err instanceof Error ? err.message : '下载失败',
-        color: 'danger',
-      })
+      addToast(getShareActionErrorToast(err, {
+        unavailable: '下载暂不可用',
+        failure: '下载失败',
+      }))
     }
   }
 
@@ -192,7 +282,7 @@ export function ShareAccessPage() {
         setPassword('')
         setListError(null)
       } else {
-        setListError(err instanceof Error ? err.message : '加载文件夹失败')
+        setListError(err)
       }
     } finally {
       setIsListing(false)
@@ -228,9 +318,9 @@ export function ShareAccessPage() {
               <AlertCircle size={32} className="text-danger" />
             </div>
             <h2 className="text-xl font-semibold text-foreground mb-2">
-              无法访问分享
+              {errorPresentation.title}
             </h2>
-            <p className="text-default-500">{error}</p>
+            <p className="text-default-500">{errorPresentation.description}</p>
             <Button className="mt-4" variant="bordered" onPress={loadShareInfo}>
               重新加载
             </Button>
@@ -392,7 +482,10 @@ export function ShareAccessPage() {
               )}
               {listError && (
                 <div className="space-y-2">
-                  <div className="text-sm text-danger">{listError}</div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium text-danger">{listErrorPresentation.title}</div>
+                    <div className="text-sm text-danger/80">{listErrorPresentation.description}</div>
+                  </div>
                   <Button size="sm" variant="bordered" onPress={loadFolderItems}>
                     重试加载
                   </Button>

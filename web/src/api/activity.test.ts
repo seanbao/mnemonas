@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { clearActivity, getActivityStats, listActivity } from './activity'
+import { ApiError, clearActivity, getActivityStats, listActivity } from './activity'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -107,6 +107,28 @@ describe('Activity API', () => {
     })
 
     await expect(getActivityStats()).rejects.toThrow('stats unavailable')
+  })
+
+  it('preserves service-unavailable activity error codes', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      json: () => Promise.resolve({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'activity log unavailable' } }),
+    })
+
+    await expect(listActivity()).rejects.toMatchObject({
+      message: 'activity log unavailable',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      isUnavailable: true,
+    })
+  })
+
+  it('marks ApiError as unavailable for 503 responses', () => {
+    const error = new ApiError('activity log unavailable', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE')
+
+    expect(error.isUnavailable).toBe(true)
   })
 
   it('reads clear activity error message from response body', async () => {

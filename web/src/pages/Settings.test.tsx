@@ -8,6 +8,7 @@ import * as HeroUI from '@heroui/react'
 const mockAddToast = vi.fn()
 
 import { getSettings } from '@/api/settings'
+import { SettingsError } from '@/api/settings'
 import { updateSettings } from '@/api/settings'
 import { getWebDAVCredentials } from '@/api/settings'
 
@@ -87,6 +88,18 @@ vi.mock('@/components/share', () => ({
 
 // Mock the settings API
 vi.mock('@/api/settings', () => ({
+  SettingsError: class SettingsError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getSettings: vi.fn().mockResolvedValue(defaultSettingsResponse),
   updateSettings: vi.fn().mockResolvedValue({ success: true }),
   getWebDAVCredentials: vi.fn().mockResolvedValue({
@@ -847,6 +860,21 @@ describe('SettingsPage', () => {
         expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
       })
     })
+
+    it('shows an unavailable warning when WebDAV credentials return service unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetWebDAVCredentials.mockRejectedValueOnce(new SettingsError('webdav credentials unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 凭据暂不可用')).toBeTruthy()
+        expect(screen.getByText('当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载凭据' })).toBeTruthy()
+      })
+    })
   })
 
   describe('advanced settings', () => {
@@ -1007,9 +1035,65 @@ describe('SettingsPage', () => {
         })
       })
     })
+
+    it('shows unavailable toast on reset when settings service is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockResolvedValueOnce(defaultSettingsResponse)
+        .mockRejectedValueOnce(new SettingsError('settings not available', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('重置')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('重置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '重置暂不可用',
+          description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows unavailable toast when saving fails because settings service is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUpdateSettings.mockRejectedValueOnce(new SettingsError('settings not available', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('保存设置')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '保存设置暂不可用',
+          description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
   })
 
   describe('error state', () => {
+    it('shows an unavailable state when the settings service returns 503', async () => {
+      mockGetSettings.mockRejectedValueOnce(new SettingsError('settings not available', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('设置服务暂不可用')).toBeTruthy()
+        expect(screen.getByText('系统设置当前不可用，请检查服务健康状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('shows retryable error state when initial settings load fails', async () => {
       mockGetSettings.mockRejectedValueOnce(new Error('Network error'))
 

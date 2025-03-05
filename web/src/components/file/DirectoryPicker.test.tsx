@@ -16,6 +16,22 @@ vi.mock('@heroui/react', async () => {
 })
 
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    statusText: string
+    code?: string
+
+    constructor(message: string, status: number, statusText: string, code?: string) {
+      super(message)
+      this.status = status
+      this.statusText = statusText
+      this.code = code
+    }
+
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   listFiles: vi.fn(),
   createDirectory: vi.fn(),
 }))
@@ -28,7 +44,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { listFiles, createDirectory } from '@/api/files'
+import { ApiError, listFiles, createDirectory } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
@@ -127,6 +143,68 @@ describe('DirectoryPicker', () => {
         title: '创建文件夹失败',
         description: 'permission denied',
         color: 'danger',
+      })
+    })
+  })
+
+  it('shows an unavailable toast when expanding a directory hits filesystem unavailability', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockListFiles
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      })
+      .mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    const toggleButtons = screen.getAllByRole('button')
+    await user.click(toggleButtons.find((button) => button.className.includes('w-5 h-5')) ?? toggleButtons[0])
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '目录暂不可用',
+        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows unavailable details when root directory is unavailable', async () => {
+    mockListFiles.mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('目录暂不可用')).toBeTruthy()
+      expect(screen.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+    })
+  })
+
+  it('shows unavailable toast when creating a folder is unavailable', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockCreateDirectory.mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '创建目录暂不可用',
+        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
       })
     })
   })

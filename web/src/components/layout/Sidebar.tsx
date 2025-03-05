@@ -21,7 +21,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
-import { getStorageStats } from '@/api/files'
+import { ApiError, getStorageStats } from '@/api/files'
 
 interface NavItem {
   icon: React.ComponentType<{ size?: number; className?: string }>
@@ -72,6 +72,20 @@ interface SidebarProps {
   onClose?: () => void
 }
 
+function getSidebarStorageErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '统计暂不可用',
+      description: '存储统计服务当前不可用。',
+    }
+  }
+
+  return {
+    title: '统计加载失败',
+    description: (error as Error).message || '请稍后重试',
+  }
+}
+
 export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const location = useLocation()
   const isAdmin = useIsAdmin()
@@ -87,6 +101,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const usedBytes = storageStats?.totalSize
   const hasUsage = usedBytes !== undefined && usedBytes > 0
   const storageStatsKnown = storageStats?.totalSize !== undefined || storageStats?.dedupRatio !== undefined
+  const storageErrorPresentation = storageStatsError ? getSidebarStorageErrorPresentation(storageStatsError) : null
 
   return (
     <aside 
@@ -203,8 +218,8 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
                 <div className="flex items-start gap-2 text-warning">
                   <AlertCircle size={14} className="mt-0.5 shrink-0" />
                   <div>
-                    <div className="font-medium text-foreground">统计加载失败</div>
-                    <div className="text-default-500">{(storageStatsError as Error).message || '请稍后重试'}</div>
+                    <div className="font-medium text-foreground">{storageErrorPresentation?.title}</div>
+                    <div className="text-default-500">{storageErrorPresentation?.description}</div>
                   </div>
                 </div>
                 <Button
