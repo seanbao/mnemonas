@@ -31,10 +31,13 @@ import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
 
-// Calculate days until auto-delete (30 days retention)
-function daysUntilDelete(deletedAt: string): number {
+// Calculate days until auto-delete based on retention config
+function daysUntilDelete(deletedAt: string, retentionDays: number): number | null {
+  if (retentionDays <= 0) {
+    return null
+  }
   const deleted = new Date(deletedAt)
-  const autoDelete = new Date(deleted.getTime() + 30 * 24 * 60 * 60 * 1000)
+  const autoDelete = new Date(deleted.getTime() + retentionDays * 24 * 60 * 60 * 1000)
   const now = new Date()
   return Math.max(0, Math.ceil((autoDelete.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
 }
@@ -45,15 +48,19 @@ function TrashRow({
   isSelected,
   onSelect,
   onRestore,
-  onDelete
+  onDelete,
+  retentionDays,
+  retentionEnabled
 }: {
   item: TrashItem
   isSelected: boolean
   onSelect: () => void
   onRestore: () => void
   onDelete: () => void
+  retentionDays: number
+  retentionEnabled: boolean
 }) {
-  const daysLeft = daysUntilDelete(item.deletedAt)
+  const daysLeft = retentionEnabled ? daysUntilDelete(item.deletedAt, retentionDays) : null
   
   return (
     <div
@@ -81,7 +88,7 @@ function TrashRow({
           <Clock size={12} />
           {formatRelativeTime(item.deletedAt)}
         </div>
-        {daysLeft <= 7 && (
+        {daysLeft !== null && daysLeft <= 7 && (
           <Chip size="sm" variant="flat" color="warning" className="mt-1">
             {daysLeft} 天后自动删除
           </Chip>
@@ -241,13 +248,18 @@ export function TrashPage() {
   const items = data?.items ?? []
   const totalSize = data?.totalSize ?? 0
   const itemCount = data?.count ?? 0
+  const retentionDays = data?.retentionDays ?? 0
+  const retentionEnabled = data?.retentionEnabled ?? retentionDays > 0
+  const retentionLabel = retentionEnabled && retentionDays > 0
+    ? `${retentionDays} 天后自动清理`
+    : '自动清理未启用'
 
   return (
     <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
       {/* Header */}
       <PageHeader
         title="回收站"
-        subtitle={`${itemCount} 项 · ${formatBytes(totalSize)} · 30 天后自动清理`}
+        subtitle={`${itemCount} 项 · ${formatBytes(totalSize)} · ${retentionLabel}`}
         icon={Trash2}
         actions={
           itemCount > 0 ? (
@@ -327,6 +339,8 @@ export function TrashPage() {
               key={item.id}
               item={item}
               isSelected={selectedItems.has(item.id)}
+              retentionDays={retentionDays}
+              retentionEnabled={retentionEnabled}
               onSelect={() => {
                 const newSet = new Set(selectedItems)
                 if (newSet.has(item.id)) {
@@ -345,7 +359,7 @@ export function TrashPage() {
             <EmptyState
               icon={Trash2}
               title="回收站是空的"
-              description="删除的文件将在这里保留 30 天"
+              description="删除的文件将按配置保留"
             />
           </div>
         )}

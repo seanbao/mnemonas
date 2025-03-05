@@ -478,6 +478,70 @@ func TestStore_FileIndex(t *testing.T) {
 	}
 }
 
+func TestStore_RenamePath(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	if err := s.AddVersion(ctx, "/docs/readme.md", "hash1", 100, ""); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
+	}
+	if err := s.AddVersion(ctx, "/docs/readme.md", "hash2", 200, ""); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docs/readme.md", 200, now, "hash2"); err != nil {
+		t.Fatalf("UpdateFileIndex() error: %v", err)
+	}
+	if err := s.SetVersioningOverride(ctx, "/docs/readme.md", true); err != nil {
+		t.Fatalf("SetVersioningOverride() error: %v", err)
+	}
+
+	if err := s.RenamePath(ctx, "/docs", "/notes"); err != nil {
+		t.Fatalf("RenamePath() error: %v", err)
+	}
+
+	versions, err := s.GetVersions(ctx, "/notes/readme.md")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("GetVersions() returned %d versions, want 2", len(versions))
+	}
+
+	oldVersions, err := s.GetVersions(ctx, "/docs/readme.md")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(oldVersions) != 0 {
+		t.Fatalf("GetVersions() returned %d versions for old path, want 0", len(oldVersions))
+	}
+
+	size, _, hash, err := s.GetFileIndex(ctx, "/notes/readme.md")
+	if err != nil {
+		t.Fatalf("GetFileIndex() error: %v", err)
+	}
+	if size != 200 {
+		t.Errorf("Size = %d, want 200", size)
+	}
+	if hash != "hash2" {
+		t.Errorf("Hash = %s, want hash2", hash)
+	}
+
+	_, _, _, err = s.GetFileIndex(ctx, "/docs/readme.md")
+	if err != ErrNotFound {
+		t.Errorf("GetFileIndex() old path error = %v, want ErrNotFound", err)
+	}
+
+	enabled, exists := s.GetVersioningOverride(ctx, "/notes/readme.md")
+	if !exists || !enabled {
+		t.Errorf("GetVersioningOverride() = (%v, %v), want (true, true)", enabled, exists)
+	}
+	_, exists = s.GetVersioningOverride(ctx, "/docs/readme.md")
+	if exists {
+		t.Error("GetVersioningOverride() old path should not exist")
+	}
+}
+
 func TestStore_SearchFiles(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

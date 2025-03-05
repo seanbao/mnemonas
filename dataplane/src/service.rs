@@ -325,19 +325,18 @@ impl DataPlane for DataPlaneService {
         &self,
         _request: Request<StatsRequest>,
     ) -> Result<Response<StatsResponse>, Status> {
-        let (total_chunks, total_size, compressed_size, hits, misses) = self.cas.stats();
-        
-        // Simple estimate of dedup ratio
-        let dedup_ratio = if hits + misses > 0 {
-            hits as f64 / (hits + misses) as f64
+        let (total_chunks, logical_size, unique_size, _compressed_size, _hits, _misses) = self.cas.stats();
+
+        let dedup_ratio = if logical_size > 0 {
+            1.0 - (unique_size as f64 / logical_size as f64)
         } else {
             0.0
         };
         
         Ok(Response::new(StatsResponse {
             total_chunks,
-            total_size,
-            unique_size: compressed_size, // Report disk usage (compressed size)
+            total_size: logical_size,
+            unique_size,
             dedup_ratio,
         }))
     }

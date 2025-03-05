@@ -4,6 +4,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
@@ -63,9 +65,11 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	}
 
 	logger := zerolog.Nop()
+	settings := config.Default()
 
 	server, err := NewServer(logger, &ServerConfig{
 		FileSystem: fs,
+		Config:     settings,
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
@@ -239,6 +243,16 @@ func TestServer_Trash(t *testing.T) {
 		body := w.Body.String()
 		if !strings.Contains(body, "items") {
 			t.Error("Response should contain 'items'")
+		}
+
+		var payload struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("Failed to parse response JSON: %v", err)
+		}
+		if _, ok := payload.Data["retentionDays"]; !ok {
+			t.Error("Response should include retentionDays")
 		}
 	})
 }

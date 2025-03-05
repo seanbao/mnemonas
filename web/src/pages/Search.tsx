@@ -29,21 +29,21 @@ function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: 
       onClick={onClick}
     >
       <div className="flex-shrink-0">
-        <FileIcon name={result.name} isDir={result.is_dir} size={24} variant="bare" />
+        <FileIcon name={result.name} isDir={result.isDir} size={24} variant="bare" />
       </div>
       <div className="flex-1 min-w-0">
         <div className="font-medium text-foreground truncate">{result.name}</div>
         <div className="text-xs text-default-500 truncate">{result.path}</div>
       </div>
       <div className="flex-shrink-0 text-right text-sm text-default-500">
-        {result.is_dir ? (
+        {result.isDir ? (
           <span>文件夹</span>
         ) : (
           <span>{formatBytes(result.size)}</span>
         )}
       </div>
       <div className="flex-shrink-0 text-right text-xs text-default-500 w-24">
-        {formatDate(result.mod_time)}
+        {formatDate(result.modTime)}
       </div>
     </div>
   )
@@ -76,12 +76,12 @@ export function SearchPage() {
   })
 
   const handleResultClick = useCallback((result: SearchResult) => {
-    if (result.is_dir) {
-      navigate(`/files${result.path}`)
+    if (result.isDir) {
+      navigate(`/files${encodeURI(result.path)}`)
     } else {
       // Navigate to parent directory and highlight the file
       const parentPath = result.path.substring(0, result.path.lastIndexOf('/')) || '/'
-      navigate(`/files${parentPath}`)
+      navigate(`/files${encodeURI(parentPath)}`)
     }
   }, [navigate])
 

@@ -10,7 +10,7 @@ vi.mock('@/api/files', () => ({
     version: '0.1.0',
     uptime: '1h30m',
     storage: {
-      dataDir: '/var/lib/mnemonas/data',
+      dataDir: '/root/.mnemonas/.mnemonas/objects',
       writable: true,
     },
   }),
@@ -46,7 +46,7 @@ describe('DashboardPage', () => {
       version: '0.1.0',
       uptime: '1h30m',
       storage: {
-        dataDir: '/var/lib/mnemonas/data',
+        dataDir: '/root/.mnemonas/.mnemonas/objects',
         writable: true,
       },
     })

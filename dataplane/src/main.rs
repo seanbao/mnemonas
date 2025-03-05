@@ -37,8 +37,8 @@ struct Args {
     grpc: SocketAddr,
     
     /// CAS storage directory
-    #[arg(short, long, default_value = "/tmp/mnemonas/cas")]
-    data_dir: PathBuf,
+    #[arg(short, long)]
+    data_dir: Option<PathBuf>,
     
     /// Log level
     #[arg(long, default_value = "info")]
@@ -55,6 +55,13 @@ struct Args {
     /// CDC maximum chunk size (KB)
     #[arg(long, default_value = "4096")]
     max_chunk_kb: u32,
+}
+
+fn default_data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".mnemonas").join(".mnemonas").join("objects");
+    }
+    PathBuf::from("./data/.mnemonas/objects")
 }
 
 /// Application state shared across handlers
@@ -86,11 +93,11 @@ struct StatsResponse {
 
 /// Health check endpoint
 async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
-    let (chunks, size, compressed_size, hits, misses) = state.cas.stats();
+    let (chunks, _logical_size, unique_size, compressed_size, hits, misses) = state.cas.stats();
     Json(HealthResponse {
         status: "healthy",
         chunks,
-        size,
+        size: unique_size,
         compressed_size,
         hits,
         misses,
@@ -99,20 +106,20 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
 
 /// Stats endpoint
 async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
-    let (chunks, size, compressed_size, hits, misses) = state.cas.stats();
-    let dedup_ratio = if hits + misses > 0 {
-        hits as f64 / (hits + misses) as f64
+    let (chunks, logical_size, unique_size, compressed_size, _hits, _misses) = state.cas.stats();
+    let dedup_ratio = if logical_size > 0 {
+        1.0 - (unique_size as f64 / logical_size as f64)
     } else {
         0.0
     };
-    let compression_ratio = if size > 0 {
-        compressed_size as f64 / size as f64
+    let compression_ratio = if unique_size > 0 {
+        compressed_size as f64 / unique_size as f64
     } else {
         1.0
     };
     Json(StatsResponse {
         total_chunks: chunks,
-        total_size: size,
+        total_size: logical_size,
         compressed_size,
         compression_ratio,
         dedup_ratio,
@@ -139,17 +146,19 @@ async fn main() -> Result<()> {
         .with_ansi(use_ansi)
         .init();
     
+    let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
         http_addr = %args.listen,
         grpc_addr = %args.grpc,
-        data_dir = %args.data_dir.display(),
+        data_dir = %data_dir.display(),
         "starting MnemoNAS DataPlane"
     );
     
     // Create CAS configuration
     let cas_config = CasConfig {
-        root: args.data_dir.clone(),
+        root: data_dir.clone(),
         shard_levels: 2,
         shard_size: 2,
         ..Default::default()

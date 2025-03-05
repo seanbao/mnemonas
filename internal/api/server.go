@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"runtime"
@@ -629,6 +630,35 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	versionHash := r.URL.Query().Get("version")
+	forceDownload := r.URL.Query().Get("download") == "true"
+
+	if versionHash != "" {
+		if err := validateHash(versionHash); err != nil {
+			BadRequest(w, err.Error())
+			return
+		}
+
+		reader, err := s.fs.GetVersion(r.Context(), filePath, versionHash)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				NotFound(w, err.Error())
+				return
+			}
+			InternalError(w, err.Error())
+			return
+		}
+		defer reader.Close()
+
+		if forceDownload {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", path.Base(filePath)))
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, reader)
+		return
+	}
+
 	// Get file info
 	info, err := s.fs.Stat(r.Context(), filePath)
 	if err != nil {
@@ -658,6 +688,9 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, info.ContentHash))
 	}
 	w.Header().Set("Cache-Control", "private, max-age=3600")
+	if forceDownload {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", path.Base(filePath)))
+	}
 
 	// Use http.ServeContent for proper Range support and content type detection
 	http.ServeContent(w, r, path.Base(filePath), info.ModTime, file)
@@ -1470,11 +1503,17 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 		apiItems = append(apiItems, apiItem)
 	}
 
-	NewAPIResponse(map[string]any{
+	response := map[string]any{
 		"items":     apiItems,
 		"count":     count,
 		"totalSize": totalSize,
-	}).Write(w, http.StatusOK)
+	}
+	if s.config != nil {
+		response["retentionDays"] = s.config.Storage.Trash.RetentionDays
+		response["retentionEnabled"] = s.config.Storage.Trash.Enabled
+		response["retentionMaxSize"] = s.config.Storage.Trash.MaxSize
+	}
+	NewAPIResponse(response).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
@@ -1874,6 +1913,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 type UpdateSettingsRequest struct {
 	Server    *ServerSettingsUpdate    `json:"server,omitempty"`
 	Retention *RetentionSettingsUpdate `json:"retention,omitempty"`
+	CDC       *CDCSettingsUpdate       `json:"cdc,omitempty"`
 	WebDAV    *WebDAVSettingsUpdate    `json:"webdav,omitempty"`
 }
 
@@ -1896,6 +1936,12 @@ type WebDAVSettingsUpdate struct {
 	AuthType *string `json:"auth_type,omitempty"`
 	Username *string `json:"username,omitempty"`
 	Password *string `json:"password,omitempty"`
+}
+
+type CDCSettingsUpdate struct {
+	MinChunkSize *uint32 `json:"min_chunk_size,omitempty"`
+	AvgChunkSize *uint32 `json:"avg_chunk_size,omitempty"`
+	MaxChunkSize *uint32 `json:"max_chunk_size,omitempty"`
 }
 
 // handleUpdateSettings updates settings
@@ -1947,6 +1993,18 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			if d, err := time.ParseDuration(*req.Retention.GCInterval); err == nil {
 				s.config.Storage.Retention.GCInterval = d
 			}
+		}
+	}
+
+	if req.CDC != nil {
+		if req.CDC.MinChunkSize != nil {
+			s.config.DataPlane.CDC.MinChunkSize = *req.CDC.MinChunkSize
+		}
+		if req.CDC.AvgChunkSize != nil {
+			s.config.DataPlane.CDC.AvgChunkSize = *req.CDC.AvgChunkSize
+		}
+		if req.CDC.MaxChunkSize != nil {
+			s.config.DataPlane.CDC.MaxChunkSize = *req.CDC.MaxChunkSize
 		}
 	}
 
