@@ -337,6 +337,8 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	dstExists := h.destinationExists(ctx, dst)
+
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
@@ -367,23 +369,54 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		}
 	}
 
-	// Simple implementation: read source file, write to destination
-	reader, err := h.fs.OpenFile(ctx, srcPath)
-	if err != nil {
+	if err := h.copyResource(ctx, srcPath, dst); err != nil {
 		h.handleError(w, err)
 		return
+	}
+
+	// Invalidate cache for destination parent and destination path.
+	h.propCache.Invalidate(path.Dir(dst))
+	h.propCache.Invalidate(dst)
+
+	if dstExists {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath string) error {
+	info, err := h.fs.Stat(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+
+	if info.IsDir {
+		if err := h.fs.Mkdir(ctx, dstPath); err != nil {
+			return err
+		}
+
+		children, err := h.fs.ReadDir(ctx, srcPath)
+		if err != nil {
+			return err
+		}
+
+		for _, child := range children {
+			childName := path.Base(child.Path)
+			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	reader, err := h.fs.OpenFile(ctx, srcPath)
+	if err != nil {
+		return err
 	}
 	defer reader.Close()
 
-	if err := h.fs.WriteFile(ctx, dst, reader); err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	// Invalidate cache for destination parent
-	h.propCache.Invalidate(path.Dir(dst))
-
-	w.WriteHeader(http.StatusCreated)
+	return h.fs.WriteFile(ctx, dstPath, reader)
 }
 
 func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Request, srcPath string) {
@@ -392,6 +425,8 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "missing Destination header", http.StatusBadRequest)
 		return
 	}
+
+	dstExists := h.destinationExists(ctx, dst)
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
@@ -419,6 +454,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	h.propCache.Invalidate(path.Dir(srcPath))
 	h.propCache.Invalidate(path.Dir(dst))
 
+	if dstExists {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -440,10 +479,16 @@ func (h *Handler) checkOverwriteHeader(ctx context.Context, r *http.Request, dst
 	return nil
 }
 
+func (h *Handler) destinationExists(ctx context.Context, dst string) bool {
+	_, err := h.fs.Stat(ctx, dst)
+	return err == nil
+}
+
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
-	depth := r.Header.Get("Depth")
-	if depth == "" {
-		depth = "infinity"
+	depth, err := h.parsePropfindDepth(r.Header.Get("Depth"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	// Check cache first
@@ -479,6 +524,19 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	h.writePropfindResponse(w, responses)
+}
+
+func (h *Handler) parsePropfindDepth(depth string) (string, error) {
+	if depth == "" {
+		return "infinity", nil
+	}
+
+	switch strings.ToLower(depth) {
+	case "0", "1", "infinity":
+		return strings.ToLower(depth), nil
+	default:
+		return "", errors.New("invalid Depth header")
+	}
 }
 
 func (h *Handler) writePropfindResponse(w http.ResponseWriter, responses []propfindResponse) {
@@ -611,12 +669,20 @@ func (h *Handler) handleError(w http.ResponseWriter, err error) {
 		http.Error(w, "resource not found", http.StatusNotFound)
 		return
 	}
+	if errors.Is(err, storage.ErrIsDir) || errors.Is(err, storage.ErrNotDir) {
+		http.Error(w, "resource type conflict", http.StatusConflict)
+		return
+	}
 	if errors.Is(err, storage.ErrDirNotEmpty) {
 		http.Error(w, "directory not empty", http.StatusConflict)
 		return
 	}
 	if errors.Is(err, storage.ErrAlreadyExists) {
 		http.Error(w, "resource already exists", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, storage.ErrFileLocked) {
+		http.Error(w, "resource is locked", http.StatusLocked)
 		return
 	}
 	http.Error(w, "internal server error", http.StatusInternalServerError)
