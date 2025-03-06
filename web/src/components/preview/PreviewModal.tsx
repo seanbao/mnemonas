@@ -4,6 +4,7 @@ import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } fro
 import { downloadFile } from '@/api/files'
 import { refreshAuthSession } from '@/api/auth'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
+import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
 import { PdfPreview } from './PdfPreview'
@@ -133,7 +134,9 @@ export function PreviewModal({
 
   const handleDownload = useCallback(() => {
     if (!currentFile) return
-    void downloadFile(currentFile.path, { filename: currentFile.name })
+    void downloadFile(currentFile.path, { filename: currentFile.name }).catch((error: unknown) => {
+      addToast(getFileDownloadErrorToast(error))
+    })
   }, [currentFile])
 
   const handleOpenExternal = useCallback(() => {

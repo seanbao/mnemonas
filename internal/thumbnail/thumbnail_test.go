@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -535,6 +536,30 @@ func TestInvalidateCache(t *testing.T) {
 	count2, _, _ := svc.CacheStats(ctx)
 	if count2 >= count && count > 0 {
 		t.Errorf("expected fewer files after invalidation, had %d now %d", count, count2)
+	}
+}
+
+func TestInvalidateCache_ReturnsRemovalErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cachePath := svc.cachePath(svc.cacheKey("/test/invalidate-error.png", SizeSmall))
+	if err := os.MkdirAll(cachePath, 0755); err != nil {
+		t.Fatalf("MkdirAll(cachePath) failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "stale-thumb"), []byte("thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(stale-thumb) failed: %v", err)
+	}
+
+	err = svc.InvalidateCache("/test/invalidate-error.png")
+	if err == nil {
+		t.Fatal("expected InvalidateCache to report cache removal failures")
+	}
+	if !strings.Contains(err.Error(), cachePath) {
+		t.Fatalf("expected cache removal error to mention %q, got %v", cachePath, err)
 	}
 }
 

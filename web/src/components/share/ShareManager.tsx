@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Card,
   CardBody,
@@ -92,6 +92,36 @@ function getShareActionErrorToast(
   }
 }
 
+function getShareLoadErrorToast(error: unknown): {
+  title: string
+  description?: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof ShareError) {
+    if (error.isFeatureDisabled) {
+      return {
+        title: '分享功能已关闭',
+        description: '当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。',
+        color: 'warning',
+      }
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: '分享功能暂不可用',
+        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return {
+    title: '刷新分享列表失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
 interface ShareManagerProps {
   showAllShares?: boolean
   featureEnabled?: boolean
@@ -103,6 +133,11 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   const [loadError, setLoadError] = useState<unknown | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Share | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
+  const sharesRef = useRef<Share[]>([])
+
+  useEffect(() => {
+    sharesRef.current = shares
+  }, [shares])
 
   const loadShares = useCallback(async () => {
     setIsLoading(true)
@@ -111,12 +146,15 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       const data = await listShares(showAllShares)
       setShares(data)
     } catch (err) {
+      const featureState = getShareFeatureState(err)
       setLoadError(err)
-      if (getShareFeatureState(err) === null) {
-        addToast({ 
-          title: err instanceof Error ? err.message : '加载分享列表失败',
-          color: 'danger' 
-        })
+      if (featureState !== null) {
+        setShares([])
+        return
+      }
+
+      if (sharesRef.current.length > 0) {
+        addToast(getShareLoadErrorToast(err))
       }
     } finally {
       setIsLoading(false)
@@ -128,6 +166,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     setIsLoading(false)
     setLoadError(null)
     setShares([])
+    sharesRef.current = []
     return
   }
     loadShares()
@@ -268,6 +307,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
           variant="flat"
           size="sm"
           onPress={loadShares}
+          aria-label="刷新分享列表"
           className="rounded-xl"
         >
           <RefreshCw size={16} />

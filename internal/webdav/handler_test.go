@@ -90,6 +90,7 @@ func setupTestHandler(t *testing.T) (*Handler, *storage.FileSystem, string) {
 		ReadOnly:   false,
 		AuthType:   "none",
 	})
+	t.Cleanup(func() { handler.Close() })
 
 	return handler, fs, tmpDir
 }
@@ -1822,6 +1823,35 @@ func TestHandler_ExpiredLockIsIgnoredAndCleanedUp(t *testing.T) {
 	if exists {
 		t.Fatal("expected expired lock to be cleaned up")
 	}
+}
+
+func TestHandler_LockCleanupLoopRemovesExpiredLocksWithoutNewRequests(t *testing.T) {
+	handler := NewHandler(Config{AuthType: "none"})
+	handler.lockCleanupInterval = 10 * time.Millisecond
+	t.Cleanup(func() { handler.Close() })
+
+	handler.locksMu.Lock()
+	handler.locks["/expired-background-lock.txt"] = webdavLock{
+		token:     "opaquelocktoken:expired-background",
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	handler.locksMu.Unlock()
+
+	handler.startLockCleanupLoop()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		handler.locksMu.Lock()
+		_, exists := handler.locks["/expired-background-lock.txt"]
+		handler.locksMu.Unlock()
+		if !exists {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("expected background lock cleanup loop to remove expired lock")
 }
 
 func TestHandler_LOCK_ReplacesExpiredLock(t *testing.T) {

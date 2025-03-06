@@ -115,6 +115,54 @@ describe('ShareManager', () => {
     })
   })
 
+  it('shows unavailable state after refreshing an existing list when share service becomes unavailable', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares)
+      .mockResolvedValueOnce(mockShares)
+      .mockRejectedValueOnce(new ShareError('share service unavailable', 503))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('刷新分享列表'))
+
+    await waitFor(() => {
+      expect(screen.getByText('分享功能暂不可用')).toBeInTheDocument()
+      expect(screen.getByText('分享服务当前不可用，请检查系统健康状态或稍后重试。')).toBeInTheDocument()
+    })
+
+    expect(mockAddToast).not.toHaveBeenCalled()
+  })
+
+  it('keeps the existing list and shows a toast when refresh fails with a generic error', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares)
+      .mockResolvedValueOnce(mockShares)
+      .mockRejectedValueOnce(new Error('Network error'))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('刷新分享列表'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '刷新分享列表失败',
+        description: 'Network error',
+        color: 'danger',
+      })
+    })
+
+    expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
+    expect(screen.getByText('report.pdf')).toBeInTheDocument()
+  })
+
   it('shows unavailable toast when toggling a share fails because the share service is unavailable', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.updateShare).mockRejectedValue(new ShareError('share service unavailable', 503))

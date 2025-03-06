@@ -1,6 +1,7 @@
 package favorites
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -192,6 +193,41 @@ func TestHandler_AddFavorite_RejectsUnknownFields(t *testing.T) {
 	}
 	if store.IsFavorite("user-123", "/docs/report.pdf") {
 		t.Fatal("expected favorite creation to be rejected before persistence")
+	}
+}
+
+func TestHandler_AddFavorite_RejectsOversizedRequestBody(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	body := bytes.NewReader(bytes.Repeat([]byte{'x'}, defaultJSONRequestBodyLimit+1))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	rec := httptest.NewRecorder()
+
+	handler.AddFavorite(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status 413, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Error   *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Success || payload.Error == nil || payload.Error.Code != "PAYLOAD_TOO_LARGE" {
+		t.Fatalf("expected PAYLOAD_TOO_LARGE error, got %s", rec.Body.String())
+	}
+	if store.IsFavorite("user-123", "/docs/report.pdf") {
+		t.Fatal("expected oversized favorite request to be rejected before persistence")
 	}
 }
 

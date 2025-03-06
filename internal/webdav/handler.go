@@ -33,6 +33,7 @@ var (
 )
 
 const webdavLockTimeout = time.Hour
+const webdavLockCleanupInterval = 5 * time.Minute
 
 type webdavLock struct {
 	token     string
@@ -41,13 +42,19 @@ type webdavLock struct {
 
 // Handler is the WebDAV request handler
 type Handler struct {
-	fs        *storage.FileSystem
-	prefix    string
-	readOnly  bool
-	pathLock  *PathLock
-	propCache *PropfindCache
-	locksMu   sync.Mutex
-	locks     map[string]webdavLock
+	fs                   *storage.FileSystem
+	prefix               string
+	readOnly             bool
+	pathLock             *PathLock
+	propCache            *PropfindCache
+	locksMu              sync.Mutex
+	locks                map[string]webdavLock
+	lockCleanupInterval  time.Duration
+	lockCleanupStartOnce sync.Once
+	lockCleanupStopOnce  sync.Once
+	lockCleanupStarted   chan struct{}
+	lockCleanupStop      chan struct{}
+	lockCleanupDone      chan struct{}
 	// REM-1 fix: Authentication
 	authType string
 	username string
@@ -68,16 +75,59 @@ type Config struct {
 // NewHandler creates a WebDAV handler
 func NewHandler(cfg Config) *Handler {
 	return &Handler{
-		fs:        cfg.FileSystem,
-		prefix:    strings.TrimSuffix(cfg.Prefix, "/"),
-		readOnly:  cfg.ReadOnly,
-		pathLock:  NewPathLock(),
-		propCache: NewPropfindCache(30*time.Second, 1000),
-		locks:     make(map[string]webdavLock),
-		authType:  strings.ToLower(cfg.AuthType),
-		username:  cfg.Username,
-		password:  cfg.Password,
+		fs:                  cfg.FileSystem,
+		prefix:              strings.TrimSuffix(cfg.Prefix, "/"),
+		readOnly:            cfg.ReadOnly,
+		pathLock:            NewPathLock(),
+		propCache:           NewPropfindCache(30*time.Second, 1000),
+		locks:               make(map[string]webdavLock),
+		lockCleanupInterval: webdavLockCleanupInterval,
+		lockCleanupStarted:  make(chan struct{}),
+		lockCleanupStop:     make(chan struct{}),
+		lockCleanupDone:     make(chan struct{}),
+		authType:            strings.ToLower(cfg.AuthType),
+		username:            cfg.Username,
+		password:            cfg.Password,
 	}
+}
+
+// Close stops background resources owned by the handler.
+func (h *Handler) Close() {
+	select {
+	case <-h.lockCleanupStarted:
+		h.lockCleanupStopOnce.Do(func() {
+			close(h.lockCleanupStop)
+		})
+		<-h.lockCleanupDone
+	default:
+	}
+}
+
+func (h *Handler) startLockCleanupLoop() {
+	if h.lockCleanupInterval <= 0 {
+		return
+	}
+
+	h.lockCleanupStartOnce.Do(func() {
+		close(h.lockCleanupStarted)
+
+		go func() {
+			ticker := time.NewTicker(h.lockCleanupInterval)
+			defer ticker.Stop()
+			defer close(h.lockCleanupDone)
+
+			for {
+				select {
+				case <-ticker.C:
+					h.locksMu.Lock()
+					h.removeExpiredLocksLocked(time.Now())
+					h.locksMu.Unlock()
+				case <-h.lockCleanupStop:
+					return
+				}
+			}
+		}()
+	})
 }
 
 // ServeHTTP handles WebDAV requests
@@ -963,11 +1013,14 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	h.startLockCleanupLoop()
+	now := time.Now()
+
 	h.locksMu.Lock()
-	h.removeExpiredLocksLocked(time.Now())
+	h.removeExpiredLocksLocked(now)
 	if existing, exists := h.locks[filePath]; exists {
 		if hasMatchingLockToken(extractLockTokens(r), existing.token) {
-			existing.expiresAt = time.Now().Add(webdavLockTimeout)
+			existing.expiresAt = now.Add(webdavLockTimeout)
 			h.locks[filePath] = existing
 			h.locksMu.Unlock()
 			h.writeLockResponse(w, existing.token)
@@ -979,10 +1032,10 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	// Simple implementation: return virtual lock
-	token := fmt.Sprintf("opaquelocktoken:%d", time.Now().UnixNano())
+	token := fmt.Sprintf("opaquelocktoken:%d", now.UnixNano())
 	h.locks[filePath] = webdavLock{
 		token:     token,
-		expiresAt: time.Now().Add(webdavLockTimeout),
+		expiresAt: now.Add(webdavLockTimeout),
 	}
 	h.locksMu.Unlock()
 

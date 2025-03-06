@@ -115,6 +115,7 @@ vi.mock('@/api/settings', () => ({
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    window.history.pushState({}, '', '/settings')
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
     mockGetWebDAVCredentials.mockResolvedValue({
       enabled: true,
@@ -209,6 +210,55 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('CDC 分块参数')).toBeTruthy()
         expect(screen.getByText('数据面连接')).toBeTruthy()
+      })
+    })
+
+    it('uses numeric input constraints for server port and retry settings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('8080')).toBeTruthy()
+      })
+
+      const portInput = screen.getByDisplayValue('8080')
+      expect(portInput).toHaveAttribute('type', 'number')
+      expect(portInput).toHaveAttribute('min', '1')
+      expect(portInput).toHaveAttribute('max', '65535')
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('3')).toBeTruthy()
+      })
+
+      const maxRetriesInput = screen.getByDisplayValue('3')
+      expect(maxRetriesInput).toHaveAttribute('type', 'number')
+      expect(maxRetriesInput).toHaveAttribute('min', '0')
+    })
+
+    it('uses url inputs for alert webhook and share base addresses', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      const alertsWebhookInput = await screen.findByPlaceholderText('https://hooks.example.com/alert')
+      expect(alertsWebhookInput).toHaveAttribute('type', 'url')
+
+      await openTab(user, '分享管理')
+
+      const shareBaseUrlInput = await screen.findByPlaceholderText('https://nas.example.com')
+      expect(shareBaseUrlInput).toHaveAttribute('type', 'url')
+    })
+
+    it('opens the tab selected in the query string on first render', async () => {
+      window.history.pushState({}, '', '/settings?tab=advanced')
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('CDC 分块参数')).toBeTruthy()
+        expect(screen.getByText('存储告警')).toBeTruthy()
       })
     })
   })

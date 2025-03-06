@@ -385,14 +385,18 @@ func (s *Service) InvalidateCache(filePath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var removeErr error
+
 	// Remove all size variants
 	for size := range SizeDimensions {
 		cacheKey := s.cacheKey(filePath, size)
 		cachePath := s.cachePath(cacheKey)
-		os.Remove(cachePath) // Ignore errors
+		if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removeErr = errors.Join(removeErr, fmt.Errorf("remove thumbnail cache %q: %w", cachePath, err))
+		}
 	}
 
-	return nil
+	return removeErr
 }
 
 // hasAlpha checks if an image has an alpha channel
