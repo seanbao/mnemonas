@@ -126,7 +126,11 @@ const (
 	auditWarningHeader     = `199 MnemoNAS "activity log persistence failed"`
 )
 
-func decodeJSONBody(r *http.Request, dst any) error {
+func decodeJSONBodyWithLimit(r *http.Request, dst any, limit int64) error {
+	if _, err := readBufferedRequestBody(r, limit); err != nil {
+		return err
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -142,6 +146,37 @@ func decodeJSONBody(r *http.Request, dst any) error {
 	}
 
 	return nil
+}
+
+func decodeJSONBody(r *http.Request, dst any) error {
+	return decodeJSONBodyWithLimit(r, dst, DefaultJSONRequestBodyLimit)
+}
+
+func readBufferedRequestBody(r *http.Request, limit int64) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, &http.MaxBytesError{Limit: limit}
+	}
+
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
+}
+
+func writeLimitedJSONBodyError(w http.ResponseWriter, err error, limit int64) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		respondPayloadTooLarge(w, fmt.Sprintf("request body too large (max %d bytes)", limit))
+		return
+	}
+
+	BadRequest(w, "invalid request body")
 }
 
 func requestHasBody(r *http.Request) (bool, error) {
@@ -1336,7 +1371,7 @@ type MoveRequest struct {
 func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 	var req MoveRequest
 	if err := decodeJSONBody(r, &req); err != nil {
-		BadRequest(w, "invalid request body")
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
 
@@ -1416,7 +1451,7 @@ type CopyRequest struct {
 func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 	var req CopyRequest
 	if err := decodeJSONBody(r, &req); err != nil {
-		BadRequest(w, "invalid request body")
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
 
@@ -1896,8 +1931,8 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasBody {
-		if err := decodeJSONBody(r, &req); err != nil {
-			BadRequest(w, "invalid request body")
+		if err := decodeJSONBodyWithLimit(r, &req, DefaultScrubRequestBodyLimit); err != nil {
+			writeLimitedJSONBodyError(w, err, DefaultScrubRequestBodyLimit)
 			return
 		}
 	}
@@ -3003,8 +3038,15 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 	if s.activity != nil {
 		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
 			user = claims.Username
-		} else if loginUser, err := readLoginUsername(r); err == nil && loginUser != "" {
-			user = loginUser
+		} else {
+			loginUser, err := readLoginUsername(r)
+			if err != nil {
+				writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+				return
+			}
+			if loginUser != "" {
+				user = loginUser
+			}
 		}
 	}
 
@@ -3027,11 +3069,10 @@ func readLoginUsername(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
 	if err != nil {
 		return "", err
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	var req auth.LoginRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -3268,7 +3309,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	var req UpdateSettingsRequest
 	if err := decodeJSONBody(r, &req); err != nil {
-		BadRequest(w, "invalid request body")
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
 
@@ -4124,7 +4165,12 @@ func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
-	if favoritePath, err := readFavoriteBodyPath(r); err == nil && favoritePath != "" {
+	favoritePath, err := readFavoriteBodyPath(r)
+	if err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+	if favoritePath != "" {
 		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
 			forbiddenPathOutsideHome(w)
 			return
@@ -4160,12 +4206,15 @@ func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
-	if favoritePaths, err := readFavoriteBatchPaths(r); err == nil {
-		for _, favoritePath := range favoritePaths {
-			if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
-				forbiddenPathOutsideHome(w)
-				return
-			}
+	favoritePaths, err := readFavoriteBatchPaths(r)
+	if err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+	for _, favoritePath := range favoritePaths {
+		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+			forbiddenPathOutsideHome(w)
+			return
 		}
 	}
 	s.favoritesHandler.CheckFavorites(w, r)
@@ -4215,9 +4264,12 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 	}
 
 	sharePath := ""
-	if parsedPath, err := readCreateSharePath(r); err == nil {
-		sharePath = parsedPath
+	parsedPath, err := readCreateSharePath(r)
+	if err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
 	}
+	sharePath = parsedPath
 	if sharePath != "" {
 		if err := s.authorizeUserPath(r.Context(), sharePath); err != nil {
 			forbiddenPathOutsideHome(w)
@@ -4271,11 +4323,10 @@ func readCreateSharePath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
 	if err != nil {
 		return "", err
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	var req share.CreateShareRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -4295,11 +4346,10 @@ func readFavoriteBodyPath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
 	if err != nil {
 		return "", err
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	var req struct {
 		Path string `json:"path"`
@@ -4321,11 +4371,10 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 		return nil, nil
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
 	if err != nil {
 		return nil, err
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	var req struct {
 		Paths []string `json:"paths"`

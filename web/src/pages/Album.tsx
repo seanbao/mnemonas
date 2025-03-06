@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { 
+  addToast,
   Button,
   Modal,
   ModalContent,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react'
 import { refreshAuthSession } from '@/api/auth'
 import { listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
+import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
 import { useUser } from '@/stores/auth'
 import { formatBytes, formatDate, isImageFile, cn, normalizePath } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -235,6 +237,14 @@ function ImagePreview({
     if (images.length === 0) return
     onNavigate((currentIndex + 1) % images.length)
   }, [currentIndex, images.length, onNavigate])
+
+  const handleDownload = useCallback(() => {
+    if (!currentImage) return
+
+    void downloadFile(currentImage.path, { filename: currentImage.name }).catch((error: unknown) => {
+      addToast(getFileDownloadErrorToast(error))
+    })
+  }, [currentImage])
 
   // Preload adjacent images
   useEffect(() => {
@@ -470,7 +480,7 @@ function ImagePreview({
                   variant="light"
                   aria-label="下载当前图片"
                   className="text-white rounded-xl"
-                  onPress={() => currentImage && void downloadFile(currentImage.path, { filename: currentImage.name })}
+                  onPress={handleDownload}
                 >
                   <Download size={18} />
                 </Button>

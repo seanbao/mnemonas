@@ -938,6 +938,26 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("login rejects oversized bodies", func(t *testing.T) {
+		body := bytes.Repeat([]byte{'x'}, defaultJSONRequestBodyLimit+1)
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("expected status 413, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "PAYLOAD_TOO_LARGE" {
+			t.Fatalf("expected PAYLOAD_TOO_LARGE error, got %+v", envelope.Error)
+		}
+	})
+
 	t.Run("login failure", func(t *testing.T) {
 		body := `{"username":"handleruser","password":"wrongpassword"}`
 		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))

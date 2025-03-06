@@ -14,6 +14,8 @@ import (
 
 var errCASPathSymlink = errors.New("CAS storage path must not traverse a symlink")
 
+var syncDir = syncCASDirectory
+
 // Layout defines the directory layout strategy for CAS storage
 type Layout interface {
 	// HashToPath converts hash to storage path (relative path)
@@ -161,13 +163,25 @@ func (s *Store) Put(hash string, data []byte) error {
 	}
 
 	// Step 3: fsync directory to ensure rename is persisted
-	parentDir, err := os.Open(dir)
-	if err == nil {
-		parentDir.Sync()
-		parentDir.Close()
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("failed to sync directory: %w", err)
 	}
 
 	return nil
+}
+
+func syncCASDirectory(dir string) error {
+	parentDir, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+
+	if err := parentDir.Sync(); err != nil {
+		_ = parentDir.Close()
+		return err
+	}
+
+	return parentDir.Close()
 }
 
 // Get reads data

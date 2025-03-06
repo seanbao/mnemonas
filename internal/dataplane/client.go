@@ -237,6 +237,9 @@ func (c *Client) PutFile(ctx context.Context, path string, r io.Reader) (*FileIn
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		_ = stream.CloseSend()
+	}()
 
 	// Send metadata first
 	if err := stream.Send(&pb.PutFileRequest{
@@ -295,6 +298,9 @@ func (c *Client) GetFile(ctx context.Context, manifestHash string, w io.Writer) 
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = stream.CloseSend()
+	}()
 
 	for {
 		resp, err := stream.Recv()

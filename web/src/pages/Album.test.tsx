@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent } from '@testing-library/react'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import * as HeroUI from '@heroui/react'
 import { refreshAuthSession } from '@/api/auth'
 import { AlbumPage } from './Album'
+
+const mockAddToast = vi.fn()
 
 const { mockUser } = vi.hoisted(() => ({
   mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
@@ -33,9 +36,10 @@ vi.mock('@/api/files', () => ({
   downloadFile: vi.fn(),
 }))
 
-import { listFiles } from '@/api/files'
+import { downloadFile, listFiles } from '@/api/files'
 
 const mockListFiles = listFiles as ReturnType<typeof vi.fn>
+const mockDownloadFile = vi.mocked(downloadFile)
 
 describe('AlbumPage', () => {
   const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
@@ -86,8 +90,10 @@ describe('AlbumPage', () => {
     mockUser.role = 'admin'
     mockUser.email = 'admin@local'
     mockUser.homeDir = '/'
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver as unknown as typeof IntersectionObserver)
     mockRefreshAuthSession.mockResolvedValue(false)
+    mockDownloadFile.mockResolvedValue(undefined)
     mockListFiles.mockResolvedValue({
       files: mockImageFiles,
       path: '/',
@@ -388,6 +394,34 @@ describe('AlbumPage', () => {
       await waitFor(() => {
         expect(screen.getByText('大小')).toBeTruthy()
         expect(screen.getByText('--')).toBeTruthy()
+      })
+    })
+
+    it('shows unavailable toast when downloading the current preview image fails because the filesystem is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockDownloadFile.mockRejectedValue(Object.assign(new Error('filesystem unavailable'), {
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+      }))
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      await user.click(thumbnail)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '下载当前图片' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '下载当前图片' }))
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledWith('/photos/photo1.jpg', { filename: 'photo1.jpg' })
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '下载暂不可用',
+          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
       })
     })
 
