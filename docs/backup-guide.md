@@ -88,7 +88,7 @@ set -e
 
 # 配置
 MNEMONAS_DIR="$HOME/.mnemonas"
-CONFIG_FILE="$HOME/.config/mnemonas/config.toml"
+CONFIG_FILE="$HOME/.mnemonas/config.toml"
 REMOTE="aliyun:mnemonas-backup"  # 改为你的远程配置
 DATE=$(date +%Y%m%d)
 
