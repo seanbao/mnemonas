@@ -2,6 +2,8 @@
  * Preview utility functions for file type detection and URL building
  */
 
+import { getStoredToken } from '@/api/auth'
+
 export type PreviewType = 
   | 'text' 
   | 'image' 
@@ -61,16 +63,15 @@ export function getFileExtension(filename: string): string {
  * Detect the preview type for a file
  */
 export function getPreviewType(filename: string): PreviewType {
-  const ext = getFileExtension(filename)
-  if (!ext) return 'unsupported'
-  
-  // Check special cases for files without extensions
   const baseName = filename.toLowerCase()
   if (baseName === 'dockerfile' || baseName === 'makefile' || 
       baseName === '.gitignore' || baseName === '.gitattributes' ||
       baseName === '.env') {
     return 'text'
   }
+
+  const ext = getFileExtension(filename)
+  if (!ext) return 'unsupported'
   
   if (MARKDOWN_EXTENSIONS.has(ext)) return 'markdown'
   if (PDF_EXTENSIONS.has(ext)) return 'pdf'
@@ -130,7 +131,7 @@ export function isAudioFile(filename: string): boolean {
  * Build preview URL for a file
  * Uses REST API endpoint for authenticated access (avoids Basic Auth popup)
  */
-export function buildPreviewUrl(path: string): string {
+export function buildPreviewUrl(path: string, options?: { includeAuth?: boolean }): string {
   // Normalize path
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   
@@ -140,7 +141,19 @@ export function buildPreviewUrl(path: string): string {
     .map(segment => encodeURIComponent(segment))
     .join('/')
   
-  return `/api/v1/download${encodedPath}`
+  const url = `/api/v1/download${encodedPath}`
+  if (options?.includeAuth === false) {
+    return url
+  }
+  return withAuthQuery(url)
+}
+
+function withAuthQuery(url: string): string {
+  const token = getStoredToken()
+  if (!token) return url
+  if (url.includes('auth=')) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}auth=${encodeURIComponent(token)}`
 }
 
 /**

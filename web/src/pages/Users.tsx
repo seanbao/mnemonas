@@ -37,6 +37,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { listUsers, createUser, deleteUser, resetUserPassword, type User } from '@/api/users'
+import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -271,8 +272,8 @@ export function UsersPage() {
     onResetOpen()
   }, [onResetOpen])
 
-  // Get current user from localStorage (set during login)
-  const currentUserId = localStorage.getItem('userId')
+  // Get current user from stored auth state
+  const currentUserId = getStoredUser()?.id
 
   return (
     <div className="h-full flex flex-col p-6">

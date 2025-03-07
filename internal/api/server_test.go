@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,8 +15,10 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
@@ -76,6 +79,121 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	}
 
 	return server, fs, tmpDir
+}
+
+func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string, string) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	usersFile := path.Join(tmpDir, "users.json")
+	userStore, _, err := auth.NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	username := "tester"
+	password := "password123"
+	if _, err := userStore.Create(username, password, "", auth.RoleUser); err != nil {
+		t.Fatalf("create user error: %v", err)
+	}
+
+	logger := zerolog.Nop()
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+
+	server, err := NewServer(logger, &ServerConfig{
+		FileSystem:     fs,
+		Config:         settings,
+		AuthEnabled:    true,
+		AuthUsersFile:  usersFile,
+		AuthJWTSecret:  "test-secret",
+		AuthAccessTTL:  15 * time.Minute,
+		AuthRefreshTTL: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	return server, fs, tmpDir, username, password
+}
+
+func setupShareServer(t *testing.T) (*Server, string) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("mkdir error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a"))); err != nil {
+		t.Fatalf("write file error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/sub"); err != nil {
+		t.Fatalf("mkdir error: %v", err)
+	}
+
+	shareStorePath := path.Join(tmpDir, "shares.json")
+	shareStore, err := share.NewShareStore(shareStorePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/docs",
+		Type:      share.ShareTypeFolder,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("create share error: %v", err)
+	}
+
+	logger := zerolog.Nop()
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+
+	server, err := NewServer(logger, &ServerConfig{
+		FileSystem:     fs,
+		Config:         settings,
+		ShareEnabled:   true,
+		ShareStoreFile: shareStorePath,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	return server, createdShare.ID
 }
 
 func TestServer_Health(t *testing.T) {
@@ -196,6 +314,79 @@ func TestServer_DeleteFile(t *testing.T) {
 	_, err := fs.Stat(ctx, "/delete/file.txt")
 	if err == nil {
 		t.Error("File still exists after delete")
+	}
+}
+
+func TestServer_DownloadWithQueryAuth(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+
+	fs.Mkdir(ctx, "/auth")
+	fs.WriteFile(ctx, "/auth/file.txt", bytes.NewReader([]byte("secure")))
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest("POST", "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginResp auth.LoginResponse
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	downloadReq := httptest.NewRequest("GET", "/api/v1/download/auth/file.txt?auth="+loginResp.AccessToken, nil)
+	downloadRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(downloadRec, downloadReq)
+
+	if downloadRec.Code != http.StatusOK {
+		t.Fatalf("download status = %d, want %d", downloadRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(downloadRec.Body.String(), "secure") {
+		t.Error("downloaded content mismatch")
+	}
+}
+
+func TestServer_PublicShareListItems(t *testing.T) {
+	server, shareID := setupShareServer(t)
+
+	req := httptest.NewRequest("GET", "/s/"+shareID+"/items", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list share items status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Path  string `json:"path"`
+		Items []struct {
+			Name  string `json:"name"`
+			Path  string `json:"path"`
+			IsDir bool   `json:"is_dir"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	if payload.Path != "" {
+		t.Fatalf("expected empty path, got %q", payload.Path)
+	}
+
+	paths := map[string]bool{}
+	for _, item := range payload.Items {
+		paths[item.Path] = item.IsDir
+	}
+	if _, ok := paths["a.txt"]; !ok {
+		t.Fatalf("expected a.txt in share items")
+	}
+	if isDir, ok := paths["sub"]; !ok || !isDir {
+		t.Fatalf("expected sub directory in share items")
 	}
 }
 
@@ -691,6 +882,110 @@ func TestServer_DiagnosticsExport(t *testing.T) {
 	// Should return OK with zip content or service unavailable if maintenance not configured
 	if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
 		t.Errorf("DiagnosticsExport status = %d", w.Code)
+	}
+}
+
+func TestServer_WebDAVCredentials_AutoGenerated(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	secrets := &config.Secrets{
+		WebDAVPassword: "auto-pass",
+	}
+	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
+
+	server.config.Storage.Root = tmpDir
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Password = ""
+	server.config.WebDAV.Username = "webdav-user"
+
+	req := httptest.NewRequest("GET", "/api/v1/settings/webdav-credentials", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("WebDAV credentials status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Password string `json:"password"`
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Username != "webdav-user" {
+		t.Errorf("expected username webdav-user, got %q", payload.Username)
+	}
+	if payload.Password != "auto-pass" {
+		t.Errorf("expected auto-generated password, got %q", payload.Password)
+	}
+}
+
+func TestServer_WebDAVCredentials_CustomPassword(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	secrets := &config.Secrets{
+		WebDAVPassword: "auto-pass",
+	}
+	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
+
+	server.config.Storage.Root = tmpDir
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Password = "custom-pass"
+
+	req := httptest.NewRequest("GET", "/api/v1/settings/webdav-credentials", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("WebDAV credentials status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if _, ok := payload["password"]; ok {
+		t.Fatalf("expected password to be omitted for custom WebDAV password")
+	}
+}
+
+func TestServer_SetupStatus_CustomWebDAVPassword(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	secrets := &config.Secrets{
+		WebDAVPassword: "auto-pass",
+		SetupShown:     false,
+	}
+	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
+
+	server.config.Storage.Root = tmpDir
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Password = "custom-pass"
+
+	req := httptest.NewRequest("GET", "/api/v1/setup/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Setup status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if _, ok := payload["webdav_password"]; ok {
+		t.Fatalf("expected webdav_password to be omitted for custom password")
 	}
 }
 

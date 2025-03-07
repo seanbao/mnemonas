@@ -64,16 +64,16 @@ enabled = true               # 启用后所有 API 需要 JWT 认证
 jwt_secret = ""              # JWT 签名密钥（留空则自动生成）
 access_token_ttl = "15m"     # Access Token 有效期
 refresh_token_ttl = "168h"   # Refresh Token 有效期（7天）
-users_file = ""              # 用户数据文件路径（默认 ~/.mnemonas/users.json）
+users_file = ""              # 用户数据文件路径（默认 ~/.mnemonas/.mnemonas/users.json）
 
 [share]
 enabled = false              # 启用文件分享功能
-store_file = ""              # 分享数据文件路径（默认 ~/.mnemonas/shares.json）
+store_file = ""              # 分享数据文件路径（默认 ~/.mnemonas/.mnemonas/shares.json）
 base_url = ""                # 分享链接基础 URL（可选，用于生成完整链接）
 
 [favorites]
 enabled = true               # 启用收藏功能
-store_file = ""              # 收藏数据文件路径（默认 ~/.mnemonas/favorites.json）
+store_file = ""              # 收藏数据文件路径（默认 ~/.mnemonas/.mnemonas/favorites.json）
 
 [alerts]
 enabled = false              # 启用存储空间告警

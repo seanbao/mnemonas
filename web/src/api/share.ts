@@ -1,4 +1,5 @@
 import { authFetch } from './auth'
+import { encodePathForUrl, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 
@@ -50,6 +51,19 @@ export interface PublicShareInfo {
   file_name?: string
   file_size?: number
   folder_items?: number
+}
+
+export interface PublicShareItem {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+  mod_time: string
+}
+
+export interface PublicShareItemsResponse {
+  path: string
+  items: PublicShareItem[]
 }
 
 export class ShareError extends Error {
@@ -202,6 +216,41 @@ export async function getPublicShare(id: string): Promise<PublicShareInfo> {
 }
 
 /**
+ * List items in a public shared folder
+ */
+export async function getPublicShareItems(
+  id: string,
+  options?: { path?: string; password?: string }
+): Promise<PublicShareItemsResponse> {
+  const params = new URLSearchParams()
+  if (options?.path) {
+    params.set('path', options.path)
+  }
+  if (options?.password) {
+    params.set('password', options.password)
+  }
+  const query = params.toString()
+  const url = query ? `/s/${id}/items?${query}` : `/s/${id}/items`
+  const response = await fetch(url)
+
+  if (!response.ok) {
+    let message = '获取分享文件夹失败'
+    if (response.status === 410) {
+      message = '分享已过期或已禁用'
+    } else if (response.status === 401) {
+      message = '密码错误'
+    }
+    try {
+      const body = await response.json()
+      if (body.error) message = body.error
+    } catch { /* ignore */ }
+    throw new ShareError(message, response.status)
+  }
+
+  return response.json()
+}
+
+/**
  * Access password-protected share
  */
 export async function accessShareWithPassword(id: string, password: string): Promise<PublicShareInfo> {
@@ -243,7 +292,10 @@ export function getShareDownloadUrl(id: string, password?: string): string {
  * Get download URL for file in shared folder
  */
 export function getShareFileDownloadUrl(id: string, filePath: string, password?: string): string {
-  const url = `/s/${id}/download/${encodeURIComponent(filePath)}`
+  const normalizedPath = normalizePath(filePath)
+  const encodedPath = encodePathForUrl(normalizedPath)
+  const trimmedPath = encodedPath.startsWith('/') ? encodedPath.slice(1) : encodedPath
+  const url = `/s/${id}/download/${trimmedPath}`
   if (password) {
     return `${url}?password=${encodeURIComponent(password)}`
   }

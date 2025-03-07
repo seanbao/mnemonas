@@ -18,6 +18,8 @@
 
 MnemoNAS 数据分为以下几个部分：
 
+默认路径使用 `storage.root = ~/.mnemonas`。如已调整 `storage.root`，以下路径需替换为实际根目录。
+
 ```
 ~/.mnemonas/
 ├── files/                  # 用户文件（原生文件）
