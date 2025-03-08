@@ -411,6 +411,52 @@ describe('UsersPage', () => {
         expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
       })
     })
+
+    it('shows success toast when reloading users from an error state succeeds', async () => {
+    const user = userEvent.setup()
+    vi.mocked(usersApi.listUsers)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockResolvedValueOnce({
+        users: mockUsers,
+        total: mockUsers.length,
+      })
+
+    renderUsersPage()
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('用户列表')).toBeInTheDocument()
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '用户列表已刷新', color: 'success' })
+    })
+    })
+
+    it('shows warning toast when reloading users becomes unavailable', async () => {
+    const user = userEvent.setup()
+    vi.mocked(usersApi.listUsers)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce(new UsersError('configuration not available', 503))
+
+    renderUsersPage()
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '用户管理暂不可用',
+        description: '用户配置当前不可用，请检查系统配置状态或稍后重试。',
+        color: 'warning',
+      })
+    })
+    })
   })
 
   describe('validation feedback', () => {

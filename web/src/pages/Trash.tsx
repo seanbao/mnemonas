@@ -219,6 +219,18 @@ export function TrashPage() {
     queryFn: listTrash,
   })
 
+  const handleRefreshTrash = useCallback(async () => {
+  const result = await refetch()
+  if (result.error) {
+    addToast(getTrashActionErrorPresentation(result.error, {
+      unavailable: '回收站暂不可用',
+      failure: '刷新失败',
+    }))
+    return
+  }
+  addToast({ title: '回收站已刷新', color: 'success' })
+  }, [refetch])
+
   // Mutations
   const restoreMutation = useMutation({
     mutationFn: (id: string) => restoreFromTrash(id),
@@ -370,7 +382,7 @@ export function TrashPage() {
             title={errorPresentation.title}
             description={errorPresentation.description}
             action={
-              <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+		      <Button variant="bordered" className="rounded-xl" onPress={handleRefreshTrash}>
                 重新加载
               </Button>
             }

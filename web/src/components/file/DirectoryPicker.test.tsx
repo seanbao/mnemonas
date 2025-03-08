@@ -232,6 +232,30 @@ describe('DirectoryPicker', () => {
 
     await waitFor(() => {
       expect(screen.getByText('docs')).toBeTruthy()
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '目录已刷新', color: 'success' })
+    })
+  })
+
+  it('shows warning toast when reloading the root directory is temporarily unavailable', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockListFiles
+      .mockRejectedValueOnce(new Error('root unavailable'))
+      .mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '目录暂不可用',
+        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 

@@ -932,6 +932,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockListFiles).toHaveBeenCalledTimes(1)
         expect(screen.getByText('这里空空如也')).toBeTruthy()
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '刷新成功', color: 'success' })
       })
     })
 
@@ -957,6 +958,30 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(screen.queryByText('收藏状态加载失败')).toBeNull()
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '收藏状态已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when favorites status reload becomes unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCheckFavorites
+        .mockRejectedValueOnce(new Error('favorites unavailable'))
+        .mockRejectedValueOnce(Object.assign(new Error('favorites unavailable'), { status: 503, code: 'FAVORITES_UNAVAILABLE' }))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载收藏状态' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载收藏状态' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '收藏功能暂不可用',
+          description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
       })
     })
 

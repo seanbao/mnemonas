@@ -85,6 +85,36 @@ function getFavoritesActionErrorPresentation(error: unknown): {
   }
 }
 
+function getFavoritesRefreshErrorPresentation(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof FavoritesError) {
+    if (error.isFeatureDisabled) {
+      return {
+        title: '收藏功能已关闭',
+        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        color: 'warning',
+      }
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: '收藏功能暂不可用',
+        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return {
+    title: '刷新失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
 function getFavoritesBatchActionToast(result: BatchOperationResult) {
   if (result.succeeded !== 0 || result.failedErrors.length === 0) {
     return undefined
@@ -331,6 +361,15 @@ export function FavoritesPage() {
     }
   }, [canWrite, editingItem, noteValue, updateNoteMutation])
 
+  const handleRefreshFavorites = useCallback(async () => {
+  const result = await refetch()
+  if (result.error) {
+    addToast(getFavoritesRefreshErrorPresentation(result.error))
+    return
+  }
+  addToast({ title: '收藏夹已刷新', color: 'success' })
+  }, [refetch])
+
   if (isLoading) {
     return (
       <div className="p-6 lg:p-8 flex items-center justify-center h-full">
@@ -376,7 +415,7 @@ export function FavoritesPage() {
               title="收藏功能暂不可用"
               description="收藏存储未成功初始化，请检查系统健康状态或稍后重试。"
               action={
-                <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                <Button variant="bordered" className="rounded-xl" onPress={handleRefreshFavorites}>
                   重新加载
                 </Button>
               }
@@ -399,7 +438,7 @@ export function FavoritesPage() {
             title="加载收藏列表失败"
             description={(error as Error).message || '请稍后重试'}
             action={
-              <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+              <Button variant="bordered" className="rounded-xl" onPress={handleRefreshFavorites}>
                 重新加载
               </Button>
             }

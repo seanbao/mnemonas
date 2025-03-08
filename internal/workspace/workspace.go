@@ -18,11 +18,56 @@ var readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
 	return entry.Info()
 }
 
+var copyWorkspaceData = copyWithContext
+var syncWorkspaceDir = syncWorkspaceParentDir
+
+func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+	buffer := make([]byte, 32*1024)
+	var written int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return written, err
+		}
+
+		readBytes, readErr := src.Read(buffer)
+		if readBytes > 0 {
+			if err := ctx.Err(); err != nil {
+				return written, err
+			}
+			writeBytes, writeErr := dst.Write(buffer[:readBytes])
+			written += int64(writeBytes)
+			if writeErr != nil {
+				return written, writeErr
+			}
+			if writeBytes != readBytes {
+				return written, io.ErrShortWrite
+			}
+		}
+
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return written, nil
+			}
+			return written, readErr
+		}
+	}
+}
+
 func cleanupTempPath(tmpPath string, operationErr error) error {
 	if removeErr := os.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
 	}
 	return operationErr
+}
+
+func syncWorkspaceParentDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 // Common errors
@@ -174,6 +219,9 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	entries, err := os.ReadDir(fullPath)
 	if err != nil {
@@ -188,6 +236,9 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 
 	result := make([]*FileInfo, 0, len(entries))
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		info, err := readDirEntryInfo(e)
 		if err != nil {
 			return nil, err
@@ -262,6 +313,9 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 	if err := w.validatePath(fullPath); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
@@ -298,6 +352,9 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 	if err := os.Rename(tmpPath, fullPath); err != nil {
 		return cleanupTempPath(tmpPath, err)
 	}
+	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
+		return fmt.Errorf("sync parent directory: %w", err)
+	}
 
 	return nil
 }
@@ -306,6 +363,9 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.Reader) error {
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -327,7 +387,7 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 	}
 	tmpPath := tmpFile.Name()
 
-	_, copyErr := io.Copy(tmpFile, r)
+	_, copyErr := copyWorkspaceData(ctx, tmpFile, r)
 	syncErr := tmpFile.Sync()
 	closeErr := tmpFile.Close()
 
@@ -343,6 +403,9 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 
 	if err := os.Rename(tmpPath, fullPath); err != nil {
 		return cleanupTempPath(tmpPath, err)
+	}
+	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
+		return fmt.Errorf("sync parent directory: %w", err)
 	}
 
 	return nil
@@ -486,6 +549,9 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 	if err := w.validatePath(dstPath); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Check source exists and is a file
 	srcInfo, err := os.Stat(srcPath)
@@ -530,7 +596,7 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 	}
 	tmpPath := dstFile.Name()
 
-	_, copyErr := io.Copy(dstFile, srcFile)
+	_, copyErr := copyWorkspaceData(ctx, dstFile, srcFile)
 	syncErr := dstFile.Sync()
 	closeErr := dstFile.Close()
 
@@ -547,6 +613,9 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 	if err := os.Rename(tmpPath, dstPath); err != nil {
 		return cleanupTempPath(tmpPath, err)
 	}
+	if err := syncWorkspaceDir(filepath.Dir(dstPath)); err != nil {
+		return fmt.Errorf("sync parent directory: %w", err)
+	}
 
 	return nil
 }
@@ -561,8 +630,14 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 	if err := w.validatePath(rootPath); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	return filepath.Walk(rootPath, func(absPath string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return err
 		}
@@ -590,7 +665,13 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 
 // CleanupStaging removes incomplete staging files (.tmp files)
 func (w *Workspace) CleanupStaging(ctx context.Context) (files int, bytes int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
 	err = filepath.Walk(w.root, func(path string, info os.FileInfo, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}

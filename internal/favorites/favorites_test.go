@@ -4,10 +4,47 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestWriteFavoritesStoreFile_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	originalSyncFavoritesStoreDir := syncFavoritesStoreDir
+	syncFavoritesStoreDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncFavoritesStoreDir = originalSyncFavoritesStoreDir
+	}()
+
+	err := writeFavoritesStoreFile(storePath, []byte("[]"))
+	if err == nil {
+		t.Fatal("expected writeFavoritesStoreFile() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync favorites directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(storePath)
+	if readErr != nil {
+		t.Fatalf("expected favorites file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("expected favorites content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(storePath)
+	if statErr != nil {
+		t.Fatalf("expected favorites file to exist after sync failure, got %v", statErr)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected favorites file permissions 0600, got %o", info.Mode().Perm())
+	}
+}
 
 func TestStore(t *testing.T) {
 	// Create temp directory

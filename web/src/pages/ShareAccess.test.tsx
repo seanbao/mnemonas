@@ -164,6 +164,30 @@ describe('ShareAccessPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('test.txt')).toBeInTheDocument()
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '分享信息已刷新', color: 'success' })
+    })
+  })
+
+  it('shows warning toast when retrying share access becomes unavailable', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare
+      .mockRejectedValueOnce(new Error('network error'))
+      .mockRejectedValueOnce(new ShareError('share unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享内容暂不可用',
+        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 

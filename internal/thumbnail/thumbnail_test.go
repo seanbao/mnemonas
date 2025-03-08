@@ -103,6 +103,46 @@ func TestNewService_CreateDir(t *testing.T) {
 	}
 }
 
+func TestService_SaveToCache_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cachePath := filepath.Join(tmpDir, "ab", "cd", "thumb.jpg")
+	originalSyncThumbnailCacheDir := syncThumbnailCacheDir
+	syncThumbnailCacheDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncThumbnailCacheDir = originalSyncThumbnailCacheDir
+	}()
+
+	err = svc.saveToCache(cachePath, []byte("thumbnail"))
+	if err == nil {
+		t.Fatal("expected saveToCache() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync thumbnail cache directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(cachePath)
+	if readErr != nil {
+		t.Fatalf("expected thumbnail cache file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "thumbnail" {
+		t.Fatalf("expected thumbnail cache content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(cachePath)
+	if statErr != nil {
+		t.Fatalf("expected thumbnail cache file to exist after sync failure, got %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected thumbnail cache file permissions 0644, got %o", info.Mode().Perm())
+	}
+}
+
 func TestIsSupportedImage(t *testing.T) {
 	tests := []struct {
 		filename string

@@ -64,6 +64,24 @@ describe('Header', () => {
     })
 
     expect(invalidateQueries).toHaveBeenCalled()
+    expect(mockAddToast).toHaveBeenCalledWith({ title: '数据已刷新', color: 'success' })
+  })
+
+  it('shows a danger toast when refresh invalidation fails', async () => {
+    invalidateQueries.mockRejectedValueOnce(new Error('refresh failed'))
+    render(<Header />)
+
+    const refreshButton = screen.getByLabelText('刷新数据')
+    await act(async () => {
+      refreshButton.click()
+      await Promise.resolve()
+    })
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '刷新失败',
+      description: 'refresh failed',
+      color: 'danger',
+    })
   })
 
   it('hides settings menu item for non-admin users', () => {

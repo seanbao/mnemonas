@@ -4,9 +4,46 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestWriteHistoryFile_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+
+	originalSyncHistoryFileDir := syncHistoryFileDir
+	syncHistoryFileDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncHistoryFileDir = originalSyncHistoryFileDir
+	}()
+
+	err := writeHistoryFile(historyPath, []byte("{}"))
+	if err == nil {
+		t.Fatal("expected writeHistoryFile() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync maintenance history directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(historyPath)
+	if readErr != nil {
+		t.Fatalf("expected history file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "{}" {
+		t.Fatalf("expected history content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(historyPath)
+	if statErr != nil {
+		t.Fatalf("expected history file to exist after sync failure, got %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected history file permissions 0644, got %o", info.Mode().Perm())
+	}
+}
 
 func TestNewHistoryStore(t *testing.T) {
 	tmpDir := t.TempDir()

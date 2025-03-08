@@ -5,10 +5,47 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestWriteShareStoreFile_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+
+	originalSyncShareStoreDir := syncShareStoreDir
+	syncShareStoreDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreDir = originalSyncShareStoreDir
+	}()
+
+	err := writeShareStoreFile(storePath, []byte("[]"))
+	if err == nil {
+		t.Fatal("expected writeShareStoreFile() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync shares directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(storePath)
+	if readErr != nil {
+		t.Fatalf("expected shares file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("expected shares content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(storePath)
+	if statErr != nil {
+		t.Fatalf("expected shares file to exist after sync failure, got %v", statErr)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected shares file permissions 0600, got %o", info.Mode().Perm())
+	}
+}
 
 func TestShareStore_Create(t *testing.T) {
 	tempDir := t.TempDir()

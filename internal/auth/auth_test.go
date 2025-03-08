@@ -4,16 +4,54 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+func TestWriteAuthFileAtomically_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "users.json")
+
+	originalSyncAuthFileDir := syncAuthFileDir
+	syncAuthFileDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncAuthFileDir = originalSyncAuthFileDir
+	}()
+
+	err := writeAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users")
+	if err == nil {
+		t.Fatal("expected writeAuthFileAtomically() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync users directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(usersPath)
+	if readErr != nil {
+		t.Fatalf("expected users file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("expected users content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(usersPath)
+	if statErr != nil {
+		t.Fatalf("expected users file to exist after sync failure, got %v", statErr)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected users file permissions 0600, got %o", info.Mode().Perm())
+	}
+}
 
 func TestUserStore(t *testing.T) {
 	dir := t.TempDir()

@@ -37,6 +37,7 @@ type Store struct {
 }
 
 var favoritesStoreWriter = writeFavoritesStoreFile
+var syncFavoritesStoreDir = syncFavoritesDir
 
 type favoritesSnapshot struct {
 	data     map[string]map[string]*Favorite
@@ -237,8 +238,21 @@ func writeFavoritesStoreFile(path string, data []byte) error {
 		return fmt.Errorf("failed to replace favorites file: %w", err)
 	}
 	cleanup = false
+	if err := syncFavoritesStoreDir(dir); err != nil {
+		return fmt.Errorf("failed to sync favorites directory: %w", err)
+	}
 
 	return nil
+}
+
+func syncFavoritesDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 // Add adds a path to favorites
