@@ -2,11 +2,25 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { DashboardPage } from './Dashboard'
+import * as HeroUI from '@heroui/react'
 
 const useIsAdminMock = vi.fn(() => true)
+const mockAddToast = vi.fn()
 
 // Mock the API functions
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getHealth: vi.fn().mockResolvedValue({
     status: 'healthy',
     uptime: '1h30m',
@@ -65,7 +79,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { getAppVersion, getHealth, getStorageStats } from '@/api/files'
+import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats } from '@/api/files'
 import { ApiError, listActivity } from '@/api/activity'
 
 const mockGetHealth = getHealth as ReturnType<typeof vi.fn>
@@ -76,6 +90,7 @@ const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 describe('DashboardPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
     mockNavigate.mockClear()
     // Reset mocks to default values (vi.clearAllMocks clears mockResolvedValue)
@@ -215,6 +230,52 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('总容量未配置，无法计算占用比例')).toBeTruthy()
+      })
+    })
+  })
+
+  describe('retry feedback', () => {
+    it('shows success toast when retry refresh succeeds', async () => {
+      const user = userEvent.setup()
+      mockGetHealth.mockRejectedValueOnce(new FilesApiError('health unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('重新加载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('重新加载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '系统概览已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when retry is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      mockGetHealth.mockRejectedValueOnce(new FilesApiError('health unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      mockGetStorageStats.mockResolvedValueOnce({
+        totalSize: 1073741824,
+        totalObjects: 100,
+        dedupRatio: 1.5,
+      })
+      mockGetStorageStats.mockRejectedValueOnce(new FilesApiError('stats unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('重新加载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('重新加载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新暂不可用',
+          description: '部分系统概览数据当前不可用，请检查服务状态后重试。',
+          color: 'warning',
+        })
       })
     })
   })

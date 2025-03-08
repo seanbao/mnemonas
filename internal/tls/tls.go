@@ -22,7 +22,25 @@ import (
 var (
 	errCertFileSymlink = errors.New("TLS certificate file path must not be a symlink")
 	errKeyFileSymlink  = errors.New("TLS private key file path must not be a symlink")
+	syncTLSDir         = syncTLSDirectory
 )
+
+func syncTLSDirectory(dir string) error {
+	parentDir, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open directory %s: %w", dir, err)
+	}
+	defer func() {
+		_ = parentDir.Close()
+	}()
+	if err := parentDir.Sync(); err != nil {
+		return fmt.Errorf("sync directory %s: %w", dir, err)
+	}
+	if err := parentDir.Close(); err != nil {
+		return fmt.Errorf("close directory %s: %w", dir, err)
+	}
+	return nil
+}
 
 // Config holds TLS configuration
 type Config struct {
@@ -268,6 +286,9 @@ func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, 
 		return fmt.Errorf("failed to replace %s: %w", label, err)
 	}
 	cleanup = false
+	if err := syncTLSDir(dir); err != nil {
+		return fmt.Errorf("failed to sync %s directory: %w", label, err)
+	}
 	return nil
 }
 

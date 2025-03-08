@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Card, CardBody, CardHeader, Progress, Chip, Button, Divider } from '@heroui/react'
+import { Card, CardBody, CardHeader, Progress, Chip, Button, Divider, addToast } from '@heroui/react'
 import { 
   Activity, 
   Server, 
@@ -85,6 +85,23 @@ function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string
   }
 }
 
+function getHealthRefreshErrorToast(errors: Array<unknown>): { title: string; description: string; color: 'warning' | 'danger' } {
+  const presentation = getHealthLoadErrorPresentation(errors)
+  if (errors.some((error) => error instanceof ApiError && error.isUnavailable)) {
+    return {
+      title: '刷新暂不可用',
+      description: presentation.description,
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '刷新失败',
+    description: presentation.description,
+    color: 'danger',
+  }
+}
+
 export function HealthPage() {
   const { data: diagnostics, isLoading: diagLoading, error: diagError, refetch: refetchDiag } = useQuery({
     queryKey: ['diagnostics'],
@@ -102,9 +119,16 @@ export function HealthPage() {
   const loadError = diagError || statsError
   const loadErrorPresentation = getHealthLoadErrorPresentation([diagError, statsError])
 
-  const handleRefresh = () => {
-    void refetchDiag()
-    void refetchStats()
+  const handleRefresh = async () => {
+    const [diagResult, statsResult] = await Promise.all([refetchDiag(), refetchStats()])
+    const refreshErrors = [diagResult.error, statsResult.error].filter((error): error is unknown => Boolean(error))
+
+    if (refreshErrors.length > 0) {
+      addToast(getHealthRefreshErrorToast(refreshErrors))
+      return
+    }
+
+    addToast({ title: '健康数据已刷新', color: 'success' })
   }
 
   // Calculate dedup savings
