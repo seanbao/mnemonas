@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { HealthPage } from './Health'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
 
 // Mock API
 vi.mock('@/api/files', () => ({
@@ -68,6 +71,7 @@ describe('HealthPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockGetDiagnostics.mockResolvedValue(mockDiagnostics)
     mockGetStorageStats.mockResolvedValue(mockStats)
   })
@@ -121,6 +125,45 @@ describe('HealthPage', () => {
         expect(mockGetDiagnostics.mock.calls.length).toBeGreaterThanOrEqual(2)
         expect(mockGetStorageStats.mock.calls.length).toBeGreaterThanOrEqual(2)
       })
+    })
+
+    it('shows success toast when refresh succeeds', async () => {
+    const user = userEvent.setup()
+    render(<HealthPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('刷新')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('刷新'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '健康数据已刷新', color: 'success' })
+    })
+    })
+
+    it('shows warning toast when refresh is temporarily unavailable', async () => {
+    const user = userEvent.setup()
+    mockGetDiagnostics.mockResolvedValueOnce(mockDiagnostics)
+    mockGetStorageStats.mockResolvedValueOnce(mockStats)
+    mockGetDiagnostics.mockResolvedValueOnce(mockDiagnostics)
+    mockGetStorageStats.mockRejectedValueOnce(new ApiError('health unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+    render(<HealthPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('刷新')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('刷新'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '刷新暂不可用',
+        description: '诊断或存储统计服务当前不可用，请检查系统状态或稍后重试。',
+        color: 'warning',
+      })
+    })
     })
   })
 

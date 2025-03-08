@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -338,6 +339,37 @@ func TestConfig_SaveLoad(t *testing.T) {
 
 	if loaded.Log.Level != "debug" {
 		t.Errorf("Loaded log level = %s, want debug", loaded.Log.Level)
+	}
+}
+
+func TestConfig_Save_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	originalSyncManagedDir := syncManagedDir
+	syncManagedDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncManagedDir = originalSyncManagedDir
+	}()
+
+	cfg := Default()
+	cfg.Server.Port = 9999
+	err := cfg.Save(configPath)
+	if err == nil {
+		t.Fatal("expected Save() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync config directory") {
+		t.Fatalf("expected config directory sync error, got %v", err)
+	}
+
+	loaded, loadErr := Load(configPath)
+	if loadErr != nil {
+		t.Fatalf("expected config file to remain readable after sync failure, got %v", loadErr)
+	}
+	if loaded.Server.Port != 9999 {
+		t.Fatalf("expected saved config to persist despite sync failure, got port %d", loaded.Server.Port)
 	}
 }
 

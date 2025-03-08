@@ -1644,9 +1644,18 @@ export function FilesPage() {
   }, [applyKeyboardSelection, focusedIndex, sortedFiles.length])
 
   const handleKeyboardRefresh = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-    addToast({ title: '刷新成功', color: 'success' })
-  }, [queryClient, currentPath])
+    void refetch().then((result) => {
+      if (result.error) {
+        addToast(getFilesActionErrorToast(result.error, {
+          unavailable: '刷新暂不可用',
+          failure: '刷新失败',
+        }))
+        return
+      }
+
+      addToast({ title: '刷新成功', color: 'success' })
+    })
+  }, [refetch])
 
   // Register keyboard shortcuts
   useKeyboardShortcuts({

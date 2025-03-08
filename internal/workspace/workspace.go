@@ -14,6 +14,10 @@ import (
 	"time"
 )
 
+var readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+	return entry.Info()
+}
+
 func cleanupTempPath(tmpPath string, operationErr error) error {
 	if removeErr := os.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
@@ -184,9 +188,9 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 
 	result := make([]*FileInfo, 0, len(entries))
 	for _, e := range entries {
-		info, err := e.Info()
+		info, err := readDirEntryInfo(e)
 		if err != nil {
-			continue // Skip entries we can't stat
+			return nil, err
 		}
 
 		childPath := path.Join(CleanPath(name), e.Name())

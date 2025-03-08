@@ -216,9 +216,15 @@ func (s *Store) Delete(hash string) error {
 	if err := validateCASPath(s.root, path); err != nil {
 		return err
 	}
+	dir := filepath.Dir(path)
 	err := os.Remove(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to delete file: %w", err)
+	}
+	if err == nil {
+		if err := syncDir(dir); err != nil {
+			return fmt.Errorf("failed to sync directory: %w", err)
+		}
 	}
 	return nil
 }
