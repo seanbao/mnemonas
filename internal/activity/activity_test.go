@@ -108,6 +108,47 @@ func TestNewStore_RecoversFromCorruptLogFile(t *testing.T) {
 	}
 }
 
+func TestNewStore_ReturnsErrorWhenCorruptLogBackupDirectorySyncFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "activity.json")
+	if err := os.WriteFile(logPath, []byte("{invalid json"), 0640); err != nil {
+		t.Fatalf("WriteFile(activity.json) error: %v", err)
+	}
+
+	originalSyncActivityLogDir := syncActivityLogDir
+	syncFailed := false
+	syncActivityLogDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncActivityLogDir = originalSyncActivityLogDir
+	})
+
+	if _, err := NewStore(tmpDir); err == nil {
+		t.Fatal("expected NewStore() to fail when corrupt backup directory sync fails")
+	} else if !strings.Contains(err.Error(), "sync corrupt activity log directory") {
+		t.Fatalf("expected directory sync failure in error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(logPath); statErr != nil {
+		t.Fatalf("expected original corrupt log to remain after rollback, got %v", statErr)
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			t.Fatalf("expected no corrupt backup after rollback, found %s", entry.Name())
+		}
+	}
+}
+
 func TestNewStore_RejectsSymlinkLogFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	targetPath := filepath.Join(tmpDir, "real-activity.json")

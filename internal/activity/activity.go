@@ -91,7 +91,10 @@ func NewStore(root string) (*Store, error) {
 	// Load existing entries
 	if err := s.load(); err != nil {
 		if recoverErr := s.recoverCorruptLog(err); recoverErr != nil {
-			return nil, fmt.Errorf("load activity log: %w", err)
+			return nil, errors.Join(
+				fmt.Errorf("load activity log: %w", err),
+				fmt.Errorf("recover corrupt activity log: %w", recoverErr),
+			)
 		}
 	}
 
@@ -130,9 +133,25 @@ func (s *Store) recoverCorruptLog(loadErr error) error {
 		return loadErr
 	}
 
+	dir := filepath.Dir(s.logFilePath())
 	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.logFilePath(), time.Now().UnixNano())
 	if err := os.Rename(s.logFilePath(), corruptPath); err != nil {
 		return fmt.Errorf("backup corrupt activity log: %w", err)
+	}
+	if err := syncActivityLogDir(dir); err != nil {
+		if rollbackErr := os.Rename(corruptPath, s.logFilePath()); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt activity log directory: %w", err),
+				fmt.Errorf("rollback corrupt activity log backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncActivityLogDir(dir); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt activity log directory: %w", err),
+				fmt.Errorf("sync corrupt activity log rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt activity log directory: %w", err)
 	}
 
 	s.entries = make([]Entry, 0)
