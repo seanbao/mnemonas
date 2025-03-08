@@ -57,6 +57,7 @@ type Store struct {
 }
 
 var activityLogWriter = writeActivityLogFile
+var syncActivityLogDir = syncActivityDir
 
 func copyDetails(details map[string]string) map[string]string {
 	if details == nil {
@@ -278,7 +279,20 @@ func writeActivityLogFile(path string, data []byte) error {
 		return err
 	}
 	cleanup = false
+	if err := syncActivityLogDir(dir); err != nil {
+		return fmt.Errorf("failed to sync activity log directory: %w", err)
+	}
 	return nil
+}
+
+func syncActivityDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 // generateID creates a unique ID for an entry

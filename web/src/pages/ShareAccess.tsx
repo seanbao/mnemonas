@@ -137,10 +137,13 @@ export function ShareAccessPage() {
   const errorPresentation = getShareAccessErrorPresentation(error)
   const listErrorPresentation = getShareListErrorPresentation(listError)
 
-  const loadShareInfo = useCallback(async () => {
+  const loadShareInfo = useCallback(async (options?: { notify?: boolean }) => {
     if (!id) {
       setError(new Error('无效的分享链接'))
       setIsLoading(false)
+      if (options?.notify) {
+        addToast({ title: '刷新失败', description: '无效的分享链接', color: 'danger' })
+      }
       return
     }
 
@@ -164,11 +167,20 @@ export function ShareAccessPage() {
       } else {
         setIsAuthenticated(true)
       }
+      if (options?.notify) {
+        addToast({ title: '分享信息已刷新', color: 'success' })
+      }
     } catch (err) {
       if (err instanceof ShareError) {
         setError(err)
       } else {
         setError(new Error('加载分享信息失败'))
+      }
+      if (options?.notify) {
+        addToast(getShareActionErrorToast(err, {
+          unavailable: '分享内容暂不可用',
+          failure: '刷新失败',
+        }))
       }
     } finally {
       setIsLoading(false)
@@ -321,7 +333,7 @@ export function ShareAccessPage() {
               {errorPresentation.title}
             </h2>
             <p className="text-default-500">{errorPresentation.description}</p>
-            <Button className="mt-4" variant="bordered" onPress={loadShareInfo}>
+            <Button className="mt-4" variant="bordered" onPress={() => { void loadShareInfo({ notify: true }) }}>
               重新加载
             </Button>
           </CardBody>

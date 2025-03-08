@@ -7,6 +7,7 @@ import {
   CardHeader,
   Input,
   Button,
+  addToast,
 } from '@heroui/react'
 import {
   Search as SearchIcon,
@@ -35,6 +36,25 @@ function getSearchErrorPresentation(error: unknown): {
   return {
     title: '搜索失败',
     description: error instanceof Error && error.message ? error.message : '请稍后重试',
+  }
+}
+
+function getSearchRefreshErrorToast(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  const presentation = getSearchErrorPresentation(error)
+  if (error instanceof SearchError && error.isUnavailable) {
+    return {
+      ...presentation,
+      color: 'warning',
+    }
+  }
+
+  return {
+    ...presentation,
+    color: 'danger',
   }
 }
 
@@ -84,6 +104,15 @@ export function SearchPage() {
     queryFn: () => searchFiles(trimmedDebouncedQuery),
     enabled: trimmedDebouncedQuery.length > 0,
   })
+
+  const handleRetrySearch = useCallback(async () => {
+    const result = await refetch()
+    if (result.error) {
+      addToast(getSearchRefreshErrorToast(result.error))
+      return
+    }
+    addToast({ title: '搜索结果已刷新', color: 'success' })
+  }, [refetch])
 
   const handleResultClick = useCallback((result: SearchResult) => {
     if (result.isDir) {
@@ -180,7 +209,7 @@ export function SearchPage() {
                 title={getSearchErrorPresentation(error).title}
                 description={getSearchErrorPresentation(error).description}
                 action={
-                  <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                  <Button variant="bordered" className="rounded-xl" onPress={handleRetrySearch}>
                     重试搜索
                   </Button>
                 }

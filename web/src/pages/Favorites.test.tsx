@@ -157,6 +157,30 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(screen.getByText('2 项收藏')).toBeInTheDocument()
       expect(screen.getByText('report.pdf')).toBeInTheDocument()
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '收藏夹已刷新', color: 'success' })
+    })
+  })
+
+  it('shows warning toast when favorites reload becomes unavailable', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.listFavorites)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce(new FavoritesError('favorites unavailable', 503, 'FAVORITES_UNAVAILABLE'))
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能暂不可用',
+        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 

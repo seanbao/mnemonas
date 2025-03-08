@@ -99,6 +99,26 @@ function getWebDAVCredentialsErrorPresentation(error: unknown): { title: string;
   }
 }
 
+function getWebDAVCredentialsRefreshErrorToast(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof SettingsError && error.isUnavailable) {
+    return {
+      title: 'WebDAV 凭据暂不可用',
+      description: '当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '刷新失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
 function getSettingsActionErrorToast(
   error: unknown,
   titles: {
@@ -350,6 +370,33 @@ export function SettingsPage() {
     setIsDirty(false)
 
     addToast({ title: '已恢复为服务端当前配置', color: 'success' })
+  }
+
+  const handleRefreshSettings = async () => {
+    const result = await refetch()
+    if (result.error) {
+      addToast(getSettingsActionErrorToast(result.error, {
+        unavailable: '设置服务暂不可用',
+        failure: '刷新失败',
+      }))
+      return
+    }
+
+    if (result.data?.data) {
+      setDraftSettings(mapServerSettings(result.data.data))
+    }
+    setIsDirty(false)
+    addToast({ title: '设置已刷新', color: 'success' })
+  }
+
+  const handleRefreshWebDAVCredentials = async () => {
+    const result = await refetchWebDAVCredentials()
+    if (result.error) {
+      addToast(getWebDAVCredentialsRefreshErrorToast(result.error))
+      return
+    }
+
+    addToast({ title: 'WebDAV 凭据已刷新', color: 'success' })
   }
 
   // Save mutation
@@ -653,7 +700,7 @@ export function SettingsPage() {
           title={settingsLoadErrorPresentation?.title}
           description={settingsLoadErrorPresentation?.description}
           action={
-            <Button variant="bordered" className="rounded-xl" onPress={() => refetch()} isLoading={isRefetching}>
+		    <Button variant="bordered" className="rounded-xl" onPress={handleRefreshSettings} isLoading={isRefetching}>
               重新加载
             </Button>
           }
@@ -1056,7 +1103,7 @@ export function SettingsPage() {
                     size="sm"
                     variant="bordered"
                     className="rounded-xl"
-                    onPress={() => refetchWebDAVCredentials()}
+				    onPress={handleRefreshWebDAVCredentials}
                     isLoading={isRefetchingWebDAVCredentials}
                   >
                     重新加载凭据

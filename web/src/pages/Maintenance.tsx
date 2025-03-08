@@ -174,6 +174,26 @@ export default function Maintenance() {
     },
   })
   const loadErrorPresentation = getMaintenanceLoadErrorPresentation(error)
+
+  const handleRefreshScrubResult = async () => {
+    const result = await refetch()
+    if (result.error) {
+      const errorPresentation = getMaintenanceActionErrorPresentation(
+        result.error,
+        '刷新失败',
+        '校验结果暂不可用',
+        '维护历史或数据面当前不可用，请检查系统状态或稍后重试。',
+      )
+      addToast({
+        title: errorPresentation.title,
+        description: errorPresentation.description,
+        color: errorPresentation.color,
+      })
+      return
+    }
+
+    addToast({ title: '校验结果已刷新', color: 'success' })
+  }
   
   // Run scrub mutation
   const scrubMutation = useMutation({
@@ -281,7 +301,7 @@ export default function Maintenance() {
                 title={loadErrorPresentation.title}
                 description={loadErrorPresentation.description}
                 action={
-                  <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                  <Button variant="bordered" className="rounded-xl" onPress={handleRefreshScrubResult}>
                     重新加载
                   </Button>
                 }

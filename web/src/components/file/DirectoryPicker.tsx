@@ -35,6 +35,17 @@ export interface DirectoryPickerProps {
   allowCreateFolder?: boolean
 }
 
+function getDirectoryPickerRetryErrorToast(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  return getDirectoryPickerErrorPresentation(error, {
+    unavailable: '目录暂不可用',
+    failure: '加载目录失败',
+  })
+}
+
 interface TreeNodeData {
   path: string
   name: string
@@ -202,6 +213,15 @@ export function DirectoryPicker({
     enabled: isOpen,
   })
 
+  const handleRetryRoot = useCallback(async () => {
+  const result = await refetchRoot()
+  if (result.error) {
+    addToast(getDirectoryPickerRetryErrorToast(result.error))
+    return
+  }
+  addToast({ title: '目录已刷新', color: 'success' })
+  }, [refetchRoot])
+
   // Load expanded directories
   const loadDirectory = useCallback(async (path: string) => {
     if (loadedPaths.has(path)) return true
@@ -345,7 +365,7 @@ export function DirectoryPicker({
                   <p className="text-sm font-medium text-foreground">{errorPresentation.title}</p>
                   <p className="text-xs text-default-500">{errorPresentation.description}</p>
                 </div>
-                <Button size="sm" variant="bordered" className="rounded-lg" onPress={() => refetchRoot()}>
+                <Button size="sm" variant="bordered" className="rounded-lg" onPress={handleRetryRoot}>
                   重新加载
                 </Button>
               </div>

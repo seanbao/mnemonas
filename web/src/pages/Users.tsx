@@ -89,6 +89,17 @@ function getUsersActionErrorPresentation(
   }
 }
 
+function getUsersRefreshErrorPresentation(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  return getUsersActionErrorPresentation(error, {
+    unavailable: '用户管理暂不可用',
+    failure: '刷新失败',
+  })
+}
+
 // Role badge component
 function RoleBadge({ role }: { role: string }) {
   const config = {
@@ -245,7 +256,7 @@ export function UsersPage() {
   const [newRole, setNewRole] = useState<'admin' | 'user' | 'guest'>('user')
   const [resetPassword, setResetPassword] = useState('')
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isRefetching, error, refetch } = useQuery({
     queryKey: ['users'],
     queryFn: listUsers,
   })
@@ -376,6 +387,15 @@ export function UsersPage() {
     toggleStatusMutation.mutate({ userId: user.id, disabled: !user.disabled })
   }, [currentUserId, toggleStatusMutation])
 
+  const handleRefreshUsers = useCallback(async () => {
+	const result = await refetch()
+	if (result.error) {
+	  addToast(getUsersRefreshErrorPresentation(result.error))
+	  return
+	}
+	addToast({ title: '用户列表已刷新', color: 'success' })
+  }, [refetch])
+
   const users = data?.users ?? []
   const totalUsers = data?.total ?? users.length
   const adminCount = users.filter((user) => user.role === 'admin').length
@@ -394,8 +414,8 @@ export function UsersPage() {
             <Button
               variant="light"
               startContent={<RefreshCw size={16} />}
-              onPress={() => refetch()}
-              isLoading={isLoading}
+              onPress={handleRefreshUsers}
+              isLoading={isLoading || isRefetching}
               className="text-default-600 rounded-xl"
             >
               刷新
@@ -454,7 +474,7 @@ export function UsersPage() {
                 title={usersLoadError?.title ?? '加载用户列表失败'}
                 description={usersLoadError?.description ?? '请稍后重试'}
                 action={
-                  <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                  <Button variant="bordered" className="rounded-xl" onPress={handleRefreshUsers}>
                     重新加载
                   </Button>
                 }

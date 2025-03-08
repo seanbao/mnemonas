@@ -54,6 +54,7 @@ type UserStore struct {
 var userStoreWriter = func(path string, data []byte) error {
 	return writeAuthFileAtomically(path, data, errUserStoreSymlink, ".users-*.tmp", "users")
 }
+var syncAuthFileDir = syncAuthDir
 
 type userStoreSnapshot struct {
 	users    map[string]*User
@@ -287,8 +288,21 @@ func writeAuthFileAtomically(path string, data []byte, symlinkErr error, pattern
 		return fmt.Errorf("failed to replace %s file: %w", label, err)
 	}
 	cleanup = false
+	if err := syncAuthFileDir(dir); err != nil {
+		return fmt.Errorf("failed to sync %s directory: %w", label, err)
+	}
 
 	return nil
+}
+
+func syncAuthDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 func (s *UserStore) createDefaultAdmin() (string, error) {

@@ -198,6 +198,37 @@ function getFavoriteActionErrorToast(error: unknown): {
   }
 }
 
+function getFavoriteRefreshErrorToast(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  const code = getErrorCode(error)
+  const status = getErrorStatus(error)
+
+  if (code === 'FAVORITES_FEATURE_DISABLED') {
+    return {
+      title: '收藏功能已关闭',
+      description: '当前服务已关闭收藏功能。启用后重新加载即可恢复收藏状态与相关操作。',
+      color: 'warning',
+    }
+  }
+
+  if (code === 'FAVORITES_UNAVAILABLE' || (status === 503 && code !== 'FAVORITES_FEATURE_DISABLED')) {
+    return {
+      title: '收藏功能暂不可用',
+      description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '刷新失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
 function getUploadQueueErrorMessage(error: unknown): string {
   if (isFilesystemUnavailableError(error)) {
     return '文件系统当前不可用，请检查系统健康状态或稍后重试。'
@@ -1657,6 +1688,17 @@ export function FilesPage() {
     })
   }, [refetch])
 
+  const handleRefreshFavoritesBanner = useCallback(() => {
+    void refetchFavorites().then((result) => {
+      if (result.error) {
+        addToast(getFavoriteRefreshErrorToast(result.error))
+        return
+      }
+
+      addToast({ title: '收藏状态已刷新', color: 'success' })
+    })
+  }, [refetchFavorites])
+
   // Register keyboard shortcuts
   useKeyboardShortcuts({
     onDelete: canWrite ? handleKeyboardDelete : undefined,
@@ -1828,7 +1870,7 @@ export function FilesPage() {
               description={errorPresentation.description}
               className="max-w-md"
               action={
-                <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                <Button variant="bordered" className="rounded-xl" onPress={handleKeyboardRefresh}>
                   重新加载
                 </Button>
               }
@@ -2137,7 +2179,7 @@ export function FilesPage() {
               <p className="font-medium">{favoritesBanner?.title ?? '收藏状态加载失败'}</p>
               <p className="text-default-600">{favoritesBanner?.description ?? '请稍后重试'}</p>
             </div>
-            <Button size="sm" variant="bordered" className="rounded-xl" onPress={() => refetchFavorites()}>
+            <Button size="sm" variant="bordered" className="rounded-xl" onPress={handleRefreshFavoritesBanner}>
               重新加载收藏状态
             </Button>
           </div>
