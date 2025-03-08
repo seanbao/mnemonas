@@ -735,11 +735,12 @@ func TestStore_SearchFiles(t *testing.T) {
 
 func TestStore_Objects(t *testing.T) {
 	s := setupStore(t)
+	ctx := context.Background()
 
 	data := []byte("version content")
 
 	// Put object (hash is computed by dataplane)
-	hash, err := s.PutObject(data)
+	hash, err := s.PutObject(ctx, data)
 	if err != nil {
 		t.Fatalf("PutObject() error: %v", err)
 	}
@@ -750,7 +751,7 @@ func TestStore_Objects(t *testing.T) {
 	}
 
 	// Check exists
-	exists, err := s.HasObject(hash)
+	exists, err := s.HasObject(ctx, hash)
 	if err != nil {
 		t.Fatalf("HasObject() error: %v", err)
 	}
@@ -759,7 +760,7 @@ func TestStore_Objects(t *testing.T) {
 	}
 
 	// Get object
-	got, err := s.GetObject(hash)
+	got, err := s.GetObject(ctx, hash)
 	if err != nil {
 		t.Fatalf("GetObject() error: %v", err)
 	}
@@ -769,12 +770,12 @@ func TestStore_Objects(t *testing.T) {
 	}
 
 	// Delete object
-	err = s.DeleteObject(hash)
+	err = s.DeleteObject(ctx, hash)
 	if err != nil {
 		t.Fatalf("DeleteObject() error: %v", err)
 	}
 
-	exists, err = s.HasObject(hash)
+	exists, err = s.HasObject(ctx, hash)
 	if err != nil {
 		t.Fatalf("HasObject() after delete error: %v", err)
 	}
@@ -795,7 +796,7 @@ func TestStore_RunGC_ReturnsDeleteErrorsAndContinues(t *testing.T) {
 	}
 
 	called := make(map[string]int)
-	s.deleteObjectFn = func(hash string) error {
+	s.deleteObjectFn = func(ctx context.Context, hash string) error {
 		called[hash]++
 		if hash == "orphan-fail" {
 			return errors.New("delete object failed")
@@ -844,7 +845,7 @@ func TestStore_RunGC_ReturnsChunkRefDeleteErrors(t *testing.T) {
 		t.Fatalf("insert orphan-ref-fail error: %v", err)
 	}
 
-	s.deleteObjectFn = func(hash string) error { return nil }
+	s.deleteObjectFn = func(ctx context.Context, hash string) error { return nil }
 	s.deleteChunkRefFn = func(ctx context.Context, chunkHash string) error {
 		return errors.New("delete chunk ref failed")
 	}
@@ -880,7 +881,7 @@ func TestStore_RunGC_CleansChunkRefWhenObjectAlreadyMissing(t *testing.T) {
 		t.Fatalf("insert orphan-missing error: %v", err)
 	}
 
-	s.deleteObjectFn = func(hash string) error {
+	s.deleteObjectFn = func(ctx context.Context, hash string) error {
 		if hash != "orphan-missing" {
 			t.Fatalf("unexpected hash %q", hash)
 		}

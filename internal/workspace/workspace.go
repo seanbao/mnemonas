@@ -70,6 +70,18 @@ func syncWorkspaceParentDir(dir string) error {
 	return dirHandle.Sync()
 }
 
+func syncWorkspaceRenameDirs(oldPath, newPath string) error {
+	oldDir := filepath.Dir(oldPath)
+	newDir := filepath.Dir(newPath)
+	if oldDir == newDir {
+		return syncWorkspaceDir(oldDir)
+	}
+	if err := syncWorkspaceDir(newDir); err != nil {
+		return err
+	}
+	return syncWorkspaceDir(oldDir)
+}
+
 // Common errors
 var (
 	ErrNotFound             = errors.New("not found")
@@ -534,6 +546,21 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 			return ErrNotDir
 		}
 		return err
+	}
+	if err := syncWorkspaceRenameDirs(oldPath, newPath); err != nil {
+		if rollbackErr := os.Rename(newPath, oldPath); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync directory: %w", err),
+				fmt.Errorf("failed to rollback renamed path: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncWorkspaceRenameDirs(newPath, oldPath); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync directory: %w", err),
+				fmt.Errorf("failed to sync rollback directory: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("failed to sync directory: %w", err)
 	}
 
 	return nil

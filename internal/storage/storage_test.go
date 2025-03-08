@@ -446,12 +446,122 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenIndexUpdateFails(t *te
 	}
 }
 
+func TestFileSystem_WriteFile_RollsBackNewFileWhenDirectorySyncFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncStoragePathDir = func(dir string) error {
+		return errors.New("sync dir failed")
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err := fs.WriteFile(ctx, "/rollback-sync-new.bin", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() to fail when parent directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync parent directory") {
+		t.Fatalf("expected parent directory sync failure in error, got %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/rollback-sync-new.bin"); statErr != ErrNotFound {
+		t.Fatalf("Expected new file to be removed after rollback, got %v", statErr)
+	}
+}
+
+func TestFileSystem_WriteFile_RollsBackOverwriteWhenDirectorySyncFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rollback-sync-existing.bin", bytes.NewReader([]byte("old content"))); err != nil {
+		t.Fatalf("Initial WriteFile() error: %v", err)
+	}
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncStoragePathDir = func(dir string) error {
+		return errors.New("sync dir failed")
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err := fs.WriteFile(ctx, "/rollback-sync-existing.bin", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() overwrite to fail when parent directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync parent directory") {
+		t.Fatalf("expected parent directory sync failure in error, got %v", err)
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/rollback-sync-existing.bin")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != "old content" {
+		t.Fatalf("Expected original content after rollback, got %q", string(data))
+	}
+}
+
+func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenDirectorySyncFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rollback-sync-version.md", bytes.NewReader([]byte("old content"))); err != nil {
+		t.Fatalf("Initial WriteFile() error: %v", err)
+	}
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncStoragePathDir = func(dir string) error {
+		return errors.New("sync dir failed")
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err := fs.WriteFile(ctx, "/rollback-sync-version.md", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() overwrite to fail when parent directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync parent directory") {
+		t.Fatalf("expected parent directory sync failure in error, got %v", err)
+	}
+
+	versions, versionErr := fs.versions.GetVersions(ctx, "/rollback-sync-version.md")
+	if versionErr != nil {
+		t.Fatalf("GetVersions() after rollback error: %v", versionErr)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("Expected no historical version metadata after rollback, got %d entries", len(versions))
+	}
+
+	f, openErr := fs.OpenFile(ctx, "/rollback-sync-version.md")
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != "old content" {
+		t.Fatalf("Expected original content after rollback, got %q", string(data))
+	}
+}
+
 func TestFileSystem_WriteFile_ReturnsRollbackCleanupFailureWhenVersionRecordFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 	oldContent := []byte("old content " + generateID())
 	oldHash := computeHash(oldContent)
-	exists, err := fs.versions.HasObject(oldHash)
+	exists, err := fs.versions.HasObject(ctx, oldHash)
 	if err != nil {
 		t.Fatalf("HasObject(oldHash) error: %v", err)
 	}
@@ -473,7 +583,7 @@ func TestFileSystem_WriteFile_ReturnsRollbackCleanupFailureWhenVersionRecordFail
 		}
 		return errors.New("record version failed")
 	}
-	fs.deleteVersionObject = func(hash string) error {
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
 		deleteCalls++
 		if hash != oldHash {
 			t.Fatalf("unexpected delete hash %q", hash)
@@ -1129,7 +1239,7 @@ func TestFileSystem_PermanentDelete_AttemptsAllVersionObjectDeletes(t *testing.T
 	}
 
 	called := make(map[string]int)
-	fs.deleteVersionObject = func(hash string) error {
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
 		called[hash]++
 		return errors.New("delete object failed")
 	}
@@ -1166,7 +1276,7 @@ func TestFileSystem_PermanentDelete_DoesNotDeleteSharedVersionObject(t *testing.
 
 	sharedContent := []byte("shared-delete-" + generateID())
 	sharedHash := computeHash(sharedContent)
-	exists, err := fs.versions.HasObject(sharedHash)
+	exists, err := fs.versions.HasObject(ctx, sharedHash)
 	if err != nil {
 		t.Fatalf("HasObject(sharedHash) before writes error: %v", err)
 	}
@@ -1191,7 +1301,7 @@ func TestFileSystem_PermanentDelete_DoesNotDeleteSharedVersionObject(t *testing.
 		t.Fatalf("PermanentDelete(a) error: %v", err)
 	}
 
-	exists, err = fs.versions.HasObject(sharedHash)
+	exists, err = fs.versions.HasObject(ctx, sharedHash)
 	if err != nil {
 		t.Fatalf("HasObject(sharedHash) after delete error: %v", err)
 	}
@@ -2531,7 +2641,7 @@ func TestFileSystem_RestoreVersion_FailsWhenCurrentSnapshotCannotBeRecorded(t *t
 		{
 			name: "put object failure",
 			inject: func(fs *FileSystem) {
-				fs.putVersionObject = func(data []byte) (string, error) {
+				fs.putVersionObject = func(ctx context.Context, data []byte) (string, error) {
 					return "", errors.New("store current version failed")
 				}
 			},
@@ -2611,7 +2721,7 @@ func TestFileSystem_RestoreVersion_CleansUpCurrentSnapshotObjectWhenVersionRecor
 	ctx := context.Background()
 	currentContent := []byte("restore-current-" + generateID())
 	currentHash := computeHash(currentContent)
-	exists, err := fs.versions.HasObject(currentHash)
+	exists, err := fs.versions.HasObject(ctx, currentHash)
 	if err != nil {
 		t.Fatalf("HasObject(currentHash) error: %v", err)
 	}
@@ -2652,7 +2762,7 @@ func TestFileSystem_RestoreVersion_CleansUpCurrentSnapshotObjectWhenVersionRecor
 		t.Fatal("Expected RestoreVersion() to fail when current snapshot record fails")
 	}
 
-	exists, err = fs.versions.HasObject(currentHash)
+	exists, err = fs.versions.HasObject(ctx, currentHash)
 	if err != nil {
 		t.Fatalf("HasObject(currentHash) after failed restore error: %v", err)
 	}
@@ -2683,7 +2793,7 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 	currentContent := []byte("restore-index-current-" + generateID())
 	currentHash := computeHash(currentContent)
 
-	exists, err := fs.versions.HasObject(currentHash)
+	exists, err := fs.versions.HasObject(ctx, currentHash)
 	if err != nil {
 		t.Fatalf("HasObject(currentHash) before restore error: %v", err)
 	}
@@ -2723,7 +2833,7 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 		t.Fatal("Expected RestoreVersion() to fail when file index update fails")
 	}
 
-	exists, err = fs.versions.HasObject(currentHash)
+	exists, err = fs.versions.HasObject(ctx, currentHash)
 	if err != nil {
 		t.Fatalf("HasObject(currentHash) after failed restore error: %v", err)
 	}
@@ -2771,7 +2881,7 @@ func TestFileSystem_WriteFile_DoesNotFailWhenCleanupVersionsObjectDeleteFails(t 
 		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
-	fs.deleteVersionObject = func(hash string) error {
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
 		return errors.New("delete object failed")
 	}
 
@@ -2811,7 +2921,7 @@ func TestFileSystem_WriteFile_CleanupVersionsDoesNotDeleteSharedVersionObject(t 
 
 	sharedContent := []byte("shared-old-" + generateID())
 	sharedHash := computeHash(sharedContent)
-	exists, err := fs.versions.HasObject(sharedHash)
+	exists, err := fs.versions.HasObject(ctx, sharedHash)
 	if err != nil {
 		t.Fatalf("HasObject(sharedHash) before writes error: %v", err)
 	}
@@ -2835,7 +2945,7 @@ func TestFileSystem_WriteFile_CleanupVersionsDoesNotDeleteSharedVersionObject(t 
 		t.Fatalf("WriteFile(a v3) error: %v", err)
 	}
 
-	exists, err = fs.versions.HasObject(sharedHash)
+	exists, err = fs.versions.HasObject(ctx, sharedHash)
 	if err != nil {
 		t.Fatalf("HasObject(sharedHash) error: %v", err)
 	}
@@ -2901,7 +3011,7 @@ func TestFileSystem_WriteFile_DoesNotFailWhenForcedRetentionSweepFailsAfterCommi
 	}
 
 	fs.UpdateRetentionSettings(1, 365*24*time.Hour, ^uint64(0))
-	fs.deleteVersionObject = func(hash string) error {
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
 		return errors.New("delete version object failed")
 	}
 
@@ -2932,6 +3042,109 @@ func TestFileSystem_WriteFile_DoesNotFailWhenForcedRetentionSweepFailsAfterCommi
 	}
 	if _, err := fs.Stat(ctx, "/trigger.txt"); err != nil {
 		t.Fatalf("Stat(trigger) error: %v", err)
+	}
+}
+
+type storageContextKey string
+
+func TestFileSystem_WriteFile_PropagatesContextToVersionObjectOperations(t *testing.T) {
+	fs := setupFileSystem(t)
+	baseCtx := context.Background()
+	if err := fs.WriteFile(baseCtx, "/ctx-write.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+
+	ctx := context.WithValue(baseCtx, storageContextKey("key"), "write-value")
+	hasSeenCtx := false
+	putSeenCtx := false
+	fs.hasVersionObject = func(callCtx context.Context, hash string) (bool, error) {
+		if got := callCtx.Value(storageContextKey("key")); got != "write-value" {
+			t.Fatalf("hasVersionObject() context value = %v, want write-value", got)
+		}
+		hasSeenCtx = true
+		return false, nil
+	}
+	fs.putVersionObject = func(callCtx context.Context, data []byte) (string, error) {
+		if got := callCtx.Value(storageContextKey("key")); got != "write-value" {
+			t.Fatalf("putVersionObject() context value = %v, want write-value", got)
+		}
+		putSeenCtx = true
+		return computeHash(data), nil
+	}
+
+	if err := fs.WriteFile(ctx, "/ctx-write.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if !hasSeenCtx {
+		t.Fatal("expected hasVersionObject() to receive caller context")
+	}
+	if !putSeenCtx {
+		t.Fatal("expected putVersionObject() to receive caller context")
+	}
+}
+
+func TestFileSystem_GetVersion_PropagatesContextToVersionObjectLookup(t *testing.T) {
+	fs := setupFileSystem(t)
+	baseCtx := context.Background()
+	if err := fs.WriteFile(baseCtx, "/ctx-version.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(baseCtx, "/ctx-version.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	historicalHash := computeHash([]byte("v1"))
+	ctx := context.WithValue(baseCtx, storageContextKey("key"), "get-value")
+	getSeenCtx := false
+	fs.getVersionObject = func(callCtx context.Context, hash string) ([]byte, error) {
+		if got := callCtx.Value(storageContextKey("key")); got != "get-value" {
+			t.Fatalf("getVersionObject() context value = %v, want get-value", got)
+		}
+		if hash != historicalHash {
+			t.Fatalf("getVersionObject() hash = %q, want %q", hash, historicalHash)
+		}
+		getSeenCtx = true
+		return []byte("v1"), nil
+	}
+
+	reader, err := fs.GetVersion(ctx, "/ctx-version.txt", historicalHash)
+	if err != nil {
+		t.Fatalf("GetVersion() error: %v", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if string(data) != "v1" {
+		t.Fatalf("GetVersion() content = %q, want v1", string(data))
+	}
+	if !getSeenCtx {
+		t.Fatal("expected getVersionObject() to receive caller context")
+	}
+}
+
+func TestFileSystem_DeleteUnreferencedVersionObjects_PropagatesContextToDelete(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.WithValue(context.Background(), storageContextKey("key"), "delete-value")
+	deleteSeenCtx := false
+	fs.deleteVersionObject = func(callCtx context.Context, hash string) error {
+		if got := callCtx.Value(storageContextKey("key")); got != "delete-value" {
+			t.Fatalf("deleteVersionObject() context value = %v, want delete-value", got)
+		}
+		if hash != "ctx-hash" {
+			t.Fatalf("deleteVersionObject() hash = %q, want ctx-hash", hash)
+		}
+		deleteSeenCtx = true
+		return nil
+	}
+
+	if err := fs.deleteUnreferencedVersionObjects(ctx, []string{"ctx-hash"}); err != nil {
+		t.Fatalf("deleteUnreferencedVersionObjects() error: %v", err)
+	}
+	if !deleteSeenCtx {
+		t.Fatal("expected deleteVersionObject() to receive caller context")
 	}
 }
 
@@ -3051,6 +3264,56 @@ func TestMovePath_PreservesDirectoryAndFileModes(t *testing.T) {
 	}
 }
 
+func TestMovePath_RollsBackRenameWhenDirectorySyncFails(t *testing.T) {
+	tempDir := t.TempDir()
+	srcDir := filepath.Join(tempDir, "src-dir")
+	dstDir := filepath.Join(tempDir, "dst-dir")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(srcDir) error: %v", err)
+	}
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(dstDir) error: %v", err)
+	}
+
+	src := filepath.Join(srcDir, "src.txt")
+	dst := filepath.Join(dstDir, "dst.txt")
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncFailed := false
+	syncStoragePathDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err := movePath(src, dst)
+	if err == nil {
+		t.Fatal("expected movePath() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync renamed path") {
+		t.Fatalf("expected sync failure in error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(src)
+	if readErr != nil {
+		t.Fatalf("ReadFile(src) after rollback error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected source content after rollback, got %q", string(data))
+	}
+	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected destination to be removed after rollback, got %v", statErr)
+	}
+}
+
 func TestCopyFile_RejectsSymlinkDestination(t *testing.T) {
 	tempDir := t.TempDir()
 	src := filepath.Join(tempDir, "src.txt")
@@ -3079,6 +3342,56 @@ func TestCopyFile_RejectsSymlinkDestination(t *testing.T) {
 	}
 	if string(outsideData) != "outside" {
 		t.Fatalf("expected outside file to remain unchanged, got %q", string(outsideData))
+	}
+}
+
+func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
+	tempDir := t.TempDir()
+	srcDir := filepath.Join(tempDir, "src-dir")
+	dstDir := filepath.Join(tempDir, "dst-dir")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(srcDir) error: %v", err)
+	}
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(dstDir) error: %v", err)
+	}
+
+	src := filepath.Join(srcDir, "src.txt")
+	dst := filepath.Join(dstDir, "dst.txt")
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncFailed := false
+	syncStoragePathDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err := copyFile(src, dst)
+	if err == nil {
+		t.Fatal("expected copyFile() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync copied file") {
+		t.Fatalf("expected sync failure in error, got %v", err)
+	}
+
+	srcData, readErr := os.ReadFile(src)
+	if readErr != nil {
+		t.Fatalf("ReadFile(src) error: %v", readErr)
+	}
+	if string(srcData) != "content" {
+		t.Fatalf("expected source content to remain unchanged, got %q", string(srcData))
+	}
+	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected destination to be removed after rollback, got %v", statErr)
 	}
 }
 
