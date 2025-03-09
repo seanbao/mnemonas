@@ -2,6 +2,7 @@
 package webdav
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -237,5 +238,38 @@ func TestPathLock_ConcurrentWriters(t *testing.T) {
 
 	if pl.Size() != 0 {
 		t.Errorf("Size() = %d, want 0", pl.Size())
+	}
+}
+
+func TestPathLock_RapidReacquireDoesNotPermitOverlap(t *testing.T) {
+	pl := NewPathLock()
+	var concurrent int32
+	var overlapped atomic.Bool
+	var wg sync.WaitGroup
+
+	worker := func() {
+		defer wg.Done()
+		for i := 0; i < 5000; i++ {
+			pl.Lock("/shared")
+			if atomic.AddInt32(&concurrent, 1) > 1 {
+				overlapped.Store(true)
+			}
+			runtime.Gosched()
+			atomic.AddInt32(&concurrent, -1)
+			pl.Unlock("/shared")
+			runtime.Gosched()
+		}
+	}
+
+	wg.Add(2)
+	go worker()
+	go worker()
+	wg.Wait()
+
+	if overlapped.Load() {
+		t.Fatal("expected rapid reacquire sequence to preserve exclusive access")
+	}
+	if pl.Size() != 0 {
+		t.Fatalf("Size() = %d, want 0", pl.Size())
 	}
 }

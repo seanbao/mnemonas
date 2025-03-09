@@ -214,6 +214,29 @@ func TestSaveSecrets_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateSecrets_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "nested", "data")
+
+	originalSyncManagedDir := syncManagedDir
+	syncManagedDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncManagedDir = originalSyncManagedDir
+	}()
+
+	if _, _, err := LoadOrCreateSecrets(dataDir); err == nil {
+		t.Fatal("expected LoadOrCreateSecrets() to fail when directory tree sync fails")
+	} else if !strings.Contains(err.Error(), "failed to sync managed directory tree") {
+		t.Fatalf("expected managed directory tree sync error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dataDir, SecretsFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no secrets file to be created, got %v", statErr)
+	}
+}
+
 func TestLoadSecrets_TightensExistingFilePermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretsPath := filepath.Join(tmpDir, SecretsFile)

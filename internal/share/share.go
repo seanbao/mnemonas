@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -112,6 +114,7 @@ func (s *Share) CanAccess() error {
 // ShareStore manages share persistence
 type ShareStore struct {
 	mu       sync.RWMutex
+	writeMu  sync.Mutex
 	shares   map[string]*Share
 	pathIdx  map[string][]string
 	filePath string
@@ -143,7 +146,12 @@ func NewShareStore(filePath string) (*ShareStore, error) {
 	}
 
 	if err := store.load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to load shares: %w", err)
+		if recoverErr := store.recoverCorruptShares(err); recoverErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("failed to load shares: %w", err),
+				fmt.Errorf("recover corrupt shares: %w", recoverErr),
+			)
+		}
 	}
 
 	return store, nil
@@ -173,6 +181,51 @@ func (s *ShareStore) load() error {
 	}
 
 	return nil
+}
+
+func (s *ShareStore) recoverCorruptShares(loadErr error) error {
+	if !isRecoverableShareLoadError(loadErr) {
+		return loadErr
+	}
+
+	dir := filepath.Dir(s.filePath)
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().UnixNano())
+	if err := os.Rename(s.filePath, corruptPath); err != nil {
+		return fmt.Errorf("backup corrupt shares file: %w", err)
+	}
+	if err := syncShareStoreDir(dir); err != nil {
+		if rollbackErr := os.Rename(corruptPath, s.filePath); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt shares directory: %w", err),
+				fmt.Errorf("rollback corrupt shares backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncShareStoreDir(dir); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt shares directory: %w", err),
+				fmt.Errorf("sync corrupt shares rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt shares directory: %w", err)
+	}
+
+	s.shares = make(map[string]*Share)
+	s.pathIdx = make(map[string][]string)
+	return nil
+}
+
+func isRecoverableShareLoadError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
 }
 
 func (s *ShareStore) save() error {
@@ -220,6 +273,38 @@ func removeShareID(ids []string, id string) []string {
 		}
 	}
 	return ids
+}
+
+func moveSharePathIndex(pathIdx map[string][]string, oldPath, newPath, id string) {
+	ids := removeShareID(pathIdx[oldPath], id)
+	if len(ids) == 0 {
+		delete(pathIdx, oldPath)
+	} else {
+		pathIdx[oldPath] = ids
+	}
+	pathIdx[newPath] = append(pathIdx[newPath], id)
+}
+
+func sharePathMatchesOrDescendant(basePath, candidatePath string) bool {
+	basePath = path.Clean(basePath)
+	candidatePath = path.Clean(candidatePath)
+	if basePath == "/" {
+		return strings.HasPrefix(candidatePath, "/")
+	}
+	return candidatePath == basePath || strings.HasPrefix(candidatePath, basePath+"/")
+}
+
+func relocateSharePath(currentPath, oldRoot, newRoot string) (string, bool) {
+	currentPath = path.Clean(currentPath)
+	oldRoot = path.Clean(oldRoot)
+	newRoot = path.Clean(newRoot)
+	if !sharePathMatchesOrDescendant(oldRoot, currentPath) {
+		return "", false
+	}
+	if currentPath == oldRoot {
+		return newRoot, true
+	}
+	return path.Clean(newRoot + strings.TrimPrefix(currentPath, oldRoot)), true
 }
 
 func (s *ShareStore) snapshotState() shareStoreSnapshot {
@@ -300,7 +385,7 @@ func writeShareStoreFile(path string, data []byte) error {
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureShareDir(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -340,6 +425,47 @@ func writeShareStoreFile(path string, data []byte) error {
 	}
 
 	return nil
+}
+
+func collectMissingShareDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedShareDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncShareStoreDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync shares directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureShareDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingShareDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedShareDirs(createdDirs)
 }
 
 func syncShareDir(dir string) error {
@@ -398,6 +524,8 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 	}
 
 	share.Permission = normalizePermission(share.Permission)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
@@ -473,6 +601,9 @@ func (s *ShareStore) ListAll() []*Share {
 
 // Update updates a share
 func (s *ShareStore) Update(id string, fn func(*Share) error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		share, ok := snapshot.shares[id]
@@ -509,6 +640,9 @@ func (s *ShareStore) Update(id string, fn func(*Share) error) error {
 
 // Delete deletes a share
 func (s *ShareStore) Delete(id string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		share, ok := snapshot.shares[id]
@@ -524,6 +658,78 @@ func (s *ShareStore) Delete(id string) error {
 		}
 		delete(snapshot.shares, id)
 
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
+}
+
+// UpdatePathReferences rewrites share paths when a filesystem path is renamed.
+func (s *ShareStore) UpdatePathReferences(oldPath, newPath string) error {
+	oldPath = path.Clean(oldPath)
+	newPath = path.Clean(newPath)
+	if oldPath == newPath {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for id, share := range snapshot.shares {
+			updatedPath, ok := relocateSharePath(share.Path, oldPath, newPath)
+			if !ok || updatedPath == share.Path {
+				continue
+			}
+
+			updated := copyShare(share)
+			updated.Path = updatedPath
+			snapshot.shares[id] = updated
+			moveSharePathIndex(snapshot.pathIdx, share.Path, updatedPath, id)
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
+}
+
+// DisableSharesUnderPath disables shares that reference a deleted path.
+func (s *ShareStore) DisableSharesUnderPath(targetPath string) error {
+	targetPath = path.Clean(targetPath)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for id, share := range snapshot.shares {
+			if !sharePathMatchesOrDescendant(targetPath, share.Path) || !share.Enabled {
+				continue
+			}
+
+			updated := copyShare(share)
+			updated.Enabled = false
+			snapshot.shares[id] = updated
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
 		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
 			return err
 		}
@@ -549,6 +755,9 @@ func (s *ShareStore) RecordAuthorizedAccess(id string) (*Share, error) {
 }
 
 func (s *ShareStore) reserveAuthorizedAccess(id string) (*Share, *authorizedAccessReservation, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		share, ok := snapshot.shares[id]
@@ -584,6 +793,8 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 	if reservation == nil {
 		return nil
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -611,6 +822,9 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 
 // Access validates and records access to a share
 func (s *ShareStore) Access(id string, password string) (*Share, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		share, ok := snapshot.shares[id]

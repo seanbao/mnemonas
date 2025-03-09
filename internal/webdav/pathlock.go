@@ -60,8 +60,7 @@ func (pl *PathLock) RLock(path string) {
 	pl.acquire(path).RLock()
 }
 
-// RUnlock releases a read lock for the given path
-// NEW-1 fix: Decrement refCount before releasing lock to prevent race
+// RUnlock releases a read lock for the given path.
 func (pl *PathLock) RUnlock(path string) {
 	pl.mu.Lock()
 	entry, ok := pl.locks[path]
@@ -69,14 +68,12 @@ func (pl *PathLock) RUnlock(path string) {
 		pl.mu.Unlock()
 		return
 	}
-	// Decrement refCount while holding mu to prevent deletion race
+	entry.lock.RUnlock()
 	newCount := atomic.AddInt32(&entry.refCount, -1)
 	if newCount <= 0 {
 		delete(pl.locks, path)
 	}
 	pl.mu.Unlock()
-	// Now safe to unlock the RWMutex
-	entry.lock.RUnlock()
 }
 
 // Lock acquires a write lock for the given path
@@ -84,8 +81,7 @@ func (pl *PathLock) Lock(path string) {
 	pl.acquire(path).Lock()
 }
 
-// Unlock releases a write lock for the given path
-// NEW-1 fix: Decrement refCount before releasing lock to prevent race
+// Unlock releases a write lock for the given path.
 func (pl *PathLock) Unlock(path string) {
 	pl.mu.Lock()
 	entry, ok := pl.locks[path]
@@ -93,14 +89,12 @@ func (pl *PathLock) Unlock(path string) {
 		pl.mu.Unlock()
 		return
 	}
-	// Decrement refCount while holding mu to prevent deletion race
+	entry.lock.Unlock()
 	newCount := atomic.AddInt32(&entry.refCount, -1)
 	if newCount <= 0 {
 		delete(pl.locks, path)
 	}
 	pl.mu.Unlock()
-	// Now safe to unlock the RWMutex
-	entry.lock.Unlock()
 }
 
 // TryLock attempts to acquire a write lock, returns false if already locked

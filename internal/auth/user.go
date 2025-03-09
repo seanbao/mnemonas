@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,7 @@ type User struct {
 // UserStore manages user persistence
 type UserStore struct {
 	mu       sync.RWMutex
+	writeMu  sync.Mutex
 	users    map[string]*User
 	byName   map[string]*User
 	filePath string
@@ -97,7 +99,12 @@ func NewUserStore(filePath string) (*UserStore, string, error) {
 	}
 
 	if err := store.load(); err != nil {
-		return nil, "", err
+		if recoverErr := store.recoverCorruptUsers(err); recoverErr != nil {
+			return nil, "", errors.Join(
+				fmt.Errorf("load users: %w", err),
+				fmt.Errorf("recover corrupt users: %w", recoverErr),
+			)
+		}
 	}
 
 	if len(store.users) == 0 {
@@ -134,6 +141,51 @@ func (s *UserStore) load() error {
 	}
 
 	return nil
+}
+
+func (s *UserStore) recoverCorruptUsers(loadErr error) error {
+	if !isRecoverableUserLoadError(loadErr) {
+		return loadErr
+	}
+
+	dir := filepath.Dir(s.filePath)
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().UnixNano())
+	if err := os.Rename(s.filePath, corruptPath); err != nil {
+		return fmt.Errorf("backup corrupt users file: %w", err)
+	}
+	if err := syncAuthFileDir(dir); err != nil {
+		if rollbackErr := os.Rename(corruptPath, s.filePath); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt users directory: %w", err),
+				fmt.Errorf("rollback corrupt users backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncAuthFileDir(dir); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt users directory: %w", err),
+				fmt.Errorf("sync corrupt users rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt users directory: %w", err)
+	}
+
+	s.users = make(map[string]*User)
+	s.byName = make(map[string]*User)
+	return nil
+}
+
+func isRecoverableUserLoadError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
 }
 
 func (s *UserStore) save() error {
@@ -253,7 +305,7 @@ func writeAuthFileAtomically(path string, data []byte, symlinkErr error, pattern
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureAuthDir(dir, 0755, label); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -293,6 +345,47 @@ func writeAuthFileAtomically(path string, data []byte, symlinkErr error, pattern
 	}
 
 	return nil
+}
+
+func collectMissingAuthDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedAuthDirs(createdDirs []string, label string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncAuthFileDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync %s directory tree: %w", label, err)
+		}
+	}
+	return nil
+}
+
+func ensureAuthDir(dir string, perm os.FileMode, label string) error {
+	createdDirs, err := collectMissingAuthDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedAuthDirs(createdDirs, label)
 }
 
 func syncAuthDir(dir string) error {
@@ -397,6 +490,8 @@ func (s *UserStore) GetByUsername(username string) (*User, error) {
 func (s *UserStore) Authenticate(username, password string) (*User, error) {
 	normalizedUsername := normalizeUsername(username)
 	var authenticatedUser *User
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
@@ -458,6 +553,8 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 		UpdatedAt:    time.Now(),
 	}
 	normalizedUsername := normalizeUsername(username)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
@@ -479,6 +576,9 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 
 // Update updates user information
 func (s *UserStore) Update(user *User) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		existing, ok := snapshot.users[user.ID]
@@ -513,6 +613,8 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
@@ -550,6 +652,8 @@ func (s *UserStore) ResetPassword(id, newPassword string) error {
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
@@ -575,6 +679,9 @@ func (s *UserStore) ResetPassword(id, newPassword string) error {
 
 // Delete removes a user
 func (s *UserStore) Delete(id string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		user, ok := snapshot.users[id]

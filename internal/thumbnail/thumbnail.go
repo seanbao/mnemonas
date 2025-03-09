@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	_ "image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -20,10 +21,14 @@ import (
 	"time"
 
 	"github.com/disintegration/imaging"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")
 var syncThumbnailCacheDir = syncThumbnailDir
+var ErrThumbnailSourceTooLarge = errors.New("source image too large for thumbnail generation")
 
 // Size represents thumbnail size preset
 type Size string
@@ -40,6 +45,11 @@ var SizeDimensions = map[Size]int{
 	SizeMedium: 300,
 	SizeLarge:  600,
 }
+
+const (
+	maxThumbnailSourceDimension = 10000
+	maxThumbnailSourcePixels    = int64(50000000)
+)
 
 // SupportedExtensions lists image extensions that can be thumbnailed
 var SupportedExtensions = map[string]bool{
@@ -71,7 +81,7 @@ type thumbnailGenerationResult struct {
 // NewService creates a new thumbnail service
 func NewService(cacheDir string) (*Service, error) {
 	// Create cache directory if it doesn't exist
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	if err := ensureThumbnailDir(cacheDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create cache dir: %w", err)
 	}
 
@@ -169,6 +179,16 @@ func (s *Service) generate(ctx context.Context, reader io.ReadSeeker, size int) 
 	default:
 	}
 
+	if err := validateThumbnailSourceBounds(reader); err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	// Reset reader to start
 	if _, err := reader.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("failed to seek: %w", err)
@@ -213,6 +233,35 @@ func (s *Service) generate(ctx context.Context, reader io.ReadSeeker, size int) 
 	return buf.Bytes(), nil
 }
 
+func validateThumbnailSourceBounds(reader io.ReadSeeker) error {
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek: %w", err)
+	}
+
+	config, _, err := image.DecodeConfig(reader)
+	if err != nil {
+		return fmt.Errorf("failed to decode image config: %w", err)
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek: %w", err)
+	}
+
+	pixels := int64(config.Width) * int64(config.Height)
+	if config.Width > maxThumbnailSourceDimension || config.Height > maxThumbnailSourceDimension || pixels > maxThumbnailSourcePixels {
+		return fmt.Errorf(
+			"%w: %dx%d exceeds %dx%d/%dpx limit",
+			ErrThumbnailSourceTooLarge,
+			config.Width,
+			config.Height,
+			maxThumbnailSourceDimension,
+			maxThumbnailSourceDimension,
+			maxThumbnailSourcePixels,
+		)
+	}
+
+	return nil
+}
+
 // cacheKey generates a unique cache key for a file+size combination
 func (s *Service) cacheKey(filePath string, size Size) string {
 	h := md5.New()
@@ -254,7 +303,7 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 
 	// Create directory if needed
 	dir := filepath.Dir(cachePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureThumbnailDir(dir, 0755); err != nil {
 		return err
 	}
 
@@ -293,6 +342,47 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 		return fmt.Errorf("failed to sync thumbnail cache directory: %w", err)
 	}
 	return nil
+}
+
+func collectMissingThumbnailDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedThumbnailDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncThumbnailCacheDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync thumbnail cache directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureThumbnailDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingThumbnailDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedThumbnailDirs(createdDirs)
 }
 
 func syncThumbnailDir(dir string) error {

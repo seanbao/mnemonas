@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,6 +51,30 @@ func TestWriteAuthFileAtomically_ReturnsDirectorySyncError(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("expected users file permissions 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteAuthFileAtomically_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "nested", "state", "users.json")
+
+	originalSyncAuthFileDir := syncAuthFileDir
+	syncAuthFileDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncAuthFileDir = originalSyncAuthFileDir
+	}()
+
+	err := writeAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users")
+	if err == nil {
+		t.Fatal("expected writeAuthFileAtomically() to fail when directory tree sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync users directory tree") {
+		t.Fatalf("expected directory tree sync error, got %v", err)
+	}
+	if _, statErr := os.Stat(usersPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no users file to be created, got %v", statErr)
 	}
 }
 
@@ -365,6 +390,109 @@ func TestUserStore(t *testing.T) {
 		}
 		if loaded.LastLoginAt == nil {
 			t.Fatal("expected persisted last_login_at after authenticate")
+		}
+	})
+
+	t.Run("concurrent writes serialize persistence", func(t *testing.T) {
+		storeDir := t.TempDir()
+		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		originalWriter := userStoreWriter
+		firstStarted := make(chan struct{})
+		firstRelease := make(chan struct{})
+		secondStarted := make(chan struct{})
+		var startFirstOnce sync.Once
+		var releaseFirstOnce sync.Once
+		var startSecondOnce sync.Once
+		var callCount int32
+		userStoreWriter = func(path string, data []byte) error {
+			call := atomic.AddInt32(&callCount, 1)
+			switch call {
+			case 1:
+				startFirstOnce.Do(func() {
+					close(firstStarted)
+				})
+				<-firstRelease
+			case 2:
+				startSecondOnce.Do(func() {
+					close(secondStarted)
+				})
+			}
+			return originalWriter(path, data)
+		}
+		t.Cleanup(func() {
+			userStoreWriter = originalWriter
+			startFirstOnce.Do(func() {
+				close(firstStarted)
+			})
+			startSecondOnce.Do(func() {
+				close(secondStarted)
+			})
+			releaseFirstOnce.Do(func() {
+				close(firstRelease)
+			})
+		})
+
+		firstDone := make(chan error, 1)
+		go func() {
+			_, createErr := store.Create("firstuser", "password123", "first@example.com", RoleUser)
+			firstDone <- createErr
+		}()
+
+		select {
+		case <-firstStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for first user-store persist to start")
+		}
+
+		secondDone := make(chan error, 1)
+		go func() {
+			_, createErr := store.Create("seconduser", "password123", "second@example.com", RoleUser)
+			secondDone <- createErr
+		}()
+
+		select {
+		case <-secondStarted:
+			t.Fatal("second user-store persist started before first persist completed")
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		releaseFirstOnce.Do(func() {
+			close(firstRelease)
+		})
+
+		select {
+		case err := <-firstDone:
+			if err != nil {
+				t.Fatalf("first Create() error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("first Create() did not finish after releasing writer")
+		}
+
+		select {
+		case <-secondStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for second user-store persist to start")
+		}
+
+		select {
+		case err := <-secondDone:
+			if err != nil {
+				t.Fatalf("second Create() error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("second Create() did not finish")
+		}
+
+		if _, err := store.GetByUsername("firstuser"); err != nil {
+			t.Fatalf("expected first created user to exist, got %v", err)
+		}
+		if _, err := store.GetByUsername("seconduser"); err != nil {
+			t.Fatalf("expected second created user to exist, got %v", err)
 		}
 	})
 }

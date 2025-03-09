@@ -24,6 +24,8 @@ var (
 	ErrUnavailable   = errors.New("version object store unavailable")
 )
 
+var syncVersionStoreDir = syncVersionStoreDirectory
+
 // LockType defines the type of lock
 type LockType int
 
@@ -85,7 +87,7 @@ func New(cfg Config) (*Store, error) {
 
 	// Ensure database directory exists
 	dbDir := filepath.Dir(cfg.DBPath)
-	if err := os.MkdirAll(dbDir, 0700); err != nil {
+	if err := ensureVersionStoreDir(dbDir, 0700); err != nil {
 		return nil, err
 	}
 
@@ -113,6 +115,57 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+func collectMissingVersionStoreDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedVersionStoreDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncVersionStoreDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync version store directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureVersionStoreDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingVersionStoreDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedVersionStoreDirs(createdDirs)
+}
+
+func syncVersionStoreDirectory(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 // SetDataplaneClient swaps the dataplane client used by the backing object store.

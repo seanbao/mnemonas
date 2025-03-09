@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,7 +30,8 @@ type Favorite struct {
 
 // Store manages favorites persistence
 type Store struct {
-	mu sync.RWMutex
+	mu      sync.RWMutex
+	writeMu sync.Mutex
 	// map[userID]map[path]*Favorite
 	data     map[string]map[string]*Favorite
 	filePath string
@@ -61,7 +63,12 @@ func NewStore(filePath string) (*Store, error) {
 	}
 
 	if err := store.load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to load favorites: %w", err)
+		if recoverErr := store.recoverCorruptFavorites(err); recoverErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("failed to load favorites: %w", err),
+				fmt.Errorf("recover corrupt favorites: %w", recoverErr),
+			)
+		}
 	}
 
 	return store, nil
@@ -90,6 +97,50 @@ func (s *Store) load() error {
 	}
 
 	return nil
+}
+
+func (s *Store) recoverCorruptFavorites(loadErr error) error {
+	if !isRecoverableFavoritesLoadError(loadErr) {
+		return loadErr
+	}
+
+	dir := filepath.Dir(s.filePath)
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().UnixNano())
+	if err := os.Rename(s.filePath, corruptPath); err != nil {
+		return fmt.Errorf("backup corrupt favorites file: %w", err)
+	}
+	if err := syncFavoritesStoreDir(dir); err != nil {
+		if rollbackErr := os.Rename(corruptPath, s.filePath); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt favorites directory: %w", err),
+				fmt.Errorf("rollback corrupt favorites backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncFavoritesStoreDir(dir); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt favorites directory: %w", err),
+				fmt.Errorf("sync corrupt favorites rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt favorites directory: %w", err)
+	}
+
+	s.data = make(map[string]map[string]*Favorite)
+	return nil
+}
+
+func isRecoverableFavoritesLoadError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
 }
 
 func (s *Store) save() error {
@@ -203,7 +254,7 @@ func writeFavoritesStoreFile(path string, data []byte) error {
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureFavoritesDir(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -245,6 +296,47 @@ func writeFavoritesStoreFile(path string, data []byte) error {
 	return nil
 }
 
+func collectMissingFavoritesDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedFavoritesDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncFavoritesStoreDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync favorites directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureFavoritesDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingFavoritesDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedFavoritesDirs(createdDirs)
+}
+
 func syncFavoritesDir(dir string) error {
 	dirHandle, err := os.Open(dir)
 	if err != nil {
@@ -263,6 +355,8 @@ func (s *Store) Add(userID, path, note string) (*Favorite, error) {
 		CreatedAt: time.Now(),
 		Note:      note,
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	for {
 		snapshot := s.snapshotState()
@@ -286,6 +380,9 @@ func (s *Store) Add(userID, path, note string) (*Favorite, error) {
 
 // Remove removes a path from favorites
 func (s *Store) Remove(userID, path string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		if snapshot.data[userID] == nil {
@@ -366,6 +463,9 @@ func (s *Store) CheckPaths(userID string, paths []string) map[string]bool {
 
 // UpdateNote updates the note for a favorite
 func (s *Store) UpdateNote(userID, path, note string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	for {
 		snapshot := s.snapshotState()
 		if snapshot.data[userID] == nil {

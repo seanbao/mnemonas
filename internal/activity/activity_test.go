@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,6 +61,29 @@ func TestNewStore(t *testing.T) {
 
 	if store.Count() != 0 {
 		t.Errorf("Expected 0 entries, got %d", store.Count())
+	}
+}
+
+func TestNewStore_ReturnsErrorWhenActivityDirectorySyncFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nested", "activity")
+
+	originalSyncActivityLogDir := syncActivityLogDir
+	syncActivityLogDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncActivityLogDir = originalSyncActivityLogDir
+	}()
+
+	if _, err := NewStore(root); err == nil {
+		t.Fatal("expected NewStore() to fail when activity directory tree sync fails")
+	} else if !strings.Contains(err.Error(), "failed to sync activity directory tree") {
+		t.Fatalf("expected activity directory tree sync failure, got %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(root, "activity.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no activity log file to be created, got %v", statErr)
 	}
 }
 
@@ -499,6 +523,117 @@ func TestListDoesNotBlockWhileLogPersists(t *testing.T) {
 	}
 	if entries[0].Path != "/slow.txt" {
 		t.Fatalf("expected /slow.txt after save, got %s", entries[0].Path)
+	}
+}
+
+func TestLogSerializesConcurrentPersists(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalWriter := activityLogWriter
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var onceFirst sync.Once
+	var onceRelease sync.Once
+	var onceSecond sync.Once
+	var callCount int32
+	activityLogWriter = func(path string, data []byte) error {
+		call := atomic.AddInt32(&callCount, 1)
+		switch call {
+		case 1:
+			onceFirst.Do(func() {
+				close(firstStarted)
+			})
+			<-firstRelease
+		case 2:
+			onceSecond.Do(func() {
+				close(secondStarted)
+			})
+		}
+		return originalWriter(path, data)
+	}
+	t.Cleanup(func() {
+		activityLogWriter = originalWriter
+		onceFirst.Do(func() {
+			close(firstStarted)
+		})
+		onceSecond.Do(func() {
+			close(secondStarted)
+		})
+		onceRelease.Do(func() {
+			close(firstRelease)
+		})
+	})
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- store.Log(ActionUpload, "/first.txt", "user", "127.0.0.1", nil)
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first activity log persist to start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- store.Log(ActionUpload, "/second.txt", "user", "127.0.0.1", nil)
+	}()
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second activity persist started before first persist completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	onceRelease.Do(func() {
+		close(firstRelease)
+	})
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first Log() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first Log() did not finish after releasing first persist")
+	}
+
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second activity persist to start")
+	}
+
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second Log() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second Log() did not finish")
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 2 || len(entries) != 2 {
+		t.Fatalf("expected two committed activity entries, got total=%d len=%d", total, len(entries))
+	}
+
+	reloaded, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() reload error: %v", err)
+	}
+	reloadedEntries, reloadedTotal := reloaded.List(10, 0, "", "")
+	if reloadedTotal != 2 || len(reloadedEntries) != 2 {
+		t.Fatalf("expected two persisted activity entries, got total=%d len=%d", reloadedTotal, len(reloadedEntries))
+	}
+	if reloadedEntries[0].Path != "/second.txt" || reloadedEntries[1].Path != "/first.txt" {
+		t.Fatalf("expected persisted entries [/second.txt /first.txt], got [%s %s]", reloadedEntries[0].Path, reloadedEntries[1].Path)
 	}
 }
 
