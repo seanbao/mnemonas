@@ -82,6 +82,44 @@ func syncWorkspaceRenameDirs(oldPath, newPath string) error {
 	return syncWorkspaceDir(oldDir)
 }
 
+func collectMissingWorkspaceDirs(fullPath string) ([]string, error) {
+	missing := make([]string, 0)
+	current := fullPath
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return nil, ErrNotDir
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, syscall.ENOTDIR) {
+				return nil, ErrNotDir
+			}
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedWorkspaceDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncWorkspaceDir(filepath.Dir(createdDirs[i])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Common errors
 var (
 	ErrNotFound             = errors.New("not found")
@@ -114,8 +152,15 @@ func New(root string) (*Workspace, error) {
 	}
 
 	// Ensure root exists
+	createdDirs, err := collectMissingWorkspaceDirs(root)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, err
+	}
+	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
+		return nil, fmt.Errorf("failed to sync directory: %w", err)
 	}
 
 	absRoot, err := filepath.Abs(root)
@@ -442,11 +487,19 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 		return ErrNotDir
 	}
 
+	createdDirs, err := collectMissingWorkspaceDirs(fullPath)
+	if err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(fullPath, 0755); err != nil {
 		if errors.Is(err, syscall.ENOTDIR) {
 			return ErrNotDir
 		}
 		return err
+	}
+	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
+		return fmt.Errorf("failed to sync directory: %w", err)
 	}
 
 	return nil
@@ -471,10 +524,22 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 	}
 
 	if info.IsDir() {
-		return os.Remove(fullPath) // Will fail if not empty
+		if err := os.Remove(fullPath); err != nil {
+			return err
+		}
+		if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
+			return fmt.Errorf("failed to sync directory: %w", err)
+		}
+		return nil
 	}
 
-	return os.Remove(fullPath)
+	if err := os.Remove(fullPath); err != nil {
+		return err
+	}
+	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
+		return fmt.Errorf("failed to sync directory: %w", err)
+	}
+	return nil
 }
 
 // DeleteAll removes a file or directory recursively
@@ -495,7 +560,13 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 		return err
 	}
 
-	return os.RemoveAll(fullPath)
+	if err := os.RemoveAll(fullPath); err != nil {
+		return err
+	}
+	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
+		return fmt.Errorf("failed to sync directory: %w", err)
+	}
+	return nil
 }
 
 // Rename moves or renames a file or directory
@@ -690,12 +761,12 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 	})
 }
 
-// CleanupStaging removes incomplete staging files (.tmp files)
+// CleanupStaging removes incomplete workspace staging files.
 func (w *Workspace) CleanupStaging(ctx context.Context) (files int, bytes int64, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, 0, err
 	}
-	err = filepath.Walk(w.root, func(path string, info os.FileInfo, walkErr error) error {
+	err = filepath.WalkDir(w.root, func(path string, entry os.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -703,17 +774,27 @@ func (w *Workspace) CleanupStaging(ctx context.Context) (files int, bytes int64,
 			return walkErr
 		}
 
-		if !info.IsDir() && strings.HasSuffix(info.Name(), ".tmp") {
+		if entry.IsDir() || !isWorkspaceStagingFile(entry.Name()) {
+			return nil
+		}
+
+		info, err := readDirEntryInfo(entry)
+		if err != nil {
+			return err
+		}
+		if rmErr := os.Remove(path); rmErr == nil {
+			files++
 			bytes += info.Size()
-			if rmErr := os.Remove(path); rmErr == nil {
-				files++
-			}
 		}
 
 		return nil
 	})
 
 	return files, bytes, err
+}
+
+func isWorkspaceStagingFile(name string) bool {
+	return strings.HasPrefix(name, ".workspace-") && strings.HasSuffix(name, ".tmp")
 }
 
 // Exists checks if a path exists

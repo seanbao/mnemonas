@@ -4,9 +4,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"image"
+	"image/color"
+	"image/gif"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +37,62 @@ import (
 	"github.com/seanbao/mnemonas/internal/thumbnail"
 	"github.com/seanbao/mnemonas/internal/versionstore"
 )
+
+func createOversizedPNGConfigOnly(width, height int) []byte {
+	chunkData := make([]byte, 13)
+	binary.BigEndian.PutUint32(chunkData[0:4], uint32(width))
+	binary.BigEndian.PutUint32(chunkData[4:8], uint32(height))
+	chunkData[8] = 8
+	chunkData[9] = 2
+
+	chunkType := []byte("IHDR")
+	crcInput := append(append([]byte(nil), chunkType...), chunkData...)
+	crc := crc32.ChecksumIEEE(crcInput)
+
+	buf := bytes.NewBuffer(nil)
+	buf.Write([]byte{137, 80, 78, 71, 13, 10, 26, 10})
+	buf.Write([]byte{0, 0, 0, 13})
+	buf.Write(chunkType)
+	buf.Write(chunkData)
+	buf.Write([]byte{byte(crc >> 24), byte(crc >> 16), byte(crc >> 8), byte(crc)})
+	buf.Write([]byte{0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130})
+	return buf.Bytes()
+}
+
+func createGIFThumbnailSource(width, height int) []byte {
+	img := image.NewPaletted(image.Rect(0, 0, width, height), color.Palette{
+		color.RGBA{0, 0, 0, 255},
+		color.RGBA{255, 255, 255, 255},
+	})
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if (x+y)%2 == 0 {
+				img.SetColorIndex(x, y, 1)
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, img, nil); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
+
+func createPNGThumbnailSourceWithAlpha(width, height int) []byte {
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, color.NRGBA{R: 32, G: 160, B: 224, A: 128})
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
 
 // testDataplaneAddr is the address of the test dataplane server
 func testDataplaneAddr() string {
@@ -556,6 +618,64 @@ func TestServer_Health(t *testing.T) {
 	}
 }
 
+func TestServer_ObservabilityEndpoints_BypassThrottle(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	started := make(chan struct{}, DefaultMaxConcurrentRequests)
+	release := make(chan struct{})
+	requestDone := make(chan error, DefaultMaxConcurrentRequests)
+
+	server.router.Get("/slow", func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	httpServer := httptest.NewServer(server.Router())
+	defer httpServer.Close()
+	defer close(release)
+
+	for i := 0; i < DefaultMaxConcurrentRequests; i++ {
+		go func() {
+			resp, err := http.Get(httpServer.URL + "/slow")
+			if err == nil {
+				resp.Body.Close()
+			}
+			requestDone <- err
+		}()
+	}
+
+	for i := 0; i < DefaultMaxConcurrentRequests; i++ {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for slow requests to saturate the throttle")
+		}
+	}
+
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	for _, endpoint := range []string{"/health", "/api/v1/version"} {
+		resp, err := client.Get(httpServer.URL + endpoint)
+		if err != nil {
+			t.Fatalf("GET %s should bypass throttle: %v", endpoint, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d", endpoint, resp.StatusCode, http.StatusOK)
+		}
+	}
+
+	for i := 0; i < DefaultMaxConcurrentRequests; i++ {
+		select {
+		case err := <-requestDone:
+			if err != nil {
+				t.Fatalf("slow request failed after release: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for slow requests to finish")
+		}
+	}
+}
+
 func TestServer_Health_DataplaneFailureDoesNotExposeInternalError(t *testing.T) {
 	server, err := NewServer(zerolog.Nop(), &ServerConfig{DataplaneAddr: "127.0.0.1:1"})
 	if err != nil {
@@ -987,6 +1107,47 @@ func TestServer_DeleteFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
 		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_DeleteFile_DisablesSharesForDeletedPath(t *testing.T) {
+	server, shareID := setupShareServer(t)
+	ctx := context.Background()
+
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/docs/a.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete shared file status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	disabledShare, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(fileShare) error: %v", err)
+	}
+	if disabledShare.Enabled {
+		t.Fatal("expected deleted file share to be disabled")
+	}
+	folderShare, err := server.shareStore.Get(shareID)
+	if err != nil {
+		t.Fatalf("Get(folder share) error: %v", err)
+	}
+	if !folderShare.Enabled {
+		t.Fatal("expected unrelated folder share to remain enabled")
+	}
+	if _, err := server.fs.Stat(ctx, "/docs/a.txt"); err == nil {
+		t.Fatal("expected deleted file to be absent from filesystem")
 	}
 }
 
@@ -2827,6 +2988,48 @@ func TestServer_MoveFile_RejectsUnknownJSONFields(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_UpdatesSharePaths(t *testing.T) {
+	server, shareID := setupShareServer(t)
+	ctx := context.Background()
+
+	if err := server.fs.Mkdir(ctx, "/archive"); err != nil {
+		t.Fatalf("Mkdir(/archive) error: %v", err)
+	}
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/docs/a.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	body := `{"from":"/docs","to":"/archive/docs"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("move shared folder status = %d, want %d", w.Code, http.StatusOK)
+	}
+	renamedFolderShare, err := server.shareStore.Get(shareID)
+	if err != nil {
+		t.Fatalf("Get(folder share) error: %v", err)
+	}
+	if renamedFolderShare.Path != "/archive/docs" {
+		t.Fatalf("expected folder share path to be updated, got %q", renamedFolderShare.Path)
+	}
+	renamedFileShare, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(file share) error: %v", err)
+	}
+	if renamedFileShare.Path != "/archive/docs/a.txt" {
+		t.Fatalf("expected file share path to be updated, got %q", renamedFileShare.Path)
+	}
+}
+
 func TestServer_MoveFile_RejectsOversizedRequestBody(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -4307,6 +4510,93 @@ func TestServer_Thumbnail_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
 		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_Thumbnail_SupportsGIF(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/animated.gif", bytes.NewReader(createGIFThumbnailSource(24, 24))); err != nil {
+		t.Fatalf("WriteFile(animated.gif) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/animated.gif", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("thumbnail GIF status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("thumbnail GIF Content-Type = %q, want %q", w.Header().Get("Content-Type"), "image/jpeg")
+	}
+	if len(w.Body.Bytes()) == 0 {
+		t.Fatal("expected non-empty GIF thumbnail response body")
+	}
+}
+
+func TestServer_Thumbnail_PreservesPNGContentTypeForAlphaSource(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/alpha.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
+		t.Fatalf("WriteFile(alpha.png) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/alpha.png", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("thumbnail alpha PNG status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("thumbnail alpha PNG Content-Type = %q, want %q", w.Header().Get("Content-Type"), "image/png")
+	}
+	if len(w.Body.Bytes()) == 0 {
+		t.Fatal("expected non-empty alpha PNG thumbnail response body")
+	}
+}
+
+func TestServer_Thumbnail_RejectsOversizedSourceImage(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/oversized.png", bytes.NewReader(createOversizedPNGConfigOnly(10001, 10000))); err != nil {
+		t.Fatalf("WriteFile(oversized.png) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/oversized.png", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("thumbnail oversized source status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "source image too large to thumbnail") {
+		t.Fatalf("expected oversized thumbnail message, got %s", w.Body.String())
 	}
 }
 

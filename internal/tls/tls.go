@@ -251,7 +251,7 @@ func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, 
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := ensureTLSDir(dir, 0700, label); err != nil {
 		return fmt.Errorf("failed to create %s directory: %w", label, err)
 	}
 
@@ -290,6 +290,47 @@ func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, 
 		return fmt.Errorf("failed to sync %s directory: %w", label, err)
 	}
 	return nil
+}
+
+func collectMissingTLSDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedTLSDirs(createdDirs []string, label string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncTLSDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync %s directory tree: %w", label, err)
+		}
+	}
+	return nil
+}
+
+func ensureTLSDir(dir string, perm os.FileMode, label string) error {
+	createdDirs, err := collectMissingTLSDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedTLSDirs(createdDirs, label)
 }
 
 // GetCertificateInfo returns information about the current certificate

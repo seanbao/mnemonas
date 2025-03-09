@@ -106,7 +106,7 @@ func NewStore(root string, layout Layout) (*Store, error) {
 		return nil, err
 	}
 
-	if err := os.MkdirAll(root, 0755); err != nil {
+	if err := ensureCASDir(root, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
@@ -124,7 +124,7 @@ func (s *Store) Put(hash string, data []byte) error {
 		return err
 	}
 
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureCASDir(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 	if err := validateCASPath(s.root, dir); err != nil {
@@ -168,6 +168,47 @@ func (s *Store) Put(hash string, data []byte) error {
 	}
 
 	return nil
+}
+
+func collectMissingCASDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedCASDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureCASDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingCASDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedCASDirs(createdDirs)
 }
 
 func syncCASDirectory(dir string) error {

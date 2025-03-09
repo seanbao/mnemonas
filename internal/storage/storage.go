@@ -113,6 +113,8 @@ type FileSystem struct {
 	policy               *versionstore.VersioningPolicy
 	trashRoot            string
 	config               *Config
+	onPathRenamed        func(ctx context.Context, oldPath, newPath string)
+	onPathDeleted        func(ctx context.Context, path string)
 	listReferencedHashes func(ctx context.Context) ([]string, error)
 	getVersions          func(ctx context.Context, path string) ([]versionstore.Version, error)
 	deleteFileIndex      func(ctx context.Context, path string) error
@@ -190,6 +192,14 @@ func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
 	}
 }
 
+// SetPathChangeHooks registers callbacks for committed rename/delete operations.
+func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string), onDelete func(ctx context.Context, path string)) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.onPathRenamed = onRename
+	fs.onPathDeleted = onDelete
+}
+
 // RunRetentionSweep applies version retention rules across all versioned files.
 func (fs *FileSystem) RunRetentionSweep(ctx context.Context) error {
 	release := fs.beginMutation()
@@ -239,7 +249,7 @@ func New(cfg *Config) (*FileSystem, error) {
 	}
 
 	// Ensure trash directory exists
-	if err := os.MkdirAll(cfg.TrashRoot, 0700); err != nil {
+	if err := ensureStorageDir(cfg.TrashRoot, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create trash directory: %w", err)
 	}
 
@@ -395,7 +405,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 		}
 		return fmt.Errorf("failed to validate path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+	if err := ensureStorageDir(filepath.Dir(fullPath), 0755); err != nil {
 		if isPathNotDirError(err) {
 			return ErrNotDir
 		}
@@ -630,7 +640,7 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 
 	// Move file to trash
 	trashContentPath := path.Join(fs.trashRoot, id, "content")
-	if err := os.MkdirAll(path.Dir(trashContentPath), 0700); err != nil {
+	if err := ensureStorageDir(path.Dir(trashContentPath), 0700); err != nil {
 		return fmt.Errorf("failed to create trash directory: %w", err)
 	}
 
@@ -707,6 +717,7 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		}
 		return fmt.Errorf("failed to delete file index: %w", err)
 	}
+	fs.notifyPathDeleted(ctx, name)
 
 	return nil
 }
@@ -822,6 +833,7 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 			return fmt.Errorf("failed to delete version objects: %w", objectDeleteErr)
 		}
 	}
+	fs.notifyPathDeleted(ctx, name)
 
 	return nil
 }
@@ -857,8 +869,27 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 		}
 		return fmt.Errorf("failed to rename metadata: %w", err)
 	}
+	fs.notifyPathRenamed(ctx, oldName, newName)
 
 	return nil
+}
+
+func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) {
+	fs.mu.RLock()
+	hook := fs.onPathDeleted
+	fs.mu.RUnlock()
+	if hook != nil {
+		hook(ctx, name)
+	}
+}
+
+func (fs *FileSystem) notifyPathRenamed(ctx context.Context, oldName, newName string) {
+	fs.mu.RLock()
+	hook := fs.onPathRenamed
+	fs.mu.RUnlock()
+	if hook != nil {
+		hook(ctx, oldName, newName)
+	}
 }
 
 // ============================================================================
@@ -1201,7 +1232,7 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 	destPath := fs.workspace.FullPath(item.OriginalPath)
 
 	// Ensure parent directory exists
-	if err := os.MkdirAll(path.Dir(destPath), 0755); err != nil {
+	if err := ensureStorageDir(path.Dir(destPath), 0755); err != nil {
 		if isPathNotDirError(err) {
 			return ErrNotDir
 		}
@@ -1278,7 +1309,7 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	trashContentPath := path.Join(fs.trashRoot, id, "content")
 	destPath := fs.workspace.FullPath(newPath)
 
-	if err := os.MkdirAll(path.Dir(destPath), 0755); err != nil {
+	if err := ensureStorageDir(path.Dir(destPath), 0755); err != nil {
 		if isPathNotDirError(err) {
 			return ErrNotDir
 		}
@@ -1391,6 +1422,10 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 			return deleted, err
 		}
 		if err := fs.deleteTrashItem(ctx, &item); err != nil {
+			var durabilityErr *trashDeleteDurabilityError
+			if errors.As(err, &durabilityErr) {
+				deleted++
+			}
 			return deleted, err
 		}
 		deleted++
@@ -1423,6 +1458,10 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 			continue
 		}
 		if err := fs.deleteTrashItem(ctx, &item); err != nil {
+			var durabilityErr *trashDeleteDurabilityError
+			if errors.As(err, &durabilityErr) {
+				deleted++
+			}
 			return deleted, err
 		}
 		deleted++
@@ -1451,7 +1490,11 @@ func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.Tr
 		return fmt.Errorf("failed to remove trash metadata for %s: %w", item.ID, err)
 	}
 
-	if err := fs.removeTrashPath(stagedTrashPath); err != nil {
+	removedContent, err := fs.removeTrashPathDurably(stagedTrashPath)
+	if err != nil {
+		if removedContent {
+			return &trashDeleteDurabilityError{err: fmt.Errorf("failed to sync deleted trash content for %s: %w", item.ID, err)}
+		}
 		rollbackErr := movePath(stagedTrashPath, trashItemPath)
 		metadataErr := fs.addTrashMetadata(ctx, item)
 		fs.cleanupTrashStagingDir(stagedTrashPath)
@@ -1480,6 +1523,18 @@ func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.Tr
 	fs.cleanupTrashStagingDir(stagedTrashPath)
 
 	return nil
+}
+
+type trashDeleteDurabilityError struct {
+	err error
+}
+
+func (e *trashDeleteDurabilityError) Error() string {
+	return e.err.Error()
+}
+
+func (e *trashDeleteDurabilityError) Unwrap() error {
+	return e.err
 }
 
 // GetTrashStats returns trash statistics
@@ -1780,6 +1835,55 @@ func syncStorageRenameDirs(src, dst string) error {
 	return syncStoragePathDir(srcDir)
 }
 
+func collectMissingStorageDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return nil, syscall.ENOTDIR
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, syscall.ENOTDIR) {
+				return nil, err
+			}
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedStorageDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncStoragePathDir(filepath.Dir(createdDirs[i])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureStorageDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingStorageDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedStorageDirs(createdDirs)
+}
+
 func copyFile(src, dst string) error {
 	if err := validateStoragePath(src); err != nil {
 		return err
@@ -1799,7 +1903,7 @@ func copyFile(src, dst string) error {
 	}
 	defer srcFile.Close()
 
-	if err := os.MkdirAll(path.Dir(dst), 0755); err != nil {
+	if err := ensureStorageDir(path.Dir(dst), 0755); err != nil {
 		return err
 	}
 
@@ -1921,6 +2025,16 @@ func restoreTrashContent(src, dst string, isDir bool) error {
 	return copyFile(src, dst)
 }
 
+func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
+	if err := fs.removeTrashPath(trashPath); err != nil {
+		return false, err
+	}
+	if err := syncStoragePathDir(path.Dir(trashPath)); err != nil {
+		return true, fmt.Errorf("failed to sync trash delete directory: %w", err)
+	}
+	return true, nil
+}
+
 func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
 	_ = os.Remove(path.Dir(stagedTrashPath))
 }
@@ -1933,7 +2047,7 @@ func movePath(src, dst string) error {
 		return err
 	}
 
-	if err := os.MkdirAll(path.Dir(dst), 0755); err != nil {
+	if err := ensureStorageDir(path.Dir(dst), 0755); err != nil {
 		return err
 	}
 
@@ -1999,7 +2113,7 @@ func copyDir(src, dst string) error {
 		return err
 	}
 
-	if err := os.MkdirAll(dst, srcInfo.Mode().Perm()); err != nil {
+	if err := ensureStorageDir(dst, srcInfo.Mode().Perm()); err != nil {
 		return err
 	}
 	if err := os.Chmod(dst, srcInfo.Mode().Perm()); err != nil {

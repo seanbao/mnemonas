@@ -19,6 +19,7 @@ import (
 	"unsafe"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
@@ -1128,6 +1129,53 @@ func TestHandler_MOVE(t *testing.T) {
 	_, err = fs.Stat(ctx, "/movetest/moved.txt")
 	if err != nil {
 		t.Errorf("Destination should exist: %v", err)
+	}
+}
+
+func TestHandler_MOVE_UpdatesSharePathsWhenFilesystemHooksConfigured(t *testing.T) {
+	handler, fs, tmpDir := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/movetest/orig.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+	fs.SetPathChangeHooks(func(ctx context.Context, oldPath, newPath string) {
+		if err := shareStore.UpdatePathReferences(oldPath, newPath); err != nil {
+			t.Errorf("UpdatePathReferences() error: %v", err)
+		}
+	}, nil)
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/movetest/moved.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("MOVE status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	renamedShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get() error: %v", err)
+	}
+	if renamedShare.Path != "/movetest/moved.txt" {
+		t.Fatalf("expected share path to be updated, got %q", renamedShare.Path)
 	}
 }
 

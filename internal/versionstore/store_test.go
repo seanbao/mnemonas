@@ -96,6 +96,33 @@ func TestNew_RequiresDataplane(t *testing.T) {
 	}
 }
 
+func TestNew_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "nested", "db", "test.db")
+
+	originalSyncVersionStoreDir := syncVersionStoreDir
+	syncVersionStoreDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncVersionStoreDir = originalSyncVersionStoreDir
+	}()
+
+	_, err := New(Config{
+		DBPath:    dbPath,
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if err == nil {
+		t.Fatal("expected New() to fail when version store directory tree sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync version store directory tree") {
+		t.Fatalf("expected directory tree sync error, got %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no database file to be created, got %v", statErr)
+	}
+}
+
 func TestStore_AddVersion(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

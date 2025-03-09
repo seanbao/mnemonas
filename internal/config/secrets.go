@@ -59,7 +59,7 @@ func SaveSecrets(dataDir string, secrets *Secrets) error {
 	}
 
 	// Ensure directory exists
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := ensureManagedDir(dataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 
@@ -128,7 +128,7 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	}
 
 	// Ensure directory exists
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := ensureManagedDir(dataDir, 0755); err != nil {
 		return nil, false, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
