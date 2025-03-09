@@ -35,6 +35,13 @@ func TestWorkspace_WriteFile_ReturnsDirectorySyncErrorAfterRename(t *testing.T) 
 	if string(data) != "content" {
 		t.Fatalf("expected written content to be preserved, got %q", string(data))
 	}
+	info, statErr := os.Stat(filepath.Join(w.Root(), "durable.txt"))
+	if statErr != nil {
+		t.Fatalf("Stat(durable.txt) error: %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected durable.txt permissions 0644, got %o", info.Mode().Perm())
+	}
 }
 
 func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
@@ -61,6 +68,13 @@ func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *t
 	}
 	if string(data) != "streamed content" {
 		t.Fatalf("expected streamed content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(filepath.Join(w.Root(), "stream.txt"))
+	if statErr != nil {
+		t.Fatalf("Stat(stream.txt) error: %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected stream.txt permissions 0644, got %o", info.Mode().Perm())
 	}
 }
 
@@ -92,6 +106,13 @@ func TestWorkspace_Copy_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
 	}
 	if string(data) != "copy content" {
 		t.Fatalf("expected copied content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(filepath.Join(w.Root(), "copied.txt"))
+	if statErr != nil {
+		t.Fatalf("Stat(copied.txt) error: %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected copied.txt permissions 0644, got %o", info.Mode().Perm())
 	}
 }
 

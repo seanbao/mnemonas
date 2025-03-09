@@ -2608,6 +2608,46 @@ func TestFileSystem_RestoreVersion_AllowsCurrentHashWithoutStoredObject(t *testi
 	}
 }
 
+func TestFileSystem_RestoreVersion_PreservesReadableFilePermissions(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/docs/perm.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/perm.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/docs/perm.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected a historical version to restore")
+	}
+
+	if err := fs.RestoreVersion(ctx, "/docs/perm.txt", historicalHash); err != nil {
+		t.Fatalf("RestoreVersion() error: %v", err)
+	}
+
+	info, err := os.Stat(fs.workspace.FullPath("/docs/perm.txt"))
+	if err != nil {
+		t.Fatalf("Stat(perm.txt) error: %v", err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected restored file permissions 0644, got %o", info.Mode().Perm())
+	}
+}
+
 func TestMapWorkspaceReadablePathError(t *testing.T) {
 	tests := []struct {
 		name string

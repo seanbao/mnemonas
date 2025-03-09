@@ -391,6 +391,10 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 		return err
 	}
 	tmpPath := tmpFile.Name()
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return cleanupTempPath(tmpPath, err)
+	}
 
 	_, writeErr := tmpFile.Write(data)
 	syncErr := tmpFile.Sync()
@@ -443,6 +447,10 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 		return err
 	}
 	tmpPath := tmpFile.Name()
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return cleanupTempPath(tmpPath, err)
+	}
 
 	_, copyErr := copyWorkspaceData(ctx, tmpFile, r)
 	syncErr := tmpFile.Sync()
@@ -693,6 +701,10 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 		return err
 	}
 	tmpPath := dstFile.Name()
+	if err := dstFile.Chmod(0644); err != nil {
+		_ = dstFile.Close()
+		return cleanupTempPath(tmpPath, err)
+	}
 
 	_, copyErr := copyWorkspaceData(ctx, dstFile, srcFile)
 	syncErr := dstFile.Sync()
