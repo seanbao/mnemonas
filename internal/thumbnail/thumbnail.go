@@ -28,6 +28,7 @@ import (
 
 var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")
 var syncThumbnailCacheDir = syncThumbnailDir
+var walkThumbnailCache = filepath.Walk
 var ErrThumbnailSourceTooLarge = errors.New("source image too large for thumbnail generation")
 
 // Size represents thumbnail size preset
@@ -475,9 +476,10 @@ func (s *Service) CleanCache(ctx context.Context, maxAge time.Duration) (int, er
 // CacheStats returns cache statistics
 func (s *Service) CacheStats(ctx context.Context) (count int, size int64, err error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	cacheDir := s.cacheDir
+	s.mu.RUnlock()
 
-	err = filepath.Walk(s.cacheDir, func(path string, info os.FileInfo, walkErr error) error {
+	err = walkThumbnailCache(cacheDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}

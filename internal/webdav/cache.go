@@ -23,6 +23,31 @@ type cacheEntry struct {
 	cachedAt  time.Time
 }
 
+func cloneResourceType(src *resourceType) *resourceType {
+	if src == nil {
+		return nil
+	}
+	cloned := &resourceType{}
+	if src.Collection != nil {
+		cloned.Collection = &struct{}{}
+	}
+	return cloned
+}
+
+func clonePropfindResponses(responses []propfindResponse) []propfindResponse {
+	if len(responses) == 0 {
+		return nil
+	}
+
+	cloned := make([]propfindResponse, len(responses))
+	for i, response := range responses {
+		cloned[i] = response
+		cloned[i].Propstat.Prop.ResourceType = cloneResourceType(response.Propstat.Prop.ResourceType)
+	}
+
+	return cloned
+}
+
 // NewPropfindCache creates a new PROPFIND cache
 func NewPropfindCache(ttl time.Duration, maxSize int) *PropfindCache {
 	if ttl == 0 {
@@ -59,7 +84,7 @@ func (c *PropfindCache) Get(path, depth string) ([]propfindResponse, bool) {
 		return nil, false
 	}
 
-	return entry.responses, true
+	return clonePropfindResponses(entry.responses), true
 }
 
 // Set stores PROPFIND responses in cache
@@ -74,7 +99,7 @@ func (c *PropfindCache) Set(path, depth string, responses []propfindResponse) {
 
 	key := cacheKey(path, depth)
 	c.entries[key] = &cacheEntry{
-		responses: responses,
+		responses: clonePropfindResponses(responses),
 		cachedAt:  time.Now(),
 	}
 }
