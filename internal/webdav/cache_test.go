@@ -26,6 +26,83 @@ func TestPropfindCache_GetSet(t *testing.T) {
 	}
 }
 
+func TestPropfindCache_SetDeepCopiesResponses(t *testing.T) {
+	cache := NewPropfindCache(time.Second, 100)
+
+	responses := []propfindResponse{
+		{
+			Href: "/dir/",
+			Propstat: propstat{
+				Status: "HTTP/1.1 200 OK",
+				Prop: prop{
+					DisplayName:  "dir",
+					ResourceType: &resourceType{Collection: &struct{}{}},
+				},
+			},
+		},
+	}
+
+	cache.Set("/dir", "1", responses)
+
+	responses[0].Href = "/mutated/"
+	responses[0].Propstat.Prop.DisplayName = "mutated"
+	responses[0].Propstat.Prop.ResourceType.Collection = nil
+
+	got, ok := cache.Get("/dir", "1")
+	if !ok {
+		t.Fatal("Get should return cached value")
+	}
+	if got[0].Href != "/dir/" {
+		t.Fatalf("Href = %q, want /dir/", got[0].Href)
+	}
+	if got[0].Propstat.Prop.DisplayName != "dir" {
+		t.Fatalf("DisplayName = %q, want dir", got[0].Propstat.Prop.DisplayName)
+	}
+	if got[0].Propstat.Prop.ResourceType == nil || got[0].Propstat.Prop.ResourceType.Collection == nil {
+		t.Fatal("ResourceType collection should remain cached after caller mutation")
+	}
+}
+
+func TestPropfindCache_GetReturnsDeepCopy(t *testing.T) {
+	cache := NewPropfindCache(time.Second, 100)
+
+	cache.Set("/dir", "1", []propfindResponse{
+		{
+			Href: "/dir/",
+			Propstat: propstat{
+				Status: "HTTP/1.1 200 OK",
+				Prop: prop{
+					DisplayName:  "dir",
+					ResourceType: &resourceType{Collection: &struct{}{}},
+				},
+			},
+		},
+	})
+
+	got, ok := cache.Get("/dir", "1")
+	if !ok {
+		t.Fatal("Get should return cached value")
+	}
+
+	got[0].Href = "/mutated/"
+	got[0].Propstat.Prop.DisplayName = "mutated"
+	got[0].Propstat.Prop.ResourceType.Collection = nil
+
+	again, ok := cache.Get("/dir", "1")
+	if !ok {
+		t.Fatal("Get should still return cached value")
+	}
+	if again[0].Href != "/dir/" {
+		t.Fatalf("Href after caller mutation = %q, want /dir/", again[0].Href)
+	}
+	if again[0].Propstat.Prop.DisplayName != "dir" {
+		t.Fatalf("DisplayName after caller mutation = %q, want dir", again[0].Propstat.Prop.DisplayName)
+	}
+	if again[0].Propstat.Prop.ResourceType == nil || again[0].Propstat.Prop.ResourceType.Collection == nil {
+		t.Fatal("ResourceType collection should remain cached after Get mutation")
+	}
+}
+
 func TestPropfindCache_Miss(t *testing.T) {
 	cache := NewPropfindCache(time.Second, 100)
 
