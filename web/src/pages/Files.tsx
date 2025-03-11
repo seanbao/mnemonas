@@ -67,6 +67,7 @@ import {
   MAX_UPLOAD_FILE_SIZE_LABEL,
 } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
+import { listShares, ShareError } from '@/api/share'
 import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
@@ -278,6 +279,26 @@ function getShareBannerContent(): { title: string; description: string } {
     title: '分享功能已关闭',
     description: '当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。',
   }
+}
+
+function getShareUnavailableBannerContent(): { title: string; description: string } {
+  return {
+    title: '分享功能暂不可用',
+    description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+  }
+}
+
+function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
+  if (!(error instanceof ShareError)) {
+    return null
+  }
+  if (error.isFeatureDisabled) {
+    return 'disabled'
+  }
+  if (error.isUnavailable) {
+    return 'unavailable'
+  }
+  return null
 }
 
 // Breadcrumb navigation component
@@ -847,7 +868,7 @@ export function FilesPage() {
   const [isUploading, setIsUploading] = useState(false)
   const [showUploadPanel, setShowUploadPanel] = useState(false)
   const uploadClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [shareFeatureAvailable, setShareFeatureAvailable] = useState(true)
+  const [shareFeatureDisabled, setShareFeatureDisabled] = useState(false)
   
   const { 
     currentPath, 
@@ -1036,10 +1057,22 @@ export function FilesPage() {
     enabled: filePaths.length > 0,
     staleTime: 30000, // Cache for 30 seconds
   })
+  const { error: shareAvailabilityError } = useQuery({
+    queryKey: ['shares-availability'],
+    queryFn: () => listShares(),
+    enabled: canWrite,
+    retry: false,
+    staleTime: 30000,
+  })
   const favoriteActionsAvailable = !favoritesError
   const favoritesBanner = favoritesError ? getFavoritesBannerContent(favoritesError) : null
-  const shareActionsAvailable = shareFeatureAvailable
-  const shareBanner = shareActionsAvailable ? null : getShareBannerContent()
+  const shareFeatureState = shareFeatureDisabled ? 'disabled' : getShareFeatureState(shareAvailabilityError)
+  const shareActionsAvailable = shareFeatureState === null
+  const shareBanner = shareFeatureState === 'disabled'
+    ? getShareBannerContent()
+    : shareFeatureState === 'unavailable'
+      ? getShareUnavailableBannerContent()
+      : null
 
   const favoriteMutation = useMutation({
     mutationFn: ({ path, isFavorited }: { path: string; isFavorited: boolean }) => 
@@ -2547,7 +2580,7 @@ export function FilesPage() {
         filePath={shareFile?.path || ''}
         isFolder={shareFile?.isDir}
         featureEnabled={shareActionsAvailable}
-        onFeatureDisabled={() => setShareFeatureAvailable(false)}
+        onFeatureDisabled={() => setShareFeatureDisabled(true)}
       />
 
       {/* Move/Copy Dialog */}

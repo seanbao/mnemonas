@@ -23,38 +23,50 @@ type RetentionMonitor struct {
 	baseCtx context.Context
 	cfg     RetentionMonitorConfig
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	lifecycleMu sync.Mutex
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
+
+var onRetentionMonitorLoopStart = func(context.Context) {}
 
 func NewRetentionMonitor(fs *FileSystem, cfg RetentionMonitorConfig, logger zerolog.Logger) *RetentionMonitor {
 	return &RetentionMonitor{fs: fs, cfg: cfg, logger: logger}
 }
 
 func (m *RetentionMonitor) Start(ctx context.Context) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	m.mu.Lock()
 	m.baseCtx = ctx
 	cfg := m.cfg
 	m.mu.Unlock()
 
-	m.restart(cfg)
+	m.restartLocked(cfg)
 }
 
 func (m *RetentionMonitor) Stop() {
-	m.stopLoop()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	m.stopLoopLocked()
 	m.wg.Wait()
 }
 
 func (m *RetentionMonitor) UpdateConfig(cfg RetentionMonitorConfig) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	if m.fs != nil {
 		m.fs.UpdateRetentionSettings(cfg.MaxVersions, cfg.MaxVersionAge, cfg.MinFreeSpace)
 	}
-	m.restart(cfg)
+	m.restartLocked(cfg)
 }
 
-func (m *RetentionMonitor) restart(cfg RetentionMonitorConfig) {
-	m.stopLoop()
+func (m *RetentionMonitor) restartLocked(cfg RetentionMonitorConfig) {
+	m.stopLoopLocked()
 	m.wg.Wait()
 
 	m.mu.Lock()
@@ -79,6 +91,7 @@ func (m *RetentionMonitor) restart(cfg RetentionMonitorConfig) {
 
 	go func(interval time.Duration) {
 		defer m.wg.Done()
+		onRetentionMonitorLoopStart(loopCtx)
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -98,7 +111,7 @@ func (m *RetentionMonitor) restart(cfg RetentionMonitorConfig) {
 	m.logger.Info().Dur("interval", cfg.SweepInterval).Msg("Retention monitor started")
 }
 
-func (m *RetentionMonitor) stopLoop() {
+func (m *RetentionMonitor) stopLoopLocked() {
 	m.mu.Lock()
 	cancel := m.cancel
 	m.cancel = nil

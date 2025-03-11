@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -25,7 +25,8 @@ import {
   deleteFromTrash,
   emptyTrash,
   ApiError,
-  type TrashItem
+  type TrashItem,
+  type TrashListResponse
 } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -219,6 +220,71 @@ export function TrashPage() {
     queryFn: listTrash,
   })
 
+  const removeSelectedIds = useCallback((ids: string[]) => {
+    if (ids.length === 0) {
+      return
+    }
+
+    const removedIds = new Set(ids)
+    setSelectedItems((prev) => {
+      if (prev.size === 0) {
+        return prev
+      }
+
+      let changed = false
+      const next = new Set<string>()
+      for (const id of prev) {
+        if (removedIds.has(id)) {
+          changed = true
+          continue
+        }
+        next.add(id)
+      }
+
+      return changed ? next : prev
+    })
+  }, [])
+
+  const removeTrashItemsFromCache = useCallback((ids: string[]) => {
+    if (ids.length === 0) {
+      return
+    }
+
+    const removedIds = new Set(ids)
+    queryClient.setQueryData<TrashListResponse>(['trash'], (current) => {
+      if (!current) {
+        return current
+      }
+
+      const items = current.items.filter((item) => !removedIds.has(item.id))
+      if (items.length === current.items.length) {
+        return current
+      }
+
+      return {
+        ...current,
+        items,
+        count: items.length,
+        totalSize: items.reduce((sum, item) => sum + item.size, 0),
+      }
+    })
+  }, [queryClient])
+
+  const clearTrashCache = useCallback(() => {
+    queryClient.setQueryData<TrashListResponse>(['trash'], (current) => {
+      if (!current) {
+        return current
+      }
+
+      return {
+        ...current,
+        items: [],
+        count: 0,
+        totalSize: 0,
+      }
+    })
+  }, [queryClient])
+
   const handleRefreshTrash = useCallback(async () => {
   const result = await refetch()
   if (result.error) {
@@ -234,7 +300,9 @@ export function TrashPage() {
   // Mutations
   const restoreMutation = useMutation({
     mutationFn: (id: string) => restoreFromTrash(id),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      removeTrashItemsFromCache([id])
+      removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
       addToast({ title: '恢复成功', color: 'success' })
@@ -249,11 +317,13 @@ export function TrashPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteFromTrash(id),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      removeTrashItemsFromCache([id])
+      removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       addToast({ title: '已永久删除', color: 'success' })
       onDeleteClose()
-      setActionItem(null)
+      setActionItem((current) => current?.id === id ? null : current)
     },
     onError: (error) => {
       addToast(getTrashActionErrorPresentation(error, {
@@ -266,6 +336,8 @@ export function TrashPage() {
   const emptyMutation = useMutation({
     mutationFn: emptyTrash,
     onSuccess: (result) => {
+      clearTrashCache()
+      setSelectedItems(new Set())
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       if (result.partial) {
         addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
@@ -304,6 +376,7 @@ export function TrashPage() {
       unavailable: '批量恢复暂不可用',
     }),
     onComplete: (result) => {
+      removeTrashItemsFromCache(result.succeededItems as string[])
       setSelectedItems(new Set(result.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
@@ -329,6 +402,7 @@ export function TrashPage() {
       unavailable: '批量永久删除暂不可用',
     }),
     onComplete: (result) => {
+      removeTrashItemsFromCache(result.succeededItems as string[])
       setSelectedItems(new Set(result.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: ['trash'] })
     },
@@ -354,6 +428,29 @@ export function TrashPage() {
       deleteMutation.mutate(actionItem.id)
     }
   }, [canWrite, actionItem, deleteMutation])
+
+  const items = data?.items ?? []
+
+  useEffect(() => {
+    const validIds = new Set(items.map((item) => item.id))
+    setSelectedItems((prev) => {
+      if (prev.size === 0) {
+        return prev
+      }
+
+      let changed = false
+      const next = new Set<string>()
+      for (const id of prev) {
+        if (validIds.has(id)) {
+          next.add(id)
+          continue
+        }
+        changed = true
+      }
+
+      return changed ? next : prev
+    })
+  }, [items])
 
   if (isLoading) {
     return (
@@ -392,7 +489,6 @@ export function TrashPage() {
     )
   }
 
-  const items = data?.items ?? []
   const totalSize = data?.totalSize ?? items.reduce((sum, item) => sum + item.size, 0)
   const itemCount = data?.count ?? items.length
   const retentionDays = data?.retentionDays

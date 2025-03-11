@@ -252,6 +252,22 @@ describe('SettingsPage', () => {
       expect(shareBaseUrlInput).toHaveAttribute('type', 'url')
     })
 
+    it('shows example duration placeholders for retention and alert timing settings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      expect(await screen.findByPlaceholderText('8760h')).toBeTruthy()
+      expect(screen.getByPlaceholderText('24h')).toBeTruthy()
+
+      await openTab(user, '高级')
+
+      expect(await screen.findByPlaceholderText('30s')).toBeTruthy()
+      expect(screen.getByPlaceholderText('1h')).toBeTruthy()
+      expect(screen.getByPlaceholderText('4h')).toBeTruthy()
+    })
+
     it('opens the tab selected in the query string on first render', async () => {
       window.history.pushState({}, '', '/settings?tab=advanced')
       render(<SettingsPage />)
