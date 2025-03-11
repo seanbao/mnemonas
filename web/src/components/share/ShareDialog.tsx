@@ -97,6 +97,8 @@ export function ShareDialog({
   const [maxAccess, setMaxAccess] = useState('')
   const [description, setDescription] = useState('')
 
+  const passwordRequiredButEmpty = usePassword && password.trim() === ''
+
   const shareUrl = useMemo(() => {
     if (!createdShare) return ''
     return createdShare.url.startsWith('http')
@@ -122,6 +124,14 @@ export function ShareDialog({
 
   const handleCreate = async () => {
     if (featureDisabled || !featureEnabled) return
+    if (passwordRequiredButEmpty) {
+      addToast({
+        title: '请输入分享密码',
+        description: '启用密码保护后，必须设置访问密码。',
+        color: 'warning',
+      })
+      return
+    }
 
     setIsLoading(true)
     try {
@@ -264,15 +274,20 @@ export function ShareDialog({
                   />
                 </div>
                 {usePassword && (
-                  <Input
-                    type="password"
-                    placeholder="设置访问密码"
-                    value={password}
-                    onValueChange={setPassword}
-                    classNames={{
-                      inputWrapper: "bg-content2 border-divider",
-                    }}
-                  />
+                  <div className="space-y-2">
+                    <Input
+                      type="password"
+                      placeholder="设置访问密码"
+                      value={password}
+                      onValueChange={setPassword}
+                      isInvalid={passwordRequiredButEmpty}
+                      errorMessage={passwordRequiredButEmpty ? '启用密码保护后必须输入密码' : undefined}
+                      classNames={{
+                        inputWrapper: "bg-content2 border-divider",
+                      }}
+                    />
+                    <p className="text-xs text-default-500">启用后，访问此分享链接必须先输入密码。</p>
+                  </div>
                 )}
               </div>
 
@@ -363,6 +378,7 @@ export function ShareDialog({
               <Button 
                 color="primary" 
                 onPress={handleCreate}
+                isDisabled={passwordRequiredButEmpty}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
                 className="rounded-xl"
