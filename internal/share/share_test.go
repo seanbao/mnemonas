@@ -320,6 +320,101 @@ func TestShareStore_GetNotFound(t *testing.T) {
 	}
 }
 
+func TestShareStore_ListByUser_SortsNewestFirst(t *testing.T) {
+	now := time.Now()
+	store := &ShareStore{
+		shares: map[string]*Share{
+			"older": {
+				ID:        "older",
+				Path:      "/docs/older.txt",
+				CreatedBy: "user1",
+				CreatedAt: now.Add(-time.Hour),
+			},
+			"newer": {
+				ID:        "newer",
+				Path:      "/docs/newer.txt",
+				CreatedBy: "user1",
+				CreatedAt: now,
+			},
+			"other-user": {
+				ID:        "other-user",
+				Path:      "/docs/other.txt",
+				CreatedBy: "user2",
+				CreatedAt: now.Add(time.Hour),
+			},
+		},
+		pathIdx: map[string][]string{},
+	}
+
+	shares := store.ListByUser("user1")
+	if len(shares) != 2 {
+		t.Fatalf("expected 2 shares, got %d", len(shares))
+	}
+	if shares[0].ID != "newer" || shares[1].ID != "older" {
+		t.Fatalf("expected newest-first ordering, got %q then %q", shares[0].ID, shares[1].ID)
+	}
+}
+
+func TestShareStore_ListAll_SortsDeterministicallyWhenTimestampsMatch(t *testing.T) {
+	createdAt := time.Now()
+	store := &ShareStore{
+		shares: map[string]*Share{
+			"share-b": {
+				ID:        "share-b",
+				Path:      "/docs/b.txt",
+				CreatedBy: "user1",
+				CreatedAt: createdAt,
+			},
+			"share-a": {
+				ID:        "share-a",
+				Path:      "/docs/a.txt",
+				CreatedBy: "user2",
+				CreatedAt: createdAt,
+			},
+		},
+		pathIdx: map[string][]string{},
+	}
+
+	shares := store.ListAll()
+	if len(shares) != 2 {
+		t.Fatalf("expected 2 shares, got %d", len(shares))
+	}
+	if shares[0].ID != "share-a" || shares[1].ID != "share-b" {
+		t.Fatalf("expected ID tie-break ordering, got %q then %q", shares[0].ID, shares[1].ID)
+	}
+}
+
+func TestShareStore_GetByPath_SortsNewestFirst(t *testing.T) {
+	now := time.Now()
+	store := &ShareStore{
+		shares: map[string]*Share{
+			"older": {
+				ID:        "older",
+				Path:      "/docs/shared.txt",
+				CreatedBy: "user1",
+				CreatedAt: now.Add(-time.Hour),
+			},
+			"newer": {
+				ID:        "newer",
+				Path:      "/docs/shared.txt",
+				CreatedBy: "user2",
+				CreatedAt: now,
+			},
+		},
+		pathIdx: map[string][]string{
+			"/docs/shared.txt": {"older", "newer"},
+		},
+	}
+
+	shares := store.GetByPath("/docs/shared.txt")
+	if len(shares) != 2 {
+		t.Fatalf("expected 2 shares, got %d", len(shares))
+	}
+	if shares[0].ID != "newer" || shares[1].ID != "older" {
+		t.Fatalf("expected newest-first path share ordering, got %q then %q", shares[0].ID, shares[1].ID)
+	}
+}
+
 func TestShareStore_Delete(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

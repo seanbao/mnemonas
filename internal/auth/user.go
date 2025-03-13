@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -722,7 +723,22 @@ func (s *UserStore) List() []*User {
 	for _, u := range s.users {
 		users = append(users, cloneUser(u))
 	}
+	sortUsersForList(users)
 	return users
+}
+
+func sortUsersForList(users []*User) {
+	sort.Slice(users, func(i, j int) bool {
+		left := normalizeUsername(users[i].Username)
+		right := normalizeUsername(users[j].Username)
+		if left != right {
+			return left < right
+		}
+		if users[i].Username != users[j].Username {
+			return users[i].Username < users[j].Username
+		}
+		return users[i].ID < users[j].ID
+	})
 }
 
 // Count returns the number of users

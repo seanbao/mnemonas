@@ -299,6 +299,54 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("list users sorts by username case-insensitively", func(t *testing.T) {
+		store, _, err := NewUserStore(filepath.Join(dir, "users8-order.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		if _, err := store.Create("zeta", "password123", "", RoleUser); err != nil {
+			t.Fatalf("failed to create zeta user: %v", err)
+		}
+		if _, err := store.Create("Alpha", "password123", "", RoleUser); err != nil {
+			t.Fatalf("failed to create Alpha user: %v", err)
+		}
+		if _, err := store.Create("beta", "password123", "", RoleUser); err != nil {
+			t.Fatalf("failed to create beta user: %v", err)
+		}
+
+		users := store.List()
+		if len(users) < 4 {
+			t.Fatalf("expected at least 4 users including default admin, got %d", len(users))
+		}
+
+		orderedNames := make([]string, len(users))
+		for i, user := range users {
+			orderedNames[i] = user.Username
+		}
+
+		alphaIndex := -1
+		betaIndex := -1
+		zetaIndex := -1
+		for i, name := range orderedNames {
+			switch name {
+			case "Alpha":
+				alphaIndex = i
+			case "beta":
+				betaIndex = i
+			case "zeta":
+				zetaIndex = i
+			}
+		}
+
+		if alphaIndex == -1 || betaIndex == -1 || zetaIndex == -1 {
+			t.Fatalf("expected Alpha, beta, and zeta in listed users, got %v", orderedNames)
+		}
+		if !(alphaIndex < betaIndex && betaIndex < zetaIndex) {
+			t.Fatalf("expected alphabetical order Alpha < beta < zeta, got %v", orderedNames)
+		}
+	})
+
 	t.Run("get by username stays responsive during login persistence", func(t *testing.T) {
 		storeDir := t.TempDir()
 		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
