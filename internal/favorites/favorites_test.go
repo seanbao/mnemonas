@@ -454,6 +454,92 @@ func TestStore_AddRejectsSymlinkPath(t *testing.T) {
 	}
 }
 
+func TestStore_UpdatePathReferences_RenamesDescendantFavorites(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs", "folder"); err != nil {
+		t.Fatalf("Add(/docs) error: %v", err)
+	}
+	if _, err := store.Add("user1", "/docs/a.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+	if _, err := store.Add("user1", "/other.txt", "other"); err != nil {
+		t.Fatalf("Add(/other.txt) error: %v", err)
+	}
+	if _, err := store.Add("user2", "/docs/sub/b.txt", "nested"); err != nil {
+		t.Fatalf("Add(/docs/sub/b.txt) error: %v", err)
+	}
+
+	if err := store.UpdatePathReferences("/docs", "/archive/docs"); err != nil {
+		t.Fatalf("UpdatePathReferences() error: %v", err)
+	}
+
+	if store.IsFavorite("user1", "/docs") {
+		t.Fatal("expected original folder favorite path to be removed")
+	}
+	if !store.IsFavorite("user1", "/archive/docs") {
+		t.Fatal("expected folder favorite path to be updated")
+	}
+	if store.IsFavorite("user1", "/docs/a.txt") {
+		t.Fatal("expected original file favorite path to be removed")
+	}
+	if !store.IsFavorite("user1", "/archive/docs/a.txt") {
+		t.Fatal("expected file favorite path to be updated")
+	}
+	if !store.IsFavorite("user1", "/other.txt") {
+		t.Fatal("expected unrelated favorite to remain")
+	}
+	if !store.IsFavorite("user2", "/archive/docs/sub/b.txt") {
+		t.Fatal("expected descendant favorite for second user to be updated")
+	}
+}
+
+func TestStore_RemoveFavoritesUnderPath_RemovesExactAndDescendantFavorites(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs", "folder"); err != nil {
+		t.Fatalf("Add(/docs) error: %v", err)
+	}
+	if _, err := store.Add("user1", "/docs/a.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+	if _, err := store.Add("user1", "/other.txt", "other"); err != nil {
+		t.Fatalf("Add(/other.txt) error: %v", err)
+	}
+	if _, err := store.Add("user2", "/docs/sub/b.txt", "nested"); err != nil {
+		t.Fatalf("Add(/docs/sub/b.txt) error: %v", err)
+	}
+
+	if err := store.RemoveFavoritesUnderPath("/docs"); err != nil {
+		t.Fatalf("RemoveFavoritesUnderPath() error: %v", err)
+	}
+
+	if store.IsFavorite("user1", "/docs") {
+		t.Fatal("expected exact deleted-path favorite to be removed")
+	}
+	if store.IsFavorite("user1", "/docs/a.txt") {
+		t.Fatal("expected descendant deleted-path favorite to be removed")
+	}
+	if !store.IsFavorite("user1", "/other.txt") {
+		t.Fatal("expected unrelated favorite to remain")
+	}
+	if store.IsFavorite("user2", "/docs/sub/b.txt") {
+		t.Fatal("expected second user descendant favorite to be removed")
+	}
+}
+
 func TestStore_ListDoesNotBlockWhileAddPersists(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")

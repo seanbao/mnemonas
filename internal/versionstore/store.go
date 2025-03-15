@@ -69,8 +69,9 @@ type Store struct {
 	db      *sql.DB
 	objects *ObjectStore
 
-	deleteObjectFn   func(ctx context.Context, hash string) error
-	deleteChunkRefFn func(ctx context.Context, chunkHash string) error
+	getChunkRefSizeFn func(ctx context.Context, hash string) (int64, error)
+	deleteObjectFn    func(ctx context.Context, hash string) error
+	deleteChunkRefFn  func(ctx context.Context, chunkHash string) error
 }
 
 // Config holds store configuration
@@ -106,6 +107,13 @@ func New(cfg Config) (*Store, error) {
 	store := &Store{
 		db:      db,
 		objects: NewObjectStore(cfg.Dataplane),
+	}
+	store.getChunkRefSizeFn = func(ctx context.Context, hash string) (int64, error) {
+		var size int64
+		if err := store.db.QueryRowContext(ctx, `SELECT size FROM chunk_refs WHERE hash = ?`, hash).Scan(&size); err != nil {
+			return 0, err
+		}
+		return size, nil
 	}
 	store.deleteObjectFn = func(ctx context.Context, hash string) error {
 		return store.DeleteObject(ctx, hash)
@@ -971,9 +979,12 @@ func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
 	var gcErr error
 
 	for _, hash := range orphans {
-		// Get size before deleting
-		var size int64
-		_ = s.db.QueryRowContext(ctx, `SELECT size FROM chunk_refs WHERE hash = ?`, hash).Scan(&size)
+		// If chunk metadata cannot be loaded reliably, leave the candidate for a later GC pass.
+		size, err := s.getChunkRefSizeFn(ctx, hash)
+		if err != nil {
+			gcErr = errors.Join(gcErr, fmt.Errorf("get chunk ref size %s: %w", hash, err))
+			continue
+		}
 
 		// Delete from CAS
 		objectDeleted := true

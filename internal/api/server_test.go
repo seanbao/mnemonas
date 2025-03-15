@@ -585,6 +585,61 @@ func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string
 	return server, createdShare.ID
 }
 
+func setupFavoritesPathSyncServer(t *testing.T) *Server {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a"))); err != nil {
+		t.Fatalf("WriteFile(/docs/a.txt) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/sub"); err != nil {
+		t.Fatalf("Mkdir(/docs/sub) error: %v", err)
+	}
+
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	settings.Favorites.Enabled = true
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		FileSystem:         fs,
+		ActivityRoot:       path.Join(internalRoot, "activity"),
+		Config:             settings,
+		ConfigPath:         configPath,
+		FavoritesEnabled:   true,
+		FavoritesStoreFile: path.Join(tmpDir, "favorites.json"),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	return server
+}
+
 type repeatingReader struct{}
 
 func (repeatingReader) Read(p []byte) (int, error) {
@@ -1148,6 +1203,32 @@ func TestServer_DeleteFile_DisablesSharesForDeletedPath(t *testing.T) {
 	}
 	if _, err := server.fs.Stat(ctx, "/docs/a.txt"); err == nil {
 		t.Fatal("expected deleted file to be absent from filesystem")
+	}
+}
+
+func TestServer_DeleteFile_RemovesFavoritesForDeletedPath(t *testing.T) {
+	server := setupFavoritesPathSyncServer(t)
+
+	if _, err := server.favoritesStore.Add("tester", "/docs/a.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+	if _, err := server.favoritesStore.Add("tester", "/docs/sub", "dir"); err != nil {
+		t.Fatalf("Add(/docs/sub) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete favorited file status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.favoritesStore.IsFavorite("tester", "/docs/a.txt") {
+		t.Fatal("expected deleted file favorite to be removed")
+	}
+	if !server.favoritesStore.IsFavorite("tester", "/docs/sub") {
+		t.Fatal("expected unrelated favorite to remain")
 	}
 }
 
@@ -3030,6 +3111,44 @@ func TestServer_MoveFile_UpdatesSharePaths(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_UpdatesFavoritePaths(t *testing.T) {
+	server := setupFavoritesPathSyncServer(t)
+	ctx := context.Background()
+
+	if err := server.fs.Mkdir(ctx, "/archive"); err != nil {
+		t.Fatalf("Mkdir(/archive) error: %v", err)
+	}
+	if _, err := server.favoritesStore.Add("tester", "/docs", "folder"); err != nil {
+		t.Fatalf("Add(/docs) error: %v", err)
+	}
+	if _, err := server.favoritesStore.Add("tester", "/docs/a.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+
+	body := `{"from":"/docs","to":"/archive/docs"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("move favorited folder status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.favoritesStore.IsFavorite("tester", "/docs") {
+		t.Fatal("expected original folder favorite path to be removed")
+	}
+	if server.favoritesStore.IsFavorite("tester", "/docs/a.txt") {
+		t.Fatal("expected original file favorite path to be removed")
+	}
+	if !server.favoritesStore.IsFavorite("tester", "/archive/docs") {
+		t.Fatal("expected folder favorite path to be updated")
+	}
+	if !server.favoritesStore.IsFavorite("tester", "/archive/docs/a.txt") {
+		t.Fatal("expected file favorite path to be updated")
+	}
+}
+
 func TestServer_MoveFile_RejectsOversizedRequestBody(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -4819,6 +4938,43 @@ func TestServer_PublicShareAccess_HidesLegacyShareOutsideHomeForNonAdminOwner(t 
 	}
 }
 
+func TestServer_PublicShareAccess_HidesShareForDisabledOwner(t *testing.T) {
+	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create share error: %v", err)
+	}
+
+	user.Disabled = true
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(disabled user) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/s/"+fileShare.ID, nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("public share for disabled owner status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(w.Body.String(), "SHARE_NOT_FOUND") {
+		t.Fatalf("expected SHARE_NOT_FOUND response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_GetShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
@@ -5222,6 +5378,41 @@ func TestServer_WebDAVCredentials_URLNormalized(t *testing.T) {
 	}
 }
 
+func TestServer_WebDAVCredentials_GeneratedPasswordUnavailableReturnsServiceUnavailable(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.config.Storage.Root = filepath.Join(tmpDir, "missing-secrets")
+	server.config.WebDAV.Enabled = true
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Username = "webdav-user"
+	server.config.WebDAV.Password = ""
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:  true,
+		Prefix:   "/dav",
+		AuthType: "basic",
+		Username: "webdav-user",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/webdav-credentials", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("WebDAV credentials missing generated password status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "webdav credentials unavailable" {
+		t.Fatalf("expected webdav credentials unavailable message, got %q", payload.Message)
+	}
+}
+
 func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -5311,6 +5502,9 @@ func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *tes
 func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
+	if err := config.SaveSecrets(tmpDir, &config.Secrets{JWTSecret: "jwt", WebDAVPassword: "auto-pass"}); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
 
 	body := `{"webdav":{"prefix":"dav/"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
@@ -5324,6 +5518,73 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 	if server.config.WebDAV.Prefix != "/dav" {
 		t.Fatalf("expected prefix normalized to /dav, got %q", server.config.WebDAV.Prefix)
+	}
+}
+
+func TestServer_UpdateSettings_RejectsGeneratedWebDAVPasswordWhenSecretsUnavailable(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Storage.Root = filepath.Join(tmpDir, "missing-secrets")
+	server.config.WebDAV.Enabled = true
+	server.config.WebDAV.Prefix = "/dav"
+	server.config.WebDAV.ReadOnly = false
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Username = "runtime-user"
+	server.config.WebDAV.Password = "runtime-pass"
+	if err := server.config.Save(server.configPath); err != nil {
+		t.Fatalf("failed to save baseline config: %v", err)
+	}
+	baselineConfig, err := os.ReadFile(server.configPath)
+	if err != nil {
+		t.Fatalf("failed to read baseline config: %v", err)
+	}
+	webdavUpdater := &fakeWebDAVUpdater{}
+	server.updateWebDAV = webdavUpdater.UpdateConfig
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:  true,
+		Prefix:   "/dav",
+		ReadOnly: false,
+		AuthType: "basic",
+		Username: "runtime-user",
+		Password: "runtime-pass",
+	}
+
+	body := `{"webdav":{"enabled":true,"auth_type":"basic","username":"saved-user","password":""}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("update settings missing generated webdav password status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "webdav credentials unavailable" {
+		t.Fatalf("expected webdav credentials unavailable message, got %q", payload.Message)
+	}
+	if server.config.WebDAV.Password != "runtime-pass" || server.config.WebDAV.Username != "runtime-user" {
+		t.Fatalf("expected in-memory WebDAV config to remain unchanged, got %+v", server.config.WebDAV)
+	}
+	if server.activeWebDAV.Password != "runtime-pass" || server.activeWebDAV.Username != "runtime-user" {
+		t.Fatalf("expected active WebDAV runtime config to remain unchanged, got %+v", server.activeWebDAV)
+	}
+	if webdavUpdater.updateCount != 0 {
+		t.Fatalf("expected WebDAV updater not to run, got %d", webdavUpdater.updateCount)
+	}
+	persistedConfig, err := os.ReadFile(server.configPath)
+	if err != nil {
+		t.Fatalf("failed to read persisted config: %v", err)
+	}
+	if !bytes.Equal(persistedConfig, baselineConfig) {
+		t.Fatalf("expected rejected update to leave persisted config unchanged")
 	}
 }
 
@@ -6372,7 +6633,7 @@ func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testin
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
-	if err := server.activity.Log(activity.ActionUpload, "/users/own.txt", username, "127.0.0.1", nil); err != nil {
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", username, "127.0.0.1", nil); err != nil {
 		t.Fatalf("log own activity error: %v", err)
 	}
 	if err := server.activity.Log(activity.ActionDelete, "/users/admin.txt", adminUsername, "127.0.0.2", nil); err != nil {
@@ -6407,8 +6668,66 @@ func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testin
 	if payload.Data.Items[0].User != username {
 		t.Fatalf("non-admin saw user %q, want %q", payload.Data.Items[0].User, username)
 	}
-	if payload.Data.Items[0].Path != "/users/own.txt" {
+	if payload.Data.Items[0].Path != "/tester/own.txt" {
 		t.Fatalf("non-admin saw path %q, want own path", payload.Data.Items[0].Path)
+	}
+}
+
+func TestServer_ListActivity_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log in-home activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionDelete, "/other/secret.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log outside-home activity error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/", nil)
+	req.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity as non-admin status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Items []activity.Entry `json:"items"`
+			Total int              `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse list activity response: %v", err)
+	}
+	if payload.Data.Total != 1 {
+		t.Fatalf("non-admin filtered activity total = %d, want 1", payload.Data.Total)
+	}
+	if len(payload.Data.Items) != 1 {
+		t.Fatalf("non-admin filtered activity items = %d, want 1", len(payload.Data.Items))
+	}
+	if payload.Data.Items[0].Path != "/tester/own.txt" {
+		t.Fatalf("non-admin saw path %q, want in-home path only", payload.Data.Items[0].Path)
 	}
 }
 
@@ -6437,7 +6756,7 @@ func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testi
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
-	if err := server.activity.Log(activity.ActionUpload, "/users/own.txt", username, "127.0.0.1", nil); err != nil {
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", username, "127.0.0.1", nil); err != nil {
 		t.Fatalf("log own activity error: %v", err)
 	}
 	if err := server.activity.Log(activity.ActionDelete, "/users/admin.txt", "stats-admin", "127.0.0.2", nil); err != nil {
@@ -6481,6 +6800,72 @@ func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testi
 	}
 	if payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
 		t.Fatalf("expected admin delete count to be hidden, got %d", payload.Data.ByAction[string(activity.ActionDelete)])
+	}
+}
+
+func TestServer_ActivityStats_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/tester/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log in-home activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionDelete, "/other/secret.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log outside-home activity error: %v", err)
+	}
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
+	statsReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	statsRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(statsRec, statsReq)
+
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("activity stats as non-admin status = %d, want %d", statsRec.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Total    int            `json:"total"`
+			Today    int            `json:"today"`
+			ByUser   map[string]int `json:"by_user"`
+			ByAction map[string]int `json:"by_action"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(statsRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse activity stats response: %v", err)
+	}
+	if payload.Data.Total != 1 {
+		t.Fatalf("non-admin filtered activity stats total = %d, want 1", payload.Data.Total)
+	}
+	if payload.Data.Today != 1 {
+		t.Fatalf("non-admin filtered activity stats today = %d, want 1", payload.Data.Today)
+	}
+	if payload.Data.ByUser[username] != 1 {
+		t.Fatalf("expected own filtered user count = 1, got %d", payload.Data.ByUser[username])
+	}
+	if payload.Data.ByAction[string(activity.ActionUpload)] != 1 {
+		t.Fatalf("expected in-home upload count = 1, got %d", payload.Data.ByAction[string(activity.ActionUpload)])
+	}
+	if payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
+		t.Fatalf("expected outside-home delete count to be hidden, got %d", payload.Data.ByAction[string(activity.ActionDelete)])
 	}
 }
 
