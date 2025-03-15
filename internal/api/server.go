@@ -140,6 +140,32 @@ func (s *Server) storeActiveWebDAV(cfg WebDAVRuntimeConfig) {
 	s.activeWebDAV = cfg
 }
 
+func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) {
+	if s.shareStore != nil {
+		if err := s.shareStore.UpdatePathReferences(oldPath, newPath); err != nil {
+			s.logger.Error().Err(err).Str("old_path", oldPath).Str("new_path", newPath).Msg("failed to sync share paths after rename")
+		}
+	}
+	if s.favoritesStore != nil {
+		if err := s.favoritesStore.UpdatePathReferences(oldPath, newPath); err != nil {
+			s.logger.Error().Err(err).Str("old_path", oldPath).Str("new_path", newPath).Msg("failed to sync favorite paths after rename")
+		}
+	}
+}
+
+func (s *Server) handlePathDeleted(_ context.Context, targetPath string) {
+	if s.shareStore != nil {
+		if err := s.shareStore.DisableSharesUnderPath(targetPath); err != nil {
+			s.logger.Error().Err(err).Str("path", targetPath).Msg("failed to disable shares after delete")
+		}
+	}
+	if s.favoritesStore != nil {
+		if err := s.favoritesStore.RemoveFavoritesUnderPath(targetPath); err != nil {
+			s.logger.Error().Err(err).Str("path", targetPath).Msg("failed to remove favorites after delete")
+		}
+	}
+}
+
 type AlertMonitor interface {
 	UpdateConfig(cfg alerts.Config)
 }
@@ -265,18 +291,58 @@ func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConf
 		return runtimeCfg
 	}
 
-	secrets, err := config.LoadSecrets(cfg.Storage.Root)
+	password, err := loadGeneratedWebDAVPassword(cfg.Storage.Root)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("failed to load secrets for WebDAV runtime config")
 		return runtimeCfg
 	}
-	if secrets == nil || strings.TrimSpace(secrets.WebDAVPassword) == "" {
-		return runtimeCfg
-	}
 
-	runtimeCfg.Password = secrets.WebDAVPassword
+	runtimeCfg.Password = password
 	runtimeCfg.PasswordIsGenerated = true
 	return runtimeCfg
+}
+
+func loadGeneratedWebDAVPassword(dataRoot string) (string, error) {
+	secrets, err := config.LoadSecrets(dataRoot)
+	if err != nil {
+		return "", err
+	}
+	if secrets == nil || strings.TrimSpace(secrets.WebDAVPassword) == "" {
+		return "", config.ErrSecretsNotFound
+	}
+	return secrets.WebDAVPassword, nil
+}
+
+func prepareWebDAVRuntimeConfig(cfg config.Config) (*WebDAVRuntimeConfig, error) {
+	runtimeCfg := WebDAVRuntimeConfig{
+		Enabled:  cfg.WebDAV.Enabled,
+		Prefix:   cfg.WebDAV.Prefix,
+		ReadOnly: cfg.WebDAV.ReadOnly,
+		AuthType: cfg.WebDAV.AuthType,
+		Username: cfg.WebDAV.Username,
+		Password: cfg.WebDAV.Password,
+	}
+
+	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
+		return &runtimeCfg, nil
+	}
+
+	if strings.TrimSpace(runtimeCfg.Username) == "" {
+		runtimeCfg.Username = "admin"
+	}
+
+	if strings.TrimSpace(runtimeCfg.Password) != "" {
+		return &runtimeCfg, nil
+	}
+
+	password, err := loadGeneratedWebDAVPassword(cfg.Storage.Root)
+	if err != nil {
+		return nil, err
+	}
+
+	runtimeCfg.Password = password
+	runtimeCfg.PasswordIsGenerated = true
+	return &runtimeCfg, nil
 }
 
 // ServerConfig holds server configuration
@@ -449,20 +515,6 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize share store: %w", err)
 		}
 		s.shareStore = shareStore
-		if s.fs != nil {
-			s.fs.SetPathChangeHooks(
-				func(ctx context.Context, oldPath, newPath string) {
-					if err := shareStore.UpdatePathReferences(oldPath, newPath); err != nil {
-						logger.Error().Err(err).Str("old_path", oldPath).Str("new_path", newPath).Msg("failed to sync share paths after rename")
-					}
-				},
-				func(ctx context.Context, path string) {
-					if err := shareStore.DisableSharesUnderPath(path); err != nil {
-						logger.Error().Err(err).Str("path", path).Msg("failed to disable shares after delete")
-					}
-				},
-			)
-		}
 		// Pass filesystem adapter to share handler
 		var fsAdapter share.FileOpener
 		if s.fs != nil {
@@ -495,6 +547,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 				logger.Info().Msg("Favorites feature configured but currently disabled")
 			}
 		}
+	}
+	if s.fs != nil {
+		s.fs.SetPathChangeHooks(s.handlePathRenamed, s.handlePathDeleted)
 	}
 
 	s.setupRoutes()
@@ -879,6 +934,39 @@ func (s *Server) filterFavoritesByHomeDir(ctx context.Context, items []*favorite
 		}
 	}
 	return filtered, nil
+}
+
+func (s *Server) filterActivityEntriesByHomeDir(ctx context.Context, entries []activity.Entry) ([]activity.Entry, error) {
+	homeDir, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return entries, nil
+	}
+
+	filtered := make([]activity.Entry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Path == "" || pathWithinBase(homeDir, entry.Path) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered, nil
+}
+
+func paginateActivityEntries(entries []activity.Entry, limit, offset int) []activity.Entry {
+	if offset >= len(entries) {
+		return []activity.Entry{}
+	}
+
+	end := offset + limit
+	if end > len(entries) {
+		end = len(entries)
+	}
+
+	page := make([]activity.Entry, end-offset)
+	copy(page, entries[offset:end])
+	return page
 }
 
 func (s *Server) filterSharesByHomeDir(ctx context.Context, items []*share.Share) ([]*share.Share, error) {
@@ -2953,6 +3041,23 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
+		entries, _ := s.activity.List(s.activity.Count(), 0, activity.ActionType(actionFilter), currentUserFilter)
+		entries, err := s.filterActivityEntriesByHomeDir(r.Context(), entries)
+		if err != nil {
+			s.respondInternalError(w, "filter activity by home directory", err)
+			return
+		}
+
+		NewAPIResponse(map[string]any{
+			"items":  paginateActivityEntries(entries, limit, offset),
+			"total":  len(entries),
+			"limit":  limit,
+			"offset": offset,
+		}).Write(w, http.StatusOK)
+		return
+	}
+
 	entries, total := s.activity.List(limit, offset, activity.ActionType(actionFilter), userFilter)
 
 	NewAPIResponse(map[string]any{
@@ -2982,6 +3087,11 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 
 	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
 		entries, _ := s.activity.List(s.activity.Count(), 0, "", currentUserFilter)
+		entries, err := s.filterActivityEntriesByHomeDir(r.Context(), entries)
+		if err != nil {
+			s.respondInternalError(w, "filter activity stats by home directory", err)
+			return
+		}
 		NewAPIResponse(buildActivityStats(entries)).Write(w, http.StatusOK)
 		return
 	}
@@ -3656,6 +3766,17 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var preparedWebDAV *WebDAVRuntimeConfig
+	if req.WebDAV != nil {
+		resolvedWebDAV, resolveErr := prepareWebDAVRuntimeConfig(updatedConfig)
+		if resolveErr != nil {
+			s.logger.Error().Err(resolveErr).Msg("failed to resolve generated WebDAV password for updated config")
+			ServiceUnavailable(w, "webdav credentials unavailable")
+			return
+		}
+		preparedWebDAV = resolvedWebDAV
+	}
+
 	preparedDataplane, err := s.prepareDataplaneReplacement(r.Context(), req, updatedConfig)
 	if err != nil {
 		ServiceUnavailable(w, "unable to connect to configured dataplane")
@@ -3676,7 +3797,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.storeConfig(&updatedConfig)
-	s.applyRuntimeSettings(r.Context(), req, updatedConfig, preparedDataplane)
+	s.applyRuntimeSettings(r.Context(), req, updatedConfig, preparedDataplane, preparedWebDAV)
 	preparedDataplane = nil
 
 	s.logger.Info().Msg("settings updated and saved")
@@ -3701,7 +3822,7 @@ func (s *Server) prepareDataplaneReplacement(ctx context.Context, req UpdateSett
 	return replacement, nil
 }
 
-func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client) {
+func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client, preparedWebDAV *WebDAVRuntimeConfig) {
 	if req.DataPlane != nil && req.DataPlane.GRPCAddress != nil {
 		swapDataplane := s.dataplane == nil || s.dataplane.Addr() != cfg.DataPlane.GRPCAddress
 		if swapDataplane {
@@ -3765,6 +3886,9 @@ func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsReq
 
 	if req.WebDAV != nil {
 		runtimeCfg := s.resolveWebDAVRuntimeConfig(cfg)
+		if preparedWebDAV != nil {
+			runtimeCfg = *preparedWebDAV
+		}
 		s.storeActiveWebDAV(runtimeCfg)
 		if s.updateWebDAV != nil {
 			s.updateWebDAV(runtimeCfg)
@@ -3804,6 +3928,16 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 	}
 
 	runtimeCfg := s.currentActiveWebDAV()
+	if runtimeCfg.Enabled && strings.EqualFold(runtimeCfg.AuthType, "basic") && strings.TrimSpace(cfg.WebDAV.Password) == "" {
+		preparedRuntimeCfg, err := prepareWebDAVRuntimeConfig(*cfg)
+		if err != nil {
+			s.logger.Error().Err(err).Msg("failed to load generated WebDAV password for credentials response")
+			ServiceUnavailable(w, "webdav credentials unavailable")
+			return
+		}
+		runtimeCfg = *preparedRuntimeCfg
+	}
+
 	resp := WebDAVCredentialsResponse{
 		Enabled:  runtimeCfg.Enabled,
 		URL:      formatWebDAVPrefix(runtimeCfg.Prefix),
@@ -3818,12 +3952,6 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 		}
 		if runtimeCfg.PasswordIsGenerated && runtimeCfg.Password != "" {
 			resp.Password = runtimeCfg.Password
-		} else if runtimeCfg.Password == "" {
-			// Get password from secrets (auto-generated only)
-			secrets, err := config.LoadSecrets(cfg.Storage.Root)
-			if err == nil && secrets != nil {
-				resp.Password = secrets.WebDAVPassword
-			}
 		}
 	}
 
@@ -4029,6 +4157,9 @@ func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
 			return nil, share.ErrShareNotFound
 		}
 		return nil, err
+	}
+	if owner.Disabled {
+		return nil, share.ErrShareNotFound
 	}
 	if owner.Role == auth.RoleAdmin {
 		return shareInfo, nil

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -496,4 +497,105 @@ func (s *Store) Count(userID string) int {
 		return 0
 	}
 	return len(s.data[userID])
+}
+
+func favoritePathMatchesOrDescendant(basePath, candidatePath string) bool {
+	basePath = path.Clean(basePath)
+	candidatePath = path.Clean(candidatePath)
+	if basePath == "/" {
+		return strings.HasPrefix(candidatePath, "/")
+	}
+	return candidatePath == basePath || strings.HasPrefix(candidatePath, basePath+"/")
+}
+
+func relocateFavoritePath(currentPath, oldRoot, newRoot string) (string, bool) {
+	currentPath = path.Clean(currentPath)
+	oldRoot = path.Clean(oldRoot)
+	newRoot = path.Clean(newRoot)
+	if !favoritePathMatchesOrDescendant(oldRoot, currentPath) {
+		return "", false
+	}
+	if currentPath == oldRoot {
+		return newRoot, true
+	}
+	return path.Clean(newRoot + strings.TrimPrefix(currentPath, oldRoot)), true
+}
+
+// UpdatePathReferences rewrites favorite paths when a filesystem path is renamed.
+func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
+	oldPath = path.Clean(oldPath)
+	newPath = path.Clean(newPath)
+	if oldPath == newPath {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for userID, userFavs := range snapshot.data {
+			for currentPath, fav := range userFavs {
+				updatedPath, ok := relocateFavoritePath(currentPath, oldPath, newPath)
+				if !ok || updatedPath == currentPath {
+					continue
+				}
+
+				updated := copyFavorite(fav)
+				updated.Path = updatedPath
+				delete(snapshot.data[userID], currentPath)
+				snapshot.data[userID][updatedPath] = updated
+				changed = true
+			}
+		}
+
+		if !changed {
+			return nil
+		}
+		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
+}
+
+// RemoveFavoritesUnderPath removes favorites that reference a deleted path.
+func (s *Store) RemoveFavoritesUnderPath(targetPath string) error {
+	targetPath = path.Clean(targetPath)
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for userID, userFavs := range snapshot.data {
+			for currentPath := range userFavs {
+				if !favoritePathMatchesOrDescendant(targetPath, currentPath) {
+					continue
+				}
+
+				delete(snapshot.data[userID], currentPath)
+				changed = true
+			}
+			if len(snapshot.data[userID]) == 0 {
+				delete(snapshot.data, userID)
+			}
+		}
+
+		if !changed {
+			return nil
+		}
+		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
 }
