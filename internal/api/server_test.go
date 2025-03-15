@@ -505,6 +505,19 @@ func loginAndGetAccessToken(t *testing.T, server *Server, username, password str
 	return payload.Data.AccessToken
 }
 
+func setUserHomeDirForTest(t *testing.T, server *Server, username, homeDir string) {
+	t.Helper()
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	user.HomeDir = homeDir
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(%s) error: %v", username, err)
+	}
+}
+
 func setupShareServer(t *testing.T) (*Server, string) {
 	return setupShareServerWithOptions(t, true, "")
 }
@@ -5073,6 +5086,40 @@ func TestServer_ListShares_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_ListShares_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list shares with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+func TestServer_CreateShare_TraversalPathReturnsBadRequest(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"../other/secret.txt","type":"file"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create share traversal path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_CheckFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 
@@ -5209,6 +5256,57 @@ func TestServer_ListFavorites_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 	if strings.Contains(body, "/other/secret.txt") {
 		t.Fatalf("expected outside-home favorite to be filtered, got %s", body)
+	}
+}
+
+func TestServer_ListFavorites_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list favorites with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+func TestServer_AddFavorite_TraversalPathReturnsBadRequest(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"../other/secret.txt"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("add favorite traversal path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_CheckFavorite_TraversalPathReturnsBadRequest(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=../other/secret.txt", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("check favorite traversal path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
 	}
 }
 
@@ -6731,6 +6829,21 @@ func TestServer_ListActivity_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) 
 	}
 }
 
+func TestServer_ListActivity_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list activity with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
 func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 
@@ -6866,6 +6979,21 @@ func TestServer_ActivityStats_NonAdminFiltersOutsideHomeDirEntries(t *testing.T)
 	}
 	if payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
 		t.Fatalf("expected outside-home delete count to be hidden, got %d", payload.Data.ByAction[string(activity.ActionDelete)])
+	}
+}
+
+func TestServer_ActivityStats_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("activity stats with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
 	}
 }
 

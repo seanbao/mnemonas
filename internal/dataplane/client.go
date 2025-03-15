@@ -40,7 +40,17 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
-		return nil // Already connected
+		if c.conn.GetState() == connectivity.Shutdown {
+			_ = c.conn.Close()
+			c.conn = nil
+			c.client = nil
+		} else {
+			if err := waitForReady(ctx, c.conn); err != nil {
+				return fmt.Errorf("failed to connect to data plane: %w", err)
+			}
+			c.client = pb.NewDataPlaneClient(c.conn)
+			return nil
+		}
 	}
 
 	// V3-4 fix: Set max message size limits
@@ -99,7 +109,7 @@ func (c *Client) Close() error {
 func (c *Client) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.conn != nil
+	return c.conn != nil && c.conn.GetState() == connectivity.Ready
 }
 
 // Health checks data plane health

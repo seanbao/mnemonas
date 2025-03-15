@@ -52,8 +52,21 @@ func getUserID(r *http.Request) string {
 	return "anonymous"
 }
 
-func normalizeFavoritePath(rawPath string) string {
-	return path.Clean("/" + strings.TrimSpace(rawPath))
+func normalizeFavoritePath(rawPath string) (string, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	if hasFavoriteTraversalSegment(normalized) {
+		return "", errors.New("invalid path")
+	}
+	return path.Clean("/" + normalized), nil
+}
+
+func hasFavoriteTraversalSegment(filePath string) bool {
+	for _, segment := range strings.Split(filePath, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
@@ -119,7 +132,11 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate path
-	cleanPath := normalizeFavoritePath(req.Path)
+	cleanPath, err := normalizeFavoritePath(req.Path)
+	if err != nil {
+		h.error(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
 	if cleanPath == "/" {
 		h.error(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
 		return
@@ -150,7 +167,11 @@ func (h *Handler) RemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := normalizeFavoritePath(favPath)
+	cleanPath, err := normalizeFavoritePath(favPath)
+	if err != nil {
+		h.error(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
 
 	if err := h.store.Remove(userID, cleanPath); err != nil {
 		if err == ErrFavoriteNotFound {
@@ -175,7 +196,11 @@ func (h *Handler) CheckFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := normalizeFavoritePath(checkPath)
+	cleanPath, err := normalizeFavoritePath(checkPath)
+	if err != nil {
+		h.error(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
 	if cleanPath == "/" {
 		h.error(w, http.StatusBadRequest, "path query parameter is required", "MISSING_PATH")
 		return
@@ -205,7 +230,12 @@ func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
 	// Clean paths
 	cleanPaths := make([]string, len(req.Paths))
 	for i, p := range req.Paths {
-		cleanPaths[i] = normalizeFavoritePath(p)
+		cleanPath, err := normalizeFavoritePath(p)
+		if err != nil {
+			h.error(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+			return
+		}
+		cleanPaths[i] = cleanPath
 		if cleanPaths[i] == "/" {
 			h.error(w, http.StatusBadRequest, "paths must not contain empty values", "MISSING_PATH")
 			return
@@ -230,7 +260,11 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := normalizeFavoritePath(favPath)
+	cleanPath, err := normalizeFavoritePath(favPath)
+	if err != nil {
+		h.error(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+		return
+	}
 
 	var req struct {
 		Note string `json:"note"`
