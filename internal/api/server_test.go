@@ -5790,6 +5790,73 @@ func TestServer_UpdateSettings_UnreachableDataplaneRejectedBeforeSave(t *testing
 	_ = oldClient.Close()
 }
 
+func TestServer_UpdateSettings_CanceledDataplaneConnectDoesNotSaveOrSwap(t *testing.T) {
+	probe := setupDataplaneClient(t)
+	if probe == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	if err := server.config.Save(server.configPath); err != nil {
+		t.Fatalf("save baseline config error: %v", err)
+	}
+	baselineConfig, err := os.ReadFile(server.configPath)
+	if err != nil {
+		t.Fatalf("read baseline config error: %v", err)
+	}
+
+	oldClient := dataplane.NewClient("127.0.0.1:2")
+	server.dataplane = oldClient
+	setVersionStoreObjectClient(t, fs, oldClient)
+
+	body := fmt.Sprintf(`{"dataplane":{"grpc_address":%q}}`, testDataplaneAddr())
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("update settings canceled dataplane status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "unable to connect to configured dataplane" {
+		t.Fatalf("expected dataplane connectivity error message, got %q", payload.Message)
+	}
+	if server.dataplane != oldClient {
+		t.Fatal("expected running dataplane client to remain unchanged after canceled request")
+	}
+	if got := server.config.DataPlane.GRPCAddress; got == testDataplaneAddr() {
+		t.Fatalf("expected in-memory config to remain unchanged, got %q", got)
+	}
+	if objectClient := getVersionStoreObjectClient(t, fs); objectClient != oldClient {
+		t.Fatal("expected version store object client to remain unchanged after canceled request")
+	}
+
+	persistedConfig, err := os.ReadFile(server.configPath)
+	if err != nil {
+		t.Fatalf("read persisted config error: %v", err)
+	}
+	if !bytes.Equal(persistedConfig, baselineConfig) {
+		t.Fatalf("expected persisted config to stay unchanged, got %s", string(persistedConfig))
+	}
+	if bytes.Contains(persistedConfig, []byte(testDataplaneAddr())) {
+		t.Fatalf("expected canceled dataplane address not to be persisted, got %s", string(persistedConfig))
+	}
+	_ = oldClient.Close()
+}
+
 func TestServer_UpdateSettings_InvalidTrashSettingsRejected(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -6078,6 +6145,72 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 }
 
+func TestServer_StoreConfig_ReplacesSnapshotWithoutMutatingPreviousReaders(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	baseline := server.currentConfig()
+	if baseline == nil {
+		t.Fatal("expected server config")
+	}
+
+	updated := *baseline
+	updated.Server.Port = baseline.Server.Port + 17
+	updated.WebDAV.Prefix = "/snapshot-dav"
+
+	server.storeConfig(&updated)
+
+	current := server.currentConfig()
+	if current == nil {
+		t.Fatal("expected updated server config")
+	}
+	if current == baseline {
+		t.Fatal("expected storeConfig to replace the config snapshot pointer")
+	}
+	if current.Server.Port != updated.Server.Port || current.WebDAV.Prefix != updated.WebDAV.Prefix {
+		t.Fatalf("expected current config to reflect update, got %+v", current)
+	}
+	if baseline.Server.Port == updated.Server.Port {
+		t.Fatalf("expected prior snapshot port to remain unchanged, got %d", baseline.Server.Port)
+	}
+	if baseline.WebDAV.Prefix == updated.WebDAV.Prefix {
+		t.Fatalf("expected prior snapshot prefix to remain unchanged, got %q", baseline.WebDAV.Prefix)
+	}
+}
+
+func TestServer_StoreActiveWebDAV_ReplacesSnapshotWithoutMutatingPreviousReaders(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.storeActiveWebDAV(WebDAVRuntimeConfig{
+		Enabled:             true,
+		Prefix:              "/dav",
+		AuthType:            "basic",
+		Username:            "admin",
+		Password:            "first-pass",
+		PasswordIsGenerated: true,
+	})
+
+	baseline := server.currentActiveWebDAV()
+	updated := baseline
+	updated.Prefix = "/new-dav"
+	updated.Password = "next-pass"
+	updated.PasswordIsGenerated = false
+
+	server.storeActiveWebDAV(updated)
+
+	current := server.currentActiveWebDAV()
+	if current.Prefix != "/new-dav" || current.Password != "next-pass" || current.PasswordIsGenerated {
+		t.Fatalf("expected current active WebDAV config to reflect update, got %+v", current)
+	}
+	if baseline.Prefix != "/dav" {
+		t.Fatalf("expected prior active WebDAV snapshot prefix to remain unchanged, got %q", baseline.Prefix)
+	}
+	if baseline.Password != "first-pass" {
+		t.Fatalf("expected prior active WebDAV snapshot password to remain unchanged, got %q", baseline.Password)
+	}
+	if !baseline.PasswordIsGenerated {
+		t.Fatal("expected prior active WebDAV snapshot generated flag to remain true")
+	}
+}
+
 func TestServer_SetupStatus_WithoutConfigReturnsServiceUnavailable(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	server.config = nil
@@ -6089,6 +6222,60 @@ func TestServer_SetupStatus_WithoutConfigReturnsServiceUnavailable(t *testing.T)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("setup status without config = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServer_SetupStatus_WithoutSecretsReturnsServiceUnavailable(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.config.Storage.Root = tmpDir
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/setup/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup status without secrets status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "setup status unavailable" {
+		t.Fatalf("expected setup status unavailable message, got %q", payload.Message)
+	}
+}
+
+func TestServer_SetupStatus_SecretsLoadFailureReturnsServiceUnavailable(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.config.Storage.Root = tmpDir
+
+	if err := os.WriteFile(filepath.Join(tmpDir, config.SecretsFile), []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("failed to write corrupt secrets file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/setup/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup status corrupt secrets status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "setup status unavailable" {
+		t.Fatalf("expected setup status unavailable message, got %q", payload.Message)
 	}
 }
 
@@ -6321,6 +6508,31 @@ func TestServer_AcknowledgeSetup_WithoutAuthMarksSetupShown(t *testing.T) {
 	}
 	if updatedSecrets == nil || !updatedSecrets.SetupShown {
 		t.Fatalf("expected setup to be marked shown after acknowledge without auth")
+	}
+}
+
+func TestServer_AcknowledgeSetup_WithoutSecretsReturnsServiceUnavailable(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.config.Storage.Root = tmpDir
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("acknowledge setup without secrets status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "setup acknowledge unavailable" {
+		t.Fatalf("expected setup acknowledge unavailable message, got %q", payload.Message)
 	}
 }
 

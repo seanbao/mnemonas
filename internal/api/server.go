@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -90,8 +91,10 @@ type Server struct {
 	favoritesConfigured bool
 	// Config
 	config       *config.Config
+	configMu     sync.RWMutex
 	configPath   string
 	activeWebDAV WebDAVRuntimeConfig
+	webdavMu     sync.RWMutex
 	updateWebDAV func(WebDAVRuntimeConfig)
 }
 
@@ -103,6 +106,38 @@ type WebDAVRuntimeConfig struct {
 	Username            string
 	Password            string
 	PasswordIsGenerated bool
+}
+
+func cloneConfigSnapshot(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	return &cloned
+}
+
+func (s *Server) currentConfig() *config.Config {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.config
+}
+
+func (s *Server) storeConfig(cfg *config.Config) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	s.config = cloneConfigSnapshot(cfg)
+}
+
+func (s *Server) currentActiveWebDAV() WebDAVRuntimeConfig {
+	s.webdavMu.RLock()
+	defer s.webdavMu.RUnlock()
+	return s.activeWebDAV
+}
+
+func (s *Server) storeActiveWebDAV(cfg WebDAVRuntimeConfig) {
+	s.webdavMu.Lock()
+	defer s.webdavMu.Unlock()
+	s.activeWebDAV = cfg
 }
 
 type AlertMonitor interface {
@@ -302,12 +337,12 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	// Store config early so runtime dataplane connection settings are available
 	// during initial client setup.
 	if cfg != nil && cfg.Config != nil {
-		s.config = cfg.Config
+		s.storeConfig(cfg.Config)
 		s.configPath = cfg.ConfigPath
-		s.activeWebDAV = s.resolveWebDAVRuntimeConfig(*cfg.Config)
+		s.storeActiveWebDAV(s.resolveWebDAVRuntimeConfig(*cfg.Config))
 	}
 	if cfg != nil && cfg.ActiveWebDAV != nil {
-		s.activeWebDAV = *cfg.ActiveWebDAV
+		s.storeActiveWebDAV(*cfg.ActiveWebDAV)
 	}
 
 	// Initialize data plane client if address provided
@@ -906,10 +941,11 @@ func shouldSkipGCObjectByGrace(obj dataplane.ObjectInfo, graceCutoff time.Time) 
 }
 
 func (s *Server) dataplaneConnectRetries() int {
-	if s.config == nil || s.config.DataPlane.MaxRetries < 0 {
+	cfg := s.currentConfig()
+	if cfg == nil || cfg.DataPlane.MaxRetries < 0 {
 		return 0
 	}
-	return s.config.DataPlane.MaxRetries
+	return cfg.DataPlane.MaxRetries
 }
 
 func (s *Server) connectDataplaneClient(parent context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
@@ -2542,10 +2578,10 @@ func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
 		"count":     count,
 		"totalSize": totalSize,
 	}
-	if s.config != nil {
-		response["retentionDays"] = s.config.Storage.Trash.RetentionDays
-		response["retentionEnabled"] = s.config.Storage.Trash.Enabled
-		response["retentionMaxSize"] = s.config.Storage.Trash.MaxSize
+	if cfg := s.currentConfig(); cfg != nil {
+		response["retentionDays"] = cfg.Storage.Trash.RetentionDays
+		response["retentionEnabled"] = cfg.Storage.Trash.Enabled
+		response["retentionMaxSize"] = cfg.Storage.Trash.MaxSize
 	}
 	NewAPIResponse(response).Write(w, http.StatusOK)
 }
@@ -3143,79 +3179,80 @@ func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request
 
 // handleGetSettings returns current settings
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	if s.config == nil {
+	cfg := s.currentConfig()
+	if cfg == nil {
 		ServiceUnavailable(w, "settings not available")
 		return
 	}
 
 	settings := map[string]interface{}{
 		"server": map[string]interface{}{
-			"host":          s.config.Server.Host,
-			"port":          s.config.Server.Port,
-			"read_timeout":  s.config.Server.ReadTimeout.String(),
-			"write_timeout": s.config.Server.WriteTimeout.String(),
-			"idle_timeout":  s.config.Server.IdleTimeout.String(),
+			"host":          cfg.Server.Host,
+			"port":          cfg.Server.Port,
+			"read_timeout":  cfg.Server.ReadTimeout.String(),
+			"write_timeout": cfg.Server.WriteTimeout.String(),
+			"idle_timeout":  cfg.Server.IdleTimeout.String(),
 			"tls": map[string]interface{}{
-				"enabled":       s.config.Server.TLS.Enabled,
-				"cert_file":     s.config.Server.TLS.CertFile,
-				"key_file":      s.config.Server.TLS.KeyFile,
-				"auto_generate": s.config.Server.TLS.AutoGenerate,
-				"cert_dir":      s.config.Server.TLS.CertDir,
+				"enabled":       cfg.Server.TLS.Enabled,
+				"cert_file":     cfg.Server.TLS.CertFile,
+				"key_file":      cfg.Server.TLS.KeyFile,
+				"auto_generate": cfg.Server.TLS.AutoGenerate,
+				"cert_dir":      cfg.Server.TLS.CertDir,
 			},
 		},
 		"storage": map[string]interface{}{
-			"root": s.config.Storage.Root,
+			"root": cfg.Storage.Root,
 		},
 		"trash": map[string]interface{}{
-			"enabled":        s.config.Storage.Trash.Enabled,
-			"retention_days": s.config.Storage.Trash.RetentionDays,
-			"max_size":       s.config.Storage.Trash.MaxSize,
+			"enabled":        cfg.Storage.Trash.Enabled,
+			"retention_days": cfg.Storage.Trash.RetentionDays,
+			"max_size":       cfg.Storage.Trash.MaxSize,
 		},
 		"retention": map[string]interface{}{
-			"max_versions":   s.config.Storage.Retention.MaxVersions,
-			"max_age":        formatSettingsDuration(s.config.Storage.Retention.MaxAge),
-			"min_free_space": s.config.Storage.Retention.MinFreeSpace,
-			"gc_interval":    formatSettingsDuration(s.config.Storage.Retention.GCInterval),
+			"max_versions":   cfg.Storage.Retention.MaxVersions,
+			"max_age":        formatSettingsDuration(cfg.Storage.Retention.MaxAge),
+			"min_free_space": cfg.Storage.Retention.MinFreeSpace,
+			"gc_interval":    formatSettingsDuration(cfg.Storage.Retention.GCInterval),
 		},
 		"versioning": map[string]interface{}{
-			"auto_versioned_extensions": s.config.Storage.Versioning.AutoVersionedExtensions,
-			"auto_versioned_filenames":  s.config.Storage.Versioning.AutoVersionedFilenames,
-			"max_versioned_size":        s.config.Storage.Versioning.MaxVersionedSize,
+			"auto_versioned_extensions": cfg.Storage.Versioning.AutoVersionedExtensions,
+			"auto_versioned_filenames":  cfg.Storage.Versioning.AutoVersionedFilenames,
+			"max_versioned_size":        cfg.Storage.Versioning.MaxVersionedSize,
 		},
 		"webdav": map[string]interface{}{
-			"enabled":   s.config.WebDAV.Enabled,
-			"prefix":    s.config.WebDAV.Prefix,
-			"read_only": s.config.WebDAV.ReadOnly,
-			"auth_type": s.config.WebDAV.AuthType,
-			"username":  s.config.WebDAV.Username,
+			"enabled":   cfg.WebDAV.Enabled,
+			"prefix":    cfg.WebDAV.Prefix,
+			"read_only": cfg.WebDAV.ReadOnly,
+			"auth_type": cfg.WebDAV.AuthType,
+			"username":  cfg.WebDAV.Username,
 		},
 		"share": map[string]interface{}{
-			"enabled":  s.config.Share.Enabled,
-			"base_url": s.config.Share.BaseURL,
+			"enabled":  cfg.Share.Enabled,
+			"base_url": cfg.Share.BaseURL,
 		},
 		"favorites": map[string]interface{}{
-			"enabled": s.config.Favorites.Enabled,
+			"enabled": cfg.Favorites.Enabled,
 		},
 		"alerts": map[string]interface{}{
-			"enabled":         s.config.Alerts.Enabled,
-			"check_interval":  s.config.Alerts.CheckInterval.String(),
-			"threshold_pct":   s.config.Alerts.ThresholdPct,
-			"critical_pct":    s.config.Alerts.CriticalPct,
-			"min_free_bytes":  s.config.Alerts.MinFreeBytes,
-			"cooldown_period": s.config.Alerts.CooldownPeriod.String(),
-			"webhook_url":     s.config.Alerts.WebhookURL,
-			"webhook_method":  s.config.Alerts.WebhookMethod,
-			"webhook_headers": s.config.Alerts.WebhookHeaders,
+			"enabled":         cfg.Alerts.Enabled,
+			"check_interval":  cfg.Alerts.CheckInterval.String(),
+			"threshold_pct":   cfg.Alerts.ThresholdPct,
+			"critical_pct":    cfg.Alerts.CriticalPct,
+			"min_free_bytes":  cfg.Alerts.MinFreeBytes,
+			"cooldown_period": cfg.Alerts.CooldownPeriod.String(),
+			"webhook_url":     cfg.Alerts.WebhookURL,
+			"webhook_method":  cfg.Alerts.WebhookMethod,
+			"webhook_headers": cfg.Alerts.WebhookHeaders,
 		},
 		"dataplane": map[string]interface{}{
-			"grpc_address": s.config.DataPlane.GRPCAddress,
-			"timeout":      s.config.DataPlane.Timeout.String(),
-			"max_retries":  s.config.DataPlane.MaxRetries,
+			"grpc_address": cfg.DataPlane.GRPCAddress,
+			"timeout":      cfg.DataPlane.Timeout.String(),
+			"max_retries":  cfg.DataPlane.MaxRetries,
 		},
 		"cdc": map[string]interface{}{
-			"min_chunk_size": s.config.DataPlane.CDC.MinChunkSize,
-			"avg_chunk_size": s.config.DataPlane.CDC.AvgChunkSize,
-			"max_chunk_size": s.config.DataPlane.CDC.MaxChunkSize,
+			"min_chunk_size": cfg.DataPlane.CDC.MinChunkSize,
+			"avg_chunk_size": cfg.DataPlane.CDC.AvgChunkSize,
+			"max_chunk_size": cfg.DataPlane.CDC.MaxChunkSize,
 		},
 	}
 
@@ -3340,7 +3377,8 @@ func (s *Server) validateWebDAVIdentity(cfg config.Config) error {
 
 // handleUpdateSettings updates settings
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	if s.config == nil || s.configPath == "" {
+	currentConfig := s.currentConfig()
+	if currentConfig == nil || s.configPath == "" {
 		ServiceUnavailable(w, "settings not available or no config file path")
 		return
 	}
@@ -3351,7 +3389,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updatedConfig := *s.config
+	updatedConfig := *currentConfig
 
 	// Apply updates
 	if req.Server != nil {
@@ -3618,7 +3656,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	preparedDataplane, err := s.prepareDataplaneReplacement(req, updatedConfig)
+	preparedDataplane, err := s.prepareDataplaneReplacement(r.Context(), req, updatedConfig)
 	if err != nil {
 		ServiceUnavailable(w, "unable to connect to configured dataplane")
 		return
@@ -3637,8 +3675,8 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	*s.config = updatedConfig
-	s.applyRuntimeSettings(req, updatedConfig, preparedDataplane)
+	s.storeConfig(&updatedConfig)
+	s.applyRuntimeSettings(r.Context(), req, updatedConfig, preparedDataplane)
 	preparedDataplane = nil
 
 	s.logger.Info().Msg("settings updated and saved")
@@ -3646,7 +3684,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(nil).WithMessage("settings updated, some changes may require restart").Write(w, http.StatusOK)
 }
 
-func (s *Server) prepareDataplaneReplacement(req UpdateSettingsRequest, cfg config.Config) (*dataplane.Client, error) {
+func (s *Server) prepareDataplaneReplacement(ctx context.Context, req UpdateSettingsRequest, cfg config.Config) (*dataplane.Client, error) {
 	if req.DataPlane == nil || req.DataPlane.GRPCAddress == nil {
 		return nil, nil
 	}
@@ -3655,7 +3693,7 @@ func (s *Server) prepareDataplaneReplacement(req UpdateSettingsRequest, cfg conf
 	}
 
 	replacement := dataplane.NewClient(cfg.DataPlane.GRPCAddress)
-	if err := s.connectDataplaneClient(context.Background(), replacement, cfg.DataPlane.Timeout); err != nil {
+	if err := s.connectDataplaneClient(ctx, replacement, cfg.DataPlane.Timeout); err != nil {
 		_ = replacement.Close()
 		return nil, err
 	}
@@ -3663,14 +3701,14 @@ func (s *Server) prepareDataplaneReplacement(req UpdateSettingsRequest, cfg conf
 	return replacement, nil
 }
 
-func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client) {
+func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client) {
 	if req.DataPlane != nil && req.DataPlane.GRPCAddress != nil {
 		swapDataplane := s.dataplane == nil || s.dataplane.Addr() != cfg.DataPlane.GRPCAddress
 		if swapDataplane {
 			replacement := preparedDataplane
 			if replacement == nil {
 				replacement = dataplane.NewClient(cfg.DataPlane.GRPCAddress)
-				if err := s.connectDataplaneClient(context.Background(), replacement, cfg.DataPlane.Timeout); err != nil {
+				if err := s.connectDataplaneClient(ctx, replacement, cfg.DataPlane.Timeout); err != nil {
 					s.logger.Warn().Err(err).Str("addr", cfg.DataPlane.GRPCAddress).Msg("Failed to connect updated data plane address")
 					_ = replacement.Close()
 					return
@@ -3727,7 +3765,7 @@ func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Conf
 
 	if req.WebDAV != nil {
 		runtimeCfg := s.resolveWebDAVRuntimeConfig(cfg)
-		s.activeWebDAV = runtimeCfg
+		s.storeActiveWebDAV(runtimeCfg)
 		if s.updateWebDAV != nil {
 			s.updateWebDAV(runtimeCfg)
 		}
@@ -3759,12 +3797,13 @@ type WebDAVCredentialsResponse struct {
 
 // handleGetWebDAVCredentials returns WebDAV credentials for admin users.
 func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Request) {
-	if s.config == nil {
+	cfg := s.currentConfig()
+	if cfg == nil {
 		ServiceUnavailable(w, "configuration not available")
 		return
 	}
 
-	runtimeCfg := s.activeWebDAV
+	runtimeCfg := s.currentActiveWebDAV()
 	resp := WebDAVCredentialsResponse{
 		Enabled:  runtimeCfg.Enabled,
 		URL:      formatWebDAVPrefix(runtimeCfg.Prefix),
@@ -3781,7 +3820,7 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 			resp.Password = runtimeCfg.Password
 		} else if runtimeCfg.Password == "" {
 			// Get password from secrets (auto-generated only)
-			secrets, err := config.LoadSecrets(s.config.Storage.Root)
+			secrets, err := config.LoadSecrets(cfg.Storage.Root)
 			if err == nil && secrets != nil {
 				resp.Password = secrets.WebDAVPassword
 			}
@@ -3811,28 +3850,23 @@ type SetupStatusResponse struct {
 // handleGetSetupStatus returns setup status for first run.
 // Initial credentials are intentionally only exposed through server-side logs.
 func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
-	if s.config == nil {
+	cfg := s.currentConfig()
+	if cfg == nil {
 		ServiceUnavailable(w, "configuration not available")
 		return
 	}
 
-	secrets, err := config.LoadSecrets(s.config.Storage.Root)
+	secrets, err := config.LoadSecrets(cfg.Storage.Root)
 	if err != nil {
-		// Error reading secrets file
 		s.logger.Error().Err(err).Msg("failed to load secrets")
-		s.json(w, http.StatusOK, SetupStatusResponse{
-			Success:    true,
-			IsFirstRun: false,
-		})
+		ServiceUnavailable(w, "setup status unavailable")
 		return
 	}
 
 	// No secrets file means not first run or something went wrong
 	if secrets == nil {
-		s.json(w, http.StatusOK, SetupStatusResponse{
-			Success:    true,
-			IsFirstRun: false,
-		})
+		s.logger.Error().Msg("setup status requested without runtime secrets")
+		ServiceUnavailable(w, "setup status unavailable")
 		return
 	}
 
@@ -3840,8 +3874,8 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 		Success:        true,
 		IsFirstRun:     !secrets.SetupShown,
 		AuthEnabled:    s.authEnabled,
-		WebDAVEnabled:  s.config.WebDAV.Enabled,
-		WebDAVAuthType: s.config.WebDAV.AuthType,
+		WebDAVEnabled:  cfg.WebDAV.Enabled,
+		WebDAVAuthType: cfg.WebDAV.AuthType,
 	}
 
 	s.json(w, http.StatusOK, resp)
@@ -3849,11 +3883,17 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleAcknowledgeSetup marks the setup as shown
 func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
-	if s.config == nil {
+	cfg := s.currentConfig()
+	if cfg == nil {
 		ServiceUnavailable(w, "configuration not available")
 		return
 	}
-	if err := config.MarkSetupShown(s.config.Storage.Root); err != nil {
+	if err := config.MarkSetupShown(cfg.Storage.Root); err != nil {
+		if errors.Is(err, config.ErrSecretsNotFound) {
+			s.logger.Error().Err(err).Msg("failed to acknowledge setup")
+			ServiceUnavailable(w, "setup acknowledge unavailable")
+			return
+		}
 		s.respondInternalError(w, "acknowledge setup", err)
 		return
 	}
@@ -3941,11 +3981,13 @@ func writeRawJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func (s *Server) isShareFeatureEnabled() bool {
-	return s.config != nil && s.config.Share.Enabled
+	cfg := s.currentConfig()
+	return cfg != nil && cfg.Share.Enabled
 }
 
 func (s *Server) isFavoritesFeatureEnabled() bool {
-	return s.config != nil && s.config.Favorites.Enabled
+	cfg := s.currentConfig()
+	return cfg != nil && cfg.Favorites.Enabled
 }
 
 func (s *Server) favoritesConfiguredButUnavailable() bool {
@@ -3958,8 +4000,8 @@ func (s *Server) writeShareFeatureDisabled(w http.ResponseWriter, status int) {
 
 func (s *Server) buildShareURL(id string) string {
 	baseURL := ""
-	if s.config != nil {
-		baseURL = strings.TrimRight(strings.TrimSpace(s.config.Share.BaseURL), "/")
+	if cfg := s.currentConfig(); cfg != nil {
+		baseURL = strings.TrimRight(strings.TrimSpace(cfg.Share.BaseURL), "/")
 	}
 	if baseURL != "" {
 		return baseURL + "/s/" + id

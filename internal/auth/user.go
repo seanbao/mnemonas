@@ -509,6 +509,10 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 			return nil, ErrInvalidCredentials
 		}
 
+		if err := removeInitialPasswordFile(snapshot.filePath); err != nil {
+			return nil, fmt.Errorf("failed to remove initial password file: %w", err)
+		}
+
 		updated := cloneUser(user)
 		now := time.Now()
 		updated.LastLoginAt = &now
@@ -525,11 +529,15 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 		}
 	}
 
-	// Remove initial password file after successful login (if exists)
-	passwordFile := filepath.Join(filepath.Dir(s.filePath), "initial-password.txt")
-	os.Remove(passwordFile) // Ignore error - file may not exist
-
 	return authenticatedUser, nil
+}
+
+func removeInitialPasswordFile(usersFilePath string) error {
+	passwordFile := filepath.Join(filepath.Dir(usersFilePath), "initial-password.txt")
+	if err := os.Remove(passwordFile); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // Create creates a new user
