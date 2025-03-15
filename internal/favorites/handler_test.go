@@ -231,6 +231,44 @@ func TestHandler_AddFavorite_RejectsOversizedRequestBody(t *testing.T) {
 	}
 }
 
+func TestHandler_AddFavorite_RejectsTraversalPath(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	for _, favoritePath := range []string{"../docs/report.pdf", `..\\docs\\report.pdf`} {
+		body := strings.NewReader(`{"path":"` + favoritePath + `"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", body)
+		req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+		rec := httptest.NewRecorder()
+
+		handler.AddFavorite(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("path %q expected status 400, got %d: %s", favoritePath, rec.Code, rec.Body.String())
+		}
+
+		var payload struct {
+			Success bool `json:"success"`
+			Error   *struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("path %q failed to decode response: %v", favoritePath, err)
+		}
+		if payload.Success || payload.Error == nil || payload.Error.Code != "INVALID_PATH" {
+			t.Fatalf("path %q expected INVALID_PATH error, got %s", favoritePath, rec.Body.String())
+		}
+	}
+
+	if store.IsFavorite("user-123", "/docs/report.pdf") {
+		t.Fatal("expected traversal-like favorite request to be rejected before persistence")
+	}
+}
+
 func TestHandler_InternalErrorsHideOperationDetails(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
 	if err != nil {

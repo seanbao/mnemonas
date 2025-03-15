@@ -809,12 +809,12 @@ func validatePath(filePath string) (string, error) {
 
 	// Reject any path with .. segments while allowing legal names like foo..txt.
 	if hasTraversalSegment(normalized) {
-		return "", errors.New("invalid path")
+		return "", errInvalidPath
 	}
 
 	// Reject paths outside root
 	if cleaned != "/" && !strings.HasPrefix(cleaned, "/") {
-		return "", errors.New("invalid path")
+		return "", errInvalidPath
 	}
 
 	return cleaned, nil
@@ -840,6 +840,7 @@ func pathContainsDescendant(basePath, targetPath string) bool {
 
 var errPathOutsideHomeDir = errors.New("path outside user home directory")
 var errWebDAVUsernameMatchesNonAdmin = errors.New("webdav.username must not match a non-admin user when auth is enabled")
+var errInvalidPath = errors.New("invalid path")
 
 func pathWithinBase(basePath, targetPath string) bool {
 	basePath = path.Clean(basePath)
@@ -1018,6 +1019,14 @@ func badRequestInvalidDestinationPath(w http.ResponseWriter) {
 
 func forbiddenPathOutsideHome(w http.ResponseWriter) {
 	Forbidden(w, "path is outside the assigned home directory")
+}
+
+func (s *Server) respondHomeDirFilterError(w http.ResponseWriter, action string, err error) {
+	if errors.Is(err, errPathOutsideHomeDir) {
+		forbiddenPathOutsideHome(w)
+		return
+	}
+	s.respondInternalError(w, action, err)
 }
 
 func shouldSkipGCObjectByGrace(obj dataplane.ObjectInfo, graceCutoff time.Time) bool {
@@ -3045,7 +3054,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		entries, _ := s.activity.List(s.activity.Count(), 0, activity.ActionType(actionFilter), currentUserFilter)
 		entries, err := s.filterActivityEntriesByHomeDir(r.Context(), entries)
 		if err != nil {
-			s.respondInternalError(w, "filter activity by home directory", err)
+			s.respondHomeDirFilterError(w, "filter activity by home directory", err)
 			return
 		}
 
@@ -3089,7 +3098,7 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 		entries, _ := s.activity.List(s.activity.Count(), 0, "", currentUserFilter)
 		entries, err := s.filterActivityEntriesByHomeDir(r.Context(), entries)
 		if err != nil {
-			s.respondInternalError(w, "filter activity stats by home directory", err)
+			s.respondHomeDirFilterError(w, "filter activity stats by home directory", err)
 			return
 		}
 		NewAPIResponse(buildActivityStats(entries)).Write(w, http.StatusOK)
@@ -4282,7 +4291,7 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		var err error
 		sharesList, err = s.filterSharesByHomeDir(r.Context(), sharesList)
 		if err != nil {
-			s.respondInternalError(w, "filter shares by home directory", err)
+			s.respondHomeDirFilterError(w, "filter shares by home directory", err)
 			return
 		}
 	}
@@ -4356,7 +4365,7 @@ func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
 		var err error
 		favoritesList, err = s.filterFavoritesByHomeDir(r.Context(), favoritesList)
 		if err != nil {
-			s.respondInternalError(w, "filter favorites by home directory", err)
+			s.respondHomeDirFilterError(w, "filter favorites by home directory", err)
 			return
 		}
 	}
@@ -4378,6 +4387,10 @@ func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 	}
 	favoritePath, err := readFavoriteBodyPath(r)
 	if err != nil {
+		if errors.Is(err, errInvalidPath) {
+			badRequestInvalidPath(w)
+			return
+		}
 		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
@@ -4399,7 +4412,12 @@ func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
-	if favoritePath := readFavoriteQueryPath(r); favoritePath != "" {
+	favoritePath, err := readFavoriteQueryPath(r)
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if favoritePath != "" {
 		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
 			forbiddenPathOutsideHome(w)
 			return
@@ -4419,6 +4437,10 @@ func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 	favoritePaths, err := readFavoriteBatchPaths(r)
 	if err != nil {
+		if errors.Is(err, errInvalidPath) {
+			badRequestInvalidPath(w)
+			return
+		}
 		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
@@ -4440,7 +4462,12 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
-	if favoritePath := readFavoriteRoutePath(r); favoritePath != "" {
+	favoritePath, err := readFavoriteRoutePath(r)
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if favoritePath != "" {
 		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
 			forbiddenPathOutsideHome(w)
 			return
@@ -4458,7 +4485,12 @@ func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request
 		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature unavailable", "FAVORITES_UNAVAILABLE")
 		return
 	}
-	if favoritePath := readFavoriteRoutePath(r); favoritePath != "" {
+	favoritePath, err := readFavoriteRoutePath(r)
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if favoritePath != "" {
 		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
 			forbiddenPathOutsideHome(w)
 			return
@@ -4477,6 +4509,10 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 	sharePath := ""
 	parsedPath, err := readCreateSharePath(r)
 	if err != nil {
+		if errors.Is(err, errInvalidPath) {
+			badRequestInvalidPath(w)
+			return
+		}
 		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
 		return
 	}
@@ -4549,7 +4585,7 @@ func readCreateSharePath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	return path.Clean("/" + cleanPath), nil
+	return validatePath(cleanPath)
 }
 
 func readFavoriteBodyPath(r *http.Request) (string, error) {
@@ -4574,7 +4610,7 @@ func readFavoriteBodyPath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	return path.Clean("/" + cleanPath), nil
+	return validatePath(cleanPath)
 }
 
 func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
@@ -4600,24 +4636,28 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 		if trimmedPath == "" {
 			continue
 		}
-		cleanPaths = append(cleanPaths, path.Clean("/"+trimmedPath))
+		cleanPath, err := validatePath(trimmedPath)
+		if err != nil {
+			return nil, err
+		}
+		cleanPaths = append(cleanPaths, cleanPath)
 	}
 
 	return cleanPaths, nil
 }
 
-func readFavoriteQueryPath(r *http.Request) string {
+func readFavoriteQueryPath(r *http.Request) (string, error) {
 	cleanPath := strings.TrimSpace(r.URL.Query().Get("path"))
 	if cleanPath == "" {
-		return ""
+		return "", nil
 	}
-	return path.Clean("/" + cleanPath)
+	return validatePath(cleanPath)
 }
 
-func readFavoriteRoutePath(r *http.Request) string {
+func readFavoriteRoutePath(r *http.Request) (string, error) {
 	cleanPath := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/favorites"))
 	if cleanPath == "" || cleanPath == "/" {
-		return ""
+		return "", nil
 	}
-	return path.Clean("/" + cleanPath)
+	return validatePath(cleanPath)
 }
