@@ -26,6 +26,9 @@ const secretsFileMode = 0600
 
 var errSecretsFileSymlink = errors.New("secrets file path must not be a symlink")
 
+// ErrSecretsNotFound indicates that the runtime secrets file is unexpectedly missing.
+var ErrSecretsNotFound = errors.New("secrets file not found")
+
 // LoadSecrets loads secrets from file without creating new ones.
 // Returns nil if file does not exist.
 func LoadSecrets(dataDir string) (*Secrets, error) {
@@ -81,7 +84,7 @@ func MarkSetupShown(dataDir string) error {
 		return err
 	}
 	if secrets == nil {
-		return nil // No secrets file, nothing to mark
+		return ErrSecretsNotFound
 	}
 
 	secrets.SetupShown = true
