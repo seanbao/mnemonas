@@ -4,7 +4,9 @@ package webdav
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -34,6 +36,10 @@ var (
 
 const webdavLockTimeout = time.Hour
 const webdavLockCleanupInterval = 5 * time.Minute
+const webdavLockTokenBytes = 16
+const maxWebDAVLockTokenAttempts = 8
+
+var webdavRandomRead = rand.Read
 
 type webdavLock struct {
 	token     string
@@ -55,6 +61,7 @@ type Handler struct {
 	lockCleanupStarted   chan struct{}
 	lockCleanupStop      chan struct{}
 	lockCleanupDone      chan struct{}
+	newLockToken         func() (string, error)
 	// REM-1 fix: Authentication
 	authType string
 	username string
@@ -85,6 +92,7 @@ func NewHandler(cfg Config) *Handler {
 		lockCleanupStarted:  make(chan struct{}),
 		lockCleanupStop:     make(chan struct{}),
 		lockCleanupDone:     make(chan struct{}),
+		newLockToken:        generateOpaqueLockToken,
 		authType:            strings.ToLower(cfg.AuthType),
 		username:            cfg.Username,
 		password:            cfg.Password,
@@ -883,6 +891,7 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 		h.writePropfindResponse(w, responses)
 		return
 	}
+	generation := h.propCache.SnapshotGeneration()
 
 	info, err := h.fs.Stat(ctx, filePath)
 	if err != nil {
@@ -902,7 +911,7 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 
 	// Cache the result for large directories
 	if len(responses) > 10 {
-		h.propCache.Set(filePath, depth, responses)
+		h.propCache.SetIfUnchanged(filePath, depth, responses, generation)
 	}
 
 	h.writePropfindResponse(w, responses)
@@ -1031,8 +1040,12 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
-	// Simple implementation: return virtual lock
-	token := fmt.Sprintf("opaquelocktoken:%d", now.UnixNano())
+	token, err := h.generateUniqueLockTokenLocked()
+	if err != nil {
+		h.locksMu.Unlock()
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 	h.locks[filePath] = webdavLock{
 		token:     token,
 		expiresAt: now.Add(webdavLockTimeout),
@@ -1234,6 +1247,37 @@ func (h *Handler) removeExpiredLocksLocked(now time.Time) {
 			delete(h.locks, filePath)
 		}
 	}
+}
+
+func (h *Handler) generateUniqueLockTokenLocked() (string, error) {
+	for attempt := 0; attempt < maxWebDAVLockTokenAttempts; attempt++ {
+		token, err := h.newLockToken()
+		if err != nil {
+			return "", fmt.Errorf("generate lock token: %w", err)
+		}
+		if !h.lockTokenExistsLocked(token) {
+			return token, nil
+		}
+	}
+
+	return "", errors.New("generate lock token: exhausted unique token attempts")
+}
+
+func (h *Handler) lockTokenExistsLocked(expected string) bool {
+	for _, lockInfo := range h.locks {
+		if lockInfo.token == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func generateOpaqueLockToken() (string, error) {
+	b := make([]byte, webdavLockTokenBytes)
+	if _, err := webdavRandomRead(b); err != nil {
+		return "", err
+	}
+	return "opaquelocktoken:" + hex.EncodeToString(b), nil
 }
 
 func (h *Handler) getDestination(r *http.Request) string {

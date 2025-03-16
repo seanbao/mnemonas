@@ -847,28 +847,30 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		share, ok := snapshot.shares[reservation.id]
+		if !ok {
+			return ErrShareNotFound
+		}
+		if share.AccessCount == 0 {
+			return nil
+		}
 
-	share, ok := s.shares[reservation.id]
-	if !ok {
-		return ErrShareNotFound
-	}
-	if share.AccessCount == 0 {
-		return nil
-	}
+		updated := copyShare(share)
+		updated.AccessCount--
+		if updated.LastAccess != nil && updated.LastAccess.Equal(reservation.currentLastAccess) {
+			updated.LastAccess = cloneTimePtr(reservation.previousLastAccess)
+		}
+		snapshot.shares[reservation.id] = updated
 
-	share.AccessCount--
-	if share.LastAccess != nil && share.LastAccess.Equal(reservation.currentLastAccess) {
-		share.LastAccess = cloneTimePtr(reservation.previousLastAccess)
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
 	}
-	s.version++
-
-	if err := s.save(); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // Access validates and records access to a share
