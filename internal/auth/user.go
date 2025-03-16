@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mattn/go-isatty"
 	"golang.org/x/crypto/bcrypt"
@@ -85,6 +86,7 @@ var (
 	ErrUserExists          = errors.New("user already exists")
 	ErrUserDisabled        = errors.New("user is disabled")
 	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrInvalidUsername     = errors.New("invalid username")
 	ErrPasswordTooShort    = errors.New("password must be at least 8 characters")
 	ErrLastAdmin           = errors.New("cannot delete last admin user")
 	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
@@ -550,6 +552,11 @@ func removeInitialPasswordFile(usersFilePath string) error {
 
 // Create creates a new user
 func (s *UserStore) Create(username, password, email string, role Role) (*User, error) {
+	cleanUsername, err := normalizeNewUsername(username)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(password) < 8 {
 		return nil, ErrPasswordTooShort
 	}
@@ -565,15 +572,15 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 
 	user := &User{
 		ID:           userID,
-		Username:     username,
+		Username:     cleanUsername,
 		Email:        email,
 		PasswordHash: string(hash),
 		Role:         role,
-		HomeDir:      "/" + username,
+		HomeDir:      "/" + cleanUsername,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
-	normalizedUsername := normalizeUsername(username)
+	normalizedUsername := normalizeUsername(cleanUsername)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -787,6 +794,20 @@ func generateRandomPassword(length int) (string, error) {
 		b[i] = charset[int(b[i])%len(charset)]
 	}
 	return string(b), nil
+}
+
+func normalizeNewUsername(username string) (string, error) {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" || trimmed == "." || trimmed == ".." {
+		return "", ErrInvalidUsername
+	}
+	if strings.ContainsAny(trimmed, "/\\") {
+		return "", ErrInvalidUsername
+	}
+	if strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return "", ErrInvalidUsername
+	}
+	return trimmed, nil
 }
 
 func normalizeUsername(username string) string {

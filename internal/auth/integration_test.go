@@ -515,7 +515,9 @@ func TestBoundaryConditions_Username(t *testing.T) {
 		{"mixed case", "TestUser2", false},
 		{"with underscore", "test_user", false},
 		{"unicode", "用户", false},
-		{"empty", "", false}, // We don't validate empty username currently
+		{"empty", "", true},
+		{"dot path", "..", true},
+		{"slash path", "team/user", true},
 		{"single char", "x", false},
 		{"long name", strings.Repeat("a", 255), false},
 	}
