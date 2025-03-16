@@ -38,6 +38,7 @@ var (
 )
 
 var syncStoragePathDir = syncStorageDir
+var storageRandomRead = rand.Read
 var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
 	return ws.Walk(ctx, root, fn)
 }
@@ -290,7 +291,11 @@ func (fs *FileSystem) Close() error {
 
 // Stat returns file info
 func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) {
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return nil, err
+	}
 
 	// Handle root directory
 	if name == "/" {
@@ -337,7 +342,11 @@ func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, er
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return nil, err
+	}
 
 	entries, err := fs.workspace.ReadDir(ctx, name)
 	if err != nil {
@@ -373,7 +382,11 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string) (*os.File, erro
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return nil, err
+	}
 
 	f, err := fs.workspace.OpenFile(ctx, name)
 	if err != nil {
@@ -388,7 +401,11 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	release := fs.beginMutation()
 	defer release()
 
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return err
+	}
 	previousData, hadPreviousFile, err := fs.readExistingFileForRollback(ctx, name)
 	if err != nil {
 		return err
@@ -574,9 +591,13 @@ func (fs *FileSystem) Mkdir(ctx context.Context, name string) error {
 	release := fs.beginMutation()
 	defer release()
 
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return err
+	}
 
-	err := fs.workspace.Mkdir(ctx, name)
+	err = fs.workspace.Mkdir(ctx, name)
 	if err != nil {
 		if errors.Is(err, workspace.ErrAlreadyExists) {
 			return ErrAlreadyExists
@@ -599,7 +620,11 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	release := fs.beginMutation()
 	defer release()
 
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return err
+	}
 
 	// Get file info
 	info, err := fs.workspace.Stat(ctx, name)
@@ -629,7 +654,10 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	}
 
 	// Generate trash ID
-	id := generateID()
+	id, err := generateID()
+	if err != nil {
+		return fmt.Errorf("generate trash ID: %w", err)
+	}
 
 	// Check if file had versioning
 	hadVersions := false
@@ -759,7 +787,11 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 	release := fs.beginMutation()
 	defer release()
 
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return err
+	}
 	previousData, hadPreviousFile, err := fs.readExistingFileForRollback(ctx, name)
 	if err != nil && !errors.Is(err, ErrIsDir) {
 		return err
@@ -846,10 +878,17 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 	release := fs.beginMutation()
 	defer release()
 
-	oldName = workspace.CleanPath(oldName)
-	newName = workspace.CleanPath(newName)
+	var err error
+	oldName, err = normalizeStorageWorkspacePath(oldName)
+	if err != nil {
+		return err
+	}
+	newName, err = normalizeStorageWorkspacePath(newName)
+	if err != nil {
+		return err
+	}
 
-	err := fs.renameWorkspacePath(ctx, oldName, newName)
+	err = fs.renameWorkspacePath(ctx, oldName, newName)
 	if err != nil {
 		if errors.Is(err, workspace.ErrAlreadyExists) {
 			return ErrAlreadyExists
@@ -901,7 +940,11 @@ func (fs *FileSystem) notifyPathRenamed(ctx context.Context, oldName, newName st
 
 // ListVersions returns all versions of a file (including current)
 func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionRef, error) {
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get current file info
 	info, err := fs.workspace.Stat(ctx, name)
@@ -971,7 +1014,11 @@ func mapWorkspaceOpenFileError(err error) error {
 
 // GetVersion reads a specific version of a file
 func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.ReadCloser, error) {
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return nil, err
+	}
 	info, err := fs.workspace.Stat(ctx, name)
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotFound) {
@@ -1036,7 +1083,11 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	release := fs.beginMutation()
 	defer release()
 
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return err
+	}
 	previousData, hadPreviousFile, err := fs.readExistingFileForRollback(ctx, name)
 	if err != nil {
 		return err
@@ -1137,13 +1188,20 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 
 // SetVersioning sets the versioning override for a file
 func (fs *FileSystem) SetVersioning(ctx context.Context, name string, enabled bool) error {
-	name = workspace.CleanPath(name)
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return err
+	}
 	return fs.versions.SetVersioningOverride(ctx, name, enabled)
 }
 
 // GetVersioningStatus returns the versioning status for a file
 func (fs *FileSystem) GetVersioningStatus(ctx context.Context, name string) (enabled bool, reason string, err error) {
-	name = workspace.CleanPath(name)
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		return false, "", err
+	}
 
 	info, err := fs.workspace.Stat(ctx, name)
 	if err != nil {
@@ -1292,7 +1350,11 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	release := fs.beginMutation()
 	defer release()
 
-	newPath = workspace.CleanPath(newPath)
+	var err error
+	newPath, err = normalizeStorageWorkspacePath(newPath)
+	if err != nil {
+		return err
+	}
 
 	// Verify trash item exists
 	item, err := fs.versions.GetTrashItem(ctx, id)
@@ -1475,7 +1537,11 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 
 func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.TrashItem) error {
 	trashItemPath := path.Join(fs.trashRoot, item.ID)
-	stagedTrashPath := path.Join(fs.trashRoot, ".deleting", item.ID+"-"+generateID())
+	stageID, err := generateID()
+	if err != nil {
+		return fmt.Errorf("generate trash staging ID for %s: %w", item.ID, err)
+	}
+	stagedTrashPath := path.Join(fs.trashRoot, ".deleting", item.ID+"-"+stageID)
 
 	// Stage the trash entry first so metadata deletion can be rolled back safely.
 	if err := movePath(trashItemPath, stagedTrashPath); err != nil {
@@ -1763,10 +1829,22 @@ func computeHash(data []byte) string {
 	return fmt.Sprintf("%x", h[:])
 }
 
-func generateID() string {
+func generateID() (string, error) {
 	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := storageRandomRead(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func normalizeStorageWorkspacePath(name string) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return "", ErrNotFound
+		}
+	}
+	return workspace.CleanPath(name), nil
 }
 
 func validateStoragePath(target string) error {

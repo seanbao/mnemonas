@@ -58,6 +58,7 @@ var userStoreWriter = func(path string, data []byte) error {
 	return writeAuthFileAtomically(path, data, errUserStoreSymlink, ".users-*.tmp", "users")
 }
 var syncAuthFileDir = syncAuthDir
+var userRandomRead = rand.Read
 
 type userStoreSnapshot struct {
 	users    map[string]*User
@@ -400,10 +401,17 @@ func syncAuthDir(dir string) error {
 }
 
 func (s *UserStore) createDefaultAdmin() (string, error) {
-	password := generateRandomPassword(16)
+	password, err := generateRandomPassword(16)
+	if err != nil {
+		return "", fmt.Errorf("generate default admin password: %w", err)
+	}
+	adminID, err := generateID()
+	if err != nil {
+		return "", fmt.Errorf("generate default admin ID: %w", err)
+	}
 
 	admin := &User{
-		ID:        generateID(),
+		ID:        adminID,
 		Username:  "admin",
 		Role:      RoleAdmin,
 		HomeDir:   "/",
@@ -550,9 +558,13 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
+	userID, err := generateID()
+	if err != nil {
+		return nil, fmt.Errorf("generate user ID: %w", err)
+	}
 
 	user := &User{
-		ID:           generateID(),
+		ID:           userID,
 		Username:     username,
 		Email:        email,
 		PasswordHash: string(hash),
@@ -757,20 +769,24 @@ func (s *UserStore) Count() int {
 }
 
 // Helper functions
-func generateID() string {
+func generateID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := userRandomRead(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
-func generateRandomPassword(length int) string {
+func generateRandomPassword(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
 	b := make([]byte, length)
-	rand.Read(b)
+	if _, err := userRandomRead(b); err != nil {
+		return "", err
+	}
 	for i := range b {
 		b[i] = charset[int(b[i])%len(charset)]
 	}
-	return string(b)
+	return string(b), nil
 }
 
 func normalizeUsername(username string) string {

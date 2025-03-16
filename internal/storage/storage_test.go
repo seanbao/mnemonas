@@ -92,6 +92,16 @@ func setupFileSystem(t *testing.T) *FileSystem {
 	return fs
 }
 
+func mustGenerateStorageID(t *testing.T) string {
+	t.Helper()
+
+	id, err := generateID()
+	if err != nil {
+		t.Fatalf("generateID() error: %v", err)
+	}
+	return id
+}
+
 func TestNew(t *testing.T) {
 	client := setupDataplaneClient(t)
 	if client == nil {
@@ -559,7 +569,7 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenDirectorySyncFails(t *
 func TestFileSystem_WriteFile_ReturnsRollbackCleanupFailureWhenVersionRecordFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
-	oldContent := []byte("old content " + generateID())
+	oldContent := []byte("old content " + mustGenerateStorageID(t))
 	oldHash := computeHash(oldContent)
 	exists, err := fs.versions.HasObject(ctx, oldHash)
 	if err != nil {
@@ -674,6 +684,131 @@ func TestFileSystem_Stat_Root(t *testing.T) {
 	}
 }
 
+func TestFileSystem_OperationsRejectTraversalLikePaths(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/safe"); err != nil {
+		t.Fatalf("Mkdir(/safe) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/safe/versioned.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/safe/versioned.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/safe/trash.txt", bytes.NewReader([]byte("trash"))); err != nil {
+		t.Fatalf("WriteFile(trash) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/safe/trash.txt"); err != nil {
+		t.Fatalf("Delete(/safe/trash.txt) error: %v", err)
+	}
+
+	trashItems, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(trashItems) == 0 {
+		t.Fatal("expected trash item for traversal restore test")
+	}
+	trashID := ""
+	for _, item := range trashItems {
+		if item != nil && item.OriginalPath == "/safe/trash.txt" {
+			trashID = item.ID
+			break
+		}
+	}
+	if trashID == "" {
+		t.Fatal("expected /safe/trash.txt trash item")
+	}
+
+	if _, err := fs.Stat(ctx, "../safe/versioned.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.ReadDir(ctx, "../safe"); err != ErrNotFound {
+		t.Fatalf("ReadDir(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.OpenFile(ctx, "../safe/versioned.txt"); err != ErrNotFound {
+		t.Fatalf("OpenFile(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.WriteFile(ctx, "../escape.txt", bytes.NewReader([]byte("blocked"))); err != ErrNotFound {
+		t.Fatalf("WriteFile(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Mkdir(ctx, "../escape-dir"); err != ErrNotFound {
+		t.Fatalf("Mkdir(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Delete(ctx, "../safe/versioned.txt"); err != ErrNotFound {
+		t.Fatalf("Delete(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.PermanentDelete(ctx, "../safe/versioned.txt"); err != ErrNotFound {
+		t.Fatalf("PermanentDelete(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Rename(ctx, "../safe/versioned.txt", "/safe/renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(source traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Rename(ctx, "/safe/versioned.txt", "../renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(destination traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.ListVersions(ctx, "../safe/versioned.txt"); err != ErrNotFound {
+		t.Fatalf("ListVersions(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.GetVersion(ctx, "../safe/versioned.txt", "missing-hash"); err != ErrNotFound {
+		t.Fatalf("GetVersion(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.RestoreVersion(ctx, "../safe/versioned.txt", "missing-hash"); err != ErrNotFound {
+		t.Fatalf("RestoreVersion(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.SetVersioning(ctx, "../safe/versioned.txt", true); err != ErrNotFound {
+		t.Fatalf("SetVersioning(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, _, err := fs.GetVersioningStatus(ctx, "../safe/versioned.txt"); err != ErrNotFound {
+		t.Fatalf("GetVersioningStatus(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.RestoreFromTrashTo(ctx, trashID, "../restored.txt"); err != ErrNotFound {
+		t.Fatalf("RestoreFromTrashTo(traversal) error = %v, want ErrNotFound", err)
+	}
+
+	file, err := fs.OpenFile(ctx, "/safe/versioned.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(/safe/versioned.txt) after traversal rejections error: %v", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("ReadAll(/safe/versioned.txt) error: %v", err)
+	}
+	if string(data) != "v2" {
+		t.Fatalf("OpenFile(/safe/versioned.txt) content = %q, want %q", string(data), "v2")
+	}
+	if _, err := fs.Stat(ctx, "/escape.txt"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /escape.txt after traversal write, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/escape-dir"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /escape-dir after traversal mkdir, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/renamed.txt"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /renamed.txt after traversal rename, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/restored.txt"); err != ErrNotFound {
+		t.Fatalf("expected no normalized /restored.txt after traversal restore, got %v", err)
+	}
+
+	remainingTrash, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after traversal restore rejection error: %v", err)
+	}
+	foundTrash := false
+	for _, item := range remainingTrash {
+		if item != nil && item.ID == trashID {
+			foundTrash = true
+			break
+		}
+	}
+	if !foundTrash {
+		t.Fatal("expected traversal restore rejection to leave trash item intact")
+	}
+}
+
 func TestFileSystem_Mkdir(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -766,6 +901,42 @@ func TestFileSystem_Delete(t *testing.T) {
 
 	if len(items) != 1 {
 		t.Errorf("ListTrash() returned %d items, want 1", len(items))
+	}
+}
+
+func TestFileSystem_Delete_ReturnsEntropyFailureBeforeMovingToTrash(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-entropy.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	originalRandomRead := storageRandomRead
+	storageRandomRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	defer func() {
+		storageRandomRead = originalRandomRead
+	}()
+
+	err := fs.Delete(ctx, "/delete-entropy.txt")
+	if err == nil {
+		t.Fatal("expected Delete() to fail when trash ID generation fails")
+	}
+	if !strings.Contains(err.Error(), "generate trash ID") {
+		t.Fatalf("expected trash ID generation error, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/delete-entropy.txt"); err != nil {
+		t.Fatalf("expected file to remain after failed delete, got %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no trash items after failed delete, got %d", len(items))
 	}
 }
 
@@ -1274,7 +1445,7 @@ func TestFileSystem_PermanentDelete_DoesNotDeleteSharedVersionObject(t *testing.
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
-	sharedContent := []byte("shared-delete-" + generateID())
+	sharedContent := []byte("shared-delete-" + mustGenerateStorageID(t))
 	sharedHash := computeHash(sharedContent)
 	exists, err := fs.versions.HasObject(ctx, sharedHash)
 	if err != nil {
@@ -2016,6 +2187,53 @@ func TestFileSystem_DeleteFromTrash_KeepsMetadataWhenContentDeleteFails(t *testi
 	}
 	if len(items) != 1 {
 		t.Fatalf("Expected trash metadata to remain after failed content delete, got %d items", len(items))
+	}
+}
+
+func TestFileSystem_DeleteFromTrash_ReturnsEntropyFailureBeforeStaging(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-entropy.txt", bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-entropy.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+
+	originalRandomRead := storageRandomRead
+	storageRandomRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	defer func() {
+		storageRandomRead = originalRandomRead
+	}()
+
+	err = fs.DeleteFromTrash(ctx, items[0].ID)
+	if err == nil {
+		t.Fatal("expected DeleteFromTrash() to fail when trash staging ID generation fails")
+	}
+	if !strings.Contains(err.Error(), "generate trash staging ID") {
+		t.Fatalf("expected trash staging ID generation error, got %v", err)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed staging error: %v", listErr)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("expected trash metadata to remain after staging ID failure, got %d items", len(remaining))
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); statErr != nil {
+		t.Fatalf("expected trash content to remain after staging ID failure, got %v", statErr)
 	}
 }
 
@@ -2863,7 +3081,7 @@ func TestFileSystem_RestoreVersion_FailsWhenCurrentSnapshotCannotBeRecorded(t *t
 func TestFileSystem_RestoreVersion_CleansUpCurrentSnapshotObjectWhenVersionRecordFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
-	currentContent := []byte("restore-current-" + generateID())
+	currentContent := []byte("restore-current-" + mustGenerateStorageID(t))
 	currentHash := computeHash(currentContent)
 	exists, err := fs.versions.HasObject(ctx, currentHash)
 	if err != nil {
@@ -2873,7 +3091,7 @@ func TestFileSystem_RestoreVersion_CleansUpCurrentSnapshotObjectWhenVersionRecor
 		t.Fatalf("expected unique current hash %s to be absent before restore", currentHash)
 	}
 
-	historicalContent := []byte("restore-historical-" + generateID())
+	historicalContent := []byte("restore-historical-" + mustGenerateStorageID(t))
 	if err := fs.WriteFile(ctx, "/restore-cleanup.txt", bytes.NewReader(historicalContent)); err != nil {
 		t.Fatalf("WriteFile(v1) error: %v", err)
 	}
@@ -2933,8 +3151,8 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
-	historicalContent := []byte("restore-index-old-" + generateID())
-	currentContent := []byte("restore-index-current-" + generateID())
+	historicalContent := []byte("restore-index-old-" + mustGenerateStorageID(t))
+	currentContent := []byte("restore-index-current-" + mustGenerateStorageID(t))
 	currentHash := computeHash(currentContent)
 
 	exists, err := fs.versions.HasObject(ctx, currentHash)
@@ -3063,7 +3281,7 @@ func TestFileSystem_WriteFile_CleanupVersionsDoesNotDeleteSharedVersionObject(t 
 	fs.config.MaxVersions = 1
 	fs.config.MaxVersionAge = 365 * 24 * time.Hour
 
-	sharedContent := []byte("shared-old-" + generateID())
+	sharedContent := []byte("shared-old-" + mustGenerateStorageID(t))
 	sharedHash := computeHash(sharedContent)
 	exists, err := fs.versions.HasObject(ctx, sharedHash)
 	if err != nil {
