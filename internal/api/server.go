@@ -2749,7 +2749,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	// Check if custom restore path is provided
 	newPath := r.URL.Query().Get("path")
-	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
+	activityPath := item.OriginalPath
 
 	if newPath != "" {
 		// Restore to custom path
@@ -2820,7 +2820,7 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		s.respondNotFound(w, "delete from trash", storage.ErrNotFound)
 		return
 	}
-	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
+	activityPath := item.OriginalPath
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
 		if isStorageNotFound(err) {
@@ -2839,24 +2839,6 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		"id":      id,
 		"deleted": true,
 	}).WithMessage("item permanently deleted").Write(w, http.StatusOK)
-}
-
-func (s *Server) lookupTrashOriginalPath(ctx context.Context, id string) string {
-	if s.fs == nil || id == "" {
-		return ""
-	}
-
-	items, err := s.fs.ListTrash(ctx)
-	if err != nil {
-		return ""
-	}
-	for _, item := range items {
-		if item.ID == id {
-			return item.OriginalPath
-		}
-	}
-
-	return ""
 }
 
 func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {

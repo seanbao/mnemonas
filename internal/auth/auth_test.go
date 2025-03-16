@@ -133,6 +133,17 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid username", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users3-invalid-username.json"))
+		_, err := store.Create("../escape", "password123", "", RoleUser)
+		if err != ErrInvalidUsername {
+			t.Fatalf("expected ErrInvalidUsername, got %v", err)
+		}
+		if _, lookupErr := store.GetByUsername("../escape"); lookupErr != ErrUserNotFound {
+			t.Fatalf("expected invalid username create to leave no persisted user, got %v", lookupErr)
+		}
+	})
+
 	t.Run("create returns entropy failure", func(t *testing.T) {
 		store, _, err := NewUserStore(filepath.Join(dir, "users3-rand-fail.json"))
 		if err != nil {
@@ -1791,6 +1802,31 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if envelope.Error == nil || envelope.Error.Code != "MISSING_FIELDS" {
 			t.Fatalf("expected MISSING_FIELDS error, got %+v", envelope.Error)
+		}
+	})
+
+	t.Run("admin create user rejects invalid username", func(t *testing.T) {
+		body := `{"username":"../escape","password":"newpass123","email":"new@test.com","role":"user"}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		ctx := context.WithValue(req.Context(), ContextKeyUser, admin)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create user envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_USERNAME" {
+			t.Fatalf("expected INVALID_USERNAME error, got %+v", envelope.Error)
+		}
+		if _, err := store.GetByUsername("../escape"); err == nil {
+			t.Fatal("expected invalid username create to be rejected before persistence")
 		}
 	})
 

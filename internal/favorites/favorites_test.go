@@ -1,6 +1,7 @@
 package favorites
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -112,6 +113,43 @@ func TestNewStore_RecoversFromCorruptFavoritesFile(t *testing.T) {
 	}
 	if count := reloaded.Count("user1"); count != 1 {
 		t.Fatalf("expected recovered store to persist new favorites, got %d", count)
+	}
+}
+
+func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	legacy := []Favorite{
+		{Path: `docs\\report.pdf`, UserID: "user1", CreatedAt: time.Now(), Note: "normalized"},
+		{Path: "../escape.txt", UserID: "user1", CreatedAt: time.Now(), Note: "invalid"},
+		{Path: "   ", UserID: "user1", CreatedAt: time.Now(), Note: "blank"},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("Marshal(legacy favorites) error: %v", err)
+	}
+	if err := os.WriteFile(storePath, data, 0600); err != nil {
+		t.Fatalf("WriteFile(favorites.json) error: %v", err)
+	}
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if !store.IsFavorite("user1", "/docs/report.pdf") {
+		t.Fatal("expected legacy favorite path to be normalized on load")
+	}
+	if store.IsFavorite("user1", "/escape.txt") {
+		t.Fatal("expected invalid traversal favorite to be dropped on load")
+	}
+	if count := store.Count("user1"); count != 1 {
+		t.Fatalf("expected only normalized valid favorite to remain, got %d", count)
+	}
+	listed := store.List("user1")
+	if len(listed) != 1 || listed[0].Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized favorite path in list output, got %+v", listed)
 	}
 }
 
@@ -259,6 +297,76 @@ func TestStore(t *testing.T) {
 	}
 	if store2.IsFavorite(userID, path1) {
 		t.Error("expected path1 to not be favorite after reload")
+	}
+}
+
+func TestStore_NormalizesDirectPathInputs(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	fav, err := store.Add("user1", `docs\\report.pdf`, "note")
+	if err != nil {
+		t.Fatalf("Add() error: %v", err)
+	}
+	if fav.Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized favorite path, got %q", fav.Path)
+	}
+	if !store.IsFavorite("user1", "docs/report.pdf") {
+		t.Fatal("expected IsFavorite() to normalize direct relative path input")
+	}
+
+	if err := store.UpdateNote("user1", `docs\\report.pdf`, "updated"); err != nil {
+		t.Fatalf("UpdateNote() error: %v", err)
+	}
+	listed := store.List("user1")
+	if len(listed) != 1 || listed[0].Note != "updated" {
+		t.Fatalf("expected normalized UpdateNote() to update stored favorite, got %+v", listed)
+	}
+
+	if err := store.Remove("user1", `docs\\report.pdf`); err != nil {
+		t.Fatalf("Remove() error: %v", err)
+	}
+	if store.IsFavorite("user1", "/docs/report.pdf") {
+		t.Fatal("expected normalized Remove() to delete the stored favorite")
+	}
+}
+
+func TestStore_AddRejectsTraversalLikePath(t *testing.T) {
+	testCases := []string{
+		"../escape.txt",
+		`..\\escape.txt`,
+		"   ",
+	}
+
+	for _, rawPath := range testCases {
+		t.Run(rawPath, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			storePath := filepath.Join(tmpDir, "favorites.json")
+
+			store, err := NewStore(storePath)
+			if err != nil {
+				t.Fatalf("failed to create store: %v", err)
+			}
+
+			fav, err := store.Add("user1", rawPath, "note")
+			if !errors.Is(err, errInvalidFavoritePath) {
+				t.Fatalf("Add() error = %v, want %v", err, errInvalidFavoritePath)
+			}
+			if fav != nil {
+				t.Fatalf("expected failed add to return nil favorite, got %+v", fav)
+			}
+			if got := store.Count("user1"); got != 0 {
+				t.Fatalf("expected no persisted favorites after failed add, got %d", got)
+			}
+			if store.IsFavorite("user1", "/escape.txt") {
+				t.Fatal("expected traversal-like add not to create a normalized alias favorite")
+			}
+		})
 	}
 }
 

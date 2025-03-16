@@ -187,6 +187,58 @@ func TestShareStore_Create(t *testing.T) {
 	}
 }
 
+func TestShareStore_CreateRejectsInvalidInvariants(t *testing.T) {
+	testCases := []struct {
+		name    string
+		opts    CreateShareOptions
+		wantErr error
+	}{
+		{
+			name:    "empty path",
+			opts:    CreateShareOptions{Path: "   ", Type: ShareTypeFile, CreatedBy: "user1"},
+			wantErr: errInvalidSharePath,
+		},
+		{
+			name:    "traversal path",
+			opts:    CreateShareOptions{Path: "../escape.txt", Type: ShareTypeFile, CreatedBy: "user1"},
+			wantErr: errInvalidSharePath,
+		},
+		{
+			name:    "negative max access",
+			opts:    CreateShareOptions{Path: "/test/file.txt", Type: ShareTypeFile, CreatedBy: "user1", MaxAccess: -1},
+			wantErr: errInvalidMaxAccess,
+		},
+		{
+			name:    "unsupported permission",
+			opts:    CreateShareOptions{Path: "/test/file.txt", Type: ShareTypeFile, CreatedBy: "user1", Permission: PermissionReadWrite},
+			wantErr: errInvalidSharePermission,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			storePath := filepath.Join(tempDir, "shares.json")
+
+			store, err := NewShareStore(storePath)
+			if err != nil {
+				t.Fatalf("failed to create store: %v", err)
+			}
+
+			share, err := store.Create(tc.opts)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Create() error = %v, want %v", err, tc.wantErr)
+			}
+			if share != nil {
+				t.Fatalf("expected failed create to return nil share, got %+v", share)
+			}
+			if got := len(store.ListAll()); got != 0 {
+				t.Fatalf("expected no persisted shares after failed create, got %d", got)
+			}
+		})
+	}
+}
+
 func TestShareStore_CreateWithExpiration(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -212,6 +264,87 @@ func TestShareStore_CreateWithExpiration(t *testing.T) {
 	}
 	if !share.ExpiresAt.After(time.Now()) {
 		t.Error("expiration should be in the future")
+	}
+}
+
+func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	legacy := []*Share{
+		{
+			ID:         "valid",
+			Path:       `docs\\report.pdf`,
+			Type:       ShareTypeFile,
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionReadWrite,
+			Enabled:    true,
+		},
+		{
+			ID:         "invalid-path",
+			Path:       "../escape.txt",
+			Type:       ShareTypeFile,
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionRead,
+			Enabled:    true,
+		},
+		{
+			ID:         "invalid-max-access",
+			Path:       "/docs/limit.txt",
+			Type:       ShareTypeFile,
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionRead,
+			Enabled:    true,
+			MaxAccess:  -1,
+		},
+		{
+			ID:         "blank-path",
+			Path:       "   ",
+			Type:       ShareTypeFile,
+			CreatedBy:  "user1",
+			CreatedAt:  time.Now(),
+			Permission: PermissionRead,
+			Enabled:    true,
+		},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("Marshal(legacy shares) error: %v", err)
+	}
+	if err := os.WriteFile(storePath, data, 0600); err != nil {
+		t.Fatalf("WriteFile(shares.json) error: %v", err)
+	}
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+
+	share, err := store.Get("valid")
+	if err != nil {
+		t.Fatalf("Get(valid) error: %v", err)
+	}
+	if share.Path != "/docs/report.pdf" {
+		t.Fatalf("expected valid share path to normalize on load, got %q", share.Path)
+	}
+	if share.Permission != PermissionRead {
+		t.Fatalf("expected unsupported permission to normalize to read, got %q", share.Permission)
+	}
+
+	if _, err := store.Get("invalid-path"); err != ErrShareNotFound {
+		t.Fatalf("expected invalid path share to be dropped on load, got %v", err)
+	}
+	if _, err := store.Get("invalid-max-access"); err != ErrShareNotFound {
+		t.Fatalf("expected invalid max_access share to be dropped on load, got %v", err)
+	}
+	if _, err := store.Get("blank-path"); err != ErrShareNotFound {
+		t.Fatalf("expected blank path share to be dropped on load, got %v", err)
+	}
+	if shares := store.GetByPath("/docs/report.pdf"); len(shares) != 1 || shares[0].ID != "valid" {
+		t.Fatalf("expected only normalized valid share in path index, got %+v", shares)
 	}
 }
 
@@ -846,6 +979,89 @@ func TestShareStore_UpdatePathMaintainsIndex(t *testing.T) {
 	}
 	if shares[0].ID != share.ID {
 		t.Fatalf("expected renamed share id %s, got %s", share.ID, shares[0].ID)
+	}
+}
+
+func TestShareStore_UpdateRejectsInvalidInvariantsAndPreservesState(t *testing.T) {
+	testCases := []struct {
+		name      string
+		mutate    func(*Share)
+		wantErr   error
+		checkPath bool
+	}{
+		{
+			name: "invalid path",
+			mutate: func(s *Share) {
+				s.Path = "../escape.txt"
+			},
+			wantErr:   errInvalidSharePath,
+			checkPath: true,
+		},
+		{
+			name: "negative max access",
+			mutate: func(s *Share) {
+				s.MaxAccess = -1
+			},
+			wantErr: errInvalidMaxAccess,
+		},
+		{
+			name: "unsupported permission",
+			mutate: func(s *Share) {
+				s.Permission = PermissionReadWrite
+			},
+			wantErr: errInvalidSharePermission,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			storePath := filepath.Join(tempDir, "shares.json")
+
+			store, err := NewShareStore(storePath)
+			if err != nil {
+				t.Fatalf("failed to create store: %v", err)
+			}
+
+			share, err := store.Create(CreateShareOptions{
+				Path:      "/docs/report.txt",
+				Type:      ShareTypeFile,
+				CreatedBy: "user1",
+			})
+			if err != nil {
+				t.Fatalf("failed to create share: %v", err)
+			}
+
+			err = store.Update(share.ID, func(s *Share) error {
+				tc.mutate(s)
+				return nil
+			})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Update() error = %v, want %v", err, tc.wantErr)
+			}
+
+			loaded, err := store.Get(share.ID)
+			if err != nil {
+				t.Fatalf("failed to reload share: %v", err)
+			}
+			if loaded.Path != "/docs/report.txt" {
+				t.Fatalf("expected path to remain unchanged, got %q", loaded.Path)
+			}
+			if loaded.MaxAccess != 0 {
+				t.Fatalf("expected max_access to remain unchanged, got %d", loaded.MaxAccess)
+			}
+			if loaded.Permission != PermissionRead {
+				t.Fatalf("expected permission to remain read, got %q", loaded.Permission)
+			}
+			if tc.checkPath {
+				if shares := store.GetByPath("/docs/report.txt"); len(shares) != 1 || shares[0].ID != share.ID {
+					t.Fatalf("expected original path index to remain intact, got %+v", shares)
+				}
+				if shares := store.GetByPath("/escape.txt"); len(shares) != 0 {
+					t.Fatalf("expected invalid path update not to create normalized index entries, got %d", len(shares))
+				}
+			}
+		})
 	}
 }
 
