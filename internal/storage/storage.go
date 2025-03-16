@@ -117,7 +117,7 @@ type FileSystem struct {
 	policy               *versionstore.VersioningPolicy
 	trashRoot            string
 	config               *Config
-	onPathRenamed        func(ctx context.Context, oldPath, newPath string)
+	onPathRenamed        func(ctx context.Context, oldPath, newPath string) error
 	onPathDeleted        func(ctx context.Context, path string)
 	listReferencedHashes func(ctx context.Context) ([]string, error)
 	getVersions          func(ctx context.Context, path string) ([]versionstore.Version, error)
@@ -197,7 +197,7 @@ func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
 }
 
 // SetPathChangeHooks registers callbacks for committed rename/delete operations.
-func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string), onDelete func(ctx context.Context, path string)) {
+func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string) error, onDelete func(ctx context.Context, path string)) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	fs.onPathRenamed = onRename
@@ -911,7 +911,21 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 		}
 		return fmt.Errorf("failed to rename metadata: %w", err)
 	}
-	fs.notifyPathRenamed(ctx, oldName, newName)
+	if err := fs.notifyPathRenamed(ctx, oldName, newName); err != nil {
+		rollbackWorkspaceErr := fs.renameWorkspacePath(ctx, newName, oldName)
+		rollbackMetadataErr := fs.renameMetadataPath(ctx, newName, oldName)
+		if rollbackWorkspaceErr != nil || rollbackMetadataErr != nil {
+			errs := []error{fmt.Errorf("failed to sync rename hooks: %w", err)}
+			if rollbackWorkspaceErr != nil {
+				errs = append(errs, fmt.Errorf("failed to rollback workspace rename after hook failure: %w", rollbackWorkspaceErr))
+			}
+			if rollbackMetadataErr != nil {
+				errs = append(errs, fmt.Errorf("failed to rollback metadata rename after hook failure: %w", rollbackMetadataErr))
+			}
+			return errors.Join(errs...)
+		}
+		return fmt.Errorf("failed to sync rename hooks: %w", err)
+	}
 
 	return nil
 }
@@ -925,13 +939,14 @@ func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) {
 	}
 }
 
-func (fs *FileSystem) notifyPathRenamed(ctx context.Context, oldName, newName string) {
+func (fs *FileSystem) notifyPathRenamed(ctx context.Context, oldName, newName string) error {
 	fs.mu.RLock()
 	hook := fs.onPathRenamed
 	fs.mu.RUnlock()
 	if hook != nil {
-		hook(ctx, oldName, newName)
+		return hook(ctx, oldName, newName)
 	}
+	return nil
 }
 
 // ============================================================================
@@ -1454,14 +1469,28 @@ func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
 		return err
 	}
 
-	// Delete version objects if file had versions
+	var versionHashes []string
 	if item.HadVersions {
-		// Note: We could store version hashes in trash metadata for complete cleanup
-		// For now, orphan objects will be cleaned up by GC
+		versions, versionsErr := fs.versions.GetVersions(ctx, item.OriginalPath)
+		if versionsErr != nil {
+			return fmt.Errorf("failed to read version metadata for trash item: %w", versionsErr)
+		}
+		versionHashes = make([]string, 0, len(versions))
+		for _, version := range versions {
+			versionHashes = append(versionHashes, version.Hash)
+		}
 	}
 
 	if err := fs.deleteTrashItem(ctx, item); err != nil {
 		return err
+	}
+	if item.HadVersions {
+		if err := fs.versions.DeleteVersions(ctx, item.OriginalPath); err != nil {
+			return fmt.Errorf("failed to delete version metadata for trash item: %w", err)
+		}
+		if err := fs.deleteUnreferencedVersionObjects(ctx, versionHashes); err != nil {
+			return fmt.Errorf("failed to delete version objects for trash item: %w", err)
+		}
 	}
 
 	return nil

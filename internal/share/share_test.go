@@ -1397,7 +1397,7 @@ func TestShareStore_RollbackAuthorizedAccess_PreservesNewerLastAccess(t *testing
 	}
 }
 
-func TestShareStore_RollbackAuthorizedAccess_PreservesRollbackStateWhenSaveFails(t *testing.T) {
+func TestShareStore_RollbackAuthorizedAccess_FailsClosedWhenSaveFails(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -1439,11 +1439,11 @@ func TestShareStore_RollbackAuthorizedAccess_PreservesRollbackStateWhenSaveFails
 	if err != nil {
 		t.Fatalf("failed to reload share: %v", err)
 	}
-	if loaded.AccessCount != 0 {
-		t.Fatalf("expected rollback state to remain in memory despite save failure, got access_count %d", loaded.AccessCount)
+	if loaded.AccessCount != 1 {
+		t.Fatalf("expected reserved access to remain in memory when rollback save fails, got access_count %d", loaded.AccessCount)
 	}
-	if loaded.LastAccess != nil {
-		t.Fatalf("expected last_access to roll back to nil despite save failure, got %v", loaded.LastAccess)
+	if loaded.LastAccess == nil || !loaded.LastAccess.Equal(reservation.currentLastAccess) {
+		t.Fatalf("expected last_access to remain at reserved access time %v, got %v", reservation.currentLastAccess, loaded.LastAccess)
 	}
 }
 

@@ -96,11 +96,12 @@ func newPasswordAttemptTracker() *passwordAttemptTracker {
 	}
 }
 
-func (t *passwordAttemptTracker) isLocked(key string) bool {
+func (t *passwordAttemptTracker) isLocked(key string, failureWindow time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := t.now()
+	t.pruneExpiredLocked(now, failureWindow)
 	state, ok := t.attempts[key]
 	if !ok {
 		return false
@@ -702,7 +703,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 
 	if share.HasPassword() {
 		attemptKey := sharePasswordAttemptKey(id, r)
-		if h.passwordAttempts.isLocked(attemptKey) {
+		if h.passwordAttempts.isLocked(attemptKey, h.passwordFailureWindow) {
 			writeShareError(w, http.StatusTooManyRequests, defaultRateLimitErrorMessage, "SHARE_PASSWORD_RATE_LIMITED")
 			return
 		}

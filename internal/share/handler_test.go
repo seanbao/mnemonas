@@ -3114,6 +3114,24 @@ func TestPasswordAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {
 	}
 }
 
+func TestPasswordAttemptTracker_PrunesStaleEntriesOnLockCheck(t *testing.T) {
+	tracker := newPasswordAttemptTracker()
+	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	tracker.now = func() time.Time { return now }
+	tracker.attempts["stale"] = passwordAttemptState{failures: 1, lastFailure: now.Add(-2 * time.Minute)}
+	tracker.attempts["current"] = passwordAttemptState{failures: 1, lastFailure: now}
+
+	if tracker.isLocked("current", time.Minute) {
+		t.Fatal("expected current tracker entry not to be locked")
+	}
+	if _, ok := tracker.attempts["stale"]; ok {
+		t.Fatal("expected stale tracker entry to be pruned during lock check")
+	}
+	if _, ok := tracker.attempts["current"]; !ok {
+		t.Fatal("expected current tracker entry to remain after lock check")
+	}
+}
+
 func TestClientIdentifier_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/s/share-1", nil)
 	req.RemoteAddr = "203.0.113.5:1234"

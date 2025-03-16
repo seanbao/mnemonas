@@ -1707,6 +1707,45 @@ func TestFileSystem_Rename_ReturnsRollbackFailure(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Rename_RollsBackWhenPathRenameHookFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-hook.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	fs.SetPathChangeHooks(func(context.Context, string, string) error {
+		return errors.New("share path sync failed")
+	}, nil)
+
+	err := fs.Rename(ctx, "/rename-hook.txt", "/rename-hook-new.txt")
+	if err == nil {
+		t.Fatal("Expected Rename() to fail when path rename hook fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync rename hooks") {
+		t.Fatalf("expected rename hook failure in error, got %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/rename-hook.txt"); statErr != nil {
+		t.Fatalf("expected original path to remain after hook rollback, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-hook-new.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected new path to be absent after hook rollback, got %v", statErr)
+	}
+
+	versions, listErr := fs.ListVersions(ctx, "/rename-hook.txt")
+	if listErr != nil {
+		t.Fatalf("ListVersions(original path) error: %v", listErr)
+	}
+	if len(versions) == 0 {
+		t.Fatal("expected version metadata to remain attached to original path after hook rollback")
+	}
+	if _, listErr := fs.ListVersions(ctx, "/rename-hook-new.txt"); !errors.Is(listErr, ErrNotFound) {
+		t.Fatalf("expected new path version metadata to be absent after hook rollback, got %v", listErr)
+	}
+}
+
 func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2234,6 +2273,78 @@ func TestFileSystem_DeleteFromTrash_ReturnsEntropyFailureBeforeStaging(t *testin
 	}
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); statErr != nil {
 		t.Fatalf("expected trash content to remain after staging ID failure, got %v", statErr)
+	}
+}
+
+func TestFileSystem_DeleteFromTrash_AttemptsVersionObjectCleanup(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-permanent-objects.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-permanent-objects.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-permanent-objects.md", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(v3) error: %v", err)
+	}
+
+	versions, err := fs.versions.GetVersions(ctx, "/trash-permanent-objects.md")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("expected historical versions, got %d", len(versions))
+	}
+
+	if err := fs.Delete(ctx, "/trash-permanent-objects.md"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	called := make(map[string]int)
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
+		called[hash]++
+		return errors.New("delete object failed")
+	}
+
+	err = fs.DeleteFromTrash(ctx, items[0].ID)
+	if err == nil {
+		t.Fatal("expected DeleteFromTrash() to fail when version object cleanup fails")
+	}
+	if !strings.Contains(err.Error(), "failed to delete version objects for trash item") {
+		t.Fatalf("expected trash version object cleanup error, got %v", err)
+	}
+
+	for _, version := range versions {
+		if called[version.Hash] != 1 {
+			t.Fatalf("expected deleteVersionObject to be attempted once for %s, got %d", version.Hash, called[version.Hash])
+		}
+	}
+	if _, statErr := fs.Stat(ctx, "/trash-permanent-objects.md"); statErr != ErrNotFound {
+		t.Fatalf("expected file content to remain deleted after trash cleanup failure, got %v", statErr)
+	}
+	remainingItems, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after object cleanup failure error: %v", listErr)
+	}
+	if len(remainingItems) != 0 {
+		t.Fatalf("expected trash metadata to be removed before object cleanup failure, got %d items", len(remainingItems))
+	}
+	remainingVersions, versionsErr := fs.versions.GetVersions(ctx, "/trash-permanent-objects.md")
+	if versionsErr != nil {
+		t.Fatalf("GetVersions() after trash cleanup failure error: %v", versionsErr)
+	}
+	if len(remainingVersions) != 0 {
+		t.Fatalf("expected version metadata to be removed before object cleanup failure, got %d entries", len(remainingVersions))
 	}
 }
 
