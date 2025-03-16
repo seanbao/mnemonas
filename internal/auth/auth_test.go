@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -129,6 +130,67 @@ func TestUserStore(t *testing.T) {
 		_, err := store.Create("shortpass", "short", "", RoleUser)
 		if err != ErrPasswordTooShort {
 			t.Errorf("expected ErrPasswordTooShort, got %v", err)
+		}
+	})
+
+	t.Run("create returns entropy failure", func(t *testing.T) {
+		store, _, err := NewUserStore(filepath.Join(dir, "users3-rand-fail.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		originalRandomRead := userRandomRead
+		userRandomRead = func([]byte) (int, error) {
+			return 0, errors.New("entropy unavailable")
+		}
+		defer func() {
+			userRandomRead = originalRandomRead
+		}()
+
+		user, err := store.Create("randfail", "password123", "", RoleUser)
+		if err == nil {
+			t.Fatal("expected create to fail when entropy source is unavailable")
+		}
+		if user != nil {
+			t.Fatalf("expected no user to be returned on entropy failure, got %+v", user)
+		}
+		if !strings.Contains(err.Error(), "generate user ID") {
+			t.Fatalf("expected generate user ID error, got %v", err)
+		}
+		if _, lookupErr := store.GetByUsername("randfail"); lookupErr != ErrUserNotFound {
+			t.Fatalf("expected failed create to leave no persisted user, got %v", lookupErr)
+		}
+	})
+
+	t.Run("new user store returns default admin entropy failure", func(t *testing.T) {
+		originalRandomRead := userRandomRead
+		userRandomRead = func([]byte) (int, error) {
+			return 0, errors.New("entropy unavailable")
+		}
+		defer func() {
+			userRandomRead = originalRandomRead
+		}()
+
+		usersFile := filepath.Join(t.TempDir(), "users.json")
+		store, password, err := NewUserStore(usersFile)
+		if err == nil {
+			t.Fatal("expected NewUserStore to fail when default admin randomness is unavailable")
+		}
+		if store != nil {
+			t.Fatalf("expected no store to be returned on default admin entropy failure, got %+v", store)
+		}
+		if password != "" {
+			t.Fatalf("expected no initial password on failure, got %q", password)
+		}
+		if !strings.Contains(err.Error(), "generate default admin password") {
+			t.Fatalf("expected default admin password generation error, got %v", err)
+		}
+		if _, statErr := os.Stat(usersFile); !os.IsNotExist(statErr) {
+			t.Fatalf("expected no users file to be written, got %v", statErr)
+		}
+		passwordFile := filepath.Join(filepath.Dir(usersFile), "initial-password.txt")
+		if _, statErr := os.Stat(passwordFile); !os.IsNotExist(statErr) {
+			t.Fatalf("expected no initial password file to be written, got %v", statErr)
 		}
 	})
 
@@ -730,6 +792,48 @@ func TestTokenManager(t *testing.T) {
 		_, err := tm.ValidateAccessToken(tokenPair.AccessToken)
 		if err != ErrTokenExpired {
 			t.Errorf("expected ErrTokenExpired, got %v", err)
+		}
+	})
+
+	t.Run("generate token pair returns entropy failure", func(t *testing.T) {
+		originalRandomRead := tokenRandomRead
+		tokenRandomRead = func(b []byte) (int, error) {
+			return 0, errors.New("entropy unavailable")
+		}
+		defer func() {
+			tokenRandomRead = originalRandomRead
+		}()
+
+		tm := NewTokenManager(strings.Repeat("a", 32), 15*time.Minute, 24*time.Hour)
+		user := &User{
+			ID:       "user-entropy-failure",
+			Username: "entropy-failure",
+			Role:     RoleUser,
+		}
+
+		_, err := tm.GenerateTokenPair(user)
+		if err == nil {
+			t.Fatal("expected token generation to fail when token ID entropy is unavailable")
+		}
+		if !strings.Contains(err.Error(), "generate token id") {
+			t.Fatalf("expected wrapped token id generation error, got %v", err)
+		}
+	})
+
+	t.Run("short secret falls back to deterministic key when entropy fails", func(t *testing.T) {
+		originalRandomRead := tokenRandomRead
+		tokenRandomRead = func(b []byte) (int, error) {
+			return 0, errors.New("entropy unavailable")
+		}
+		defer func() {
+			tokenRandomRead = originalRandomRead
+		}()
+
+		secret := "short-secret"
+		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+		fallback := sha256.Sum256([]byte(secret))
+		if !bytes.Equal(tm.secretKey, fallback[:]) {
+			t.Fatalf("expected fallback secret key %x, got %x", fallback, tm.secretKey)
 		}
 	})
 }

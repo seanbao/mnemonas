@@ -238,6 +238,82 @@ func TestWorkspace_WriteFile_AllowsDoubleDotInFileName(t *testing.T) {
 	}
 }
 
+func TestWorkspace_OperationsRejectTraversalLikeNames(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/safe"); err != nil {
+		t.Fatalf("Mkdir(/safe) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/safe/existing.txt", []byte("safe")); err != nil {
+		t.Fatalf("WriteFile(/safe/existing.txt) error: %v", err)
+	}
+
+	if _, err := w.Stat(ctx, "../safe/existing.txt"); err != ErrNotFound {
+		t.Fatalf("Stat(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := w.ReadDir(ctx, "../safe"); err != ErrNotFound {
+		t.Fatalf("ReadDir(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := w.OpenFile(ctx, "../safe/existing.txt"); err != ErrNotFound {
+		t.Fatalf("OpenFile(traversal) error = %v, want ErrNotFound", err)
+	}
+	if _, err := w.ReadFile(ctx, "../safe/existing.txt"); err != ErrNotFound {
+		t.Fatalf("ReadFile(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.WriteFile(ctx, "../escape.txt", []byte("blocked")); err != ErrNotFound {
+		t.Fatalf("WriteFile(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.WriteFileFromReader(ctx, "../escape-reader.txt", strings.NewReader("blocked")); err != ErrNotFound {
+		t.Fatalf("WriteFileFromReader(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Mkdir(ctx, "../escape-dir"); err != ErrNotFound {
+		t.Fatalf("Mkdir(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Delete(ctx, "../safe/existing.txt"); err != ErrNotFound {
+		t.Fatalf("Delete(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.DeleteAll(ctx, "../safe"); err != ErrNotFound {
+		t.Fatalf("DeleteAll(traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Rename(ctx, "../safe/existing.txt", "/safe/renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(source traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Rename(ctx, "/safe/existing.txt", "../renamed.txt"); err != ErrNotFound {
+		t.Fatalf("Rename(destination traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Copy(ctx, "../safe/existing.txt", "/safe/copied.txt"); err != ErrNotFound {
+		t.Fatalf("Copy(source traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Copy(ctx, "/safe/existing.txt", "../copied.txt"); err != ErrNotFound {
+		t.Fatalf("Copy(destination traversal) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Walk(ctx, "../safe", func(path string, info *FileInfo) error { return nil }); err != ErrNotFound {
+		t.Fatalf("Walk(traversal) error = %v, want ErrNotFound", err)
+	}
+	if w.Exists(ctx, "../safe/existing.txt") {
+		t.Fatal("expected Exists(traversal) to return false")
+	}
+	if w.IsDir(ctx, "../safe") {
+		t.Fatal("expected IsDir(traversal) to return false")
+	}
+
+	if data, err := w.ReadFile(ctx, "/safe/existing.txt"); err != nil {
+		t.Fatalf("ReadFile(/safe/existing.txt) after traversal rejections error: %v", err)
+	} else if string(data) != "safe" {
+		t.Fatalf("ReadFile(/safe/existing.txt) = %q, want %q", string(data), "safe")
+	}
+	if w.Exists(ctx, "/escape.txt") {
+		t.Fatal("expected traversal write not to create normalized /escape.txt")
+	}
+	if w.Exists(ctx, "/escape-reader.txt") {
+		t.Fatal("expected traversal reader write not to create normalized /escape-reader.txt")
+	}
+	if w.Exists(ctx, "/escape-dir") {
+		t.Fatal("expected traversal mkdir not to create normalized /escape-dir")
+	}
+}
+
 func TestWorkspace_WriteFile_ReadFile(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
