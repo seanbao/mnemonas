@@ -166,17 +166,51 @@ func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) e
 	return nil
 }
 
-func (s *Server) handlePathDeleted(_ context.Context, targetPath string) {
+func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (func() error, error) {
+	var disabledShares []*share.Share
 	if s.shareStore != nil {
-		if err := s.shareStore.DisableSharesUnderPath(targetPath); err != nil {
-			s.logger.Error().Err(err).Str("path", targetPath).Msg("failed to disable shares after delete")
+		var err error
+		disabledShares, err = s.shareStore.DisableSharesUnderPathWithRestore(targetPath)
+		if err != nil {
+			return nil, fmt.Errorf("disable shares after delete: %w", err)
 		}
 	}
+
+	var removedFavorites []*favorites.Favorite
 	if s.favoritesStore != nil {
-		if err := s.favoritesStore.RemoveFavoritesUnderPath(targetPath); err != nil {
-			s.logger.Error().Err(err).Str("path", targetPath).Msg("failed to remove favorites after delete")
+		var err error
+		removedFavorites, err = s.favoritesStore.RemoveFavoritesUnderPathWithRestore(targetPath)
+		if err != nil {
+			if s.shareStore != nil {
+				if rollbackErr := s.shareStore.RestoreShares(disabledShares); rollbackErr != nil {
+					return nil, errors.Join(
+						fmt.Errorf("remove favorites after delete: %w", err),
+						fmt.Errorf("rollback shares after delete: %w", rollbackErr),
+					)
+				}
+			}
+			return nil, fmt.Errorf("remove favorites after delete: %w", err)
 		}
 	}
+
+	if len(disabledShares) == 0 && len(removedFavorites) == 0 {
+		return nil, nil
+	}
+
+	return func() error {
+		var rollbackErr error
+		if len(removedFavorites) > 0 {
+			if err := s.favoritesStore.RestoreFavorites(removedFavorites); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore favorites after delete rollback: %w", err))
+			}
+		}
+		if len(disabledShares) > 0 {
+			if err := s.shareStore.RestoreShares(disabledShares); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore shares after delete rollback: %w", err))
+			}
+		}
+		return rollbackErr
+	}, nil
 }
 
 type AlertMonitor interface {
