@@ -118,7 +118,7 @@ type FileSystem struct {
 	trashRoot            string
 	config               *Config
 	onPathRenamed        func(ctx context.Context, oldPath, newPath string) error
-	onPathDeleted        func(ctx context.Context, path string)
+	onPathDeleted        func(ctx context.Context, path string) (func() error, error)
 	listReferencedHashes func(ctx context.Context) ([]string, error)
 	getVersions          func(ctx context.Context, path string) ([]versionstore.Version, error)
 	deleteFileIndex      func(ctx context.Context, path string) error
@@ -197,7 +197,7 @@ func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
 }
 
 // SetPathChangeHooks registers callbacks for committed rename/delete operations.
-func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string) error, onDelete func(ctx context.Context, path string)) {
+func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string) error, onDelete func(ctx context.Context, path string) (func() error, error)) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	fs.onPathRenamed = onRename
@@ -652,6 +652,11 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	if err := fs.ensureTrashCapacityLocked(ctx, info.Size); err != nil {
 		return err
 	}
+	rollbackInfo := &FileInfo{
+		IsDir:   info.IsDir,
+		Size:    info.Size,
+		ModTime: info.ModTime,
+	}
 
 	// Generate trash ID
 	id, err := generateID()
@@ -662,6 +667,11 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	// Check if file had versioning
 	hadVersions := false
 	if !info.IsDir {
+		contentHash, hashErr := fs.hashWorkspaceFile(ctx, name)
+		if hashErr != nil {
+			return hashErr
+		}
+		rollbackInfo.ContentHash = contentHash
 		versions, err := fs.versions.GetVersions(ctx, name)
 		if err != nil {
 			return fmt.Errorf("failed to read version metadata: %w", err)
@@ -703,52 +713,23 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 
 	// Remove from file index
 	if err := fs.deleteFileIndex(ctx, name); err != nil {
-		rollbackErr := movePath(trashContentPath, fullPath)
-		metadataErr := fs.versions.RemoveFromTrash(ctx, id)
-		var restoreTrashContentErr error
-		if rollbackErr == nil && metadataErr != nil {
-			restoreTrashContentErr = restoreTrashContent(fullPath, trashContentPath, info.IsDir)
-		}
-		if rollbackErr == nil && metadataErr == nil {
-			os.RemoveAll(path.Join(fs.trashRoot, id))
-		}
-		if rollbackErr != nil && metadataErr != nil && restoreTrashContentErr != nil {
+		if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, false); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to delete file index: %w", err),
-				fmt.Errorf("failed to rollback deleted content: %w", rollbackErr),
-				fmt.Errorf("failed to rollback trash metadata: %w", metadataErr),
-				fmt.Errorf("failed to restore trash content: %w", restoreTrashContentErr),
-			)
-		}
-		if rollbackErr != nil && metadataErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete file index: %w", err),
-				fmt.Errorf("failed to rollback deleted content: %w", rollbackErr),
-				fmt.Errorf("failed to rollback trash metadata: %w", metadataErr),
-			)
-		}
-		if restoreTrashContentErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete file index: %w", err),
-				fmt.Errorf("failed to rollback trash metadata: %w", metadataErr),
-				fmt.Errorf("failed to restore trash content: %w", restoreTrashContentErr),
-			)
-		}
-		if rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete file index: %w", err),
-				fmt.Errorf("failed to rollback deleted content: %w", rollbackErr),
-			)
-		}
-		if metadataErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to delete file index: %w", err),
-				fmt.Errorf("failed to rollback trash metadata: %w", metadataErr),
+				rollbackErr,
 			)
 		}
 		return fmt.Errorf("failed to delete file index: %w", err)
 	}
-	fs.notifyPathDeleted(ctx, name)
+	if _, err := fs.notifyPathDeleted(ctx, name); err != nil {
+		if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, true); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync delete hooks: %w", err),
+				rollbackErr,
+			)
+		}
+		return fmt.Errorf("failed to sync delete hooks: %w", err)
+	}
 
 	return nil
 }
@@ -845,19 +826,49 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 		}
 		return fmt.Errorf("failed to delete file index: %w", err)
 	}
+	rollbackDeleteHook, err := fs.notifyPathDeleted(ctx, name)
+	if err != nil {
+		if rollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync delete hooks: %w", err),
+				fmt.Errorf("failed to rollback deleted path: %w", rollbackErr),
+			)
+		}
+		if !info.IsDir {
+			if restoreIndexErr := fs.updateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(previousData)); restoreIndexErr != nil {
+				return errors.Join(
+					fmt.Errorf("failed to sync delete hooks: %w", err),
+					fmt.Errorf("failed to restore file index after rollback: %w", restoreIndexErr),
+				)
+			}
+		}
+		return fmt.Errorf("failed to sync delete hooks: %w", err)
+	}
 
 	if !info.IsDir {
 		if err := fs.versions.DeleteVersions(ctx, name); err != nil {
-			if rollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); rollbackErr != nil {
+			var rollbackErr error
+			if rollbackDeleteHook != nil {
+				rollbackErr = rollbackDeleteHook()
+			}
+			if pathRollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); pathRollbackErr != nil {
 				return errors.Join(
 					fmt.Errorf("failed to delete version metadata: %w", err),
-					fmt.Errorf("failed to rollback deleted path: %w", rollbackErr),
+					wrapStorageStepError("rollback deleted-path hooks", rollbackErr),
+					fmt.Errorf("failed to rollback deleted path: %w", pathRollbackErr),
 				)
 			}
 			if restoreIndexErr := fs.updateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(previousData)); restoreIndexErr != nil {
 				return errors.Join(
 					fmt.Errorf("failed to delete version metadata: %w", err),
+					wrapStorageStepError("rollback deleted-path hooks", rollbackErr),
 					fmt.Errorf("failed to restore file index after rollback: %w", restoreIndexErr),
+				)
+			}
+			if rollbackErr != nil {
+				return errors.Join(
+					fmt.Errorf("failed to delete version metadata: %w", err),
+					wrapStorageStepError("rollback deleted-path hooks", rollbackErr),
 				)
 			}
 			return fmt.Errorf("failed to delete version metadata: %w", err)
@@ -868,7 +879,6 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 			return fmt.Errorf("failed to delete version objects: %w", objectDeleteErr)
 		}
 	}
-	fs.notifyPathDeleted(ctx, name)
 
 	return nil
 }
@@ -930,13 +940,14 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 	return nil
 }
 
-func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) {
+func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) (func() error, error) {
 	fs.mu.RLock()
 	hook := fs.onPathDeleted
 	fs.mu.RUnlock()
 	if hook != nil {
-		hook(ctx, name)
+		return hook(ctx, name)
 	}
+	return nil, nil
 }
 
 func (fs *FileSystem) notifyPathRenamed(ctx context.Context, oldName, newName string) error {
@@ -1469,31 +1480,8 @@ func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
 		return err
 	}
 
-	var versionHashes []string
-	if item.HadVersions {
-		versions, versionsErr := fs.versions.GetVersions(ctx, item.OriginalPath)
-		if versionsErr != nil {
-			return fmt.Errorf("failed to read version metadata for trash item: %w", versionsErr)
-		}
-		versionHashes = make([]string, 0, len(versions))
-		for _, version := range versions {
-			versionHashes = append(versionHashes, version.Hash)
-		}
-	}
-
-	if err := fs.deleteTrashItem(ctx, item); err != nil {
-		return err
-	}
-	if item.HadVersions {
-		if err := fs.versions.DeleteVersions(ctx, item.OriginalPath); err != nil {
-			return fmt.Errorf("failed to delete version metadata for trash item: %w", err)
-		}
-		if err := fs.deleteUnreferencedVersionObjects(ctx, versionHashes); err != nil {
-			return fmt.Errorf("failed to delete version objects for trash item: %w", err)
-		}
-	}
-
-	return nil
+	_, err = fs.permanentlyDeleteTrashItem(ctx, item)
+	return err
 }
 
 // EmptyTrash permanently deletes all items from trash
@@ -1515,9 +1503,9 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
-		if err := fs.deleteTrashItem(ctx, &item); err != nil {
-			var durabilityErr *trashDeleteDurabilityError
-			if errors.As(err, &durabilityErr) {
+		visibleDeleted, err := fs.permanentlyDeleteTrashItem(ctx, &item)
+		if err != nil {
+			if visibleDeleted {
 				deleted++
 			}
 			return deleted, err
@@ -1551,9 +1539,9 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 		if !item.ExpiresAt.Before(now) {
 			continue
 		}
-		if err := fs.deleteTrashItem(ctx, &item); err != nil {
-			var durabilityErr *trashDeleteDurabilityError
-			if errors.As(err, &durabilityErr) {
+		visibleDeleted, err := fs.permanentlyDeleteTrashItem(ctx, &item)
+		if err != nil {
+			if visibleDeleted {
 				deleted++
 			}
 			return deleted, err
@@ -1562,6 +1550,54 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 	}
 
 	return deleted, nil
+}
+
+func (fs *FileSystem) permanentlyDeleteTrashItem(ctx context.Context, item *versionstore.TrashItem) (bool, error) {
+	err := fs.deleteTrashItem(ctx, item)
+	visibleDeleted := err == nil
+	if !item.HadVersions {
+		var durabilityErr *trashDeleteDurabilityError
+		if errors.As(err, &durabilityErr) {
+			visibleDeleted = true
+		}
+		return visibleDeleted, err
+	}
+
+	var durabilityErr *trashDeleteDurabilityError
+	if err != nil && !errors.As(err, &durabilityErr) {
+		return false, err
+	}
+	if durabilityErr != nil {
+		visibleDeleted = true
+	}
+
+	cleanupErr := fs.cleanupDeletedTrashVersions(ctx, item)
+	if cleanupErr != nil {
+		return visibleDeleted, errors.Join(err, cleanupErr)
+	}
+
+	return visibleDeleted, err
+}
+
+func (fs *FileSystem) cleanupDeletedTrashVersions(ctx context.Context, item *versionstore.TrashItem) error {
+	versions, err := fs.versions.GetVersions(ctx, item.OriginalPath)
+	if err != nil {
+		return fmt.Errorf("failed to read version metadata for trash item: %w", err)
+	}
+
+	versionHashes := make([]string, 0, len(versions))
+	for _, version := range versions {
+		versionHashes = append(versionHashes, version.Hash)
+	}
+
+	if err := fs.versions.DeleteVersions(ctx, item.OriginalPath); err != nil {
+		return fmt.Errorf("failed to delete version metadata for trash item: %w", err)
+	}
+	if err := fs.deleteUnreferencedVersionObjects(ctx, versionHashes); err != nil {
+		return fmt.Errorf("failed to delete version objects for trash item: %w", err)
+	}
+
+	return nil
 }
 
 func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.TrashItem) error {
@@ -1726,18 +1762,59 @@ func (fs *FileSystem) cleanupVersions(ctx context.Context, name string) error {
 	maxCount := fs.config.MaxVersions
 	maxAge := fs.config.MaxVersionAge
 
-	hashes, err := fs.versions.DeleteOldVersions(ctx, name, maxCount, maxAge)
+	versions, err := fs.versions.DeleteOldVersionsDetailed(ctx, name, maxCount, maxAge)
 	if err != nil {
 		return err
 	}
+	if len(versions) == 0 {
+		return nil
+	}
 
-	// Delete orphaned objects.
-	deleteErr := fs.deleteUnreferencedVersionObjects(ctx, hashes)
+	// Delete orphaned objects. If deletion fails for a hash, restore the
+	// corresponding version metadata so maintenance leaves extra history behind.
+	deleteErr, versionsToRestore := fs.deleteRetainedVersionObjects(ctx, versions)
 	if deleteErr != nil {
+		if restoreErr := fs.versions.RestoreVersions(ctx, versionsToRestore); restoreErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to cleanup one or more version objects: %w", deleteErr),
+				fmt.Errorf("failed to restore retained version metadata: %w", restoreErr),
+			)
+		}
 		return fmt.Errorf("failed to cleanup one or more version objects: %w", deleteErr)
 	}
 
 	return nil
+}
+
+func (fs *FileSystem) deleteRetainedVersionObjects(ctx context.Context, versions []versionstore.Version) (error, []versionstore.Version) {
+	versionsByHash := make(map[string][]versionstore.Version)
+	for _, version := range versions {
+		versionsByHash[version.Hash] = append(versionsByHash[version.Hash], version)
+	}
+
+	var deleteErr error
+	var versionsToRestore []versionstore.Version
+	for hash, groupedVersions := range versionsByHash {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(deleteErr, err), append(versionsToRestore, groupedVersions...)
+		}
+
+		referenced, err := fs.versions.HasVersionReference(ctx, hash)
+		if err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("check version references %s: %w", hash, err))
+			versionsToRestore = append(versionsToRestore, groupedVersions...)
+			continue
+		}
+		if referenced {
+			continue
+		}
+		if err := fs.deleteVersionObject(ctx, hash); err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("delete version object %s: %w", hash, err))
+			versionsToRestore = append(versionsToRestore, groupedVersions...)
+		}
+	}
+
+	return deleteErr, versionsToRestore
 }
 
 func (fs *FileSystem) deleteUnreferencedVersionObjects(ctx context.Context, hashes []string) error {
@@ -2127,6 +2204,55 @@ func (fs *FileSystem) rollbackDeletedPath(ctx context.Context, name string, hadP
 		return fs.workspace.Mkdir(ctx, name)
 	}
 	return nil
+}
+
+func (fs *FileSystem) restoreDeletedFileIndex(ctx context.Context, name string, info *FileInfo) error {
+	if info == nil || info.IsDir {
+		return nil
+	}
+
+	hash := info.ContentHash
+	if hash == "" {
+		computedHash, err := fs.hashWorkspaceFile(ctx, name)
+		if err != nil {
+			return fmt.Errorf("rehash restored file index: %w", err)
+		}
+		hash = computedHash
+	}
+
+	return fs.updateFileIndex(ctx, name, info.Size, info.ModTime, hash)
+}
+
+func (fs *FileSystem) rollbackSoftDelete(ctx context.Context, name string, info *FileInfo, id, trashContentPath string, restoreIndex bool) error {
+	fullPath := fs.workspace.FullPath(name)
+	rollbackErr := movePath(trashContentPath, fullPath)
+	metadataErr := fs.versions.RemoveFromTrash(ctx, id)
+	var restoreTrashContentErr error
+	if rollbackErr == nil && metadataErr != nil {
+		restoreTrashContentErr = restoreTrashContent(fullPath, trashContentPath, info.IsDir)
+	}
+	if rollbackErr == nil && metadataErr == nil {
+		os.RemoveAll(path.Join(fs.trashRoot, id))
+	}
+
+	var restoreIndexErr error
+	if restoreIndex && rollbackErr == nil && metadataErr == nil {
+		restoreIndexErr = fs.restoreDeletedFileIndex(ctx, name, info)
+	}
+
+	return errors.Join(
+		wrapStorageStepError("rollback deleted content", rollbackErr),
+		wrapStorageStepError("rollback trash metadata", metadataErr),
+		wrapStorageStepError("restore trash content", restoreTrashContentErr),
+		wrapStorageStepError("restore file index", restoreIndexErr),
+	)
+}
+
+func wrapStorageStepError(step string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("failed to %s: %w", step, err)
 }
 
 func restoreTrashContent(src, dst string, isDir bool) error {

@@ -759,6 +759,13 @@ func (s *ShareStore) UpdatePathReferences(oldPath, newPath string) error {
 
 // DisableSharesUnderPath disables shares that reference a deleted path.
 func (s *ShareStore) DisableSharesUnderPath(targetPath string) error {
+	_, err := s.DisableSharesUnderPathWithRestore(targetPath)
+	return err
+}
+
+// DisableSharesUnderPathWithRestore disables shares under a path and returns
+// the prior share states needed to restore the change if a later step fails.
+func (s *ShareStore) DisableSharesUnderPathWithRestore(targetPath string) ([]*Share, error) {
 	targetPath = path.Clean(targetPath)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -766,15 +773,54 @@ func (s *ShareStore) DisableSharesUnderPath(targetPath string) error {
 	for {
 		snapshot := s.snapshotState()
 		changed := false
+		var disabled []*Share
 
 		for id, share := range snapshot.shares {
 			if !sharePathMatchesOrDescendant(targetPath, share.Path) || !share.Enabled {
 				continue
 			}
 
+			disabled = append(disabled, copyShare(share))
 			updated := copyShare(share)
 			updated.Enabled = false
 			snapshot.shares[id] = updated
+			changed = true
+		}
+
+		if !changed {
+			return nil, nil
+		}
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return nil, err
+		}
+		if s.commitSnapshot(snapshot) {
+			return disabled, nil
+		}
+	}
+}
+
+// RestoreShares restores previously changed share states after a failed operation.
+func (s *ShareStore) RestoreShares(shares []*Share) error {
+	if len(shares) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for _, original := range shares {
+			current, ok := snapshot.shares[original.ID]
+			if !ok || current.Enabled == original.Enabled {
+				continue
+			}
+
+			updated := copyShare(current)
+			updated.Enabled = original.Enabled
+			snapshot.shares[original.ID] = updated
 			changed = true
 		}
 

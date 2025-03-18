@@ -437,6 +437,11 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 		return
 	}
 
+	// Acquire write lock before evaluating preconditions so DELETE validates
+	// against the representation it will actually remove.
+	h.pathLock.Lock(filePath)
+	defer h.pathLock.Unlock(filePath)
+
 	info, err := h.fs.Stat(ctx, filePath)
 	if err != nil {
 		h.handleError(w, err)
@@ -456,10 +461,6 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 			return
 		}
 	}
-
-	// Acquire write lock for exclusive access
-	h.pathLock.Lock(filePath)
-	defer h.pathLock.Unlock(filePath)
 
 	if err := h.fs.Delete(ctx, filePath); err != nil {
 		h.handleError(w, err)
@@ -482,6 +483,10 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 	if !h.authorizeWriteLock(w, r, filePath) {
 		return
 	}
+
+	h.pathLock.Lock(filePath)
+	defer h.pathLock.Unlock(filePath)
+
 	if _, err := h.fs.Stat(ctx, filePath); err == nil {
 		http.Error(w, "resource already exists", http.StatusMethodNotAllowed)
 		return
@@ -491,6 +496,10 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 
 	if err := h.fs.Mkdir(ctx, filePath); err != nil {
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			http.Error(w, "resource already exists", http.StatusMethodNotAllowed)
+			return
+		}
 		if errors.Is(err, storage.ErrNotDir) {
 			http.Error(w, "parent path is not a directory", http.StatusConflict)
 			return
@@ -539,19 +548,6 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
-	dstExists := h.destinationExists(ctx, dst)
-
-	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
-		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
-			return
-		}
-		if h.writeParentNotDirectoryConflict(w, err) {
-			return
-		}
-		h.handleError(w, err)
-		return
-	}
-
 	// NEW-3 fix: Acquire locks in deterministic order to avoid deadlock (same as MOVE)
 	first, second := srcPath, dst
 	if first > second {
@@ -575,6 +571,19 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 			h.pathLock.Lock(second)
 			defer h.pathLock.Unlock(second)
 		}
+	}
+
+	dstExists := h.destinationExists(ctx, dst)
+
+	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
+		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
+			return
+		}
+		if h.writeParentNotDirectoryConflict(w, err) {
+			return
+		}
+		h.handleError(w, err)
+		return
 	}
 
 	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {
@@ -693,6 +702,18 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	// Acquire locks for both paths (in deterministic order to avoid deadlock)
+	first, second := srcPath, dst
+	if first > second {
+		first, second = second, first
+	}
+	h.pathLock.Lock(first)
+	defer h.pathLock.Unlock(first)
+	if first != second {
+		h.pathLock.Lock(second)
+		defer h.pathLock.Unlock(second)
+	}
+
 	dstExists := h.destinationExists(ctx, dst)
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
@@ -704,18 +725,6 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		}
 		h.handleError(w, err)
 		return
-	}
-
-	// Acquire locks for both paths (in deterministic order to avoid deadlock)
-	first, second := srcPath, dst
-	if first > second {
-		first, second = second, first
-	}
-	h.pathLock.Lock(first)
-	defer h.pathLock.Unlock(first)
-	if first != second {
-		h.pathLock.Lock(second)
-		defer h.pathLock.Unlock(second)
 	}
 
 	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {

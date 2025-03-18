@@ -1194,6 +1194,64 @@ func TestShareStore_DisableSharesUnderPath_DisablesExactAndDescendantShares(t *t
 	}
 }
 
+func TestShareStore_DisableSharesUnderPathWithRestore_RestoresDisabledShares(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	folderShare, err := store.Create(CreateShareOptions{Path: "/docs", Type: ShareTypeFolder, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create folder share: %v", err)
+	}
+	fileShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	disabled, err := store.DisableSharesUnderPathWithRestore("/docs")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabled) != 2 {
+		t.Fatalf("expected two disabled shares in rollback state, got %d", len(disabled))
+	}
+
+	if err := store.RestoreShares(disabled); err != nil {
+		t.Fatalf("RestoreShares() error: %v", err)
+	}
+
+	restoredFolder, err := store.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restored folderShare) error: %v", err)
+	}
+	if !restoredFolder.Enabled {
+		t.Fatal("expected folder share to be re-enabled after restore")
+	}
+	restoredFile, err := store.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restored fileShare) error: %v", err)
+	}
+	if !restoredFile.Enabled {
+		t.Fatal("expected file share to be re-enabled after restore")
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedFolder, err := reloaded.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloaded folderShare) error: %v", err)
+	}
+	if !reloadedFolder.Enabled {
+		t.Fatal("expected restored enabled state to persist for folder share")
+	}
+}
+
 func TestShareStore_CreateRollbackOnSaveFailure(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

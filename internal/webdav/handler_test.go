@@ -185,6 +185,54 @@ func TestHandler_MKCOL_ExistingFileReturnsMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHandler_MKCOL_ConcurrentCreateReturnsMethodNotAllowed(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/race-dir"
+
+	handler.pathLock.Lock(targetPath)
+
+	mkcolDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest("MKCOL", "/dav/race-dir", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		mkcolDone <- w
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		handler.pathLock.mu.Lock()
+		entry := handler.pathLock.locks[targetPath]
+		var refCount int32
+		if entry != nil {
+			refCount = entry.refCount
+		}
+		handler.pathLock.mu.Unlock()
+		if refCount >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			handler.pathLock.Unlock(targetPath)
+			t.Fatal("timed out waiting for MKCOL to block on path lock")
+		}
+	}
+
+	if err := fs.Mkdir(ctx, targetPath); err != nil {
+		handler.pathLock.Unlock(targetPath)
+		t.Fatalf("Mkdir(race-dir) error: %v", err)
+	}
+
+	handler.pathLock.Unlock(targetPath)
+	w := <-mkcolDone
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("MKCOL concurrent create status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+	if _, err := fs.Stat(ctx, targetPath); err != nil {
+		t.Fatalf("expected concurrently created collection to remain, got %v", err)
+	}
+}
+
 func TestHandler_MKCOL_ReturnsConflictWhenParentPathIsFile(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -646,6 +694,74 @@ func TestHandler_DELETE_ConditionalHeaders(t *testing.T) {
 	})
 }
 
+func TestHandler_DELETE_IfMatchValidatesCurrentETagUnderLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/deltest-race/file.txt"
+
+	if err := fs.Mkdir(ctx, "/deltest-race"); err != nil {
+		t.Fatalf("Mkdir(deltest-race) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("Stat(v1) error: %v", err)
+	}
+	staleETag := `"` + info.ContentHash + `"`
+
+	handler.pathLock.Lock(targetPath)
+
+	deleteDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodDelete, "/dav/deltest-race/file.txt", nil)
+		req.Header.Set("If-Match", staleETag)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		deleteDone <- w
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		handler.pathLock.mu.Lock()
+		entry := handler.pathLock.locks[targetPath]
+		var refCount int32
+		if entry != nil {
+			refCount = entry.refCount
+		}
+		handler.pathLock.mu.Unlock()
+		if refCount >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			handler.pathLock.Unlock(targetPath)
+			t.Fatal("timed out waiting for DELETE to block on path lock")
+		}
+	}
+
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("v2"))); err != nil {
+		handler.pathLock.Unlock(targetPath)
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	handler.pathLock.Unlock(targetPath)
+	w := <-deleteDone
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("DELETE stale If-Match after concurrent write status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+	if _, err := fs.Stat(ctx, targetPath); err != nil {
+		t.Fatalf("expected file to remain after stale If-Match DELETE, got %v", err)
+	}
+	currentInfo, err := fs.Stat(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("Stat(current) error: %v", err)
+	}
+	if currentInfo.ContentHash == info.ContentHash {
+		t.Fatal("expected concurrent write to change the file hash")
+	}
+}
+
 func TestHandler_HandleError_DoesNotLeakInternalDetails(t *testing.T) {
 	handler := NewHandler(Config{AuthType: "none"})
 	w := httptest.NewRecorder()
@@ -757,6 +873,79 @@ func TestHandler_COPY_OverwriteFalse(t *testing.T) {
 	}
 	if string(data) != "existing" {
 		t.Fatalf("Expected destination content unchanged, got %q", string(data))
+	}
+}
+
+func TestHandler_COPY_OverwriteFalseValidatesDestinationUnderLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/dst/race.txt"
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src/file.txt) error: %v", err)
+	}
+
+	handler.pathLock.Lock(targetPath)
+
+	copyDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/dst/race.txt")
+		req.Header.Set("Overwrite", "F")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		copyDone <- w
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		handler.pathLock.mu.Lock()
+		entry := handler.pathLock.locks[targetPath]
+		var refCount int32
+		if entry != nil {
+			refCount = entry.refCount
+		}
+		handler.pathLock.mu.Unlock()
+		if refCount >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			handler.pathLock.Unlock(targetPath)
+			t.Fatal("timed out waiting for COPY to block on destination lock")
+		}
+	}
+
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("existing"))); err != nil {
+		handler.pathLock.Unlock(targetPath)
+		t.Fatalf("WriteFile(dst/race.txt) error: %v", err)
+	}
+
+	handler.pathLock.Unlock(targetPath)
+	w := <-copyDone
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("COPY stale Overwrite:F after concurrent destination create status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+
+	f, err := fs.OpenFile(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("OpenFile(dst/race.txt) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(dst/race.txt) error: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("Expected destination content unchanged after concurrent create, got %q", string(data))
+	}
+	if _, err := fs.Stat(ctx, "/src/file.txt"); err != nil {
+		t.Fatalf("expected source file to remain after COPY rejection, got %v", err)
 	}
 }
 
@@ -1216,6 +1405,75 @@ func TestHandler_MOVE_OverwriteFalse(t *testing.T) {
 	}
 	if string(data) != "existing" {
 		t.Fatalf("Expected destination content unchanged, got %q", string(data))
+	}
+}
+
+func TestHandler_MOVE_OverwriteFalseValidatesDestinationUnderLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/movetest/z-race.txt"
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+
+	handler.pathLock.Lock(targetPath)
+
+	moveDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/movetest/z-race.txt")
+		req.Header.Set("Overwrite", "F")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		moveDone <- w
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		handler.pathLock.mu.Lock()
+		entry := handler.pathLock.locks[targetPath]
+		var refCount int32
+		if entry != nil {
+			refCount = entry.refCount
+		}
+		handler.pathLock.mu.Unlock()
+		if refCount >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			handler.pathLock.Unlock(targetPath)
+			t.Fatal("timed out waiting for MOVE to block on destination lock")
+		}
+	}
+
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("existing"))); err != nil {
+		handler.pathLock.Unlock(targetPath)
+		t.Fatalf("WriteFile(z-race.txt) error: %v", err)
+	}
+
+	handler.pathLock.Unlock(targetPath)
+	w := <-moveDone
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("MOVE stale Overwrite:F after concurrent destination create status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+		t.Fatalf("expected source file to remain after MOVE rejection, got %v", err)
+	}
+	f, err := fs.OpenFile(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("OpenFile(z-race.txt) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(z-race.txt) error: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("Expected destination content unchanged after concurrent create, got %q", string(data))
 	}
 }
 
