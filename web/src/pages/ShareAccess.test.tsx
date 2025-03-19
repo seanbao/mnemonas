@@ -104,6 +104,32 @@ describe('ShareAccessPage', () => {
     })
   })
 
+  it('retries loading share info from the error state', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare
+      .mockRejectedValueOnce(new Error('分享不存在或已失效'))
+      .mockResolvedValueOnce({
+        id: 'abc123',
+        type: 'file',
+        has_password: false,
+        permission: 'read',
+        file_name: 'test.txt',
+        file_size: 1024,
+      })
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('test.txt')).toBeInTheDocument()
+    })
+  })
+
   it('shows password form when share requires password', async () => {
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -116,6 +142,30 @@ describe('ShareAccessPage', () => {
     
     await waitFor(() => {
       expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+  })
+
+  it('shows warning feedback when submitting an empty password', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('验证密码'))
+
+    expect(mockAccessShareWithPassword).not.toHaveBeenCalled()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '请输入访问密码',
+      color: 'warning',
     })
   })
 
@@ -178,6 +228,37 @@ describe('ShareAccessPage', () => {
     await waitFor(() => {
       expect(screen.getByText('docs')).toBeInTheDocument()
       expect(screen.getByText('note.txt')).toBeInTheDocument()
+    })
+  })
+
+  it('retries loading folder items after a listing failure', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems
+      .mockRejectedValueOnce(new Error('加载文件夹失败'))
+      .mockResolvedValueOnce({
+        path: '',
+        items: [
+          { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        ],
+      })
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重试加载' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeInTheDocument()
     })
   })
 

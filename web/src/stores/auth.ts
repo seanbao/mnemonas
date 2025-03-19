@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { User } from '@/api/auth'
 import { 
+  AUTH_CLEARED_EVENT,
   login as apiLogin, 
   logout as apiLogout, 
   getCurrentUser,
@@ -142,4 +143,28 @@ export function useAuthLoading() {
 
 export function useAuthError() {
   return useAuthStore((state) => state.error)
+}
+
+const AUTH_CLEARED_LISTENER_KEY = '__mnemonasAuthClearedListenerRegistered__'
+
+if (typeof window !== 'undefined') {
+  const markerWindow = window as Window & { [AUTH_CLEARED_LISTENER_KEY]?: boolean }
+
+  if (!markerWindow[AUTH_CLEARED_LISTENER_KEY]) {
+    window.addEventListener(AUTH_CLEARED_EVENT, () => {
+      const state = useAuthStore.getState()
+      if (!state.isAuthenticated && !state.user && !state.isLoading) {
+        return
+      }
+
+      useAuthStore.setState({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+        error: state.error ?? '登录已过期，请重新登录',
+      })
+    })
+
+    markerWindow[AUTH_CLEARED_LISTENER_KEY] = true
+  }
 }

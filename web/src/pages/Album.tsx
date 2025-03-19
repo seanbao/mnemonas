@@ -15,7 +15,8 @@ import {
   ZoomIn,
   ZoomOut,
   RotateCw,
-  Info
+  Info,
+  AlertCircle,
 } from 'lucide-react'
 import { listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
 import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
@@ -27,12 +28,22 @@ const MAX_DEPTH = 5 // Maximum directory depth to traverse
 const MAX_IMAGES = 1000 // Maximum images to collect
 const CONCURRENCY_LIMIT = 3 // Maximum concurrent directory requests
 
+interface AlbumFetchErrorState {
+  hadPartialError: boolean
+}
+
+interface AlbumQueryResult {
+  images: FileItem[]
+  hadPartialError: boolean
+}
+
 // Recursively fetch all images with safety limits
 async function fetchAllImages(
   path: string = '/',
   depth: number = 0,
   signal?: AbortSignal,
-  collectedCount: { count: number } = { count: 0 }
+  collectedCount: { count: number } = { count: 0 },
+  errorState: AlbumFetchErrorState = { hadPartialError: false }
 ): Promise<FileItem[]> {
   // Check abort signal
   if (signal?.aborted) {
@@ -68,7 +79,10 @@ async function fetchAllImages(
     const results = await Promise.all(
       batch.map(dir => 
         fetchAllImages(dir.path, depth + 1, signal, collectedCount)
-          .catch(() => [] as FileItem[]) // Gracefully handle errors
+          .catch(() => {
+            errorState.hadPartialError = true
+            return [] as FileItem[]
+          })
       )
     )
     
@@ -452,16 +466,23 @@ export function AlbumPage() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   
-  const { data: images, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery<AlbumQueryResult>({
     queryKey: ['album-images'],
-    queryFn: () => {
+    queryFn: async () => {
       // Cancel previous request if any
       abortControllerRef.current?.abort()
       abortControllerRef.current = new AbortController()
-      return fetchAllImages('/', 0, abortControllerRef.current.signal)
+      const errorState = { hadPartialError: false }
+      const images = await fetchAllImages('/', 0, abortControllerRef.current.signal, { count: 0 }, errorState)
+      return {
+        images,
+        hadPartialError: errorState.hadPartialError,
+      }
     },
     staleTime: 1000 * 60 * 5, // Cache for 5 minutes
   })
+
+  const images = data?.images
   
   // Cleanup on unmount
   useEffect(() => {
@@ -503,6 +524,30 @@ export function AlbumPage() {
     )
   }
 
+  if (error) {
+    return (
+      <div className="h-full overflow-auto custom-scrollbar p-7">
+        <div className="space-y-6">
+          <PageHeader
+            title="相册"
+            subtitle="加载失败"
+            icon={ImageIcon}
+          />
+          <EmptyState
+            icon={AlertCircle}
+            title="加载相册失败"
+            description="无法扫描图片目录，当前结果不可用。请检查连接状态后重试。"
+            action={
+              <Button className="rounded-xl" variant="bordered" onPress={() => void refetch()}>
+                重新加载
+              </Button>
+            }
+          />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="h-full overflow-auto custom-scrollbar p-7">
       <div className="space-y-6">
@@ -511,6 +556,16 @@ export function AlbumPage() {
           subtitle={images ? `共 ${images.length} 张图片` : undefined}
           icon={ImageIcon}
         />
+
+        {data?.hadPartialError && (
+          <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+            <div>
+              <p className="font-medium">部分目录扫描失败</p>
+              <p className="text-default-600">当前相册仅展示已成功加载的图片，结果可能不完整。</p>
+            </div>
+          </div>
+        )}
 
         {images && images.length > 0 ? (
           <>

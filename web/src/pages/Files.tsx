@@ -604,13 +604,27 @@ export function FilesPage() {
   useEffect(() => {
     if (!location.pathname.startsWith('/files')) return
     const routePath = location.pathname.replace(/^\/files/, '')
-    const decodedPath = routePath ? decodeURI(routePath) : '/'
+    let decodedPath = '/'
+    if (routePath) {
+      try {
+        decodedPath = decodeURI(routePath)
+      } catch {
+        addToast({ title: '路径格式无效，已返回根目录', color: 'warning' })
+        if (currentPath !== '/') {
+          setCurrentPath('/')
+        }
+        if (location.pathname !== '/files') {
+          navigate('/files', { replace: true })
+        }
+        return
+      }
+    }
     const normalizedPath = decodedPath.startsWith('/') ? decodedPath : `/${decodedPath}`
     const finalPath = normalizedPath === '' ? '/' : normalizedPath
     if (finalPath !== currentPath) {
       setCurrentPath(finalPath)
     }
-  }, [location.pathname, currentPath, setCurrentPath])
+  }, [location.pathname, currentPath, navigate, setCurrentPath])
 
   useEffect(() => {
     const encodedPath = currentPath === '/' ? '' : encodeURI(currentPath)
@@ -627,7 +641,7 @@ export function FilesPage() {
     setFocusedIndex(-1)
   }, [currentPath, clearSelection])
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['files', currentPath],
     queryFn: () => listFiles(currentPath),
   })
@@ -1453,6 +1467,29 @@ export function FilesPage() {
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载记忆中...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex overflow-hidden relative">
+        <div className="flex-1 flex flex-col min-w-0 p-7">
+          <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
+          <div className="flex-1 flex items-center justify-center surface-card">
+            <EmptyState
+              icon={AlertCircle}
+              title="当前目录加载失败"
+              description={(error as Error).message || '请稍后重试'}
+              className="max-w-md"
+              action={
+                <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                  重新加载
+                </Button>
+              }
+            />
+          </div>
         </div>
       </div>
     )

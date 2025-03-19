@@ -21,12 +21,15 @@ import { formatBytes, formatDate, cn } from '@/lib/utils'
 // Search result item component
 function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: () => void }) {
   return (
-    <div
+    <button
+      type="button"
       className={cn(
-        "flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-all duration-150",
-        "hover:bg-content2 border-b border-divider last:border-b-0"
+        "flex w-full items-center gap-3 px-4 py-2.5 text-left transition-all duration-150",
+        "hover:bg-content2 border-b border-divider last:border-b-0",
+        "focus:outline-none focus:bg-content2"
       )}
       onClick={onClick}
+      aria-label={`${result.isDir ? '打开文件夹' : '打开文件'} ${result.path}`}
     >
       <div className="flex-shrink-0">
         <FileIcon name={result.name} isDir={result.isDir} size={24} variant="bare" />
@@ -45,7 +48,7 @@ function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: 
       <div className="flex-shrink-0 text-right text-xs text-default-500 w-24">
         {formatDate(result.modTime)}
       </div>
-    </div>
+    </button>
   )
 }
 
