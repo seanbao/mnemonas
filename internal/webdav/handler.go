@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 
 var (
 	errInvalidDepthHeader                 = errors.New("invalid Depth header")
+	errPropfindDepthLimitExceeded         = errors.New("Depth header exceeds server recursion limit")
 	errInvalidOverwriteHeader             = errors.New("invalid Overwrite header")
 	errPreconditionFailed                 = errors.New("precondition failed")
 	errFileAlreadyExists                  = errors.New("file already exists")
@@ -38,6 +40,7 @@ const webdavLockTimeout = time.Hour
 const webdavLockCleanupInterval = 5 * time.Minute
 const webdavLockTokenBytes = 16
 const maxWebDAVLockTokenAttempts = 8
+const maxPropfindTraversalDepth = 64
 
 var webdavRandomRead = rand.Read
 
@@ -207,9 +210,8 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
-	// Acquire read lock for concurrent read protection
-	h.pathLock.RLock(filePath)
-	defer h.pathLock.RUnlock(filePath)
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
+	defer releaseLocks()
 
 	info, err := h.fs.Stat(ctx, filePath)
 	if err != nil {
@@ -341,13 +343,12 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 }
 
 func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
+	defer releaseLocks()
+
 	if !h.authorizeWriteLock(w, r, filePath) {
 		return
 	}
-
-	// Acquire write lock for exclusive access
-	h.pathLock.Lock(filePath)
-	defer h.pathLock.Unlock(filePath)
 
 	// Check if parent directory exists
 	parent := path.Dir(filePath)
@@ -433,14 +434,12 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 }
 
 func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
-	if !h.authorizeWriteLock(w, r, filePath) {
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
+	defer releaseLocks()
+
+	if !h.authorizeWriteLockWithDescendants(w, r, []string{filePath}, filePath) {
 		return
 	}
-
-	// Acquire write lock before evaluating preconditions so DELETE validates
-	// against the representation it will actually remove.
-	h.pathLock.Lock(filePath)
-	defer h.pathLock.Unlock(filePath)
 
 	info, err := h.fs.Stat(ctx, filePath)
 	if err != nil {
@@ -466,6 +465,7 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 		h.handleError(w, err)
 		return
 	}
+	h.clearLocksUnderPath(filePath)
 
 	// Invalidate cache for parent directory
 	h.propCache.Invalidate(path.Dir(filePath))
@@ -480,12 +480,12 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 		http.Error(w, "MKCOL does not allow request body", http.StatusUnsupportedMediaType)
 		return
 	}
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
+	defer releaseLocks()
+
 	if !h.authorizeWriteLock(w, r, filePath) {
 		return
 	}
-
-	h.pathLock.Lock(filePath)
-	defer h.pathLock.Unlock(filePath)
 
 	if _, err := h.fs.Stat(ctx, filePath); err == nil {
 		http.Error(w, "resource already exists", http.StatusMethodNotAllowed)
@@ -544,33 +544,15 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "source and destination must differ", http.StatusForbidden)
 		return
 	}
+
+	releaseLocks := h.acquireHierarchyLocks(
+		hierarchyLockSpec{path: srcPath, write: false},
+		hierarchyLockSpec{path: dst, write: true},
+	)
+	defer releaseLocks()
+
 	if !h.authorizeWriteLock(w, r, dst) {
 		return
-	}
-
-	// NEW-3 fix: Acquire locks in deterministic order to avoid deadlock (same as MOVE)
-	first, second := srcPath, dst
-	if first > second {
-		first, second = second, first
-	}
-
-	// First path gets read lock if it's source, write lock if destination
-	if first == srcPath {
-		h.pathLock.RLock(first)
-		defer h.pathLock.RUnlock(first)
-	} else {
-		h.pathLock.Lock(first)
-		defer h.pathLock.Unlock(first)
-	}
-
-	if first != second {
-		if second == srcPath {
-			h.pathLock.RLock(second)
-			defer h.pathLock.RUnlock(second)
-		} else {
-			h.pathLock.Lock(second)
-			defer h.pathLock.Unlock(second)
-		}
 	}
 
 	dstExists := h.destinationExists(ctx, dst)
@@ -698,20 +680,15 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "source and destination must differ", http.StatusForbidden)
 		return
 	}
-	if !h.authorizeWriteLock(w, r, srcPath, dst) {
-		return
-	}
 
-	// Acquire locks for both paths (in deterministic order to avoid deadlock)
-	first, second := srcPath, dst
-	if first > second {
-		first, second = second, first
-	}
-	h.pathLock.Lock(first)
-	defer h.pathLock.Unlock(first)
-	if first != second {
-		h.pathLock.Lock(second)
-		defer h.pathLock.Unlock(second)
+	releaseLocks := h.acquireHierarchyLocks(
+		hierarchyLockSpec{path: srcPath, write: true},
+		hierarchyLockSpec{path: dst, write: true},
+	)
+	defer releaseLocks()
+
+	if !h.authorizeWriteLockWithDescendants(w, r, []string{srcPath, dst}, srcPath, dst) {
+		return
 	}
 
 	dstExists := h.destinationExists(ctx, dst)
@@ -778,6 +755,7 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 			return
 		}
 	}
+	h.moveLocksUnderPath(srcPath, dst)
 
 	// Invalidate cache for both source and destination parents
 	h.propCache.Invalidate(path.Dir(srcPath))
@@ -889,6 +867,9 @@ func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, sta
 }
 
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
+	defer releaseLocks()
+
 	depth, err := h.parsePropfindDepth(r.Header.Get("Depth"))
 	if err != nil {
 		writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
@@ -913,7 +894,11 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 	// Add current resource
 	responses = append(responses, h.propResponse(filePath, info))
 
-	if err := h.appendPropfindChildren(ctx, filePath, info, depth, &responses); err != nil {
+	if err := h.appendPropfindChildren(ctx, filePath, info, depth, 0, &responses); err != nil {
+		if errors.Is(err, errPropfindDepthLimitExceeded) {
+			writeKnownWebDAVError(w, errPropfindDepthLimitExceeded, http.StatusForbidden)
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
@@ -926,9 +911,12 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 	h.writePropfindResponse(w, responses)
 }
 
-func (h *Handler) appendPropfindChildren(ctx context.Context, filePath string, info *storage.FileInfo, depth string, responses *[]propfindResponse) error {
+func (h *Handler) appendPropfindChildren(ctx context.Context, filePath string, info *storage.FileInfo, depth string, currentDepth int, responses *[]propfindResponse) error {
 	if !info.IsDir || depth == "0" {
 		return nil
+	}
+	if depth == "infinity" && currentDepth >= maxPropfindTraversalDepth {
+		return errPropfindDepthLimitExceeded
 	}
 
 	children, err := h.fs.ReadDir(ctx, filePath)
@@ -939,7 +927,7 @@ func (h *Handler) appendPropfindChildren(ctx context.Context, filePath string, i
 	for _, child := range children {
 		*responses = append(*responses, h.propResponse(child.Path, child))
 		if depth == "infinity" {
-			if err := h.appendPropfindChildren(ctx, child.Path, child, depth, responses); err != nil {
+			if err := h.appendPropfindChildren(ctx, child.Path, child, depth, currentDepth+1, responses); err != nil {
 				return err
 			}
 		}
@@ -1003,6 +991,8 @@ func (h *Handler) propResponse(filePath string, info *storage.FileInfo) propfind
 }
 
 func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
+	defer releaseLocks()
 	if !h.authorizeWriteLock(w, r, filePath) {
 		return
 	}
@@ -1026,6 +1016,9 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 }
 
 func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
+	defer releaseLocks()
+
 	if _, err := h.fs.Stat(ctx, filePath); err != nil {
 		h.handleError(w, err)
 		return
@@ -1084,6 +1077,9 @@ func (h *Handler) writeLockResponse(w http.ResponseWriter, token string) {
 }
 
 func (h *Handler) handleUnlock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
+	defer releaseLocks()
+
 	if _, err := h.fs.Stat(ctx, filePath); err != nil {
 		h.handleError(w, err)
 		return
@@ -1209,13 +1205,17 @@ func hasMatchingLockToken(providedTokens []string, expected string) bool {
 }
 
 func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, paths ...string) bool {
+	return h.authorizeWriteLockWithDescendants(w, r, nil, paths...)
+}
+
+func (h *Handler) authorizeWriteLockWithDescendants(w http.ResponseWriter, r *http.Request, descendantRoots []string, paths ...string) bool {
 	providedTokens := extractLockTokens(r)
 
 	h.locksMu.Lock()
 	defer h.locksMu.Unlock()
 	h.removeExpiredLocksLocked(time.Now())
 
-	for _, filePath := range lockCheckPaths(paths...) {
+	for _, filePath := range h.lockCheckPathsWithDescendantsLocked(paths, descendantRoots) {
 		lockInfo, locked := h.locks[filePath]
 		if !locked {
 			continue
@@ -1227,6 +1227,145 @@ func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, pat
 	}
 
 	return true
+}
+
+type hierarchyLockSpec struct {
+	path  string
+	write bool
+}
+
+func (h *Handler) acquireHierarchyLocks(specs ...hierarchyLockSpec) func() {
+	paths := make(map[string]bool)
+	for _, spec := range specs {
+		for _, lockPath := range lockHierarchy(spec.path) {
+			if currentWrite, exists := paths[lockPath]; exists && currentWrite {
+				continue
+			}
+			paths[lockPath] = spec.write
+		}
+	}
+
+	ordered := make([]string, 0, len(paths))
+	for lockPath := range paths {
+		ordered = append(ordered, lockPath)
+	}
+	slices.Sort(ordered)
+
+	for _, lockPath := range ordered {
+		if paths[lockPath] {
+			h.pathLock.Lock(lockPath)
+			continue
+		}
+		h.pathLock.RLock(lockPath)
+	}
+
+	return func() {
+		for i := len(ordered) - 1; i >= 0; i-- {
+			lockPath := ordered[i]
+			if paths[lockPath] {
+				h.pathLock.Unlock(lockPath)
+				continue
+			}
+			h.pathLock.RUnlock(lockPath)
+		}
+	}
+}
+
+func lockHierarchy(filePath string) []string {
+	cleanPath := path.Clean(filePath)
+	if cleanPath == "/" {
+		return []string{"/"}
+	}
+
+	segments := strings.Split(strings.TrimPrefix(cleanPath, "/"), "/")
+	current := ""
+	hierarchy := make([]string, 0, len(segments)+1)
+	hierarchy = append(hierarchy, "/")
+	for _, segment := range segments {
+		if segment == "" {
+			continue
+		}
+		current += "/" + segment
+		hierarchy = append(hierarchy, current)
+	}
+
+	return hierarchy
+}
+
+func (h *Handler) lockCheckPathsWithDescendantsLocked(paths, descendantRoots []string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(paths)*2)
+
+	for _, filePath := range lockCheckPaths(paths...) {
+		if _, ok := seen[filePath]; ok {
+			continue
+		}
+		seen[filePath] = struct{}{}
+		result = append(result, filePath)
+	}
+
+	for _, root := range descendantRoots {
+		for lockPath := range h.locks {
+			if !pathMatchesOrDescendant(root, lockPath) {
+				continue
+			}
+			if _, ok := seen[lockPath]; ok {
+				continue
+			}
+			seen[lockPath] = struct{}{}
+			result = append(result, lockPath)
+		}
+	}
+
+	return result
+}
+
+func pathMatchesOrDescendant(rootPath, candidatePath string) bool {
+	return rootPath == candidatePath || isDescendantPath(rootPath, candidatePath)
+}
+
+func rebaseLockedPath(rootPath, newRootPath, lockPath string) string {
+	if lockPath == rootPath {
+		return newRootPath
+	}
+	relative := strings.TrimPrefix(lockPath, rootPath)
+	return path.Clean(newRootPath + relative)
+}
+
+func (h *Handler) clearLocksUnderPath(rootPath string) {
+	h.locksMu.Lock()
+	defer h.locksMu.Unlock()
+	h.removeExpiredLocksLocked(time.Now())
+
+	for lockPath := range h.locks {
+		if pathMatchesOrDescendant(rootPath, lockPath) {
+			delete(h.locks, lockPath)
+		}
+	}
+}
+
+func (h *Handler) moveLocksUnderPath(rootPath, newRootPath string) {
+	h.locksMu.Lock()
+	defer h.locksMu.Unlock()
+	h.removeExpiredLocksLocked(time.Now())
+
+	moved := make(map[string]webdavLock)
+	for lockPath, lockInfo := range h.locks {
+		if pathMatchesOrDescendant(newRootPath, lockPath) {
+			delete(h.locks, lockPath)
+			continue
+		}
+		if !pathMatchesOrDescendant(rootPath, lockPath) {
+			continue
+		}
+
+		delete(h.locks, lockPath)
+		moved[rebaseLockedPath(rootPath, newRootPath, lockPath)] = lockInfo
+	}
+
+	for lockPath, lockInfo := range moved {
+		h.locks[lockPath] = lockInfo
+	}
 }
 
 func lockCheckPaths(paths ...string) []string {

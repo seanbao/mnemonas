@@ -233,6 +233,165 @@ func TestHandler_MKCOL_ConcurrentCreateReturnsMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_BlocksOnAncestorPathLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	ancestorPath := "/locked-parent"
+	targetPath := "/locked-parent/child.txt"
+
+	if err := fs.Mkdir(ctx, ancestorPath); err != nil {
+		t.Fatalf("Mkdir(locked-parent) error: %v", err)
+	}
+
+	handler.pathLock.Lock(ancestorPath)
+
+	putDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPut, "/dav/locked-parent/child.txt", strings.NewReader("new content"))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		putDone <- w
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		handler.pathLock.mu.Lock()
+		entry := handler.pathLock.locks[ancestorPath]
+		var refCount int32
+		if entry != nil {
+			refCount = entry.refCount
+		}
+		handler.pathLock.mu.Unlock()
+		if refCount >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			handler.pathLock.Unlock(ancestorPath)
+			t.Fatal("timed out waiting for PUT to block on ancestor path lock")
+		}
+	}
+
+	handler.pathLock.Unlock(ancestorPath)
+	w := <-putDone
+	if w.Code != http.StatusCreated {
+		t.Fatalf("PUT after ancestor path unlock status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	if _, err := fs.Stat(ctx, targetPath); err != nil {
+		t.Fatalf("expected PUT target to exist after ancestor lock release, got %v", err)
+	}
+}
+
+func TestHandler_PUT_BlocksOnRootPathLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/root-locked-child.txt"
+
+	handler.pathLock.Lock("/")
+
+	putDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPut, "/dav/root-locked-child.txt", strings.NewReader("new content"))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		putDone <- w
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		handler.pathLock.mu.Lock()
+		entry := handler.pathLock.locks["/"]
+		var refCount int32
+		if entry != nil {
+			refCount = entry.refCount
+		}
+		handler.pathLock.mu.Unlock()
+		if refCount >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			handler.pathLock.Unlock("/")
+			t.Fatal("timed out waiting for PUT to block on root path lock")
+		}
+	}
+
+	handler.pathLock.Unlock("/")
+	w := <-putDone
+	if w.Code != http.StatusCreated {
+		t.Fatalf("PUT after root path unlock status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	if _, err := fs.Stat(ctx, targetPath); err != nil {
+		t.Fatalf("expected PUT target to exist after root lock release, got %v", err)
+	}
+}
+
+func TestHandler_PUT_ValidatesWriteLockAfterHierarchyLockWait(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/lock-race/file.txt"
+
+	if err := fs.Mkdir(ctx, "/lock-race"); err != nil {
+		t.Fatalf("Mkdir(lock-race) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("original"))); err != nil {
+		t.Fatalf("WriteFile(original) error: %v", err)
+	}
+
+	handler.pathLock.RLock(targetPath)
+
+	putDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPut, "/dav/lock-race/file.txt", strings.NewReader("updated"))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		putDone <- w
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		handler.pathLock.mu.Lock()
+		entry := handler.pathLock.locks[targetPath]
+		var refCount int32
+		if entry != nil {
+			refCount = entry.refCount
+		}
+		handler.pathLock.mu.Unlock()
+		if refCount >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			handler.pathLock.RUnlock(targetPath)
+			t.Fatal("timed out waiting for PUT to block on hierarchy write lock")
+		}
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/lock-race/file.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		handler.pathLock.RUnlock(targetPath)
+		t.Fatalf("LOCK during PUT wait status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+
+	handler.pathLock.RUnlock(targetPath)
+	w := <-putDone
+	if w.Code != http.StatusLocked {
+		t.Fatalf("PUT after concurrent LOCK status = %d, want %d", w.Code, http.StatusLocked)
+	}
+
+	f, err := fs.OpenFile(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("OpenFile(lock-race/file.txt) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(lock-race/file.txt) error: %v", err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("expected file content to remain unchanged after late LOCK, got %q", string(data))
+	}
+}
+
 func TestHandler_MKCOL_ReturnsConflictWhenParentPathIsFile(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1503,6 +1662,82 @@ func TestHandler_MOVE_OverwriteTrueReturnsNoContent(t *testing.T) {
 	}
 }
 
+func TestHandler_MOVE_FileOverwriteExistingDirectoryReturnsConflict(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir(movetest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/movetest/existing-dir"); err != nil {
+		t.Fatalf("Mkdir(existing-dir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing-dir/child.txt", bytes.NewReader([]byte("keep dir"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing-dir")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE file overwrite existing directory status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected type-conflict MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/existing-dir"); err != nil {
+		t.Fatalf("expected destination directory to remain after rejected type-conflict MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/existing-dir/child.txt"); err != nil {
+		t.Fatalf("expected destination directory contents to remain after rejected type-conflict MOVE, got %v", err)
+	}
+}
+
+func TestHandler_MOVE_DirectoryOverwriteExistingFileReturnsConflict(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir(movetest) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/movetest/orig-dir"); err != nil {
+		t.Fatalf("Mkdir(orig-dir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig-dir/child.txt", bytes.NewReader([]byte("keep dir"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing.txt", bytes.NewReader([]byte("keep file"))); err != nil {
+		t.Fatalf("WriteFile(existing.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig-dir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing.txt")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE directory overwrite existing file status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig-dir"); err != nil {
+		t.Fatalf("expected source directory to remain after rejected type-conflict MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig-dir/child.txt"); err != nil {
+		t.Fatalf("expected source directory contents to remain after rejected type-conflict MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/existing.txt"); err != nil {
+		t.Fatalf("expected destination file to remain after rejected type-conflict MOVE, got %v", err)
+	}
+}
+
 func TestHandler_MOVE_OverwriteFailureRestoresExistingDestination(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -2038,6 +2273,35 @@ func TestHandler_PROPFIND_InvalidatesDeletedDirectoryCache(t *testing.T) {
 
 	if secondW.Code != http.StatusNotFound {
 		t.Fatalf("second PROPFIND status = %d, want %d", secondW.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandler_PROPFIND_InfinityDepthLimitExceeded(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	currentPath := "/deep"
+	if err := fs.Mkdir(ctx, currentPath); err != nil {
+		t.Fatalf("Mkdir(/deep) error: %v", err)
+	}
+	for i := 0; i <= maxPropfindTraversalDepth; i++ {
+		currentPath = path.Join(currentPath, fmt.Sprintf("level-%02d", i))
+		if err := fs.Mkdir(ctx, currentPath); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", currentPath, err)
+		}
+	}
+
+	req := httptest.NewRequest("PROPFIND", "/dav/deep", nil)
+	req.Header.Set("Depth", "infinity")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("PROPFIND infinity over recursion limit status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if !strings.Contains(w.Body.String(), errPropfindDepthLimitExceeded.Error()) {
+		t.Fatalf("expected recursion limit sentinel message, got %q", w.Body.String())
 	}
 }
 
@@ -2596,6 +2860,64 @@ func TestHandler_DeleteLockedCollectionRequiresDescendantToken(t *testing.T) {
 	handler.locksMu.Unlock()
 	if stillLocked {
 		t.Fatal("expected descendant lock to be cleared after deleting the locked collection")
+	}
+}
+
+func TestHandler_MoveLockedCollectionRequiresDescendantToken(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/move-locked-parent"); err != nil {
+		t.Fatalf("Mkdir(move-locked-parent) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/move-locked-dst"); err != nil {
+		t.Fatalf("Mkdir(move-locked-dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/move-locked-parent/child.txt", bytes.NewReader([]byte("locked child"))); err != nil {
+		t.Fatalf("WriteFile(child.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/move-locked-parent/child.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK child status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	moveReq := httptest.NewRequest("MOVE", "/dav/move-locked-parent", nil)
+	moveReq.Header.Set("Destination", "http://example.com/dav/move-locked-dst/moved")
+	moveW := httptest.NewRecorder()
+	handler.ServeHTTP(moveW, moveReq)
+	if moveW.Code != http.StatusLocked {
+		t.Fatalf("MOVE locked parent without descendant token status = %d, want %d", moveW.Code, http.StatusLocked)
+	}
+
+	moveReq = httptest.NewRequest("MOVE", "/dav/move-locked-parent", nil)
+	moveReq.Header.Set("Destination", "http://example.com/dav/move-locked-dst/moved")
+	moveReq.Header.Set("Lock-Token", lockToken)
+	moveW = httptest.NewRecorder()
+	handler.ServeHTTP(moveW, moveReq)
+	if moveW.Code != http.StatusCreated {
+		t.Fatalf("MOVE locked parent with descendant token status = %d, want %d", moveW.Code, http.StatusCreated)
+	}
+
+	if _, err := fs.Stat(ctx, "/move-locked-parent"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected source directory to be moved away, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/move-locked-dst/moved/child.txt"); err != nil {
+		t.Fatalf("expected moved child to exist, got %v", err)
+	}
+
+	handler.locksMu.Lock()
+	_, oldLocked := handler.locks["/move-locked-parent/child.txt"]
+	_, newLocked := handler.locks["/move-locked-dst/moved/child.txt"]
+	handler.locksMu.Unlock()
+	if oldLocked {
+		t.Fatal("expected descendant lock to move away from source subtree")
+	}
+	if !newLocked {
+		t.Fatal("expected descendant lock to transfer with moved subtree")
 	}
 }
 
