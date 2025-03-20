@@ -4966,6 +4966,95 @@ func TestServer_Thumbnail_PreservesPNGContentTypeForAlphaSource(t *testing.T) {
 	}
 }
 
+func TestServer_Thumbnail_RefreshesAfterFileContentChanges(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/changing.png", bytes.NewReader(createGIFThumbnailSource(24, 24))); err != nil {
+		t.Fatalf("WriteFile(initial changing.png) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/changing.png", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("initial thumbnail status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("initial thumbnail Content-Type = %q, want %q", w.Header().Get("Content-Type"), "image/jpeg")
+	}
+
+	if err := fs.WriteFile(ctx, "/changing.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
+		t.Fatalf("WriteFile(updated changing.png) error: %v", err)
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/thumbnails/changing.png", nil)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("updated thumbnail status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("updated thumbnail Content-Type = %q, want %q", w.Header().Get("Content-Type"), "image/png")
+	}
+	if len(w.Body.Bytes()) == 0 {
+		t.Fatal("expected non-empty updated thumbnail response body")
+	}
+}
+
+func TestServer_Thumbnail_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/etag.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
+		t.Fatalf("WriteFile(etag.png) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/etag.png", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("initial thumbnail status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if cacheControl := w.Header().Get("Cache-Control"); cacheControl != "private, no-cache" {
+		t.Fatalf("thumbnail Cache-Control = %q, want %q", cacheControl, "private, no-cache")
+	}
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected thumbnail response to include ETag")
+	}
+	if lastModified := w.Header().Get("Last-Modified"); lastModified == "" {
+		t.Fatal("expected thumbnail response to include Last-Modified")
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/thumbnails/etag.png", nil)
+	req.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotModified {
+		t.Fatalf("thumbnail If-None-Match status = %d, want %d", w.Code, http.StatusNotModified)
+	}
+	if len(w.Body.Bytes()) != 0 {
+		t.Fatalf("expected 304 thumbnail response body to be empty, got %d bytes", len(w.Body.Bytes()))
+	}
+}
+
 func TestServer_Thumbnail_RejectsOversizedSourceImage(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()

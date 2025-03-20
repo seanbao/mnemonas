@@ -3016,6 +3016,19 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Open original file
+	info, err := s.fs.Stat(r.Context(), filePath)
+	if err != nil {
+		s.respondReadableOpenFileError(w, "thumbnail stat file", err, "path is a directory")
+		return
+	}
+	thumbnailETag := fmt.Sprintf(`"thumb-%s-%s"`, info.ContentHash, size)
+	w.Header().Set("ETag", thumbnailETag)
+	w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if apiETagMatch(r.Header.Get("If-None-Match"), thumbnailETag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	reader, err := s.fs.OpenFile(r.Context(), filePath)
 	if err != nil {
 		s.respondReadableOpenFileError(w, "thumbnail open file", err, "path is a directory")
@@ -3024,7 +3037,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	defer reader.Close()
 
 	// Generate or retrieve cached thumbnail
-	data, err := s.thumbnail.GetThumbnail(r.Context(), filePath, size, reader)
+	data, err := s.thumbnail.GetThumbnailVersioned(r.Context(), filePath, info.ContentHash, size, reader)
 	if err != nil {
 		if errors.Is(err, thumbnail.ErrThumbnailSourceTooLarge) {
 			BadRequest(w, "source image too large to thumbnail")
@@ -3037,9 +3050,18 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Set appropriate headers
 	w.Header().Set("Content-Type", http.DetectContentType(data))
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 24 hours
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
+}
+
+func apiETagMatch(headerValue, currentETag string) bool {
+	for _, candidate := range strings.Split(headerValue, ",") {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "*" || trimmed == currentETag {
+			return true
+		}
+	}
+	return false
 }
 
 // handleListActivity returns recent activity log entries

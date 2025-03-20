@@ -121,6 +121,17 @@ func IsSupportedImage(filename string) bool {
 
 // GetThumbnail returns a thumbnail for the given file, generating if needed
 func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, reader io.ReadSeeker) ([]byte, error) {
+	return s.getThumbnail(ctx, filePath, "", size, reader)
+}
+
+// GetThumbnailVersioned returns a thumbnail keyed by both file path and a
+// caller-provided content signature so stale cache entries are bypassed when
+// the underlying file content changes.
+func (s *Service) GetThumbnailVersioned(ctx context.Context, filePath, cacheVersion string, size Size, reader io.ReadSeeker) ([]byte, error) {
+	return s.getThumbnail(ctx, filePath, cacheVersion, size, reader)
+}
+
+func (s *Service) getThumbnail(ctx context.Context, filePath, cacheVersion string, size Size, reader io.ReadSeeker) ([]byte, error) {
 	if size == "" {
 		size = SizeMedium
 	}
@@ -131,7 +142,7 @@ func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, 
 	}
 
 	// Generate cache key based on file path and size
-	cacheKey := s.cacheKey(filePath, size)
+	cacheKey := s.cacheKeyForVersion(filePath, cacheVersion, size)
 	cachePath := s.cachePath(cacheKey)
 
 	// Check if generation is already in progress
@@ -297,8 +308,15 @@ func validateThumbnailSourceBounds(reader io.ReadSeeker) error {
 
 // cacheKey generates a unique cache key for a file+size combination
 func (s *Service) cacheKey(filePath string, size Size) string {
+	return s.cacheKeyForVersion(filePath, "", size)
+}
+
+func (s *Service) cacheKeyForVersion(filePath, cacheVersion string, size Size) string {
 	h := md5.New()
 	h.Write([]byte(filePath))
+	h.Write([]byte{0})
+	h.Write([]byte(cacheVersion))
+	h.Write([]byte{0})
 	h.Write([]byte(size))
 	return hex.EncodeToString(h.Sum(nil))
 }
