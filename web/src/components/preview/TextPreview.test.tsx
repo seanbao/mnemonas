@@ -13,6 +13,7 @@ describe('TextPreview', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     global.fetch = vi.fn()
+    localStorage.removeItem('mnemonas_token')
   })
 
   it('shows loading state initially', () => {

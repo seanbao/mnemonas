@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	ErrShareNotFound   = errors.New("share not found")
-	ErrShareExpired    = errors.New("share has expired")
-	ErrInvalidPassword = errors.New("invalid password")
-	ErrShareDisabled   = errors.New("share is disabled")
+	ErrShareNotFound    = errors.New("share not found")
+	ErrShareExpired     = errors.New("share has expired")
+	ErrShareAccessLimit = errors.New("share access limit reached")
+	ErrInvalidPassword  = errors.New("invalid password")
+	ErrShareDisabled    = errors.New("share is disabled")
 )
 
 // ShareType represents the type of shared resource
@@ -94,7 +95,7 @@ func (s *Share) CanAccess() error {
 		return ErrShareExpired
 	}
 	if s.IsAccessLimitReached() {
-		return ErrShareExpired
+		return ErrShareAccessLimit
 	}
 	return nil
 }
@@ -232,7 +233,7 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 		return nil, err
 	}
 
-	return share, nil
+	return copyShare(share), nil
 }
 
 // Get retrieves a share by ID
@@ -245,7 +246,7 @@ func (s *ShareStore) Get(id string) (*Share, error) {
 		return nil, ErrShareNotFound
 	}
 
-	return share, nil
+	return copyShare(share), nil
 }
 
 // GetByPath retrieves all shares for a path
@@ -258,7 +259,7 @@ func (s *ShareStore) GetByPath(path string) []*Share {
 
 	for _, id := range ids {
 		if share, ok := s.shares[id]; ok {
-			shares = append(shares, share)
+			shares = append(shares, copyShare(share))
 		}
 	}
 
@@ -273,7 +274,7 @@ func (s *ShareStore) ListByUser(userID string) []*Share {
 	var shares []*Share
 	for _, share := range s.shares {
 		if share.CreatedBy == userID {
-			shares = append(shares, share)
+			shares = append(shares, copyShare(share))
 		}
 	}
 
@@ -287,7 +288,7 @@ func (s *ShareStore) ListAll() []*Share {
 
 	shares := make([]*Share, 0, len(s.shares))
 	for _, share := range s.shares {
-		shares = append(shares, share)
+		shares = append(shares, copyShare(share))
 	}
 
 	return shares
@@ -303,11 +304,17 @@ func (s *ShareStore) Update(id string, fn func(*Share) error) error {
 		return ErrShareNotFound
 	}
 
+	prev := copyShare(share)
 	if err := fn(share); err != nil {
 		return err
 	}
 
-	return s.save()
+	if err := s.save(); err != nil {
+		*share = *prev
+		return err
+	}
+
+	return nil
 }
 
 // Delete deletes a share
@@ -319,6 +326,9 @@ func (s *ShareStore) Delete(id string) error {
 	if !ok {
 		return ErrShareNotFound
 	}
+
+	prevShare := copyShare(share)
+	prevIDs := append([]string(nil), s.pathIdx[share.Path]...)
 
 	ids := s.pathIdx[share.Path]
 	for i, sid := range ids {
@@ -333,7 +343,17 @@ func (s *ShareStore) Delete(id string) error {
 
 	delete(s.shares, id)
 
-	return s.save()
+	if err := s.save(); err != nil {
+		s.shares[id] = prevShare
+		if len(prevIDs) == 0 {
+			delete(s.pathIdx, prevShare.Path)
+		} else {
+			s.pathIdx[prevShare.Path] = prevIDs
+		}
+		return err
+	}
+
+	return nil
 }
 
 // RecordAccess records an access to the share
@@ -364,15 +384,35 @@ func (s *ShareStore) Access(id string, password string) (*Share, error) {
 		return nil, ErrInvalidPassword
 	}
 
+	prev := copyShare(share)
 	share.AccessCount++
 	now := time.Now()
 	share.LastAccess = &now
 
 	if err := s.save(); err != nil {
+		*share = *prev
 		return nil, err
 	}
 
-	return share, nil
+	return copyShare(share), nil
+}
+
+func copyShare(share *Share) *Share {
+	if share == nil {
+		return nil
+	}
+
+	copy := *share
+	if share.ExpiresAt != nil {
+		expiresAt := *share.ExpiresAt
+		copy.ExpiresAt = &expiresAt
+	}
+	if share.LastAccess != nil {
+		lastAccess := *share.LastAccess
+		copy.LastAccess = &lastAccess
+	}
+
+	return &copy
 }
 
 func generateShareID() (string, error) {

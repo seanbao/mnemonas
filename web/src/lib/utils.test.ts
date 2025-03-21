@@ -6,6 +6,8 @@ import {
   formatDuration,
   sanitizeFilename,
   normalizePath,
+  normalizeWebDAVPrefix,
+  formatWebDAVUrl,
   isImageFile,
   isVideoFile,
   getFileIcon,
@@ -121,6 +123,38 @@ describe('normalizePath', () => {
   })
 })
 
+describe('normalizeWebDAVPrefix', () => {
+  it('ensures prefix starts with /', () => {
+    expect(normalizeWebDAVPrefix('dav')).toBe('/dav')
+  })
+
+  it('trims trailing slash', () => {
+    expect(normalizeWebDAVPrefix('/dav/')).toBe('/dav')
+  })
+
+  it('returns / for empty or root input', () => {
+    expect(normalizeWebDAVPrefix('')).toBe('/')
+    expect(normalizeWebDAVPrefix(' / ')).toBe('/')
+    expect(normalizeWebDAVPrefix('/')).toBe('/')
+  })
+})
+
+describe('formatWebDAVUrl', () => {
+  it('returns absolute URL as-is', () => {
+    expect(formatWebDAVUrl('https://localhost', 'https://example.com/dav')).toBe(
+      'https://example.com/dav'
+    )
+  })
+
+  it('combines origin and relative path', () => {
+    expect(formatWebDAVUrl('https://localhost', '/dav/')).toBe('https://localhost/dav/')
+    expect(formatWebDAVUrl('https://localhost/', 'dav')).toBe('https://localhost/dav')
+  })
+
+  it('falls back to origin when url is empty', () => {
+    expect(formatWebDAVUrl('https://localhost', '')).toBe('https://localhost')
+  })
+})
 describe('file type detection', () => {
   describe('isImageFile', () => {
     it('detects image files', () => {

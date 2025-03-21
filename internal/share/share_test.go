@@ -1,6 +1,7 @@
 package share
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -250,6 +251,13 @@ func TestShare_CanAccess(t *testing.T) {
 	if err := share.CanAccess(); err != ErrShareExpired {
 		t.Errorf("expired share should return ErrShareExpired: %v", err)
 	}
+
+	share.ExpiresAt = nil
+	share.MaxAccess = 1
+	share.AccessCount = 1
+	if err := share.CanAccess(); err != ErrShareAccessLimit {
+		t.Errorf("access limited share should return ErrShareAccessLimit: %v", err)
+	}
 }
 
 func TestShareStore_Access(t *testing.T) {
@@ -404,7 +412,128 @@ func TestShareStore_AccessLimitReached(t *testing.T) {
 	}
 
 	_, err = store.Access(share.ID, "")
-	if err != ErrShareExpired {
-		t.Errorf("expected ErrShareExpired after max access, got %v", err)
+	if err != ErrShareAccessLimit {
+		t.Errorf("expected ErrShareAccessLimit after max access, got %v", err)
+	}
+}
+
+func TestShareStore_UpdateRollbackOnSaveFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:        "/test/file.txt",
+		Type:        ShareTypeFile,
+		CreatedBy:   "user1",
+		Description: "original",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := os.Chmod(tempDir, 0500); err != nil {
+		t.Fatalf("failed to set dir permissions: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(tempDir, 0700)
+	}()
+
+	updateErr := store.Update(share.ID, func(s *Share) error {
+		s.Description = "updated"
+		return nil
+	})
+	if updateErr == nil {
+		t.Fatalf("expected update to fail")
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to get share: %v", err)
+	}
+	if loaded.Description != "original" {
+		t.Fatalf("expected description to roll back, got %q", loaded.Description)
+	}
+}
+
+func TestShareStore_AccessRollbackOnSaveFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := os.Chmod(tempDir, 0500); err != nil {
+		t.Fatalf("failed to set dir permissions: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(tempDir, 0700)
+	}()
+
+	_, accessErr := store.Access(share.ID, "")
+	if accessErr == nil {
+		t.Fatalf("expected access to fail")
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to get share: %v", err)
+	}
+	if loaded.AccessCount != 0 {
+		t.Fatalf("expected access_count to roll back, got %d", loaded.AccessCount)
+	}
+}
+
+func TestShareStore_DeleteRollbackOnSaveFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := os.Chmod(tempDir, 0500); err != nil {
+		t.Fatalf("failed to set dir permissions: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(tempDir, 0700)
+	}()
+
+	deleteErr := store.Delete(share.ID)
+	if deleteErr == nil {
+		t.Fatalf("expected delete to fail")
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("expected share to remain after rollback: %v", err)
+	}
+	if loaded.Path != share.Path {
+		t.Fatalf("expected share to remain after rollback")
 	}
 }

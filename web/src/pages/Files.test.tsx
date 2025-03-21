@@ -221,6 +221,82 @@ describe('FilesPage', () => {
         expect(screen.getByText('选择工具')).toBeTruthy()
       })
     })
+
+    it('clears selection when path changes', async () => {
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      const { rerender } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      mockFilesStoreState.clearSelection.mockClear()
+      mockFilesStoreState.currentPath = '/documents'
+      rerender(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
+      })
+    })
+
+    it('prunes selection when files disappear', async () => {
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockListFiles
+        .mockResolvedValueOnce({
+          files: [
+            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
+          ],
+          path: '/',
+        })
+        .mockResolvedValueOnce({
+          files: [],
+          path: '/',
+        })
+
+      const { rerender } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      mockFilesStoreState.setSelection.mockClear()
+      rerender(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith([])
+      })
+    })
+
+    it('keeps remaining selections when some files disappear', async () => {
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockListFiles
+        .mockResolvedValueOnce({
+          files: [
+            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
+            { name: 'video.mp4', path: '/video.mp4', isDir: false, size: 2048, modTime: '2024-01-03T00:00:00Z' },
+          ],
+          path: '/',
+        })
+        .mockResolvedValueOnce({
+          files: [
+            { name: 'photo.jpg', path: '/photo.jpg', isDir: false, size: 1024, modTime: '2024-01-02T00:00:00Z' },
+          ],
+          path: '/',
+        })
+
+      const { rerender } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      mockFilesStoreState.setSelection.mockClear()
+      rerender(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])
+      })
+    })
   })
 
   describe('file operations', () => {

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { ShareAccessPage } from './ShareAccess'
+import { ShareError } from '@/api/share'
 
 // Mock HeroUI components
 vi.mock('@heroui/react', () => ({
@@ -64,6 +65,16 @@ const renderWithRouter = (shareId: string) => {
         <Route path="/s/:id" element={<ShareAccessPage />} />
       </Routes>
     </MemoryRouter>
+  )
+}
+
+const NavigatingWrapper = ({ initialId, nextId }: { initialId: string; nextId: string }) => {
+  const navigate = useNavigate()
+  return (
+    <div>
+      <button type="button" onClick={() => navigate(`/s/${nextId}`)}>go</button>
+      <ShareAccessPage />
+    </div>
   )
 }
 
@@ -186,5 +197,76 @@ describe('ShareAccessPage', () => {
     expect(openSpy).toHaveBeenCalledWith('/s/abc123/download?password=secret', '_blank')
 
     openSpy.mockRestore()
+  })
+
+  it('returns to password prompt when listing fails with unauthorized', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: true,
+      permission: 'read',
+    })
+    mockAccessShareWithPassword.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: true,
+      permission: 'read',
+      folder_items: 1,
+    })
+    mockGetPublicShareItems.mockRejectedValue(new ShareError('密码错误', 401))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await user.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await user.click(screen.getByText('验证密码'))
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    expect(screen.getByPlaceholderText('请输入密码')).toHaveValue('')
+  })
+
+  it('resets auth state when share id changes', async () => {
+    mockGetPublicShare
+      .mockResolvedValueOnce({
+        id: 'first',
+        type: 'file',
+        has_password: false,
+        permission: 'read',
+        file_name: 'public.txt',
+        file_size: 10,
+      })
+      .mockResolvedValueOnce({
+        id: 'second',
+        type: 'file',
+        has_password: true,
+        permission: 'read',
+      })
+
+    render(
+      <MemoryRouter initialEntries={[`/s/first`]}>
+        <Routes>
+          <Route path="/s/:id" element={<NavigatingWrapper initialId="first" nextId="second" />} />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('public.txt')).toBeInTheDocument()
+    })
+
+    await userEvent.click(screen.getByText('go'))
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    expect(screen.getByPlaceholderText('请输入密码')).toHaveValue('')
   })
 })
