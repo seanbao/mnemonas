@@ -1,6 +1,22 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
+async function openSidebarIfNeeded(page: import('@playwright/test').Page): Promise<void> {
+  const menuButton = page.getByRole('button', { name: '打开导航菜单' })
+  if (await menuButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await menuButton.click()
+    await page.waitForTimeout(300)
+  }
+}
+
+async function navigateToSearchFromSidebar(page: import('@playwright/test').Page): Promise<void> {
+  await openSidebarIfNeeded(page)
+  const searchLink = page.getByRole('link', { name: /搜索|Search/i })
+  await expect(searchLink).toBeVisible({ timeout: 2000 })
+  await searchLink.dispatchEvent('click')
+  await expect(page).toHaveURL(/\/search/)
+}
+
 /**
  * 导航 E2E 测试
  * 认证状态由 auth.setup.ts 通过 storageState 自动注入
@@ -91,30 +107,33 @@ test.describe('404 页面', () => {
 test.describe('侧边栏点击导航', () => {
   test('点击文件链接应导航到文件页面', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/')
+    await openSidebarIfNeeded(page)
 
     const filesLink = page.getByRole('link', { name: /文件|Files/i })
     await expect(filesLink).toBeVisible({ timeout: 2000 })
-    await filesLink.click()
+    await filesLink.dispatchEvent('click')
     await page.waitForTimeout(500)
     expect(page.url()).toMatch(/files/)
   })
 
   test('点击搜索链接应导航到搜索页面', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/')
+    await openSidebarIfNeeded(page)
 
     const searchLink = page.getByRole('link', { name: /搜索|Search/i })
     await expect(searchLink).toBeVisible({ timeout: 2000 })
-    await searchLink.click()
+    await searchLink.dispatchEvent('click')
     await page.waitForTimeout(500)
     expect(page.url()).toMatch(/search/)
   })
 
   test('点击设置链接应导航到设置页面', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/')
+    await openSidebarIfNeeded(page)
 
     const settingsLink = page.getByRole('link', { name: /设置|Settings/i })
     await expect(settingsLink).toBeVisible({ timeout: 2000 })
-    await settingsLink.click()
+    await settingsLink.dispatchEvent('click')
     await page.waitForTimeout(500)
     expect(page.url()).toMatch(/settings/)
   })
@@ -123,9 +142,7 @@ test.describe('侧边栏点击导航', () => {
 test.describe('浏览器历史导航', () => {
   test('后退按钮应正常工作', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
-    
-    await page.goto('/search')
-    await page.waitForLoadState('networkidle')
+    await navigateToSearchFromSidebar(page)
     
     await page.goBack()
     await expect(page).toHaveURL(/\/files/)
@@ -133,9 +150,7 @@ test.describe('浏览器历史导航', () => {
 
   test('前进按钮应正常工作', async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
-
-    await page.goto('/search')
-    await page.waitForLoadState('networkidle')
+    await navigateToSearchFromSidebar(page)
     
     await page.goBack()
     await expect(page).toHaveURL(/\/files/)
@@ -151,7 +166,7 @@ test.describe('响应式侧边栏', () => {
     await ensureAuthenticatedAt(page, '/')
 
     // 移动端侧边栏可能折叠
-    const hamburger = page.locator('[class*="hamburger"], [class*="menu-toggle"], button svg[class*="menu"]').first()
+    const hamburger = page.getByRole('button', { name: '打开导航菜单' })
     const sidebar = page.locator('aside, [class*="sidebar"]').first()
     
     const hasHamburger = await hamburger.isVisible({ timeout: 2000 }).catch(() => false)

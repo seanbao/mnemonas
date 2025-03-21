@@ -43,12 +43,19 @@ Thumbs.db
 *.log
 logs/
 
+# Environment files (may contain secrets)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
 # Config (may contain secrets)
 !mnemonas.example.toml
 
 # Data directories (local dev)
 data/
 .mnemonas/
+.pids/
 
 # Test artifacts
 *.prof
