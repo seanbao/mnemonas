@@ -149,7 +149,12 @@ function FileRow({
 
   const handleCopyPath = useCallback(() => {
     navigator.clipboard.writeText(file.path)
-    addToast({ title: '路径已复制', color: 'success' })
+      .then(() => {
+        addToast({ title: '路径已复制', color: 'success' })
+      })
+      .catch(() => {
+        addToast({ title: '复制失败', color: 'danger' })
+      })
   }, [file.path])
 
   return (
@@ -203,13 +208,7 @@ function FileRow({
       </div>
       
       <div className="flex items-center gap-2.5">
-        {/* Version Indicator - Memory Stream */}
-        <div className="relative w-12 h-1.5 bg-content2 rounded-full overflow-hidden">
-          <div className="absolute left-0 top-0 h-full bg-accent-primary/60 w-1/3 rounded-full" />
-        </div>
-        <span className="text-[10px] font-semibold text-accent-primary bg-accent-primary/15 px-2 py-0.5 rounded-md">
-          1
-        </span>
+        <span className="text-xs text-default-400">—</span>
       </div>
 
       {/* Action Menu */}

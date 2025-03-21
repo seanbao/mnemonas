@@ -478,6 +478,22 @@ func TestStore_FileIndex(t *testing.T) {
 	}
 }
 
+func TestStore_CountFiles(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	s.UpdateFileIndex(ctx, "/docs/readme.md", 100, time.Now(), "h1")
+	s.UpdateFileIndex(ctx, "/docs/guide.md", 200, time.Now(), "h2")
+
+	count, err := s.CountFiles(ctx)
+	if err != nil {
+		t.Fatalf("CountFiles() error: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("CountFiles() = %d, want 2", count)
+	}
+}
+
 func TestStore_RenamePath(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

@@ -231,7 +231,11 @@ start_frontend() {
     # 确保使用正确的 Node.js 版本
     if [ -f "$HOME/.nvm/nvm.sh" ]; then
         source "$HOME/.nvm/nvm.sh"
-        nvm use 22 >/dev/null 2>&1 || nvm use node >/dev/null 2>&1
+        if [ -f ".nvmrc" ]; then
+            nvm use >/dev/null 2>&1 || nvm install >/dev/null 2>&1
+        else
+            nvm use 22 >/dev/null 2>&1 || nvm use node >/dev/null 2>&1
+        fi
     fi
     
     # 检查依赖
