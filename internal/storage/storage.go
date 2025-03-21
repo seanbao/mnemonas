@@ -133,6 +133,7 @@ type FileSystem struct {
 	renameWorkspacePath  func(ctx context.Context, oldName, newName string) error
 	renameMetadataPath   func(ctx context.Context, oldName, newName string) error
 	removeTrashPath      func(path string) error
+	hookMu               sync.RWMutex
 	gcMu                 sync.RWMutex
 	mu                   sync.RWMutex
 }
@@ -198,8 +199,8 @@ func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
 
 // SetPathChangeHooks registers callbacks for committed rename/delete operations.
 func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string) error, onDelete func(ctx context.Context, path string) (func() error, error)) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
+	fs.hookMu.Lock()
+	defer fs.hookMu.Unlock()
 	fs.onPathRenamed = onRename
 	fs.onPathDeleted = onDelete
 }
@@ -941,9 +942,9 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 }
 
 func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) (func() error, error) {
-	fs.mu.RLock()
+	fs.hookMu.RLock()
 	hook := fs.onPathDeleted
-	fs.mu.RUnlock()
+	fs.hookMu.RUnlock()
 	if hook != nil {
 		return hook(ctx, name)
 	}
@@ -951,9 +952,9 @@ func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) (func(
 }
 
 func (fs *FileSystem) notifyPathRenamed(ctx context.Context, oldName, newName string) error {
-	fs.mu.RLock()
+	fs.hookMu.RLock()
 	hook := fs.onPathRenamed
-	fs.mu.RUnlock()
+	fs.hookMu.RUnlock()
 	if hook != nil {
 		return hook(ctx, oldName, newName)
 	}

@@ -1244,13 +1244,51 @@ func TestFileSystem_Delete_RollsBackWhenPathDeleteHookFails(t *testing.T) {
 	if len(items) != 0 {
 		t.Fatalf("Expected trash to remain empty after hook rollback, got %d items", len(items))
 	}
-
 	_, _, hash, indexErr := fs.versions.GetFileIndex(ctx, "/delete-hook.txt")
 	if indexErr != nil {
 		t.Fatalf("GetFileIndex() after hook rollback error: %v", indexErr)
 	}
 	if hash != info.ContentHash {
 		t.Fatalf("expected restored file index hash %q, got %q", info.ContentHash, hash)
+	}
+}
+
+func TestFileSystem_Delete_CompletesWhenDeleteHookRegistered(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-hook-ok.txt", bytes.NewReader([]byte("remove me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	hookCalled := make(chan struct{}, 1)
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (func() error, error) {
+		hookCalled <- struct{}{}
+		return nil, nil
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- fs.Delete(ctx, "/delete-hook-ok.txt")
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Delete() error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Delete() deadlocked while invoking delete hook")
+	}
+
+	select {
+	case <-hookCalled:
+	default:
+		t.Fatal("expected delete hook to be called")
+	}
+
+	if _, err := fs.Stat(ctx, "/delete-hook-ok.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted file to be absent, got %v", err)
 	}
 }
 
@@ -1844,6 +1882,48 @@ func TestFileSystem_Rename_RollsBackWhenPathRenameHookFails(t *testing.T) {
 	}
 	if _, listErr := fs.ListVersions(ctx, "/rename-hook-new.txt"); !errors.Is(listErr, ErrNotFound) {
 		t.Fatalf("expected new path version metadata to be absent after hook rollback, got %v", listErr)
+	}
+}
+
+func TestFileSystem_Rename_CompletesWhenRenameHookRegistered(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-hook-ok.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	hookCalled := make(chan struct{}, 1)
+	fs.SetPathChangeHooks(func(context.Context, string, string) error {
+		hookCalled <- struct{}{}
+		return nil
+	}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- fs.Rename(ctx, "/rename-hook-ok.txt", "/rename-hook-ok-new.txt")
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Rename() error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Rename() deadlocked while invoking rename hook")
+	}
+
+	select {
+	case <-hookCalled:
+	default:
+		t.Fatal("expected rename hook to be called")
+	}
+
+	if _, err := fs.Stat(ctx, "/rename-hook-ok-new.txt"); err != nil {
+		t.Fatalf("expected renamed file to exist at new path, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/rename-hook-ok.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected original path to be absent after rename, got %v", err)
 	}
 }
 

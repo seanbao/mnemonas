@@ -21,8 +21,8 @@ setup('authenticate', async ({ page }) => {
   const { username, password, passwordSource } = credentials
 
   // 先尝试直接访问受保护页面
-  await page.goto('/files')
-  await page.waitForLoadState('networkidle')
+  await page.goto('/files', { waitUntil: 'domcontentloaded' })
+  await page.locator('body').waitFor({ state: 'visible' })
   await page.waitForTimeout(500)
 
   // 检查是否被重定向到登录页
