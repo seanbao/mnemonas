@@ -466,6 +466,35 @@ describe('ShareAccessPage', () => {
     })
   })
 
+  it('shows expired feedback when file download returns gone', async () => {
+    const user = userEvent.setup()
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'file',
+      has_password: false,
+      permission: 'read',
+      file_name: 'test.txt',
+      file_size: 10,
+    })
+    mockDownloadShare.mockRejectedValue(new ShareError('share disabled', 410, 'SHARE_DISABLED'))
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('下载文件')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('下载文件'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享已失效',
+        description: 'share disabled',
+        color: 'warning',
+      })
+    })
+  })
+
   it('returns to password prompt when listing fails with unauthorized', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
