@@ -20,6 +20,20 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
+var (
+	errInvalidOverwriteHeader             = errors.New("invalid Overwrite header")
+	errOverwriteDisabled                  = errors.New("destination exists and overwrite is disabled")
+	errDestinationInsideSourceDirectory   = errors.New("destination cannot be inside source directory")
+	errDirectoryCopyOverwriteNotSupported = errors.New("overwriting an existing destination with a directory copy is not supported")
+)
+
+const webdavLockTimeout = time.Hour
+
+type webdavLock struct {
+	token     string
+	expiresAt time.Time
+}
+
 // Handler is the WebDAV request handler
 type Handler struct {
 	fs        *storage.FileSystem
@@ -28,7 +42,7 @@ type Handler struct {
 	pathLock  *PathLock
 	propCache *PropfindCache
 	locksMu   sync.Mutex
-	locks     map[string]string
+	locks     map[string]webdavLock
 	// REM-1 fix: Authentication
 	authType string
 	username string
@@ -54,7 +68,7 @@ func NewHandler(cfg Config) *Handler {
 		readOnly:  cfg.ReadOnly,
 		pathLock:  NewPathLock(),
 		propCache: NewPropfindCache(30*time.Second, 1000),
-		locks:     make(map[string]string),
+		locks:     make(map[string]webdavLock),
 		authType:  strings.ToLower(cfg.AuthType),
 		username:  cfg.Username,
 		password:  cfg.Password,
@@ -75,16 +89,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if filePath == "" {
 		filePath = "/"
 	}
+	if hasTraversalSegment(filePath) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
 
 	// Validate path to prevent path traversal attacks (C1 fix)
 	filePath = path.Clean(filePath)
 	if !path.IsAbs(filePath) {
 		filePath = "/" + filePath
-	}
-	// Reject any path containing .. after cleaning
-	if strings.Contains(filePath, "..") {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
 	}
 
 	ctx := r.Context()
@@ -206,8 +219,9 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 `, html.EscapeString(filePath), html.EscapeString(filePath))
 
 	if filePath != "/" {
+		parentHref := path.Join(h.prefix, path.Dir(filePath))
 		fmt.Fprintf(w, `<a href="%s">..</a>
-`, html.EscapeString(path.Dir(filePath)))
+`, html.EscapeString(parentHref))
 	}
 
 	for _, child := range children {
@@ -276,7 +290,7 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 		}
 	} else {
 		// If-Match with non-existent file should fail
-		if im := r.Header.Get("If-Match"); im != "" && im != "*" {
+		if im := r.Header.Get("If-Match"); im != "" {
 			http.Error(w, "precondition failed", http.StatusPreconditionFailed)
 			return
 		}
@@ -362,7 +376,10 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	dstExists := h.destinationExists(ctx, dst)
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -392,11 +409,17 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDestinationInsideSourceDirectory) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 	if err := h.rejectDirectoryCopyOverwrite(ctx, srcPath, dst, dstExists); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDirectoryCopyOverwriteNotSupported) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -467,7 +490,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	dstExists := h.destinationExists(ctx, dst)
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusPreconditionFailed)
+		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -484,7 +510,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDestinationInsideSourceDirectory) {
+			return
+		}
+		h.handleError(w, err)
 		return
 	}
 
@@ -510,11 +539,11 @@ func (h *Handler) checkOverwriteHeader(ctx context.Context, r *http.Request, dst
 		return nil
 	}
 	if !strings.EqualFold(overwrite, "F") {
-		return errors.New("invalid Overwrite header")
+		return errInvalidOverwriteHeader
 	}
 
 	if _, err := h.fs.Stat(ctx, dst); err == nil {
-		return errors.New("destination exists and overwrite is disabled")
+		return errOverwriteDisabled
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
@@ -531,7 +560,7 @@ func (h *Handler) rejectDirectoryDescendantDestination(ctx context.Context, srcP
 		return nil
 	}
 	if isDescendantPath(srcPath, dstPath) {
-		return errors.New("destination cannot be inside source directory")
+		return errDestinationInsideSourceDirectory
 	}
 	return nil
 }
@@ -546,7 +575,7 @@ func (h *Handler) rejectDirectoryCopyOverwrite(ctx context.Context, srcPath, dst
 		return err
 	}
 	if info.IsDir {
-		return errors.New("overwriting an existing destination with a directory copy is not supported")
+		return errDirectoryCopyOverwriteNotSupported
 	}
 	return nil
 }
@@ -561,6 +590,17 @@ func isDescendantPath(parentPath, childPath string) bool {
 func (h *Handler) destinationExists(ctx context.Context, dst string) bool {
 	_, err := h.fs.Stat(ctx, dst)
 	return err == nil
+}
+
+func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, status int, expected ...error) bool {
+	for _, candidate := range expected {
+		if errors.Is(err, candidate) {
+			http.Error(w, err.Error(), status)
+			return true
+		}
+	}
+
+	return false
 }
 
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
@@ -701,6 +741,7 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	h.locksMu.Lock()
+	h.removeExpiredLocksLocked(time.Now())
 	if _, exists := h.locks[filePath]; exists {
 		h.locksMu.Unlock()
 		http.Error(w, "resource is locked", http.StatusLocked)
@@ -709,7 +750,10 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 
 	// Simple implementation: return virtual lock
 	token := fmt.Sprintf("opaquelocktoken:%d", time.Now().UnixNano())
-	h.locks[filePath] = token
+	h.locks[filePath] = webdavLock{
+		token:     token,
+		expiresAt: time.Now().Add(webdavLockTimeout),
+	}
 	h.locksMu.Unlock()
 
 	w.Header().Set("Lock-Token", "<"+token+">")
@@ -743,13 +787,14 @@ func (h *Handler) handleUnlock(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 
 	h.locksMu.Lock()
-	storedToken, exists := h.locks[filePath]
+	h.removeExpiredLocksLocked(time.Now())
+	lockInfo, exists := h.locks[filePath]
 	if !exists {
 		h.locksMu.Unlock()
 		http.Error(w, "resource is not locked", http.StatusConflict)
 		return
 	}
-	if storedToken != lockToken {
+	if lockInfo.token != lockToken {
 		h.locksMu.Unlock()
 		http.Error(w, "lock token does not match", http.StatusConflict)
 		return
@@ -772,13 +817,14 @@ func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, pat
 
 	h.locksMu.Lock()
 	defer h.locksMu.Unlock()
+	h.removeExpiredLocksLocked(time.Now())
 
 	for _, filePath := range lockCheckPaths(paths...) {
-		storedToken, locked := h.locks[filePath]
+		lockInfo, locked := h.locks[filePath]
 		if !locked {
 			continue
 		}
-		if providedToken == "" || providedToken != storedToken {
+		if providedToken == "" || providedToken != lockInfo.token {
 			http.Error(w, "resource is locked", http.StatusLocked)
 			return false
 		}
@@ -808,6 +854,14 @@ func lockCheckPaths(paths ...string) []string {
 	return result
 }
 
+func (h *Handler) removeExpiredLocksLocked(now time.Time) {
+	for filePath, lockInfo := range h.locks {
+		if !lockInfo.expiresAt.After(now) {
+			delete(h.locks, filePath)
+		}
+	}
+}
+
 func (h *Handler) getDestination(r *http.Request) string {
 	dst := r.Header.Get("Destination")
 	if dst == "" {
@@ -819,6 +873,9 @@ func (h *Handler) getDestination(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
+	if hasTraversalSegment(u.Path) {
+		return ""
+	}
 
 	// Get path and clean it
 	dstPath := path.Clean(u.Path)
@@ -826,15 +883,21 @@ func (h *Handler) getDestination(r *http.Request) string {
 		dstPath = "/" + dstPath
 	}
 
-	// Validate - reject path traversal
-	if strings.Contains(dstPath, "..") {
-		return ""
-	}
 	if h.prefix != "" && dstPath != h.prefix && !strings.HasPrefix(dstPath, h.prefix+"/") {
 		return ""
 	}
 
 	return strings.TrimPrefix(dstPath, h.prefix)
+}
+
+func hasTraversalSegment(rawPath string) bool {
+	for _, segment := range strings.Split(rawPath, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (h *Handler) handleError(w http.ResponseWriter, err error) {

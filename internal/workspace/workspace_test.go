@@ -40,6 +40,9 @@ func TestCleanPath(t *testing.T) {
 		{"./test.txt", "/test.txt"},
 		{"//test.txt", "/test.txt"},
 		{"/a/b/../c", "/a/c"},
+		{"foo..txt", "/foo..txt"},
+		{"/nested/foo..txt", "/nested/foo..txt"},
+		{"../../etc/passwd", "/etc/passwd"},
 		{"", "/"},
 		{"/", "/"},
 	}
@@ -49,6 +52,23 @@ func TestCleanPath(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("CleanPath(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestWorkspace_WriteFile_AllowsDoubleDotInFileName(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/foo..txt", []byte("double dot")); err != nil {
+		t.Fatalf("WriteFile(foo..txt) error: %v", err)
+	}
+
+	data, err := w.ReadFile(ctx, "/foo..txt")
+	if err != nil {
+		t.Fatalf("ReadFile(foo..txt) error: %v", err)
+	}
+	if string(data) != "double dot" {
+		t.Fatalf("ReadFile(foo..txt) = %q, want %q", string(data), "double dot")
 	}
 }
 

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
-import { ShareAccessPage } from './ShareAccess'
+import { ShareAccessPage, getFolderPathAfterShareAuth } from './ShareAccess'
 import { ShareError } from '@/api/share'
 
 const mockAddToast = vi.fn()
@@ -361,6 +361,22 @@ describe('ShareAccessPage', () => {
     })
 
     expect(screen.getByPlaceholderText('请输入密码')).toHaveValue('')
+  })
+
+  it('preserves the current folder path after re-authenticating a folder share', () => {
+    expect(getFolderPathAfterShareAuth('docs/nested', {
+      id: 'abc123',
+      type: 'folder',
+      has_password: true,
+      permission: 'read',
+    })).toBe('docs/nested')
+
+    expect(getFolderPathAfterShareAuth('docs/nested', {
+      id: 'abc123',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+    })).toBe('')
   })
 
   it('resets auth state when share id changes', async () => {

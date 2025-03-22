@@ -3,7 +3,9 @@ package activity
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -64,7 +66,9 @@ func NewStore(root string) (*Store, error) {
 
 	// Load existing entries
 	if err := s.load(); err != nil {
-		return nil, fmt.Errorf("load activity log: %w", err)
+		if recoverErr := s.recoverCorruptLog(err); recoverErr != nil {
+			return nil, fmt.Errorf("load activity log: %w", err)
+		}
 	}
 
 	return s, nil
@@ -92,6 +96,34 @@ func (s *Store) load() error {
 
 	s.entries = entries
 	return nil
+}
+
+func (s *Store) recoverCorruptLog(loadErr error) error {
+	if !isRecoverableActivityLogError(loadErr) {
+		return loadErr
+	}
+
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.logFilePath(), time.Now().UnixNano())
+	if err := os.Rename(s.logFilePath(), corruptPath); err != nil {
+		return fmt.Errorf("backup corrupt activity log: %w", err)
+	}
+
+	s.entries = make([]Entry, 0)
+	return nil
+}
+
+func isRecoverableActivityLogError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
 }
 
 // save writes entries to disk

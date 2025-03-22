@@ -17,9 +17,10 @@ import (
 
 // Common errors
 var (
-	ErrNotFound    = errors.New("not found")
-	ErrFileLocked  = errors.New("file is locked")
-	ErrLockExpired = errors.New("lock has expired")
+	ErrNotFound      = errors.New("not found")
+	ErrAlreadyExists = errors.New("already exists")
+	ErrFileLocked    = errors.New("file is locked")
+	ErrLockExpired   = errors.New("lock has expired")
 )
 
 // LockType defines the type of lock
@@ -248,6 +249,12 @@ func (s *Store) DeleteVersions(ctx context.Context, path string) error {
 	return err
 }
 
+// DeleteVersion deletes a specific version record for a file.
+func (s *Store) DeleteVersion(ctx context.Context, path, hash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM versions WHERE path = ? AND hash = ?`, path, hash)
+	return err
+}
+
 // DeleteOldVersions deletes versions older than maxAge or exceeding maxCount
 func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int, maxAge time.Duration) ([]string, error) {
 	cutoff := time.Now().Add(-maxAge).Unix()
@@ -345,11 +352,24 @@ func (s *Store) RenamePath(ctx context.Context, oldPath, newPath string) error {
 		return nil
 	}
 
+	conflict, err := s.hasMetadataPathConflict(ctx, newPath)
+	if err != nil {
+		return err
+	}
+	if conflict {
+		return ErrAlreadyExists
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if err := renamePathInTable(ctx, tx, "versions", oldPath, newPath); err != nil {
 		return err
@@ -364,7 +384,32 @@ func (s *Store) RenamePath(ctx context.Context, oldPath, newPath string) error {
 		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (s *Store) hasMetadataPathConflict(ctx context.Context, targetPath string) (bool, error) {
+	if targetPath == "/" {
+		return false, nil
+	}
+
+	likePattern := targetPath + "/%"
+	tables := []string{"versions", "files", "versioning_overrides", "file_locks"}
+	for _, table := range tables {
+		query := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE path = ? OR path LIKE ? LIMIT 1)`, table)
+		var exists bool
+		if err := s.db.QueryRowContext(ctx, query, targetPath, likePattern).Scan(&exists); err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func renamePathInTable(ctx context.Context, tx *sql.Tx, table, oldPath, newPath string) error {
@@ -746,7 +791,12 @@ func (s *Store) LinkVersionChunks(ctx context.Context, versionID int64, chunkHas
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO version_chunks (version_id, chunk_hash) VALUES (?, ?)`)
 	if err != nil {
@@ -760,7 +810,11 @@ func (s *Store) LinkVersionChunks(ctx context.Context, versionID int64, chunkHas
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // GetOrphanedChunks returns chunks with ref_count <= 0

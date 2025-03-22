@@ -4,12 +4,13 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use thiserror::Error;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 /// CAS storage error
 #[derive(Error, Debug)]
@@ -444,11 +445,7 @@ impl CasStore {
         let metadata = std::fs::metadata(&compressed_path)
             .or_else(|_| std::fs::metadata(&base_path))
             .ok()?;
-        metadata
-            .created()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+        metadata_timestamp_to_unix(metadata.created().ok(), metadata.modified().ok())
     }
 
     /// List all object hashes (for GC reference counting)
@@ -598,6 +595,27 @@ pub fn compute_hash(data: &[u8]) -> String {
     blake3::hash(data).to_hex().to_string()
 }
 
+fn system_time_to_unix_timestamp(time: SystemTime) -> Option<i64> {
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    duration_to_unix_timestamp(duration)
+}
+
+fn metadata_timestamp_to_unix(created: Option<SystemTime>, modified: Option<SystemTime>) -> Option<i64> {
+    created
+        .and_then(system_time_to_unix_timestamp)
+        .or_else(|| modified.and_then(system_time_to_unix_timestamp))
+}
+
+fn duration_to_unix_timestamp(duration: Duration) -> Option<i64> {
+    match i64::try_from(duration.as_secs()) {
+        Ok(timestamp) => Some(timestamp),
+        Err(_) => {
+            warn!(seconds = duration.as_secs(), "file creation time exceeds i64 unix timestamp range; omitting created_at") ;
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +733,46 @@ mod tests {
         // Verify retrieval
         let retrieved = store.get(&hash).await.unwrap();
         assert_eq!(retrieved, data);
+    }
+
+    #[test]
+    fn test_system_time_to_unix_timestamp_valid() {
+        let timestamp = system_time_to_unix_timestamp(UNIX_EPOCH + Duration::from_secs(42));
+
+        assert_eq!(timestamp, Some(42));
+    }
+
+    #[test]
+    fn test_system_time_to_unix_timestamp_before_epoch() {
+        let timestamp = system_time_to_unix_timestamp(UNIX_EPOCH - Duration::from_secs(1));
+
+        assert_eq!(timestamp, None);
+    }
+
+    #[test]
+    fn test_system_time_to_unix_timestamp_out_of_range() {
+        let overflow_seconds = (i64::MAX as u64).saturating_add(1);
+        let timestamp = duration_to_unix_timestamp(Duration::from_secs(overflow_seconds));
+
+        assert_eq!(timestamp, None);
+    }
+
+    #[test]
+    fn test_metadata_timestamp_to_unix_falls_back_to_modified() {
+        let modified = UNIX_EPOCH + Duration::from_secs(123);
+
+        let timestamp = metadata_timestamp_to_unix(None, Some(modified));
+
+        assert_eq!(timestamp, Some(123));
+    }
+
+    #[test]
+    fn test_metadata_timestamp_to_unix_prefers_created() {
+        let created = UNIX_EPOCH + Duration::from_secs(42);
+        let modified = UNIX_EPOCH + Duration::from_secs(123);
+
+        let timestamp = metadata_timestamp_to_unix(Some(created), Some(modified));
+
+        assert_eq!(timestamp, Some(42));
     }
 }

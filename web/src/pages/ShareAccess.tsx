@@ -33,6 +33,14 @@ function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
   return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
 }
 
+export function getFolderPathAfterShareAuth(currentFolderPath: string, info: PublicShareInfo): string {
+  if (info.type !== 'folder') {
+    return ''
+  }
+
+  return currentFolderPath
+}
+
 export function ShareAccessPage() {
   const { id } = useParams<{ id: string }>()
   const [isLoading, setIsLoading] = useState(true)
@@ -103,9 +111,7 @@ export function ShareAccessPage() {
       setShareInfo(info)
       setFolderItems([])
       setListError(null)
-      if (info.type === 'folder') {
-        setFolderPath('')
-      }
+      setFolderPath((currentFolderPath) => getFolderPathAfterShareAuth(currentFolderPath, info))
       setIsAuthenticated(true)
       setNeedsPassword(false)
       setPassword('')
