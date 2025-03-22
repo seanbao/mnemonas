@@ -5180,6 +5180,32 @@ func TestServer_Thumbnail_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	}
 }
 
+func TestServer_Thumbnail_RejectsInvalidSizeParameter(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/size.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
+		t.Fatalf("WriteFile(size.png) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/size.png?size=gigantic", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("thumbnail invalid size status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "size parameter must be one of: small, medium, large") {
+		t.Fatalf("expected invalid size error, got %s", w.Body.String())
+	}
+}
+
 func TestServer_Thumbnail_RejectsOversizedSourceImage(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()

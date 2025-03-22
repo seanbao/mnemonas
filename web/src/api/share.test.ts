@@ -21,7 +21,7 @@ describe('Share API', () => {
   describe('URL helpers', () => {
   it('encodes shared folder download path segments', () => {
     const url = getShareFileDownloadUrl('abc123', '/folder/my file.txt')
-    expect(url).toBe('/s/abc123/download/folder/my%20file.txt')
+    expect(url).toBe('/api/v1/public/shares/abc123/download/folder/my%20file.txt')
   })
 
   describe('downloadShare', () => {
@@ -39,7 +39,7 @@ describe('Share API', () => {
 
       await downloadShare('share-1')
 
-      expect(global.fetch).toHaveBeenCalledWith('/s/share-1/download', { credentials: 'same-origin' })
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download', { credentials: 'same-origin' })
       expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
       expect(clickSpy).toHaveBeenCalled()
       expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:share')
@@ -62,16 +62,16 @@ describe('Share API', () => {
 
   it('preserves path separators for nested files', () => {
     const url = getShareFileDownloadUrl('abc123', 'folder/sub/file.txt')
-    expect(url).toBe('/s/abc123/download/folder/sub/file.txt')
+    expect(url).toBe('/api/v1/public/shares/abc123/download/folder/sub/file.txt')
   })
 
   it('builds shared file download URL without password query', () => {
     const url = getShareFileDownloadUrl('abc123', '/folder/file.txt')
-    expect(url).toBe('/s/abc123/download/folder/file.txt')
+    expect(url).toBe('/api/v1/public/shares/abc123/download/folder/file.txt')
   })
 
   it('builds shared root download URL without password query', () => {
-    expect(getShareDownloadUrl('abc123')).toBe('/s/abc123/download')
+    expect(getShareDownloadUrl('abc123')).toBe('/api/v1/public/shares/abc123/download')
   })
   })
 
@@ -84,7 +84,7 @@ describe('Share API', () => {
 
       await getPublicShareItems('share-1', { path: 'docs' })
 
-      expect(global.fetch).toHaveBeenCalledWith('/s/share-1/items?path=docs')
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs')
     })
 
     it('throws ShareError on failure', async () => {
@@ -142,6 +142,18 @@ describe('Share API', () => {
   })
 
   describe('getPublicShare', () => {
+    it('requests the dedicated public share API route', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ id: 'share-1', type: 'file', has_password: false, permission: 'read' }),
+      })
+
+      await getPublicShare('share-1')
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1')
+    })
+
     it('reads wrapped public share errors', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
@@ -343,7 +355,7 @@ describe('Share API', () => {
 
       await accessShareWithPassword('share-1', 'secret')
 
-      expect(global.fetch).toHaveBeenCalledWith('/s/share-1', expect.objectContaining({
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/access', expect.objectContaining({
         method: 'POST',
         credentials: 'same-origin',
       }))

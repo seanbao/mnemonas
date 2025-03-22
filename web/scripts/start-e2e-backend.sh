@@ -11,6 +11,7 @@ STORAGE_ROOT="$BACKEND_ROOT/storage"
 CONFIG_FILE="$BACKEND_ROOT/config.toml"
 LOG_DIR="$BACKEND_ROOT/logs"
 E2E_PASSWORD_FILE="$BACKEND_ROOT/e2e-password.txt"
+PUBLIC_SHARE_ID_FILE="$BACKEND_ROOT/public-share-id.txt"
 
 DATAPLANE_HTTP="${MNEMONAS_E2E_DATAPLANE_HTTP:-127.0.0.1:19091}"
 DATAPLANE_GRPC="${MNEMONAS_E2E_DATAPLANE_GRPC:-127.0.0.1:19090}"
@@ -33,7 +34,7 @@ extract_json_field() {
 }
 
 seed_e2e_fixtures() {
-  local login_response token
+  local login_response token share_response share_id
 
   if [[ ! -f "$E2E_PASSWORD_FILE" ]]; then
     echo "missing E2E password file: $E2E_PASSWORD_FILE" >&2
@@ -59,6 +60,21 @@ seed_e2e_fixtures() {
   curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-trash-fixture.txt" \
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for trash e2e' >/dev/null
+
+  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-share-fixture.txt" \
+    -H "Authorization: Bearer $token" \
+    --data-binary 'fixture for public share e2e' >/dev/null
+
+  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/e2e-share-fixture.txt","type":"file","permission":"read","description":"playwright public share fixture"}')
+  share_id=$(extract_json_field "$share_response" 'id')
+  if [[ -z "$share_id" ]]; then
+    echo "failed to create public share fixture" >&2
+    return 1
+  fi
+  printf '%s\n' "$share_id" > "$PUBLIC_SHARE_ID_FILE"
 
   curl -sf -X DELETE "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-trash-fixture.txt" \
     -H "Authorization: Bearer $token" >/dev/null
