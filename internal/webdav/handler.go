@@ -316,7 +316,7 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 `, html.EscapeString(filePath), html.EscapeString(filePath))
 
 	if filePath != "/" {
-		parentHref := path.Join(h.prefix, path.Dir(filePath))
+		parentHref := escapeDirectoryHref(path.Join(h.prefix, path.Dir(filePath)))
 		fmt.Fprintf(w, `<a href="%s">..</a>
 `, html.EscapeString(parentHref))
 	}
@@ -329,7 +329,7 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 		// V3-2 fix: Escape HTML to prevent XSS
 		fmt.Fprintf(w, `<a href="%s">%s</a>    %s    %d
 `,
-			html.EscapeString(path.Join(h.prefix, child.Path)),
+			html.EscapeString(escapeDirectoryHref(path.Join(h.prefix, child.Path))),
 			html.EscapeString(name),
 			child.ModTime.Format(time.RFC3339),
 			child.Size,
@@ -340,6 +340,10 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 <hr>
 </body>
 </html>`)
+}
+
+func escapeDirectoryHref(rawPath string) string {
+	return (&url.URL{Path: rawPath}).EscapedPath()
 }
 
 func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {

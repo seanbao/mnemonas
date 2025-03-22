@@ -3307,6 +3307,32 @@ func TestHandler_DirectoryListing(t *testing.T) {
 	}
 }
 
+func TestHandler_DirectoryListing_EscapesHrefSpecialCharacters(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/listing-special"); err != nil {
+		t.Fatalf("Mkdir(/listing-special) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/listing-special/hash #file?.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/listing-special/hash #file?.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/dav/listing-special/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET dir status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `<a href="/dav/listing-special/hash%20%23file%3F.txt">hash #file?.txt</a>`) {
+		t.Fatalf("directory listing should percent-encode special characters in href, got %q", body)
+	}
+}
+
 func TestHandler_WriteExpectedWebDAVError_SanitizesUnexpectedError(t *testing.T) {
 	handler := NewHandler(Config{AuthType: "none"})
 	w := httptest.NewRecorder()

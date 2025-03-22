@@ -36,6 +36,8 @@ import (
 )
 
 const maxObjectsCursorLength = 256
+const maxListObjectsLimit = 1000
+const maxGCGracePeriodHours = int64((1<<63 - 1) / int64(time.Hour))
 
 const scrubFailurePublicMessage = "scrub failed; check server logs for details"
 
@@ -568,6 +570,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			fsAdapter = &fileSystemAdapter{fs: s.fs}
 		}
 		s.shareHandler = share.NewHandler(shareStore, fsAdapter)
+		if s.userStore != nil {
+			s.shareHandler.SetUserStore(s.userStore)
+		}
 		if cfg.ShareBaseURL != "" {
 			s.shareHandler.SetBaseURL(cfg.ShareBaseURL)
 		}
@@ -1567,7 +1572,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	if info.ContentHash != "" {
 		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, info.ContentHash))
 	}
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Cache-Control", "private, no-cache")
 	if forceDownload {
 		w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 	}
@@ -2252,11 +2257,14 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limitStr := r.URL.Query().Get("limit")
-	var limit uint32 = 1000
+	var limit uint32 = maxListObjectsLimit
 	if limitStr != "" {
-		if l, err := parseUint32(limitStr); err == nil && l > 0 {
-			limit = l
+		l, err := parseUint32(limitStr)
+		if err != nil || l == 0 || l > maxListObjectsLimit {
+			BadRequest(w, fmt.Sprintf("limit parameter must be between 1 and %d", maxListObjectsLimit))
+			return
 		}
+		limit = l
 	}
 
 	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
@@ -2295,9 +2303,13 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	gracePeriod := 24 * time.Hour
 	if gpStr := r.URL.Query().Get("grace_period_hours"); gpStr != "" {
-		hours, err := strconv.Atoi(gpStr)
+		hours, err := strconv.ParseInt(gpStr, 10, 64)
 		if err != nil || hours < 0 {
 			BadRequest(w, "grace_period_hours must be a non-negative integer")
+			return
+		}
+		if hours > maxGCGracePeriodHours {
+			BadRequest(w, fmt.Sprintf("grace_period_hours must be between 0 and %d", maxGCGracePeriodHours))
 			return
 		}
 		gracePeriod = time.Duration(hours) * time.Hour
@@ -2373,7 +2385,15 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 4: Delete unreferenced objects (dry-run by default)
-	dryRun := r.URL.Query().Get("dry_run") != "false"
+	dryRun := true
+	if rawDryRun := r.URL.Query().Get("dry_run"); rawDryRun != "" {
+		parsedDryRun, err := strconv.ParseBool(rawDryRun)
+		if err != nil {
+			BadRequest(w, "dry_run parameter must be a boolean")
+			return
+		}
+		dryRun = parsedDryRun
+	}
 
 	var deletedCount int
 	deleteFailures := make([]map[string]any, 0)

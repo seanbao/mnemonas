@@ -1106,6 +1106,97 @@ func TestAccessShare_PublicInfoFile(t *testing.T) {
 	}
 }
 
+func TestAccessShare_DisabledOwnerReturnsGone(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	userStorePath := filepath.Join(tempDir, "users.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	userStore, _, err := auth.NewUserStore(userStorePath)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+	owner, err := userStore.Create("share-owner", "password123", "", auth.RoleUser)
+	if err != nil {
+		t.Fatalf("failed to create owner: %v", err)
+	}
+	owner.Disabled = true
+	if err := userStore.Update(owner); err != nil {
+		t.Fatalf("failed to disable owner: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: owner.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.SetUserStore(userStore)
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID, share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.AccessShare(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "SHARE_DISABLED") {
+		t.Fatalf("expected SHARE_DISABLED error, got %s", recorder.Body.String())
+	}
+}
+
+func TestAccessShare_DeletedOwnerReturnsGone(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	userStorePath := filepath.Join(tempDir, "users.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	userStore, _, err := auth.NewUserStore(userStorePath)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+	owner, err := userStore.Create("deleted-owner", "password123", "", auth.RoleUser)
+	if err != nil {
+		t.Fatalf("failed to create owner: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: owner.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+	if err := userStore.Delete(owner.ID); err != nil {
+		t.Fatalf("failed to delete owner: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.SetUserStore(userStore)
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID, share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.AccessShare(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "SHARE_DISABLED") {
+		t.Fatalf("expected SHARE_DISABLED error, got %s", recorder.Body.String())
+	}
+}
+
 func TestAccessShare_PublicInfoMissingFileReturnsNotFound(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
