@@ -1445,6 +1445,79 @@ func TestServer_DownloadFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	}
 }
 
+func TestServer_DownloadFile_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/cache.txt", bytes.NewReader([]byte("first version"))); err != nil {
+		t.Fatalf("WriteFile(/cache.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/cache.txt", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("download status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if cacheControl := w.Header().Get("Cache-Control"); cacheControl != "private, no-cache" {
+		t.Fatalf("download Cache-Control = %q, want %q", cacheControl, "private, no-cache")
+	}
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected download response to include ETag")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/download/cache.txt", nil)
+	req.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotModified {
+		t.Fatalf("download If-None-Match status = %d, want %d", w.Code, http.StatusNotModified)
+	}
+}
+
+func TestServer_DownloadFile_RefreshesAfterFileContentChanges(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/refresh.txt", bytes.NewReader([]byte("first version"))); err != nil {
+		t.Fatalf("WriteFile(/refresh.txt) first error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/refresh.txt", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("initial download status = %d, want %d", w.Code, http.StatusOK)
+	}
+	oldETag := w.Header().Get("ETag")
+	if oldETag == "" {
+		t.Fatal("expected initial download response to include ETag")
+	}
+
+	if err := fs.WriteFile(ctx, "/refresh.txt", bytes.NewReader([]byte("second version"))); err != nil {
+		t.Fatalf("WriteFile(/refresh.txt) second error: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/download/refresh.txt", nil)
+	req.Header.Set("If-None-Match", oldETag)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("revalidated download status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if body := w.Body.String(); body != "second version" {
+		t.Fatalf("revalidated download body = %q, want %q", body, "second version")
+	}
+	if newETag := w.Header().Get("ETag"); newETag == "" || newETag == oldETag {
+		t.Fatalf("expected updated ETag after content change, got old=%q new=%q", oldETag, newETag)
+	}
+}
+
 func TestServer_RespondReadableOpenFileError_MapsStorageErrors(t *testing.T) {
 	server := &Server{logger: zerolog.Nop()}
 
@@ -4659,6 +4732,38 @@ func TestServer_GC_InvalidGracePeriodReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_GC_InvalidDryRunReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/gc?dry_run=definitely-not-bool", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GC invalid dry_run status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "dry_run parameter must be a boolean") {
+		t.Fatalf("expected invalid dry_run error, got %s", w.Body.String())
+	}
+}
+
+func TestServer_GC_RejectsOverflowingGracePeriod(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/maintenance/gc?grace_period_hours=%d", maxGCGracePeriodHours+1), nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GC overflowing grace period status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), fmt.Sprintf("grace_period_hours must be between 0 and %d", maxGCGracePeriodHours)) {
+		t.Fatalf("expected overflowing grace period error, got %s", w.Body.String())
+	}
+}
+
 func TestServer_GC_ReportsDeleteFailures(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -4765,6 +4870,26 @@ func TestServer_Objects_RejectsOverlongCursor(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "cursor exceeds maximum length") {
 		t.Fatalf("expected cursor validation error, got %s", w.Body.String())
+	}
+}
+
+func TestServer_Objects_RejectsInvalidLimit(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	for _, rawLimit := range []string{"0", "-1", "abc", "1001"} {
+		t.Run(rawLimit, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/v1/maintenance/objects?limit="+rawLimit, nil)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("ListObjects invalid limit %q status = %d, want %d", rawLimit, w.Code, http.StatusBadRequest)
+			}
+			if !strings.Contains(w.Body.String(), "limit parameter must be between 1 and 1000") {
+				t.Fatalf("expected limit validation error for %q, got %s", rawLimit, w.Body.String())
+			}
+		})
 	}
 }
 
