@@ -75,6 +75,15 @@ interface FavoritesApiResponse<T> {
   error?: FavoritesApiError | string
 }
 
+function isValidFavorite(value: unknown): value is Favorite {
+  return !!value &&
+    typeof value === 'object' &&
+    typeof (value as Favorite).path === 'string' &&
+    typeof (value as Favorite).user_id === 'string' &&
+    typeof (value as Favorite).created_at === 'string' &&
+    ((value as Favorite).note === undefined || typeof (value as Favorite).note === 'string')
+}
+
 function getFavoritesErrorMessage(body: FavoritesApiResponse<never>, fallback: string): string {
   if (typeof body.error === 'string' && body.error) {
     return body.error
@@ -114,6 +123,9 @@ export async function listFavorites(): Promise<Favorite[]> {
   }
 
   const data = await readFavoritesSuccessData<FavoritesResponse>(response, '获取收藏列表响应无效')
+  if (!Array.isArray(data.favorites) || data.favorites.some((favorite) => !isValidFavorite(favorite))) {
+    throw new FavoritesError('获取收藏列表响应无效', response.status)
+  }
   return data.favorites
 }
 
@@ -133,7 +145,11 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
     throw await createFavoritesError(response, fallback)
   }
 
-  return readFavoritesSuccessData<Favorite>(response, '添加收藏响应无效')
+  const data = await readFavoritesSuccessData<unknown>(response, '添加收藏响应无效')
+  if (!isValidFavorite(data)) {
+    throw new FavoritesError('添加收藏响应无效', response.status)
+  }
+  return data
 }
 
 /**
@@ -208,6 +224,9 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
   }
   const mapped: Record<string, boolean> = {}
   for (const [normalized, isFavorite] of Object.entries(data.favorites)) {
+    if (typeof isFavorite !== 'boolean') {
+      throw new FavoritesError('获取收藏状态响应无效', response.status)
+    }
     const original = normalizedMap.get(normalized)
     if (original) {
       mapped[original] = isFavorite

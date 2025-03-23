@@ -2686,6 +2686,34 @@ func TestHandler_LOCK_ReturnsServerErrorWhenTokenGenerationFails(t *testing.T) {
 	}
 }
 
+func TestHandler_LOCK_InvalidDepthReturnsBadRequest(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/lock-depth"); err != nil {
+		t.Fatalf("Mkdir(lock-depth) error: %v", err)
+	}
+
+	req := httptest.NewRequest("LOCK", "/dav/lock-depth", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	req.Header.Set("Depth", "1")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("LOCK invalid depth status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), errInvalidDepthHeader.Error()) {
+		t.Fatalf("expected invalid depth error body, got %q", w.Body.String())
+	}
+
+	handler.locksMu.Lock()
+	_, exists := handler.locks["/lock-depth"]
+	handler.locksMu.Unlock()
+	if exists {
+		t.Fatal("expected invalid LOCK depth request not to persist lock state")
+	}
+}
+
 func TestHandler_LOCK_RefreshWithMatchingIfToken(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -2714,8 +2742,11 @@ func TestHandler_LOCK_RefreshWithMatchingIfToken(t *testing.T) {
 	if refreshW.Code != http.StatusOK {
 		t.Fatalf("refresh LOCK status = %d, want %d", refreshW.Code, http.StatusOK)
 	}
-	if refreshW.Header().Get("Lock-Token") != lockToken {
-		t.Fatalf("expected refresh to preserve lock token, got %q want %q", refreshW.Header().Get("Lock-Token"), lockToken)
+	if refreshW.Header().Get("Lock-Token") != "" {
+		t.Fatalf("expected refresh response not to emit Lock-Token header, got %q", refreshW.Header().Get("Lock-Token"))
+	}
+	if !strings.Contains(refreshW.Body.String(), "<D:depth>infinity</D:depth>") {
+		t.Fatalf("expected refresh response body to report infinity depth, got %q", refreshW.Body.String())
 	}
 
 	handler.locksMu.Lock()
@@ -2747,8 +2778,156 @@ func TestHandler_LOCK_RefreshWithNegatedIfTokenFails(t *testing.T) {
 	refreshW := httptest.NewRecorder()
 	handler.ServeHTTP(refreshW, refreshReq)
 
-	if refreshW.Code != http.StatusLocked {
-		t.Fatalf("refresh LOCK with negated If token status = %d, want %d", refreshW.Code, http.StatusLocked)
+	if refreshW.Code != http.StatusPreconditionFailed {
+		t.Fatalf("refresh LOCK with negated If token status = %d, want %d", refreshW.Code, http.StatusPreconditionFailed)
+	}
+	if !strings.Contains(refreshW.Body.String(), errLockTokenMatchesRequestURI.Error()) {
+		t.Fatalf("expected lock-token-matches-request-uri failure, got %q", refreshW.Body.String())
+	}
+}
+
+func TestHandler_LOCK_RefreshWithoutTokenFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/lock-refresh-missing-token.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(lock-refresh-missing-token.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("LOCK", "/dav/lock-refresh-missing-token.txt", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("LOCK refresh without token status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), errLockRefreshRequiresToken.Error()) {
+		t.Fatalf("expected missing refresh token error body, got %q", w.Body.String())
+	}
+
+	handler.locksMu.Lock()
+	_, exists := handler.locks["/lock-refresh-missing-token.txt"]
+	handler.locksMu.Unlock()
+	if exists {
+		t.Fatal("expected bodyless LOCK without token not to create a new lock")
+	}
+}
+
+func TestHandler_LOCK_RefreshWithinCollectionScopeWithMatchingIfToken(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/lock-refresh-scope"); err != nil {
+		t.Fatalf("Mkdir(lock-refresh-scope) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/lock-refresh-scope/child.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(child.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-scope", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("initial collection LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	handler.locksMu.Lock()
+	before := handler.locks["/lock-refresh-scope"].expiresAt
+	handler.locksMu.Unlock()
+
+	refreshReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-scope/child.txt", nil)
+	refreshReq.Header.Set("If", "</dav/lock-refresh-scope/child.txt> ("+lockToken+")")
+	refreshW := httptest.NewRecorder()
+	handler.ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusOK {
+		t.Fatalf("scope refresh LOCK status = %d, want %d", refreshW.Code, http.StatusOK)
+	}
+	if refreshW.Header().Get("Lock-Token") != "" {
+		t.Fatalf("expected scope refresh response not to emit Lock-Token header, got %q", refreshW.Header().Get("Lock-Token"))
+	}
+	if !strings.Contains(refreshW.Body.String(), "<D:depth>infinity</D:depth>") {
+		t.Fatalf("expected scope refresh response body to report infinity depth, got %q", refreshW.Body.String())
+	}
+
+	handler.locksMu.Lock()
+	after := handler.locks["/lock-refresh-scope"].expiresAt
+	handler.locksMu.Unlock()
+	if !after.After(before) {
+		t.Fatalf("expected scope refresh expiry to move forward: before=%v after=%v", before, after)
+	}
+}
+
+func TestHandler_LOCK_RefreshWithMismatchedTaggedIfURIFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/lock-refresh-tagged"); err != nil {
+		t.Fatalf("Mkdir(lock-refresh-tagged) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/lock-refresh-tagged/child.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(child.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other-refresh-target.txt", bytes.NewReader([]byte("other target"))); err != nil {
+		t.Fatalf("WriteFile(other-refresh-target.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-tagged", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("initial collection LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	refreshReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-tagged/child.txt", nil)
+	refreshReq.Header.Set("If", "</dav/other-refresh-target.txt> ("+lockToken+")")
+	refreshW := httptest.NewRecorder()
+	handler.ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusPreconditionFailed {
+		t.Fatalf("refresh LOCK with mismatched tagged URI status = %d, want %d", refreshW.Code, http.StatusPreconditionFailed)
+	}
+	if !strings.Contains(refreshW.Body.String(), errLockTokenMatchesRequestURI.Error()) {
+		t.Fatalf("expected lock-token-matches-request-uri failure, got %q", refreshW.Body.String())
+	}
+}
+
+func TestHandler_LOCK_DepthInfinityConflictsWithLockedDescendant(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/lock-conflict-parent"); err != nil {
+		t.Fatalf("Mkdir(lock-conflict-parent) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/lock-conflict-parent/child.txt", bytes.NewReader([]byte("locked child"))); err != nil {
+		t.Fatalf("WriteFile(child.txt) error: %v", err)
+	}
+
+	childLockReq := httptest.NewRequest("LOCK", "/dav/lock-conflict-parent/child.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	childLockW := httptest.NewRecorder()
+	handler.ServeHTTP(childLockW, childLockReq)
+	if childLockW.Code != http.StatusOK {
+		t.Fatalf("child LOCK status = %d, want %d", childLockW.Code, http.StatusOK)
+	}
+
+	parentLockReq := httptest.NewRequest("LOCK", "/dav/lock-conflict-parent", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	parentLockW := httptest.NewRecorder()
+	handler.ServeHTTP(parentLockW, parentLockReq)
+
+	if parentLockW.Code != http.StatusLocked {
+		t.Fatalf("parent LOCK with locked descendant status = %d, want %d", parentLockW.Code, http.StatusLocked)
+	}
+	if parentLockW.Header().Get("Lock-Token") != "" {
+		t.Fatalf("expected conflicting LOCK not to emit Lock-Token header, got %q", parentLockW.Header().Get("Lock-Token"))
+	}
+
+	handler.locksMu.Lock()
+	_, exists := handler.locks["/lock-conflict-parent"]
+	handler.locksMu.Unlock()
+	if exists {
+		t.Fatal("expected conflicting collection LOCK not to persist lock state")
 	}
 }
 
@@ -2966,6 +3145,116 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 
 		if w.Code != http.StatusCreated {
 			t.Fatalf("COPY with If token status = %d, want %d", w.Code, http.StatusCreated)
+		}
+	})
+
+	t.Run("MoveIntoLockedCollectionWithMismatchedTaggedIfTokenFails", func(t *testing.T) {
+		req := httptest.NewRequest("MOVE", "/dav/src/file.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/locked-dir/tagged-mismatch.txt")
+		req.Header.Set("If", "</dav/src/file.txt> (<"+strings.Trim(lockToken, "<>")+">)")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("MOVE with mismatched If tag status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+}
+
+func TestHandler_LOCK_DepthZeroCollectionHonorsNamespaceSemantics(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/depth-zero-dir"); err != nil {
+		t.Fatalf("Mkdir(depth-zero-dir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/depth-zero-dir/existing.txt", bytes.NewReader([]byte("initial"))); err != nil {
+		t.Fatalf("WriteFile(existing.txt) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/depth-zero-dir/subdir"); err != nil {
+		t.Fatalf("Mkdir(subdir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/depth-zero-dir/subdir/existing.txt", bytes.NewReader([]byte("nested"))); err != nil {
+		t.Fatalf("WriteFile(subdir/existing.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/depth-zero-dir", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockReq.Header.Set("Depth", "0")
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK depth-zero collection status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	if !strings.Contains(lockW.Body.String(), "<D:depth>0</D:depth>") {
+		t.Fatalf("expected depth-zero lock response body, got %q", lockW.Body.String())
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	t.Run("PutExistingDirectChildDoesNotRequireToken", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/depth-zero-dir/existing.txt", strings.NewReader("updated"))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("PUT existing direct child without token status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("PutNewDirectChildRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/depth-zero-dir/new.txt", strings.NewReader("new content"))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("PUT new direct child without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("DeleteDirectChildRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/dav/depth-zero-dir/existing.txt", nil)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("DELETE direct child without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("PutNestedExistingDescendantDoesNotRequireToken", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/depth-zero-dir/subdir/existing.txt", strings.NewReader("nested update"))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("PUT nested descendant without token status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("PutNestedCreateDoesNotRequireToken", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/depth-zero-dir/subdir/new.txt", strings.NewReader("nested create"))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("PUT nested create without token status = %d, want %d", w.Code, http.StatusCreated)
+		}
+	})
+
+	t.Run("MkcolDirectChildWithTokenSucceeds", func(t *testing.T) {
+		req := httptest.NewRequest("MKCOL", "/dav/depth-zero-dir/with-token", nil)
+		req.Header.Set("Lock-Token", lockToken)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("MKCOL direct child with token status = %d, want %d", w.Code, http.StatusCreated)
 		}
 	})
 }

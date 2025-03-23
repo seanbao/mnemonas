@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { AUTH_CLEARED_EVENT, authFetch, deleteUser, getCurrentUser, getStoredUser, login, resetUserPassword } from './auth'
+import { AUTH_CLEARED_EVENT, authFetch, deleteUser, getCurrentUser, getStoredUser, listUsers, login, resetUserPassword } from './auth'
 
 const fetchMock = vi.fn()
 
@@ -721,6 +721,42 @@ describe('auth API', () => {
     expect(authCleared).toHaveBeenCalledTimes(1)
 
     window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('rejects malformed successful legacy listUsers responses', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          users: [{ id: 'u1', username: 'admin' }],
+          total: 1,
+        },
+      }),
+    })
+
+    await expect(listUsers()).rejects.toMatchObject({
+      message: '获取用户列表响应无效',
+      status: 200,
+    })
+  })
+
+  it('rejects false-success legacy listUsers responses', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ success: false, data: { users: [], total: 0 } }),
+    })
+
+    await expect(listUsers()).rejects.toMatchObject({
+      message: '获取用户列表响应无效',
+      status: 200,
+    })
   })
 
   it('rejects false-success delete user responses', async () => {
