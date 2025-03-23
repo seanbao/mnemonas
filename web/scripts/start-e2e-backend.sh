@@ -12,6 +12,10 @@ CONFIG_FILE="$BACKEND_ROOT/config.toml"
 LOG_DIR="$BACKEND_ROOT/logs"
 E2E_PASSWORD_FILE="$BACKEND_ROOT/e2e-password.txt"
 PUBLIC_SHARE_ID_FILE="$BACKEND_ROOT/public-share-id.txt"
+PROTECTED_SHARE_ID_FILE="$BACKEND_ROOT/protected-share-id.txt"
+PROTECTED_SHARE_PASSWORD_FILE="$BACKEND_ROOT/protected-share-password.txt"
+DISABLED_SHARE_ID_FILE="$BACKEND_ROOT/disabled-share-id.txt"
+FOLDER_SHARE_ID_FILE="$BACKEND_ROOT/folder-share-id.txt"
 
 DATAPLANE_HTTP="${MNEMONAS_E2E_DATAPLANE_HTTP:-127.0.0.1:19091}"
 DATAPLANE_GRPC="${MNEMONAS_E2E_DATAPLANE_GRPC:-127.0.0.1:19090}"
@@ -34,7 +38,8 @@ extract_json_field() {
 }
 
 seed_e2e_fixtures() {
-  local login_response token share_response share_id
+  local login_response token share_response share_id protected_share_id disabled_share_id folder_share_id
+  local protected_share_password="playwright-secret"
 
   if [[ ! -f "$E2E_PASSWORD_FILE" ]]; then
     echo "missing E2E password file: $E2E_PASSWORD_FILE" >&2
@@ -65,6 +70,25 @@ seed_e2e_fixtures() {
     -H "Authorization: Bearer $token" \
     --data-binary 'fixture for public share e2e' >/dev/null
 
+  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-protected-share-fixture.txt" \
+    -H "Authorization: Bearer $token" \
+    --data-binary 'fixture for protected public share e2e' >/dev/null
+
+  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-disabled-share-fixture.txt" \
+    -H "Authorization: Bearer $token" \
+    --data-binary 'fixture for disabled public share e2e' >/dev/null
+
+  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/directories/e2e-folder-share" \
+    -H "Authorization: Bearer $token" >/dev/null
+  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/directories/e2e-folder-share/subdir" \
+    -H "Authorization: Bearer $token" >/dev/null
+  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-folder-share/root-note.txt" \
+    -H "Authorization: Bearer $token" \
+    --data-binary 'fixture for shared folder root file' >/dev/null
+  curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-folder-share/subdir/nested-note.txt" \
+    -H "Authorization: Bearer $token" \
+    --data-binary 'fixture for shared folder nested file' >/dev/null
+
   share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
     -H "Authorization: Bearer $token" \
     -H 'Content-Type: application/json' \
@@ -75,6 +99,45 @@ seed_e2e_fixtures() {
     return 1
   fi
   printf '%s\n' "$share_id" > "$PUBLIC_SHARE_ID_FILE"
+
+  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d "{\"path\":\"/e2e-protected-share-fixture.txt\",\"type\":\"file\",\"permission\":\"read\",\"password\":\"${protected_share_password}\",\"description\":\"playwright protected public share fixture\"}")
+  protected_share_id=$(extract_json_field "$share_response" 'id')
+  if [[ -z "$protected_share_id" ]]; then
+    echo "failed to create protected public share fixture" >&2
+    return 1
+  fi
+  printf '%s\n' "$protected_share_id" > "$PROTECTED_SHARE_ID_FILE"
+  printf '%s\n' "$protected_share_password" > "$PROTECTED_SHARE_PASSWORD_FILE"
+
+  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/e2e-disabled-share-fixture.txt","type":"file","permission":"read","description":"playwright disabled public share fixture"}')
+  disabled_share_id=$(extract_json_field "$share_response" 'id')
+  if [[ -z "$disabled_share_id" ]]; then
+    echo "failed to create disabled public share fixture" >&2
+    return 1
+  fi
+
+  curl -sf -X PUT "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares/${disabled_share_id}" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d '{"enabled":false}' >/dev/null
+  printf '%s\n' "$disabled_share_id" > "$DISABLED_SHARE_ID_FILE"
+
+  share_response=$(curl -sf -X POST "http://${NASD_HOST}:${NASD_PORT}/api/v1/shares" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/e2e-folder-share","type":"folder","permission":"read","description":"playwright public folder share fixture"}')
+  folder_share_id=$(extract_json_field "$share_response" 'id')
+  if [[ -z "$folder_share_id" ]]; then
+    echo "failed to create public folder share fixture" >&2
+    return 1
+  fi
+  printf '%s\n' "$folder_share_id" > "$FOLDER_SHARE_ID_FILE"
 
   curl -sf -X DELETE "http://${NASD_HOST}:${NASD_PORT}/api/v1/files/e2e-trash-fixture.txt" \
     -H "Authorization: Bearer $token" >/dev/null
