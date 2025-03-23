@@ -204,6 +204,111 @@ async function parseSettingsSuccess<T>(response: Response, invalidMessage: strin
   return body
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+}
+
+function isValidWebDAVCredentials(value: unknown): value is WebDAVCredentialsResponse {
+  return isRecord(value)
+    && typeof value.enabled === 'boolean'
+    && typeof value.url === 'string'
+    && typeof value.auth_type === 'string'
+    && (value.username === undefined || typeof value.username === 'string')
+    && (value.password === undefined || typeof value.password === 'string')
+}
+
+function isValidSettingsData(value: unknown): value is SettingsData {
+  if (!isRecord(value)
+    || !isRecord(value.server)
+    || typeof value.server.host !== 'string'
+    || typeof value.server.port !== 'number'
+    || typeof value.server.read_timeout !== 'string'
+    || typeof value.server.write_timeout !== 'string'
+    || typeof value.server.idle_timeout !== 'string'
+    || !isRecord(value.storage)
+    || typeof value.storage.root !== 'string'
+    || !isRecord(value.retention)
+    || typeof value.retention.max_versions !== 'number'
+    || typeof value.retention.max_age !== 'string'
+    || typeof value.retention.min_free_space !== 'number'
+    || typeof value.retention.gc_interval !== 'string'
+    || !isRecord(value.webdav)
+    || typeof value.webdav.enabled !== 'boolean'
+    || typeof value.webdav.prefix !== 'string'
+    || typeof value.webdav.read_only !== 'boolean'
+    || typeof value.webdav.auth_type !== 'string'
+    || typeof value.webdav.username !== 'string'
+    || !isRecord(value.share)
+    || typeof value.share.enabled !== 'boolean'
+    || typeof value.share.base_url !== 'string'
+    || !isRecord(value.dataplane)
+    || typeof value.dataplane.grpc_address !== 'string'
+    || typeof value.dataplane.timeout !== 'string'
+    || typeof value.dataplane.max_retries !== 'number'
+    || !isRecord(value.cdc)
+    || typeof value.cdc.min_chunk_size !== 'number'
+    || typeof value.cdc.avg_chunk_size !== 'number'
+    || typeof value.cdc.max_chunk_size !== 'number') {
+    return false
+  }
+
+  if (value.server.tls !== undefined) {
+    if (!isRecord(value.server.tls)
+      || typeof value.server.tls.enabled !== 'boolean'
+      || typeof value.server.tls.cert_file !== 'string'
+      || typeof value.server.tls.key_file !== 'string'
+      || typeof value.server.tls.auto_generate !== 'boolean'
+      || typeof value.server.tls.cert_dir !== 'string') {
+      return false
+    }
+  }
+
+  if (value.trash !== undefined) {
+    if (!isRecord(value.trash)
+      || typeof value.trash.enabled !== 'boolean'
+      || typeof value.trash.retention_days !== 'number'
+      || typeof value.trash.max_size !== 'number') {
+      return false
+    }
+  }
+
+  if (value.versioning !== undefined) {
+    if (!isRecord(value.versioning)
+      || !isStringArray(value.versioning.auto_versioned_extensions)
+      || !isStringArray(value.versioning.auto_versioned_filenames)
+      || typeof value.versioning.max_versioned_size !== 'number') {
+      return false
+    }
+  }
+
+  if (value.favorites !== undefined) {
+    if (!isRecord(value.favorites) || typeof value.favorites.enabled !== 'boolean') {
+      return false
+    }
+  }
+
+  if (value.alerts !== undefined) {
+    if (!isRecord(value.alerts)
+      || typeof value.alerts.enabled !== 'boolean'
+      || typeof value.alerts.check_interval !== 'string'
+      || typeof value.alerts.threshold_pct !== 'number'
+      || typeof value.alerts.critical_pct !== 'number'
+      || typeof value.alerts.min_free_bytes !== 'number'
+      || typeof value.alerts.cooldown_period !== 'string'
+      || typeof value.alerts.webhook_url !== 'string'
+      || typeof value.alerts.webhook_method !== 'string'
+      || !isStringArray(value.alerts.webhook_headers)) {
+      return false
+    }
+  }
+
+  return true
+}
+
 /**
  * Get current settings
  */
@@ -214,8 +319,8 @@ export async function getSettings(): Promise<SettingsResponse> {
     throw await parseSettingsError(response, 'Failed to get settings')
   }
 
-  const body = await parseSettingsSuccess<SettingsData>(response, 'Invalid settings response')
-  if (!body.data) {
+  const body = await parseSettingsSuccess<unknown>(response, 'Invalid settings response')
+  if (!isValidSettingsData(body.data)) {
     throw new Error('Invalid settings response')
   }
   return {
@@ -241,6 +346,9 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
   }
 
   const body = await parseSettingsSuccess<null>(response, 'Invalid update settings response')
+  if (!('data' in body)) {
+    throw new Error('Invalid update settings response')
+  }
   return {
     success: true,
     message: body.message || '',
@@ -268,8 +376,8 @@ export async function getWebDAVCredentials(): Promise<WebDAVCredentialsResponse>
     throw await parseSettingsError(response, 'Failed to get WebDAV credentials')
   }
 
-  const body = await parseSettingsSuccess<WebDAVCredentialsResponse>(response, 'Invalid WebDAV credentials response')
-  if (!body.data) {
+  const body = await parseSettingsSuccess<unknown>(response, 'Invalid WebDAV credentials response')
+  if (!isValidWebDAVCredentials(body.data)) {
     throw new Error('Invalid WebDAV credentials response')
   }
   return body.data
