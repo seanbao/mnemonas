@@ -149,6 +149,23 @@ func TestHandler_MKCOL_RejectsUnknownLengthBody(t *testing.T) {
 	}
 }
 
+func TestRequestHasBody_PreservesProbeByteForUnknownLengthBody(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/dav/testdir", io.NopCloser(strings.NewReader("body")))
+	req.ContentLength = -1
+
+	if !requestHasBody(req) {
+		t.Fatal("expected requestHasBody to detect an unknown-length body")
+	}
+
+	remaining, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(body) error: %v", err)
+	}
+	if string(remaining) != "body" {
+		t.Fatalf("expected probed body to remain intact, got %q", string(remaining))
+	}
+}
+
 func TestHandler_MKCOL_ExistingDirectoryReturnsMethodNotAllowed(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -853,6 +870,37 @@ func TestHandler_DELETE_ConditionalHeaders(t *testing.T) {
 	})
 }
 
+func TestHandler_DELETE_DirectoryInvalidDepthReturnsBadRequest(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/deltest-depth"); err != nil {
+		t.Fatalf("Mkdir(deltest-depth) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/deltest-depth/file.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile(file.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/dav/deltest-depth", nil)
+	req.Header.Set("Depth", "0")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE directory invalid Depth status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), errInvalidDepthHeader.Error()) {
+		t.Fatalf("expected invalid Depth error message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/deltest-depth"); err != nil {
+		t.Fatalf("expected directory to remain after invalid Depth DELETE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/deltest-depth/file.txt"); err != nil {
+		t.Fatalf("expected child file to remain after invalid Depth DELETE, got %v", err)
+	}
+}
+
 func TestHandler_DELETE_IfMatchValidatesCurrentETagUnderLock(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1198,6 +1246,79 @@ func TestHandler_COPY_DirectoryRecursive(t *testing.T) {
 	}
 }
 
+func TestHandler_COPY_DirectoryDepthZeroCopiesOnlyCollection(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/srcdir/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/nested/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/shallow-copy")
+	req.Header.Set("Depth", "0")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("COPY directory Depth:0 status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	if _, err := fs.Stat(ctx, "/dst/shallow-copy"); err != nil {
+		t.Fatalf("expected shallow copied directory to exist, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/dst/shallow-copy/root.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected child file to remain absent for Depth:0 copy, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/dst/shallow-copy/nested"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected nested directory to remain absent for Depth:0 copy, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/srcdir/root.txt"); err != nil {
+		t.Fatalf("expected source directory to remain unchanged, got %v", err)
+	}
+}
+
+func TestHandler_COPY_DirectoryInvalidDepthReturnsBadRequest(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/invalid-depth-copy")
+	req.Header.Set("Depth", "1")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("COPY directory invalid Depth status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), errInvalidDepthHeader.Error()) {
+		t.Fatalf("expected invalid Depth error message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/dst/invalid-depth-copy"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent after invalid Depth copy, got %v", err)
+	}
+}
+
 func TestHandler_COPY_DirectoryRollbackOnChildCopyFailure(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1477,6 +1598,41 @@ func TestHandler_MOVE(t *testing.T) {
 	_, err = fs.Stat(ctx, "/movetest/moved.txt")
 	if err != nil {
 		t.Errorf("Destination should exist: %v", err)
+	}
+}
+
+func TestHandler_MOVE_DirectoryInvalidDepthReturnsBadRequest(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/moved-dir")
+	req.Header.Set("Depth", "0")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("MOVE directory invalid Depth status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), errInvalidDepthHeader.Error()) {
+		t.Fatalf("expected invalid Depth error message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/srcdir"); err != nil {
+		t.Fatalf("expected source directory to remain after rejected MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/dst/moved-dir"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent after invalid Depth MOVE, got %v", err)
 	}
 }
 

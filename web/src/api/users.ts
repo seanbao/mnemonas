@@ -53,6 +53,31 @@ interface UsersApiResponse<T> {
   error?: UsersApiError
 }
 
+function isUserRole(value: unknown): value is User['role'] {
+  return value === 'admin' || value === 'user' || value === 'guest'
+}
+
+function isValidUser(value: unknown): value is User {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const user = value as Partial<User>
+  return (
+    typeof user.id === 'string' &&
+    typeof user.username === 'string' &&
+    typeof user.email === 'string' &&
+    isUserRole(user.role) &&
+    typeof user.disabled === 'boolean' &&
+    typeof user.home_dir === 'string' &&
+    typeof user.created_at === 'string' &&
+    typeof user.updated_at === 'string' &&
+    (user.last_login_at === undefined || typeof user.last_login_at === 'string') &&
+    typeof user.quota_bytes === 'number' &&
+    typeof user.used_bytes === 'number'
+  )
+}
+
 export class UsersError extends Error {
   status: number
   code?: string
@@ -106,7 +131,11 @@ export async function listUsers(): Promise<ListUsersResponse> {
   }
 
   const body = await parseUsersSuccess<{ users?: User[]; total?: number }>(response, 'Invalid users response')
-  if (!body.data) {
+  if (
+		!body.data ||
+		(body.data.users !== undefined && (!Array.isArray(body.data.users) || body.data.users.some((user) => !isValidUser(user)))) ||
+		(body.data.total !== undefined && typeof body.data.total !== 'number')
+	) {
     throw new Error('Invalid users response')
   }
 
@@ -136,7 +165,7 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
   }
 
   const body = await parseUsersSuccess<{ user: User }>(response, 'Invalid create user response')
-  if (!body.data) {
+  if (!body.data || !isValidUser(body.data.user)) {
     throw new Error('Invalid create user response')
   }
 
@@ -205,5 +234,8 @@ export async function toggleUserStatus(
   }
 
   const body = await parseUsersSuccess<{ disabled: boolean }>(response, 'Invalid update user status response')
+  if (!body.data || typeof body.data.disabled !== 'boolean') {
+	throw new Error('Invalid update user status response')
+	}
   return { success: body.success }
 }
