@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { AUTH_CLEARED_EVENT, authFetch, deleteUser, getCurrentUser, getStoredUser, listUsers, login, resetUserPassword } from './auth'
+import { AUTH_CLEARED_EVENT, authFetch, changePassword, deleteUser, getCurrentUser, getStoredUser, listUsers, login, resetUserPassword } from './auth'
 
 const fetchMock = vi.fn()
 
@@ -785,6 +785,36 @@ describe('auth API', () => {
 
     await expect(resetUserPassword('u1', 'new-password')).rejects.toMatchObject({
       message: '重置密码响应无效',
+      status: 200,
+    })
+  })
+
+  it('rejects malformed successful change password responses', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ success: true }),
+    })
+
+    await expect(changePassword('old-password', 'new-password')).rejects.toMatchObject({
+      message: '修改密码响应无效',
+      status: 200,
+    })
+  })
+
+  it('rejects false-success change password responses', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ success: false, data: null }),
+    })
+
+    await expect(changePassword('old-password', 'new-password')).rejects.toMatchObject({
+      message: '修改密码响应无效',
       status: 200,
     })
   })

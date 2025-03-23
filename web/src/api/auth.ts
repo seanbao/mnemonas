@@ -500,6 +500,13 @@ export async function changePassword(oldPassword: string, newPassword: string): 
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
   }
+
+  try {
+    const body: AuthApiResponse<null> = await response.json()
+    readAuthSuccessData(body)
+  } catch {
+    throw new AuthError('修改密码响应无效', response.status)
+  }
 }
 
 // === Admin APIs ===

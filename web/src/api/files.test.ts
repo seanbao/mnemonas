@@ -408,6 +408,13 @@ describe('API: files', () => {
     it('deletes a file', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
       })
 
       await expect(deleteFile('/test.txt')).resolves.toBeUndefined()
@@ -415,6 +422,21 @@ describe('API: files', () => {
         method: 'DELETE',
         headers: {},
       })
+    })
+
+    it('rejects malformed successful delete responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            deleted: true,
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(deleteFile('/test.txt')).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('throws ApiError on failure', async () => {
@@ -590,6 +612,13 @@ describe('API: files', () => {
     it('creates a directory', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/new-folder',
+          },
+          timestamp: '2024-01-01',
+        }),
       })
 
       await expect(createDirectory('/new-folder')).resolves.toBeUndefined()
@@ -597,6 +626,21 @@ describe('API: files', () => {
         method: 'POST',
         headers: {},
       })
+    })
+
+    it('rejects malformed successful create directory responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            created: true,
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('surfaces structured backend errors', async () => {
@@ -615,6 +659,14 @@ describe('API: files', () => {
     it('moves/renames a file', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            from: '/old.txt',
+            to: '/new.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
       })
 
       await expect(moveFile('/old.txt', '/new.txt')).resolves.toBeUndefined()
@@ -625,6 +677,21 @@ describe('API: files', () => {
         },
         body: JSON.stringify({ from: '/old.txt', to: '/new.txt' }),
       })
+    })
+
+    it('rejects malformed successful move responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            from: '/old.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(moveFile('/old.txt', '/new.txt')).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('surfaces structured backend errors', async () => {
@@ -640,6 +707,44 @@ describe('API: files', () => {
   })
 
   describe('copyFile', () => {
+    it('copies a file', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            from: '/old.txt',
+            to: '/copy.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(copyFile('/old.txt', '/copy.txt')).resolves.toBeUndefined()
+      expectFetchCall(1, '/api/v1/files-copy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from: '/old.txt', to: '/copy.txt' }),
+      })
+    })
+
+    it('rejects malformed successful copy responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            to: '/copy.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(copyFile('/old.txt', '/copy.txt')).rejects.toThrow('服务器返回了无效的数据')
+    })
+
     it('surfaces structured backend errors', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -656,6 +761,14 @@ describe('API: files', () => {
     it('restores a file to specific version', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+            restored: 'abc123',
+          },
+          timestamp: '2024-01-01',
+        }),
       })
 
       await expect(restoreVersion('/test.txt', 'abc123')).resolves.toBeUndefined()
@@ -663,6 +776,22 @@ describe('API: files', () => {
         method: 'POST',
         headers: {},
       })
+    })
+
+    it('rejects malformed successful restore version responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+            restored: true,
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(restoreVersion('/test.txt', 'abc123')).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('surfaces structured backend errors', async () => {
@@ -752,6 +881,14 @@ describe('API: files', () => {
       it('restores item from trash', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              id: 'item1',
+              restored: true,
+            },
+            timestamp: '2024-01-01',
+          }),
         })
 
         await expect(restoreFromTrash('item1')).resolves.toBeUndefined()
@@ -764,6 +901,14 @@ describe('API: files', () => {
       it('restores to custom path', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              id: 'item1',
+              restored: true,
+            },
+            timestamp: '2024-01-01',
+          }),
         })
 
         await restoreFromTrash('item1', '/new-location/file.txt')
@@ -771,6 +916,21 @@ describe('API: files', () => {
           method: 'POST',
           headers: {},
         })
+      })
+
+      it('rejects malformed successful restore responses', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              id: 'item1',
+            },
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(restoreFromTrash('item1')).rejects.toThrow('服务器返回了无效的数据')
       })
 
       it('surfaces structured backend errors', async () => {
@@ -809,6 +969,14 @@ describe('API: files', () => {
       it('permanently deletes item', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              id: 'item1',
+              deleted: true,
+            },
+            timestamp: '2024-01-01',
+          }),
         })
 
         await expect(deleteFromTrash('item1')).resolves.toBeUndefined()
@@ -816,6 +984,21 @@ describe('API: files', () => {
           method: 'DELETE',
           headers: {},
         })
+      })
+
+      it('rejects malformed successful delete responses', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              id: 'item1',
+            },
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(deleteFromTrash('item1')).rejects.toThrow('服务器返回了无效的数据')
       })
 
       it('surfaces structured backend errors', async () => {

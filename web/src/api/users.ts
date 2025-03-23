@@ -188,6 +188,9 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
   }
 
   const body = await parseUsersSuccess<null>(response, 'Invalid delete user response')
+  if (!('data' in body)) {
+    throw new Error('Invalid delete user response')
+  }
   return { success: body.success }
 }
 
@@ -211,6 +214,9 @@ export async function resetUserPassword(
   }
 
   const body = await parseUsersSuccess<null>(response, 'Invalid reset password response')
+  if (!('data' in body)) {
+    throw new Error('Invalid reset password response')
+  }
   return { success: body.success }
 }
 
