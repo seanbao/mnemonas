@@ -22,7 +22,7 @@
 | `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
 | `COPY` | ✅ 完整 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity` |
 | `PROPPATCH` | ⚠️ 简化 | 接受请求但不实际修改属性 |
-| `LOCK` | ⚠️ 简化 | 返回虚拟锁 token，默认 1 小时过期 |
+| `LOCK` | ⚠️ 简化 | 返回虚拟锁 token，支持 `Depth: 0` / `Depth: infinity`，默认 1 小时过期 |
 | `UNLOCK` | ⚠️ 简化 | 需要匹配 `Lock-Token`，过期锁会自动清理 |
 
 ### 未实现
@@ -99,7 +99,9 @@
 
 当前实现为「虚拟锁」，不提供真正的文件锁定：
 - 返回锁 token 以满足客户端协议要求
+- 支持 `Depth: 0` 和 `Depth: infinity`；省略 `Depth` 时按 `infinity` 处理
 - 仅对已存在资源返回锁成功；不存在的路径返回 `404 Not Found`
+- 刷新锁要求空请求体并携带作用域匹配的 lock token；刷新响应不返回 `Lock-Token` 头
 - `UNLOCK` 需要提供 `Lock-Token` 请求头；缺失时返回 `400 Bad Request`
 - 过期时间固定为 1 小时；后续请求会自动清理过期锁
 - 会阻止缺少匹配 token 的写请求，但不做跨进程持久化

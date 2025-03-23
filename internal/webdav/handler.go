@@ -30,6 +30,8 @@ var (
 	errInvalidDepthHeader                 = errors.New("invalid Depth header")
 	errPropfindDepthLimitExceeded         = errors.New("Depth header exceeds server recursion limit")
 	errInvalidOverwriteHeader             = errors.New("invalid Overwrite header")
+	errLockTokenMatchesRequestURI         = errors.New("lock token does not match request URI")
+	errLockRefreshRequiresToken           = errors.New("LOCK refresh requires a matching lock token")
 	errPreconditionFailed                 = errors.New("precondition failed")
 	errFileAlreadyExists                  = errors.New("file already exists")
 	errOverwriteDisabled                  = errors.New("destination exists and overwrite is disabled")
@@ -42,11 +44,14 @@ const webdavLockCleanupInterval = 5 * time.Minute
 const webdavLockTokenBytes = 16
 const maxWebDAVLockTokenAttempts = 8
 const maxPropfindTraversalDepth = 64
+const webdavLockDepthZero = "0"
+const webdavLockDepthInfinity = "infinity"
 
 var webdavRandomRead = rand.Read
 
 type webdavLock struct {
 	token     string
+	depth     string
 	expiresAt time.Time
 }
 
@@ -351,7 +356,24 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
 	defer releaseLocks()
 
-	if !h.authorizeWriteLock(w, r, filePath) {
+	existingInfo, statErr := h.fs.Stat(ctx, filePath)
+	isCreate := false
+	if statErr != nil {
+		if errors.Is(statErr, storage.ErrNotFound) || errors.Is(statErr, storage.ErrNotDir) {
+			isCreate = true
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	resourcePaths := []string{filePath}
+	namespacePaths := []string(nil)
+	if isCreate {
+		resourcePaths = nil
+		namespacePaths = namespacePathsForResources(filePath)
+	}
+	if !h.authorizeWriteLockWithScope(w, r, filePath, resourcePaths, namespacePaths, nil) {
 		return
 	}
 
@@ -373,18 +395,6 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 		}
 		if !parentInfo.IsDir {
 			http.Error(w, "parent path is not a directory", http.StatusConflict)
-			return
-		}
-	}
-
-	// Check conditional headers for existing file
-	existingInfo, statErr := h.fs.Stat(ctx, filePath)
-	isCreate := false
-	if statErr != nil {
-		if errors.Is(statErr, storage.ErrNotFound) {
-			isCreate = true
-		} else {
-			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -442,7 +452,7 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
 	defer releaseLocks()
 
-	if !h.authorizeWriteLockWithDescendants(w, r, []string{filePath}, filePath) {
+	if !h.authorizeWriteLockWithScope(w, r, filePath, []string{filePath}, namespacePathsForResources(filePath), []string{filePath}) {
 		return
 	}
 
@@ -494,7 +504,7 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
 	defer releaseLocks()
 
-	if !h.authorizeWriteLock(w, r, filePath) {
+	if !h.authorizeWriteLockWithScope(w, r, filePath, []string{filePath}, namespacePathsForResources(filePath), nil) {
 		return
 	}
 
@@ -573,7 +583,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	)
 	defer releaseLocks()
 
-	if !h.authorizeWriteLock(w, r, dst) {
+	if !h.authorizeWriteLockWithScope(w, r, srcPath, []string{dst}, namespacePathsForResources(dst), nil) {
 		return
 	}
 
@@ -727,7 +737,7 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	)
 	defer releaseLocks()
 
-	if !h.authorizeWriteLockWithDescendants(w, r, []string{srcPath, dst}, srcPath, dst) {
+	if !h.authorizeWriteLockWithScope(w, r, srcPath, []string{srcPath, dst}, namespacePathsForResources(srcPath, dst), []string{srcPath, dst}) {
 		return
 	}
 
@@ -868,10 +878,23 @@ func (h *Handler) parseCopyDepth(depth string) (string, error) {
 }
 
 func (h *Handler) validateInfinityOnlyDepth(depth string) error {
-	if depth == "" || strings.EqualFold(strings.TrimSpace(depth), "infinity") {
+	if depth == "" || strings.EqualFold(strings.TrimSpace(depth), webdavLockDepthInfinity) {
 		return nil
 	}
 	return errInvalidDepthHeader
+}
+
+func (h *Handler) parseLockDepth(depth string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(depth)) {
+	case "":
+		return webdavLockDepthInfinity, nil
+	case webdavLockDepthZero:
+		return webdavLockDepthZero, nil
+	case webdavLockDepthInfinity:
+		return webdavLockDepthInfinity, nil
+	default:
+		return "", errInvalidDepthHeader
+	}
 }
 
 func (h *Handler) rejectDirectoryDescendantDestination(ctx context.Context, srcPath, dstPath string) error {
@@ -1065,7 +1088,7 @@ func (h *Handler) propResponse(filePath string, info *storage.FileInfo) propfind
 func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
 	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
 	defer releaseLocks()
-	if !h.authorizeWriteLock(w, r, filePath) {
+	if !h.authorizeWriteLock(w, r, filePath, filePath) {
 		return
 	}
 
@@ -1091,24 +1114,48 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
 	defer releaseLocks()
 
-	if _, err := h.fs.Stat(ctx, filePath); err != nil {
+	info, err := h.fs.Stat(ctx, filePath)
+	if err != nil {
 		h.handleError(w, err)
 		return
 	}
+	hasBody := requestHasBody(r)
+	providedTokens := extractLockTokens(r, filePath, h.prefix)
+	hasRefreshCondition := len(providedTokens) > 0 || r.Header.Get("If") != "" || r.Header.Get("Lock-Token") != ""
 
 	h.startLockCleanupLoop()
 	now := time.Now()
 
 	h.locksMu.Lock()
 	h.removeExpiredLocksLocked(now)
-	if existing, exists := h.locks[filePath]; exists {
-		if hasMatchingLockToken(extractLockTokens(r), existing.token) {
-			existing.expiresAt = now.Add(webdavLockTimeout)
-			h.locks[filePath] = existing
+	if !hasBody {
+		if !hasRefreshCondition {
 			h.locksMu.Unlock()
-			h.writeLockResponse(w, existing.token)
+			writeKnownWebDAVError(w, errLockRefreshRequiresToken, http.StatusBadRequest)
 			return
 		}
+
+		lockPath, existing, exists := h.findRefreshLockLocked(filePath, providedTokens)
+		if !exists {
+			h.locksMu.Unlock()
+			writeKnownWebDAVError(w, errLockTokenMatchesRequestURI, http.StatusPreconditionFailed)
+			return
+		}
+
+		existing.expiresAt = now.Add(webdavLockTimeout)
+		h.locks[lockPath] = existing
+		h.locksMu.Unlock()
+		h.writeLockResponse(w, existing.token, existing.depth, false)
+		return
+	}
+
+	depth, err := h.parseLockDepth(r.Header.Get("Depth"))
+	if err != nil {
+		h.locksMu.Unlock()
+		writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
+		return
+	}
+	if h.lockConflictsWithRequestLocked(filePath, info.IsDir, depth) {
 		h.locksMu.Unlock()
 		http.Error(w, "resource is locked", http.StatusLocked)
 		return
@@ -1122,15 +1169,18 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	h.locks[filePath] = webdavLock{
 		token:     token,
+		depth:     depth,
 		expiresAt: now.Add(webdavLockTimeout),
 	}
 	h.locksMu.Unlock()
 
-	h.writeLockResponse(w, token)
+	h.writeLockResponse(w, token, depth, true)
 }
 
-func (h *Handler) writeLockResponse(w http.ResponseWriter, token string) {
-	w.Header().Set("Lock-Token", "<"+token+">")
+func (h *Handler) writeLockResponse(w http.ResponseWriter, token, depth string, includeLockToken bool) {
+	if includeLockToken {
+		w.Header().Set("Lock-Token", "<"+token+">")
+	}
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 
@@ -1140,12 +1190,12 @@ func (h *Handler) writeLockResponse(w http.ResponseWriter, token string) {
     <D:activelock>
       <D:locktype><D:write/></D:locktype>
       <D:lockscope><D:exclusive/></D:lockscope>
-      <D:depth>infinity</D:depth>
+      <D:depth>%s</D:depth>
       <D:timeout>Second-3600</D:timeout>
       <D:locktoken><D:href>%s</D:href></D:locktoken>
     </D:activelock>
   </D:lockdiscovery>
-</D:prop>`, token)
+</D:prop>`, depth, token)
 }
 
 func (h *Handler) handleUnlock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
@@ -1189,116 +1239,235 @@ func normalizeLockToken(token string) string {
 	return token
 }
 
-func extractLockTokens(r *http.Request) []string {
-	seen := make(map[string]struct{})
-	tokens := make([]string, 0, 2)
+type providedLockToken struct {
+	token string
+	path  string
+}
 
-	appendToken := func(token string) {
+func extractLockTokens(r *http.Request, requestPath, prefix string) []providedLockToken {
+	seen := make(map[string]struct{})
+	tokens := make([]providedLockToken, 0, 2)
+
+	appendToken := func(token, tokenPath string) {
 		token = normalizeLockToken(token)
-		if token == "" {
+		if token == "" || tokenPath == "" {
 			return
 		}
-		if _, exists := seen[token]; exists {
+		key := tokenPath + "\x00" + token
+		if _, exists := seen[key]; exists {
 			return
 		}
-		seen[token] = struct{}{}
-		tokens = append(tokens, token)
+		seen[key] = struct{}{}
+		tokens = append(tokens, providedLockToken{token: token, path: tokenPath})
 	}
 
-	appendToken(r.Header.Get("Lock-Token"))
+	appendToken(r.Header.Get("Lock-Token"), requestPath)
 
 	ifHeader := r.Header.Get("If")
+	currentPath := requestPath
 	for {
-		start := strings.IndexByte(ifHeader, '(')
-		if start == -1 {
-			break
-		}
-		ifHeader = ifHeader[start+1:]
-
-		end := strings.IndexByte(ifHeader, ')')
-		if end == -1 {
+		ifHeader = strings.TrimSpace(ifHeader)
+		if ifHeader == "" {
 			break
 		}
 
-		stateList := ifHeader[:end]
-		for {
-			stateList = strings.TrimSpace(stateList)
-			if stateList == "" {
-				break
+		switch ifHeader[0] {
+		case '<':
+			uriEnd := strings.IndexByte(ifHeader, '>')
+			if uriEnd == -1 {
+				return tokens
 			}
-
-			negated := false
-			if len(stateList) >= 3 && strings.EqualFold(stateList[:3], "Not") {
-				remainder := strings.TrimSpace(stateList[3:])
-				if remainder != stateList[3:] || len(stateList) == 3 {
-					negated = true
-					stateList = remainder
-				}
+			resolvedPath, ok := resolveIfHeaderPath(ifHeader[1:uriEnd], requestHost(r), prefix)
+			if ok {
+				currentPath = resolvedPath
+			} else {
+				currentPath = ""
 			}
-			if stateList == "" {
-				break
+			ifHeader = ifHeader[uriEnd+1:]
+		case '(':
+			stateEnd := strings.IndexByte(ifHeader, ')')
+			if stateEnd == -1 {
+				return tokens
 			}
-
-			switch stateList[0] {
-			case '<':
-				tokenEnd := strings.IndexByte(stateList, '>')
-				if tokenEnd == -1 {
-					stateList = ""
-					break
-				}
-				if !negated {
-					appendToken(stateList[1:tokenEnd])
-				}
-				stateList = stateList[tokenEnd+1:]
-			case '[':
-				etagEnd := strings.IndexByte(stateList, ']')
-				if etagEnd == -1 {
-					stateList = ""
-					break
-				}
-				stateList = stateList[etagEnd+1:]
-			default:
-				stateList = stateList[1:]
-			}
+			extractStateListLockTokens(ifHeader[1:stateEnd], currentPath, appendToken)
+			ifHeader = ifHeader[stateEnd+1:]
+		default:
+			ifHeader = ifHeader[1:]
 		}
-		ifHeader = ifHeader[end+1:]
 	}
 
 	return tokens
 }
 
-func hasMatchingLockToken(providedTokens []string, expected string) bool {
+func extractStateListLockTokens(stateList, tokenPath string, appendToken func(token, tokenPath string)) {
+	for {
+		stateList = strings.TrimSpace(stateList)
+		if stateList == "" {
+			return
+		}
+
+		negated := false
+		if len(stateList) >= 3 && strings.EqualFold(stateList[:3], "Not") {
+			remainder := strings.TrimSpace(stateList[3:])
+			if remainder != stateList[3:] || len(stateList) == 3 {
+				negated = true
+				stateList = remainder
+			}
+		}
+		if stateList == "" {
+			return
+		}
+
+		switch stateList[0] {
+		case '<':
+			tokenEnd := strings.IndexByte(stateList, '>')
+			if tokenEnd == -1 {
+				return
+			}
+			if !negated {
+				appendToken(stateList[1:tokenEnd], tokenPath)
+			}
+			stateList = stateList[tokenEnd+1:]
+		case '[':
+			etagEnd := strings.IndexByte(stateList, ']')
+			if etagEnd == -1 {
+				return
+			}
+			stateList = stateList[etagEnd+1:]
+		default:
+			stateList = stateList[1:]
+		}
+	}
+}
+
+func resolveIfHeaderPath(rawPath, expectedHost, prefix string) (string, bool) {
+	u, err := url.Parse(rawPath)
+	if err != nil {
+		return "", false
+	}
+	if u.Host != "" && !strings.EqualFold(u.Host, expectedHost) {
+		return "", false
+	}
+	decodedPath, err := url.PathUnescape(u.EscapedPath())
+	if err != nil || hasTraversalSegment(decodedPath) {
+		return "", false
+	}
+	resolvedPath := path.Clean(decodedPath)
+	if !path.IsAbs(resolvedPath) {
+		resolvedPath = "/" + resolvedPath
+	}
+	if prefix != "" {
+		if resolvedPath != prefix && !strings.HasPrefix(resolvedPath, prefix+"/") {
+			return "", false
+		}
+		resolvedPath = strings.TrimPrefix(resolvedPath, prefix)
+		if resolvedPath == "" {
+			resolvedPath = "/"
+		}
+	}
+	return resolvedPath, true
+}
+
+func hasMatchingLockToken(providedTokens []providedLockToken, expected, lockPath string, lockInfo webdavLock) bool {
 	for _, token := range providedTokens {
-		if token == expected {
+		if token.token != expected {
+			continue
+		}
+		if lockScopeContainsPath(lockPath, lockInfo, token.path) {
 			return true
 		}
 	}
 	return false
 }
 
-func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, paths ...string) bool {
-	return h.authorizeWriteLockWithDescendants(w, r, nil, paths...)
+func lockScopeContainsPath(lockPath string, lockInfo webdavLock, candidatePath string) bool {
+	if candidatePath == lockPath {
+		return true
+	}
+	if lockInfo.depth == webdavLockDepthInfinity {
+		return isDescendantPath(lockPath, candidatePath)
+	}
+	return path.Dir(candidatePath) == lockPath
 }
 
-func (h *Handler) authorizeWriteLockWithDescendants(w http.ResponseWriter, r *http.Request, descendantRoots []string, paths ...string) bool {
-	providedTokens := extractLockTokens(r)
+func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, requestPath string, paths ...string) bool {
+	return h.authorizeWriteLockWithScope(w, r, requestPath, paths, nil, nil)
+}
+
+func (h *Handler) authorizeWriteLockWithDescendants(w http.ResponseWriter, r *http.Request, requestPath string, descendantRoots []string, paths ...string) bool {
+	return h.authorizeWriteLockWithScope(w, r, requestPath, paths, nil, descendantRoots)
+}
+
+func (h *Handler) authorizeWriteLockWithScope(w http.ResponseWriter, r *http.Request, requestPath string, resourcePaths, namespacePaths, descendantRoots []string) bool {
+	providedTokens := extractLockTokens(r, requestPath, h.prefix)
 
 	h.locksMu.Lock()
 	defer h.locksMu.Unlock()
 	h.removeExpiredLocksLocked(time.Now())
 
-	for _, filePath := range h.lockCheckPathsWithDescendantsLocked(paths, descendantRoots) {
-		lockInfo, locked := h.locks[filePath]
-		if !locked {
+	for lockPath, lockInfo := range h.locks {
+		if !lockAffectsRequest(lockPath, lockInfo, resourcePaths, namespacePaths, descendantRoots) {
 			continue
 		}
-		if !hasMatchingLockToken(providedTokens, lockInfo.token) {
+		if !hasMatchingLockToken(providedTokens, lockInfo.token, lockPath, lockInfo) {
 			http.Error(w, "resource is locked", http.StatusLocked)
 			return false
 		}
 	}
 
 	return true
+}
+
+func lockAffectsRequest(lockPath string, lockInfo webdavLock, resourcePaths, namespacePaths, descendantRoots []string) bool {
+	for _, resourcePath := range resourcePaths {
+		if lockCoversResourcePath(lockPath, lockInfo, resourcePath) {
+			return true
+		}
+	}
+	for _, namespacePath := range namespacePaths {
+		if lockCoversNamespacePath(lockPath, lockInfo, namespacePath) {
+			return true
+		}
+	}
+	for _, root := range descendantRoots {
+		if pathMatchesOrDescendant(root, lockPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func lockCoversResourcePath(lockPath string, lockInfo webdavLock, targetPath string) bool {
+	if lockPath == targetPath {
+		return true
+	}
+	return lockInfo.depth == webdavLockDepthInfinity && isDescendantPath(lockPath, targetPath)
+}
+
+func lockCoversNamespacePath(lockPath string, lockInfo webdavLock, namespacePath string) bool {
+	if lockPath == namespacePath {
+		return true
+	}
+	return lockInfo.depth == webdavLockDepthInfinity && isDescendantPath(lockPath, namespacePath)
+}
+
+func namespacePathsForResources(paths ...string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(paths))
+
+	for _, filePath := range paths {
+		if filePath == "/" {
+			continue
+		}
+		parent := path.Dir(filePath)
+		if _, exists := seen[parent]; exists {
+			continue
+		}
+		seen[parent] = struct{}{}
+		result = append(result, parent)
+	}
+
+	return result
 }
 
 type hierarchyLockSpec struct {
@@ -1362,6 +1531,43 @@ func lockHierarchy(filePath string) []string {
 	}
 
 	return hierarchy
+}
+
+func (h *Handler) findRefreshLockLocked(filePath string, providedTokens []providedLockToken) (string, webdavLock, bool) {
+	if lockInfo, exists := h.locks[filePath]; exists && hasMatchingLockToken(providedTokens, lockInfo.token, filePath, lockInfo) {
+		return filePath, lockInfo, true
+	}
+
+	current := path.Dir(filePath)
+	immediateParent := true
+	for {
+		lockInfo, exists := h.locks[current]
+		if exists && hasMatchingLockToken(providedTokens, lockInfo.token, current, lockInfo) {
+			if lockInfo.depth == webdavLockDepthInfinity || immediateParent {
+				return current, lockInfo, true
+			}
+		}
+		if current == "/" {
+			break
+		}
+		current = path.Dir(current)
+		immediateParent = false
+	}
+
+	return "", webdavLock{}, false
+}
+
+func (h *Handler) lockConflictsWithRequestLocked(filePath string, isDir bool, depth string) bool {
+	for lockPath, lockInfo := range h.locks {
+		if lockCoversResourcePath(lockPath, lockInfo, filePath) {
+			return true
+		}
+		if isDir && depth == webdavLockDepthInfinity && pathMatchesOrDescendant(filePath, lockPath) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (h *Handler) lockCheckPathsWithDescendantsLocked(paths, descendantRoots []string) []string {
