@@ -21,6 +21,18 @@ vi.mock('@/api/files', () => ({
   }),
 }))
 
+vi.mock('@/api/activity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/activity')>()
+  return {
+    ...actual,
+    listActivity: vi.fn().mockResolvedValue({
+      items: [
+        { id: 'act-1', action: 'upload', path: '/docs/report.pdf', timestamp: '2024-01-15T10:00:00Z' },
+      ],
+    }),
+  }
+})
+
 // Mock navigation
 const mockNavigate = vi.fn()
 vi.mock('react-router-dom', async () => {
@@ -32,9 +44,11 @@ vi.mock('react-router-dom', async () => {
 })
 
 import { getHealth, getStorageStats } from '@/api/files'
+import { listActivity } from '@/api/activity'
 
 const mockGetHealth = getHealth as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
+const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 
 describe('DashboardPage', () => {
   beforeEach(() => {
@@ -54,6 +68,11 @@ describe('DashboardPage', () => {
       totalSize: 1073741824, // 1 GB
       totalObjects: 100,
       dedupRatio: 1.5,
+    })
+    mockListActivity.mockResolvedValue({
+      items: [
+        { id: 'act-1', action: 'upload', path: '/docs/report.pdf', timestamp: '2024-01-15T10:00:00Z' },
+      ],
     })
   })
 
@@ -313,6 +332,17 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('部分系统数据加载失败')).toBeTruthy()
         expect(screen.getByText('当前页面展示的是可用数据，部分卡片或活动记录可能不是最新状态。')).toBeTruthy()
+      })
+    })
+
+    it('shows a recent-activity error state when activity loading fails', async () => {
+      mockListActivity.mockRejectedValueOnce(new Error('Activity unavailable'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('活动记录暂时不可用')).toBeTruthy()
+        expect(screen.getByText('请稍后重试，或前往活动页查看最新状态。')).toBeTruthy()
       })
     })
 

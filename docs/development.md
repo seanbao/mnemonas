@@ -148,15 +148,21 @@ mnemonas/
 │
 ├── internal/                    # Go 内部包（不对外暴露）
 │   ├── api/                     # REST API
-│   │   └── handlers.go          # HTTP handlers
+│   │   ├── server.go            # HTTP 路由与主处理器
+│   │   ├── errors.go            # 统一错误响应
+│   │   └── limits.go            # 请求体 / 资源限制
 │   ├── config/                  # 配置管理
 │   │   └── config.go            # TOML 配置加载
 │   ├── webdav/                  # WebDAV 协议实现
 │   │   └── handler.go           # RFC 4918 WebDAV handler
 │   ├── caslayout/               # CAS 存储布局
 │   │   └── layout.go            # 分片目录结构实现
-│   └── webdavcas/               # WebDAV-CAS 适配层
-│       └── adapter.go           # FileSystem 接口适配
+│   ├── workspace/               # 原生文件工作区操作
+│   │   └── workspace.go         # 本地文件读写 / 路径清理 / 原子写入
+│   ├── storage/                 # 对外统一文件系统
+│   │   └── storage.go           # workspace + versionstore 组合层
+│   └── versionstore/            # 版本历史与回收站元数据
+│       └── store.go             # SQLite 版本记录 / CAS 索引
 │
 ├── dataplane/                   # Rust 数据面
 │   ├── src/

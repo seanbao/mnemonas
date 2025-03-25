@@ -333,12 +333,14 @@ describe('MaintenancePage', () => {
   })
 
   describe('error handling', () => {
-    it('handles API error gracefully', async () => {
+    it('shows retryable error state when loading scrub result fails', async () => {
       mockGetScrubResult.mockRejectedValue(new Error('Network error'))
       render(<Maintenance />)
 
       await waitFor(() => {
-        expect(mockGetScrubResult).toHaveBeenCalled()
+        expect(screen.getByText('加载校验结果失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
 

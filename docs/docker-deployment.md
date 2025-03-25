@@ -297,7 +297,10 @@ curl http://localhost:8080/health
 
 ### 集成 Prometheus
 
-MnemoNAS 暴露 `/api/v1/metrics` 端点，可被 Prometheus 抓取。
+MnemoNAS 提供 `/api/v1/metrics` JSON 指标端点。
+
+- 当 `auth.enabled = false` 时，可直接由 Prometheus 抓取。
+- 当 `auth.enabled = true` 时，需要在反向代理或抓取配置中附带有效认证信息。
 
 ---
 

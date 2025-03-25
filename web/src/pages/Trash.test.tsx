@@ -180,6 +180,15 @@ describe('TrashPage', () => {
   })
 
   describe('restore functionality', () => {
+    it('exposes accessible labels for row actions', async () => {
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '恢复 deleted-file.txt' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: '永久删除 deleted-file.txt' })).toBeTruthy()
+      })
+    })
+
     it('restores item on restore button click', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockRestoreFromTrash.mockResolvedValue(undefined)
@@ -221,16 +230,13 @@ describe('TrashPage', () => {
         expect(screen.getByText('deleted-file.txt')).toBeTruthy()
       })
 
-      const deleteButtons = screen.getAllByTitle('永久删除')
-      await user.click(deleteButtons[0])
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
 
       await waitFor(() => {
-        expect(screen.getAllByRole('button', { name: '永久删除' }).length).toBeGreaterThan(1)
+        expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
       })
 
-      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
-      const confirmBtn = confirmButtons[confirmButtons.length - 1]
-      await user.click(confirmBtn)
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
 
       await waitFor(() => {
         expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1')

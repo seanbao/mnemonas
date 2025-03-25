@@ -16,6 +16,7 @@ import {
 import { getDiagnostics, getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
 
 function StatusIndicator({ 
   status, 
@@ -66,19 +67,20 @@ function formatUptime(seconds: number): string {
 }
 
 export function HealthPage() {
-  const { data: diagnostics, isLoading: diagLoading, refetch: refetchDiag } = useQuery({
+  const { data: diagnostics, isLoading: diagLoading, error: diagError, refetch: refetchDiag } = useQuery({
     queryKey: ['diagnostics'],
     queryFn: getDiagnostics,
     refetchInterval: 30000, // Refresh every 30 seconds
   })
 
-  const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useQuery({
+  const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery({
     queryKey: ['storage-stats'],
     queryFn: getStorageStats,
     refetchInterval: 30000,
   })
 
   const isLoading = diagLoading || statsLoading
+  const loadError = diagError || statsError
 
   const handleRefresh = () => {
     void refetchDiag()
@@ -121,6 +123,23 @@ export function HealthPage() {
       gradient: 'from-amber-500/20 to-orange-500/20',
     },
   ]
+
+  if (!isLoading && loadError) {
+    return (
+      <div className="p-6 lg:p-8">
+        <EmptyState
+          icon={AlertCircle}
+          title="加载系统健康信息失败"
+          description={loadError instanceof Error ? loadError.message : '请稍后重试'}
+          action={
+            <Button className="btn-secondary rounded-xl" onPress={handleRefresh}>
+              重新加载
+            </Button>
+          }
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="p-6 lg:p-8 space-y-6">

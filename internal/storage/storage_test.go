@@ -353,6 +353,33 @@ func TestFileSystem_Delete(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Delete_BypassesTrashWhenDisabled(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	trashEnabled := false
+	fs.config.TrashEnabled = &trashEnabled
+
+	if err := fs.WriteFile(ctx, "/delete-no-trash.txt", bytes.NewReader([]byte("gone forever"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	if err := fs.Delete(ctx, "/delete-no-trash.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	if _, err := fs.Stat(ctx, "/delete-no-trash.txt"); err != ErrNotFound {
+		t.Fatalf("expected file to be permanently deleted, got %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected delete with trash disabled not to create trash items, got %d", len(items))
+	}
+}
+
 func TestFileSystem_DeleteAndRestore_EmptyDirectory(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

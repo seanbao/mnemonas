@@ -58,7 +58,7 @@ const API_BASE = '/api/v1/admin/users'
 async function parseUsersError(response: Response, fallback: string): Promise<Error> {
   try {
     const body = await response.json() as UsersApiResponse<never>
-    return new Error(body.error?.message || fallback)
+    return new Error(body.error?.message || body.message || fallback)
   } catch {
     return new Error(fallback)
   }

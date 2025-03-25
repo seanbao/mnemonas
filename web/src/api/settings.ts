@@ -11,6 +11,13 @@ export interface SettingsData {
   server: {
     host: string
     port: number
+    tls?: {
+      enabled: boolean
+      cert_file: string
+      key_file: string
+      auto_generate: boolean
+      cert_dir: string
+    }
   }
   storage: {
     root: string
@@ -27,6 +34,19 @@ export interface SettingsData {
     read_only: boolean
     auth_type: string
     username: string
+  }
+  share: {
+    enabled: boolean
+    base_url: string
+  }
+  alerts?: {
+    enabled: boolean
+    check_interval: string
+    threshold_pct: number
+    critical_pct: number
+    min_free_bytes: number
+    cooldown_period: string
+    webhook_url: string
   }
   dataplane: {
     grpc_address: string
@@ -61,6 +81,13 @@ export interface UpdateSettingsRequest {
   server?: {
     host?: string
     port?: number
+    tls?: {
+      enabled?: boolean
+      cert_file?: string
+      key_file?: string
+      auto_generate?: boolean
+      cert_dir?: string
+    }
   }
   retention?: {
     max_versions?: number
@@ -68,10 +95,28 @@ export interface UpdateSettingsRequest {
     min_free_space?: number
     gc_interval?: string
   }
+  dataplane?: {
+    grpc_address?: string
+    timeout?: string
+    max_retries?: number
+  }
   cdc?: {
     min_chunk_size?: number
     avg_chunk_size?: number
     max_chunk_size?: number
+  }
+  share?: {
+    enabled?: boolean
+    base_url?: string
+  }
+  alerts?: {
+    enabled?: boolean
+    check_interval?: string
+    threshold_pct?: number
+    critical_pct?: number
+    min_free_bytes?: number
+    cooldown_period?: string
+    webhook_url?: string
   }
   webdav?: {
     enabled?: boolean

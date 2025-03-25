@@ -145,10 +145,13 @@ server {
 或通过 API：
 ```bash
 # 获取文件历史版本
-curl http://localhost:8080/api/v1/versions/path/to/file
+curl -H "Authorization: Bearer <access-token>" \
+   http://localhost:8080/api/v1/versions/path/to/file
 
 # 恢复到指定版本
-curl -X POST "http://localhost:8080/api/v1/versions/<hash>/restore?path=/path/to/file"
+curl -X POST \
+   -H "Authorization: Bearer <access-token>" \
+   "http://localhost:8080/api/v1/versions/<hash>/restore?path=/path/to/file"
 ```
 
 ### Q: 存储空间如何去重？
@@ -178,7 +181,9 @@ max_versions = 10     # 每个文件保留最近 10 个版本
 
 手动触发 GC：
 ```bash
-curl -X POST http://localhost:8080/api/v1/maintenance/gc
+curl -X POST \
+   -H "Authorization: Bearer <access-token>" \
+   http://localhost:8080/api/v1/maintenance/gc
 ```
 
 ### Q: 最大支持多大的文件？
@@ -206,7 +211,7 @@ curl http://localhost:8080/health
 
 性能指标：
 ```bash
-curl http://localhost:8080/api/v1/metrics
+curl -H "Authorization: Bearer <access-token>" http://localhost:8080/api/v1/metrics
 # 返回请求统计、延迟、吞吐量等
 ```
 
@@ -222,10 +227,13 @@ curl http://localhost:9091/stats
 
 ```bash
 # 手动触发 scrub
-curl -X POST http://localhost:8080/api/v1/maintenance/scrub
+curl -X POST \
+   -H "Authorization: Bearer <access-token>" \
+   http://localhost:8080/api/v1/maintenance/scrub
 
 # 查看最新 scrub 结果
-curl http://localhost:8080/api/v1/maintenance/scrub
+curl -H "Authorization: Bearer <access-token>" \
+   http://localhost:8080/api/v1/maintenance/scrub
 ```
 
 建议每月运行一次 scrub，使用维护接口或脚本触发。

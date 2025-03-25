@@ -102,6 +102,18 @@ describe('VersionsPage', () => {
         expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
       })
     })
+
+    it('trims surrounding whitespace from the searched path', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '  /test.txt  {enter}')
+
+      await waitFor(() => {
+        expect(mockGetVersions).toHaveBeenCalledWith('/test.txt')
+      })
+    })
   })
 
   // Note: HeroUI Table component has compatibility issues with jsdom environment
@@ -183,8 +195,7 @@ describe('VersionsPage', () => {
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        // Non-latest versions should have restore buttons
-        const restoreButtons = screen.queryAllByTitle('恢复到此版本')
+        const restoreButtons = screen.queryAllByRole('button', { name: '恢复到此版本' })
         expect(restoreButtons.length).toBeGreaterThan(0)
       })
     })

@@ -68,7 +68,7 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 		if authHeader != "" {
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-				http.Error(w, `{"error":"invalid authorization header format"}`, http.StatusUnauthorized)
+				writeError(w, http.StatusUnauthorized, "invalid authorization header format", "INVALID_AUTH_HEADER")
 				return
 			}
 			tokenString = parts[1]
@@ -78,7 +78,7 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			}
 		}
 		if tokenString == "" {
-			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "missing authorization header", "MISSING_AUTH_HEADER")
 			return
 		}
 
@@ -87,11 +87,11 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 		if err != nil {
 			switch err {
 			case ErrTokenExpired:
-				http.Error(w, `{"error":"token expired"}`, http.StatusUnauthorized)
+				writeError(w, http.StatusUnauthorized, "token expired", "TOKEN_EXPIRED")
 			case ErrTokenRevoked:
-				http.Error(w, `{"error":"token revoked"}`, http.StatusUnauthorized)
+				writeError(w, http.StatusUnauthorized, "token has been revoked", "TOKEN_REVOKED")
 			default:
-				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+				writeError(w, http.StatusUnauthorized, "invalid token", "INVALID_TOKEN")
 			}
 			return
 		}
@@ -99,12 +99,12 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 		// Get user from store
 		user, err := m.userStore.GetByID(claims.UserID)
 		if err != nil {
-			http.Error(w, `{"error":"user not found"}`, http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "user not found", "USER_NOT_FOUND")
 			return
 		}
 
 		if user.Disabled {
-			http.Error(w, `{"error":"user is disabled"}`, http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "user account is disabled", "USER_DISABLED")
 			return
 		}
 

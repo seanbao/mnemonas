@@ -192,12 +192,12 @@ secret = "..."
 在文件操作处添加钩子点：
 
 ```go
-// internal/webdavcas/filesystem.go
-func (fs *FileSystem) CreateFile(...) {
-    // ... 文件创建逻辑 ...
-    
-    // 预留钩子点（MVP 为空实现）
-    fs.onFileCreated(ctx, path, hash)
+// internal/storage/storage.go
+func (fs *FileSystem) WriteFile(ctx context.Context, name string, data []byte) error {
+    // ... 原生文件写入与版本归档逻辑 ...
+
+    // 预留钩子点（MVP 可为空实现）
+    // triggerFileCreated(ctx, name)
 }
 ```
 

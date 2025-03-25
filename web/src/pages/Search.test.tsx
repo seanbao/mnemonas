@@ -100,9 +100,7 @@ describe('SearchPage', () => {
 
     it('renders back button', () => {
       renderSearchPage()
-      // Back button should be present
-      const buttons = screen.getAllByRole('button')
-      expect(buttons.length).toBeGreaterThan(0)
+      expect(screen.getByRole('button', { name: '返回上一页' })).toBeInTheDocument()
     })
 
     it('shows empty state when no query', () => {
