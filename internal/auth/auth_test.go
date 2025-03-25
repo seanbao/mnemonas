@@ -530,6 +530,26 @@ func TestMiddleware(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("expected status 403 for user, got %d", rec.Code)
 		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"INSUFFICIENT_PERMISSIONS"`)) {
+			t.Fatalf("expected INSUFFICIENT_PERMISSIONS payload, got %s", rec.Body.String())
+		}
+	})
+
+	t.Run("require role - missing auth context uses structured unauthorized error", func(t *testing.T) {
+		handler := mw.RequireRole(RoleAdmin)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler should not be called")
+		}))
+
+		req := httptest.NewRequest("GET", "/admin", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected status 401, got %d", rec.Code)
+		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"NOT_AUTHENTICATED"`)) {
+			t.Fatalf("expected NOT_AUTHENTICATED payload, got %s", rec.Body.String())
+		}
 	})
 
 	t.Run("optional auth - with token", func(t *testing.T) {

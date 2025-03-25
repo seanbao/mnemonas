@@ -76,6 +76,7 @@ type Monitor struct {
 	cfg     Config
 	logger  zerolog.Logger
 	dataDir string
+	baseCtx context.Context
 
 	mu        sync.Mutex
 	lastAlert time.Time
@@ -97,45 +98,83 @@ func NewMonitor(cfg Config, dataDir string, logger zerolog.Logger) *Monitor {
 
 // Start begins the monitoring loop
 func (m *Monitor) Start(ctx context.Context) {
-	if !m.cfg.Enabled {
-		m.logger.Info().Msg("Storage alerting disabled")
-		return
-	}
+	m.mu.Lock()
+	m.baseCtx = ctx
+	cfg := m.cfg
+	m.mu.Unlock()
 
-	ctx, m.cancel = context.WithCancel(ctx)
-	m.wg.Add(1)
-
-	go func() {
-		defer m.wg.Done()
-
-		// Initial check
-		m.check(ctx)
-
-		ticker := time.NewTicker(m.cfg.CheckInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				m.check(ctx)
-			}
-		}
-	}()
-
-	m.logger.Info().
-		Dur("interval", m.cfg.CheckInterval).
-		Float64("threshold_pct", m.cfg.ThresholdPct).
-		Msg("Storage monitoring started")
+	m.restart(cfg)
 }
 
 // Stop stops the monitoring loop
 func (m *Monitor) Stop() {
-	if m.cancel != nil {
-		m.cancel()
-	}
+	m.stopLoop()
 	m.wg.Wait()
+}
+
+// UpdateConfig replaces the monitor configuration and applies it immediately.
+func (m *Monitor) UpdateConfig(cfg Config) {
+	m.restart(cfg)
+}
+
+func (m *Monitor) restart(cfg Config) {
+	m.stopLoop()
+	m.wg.Wait()
+
+	m.mu.Lock()
+	m.cfg = cfg
+	baseCtx := m.baseCtx
+	m.mu.Unlock()
+
+	if baseCtx == nil {
+		return
+	}
+	if !cfg.Enabled {
+		m.logger.Info().Msg("Storage alerting disabled")
+		return
+	}
+
+	loopCtx, cancel := context.WithCancel(baseCtx)
+
+	m.mu.Lock()
+	m.cancel = cancel
+	m.wg.Add(1)
+	m.mu.Unlock()
+
+	go func(cfg Config) {
+		defer m.wg.Done()
+
+		// Initial check
+		m.check(loopCtx)
+
+		ticker := time.NewTicker(cfg.CheckInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-ticker.C:
+				m.check(loopCtx)
+			}
+		}
+	}(cfg)
+
+	m.logger.Info().
+		Dur("interval", cfg.CheckInterval).
+		Float64("threshold_pct", cfg.ThresholdPct).
+		Msg("Storage monitoring started")
+}
+
+func (m *Monitor) stopLoop() {
+	m.mu.Lock()
+	cancel := m.cancel
+	m.cancel = nil
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // Check performs a manual check and returns current stats

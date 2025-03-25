@@ -12,12 +12,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/seanbao/mnemonas/internal/activity"
+	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
@@ -28,6 +30,16 @@ import (
 
 // testDataplaneAddr is the address of the test dataplane server
 const testDataplaneAddr = "127.0.0.1:9090"
+
+type fakeAlertMonitor struct {
+	updateCount int
+	lastConfig  alerts.Config
+}
+
+func (m *fakeAlertMonitor) UpdateConfig(cfg alerts.Config) {
+	m.updateCount++
+	m.lastConfig = cfg
+}
 
 // setupDataplaneClient creates a dataplane client for testing
 // Returns nil if dataplane is not available
@@ -85,11 +97,13 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	return server, fs, tmpDir
 }
 
-func TestNewServer_DoesNotInitializeFavoritesWhenDisabled(t *testing.T) {
+func TestNewServer_InitializesFavoritesWhenDisabledIfStoreConfigured(t *testing.T) {
 	logger := zerolog.Nop()
 	storeFile := filepath.Join(t.TempDir(), "favorites.json")
+	settings := config.Default()
 
 	server, err := NewServer(logger, &ServerConfig{
+		Config:             settings,
 		FavoritesEnabled:   false,
 		FavoritesStoreFile: storeFile,
 	})
@@ -97,16 +111,18 @@ func TestNewServer_DoesNotInitializeFavoritesWhenDisabled(t *testing.T) {
 		t.Fatalf("NewServer() error = %v", err)
 	}
 
-	if server.favoritesHandler != nil {
-		t.Fatal("expected favorites handler to remain nil when favorites are disabled")
+	if server.favoritesHandler == nil {
+		t.Fatal("expected favorites handler to be initialized when store is configured")
 	}
 }
 
 func TestNewServer_InitializesFavoritesWhenEnabled(t *testing.T) {
 	logger := zerolog.Nop()
 	storeFile := filepath.Join(t.TempDir(), "favorites.json")
+	settings := config.Default()
 
 	server, err := NewServer(logger, &ServerConfig{
+		Config:             settings,
 		FavoritesEnabled:   true,
 		FavoritesStoreFile: storeFile,
 	})
@@ -117,6 +133,30 @@ func TestNewServer_InitializesFavoritesWhenEnabled(t *testing.T) {
 	if server.favoritesHandler == nil {
 		t.Fatal("expected favorites handler to be initialized when favorites are enabled")
 	}
+}
+
+func setupFavoritesServerWithOptions(t *testing.T, enabled bool) *Server {
+	logger := zerolog.Nop()
+	tmpDir := t.TempDir()
+	storeFile := filepath.Join(tmpDir, "favorites.json")
+	settings := config.Default()
+	settings.Favorites.Enabled = enabled
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error = %v", err)
+	}
+
+	server, err := NewServer(logger, &ServerConfig{
+		Config:             settings,
+		ConfigPath:         configPath,
+		FavoritesEnabled:   enabled,
+		FavoritesStoreFile: storeFile,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	return server
 }
 
 func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string, string) {
@@ -172,10 +212,14 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 }
 
 func setupShareServer(t *testing.T) (*Server, string) {
-	return setupShareServerWithBaseURL(t, "")
+	return setupShareServerWithOptions(t, true, "")
 }
 
 func setupShareServerWithBaseURL(t *testing.T, baseURL string) (*Server, string) {
+	return setupShareServerWithOptions(t, true, baseURL)
+}
+
+func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string) (*Server, string) {
 	client := setupDataplaneClient(t)
 	if client == nil {
 		t.Skip("dataplane not available, skipping test")
@@ -224,11 +268,13 @@ func setupShareServerWithBaseURL(t *testing.T, baseURL string) (*Server, string)
 	logger := zerolog.Nop()
 	settings := config.Default()
 	settings.Storage.Root = tmpDir
+	settings.Share.Enabled = shareEnabled
+	settings.Share.BaseURL = baseURL
 
 	server, err := NewServer(logger, &ServerConfig{
 		FileSystem:     fs,
 		Config:         settings,
-		ShareEnabled:   true,
+		ShareEnabled:   shareEnabled,
 		ShareStoreFile: shareStorePath,
 		ShareBaseURL:   baseURL,
 	})
@@ -572,6 +618,171 @@ func TestServer_CreateShare_UsesBaseURL(t *testing.T) {
 	}
 	if strings.Contains(urlValue, "https://nas.example.com//s/") {
 		t.Fatalf("expected trimmed base URL, got %q", urlValue)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesRunningShareBaseURL(t *testing.T) {
+	server, _ := setupShareServerWithBaseURL(t, "https://old.example.com/")
+
+	updateBody := `{"share":{"base_url":"https://new.example.com/base/"}}`
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update settings share base url status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+
+	createBody := `{"path":"/docs/a.txt","type":"file"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(createBody))
+	createRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d, want %d", createRec.Code, http.StatusCreated)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	urlValue, ok := payload["url"].(string)
+	if !ok {
+		t.Fatalf("expected url in response")
+	}
+	if !strings.HasPrefix(urlValue, "https://new.example.com/base/s/") {
+		t.Fatalf("expected updated running share base URL, got %q", urlValue)
+	}
+}
+
+func TestServer_UpdateSettings_EnablesShareFeatureWithoutRestart(t *testing.T) {
+	server, _ := setupShareServerWithOptions(t, false, "")
+
+	createBody := `{"path":"/docs/a.txt","type":"file"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(createBody))
+	createRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("create share while disabled status = %d, want %d", createRec.Code, http.StatusServiceUnavailable)
+	}
+
+	updateBody := `{"share":{"enabled":true}}`
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("enable share feature status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+
+	createReq = httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(createBody))
+	createRec = httptest.NewRecorder()
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share after enable status = %d, want %d", createRec.Code, http.StatusCreated)
+	}
+}
+
+func TestServer_UpdateSettings_DisablesPublicShareAccessWithoutRestart(t *testing.T) {
+	server, shareID := setupShareServerWithOptions(t, true, "")
+
+	publicReq := httptest.NewRequest(http.MethodGet, "/s/"+shareID, nil)
+	publicRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(publicRec, publicReq)
+
+	if publicRec.Code != http.StatusOK {
+		t.Fatalf("public share before disable status = %d, want %d", publicRec.Code, http.StatusOK)
+	}
+
+	updateBody := `{"share":{"enabled":false}}`
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("disable share feature status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+
+	publicReq = httptest.NewRequest(http.MethodGet, "/s/"+shareID, nil)
+	publicRec = httptest.NewRecorder()
+	server.Router().ServeHTTP(publicRec, publicReq)
+
+	if publicRec.Code != http.StatusGone {
+		t.Fatalf("public share after disable status = %d, want %d", publicRec.Code, http.StatusGone)
+	}
+	if !strings.Contains(publicRec.Body.String(), "SHARE_FEATURE_DISABLED") {
+		t.Fatalf("expected SHARE_FEATURE_DISABLED response, got %s", publicRec.Body.String())
+	}
+}
+
+func TestServer_UpdateSettings_EnablesFavoritesWithoutRestart(t *testing.T) {
+	server := setupFavoritesServerWithOptions(t, false)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/favorites", nil)
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("list favorites while disabled status = %d, want %d", listRec.Code, http.StatusServiceUnavailable)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"favorites":{"enabled":true}}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("enable favorites status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/a.txt"}`))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(addRec, addReq)
+
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("add favorite after enable status = %d, want %d", addRec.Code, http.StatusCreated)
+	}
+}
+
+func TestServer_UpdateSettings_DisablesFavoritesWithoutRestart(t *testing.T) {
+	server := setupFavoritesServerWithOptions(t, true)
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/a.txt"}`))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(addRec, addReq)
+
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("add favorite before disable status = %d, want %d", addRec.Code, http.StatusCreated)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"favorites":{"enabled":false}}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("disable favorites status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/favorites", nil)
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("list favorites after disable status = %d, want %d", listRec.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(listRec.Body.String(), "FAVORITES_FEATURE_DISABLED") {
+		t.Fatalf("expected FAVORITES_FEATURE_DISABLED response, got %s", listRec.Body.String())
 	}
 }
 
@@ -1464,6 +1675,13 @@ func TestServer_WebDAVCredentials_AutoGenerated(t *testing.T) {
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Password = ""
 	server.config.WebDAV.Username = "webdav-user"
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:             true,
+		Prefix:              "/dav",
+		AuthType:            "basic",
+		Username:            "webdav-user",
+		PasswordIsGenerated: true,
+	}
 
 	req := httptest.NewRequest("GET", "/api/v1/settings/webdav-credentials", nil)
 	w := httptest.NewRecorder()
@@ -1504,6 +1722,12 @@ func TestServer_WebDAVCredentials_CustomPassword(t *testing.T) {
 	server.config.Storage.Root = tmpDir
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Password = "custom-pass"
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:  true,
+		Prefix:   "/dav",
+		AuthType: "basic",
+		Password: "custom-pass",
+	}
 
 	req := httptest.NewRequest("GET", "/api/v1/settings/webdav-credentials", nil)
 	w := httptest.NewRecorder()
@@ -1539,6 +1763,12 @@ func TestServer_WebDAVCredentials_URLNormalized(t *testing.T) {
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Password = ""
 	server.config.WebDAV.Prefix = "/dav/"
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:             true,
+		Prefix:              "/dav/",
+		AuthType:            "basic",
+		PasswordIsGenerated: true,
+	}
 
 	req := httptest.NewRequest("GET", "/api/v1/settings/webdav-credentials", nil)
 	w := httptest.NewRecorder()
@@ -1559,6 +1789,67 @@ func TestServer_WebDAVCredentials_URLNormalized(t *testing.T) {
 	}
 	if payload.Data.URL != "/dav/" {
 		t.Fatalf("expected url /dav/, got %q", payload.Data.URL)
+	}
+}
+
+func TestServer_WebDAVCredentials_StayOnRunningConfigAfterSettingsUpdate(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Storage.Root = tmpDir
+	server.config.WebDAV.Enabled = true
+	server.config.WebDAV.Prefix = "/dav"
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Username = "runtime-user"
+	server.config.WebDAV.Password = "runtime-pass"
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:             true,
+		Prefix:              "/dav",
+		AuthType:            "basic",
+		Username:            "runtime-user",
+		Password:            "runtime-pass",
+		PasswordIsGenerated: true,
+	}
+
+	body := `{"webdav":{"enabled":true,"prefix":"/new-dav","auth_type":"basic","username":"saved-user","password":"saved-pass"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings webdav status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	credsReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings/webdav-credentials", nil)
+	credsRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(credsRec, credsReq)
+
+	if credsRec.Code != http.StatusOK {
+		t.Fatalf("webdav credentials status = %d, want %d", credsRec.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			URL      string `json:"url"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(credsRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Data.URL != "/dav/" {
+		t.Fatalf("expected running webdav url /dav/, got %q", payload.Data.URL)
+	}
+	if payload.Data.Username != "runtime-user" {
+		t.Fatalf("expected running webdav username runtime-user, got %q", payload.Data.Username)
+	}
+	if payload.Data.Password != "runtime-pass" {
+		t.Fatalf("expected running webdav password runtime-pass, got %q", payload.Data.Password)
+	}
+	if server.config.WebDAV.Prefix != "/new-dav" {
+		t.Fatalf("expected saved config prefix /new-dav, got %q", server.config.WebDAV.Prefix)
 	}
 }
 
@@ -1708,6 +1999,282 @@ func TestServer_UpdateSettings_InvalidPortRejected(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"alerts":{"enabled":true,"check_interval":"30m","threshold_pct":85,"critical_pct":92,"min_free_bytes":21474836480,"cooldown_period":"2h","webhook_url":"https://hooks.example.com/storage","webhook_method":"POST","webhook_headers":["Authorization: Bearer token","X-MnemoNAS: alerts"]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings alerts status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !server.config.Alerts.Enabled {
+		t.Fatalf("expected alerts enabled")
+	}
+	if server.config.Alerts.CheckInterval != 30*time.Minute {
+		t.Fatalf("expected check interval 30m, got %s", server.config.Alerts.CheckInterval)
+	}
+	if server.config.Alerts.ThresholdPct != 85 {
+		t.Fatalf("expected threshold 85, got %v", server.config.Alerts.ThresholdPct)
+	}
+	if server.config.Alerts.CriticalPct != 92 {
+		t.Fatalf("expected critical threshold 92, got %v", server.config.Alerts.CriticalPct)
+	}
+	if server.config.Alerts.MinFreeBytes != 21474836480 {
+		t.Fatalf("expected min free bytes updated, got %d", server.config.Alerts.MinFreeBytes)
+	}
+	if server.config.Alerts.CooldownPeriod != 2*time.Hour {
+		t.Fatalf("expected cooldown 2h, got %s", server.config.Alerts.CooldownPeriod)
+	}
+	if server.config.Alerts.WebhookURL != "https://hooks.example.com/storage" {
+		t.Fatalf("expected webhook url updated, got %q", server.config.Alerts.WebhookURL)
+	}
+	if server.config.Alerts.WebhookMethod != "POST" {
+		t.Fatalf("expected webhook method POST, got %q", server.config.Alerts.WebhookMethod)
+	}
+	if len(server.config.Alerts.WebhookHeaders) != 2 {
+		t.Fatalf("expected webhook headers updated, got %#v", server.config.Alerts.WebhookHeaders)
+	}
+	if monitor.updateCount != 1 {
+		t.Fatalf("expected alert monitor update once, got %d", monitor.updateCount)
+	}
+	if monitor.lastConfig.CheckInterval != 30*time.Minute || monitor.lastConfig.WebhookURL != "https://hooks.example.com/storage" {
+		t.Fatalf("unexpected alert monitor config: %+v", monitor.lastConfig)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidAlertsWebhookMethodRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalMethod := server.config.Alerts.WebhookMethod
+
+	body := `{"alerts":{"webhook_method":"PATCH"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid alerts webhook method status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected generic invalid configuration message, got %s", w.Body.String())
+	}
+	if server.config.Alerts.WebhookMethod != originalMethod {
+		t.Fatalf("expected invalid webhook method to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesTrashConfig(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"trash":{"enabled":false,"retention_days":0,"max_size":10}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings trash status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.config.Storage.Trash.Enabled {
+		t.Fatalf("expected trash disabled")
+	}
+	if server.config.Storage.Trash.RetentionDays != 0 {
+		t.Fatalf("expected trash retention days 0, got %d", server.config.Storage.Trash.RetentionDays)
+	}
+	if server.config.Storage.Trash.MaxSize != 10 {
+		t.Fatalf("expected trash max size 10, got %d", server.config.Storage.Trash.MaxSize)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"trash":{"enabled":true,"retention_days":0,"max_size":10}}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("re-enable trash status = %d, want %d", updateRec.Code, http.StatusOK)
+	}
+
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/old.txt", bytes.NewReader([]byte("123456"))); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/old.txt"); err != nil {
+		t.Fatalf("Delete(old) error: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := fs.WriteFile(ctx, "/new.txt", bytes.NewReader([]byte("1234567"))); err != nil {
+		t.Fatalf("WriteFile(new) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/new.txt"); err != nil {
+		t.Fatalf("Delete(new) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || items[0].OriginalPath != "/new.txt" {
+		t.Fatalf("expected trash max size update to keep only newest item, got %#v", items)
+	}
+	if deleted, err := fs.CleanupExpiredTrash(ctx); err != nil {
+		t.Fatalf("CleanupExpiredTrash() error: %v", err)
+	} else if deleted != 1 {
+		t.Fatalf("expected cleanup to delete 1 immediately expired item, got %d", deleted)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidTrashSettingsRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalRetention := server.config.Storage.Trash.RetentionDays
+	originalMaxSize := server.config.Storage.Trash.MaxSize
+
+	for _, tc := range []struct {
+		body    string
+		message string
+	}{
+		{body: `{"trash":{"retention_days":-1}}`, message: "invalid trash.retention_days"},
+		{body: `{"trash":{"max_size":0}}`, message: "invalid trash.max_size"},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("update settings invalid trash status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+		if !strings.Contains(w.Body.String(), tc.message) {
+			t.Fatalf("expected %q message, got %s", tc.message, w.Body.String())
+		}
+		if server.config.Storage.Trash.RetentionDays != originalRetention || server.config.Storage.Trash.MaxSize != originalMaxSize {
+			t.Fatalf("expected invalid trash settings to leave config unchanged")
+		}
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesServerTimeouts(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"server":{"read_timeout":"45s","write_timeout":"90s","idle_timeout":"5m"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings server timeouts status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.config.Server.ReadTimeout != 45*time.Second {
+		t.Fatalf("expected read timeout 45s, got %s", server.config.Server.ReadTimeout)
+	}
+	if server.config.Server.WriteTimeout != 90*time.Second {
+		t.Fatalf("expected write timeout 90s, got %s", server.config.Server.WriteTimeout)
+	}
+	if server.config.Server.IdleTimeout != 5*time.Minute {
+		t.Fatalf("expected idle timeout 5m, got %s", server.config.Server.IdleTimeout)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesRetentionConfigForRunningStorage(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"retention":{"max_versions":1,"max_age":"24h"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings retention status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.config.Storage.Retention.MaxVersions != 1 {
+		t.Fatalf("expected max_versions 1, got %d", server.config.Storage.Retention.MaxVersions)
+	}
+	if server.config.Storage.Retention.MaxAge != 24*time.Hour {
+		t.Fatalf("expected max_age 24h, got %s", server.config.Storage.Retention.MaxAge)
+	}
+
+	ctx := context.Background()
+	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/retention-live.md", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(v3) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/retention-live.md")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("expected current version plus one retained historical version, got %d versions", len(versions))
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesVersioningConfig(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"versioning":{"auto_versioned_extensions":[".md"," .txt ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings versioning status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !reflect.DeepEqual(server.config.Storage.Versioning.AutoVersionedExtensions, []string{".md", ".txt"}) {
+		t.Fatalf("unexpected versioning extensions: %#v", server.config.Storage.Versioning.AutoVersionedExtensions)
+	}
+	if !reflect.DeepEqual(server.config.Storage.Versioning.AutoVersionedFilenames, []string{"README", "Dockerfile"}) {
+		t.Fatalf("unexpected versioning filenames: %#v", server.config.Storage.Versioning.AutoVersionedFilenames)
+	}
+	if server.config.Storage.Versioning.MaxVersionedSize != 209715200 {
+		t.Fatalf("expected max versioned size 209715200, got %d", server.config.Storage.Versioning.MaxVersionedSize)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidVersioningMaxSizeRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	original := server.config.Storage.Versioning.MaxVersionedSize
+
+	body := `{"versioning":{"max_versioned_size":0}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid versioning max size status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if server.config.Storage.Versioning.MaxVersionedSize != original {
+		t.Fatalf("expected invalid versioning max size to leave config unchanged")
+	}
+}
+
 func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 
@@ -1761,6 +2328,57 @@ func TestServer_AcknowledgeSetup_RequiresAuthentication(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("acknowledge setup status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestServer_AcknowledgeSetup_InternalErrorUsesStructuredAPIError(t *testing.T) {
+	server, _, tmpDir, username, password := setupAuthServer(t)
+
+	secrets := &config.Secrets{SetupShown: false}
+	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
+	secretsPath := path.Join(tmpDir, config.SecretsFile)
+	if err := os.Chmod(secretsPath, 0400); err != nil {
+		t.Fatalf("failed to chmod secrets file: %v", err)
+	}
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginResp auth.LoginResponse
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
+	req.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("acknowledge setup status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeInternal {
+		t.Fatalf("expected error code %q, got %q", ErrCodeInternal, payload.Code)
+	}
+	if payload.Message != "failed to acknowledge setup" {
+		t.Fatalf("expected sanitized message, got %q", payload.Message)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
+		t.Fatalf("expected internal file error details to stay hidden, got %s", w.Body.String())
 	}
 }
 

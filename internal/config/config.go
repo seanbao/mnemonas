@@ -349,9 +349,38 @@ func (c *Config) Validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		errs = append(errs, fmt.Errorf("invalid port: %d", c.Server.Port))
 	}
+	if c.Server.ReadTimeout <= 0 {
+		errs = append(errs, errors.New("server.read_timeout must be positive"))
+	}
+	if c.Server.WriteTimeout <= 0 {
+		errs = append(errs, errors.New("server.write_timeout must be positive"))
+	}
+	if c.Server.IdleTimeout <= 0 {
+		errs = append(errs, errors.New("server.idle_timeout must be positive"))
+	}
 
 	if c.Storage.Root == "" {
 		errs = append(errs, errors.New("storage.root cannot be empty"))
+	}
+	if c.Storage.Trash.RetentionDays < 0 {
+		errs = append(errs, errors.New("storage.trash.retention_days cannot be negative"))
+	}
+	if c.Storage.Trash.MaxSize <= 0 {
+		errs = append(errs, errors.New("storage.trash.max_size must be positive"))
+	}
+	if c.Storage.Versioning.MaxVersionedSize <= 0 {
+		errs = append(errs, errors.New("storage.versioning.max_versioned_size must be positive"))
+	}
+	for _, ext := range c.Storage.Versioning.AutoVersionedExtensions {
+		trimmed := strings.TrimSpace(ext)
+		if trimmed == "" || !strings.HasPrefix(trimmed, ".") {
+			errs = append(errs, fmt.Errorf("invalid storage.versioning.auto_versioned_extensions entry: %q", ext))
+		}
+	}
+	for _, name := range c.Storage.Versioning.AutoVersionedFilenames {
+		if strings.TrimSpace(name) == "" {
+			errs = append(errs, errors.New("storage.versioning.auto_versioned_filenames cannot contain empty entries"))
+		}
 	}
 
 	if c.DataPlane.GRPCAddress == "" {
@@ -365,6 +394,35 @@ func (c *Config) Validate() error {
 	}
 	if cdc.AvgChunkSize >= cdc.MaxChunkSize {
 		errs = append(errs, errors.New("avg_chunk_size must be less than max_chunk_size"))
+	}
+
+	if c.Alerts.CheckInterval <= 0 {
+		errs = append(errs, errors.New("alerts.check_interval must be positive"))
+	}
+	if c.Alerts.CooldownPeriod <= 0 {
+		errs = append(errs, errors.New("alerts.cooldown_period must be positive"))
+	}
+	if c.Alerts.ThresholdPct < 0 || c.Alerts.ThresholdPct > 100 {
+		errs = append(errs, errors.New("alerts.threshold_pct must be between 0 and 100"))
+	}
+	if c.Alerts.CriticalPct < 0 || c.Alerts.CriticalPct > 100 {
+		errs = append(errs, errors.New("alerts.critical_pct must be between 0 and 100"))
+	}
+	if c.Alerts.CriticalPct < c.Alerts.ThresholdPct {
+		errs = append(errs, errors.New("alerts.critical_pct must be greater than or equal to alerts.threshold_pct"))
+	}
+	if c.Alerts.WebhookMethod != "" && c.Alerts.WebhookMethod != "GET" && c.Alerts.WebhookMethod != "POST" {
+		errs = append(errs, errors.New("alerts.webhook_method must be GET or POST"))
+	}
+	for _, header := range c.Alerts.WebhookHeaders {
+		trimmed := strings.TrimSpace(header)
+		if trimmed == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			errs = append(errs, fmt.Errorf("invalid alerts.webhook_headers entry: %q", header))
+		}
 	}
 
 	return errors.Join(errs...)
