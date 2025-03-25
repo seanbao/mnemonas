@@ -2461,6 +2461,32 @@ func TestHandler_PROPFIND_InfinityDepthLimitExceeded(t *testing.T) {
 	}
 }
 
+func TestHandler_PROPFIND_EscapesHrefSpecialCharacters(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/propfind-special"); err != nil {
+		t.Fatalf("Mkdir(/propfind-special) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/propfind-special/hash #file?.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/propfind-special/hash #file?.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PROPFIND", "/dav/propfind-special", nil)
+	req.Header.Set("Depth", "1")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `<href>/dav/propfind-special/hash%20%23file%3F.txt</href>`) {
+		t.Fatalf("expected PROPFIND href to be percent-encoded, got %q", body)
+	}
+}
+
 func TestHandler_PROPPATCH_MissingResourceReturnsNotFound(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 	req := httptest.NewRequest("PROPPATCH", "/dav/missing-proppatch.txt", strings.NewReader(`<?xml version="1.0"?><propertyupdate xmlns="DAV:"/>`))
@@ -2470,6 +2496,56 @@ func TestHandler_PROPPATCH_MissingResourceReturnsNotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandler_PROPPATCH_SetsXMLContentTypeAndEscapesHref(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/prop-patch"); err != nil {
+		t.Fatalf("Mkdir(/prop-patch) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/prop-patch/hash #file?.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/prop-patch/hash #file?.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PROPPATCH", "/dav/prop-patch/hash%20%23file%3F.txt", strings.NewReader(`<?xml version="1.0"?><propertyupdate xmlns="DAV:"/>`))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
+	}
+	if contentType := w.Header().Get("Content-Type"); contentType != "application/xml; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want %q", contentType, "application/xml; charset=utf-8")
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `<D:href>/dav/prop-patch/hash%20%23file%3F.txt</D:href>`) {
+		t.Fatalf("expected PROPPATCH href to be percent-encoded, got %q", body)
+	}
+}
+
+func TestHandler_PROPPATCH_DirectoryHrefPreservesTrailingSlash(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/prop-patch-dir"); err != nil {
+		t.Fatalf("Mkdir(/prop-patch-dir) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PROPPATCH", "/dav/prop-patch-dir", strings.NewReader(`<?xml version="1.0"?><propertyupdate xmlns="DAV:"/>`))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `<D:href>/dav/prop-patch-dir/</D:href>`) {
+		t.Fatalf("expected PROPPATCH directory href to preserve trailing slash, got %q", body)
 	}
 }
 

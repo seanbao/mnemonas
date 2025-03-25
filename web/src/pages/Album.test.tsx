@@ -440,6 +440,32 @@ describe('AlbumPage', () => {
       })
     })
 
+    it('updates the fullscreen preview source when navigating to the next image', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      await user.click(thumbnail)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '下一张图片' })).toBeTruthy()
+        expect(screen.getAllByRole('img', { name: 'photo1.jpg' }).at(-1)).toHaveAttribute(
+          'src',
+          '/api/v1/download/photos/photo1.jpg?download=true'
+        )
+      })
+
+      await user.click(screen.getByRole('button', { name: '下一张图片' }))
+
+      await waitFor(() => {
+        expect(screen.getAllByRole('img', { name: 'photo2.png' }).at(-1)).toHaveAttribute(
+          'src',
+          '/api/v1/download/photos/photo2.png?download=true'
+        )
+      })
+    })
+
     it('shows unknown size instead of 0 B when preview metadata is incomplete', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockListFiles.mockResolvedValue({
