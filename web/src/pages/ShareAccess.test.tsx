@@ -40,15 +40,13 @@ vi.mock('@heroui/react', () => ({
 // Mock share API
 const mockGetPublicShare = vi.fn()
 const mockAccessShareWithPassword = vi.fn()
-const mockGetShareDownloadUrl = vi.fn()
-const mockGetShareFileDownloadUrl = vi.fn()
+const mockDownloadShare = vi.fn()
 const mockGetPublicShareItems = vi.fn()
 
 vi.mock('@/api/share', () => ({
   getPublicShare: (...args: unknown[]) => mockGetPublicShare(...args),
   accessShareWithPassword: (...args: unknown[]) => mockAccessShareWithPassword(...args),
-  getShareDownloadUrl: (...args: unknown[]) => mockGetShareDownloadUrl(...args),
-  getShareFileDownloadUrl: (...args: unknown[]) => mockGetShareFileDownloadUrl(...args),
+  downloadShare: (...args: unknown[]) => mockDownloadShare(...args),
   getPublicShareItems: (...args: unknown[]) => mockGetPublicShareItems(...args),
   ShareError: class ShareError extends Error {
     status: number
@@ -262,9 +260,8 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('downloads protected share via access cookie flow without password in url', async () => {
+  it('downloads protected share via fetch/blob flow after password verification', async () => {
     const user = userEvent.setup()
-    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
       type: 'file',
@@ -279,7 +276,7 @@ describe('ShareAccessPage', () => {
       file_name: 'secret.txt',
       file_size: 10,
     })
-    mockGetShareDownloadUrl.mockReturnValue('/s/abc123/download')
+    mockDownloadShare.mockResolvedValue(undefined)
 
     renderWithRouter('abc123')
 
@@ -297,15 +294,11 @@ describe('ShareAccessPage', () => {
     await user.click(screen.getByText('下载文件'))
 
     expect(mockAccessShareWithPassword).toHaveBeenCalledWith('abc123', 'secret')
-    expect(mockGetShareDownloadUrl).toHaveBeenCalledWith('abc123')
-    expect(openSpy).toHaveBeenCalledWith('/s/abc123/download', '_blank', 'noopener,noreferrer')
-
-    openSpy.mockRestore()
+    expect(mockDownloadShare).toHaveBeenCalledWith('abc123', { filename: 'secret.txt' })
   })
 
-  it('shows warning toast when browser blocks share download tab', async () => {
+  it('returns to password prompt when share download cookie is expired', async () => {
     const user = userEvent.setup()
-    vi.spyOn(window, 'open').mockReturnValue(null)
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
       type: 'file',
@@ -314,7 +307,7 @@ describe('ShareAccessPage', () => {
       file_name: 'test.txt',
       file_size: 10,
     })
-    mockGetShareDownloadUrl.mockReturnValue('/s/abc123/download')
+    mockDownloadShare.mockRejectedValue(new ShareError('访问凭证已失效，请重新输入密码', 401))
 
     renderWithRouter('abc123')
 
@@ -324,8 +317,12 @@ describe('ShareAccessPage', () => {
 
     await user.click(screen.getByText('下载文件'))
 
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
     expect(mockAddToast).toHaveBeenCalledWith({
-      title: '浏览器拦截了下载窗口，请允许弹窗后重试',
+      title: '访问凭证已失效，请重新输入密码',
       color: 'warning',
     })
   })

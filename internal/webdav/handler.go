@@ -21,6 +21,7 @@ import (
 )
 
 var (
+	errInvalidDepthHeader                 = errors.New("invalid Depth header")
 	errInvalidOverwriteHeader             = errors.New("invalid Overwrite header")
 	errOverwriteDisabled                  = errors.New("destination exists and overwrite is disabled")
 	errDestinationInsideSourceDirectory   = errors.New("destination cannot be inside source directory")
@@ -595,7 +596,7 @@ func (h *Handler) destinationExists(ctx context.Context, dst string) bool {
 func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, status int, expected ...error) bool {
 	for _, candidate := range expected {
 		if errors.Is(err, candidate) {
-			http.Error(w, err.Error(), status)
+			http.Error(w, candidate.Error(), status)
 			return true
 		}
 	}
@@ -606,7 +607,7 @@ func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, sta
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
 	depth, err := h.parsePropfindDepth(r.Header.Get("Depth"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, errInvalidDepthHeader.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -671,7 +672,7 @@ func (h *Handler) parsePropfindDepth(depth string) (string, error) {
 	case "0", "1", "infinity":
 		return strings.ToLower(depth), nil
 	default:
-		return "", errors.New("invalid Depth header")
+		return "", errInvalidDepthHeader
 	}
 }
 

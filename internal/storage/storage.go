@@ -99,18 +99,19 @@ type Config struct {
 
 // FileSystem provides unified storage operations
 type FileSystem struct {
-	workspace           *workspace.Workspace
-	versions            *versionstore.Store
-	policy              *versionstore.VersioningPolicy
-	trashRoot           string
-	config              *Config
-	deleteFileIndex     func(ctx context.Context, path string) error
-	updateFileIndex     func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
-	deleteVersionObject func(hash string) error
-	renameWorkspacePath func(ctx context.Context, oldName, newName string) error
-	renameMetadataPath  func(ctx context.Context, oldName, newName string) error
-	removeTrashPath     func(path string) error
-	mu                  sync.RWMutex
+	workspace            *workspace.Workspace
+	versions             *versionstore.Store
+	policy               *versionstore.VersioningPolicy
+	trashRoot            string
+	config               *Config
+	listReferencedHashes func(ctx context.Context) ([]string, error)
+	deleteFileIndex      func(ctx context.Context, path string) error
+	updateFileIndex      func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
+	deleteVersionObject  func(hash string) error
+	renameWorkspacePath  func(ctx context.Context, oldName, newName string) error
+	renameMetadataPath   func(ctx context.Context, oldName, newName string) error
+	removeTrashPath      func(path string) error
+	mu                   sync.RWMutex
 }
 
 // New creates a new FileSystem
@@ -152,17 +153,18 @@ func New(cfg *Config) (*FileSystem, error) {
 	}
 
 	return &FileSystem{
-		workspace:           ws,
-		versions:            vs,
-		policy:              policy,
-		trashRoot:           cfg.TrashRoot,
-		config:              cfg,
-		deleteFileIndex:     vs.DeleteFileIndex,
-		updateFileIndex:     vs.UpdateFileIndex,
-		deleteVersionObject: vs.DeleteObject,
-		renameWorkspacePath: ws.Rename,
-		renameMetadataPath:  vs.RenamePath,
-		removeTrashPath:     os.RemoveAll,
+		workspace:            ws,
+		versions:             vs,
+		policy:               policy,
+		trashRoot:            cfg.TrashRoot,
+		config:               cfg,
+		listReferencedHashes: vs.GetAllVersionHashes,
+		deleteFileIndex:      vs.DeleteFileIndex,
+		updateFileIndex:      vs.UpdateFileIndex,
+		deleteVersionObject:  vs.DeleteObject,
+		renameWorkspacePath:  ws.Rename,
+		renameMetadataPath:   vs.RenamePath,
+		removeTrashPath:      os.RemoveAll,
 	}, nil
 }
 
@@ -1243,7 +1245,21 @@ func (fs *FileSystem) GetAllReferencedHashes(ctx context.Context) ([]string, err
 
 	// In the new architecture, versions are managed by versionstore
 	// Return version hashes from the database
-	return fs.versions.GetAllVersionHashes(ctx)
+	return fs.listReferencedHashes(ctx)
+}
+
+// AcquireGCLock blocks storage mutations for the duration of a GC pass and returns the current referenced hashes.
+func (fs *FileSystem) AcquireGCLock(ctx context.Context) ([]string, func(), error) {
+	fs.mu.Lock()
+	hashes, err := fs.listReferencedHashes(ctx)
+	if err != nil {
+		fs.mu.Unlock()
+		return nil, nil, err
+	}
+
+	return hashes, func() {
+		fs.mu.Unlock()
+	}, nil
 }
 
 // ============================================================================
