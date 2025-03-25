@@ -184,6 +184,19 @@ describe('SearchPage', () => {
         expect(screen.getByDisplayValue('archive')).toBeInTheDocument()
       })
     })
+
+    it('does not trigger search for whitespace-only queries', async () => {
+      const user = userEvent.setup()
+      renderSearchPage()
+
+      const input = screen.getByPlaceholderText('输入文件名搜索...')
+      await user.type(input, '   ')
+
+      await waitFor(() => {
+        expect(screen.getByText('输入关键词开始搜索')).toBeInTheDocument()
+      })
+      expect(searchApi.searchFiles).not.toHaveBeenCalled()
+    })
   })
 
   describe('navigation', () => {

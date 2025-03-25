@@ -33,6 +33,36 @@ describe('Search API', () => {
     expect(result.results[0].name).toBe('report.pdf')
   })
 
+  it('trims the search query before sending the request', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          query: 'report',
+          count: 0,
+          results: [],
+        },
+      }),
+    })
+
+    await searchFiles('  report  ')
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/search?q=report')
+  })
+
+  it('rejects blank search queries without calling the API', async () => {
+    await expect(searchFiles('   ')).rejects.toThrow('Search query is required')
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects invalid limits without calling the API', async () => {
+    await expect(searchFiles('report', 0)).rejects.toThrow('Search limit must be between 1 and 100')
+    await expect(searchFiles('report', 101)).rejects.toThrow('Search limit must be between 1 and 100')
+    await expect(searchFiles('report', 1.5)).rejects.toThrow('Search limit must be between 1 and 100')
+    expect(mockAuthFetch).not.toHaveBeenCalled()
+  })
+
   it('uses structured error message on failure', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,

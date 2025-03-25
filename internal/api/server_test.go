@@ -204,6 +204,15 @@ func setupShareServerWithBaseURL(t *testing.T, baseURL string) (*Server, string)
 	return server, createdShare.ID
 }
 
+type repeatingReader struct{}
+
+func (repeatingReader) Read(p []byte) (int, error) {
+	for index := range p {
+		p[index] = 'a'
+	}
+	return len(p), nil
+}
+
 func TestServer_Health(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -324,6 +333,84 @@ func TestServer_UploadFile(t *testing.T) {
 	data, _ := io.ReadAll(reader)
 	if string(data) != content {
 		t.Errorf("Content = %q, want %q", data, content)
+	}
+}
+
+func TestServer_UploadFile_TooLargeReturnsPayloadTooLarge(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/upload"); err != nil {
+		t.Fatalf("Mkdir(/upload) error: %v", err)
+	}
+
+	body := io.NopCloser(io.LimitReader(repeatingReader{}, DefaultMaxUploadSize+1))
+	req := httptest.NewRequest("POST", "/api/v1/files/upload/toolarge.bin", body)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("Upload too large status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	responseBody := w.Body.String()
+	if !strings.Contains(responseBody, "file too large") {
+		t.Fatalf("expected generic file too large error, got %s", responseBody)
+	}
+	if _, err := fs.Stat(ctx, "/upload/toolarge.bin"); err == nil {
+		t.Fatal("expected oversized upload to leave no file behind")
+	}
+}
+
+func TestServer_Search_InvalidLimitReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	tests := []string{"0", "101", "nope"}
+	for _, limit := range tests {
+		t.Run(limit, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/v1/search?q=report&limit="+limit, nil)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Search invalid limit status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			if !strings.Contains(w.Body.String(), "limit parameter must be between 1 and 100") {
+				t.Fatalf("expected invalid limit error, got %s", w.Body.String())
+			}
+		})
+	}
+}
+
+func TestServer_Activity_InvalidPaginationReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	tests := []struct {
+		name    string
+		query   string
+		message string
+	}{
+		{name: "invalid limit", query: "/api/v1/activity?limit=0", message: "limit parameter must be between 1 and 500"},
+		{name: "overlarge limit", query: "/api/v1/activity?limit=501", message: "limit parameter must be between 1 and 500"},
+		{name: "invalid offset", query: "/api/v1/activity?offset=-1", message: "offset parameter must be a non-negative integer"},
+		{name: "nonnumeric offset", query: "/api/v1/activity?offset=nope", message: "offset parameter must be a non-negative integer"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, testCase.query, nil)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Activity invalid pagination status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+			if !strings.Contains(w.Body.String(), testCase.message) {
+				t.Fatalf("expected invalid pagination error %q, got %s", testCase.message, w.Body.String())
+			}
+		})
 	}
 }
 
@@ -1145,6 +1232,22 @@ func TestServer_GC_NoDataplane(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("GC without dataplane status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServer_GC_InvalidGracePeriodReturnsBadRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/maintenance/gc?grace_period_hours=-1", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GC invalid grace period status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "grace_period_hours must be a non-negative integer") {
+		t.Fatalf("expected invalid grace period error, got %s", w.Body.String())
 	}
 }
 

@@ -59,6 +59,8 @@ export function SearchPage() {
   const urlQuery = searchParams.get('q') || ''
   const [query, setQuery] = useState(initialQuery)
   const [debouncedQuery, setDebouncedQuery] = useState(initialQuery)
+  const trimmedQuery = query.trim()
+  const trimmedDebouncedQuery = debouncedQuery.trim()
 
   useEffect(() => {
     setQuery((current) => current === urlQuery ? current : urlQuery)
@@ -69,19 +71,19 @@ export function SearchPage() {
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedQuery(query)
-      if (query) {
-        setSearchParams({ q: query })
+      if (trimmedQuery) {
+        setSearchParams({ q: trimmedQuery })
       } else {
         setSearchParams({})
       }
     }, 300)
     return () => clearTimeout(timer)
-  }, [query, setSearchParams])
+  }, [query, setSearchParams, trimmedQuery])
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['search', debouncedQuery],
-    queryFn: () => searchFiles(debouncedQuery),
-    enabled: debouncedQuery.length > 0,
+    queryKey: ['search', trimmedDebouncedQuery],
+    queryFn: () => searchFiles(trimmedDebouncedQuery),
+    enabled: trimmedDebouncedQuery.length > 0,
   })
 
   const handleResultClick = useCallback((result: SearchResult) => {
@@ -97,11 +99,13 @@ export function SearchPage() {
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       setDebouncedQuery(query)
-      if (query) {
-        setSearchParams({ q: query })
+      if (trimmedQuery) {
+        setSearchParams({ q: trimmedQuery })
+      } else {
+        setSearchParams({})
       }
     }
-  }, [query, setSearchParams])
+  }, [query, setSearchParams, trimmedQuery])
 
   return (
     <div className="h-full flex flex-col p-6">
@@ -167,7 +171,7 @@ export function SearchPage() {
               <p>搜索失败</p>
               <p className="text-sm text-default-500">{(error as Error).message}</p>
             </div>
-          ) : !debouncedQuery ? (
+          ) : !trimmedDebouncedQuery ? (
             <div className="flex items-center justify-center h-40">
               <EmptyState
                 icon={SearchIcon}
