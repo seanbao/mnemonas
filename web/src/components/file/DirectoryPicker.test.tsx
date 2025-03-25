@@ -147,6 +147,40 @@ describe('DirectoryPicker', () => {
     })
   })
 
+  it('updates the visible root tree immediately after creating a folder at root', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockListFiles
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [
+          { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+          { name: 'private', path: '/private', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+        ],
+      })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'private')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockCreateDirectory).toHaveBeenCalledWith('/private')
+      expect(screen.getByText('private')).toBeTruthy()
+      expect(screen.getByText('/private')).toBeTruthy()
+    })
+  })
+
   it('shows an unavailable toast when expanding a directory hits filesystem unavailability', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     mockListFiles
