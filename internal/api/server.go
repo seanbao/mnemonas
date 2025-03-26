@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -242,7 +243,6 @@ func (s *Server) setupRoutes() {
 	// Setup status (public, for showing credentials on first run)
 	s.router.Route("/api/v1/setup", func(r chi.Router) {
 		r.Get("/", s.handleGetSetupStatus)
-		r.Post("/acknowledge", s.handleAcknowledgeSetup)
 	})
 
 	// Auth endpoints (public)
@@ -272,6 +272,11 @@ func (s *Server) setupRoutes() {
 			r.Post("/auth/logout", s.handleLogoutWithActivity)
 			r.Get("/auth/me", s.authHandler.HandleMe)
 			r.Post("/auth/password", s.authHandler.HandleChangePassword)
+
+			r.Route("/setup", func(r chi.Router) {
+				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
+				r.Post("/acknowledge", s.handleAcknowledgeSetup)
+			})
 
 			// Admin user management
 			r.Route("/admin/users", func(r chi.Router) {
@@ -868,7 +873,16 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.authEnabled && !auth.IsAdmin(r.Context()) {
+		Forbidden(w, "admin access required to restore versions")
+		return
+	}
+
 	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
+		if errors.Is(err, storage.ErrVersionNotFound) {
+			NotFound(w, err.Error())
+			return
+		}
 		InternalError(w, err.Error())
 		return
 	}
@@ -2132,15 +2146,12 @@ type SetupStatusResponse struct {
 	Success        bool   `json:"success"`
 	IsFirstRun     bool   `json:"is_first_run"`
 	AuthEnabled    bool   `json:"auth_enabled"`
-	WebUsername    string `json:"web_username,omitempty"`
-	WebPassword    string `json:"web_password,omitempty"`
 	WebDAVEnabled  bool   `json:"webdav_enabled"`
 	WebDAVAuthType string `json:"webdav_auth_type"`
-	WebDAVUsername string `json:"webdav_username,omitempty"`
-	WebDAVPassword string `json:"webdav_password,omitempty"`
 }
 
-// handleGetSetupStatus returns setup status and credentials for first run
+// handleGetSetupStatus returns setup status for first run.
+// Initial credentials are intentionally only exposed through server-side logs.
 func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 	secrets, err := config.LoadSecrets(s.config.Storage.Root)
 	if err != nil {
@@ -2170,25 +2181,6 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 		AuthEnabled:    s.authEnabled,
 		WebDAVEnabled:  s.config.WebDAV.Enabled,
 		WebDAVAuthType: s.config.WebDAV.AuthType,
-	}
-
-	// Only include credentials if setup hasn't been shown yet
-	if !secrets.SetupShown {
-		// Web auth credentials
-		if s.authEnabled && secrets.WebPassword != "" {
-			resp.WebUsername = "admin"
-			resp.WebPassword = secrets.WebPassword
-		}
-		// WebDAV credentials
-		if s.config.WebDAV.AuthType == "basic" {
-			resp.WebDAVUsername = s.config.WebDAV.Username
-			if resp.WebDAVUsername == "" {
-				resp.WebDAVUsername = "admin"
-			}
-			if s.config.WebDAV.Password == "" {
-				resp.WebDAVPassword = secrets.WebDAVPassword
-			}
-		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

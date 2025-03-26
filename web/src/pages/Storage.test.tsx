@@ -98,7 +98,7 @@ describe('StoragePage', () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        const progressBar = document.querySelector('[class*="bg-gradient-to-r"]')
+        const progressBar = document.querySelector('[class*="flow-line"], [class*="bg-accent-primary"]')
         expect(progressBar).toBeTruthy()
       })
     })
@@ -159,35 +159,35 @@ describe('StoragePage', () => {
       })
     })
 
-    it('renders scrub button (coming soon)', async () => {
+    it('renders scrub maintenance button', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('开始巡检（即将推出）')).toBeTruthy()
+        expect(screen.getAllByText('打开维护工具').length).toBeGreaterThan(0)
       })
     })
 
-    it('renders GC button (coming soon)', async () => {
+    it('renders GC maintenance button', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getByText('开始清理（即将推出）')).toBeTruthy()
+        expect(screen.getAllByText('打开维护工具').length).toBeGreaterThan(1)
       })
     })
 
-    it('shows development status for scrub', async () => {
+    it('shows scrub execution context', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getAllByText('功能开发中').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('在系统维护中执行').length).toBeGreaterThan(0)
       })
     })
 
-    it('shows coming soon status for features', async () => {
+    it('shows GC execution context', async () => {
       render(<StoragePage />)
 
       await waitFor(() => {
-        expect(screen.getAllByText('即将推出').length).toBeGreaterThan(0)
+        expect(screen.getAllByText(/支持/).length).toBeGreaterThan(1)
       })
     })
   })

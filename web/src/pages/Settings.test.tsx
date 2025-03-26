@@ -3,6 +3,10 @@ import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { SettingsPage } from './Settings'
 
+vi.mock('@/components/share', () => ({
+  ShareManager: () => <div>ShareManager</div>,
+}))
+
 // Mock the settings API
 vi.mock('@/api/settings', () => ({
   getSettings: vi.fn().mockResolvedValue({
@@ -130,10 +134,10 @@ describe('SettingsPage', () => {
       })
     })
 
-    it('renders data directory input', async () => {
+    it('renders storage root input', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
-        const input = screen.getByDisplayValue('/root/.mnemonas/.mnemonas/objects')
+        const input = screen.getByDisplayValue('/root/.mnemonas')
         expect(input).toBeTruthy()
       })
     })

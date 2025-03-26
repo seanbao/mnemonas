@@ -10,6 +10,12 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+func init() {
+	if jwt.TimePrecision > time.Nanosecond {
+		jwt.TimePrecision = time.Nanosecond
+	}
+}
+
 // TokenManager handles JWT token generation and validation
 type TokenManager struct {
 	secretKey     []byte
@@ -20,6 +26,7 @@ type TokenManager struct {
 	// Revoked tokens (for logout)
 	mu            sync.RWMutex
 	revokedTokens map[string]time.Time // token ID -> expiry time
+	userRevokedAt map[string]time.Time // user ID -> revocation timestamp
 }
 
 // TokenClaims extends standard JWT claims
@@ -54,12 +61,15 @@ func NewTokenManager(secretKey string, accessExpiry, refreshExpiry time.Duration
 		refreshExpiry: refreshExpiry,
 		issuer:        "mnemonas",
 		revokedTokens: make(map[string]time.Time),
+		userRevokedAt: make(map[string]time.Time),
 	}
 }
 
 // GenerateTokenPair creates access and refresh tokens for a user
 func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
-	now := time.Now()
+	tm.CleanupRevokedTokens()
+
+	now := jwtTimestamp(time.Now())
 	accessExpiry := now.Add(tm.accessExpiry)
 	refreshExpiry := now.Add(tm.refreshExpiry)
 
@@ -114,6 +124,8 @@ func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
 
 // ValidateAccessToken validates an access token and returns claims
 func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenClaims, error) {
+	tm.CleanupRevokedTokens()
+
 	token, err := jwt.ParseWithClaims(tokenString, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
@@ -138,11 +150,17 @@ func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenClaims, e
 		return nil, ErrTokenRevoked
 	}
 
+	if tm.isUserRevoked(claims.UserID, claims.IssuedAt) {
+		return nil, ErrTokenRevoked
+	}
+
 	return claims, nil
 }
 
 // ValidateRefreshToken validates a refresh token
 func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error) {
+	tm.CleanupRevokedTokens()
+
 	token, err := jwt.ParseWithClaims(tokenString, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
@@ -171,11 +189,17 @@ func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error)
 		}
 	}
 
+	if tm.isUserRevoked(claims.Subject, claims.IssuedAt) {
+		return "", ErrTokenRevoked
+	}
+
 	return claims.Subject, nil
 }
 
 // RevokeToken revokes a token by ID
 func (tm *TokenManager) RevokeToken(tokenID string) {
+	tm.CleanupRevokedTokens()
+
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -185,17 +209,34 @@ func (tm *TokenManager) RevokeToken(tokenID string) {
 
 // RevokeByUser revokes all tokens for a user (used when password changed)
 func (tm *TokenManager) RevokeByUser(userID string) {
-	// In a production system, you'd track token IDs by user
-	// For now, this is a placeholder
+	tm.CleanupRevokedTokens()
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	tm.userRevokedAt[userID] = jwtTimestamp(time.Now())
 }
 
 // isRevoked checks if a token is revoked
 func (tm *TokenManager) isRevoked(tokenID string) bool {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	expiry, revoked := tm.revokedTokens[tokenID]
+	tm.mu.RUnlock()
 
-	_, revoked := tm.revokedTokens[tokenID]
-	return revoked
+	if !revoked {
+		return false
+	}
+
+	if time.Now().After(expiry) {
+		tm.mu.Lock()
+		if currentExpiry, ok := tm.revokedTokens[tokenID]; ok && time.Now().After(currentExpiry) {
+			delete(tm.revokedTokens, tokenID)
+		}
+		tm.mu.Unlock()
+		return false
+	}
+
+	return true
 }
 
 // CleanupRevokedTokens removes expired revoked tokens
@@ -209,6 +250,28 @@ func (tm *TokenManager) CleanupRevokedTokens() {
 			delete(tm.revokedTokens, id)
 		}
 	}
+
+	for userID, revokedAt := range tm.userRevokedAt {
+		if now.Sub(revokedAt) > tm.refreshExpiry {
+			delete(tm.userRevokedAt, userID)
+		}
+	}
+}
+
+func (tm *TokenManager) isUserRevoked(userID string, issuedAt *jwt.NumericDate) bool {
+	if issuedAt == nil {
+		return false
+	}
+
+	tm.mu.RLock()
+	revokedAt, revoked := tm.userRevokedAt[userID]
+	tm.mu.RUnlock()
+
+	if !revoked {
+		return false
+	}
+
+	return !issuedAt.Time.After(revokedAt)
 }
 
 // Token errors
@@ -222,4 +285,8 @@ func generateTokenID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func jwtTimestamp(now time.Time) time.Time {
+	return now.UTC().Truncate(jwt.TimePrecision)
 }

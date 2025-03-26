@@ -310,6 +310,35 @@ export function getDownloadUrl(path?: string): string {
   return buildDownloadUrl(path)
 }
 
+function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
+  if (!contentDisposition) {
+    return fallback
+  }
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+
+  const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+  return filenameMatch?.[1] ?? fallback
+}
+
+function triggerBrowserDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 function withAuthQuery(url: string): string {
   const token = getStoredToken()
   if (!token) return url
@@ -335,6 +364,34 @@ export function buildDownloadUrl(
   const query = params.toString()
   const url = query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
   return withAuthQuery(url)
+}
+
+export async function downloadFile(
+  path: string,
+  options?: { version?: string; download?: boolean; filename?: string }
+): Promise<void> {
+  const normalizedPath = normalizePath(path)
+  const encodedPath = encodePathForUrl(normalizedPath)
+  const params = new URLSearchParams()
+  if (options?.version) {
+    params.set('version', options.version)
+  }
+  if (options?.download !== false) {
+    params.set('download', 'true')
+  }
+
+  const query = params.toString()
+  const url = query ? `${API_BASE}/download${encodedPath}?${query}` : `${API_BASE}/download${encodedPath}`
+  const response = await authFetch(url)
+
+  if (!response.ok) {
+    throw new ApiError('下载文件失败', response.status, response.statusText)
+  }
+
+  const fallbackFilename = options?.filename ?? normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
+  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+  const blob = await response.blob()
+  triggerBrowserDownload(blob, filename)
 }
 
 // Thumbnail URL
@@ -561,12 +618,5 @@ export async function downloadDiagnosticsExport(): Promise<void> {
   }
   
   const blob = await response.blob()
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+  triggerBrowserDownload(blob, filename)
 }

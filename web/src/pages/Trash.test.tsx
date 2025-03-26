@@ -189,10 +189,11 @@ describe('TrashPage', () => {
       await user.click(deleteButtons[0])
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+        expect(screen.getAllByRole('button', { name: '永久删除' }).length).toBeGreaterThan(1)
       })
 
-      const confirmBtn = screen.getByRole('button', { name: '永久删除' })
+      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
+      const confirmBtn = confirmButtons[confirmButtons.length - 1]
       await user.click(confirmBtn)
 
       await waitFor(() => {

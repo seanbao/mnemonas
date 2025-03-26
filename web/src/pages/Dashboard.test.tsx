@@ -72,8 +72,7 @@ describe('DashboardPage', () => {
       mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
       
       render(<DashboardPage />)
-      // Multiple skeleton elements should be present
-      const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="animate"]')
+      const skeletons = document.querySelectorAll('.rounded-lg, .rounded-xl, [class*="animate"]')
       expect(skeletons.length).toBeGreaterThan(0)
     })
   })

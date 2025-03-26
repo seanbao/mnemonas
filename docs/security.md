@@ -17,17 +17,21 @@ password = ""  # 留空则首次启动时自动生成
 ```
 
 **自动生成密码**：
+
 - 首次启动时，如果 `password` 为空，系统会自动生成 16 位随机密码
 - 密码会显示在启动日志中，并保存到 `<storage_root>/secrets.json`
+- 浏览器端不会通过 setup API 或弹窗回传初始密码
 - 后续启动会自动使用保存的密码
 
 **手动设置密码**（如需自定义）：
+
 ```toml
 [webdav]
 password = "your-strong-password"  # 至少 16 字符，混合大小写、数字、符号
 ```
 
 **密码强度建议**：
+
 - 长度 ≥ 16 字符
 - 包含大小写字母、数字、特殊符号
 - 使用密码管理器生成
@@ -72,6 +76,7 @@ password = "your-password"
 ```
 
 **防火墙配置**：
+
 ```bash
 # Ubuntu/Debian
 sudo ufw allow from 192.168.0.0/24 to any port 8080
@@ -126,6 +131,7 @@ server {
 ```
 
 使用 Certbot 获取证书：
+
 ```bash
 sudo certbot --nginx -d nas.example.com
 ```
@@ -206,36 +212,42 @@ curl http://<server-ip>:8080/dav/
 
 ### 当前版本
 
-1. **LOCK/UNLOCK 是虚拟实现**
-   - 不提供真正的并发编辑保护
-   - 多用户编辑同一文件时需协调
+#### LOCK/UNLOCK 是虚拟实现
 
-2. **多用户权限边界**
-  - 当前版本已支持多用户与角色（admin/user/guest）
-  - 文件与目录权限隔离尚未实现，所有登录用户共享同一数据空间
+- 不提供真正的并发编辑保护
+- 多用户编辑同一文件时需协调
 
-3. **速率限制粒度**
-  - 内置并发请求限制（默认 100 并发）
-  - 未提供按 IP/用户的细粒度速率限制
-  - 可通过反向代理实现更细粒度限制
-  - 示例（Nginx）：
-     ```nginx
-     limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
-     location /api/ {
-         limit_req zone=api burst=20;
-         proxy_pass http://localhost:8080;
-     }
-     ```
+#### 多用户权限边界
 
-4. **浏览器预览鉴权参数**
-   - 文件预览/播放允许通过 `auth` 查询参数携带访问令牌（仅 `GET`/`HEAD` 且限定下载/缩略图路径）
-   - URL 可能出现在浏览器历史、代理日志或监控系统中
-   - 建议仅用于前端预览场景，避免将包含令牌的链接分享或长期保存
+- 当前版本已支持多用户与角色（admin/user/guest）
+- 文件与目录权限隔离尚未实现，所有登录用户共享同一数据空间
+
+#### 速率限制粒度
+
+- 内置并发请求限制（默认 100 并发）
+- 未提供按 IP/用户的细粒度速率限制
+- 可通过反向代理实现更细粒度限制
+
+示例（Nginx）：
+
+```nginx
+limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+location /api/ {
+    limit_req zone=api burst=20;
+    proxy_pass http://localhost:8080;
+}
+```
+
+#### 浏览器预览鉴权参数
+
+- 文件预览/播放允许通过 `auth` 查询参数携带访问令牌（仅 `GET`/`HEAD` 且限定下载/缩略图路径）
+- URL 可能出现在浏览器历史、代理日志或监控系统中
+- 建议仅用于前端预览场景，避免将包含令牌的链接分享或长期保存
 
 ### 路线图
 
 | 版本 | 安全特性 |
-|------|----------|
+| ---- | -------- |
 | v0.1.0 | Basic Auth, 路径遍历保护, 只读模式 |
 | v0.2.0 | 多用户支持, 权限控制 |
 | v0.3.0 | OAuth/OIDC 集成 |

@@ -17,7 +17,7 @@ func TestUserStore(t *testing.T) {
 	usersFile := filepath.Join(dir, "users.json")
 
 	t.Run("create and authenticate", func(t *testing.T) {
-		store, err := NewUserStore(usersFile)
+		store, _, err := NewUserStore(usersFile)
 		if err != nil {
 			t.Fatalf("failed to create user store: %v", err)
 		}
@@ -49,7 +49,7 @@ func TestUserStore(t *testing.T) {
 	})
 
 	t.Run("duplicate username", func(t *testing.T) {
-		store, _ := NewUserStore(filepath.Join(dir, "users2.json"))
+		store, _, _ := NewUserStore(filepath.Join(dir, "users2.json"))
 		store.Create("duplicate", "password123", "", RoleUser)
 
 		_, err := store.Create("duplicate", "password456", "", RoleUser)
@@ -59,7 +59,7 @@ func TestUserStore(t *testing.T) {
 	})
 
 	t.Run("short password", func(t *testing.T) {
-		store, _ := NewUserStore(filepath.Join(dir, "users3.json"))
+		store, _, _ := NewUserStore(filepath.Join(dir, "users3.json"))
 		_, err := store.Create("shortpass", "short", "", RoleUser)
 		if err != ErrPasswordTooShort {
 			t.Errorf("expected ErrPasswordTooShort, got %v", err)
@@ -67,7 +67,7 @@ func TestUserStore(t *testing.T) {
 	})
 
 	t.Run("change password", func(t *testing.T) {
-		store, _ := NewUserStore(filepath.Join(dir, "users4.json"))
+		store, _, _ := NewUserStore(filepath.Join(dir, "users4.json"))
 		user, _ := store.Create("changepw", "oldpassword123", "", RoleUser)
 
 		err := store.ChangePassword(user.ID, "oldpassword123", "newpassword456")
@@ -87,7 +87,7 @@ func TestUserStore(t *testing.T) {
 	})
 
 	t.Run("disable user", func(t *testing.T) {
-		store, _ := NewUserStore(filepath.Join(dir, "users5.json"))
+		store, _, _ := NewUserStore(filepath.Join(dir, "users5.json"))
 		user, _ := store.Create("disabled", "password123", "", RoleUser)
 
 		user.Disabled = true
@@ -100,7 +100,7 @@ func TestUserStore(t *testing.T) {
 	})
 
 	t.Run("delete user", func(t *testing.T) {
-		store, _ := NewUserStore(filepath.Join(dir, "users6.json"))
+		store, _, _ := NewUserStore(filepath.Join(dir, "users6.json"))
 		user, _ := store.Create("todelete", "password123", "", RoleUser)
 
 		err := store.Delete(user.ID)
@@ -115,7 +115,7 @@ func TestUserStore(t *testing.T) {
 	})
 
 	t.Run("cannot delete last admin", func(t *testing.T) {
-		store, _ := NewUserStore(filepath.Join(dir, "users7.json"))
+		store, _, _ := NewUserStore(filepath.Join(dir, "users7.json"))
 		// NewUserStore creates default admin, so we get existing admin
 		admin, _ := store.GetByUsername("admin")
 
@@ -127,10 +127,10 @@ func TestUserStore(t *testing.T) {
 
 	t.Run("persistence", func(t *testing.T) {
 		usersFile := filepath.Join(dir, "users8.json")
-		store1, _ := NewUserStore(usersFile)
+		store1, _, _ := NewUserStore(usersFile)
 		store1.Create("persistent", "password123", "p@example.com", RoleUser)
 
-		store2, err := NewUserStore(usersFile)
+		store2, _, err := NewUserStore(usersFile)
 		if err != nil {
 			t.Fatalf("failed to load existing store: %v", err)
 		}
@@ -212,7 +212,6 @@ func TestTokenManager(t *testing.T) {
 	})
 
 	t.Run("revoke by user", func(t *testing.T) {
-		t.Skip("RevokeByUser not fully implemented yet")
 		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
 
 		user := &User{
@@ -233,6 +232,38 @@ func TestTokenManager(t *testing.T) {
 		_, err = tm.ValidateAccessToken(tokenPair2.AccessToken)
 		if err != ErrTokenRevoked {
 			t.Errorf("token2: expected ErrTokenRevoked, got %v", err)
+		}
+
+		_, err = tm.ValidateRefreshToken(tokenPair1.RefreshToken)
+		if err != ErrTokenRevoked {
+			t.Errorf("refresh token: expected ErrTokenRevoked, got %v", err)
+		}
+	})
+
+	t.Run("revoke by user does not revoke newly issued tokens in same second", func(t *testing.T) {
+		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+
+		user := &User{
+			ID:       "user-same-second",
+			Username: "same-second",
+			Role:     RoleUser,
+		}
+
+		oldPair, _ := tm.GenerateTokenPair(user)
+		tm.RevokeByUser(user.ID)
+		newPair, _ := tm.GenerateTokenPair(user)
+
+		_, err := tm.ValidateAccessToken(oldPair.AccessToken)
+		if err != ErrTokenRevoked {
+			t.Fatalf("old access token: expected ErrTokenRevoked, got %v", err)
+		}
+
+		if _, err := tm.ValidateAccessToken(newPair.AccessToken); err != nil {
+			t.Fatalf("new access token should remain valid, got %v", err)
+		}
+
+		if _, err := tm.ValidateRefreshToken(newPair.RefreshToken); err != nil {
+			t.Fatalf("new refresh token should remain valid, got %v", err)
 		}
 	})
 
@@ -263,10 +294,31 @@ func TestTokenManager(t *testing.T) {
 	})
 }
 
+func TestTokenManager_CleanupRevokedTokens_RemovesExpiredEntries(t *testing.T) {
+	tm := NewTokenManager("cleanup-secret", time.Minute, time.Minute)
+
+	tm.mu.Lock()
+	tm.revokedTokens["expired-token"] = time.Now().Add(-time.Minute)
+	tm.userRevokedAt["expired-user"] = time.Now().Add(-2 * time.Minute)
+	tm.mu.Unlock()
+
+	tm.CleanupRevokedTokens()
+
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	if _, ok := tm.revokedTokens["expired-token"]; ok {
+		t.Fatal("expected expired token entry to be removed")
+	}
+	if _, ok := tm.userRevokedAt["expired-user"]; ok {
+		t.Fatal("expected expired user revocation entry to be removed")
+	}
+}
+
 func TestMiddleware(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "middleware_users.json")
-	store, _ := NewUserStore(usersFile)
+	store, _, _ := NewUserStore(usersFile)
 	tm := NewTokenManager("test-secret", 15*time.Minute, 24*time.Hour)
 
 	user, _ := store.Create("middlewareuser", "password123", "", RoleUser)
@@ -475,7 +527,7 @@ func TestMiddleware(t *testing.T) {
 func TestAuthHandler(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "handler_users.json")
-	store, _ := NewUserStore(usersFile)
+	store, _, _ := NewUserStore(usersFile)
 	tm := NewTokenManager("test-secret", 15*time.Minute, 24*time.Hour)
 
 	store.Create("handleruser", "password123", "handler@test.com", RoleUser)
@@ -624,7 +676,7 @@ func TestDefaultAdminCreation(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "new_users.json")
 
-	store, err := NewUserStore(usersFile)
+	store, _, err := NewUserStore(usersFile)
 	if err != nil {
 		t.Fatalf("failed to create user store: %v", err)
 	}
@@ -642,7 +694,7 @@ func TestDefaultAdminCreation(t *testing.T) {
 func TestUserStoreQuota(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "quota_users.json")
-	store, _ := NewUserStore(usersFile)
+	store, _, _ := NewUserStore(usersFile)
 
 	user, _ := store.Create("quotauser", "password123", "", RoleUser)
 

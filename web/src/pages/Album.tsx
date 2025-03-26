@@ -17,7 +17,7 @@ import {
   RotateCw,
   Info
 } from 'lucide-react'
-import { listFiles, getDownloadUrl, getThumbnailUrl, type FileItem } from '@/api/files'
+import { listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
 import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -411,7 +411,7 @@ function ImagePreview({
                   size="sm"
                   variant="light"
                   className="text-white rounded-xl"
-                  onPress={() => currentImage && window.open(getDownloadUrl(currentImage.path), '_blank')}
+                  onPress={() => currentImage && void downloadFile(currentImage.path, { filename: currentImage.name })}
                 >
                   <Download size={18} />
                 </Button>
