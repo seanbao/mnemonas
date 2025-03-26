@@ -384,8 +384,6 @@ port = 8080
 
 [storage]
 root = "~/.mnemonas"
-data_dir = "~/.mnemonas/.mnemonas/objects"
-metadata_dir = "~/.mnemonas/.mnemonas"
 
 [dataplane]
 grpc_address = "127.0.0.1:9090"

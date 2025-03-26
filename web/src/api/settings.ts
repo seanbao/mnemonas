@@ -13,9 +13,7 @@ export interface SettingsData {
     port: number
   }
   storage: {
-    data_dir: string
-    metadata_dir: string
-    temp_dir: string
+    root: string
   }
   retention: {
     max_versions: number

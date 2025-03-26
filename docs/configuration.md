@@ -31,12 +31,6 @@ cert_dir = "~/.mnemonas/.mnemonas/certs"
 
 [storage]
 root = "~/.mnemonas"
-data_dir = "~/.mnemonas/.mnemonas/objects"
-metadata_dir = "~/.mnemonas/.mnemonas"
-temp_dir = "~/.mnemonas/.mnemonas/tmp"
-thumbnail_dir = "~/.mnemonas/.mnemonas/thumbnails"
-maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
-activity_dir = "~/.mnemonas/.mnemonas/activity"
 
 [storage.retention]
 max_versions = 50
@@ -153,38 +147,21 @@ auto_generate = true
 
 ### [storage] — 存储配置
 
-定义数据存储位置和目录结构。推荐使用 `root` 配置统一根目录，其他目录为兼容字段。
+定义数据存储位置和目录结构。
 
 | 选项 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `root` | string | `~/.mnemonas` | 存储根目录（用户文件在 `root/files`） |
-| `data_dir` | string | `~/.mnemonas/.mnemonas/objects` | 兼容字段：CAS 对象目录 |
-| `metadata_dir` | string | `~/.mnemonas/.mnemonas` | 兼容字段：元数据目录 |
-| `temp_dir` | string | `~/.mnemonas/.mnemonas/tmp` | 临时文件目录（用于原子写入） |
-| `thumbnail_dir` | string | `~/.mnemonas/.mnemonas/thumbnails` | 缩略图缓存目录 |
-| `maintenance_dir` | string | `~/.mnemonas/.mnemonas/maintenance` | 维护状态文件目录 |
-| `activity_dir` | string | `~/.mnemonas/.mnemonas/activity` | 活动日志目录 |
 
 **存储目录说明：**
 
 - **root**: 存储根目录。用户文件位于 `root/files`，内部数据位于 `root/.mnemonas`
-- **data_dir**: CAS 对象目录（兼容字段）
-- **metadata_dir**: SQLite 与维护元数据目录（兼容字段）
-- **temp_dir**: 写入操作临时文件目录（原子写入）
-- **thumbnail_dir**: 缩略图缓存目录
-- **maintenance_dir**: Scrub、GC 等维护任务目录
-- **activity_dir**: 活动日志目录
+- 内部数据目录结构固定在 `root/.mnemonas` 下。
 
 **示例：**
 ```toml
 [storage]
 root = "~/.mnemonas"
-data_dir = "~/.mnemonas/.mnemonas/objects"
-metadata_dir = "~/.mnemonas/.mnemonas"
-temp_dir = "~/.mnemonas/.mnemonas/tmp"
-thumbnail_dir = "~/.mnemonas/.mnemonas/thumbnails"
-maintenance_dir = "~/.mnemonas/.mnemonas/maintenance"
-activity_dir = "~/.mnemonas/.mnemonas/activity"
 ```
 
 ---
@@ -492,7 +469,7 @@ MNEMONAS_WEBDAV_ENABLED=false
 系统在启动时自动验证配置：
 
 - `port` 必须在 1-65535 范围内
-- `data_dir` 不能为空
+- `storage.root` 不能为空
 - `grpc_address` 不能为空
 - CDC 参数必须满足 `min < avg < max`
 
@@ -511,9 +488,6 @@ port = 8080
 
 [storage]
 root = "~/.mnemonas"
-data_dir = "~/.mnemonas/.mnemonas/objects"
-metadata_dir = "~/.mnemonas/.mnemonas"
-temp_dir = "~/.mnemonas/.mnemonas/tmp"
 
 [webdav]
 enabled = true

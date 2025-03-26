@@ -15,7 +15,6 @@ import {
 } from '@heroui/react'
 import { 
   Server, 
-  Database, 
   Shield, 
   HardDrive,
   Clock,
@@ -140,9 +139,7 @@ export function SettingsPage() {
   const [settings, setSettings] = useState({
     serverHost: '0.0.0.0',
     serverPort: '8080',
-    dataDir: '',
-    metadataDir: '',
-    tempDir: '',
+    storageRoot: '',
     maxVersions: 100,
     maxAge: '8760h',
     minFreeSpace: '10GB',
@@ -167,9 +164,7 @@ export function SettingsPage() {
       setSettings({
         serverHost: d.server.host,
         serverPort: String(d.server.port),
-        dataDir: d.storage.data_dir,
-        metadataDir: d.storage.metadata_dir,
-        tempDir: d.storage.temp_dir,
+        storageRoot: d.storage.root,
         maxVersions: d.retention.max_versions,
         maxAge: d.retention.max_age,
         minFreeSpace: formatBytes(d.retention.min_free_space),
@@ -356,42 +351,16 @@ export function SettingsPage() {
 
               <SettingsSection
                 title="存储路径"
-                description="配置数据存储目录"
+                description="配置数据存储根目录"
                 icon={Folder}
               >
                 <div className="space-y-4">
                   <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">数据目录</label>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">存储根目录</label>
                     <Input
-                      placeholder="~/.mnemonas/.mnemonas/objects"
-                      value={settings.dataDir}
-                      onValueChange={(v) => setSettings(s => ({ ...s, dataDir: v }))}
-                      isReadOnly
-                      startContent={<Database size={16} className="text-default-500" />}
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">元数据目录</label>
-                    <Input
-                      placeholder="~/.mnemonas/.mnemonas"
-                      value={settings.metadataDir}
-                      onValueChange={(v) => setSettings(s => ({ ...s, metadataDir: v }))}
-                      isReadOnly
-                      startContent={<Database size={16} className="text-default-500" />}
-                      classNames={{ 
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-default-600 mb-1.5 block">临时目录</label>
-                    <Input
-                      placeholder="~/.mnemonas/.mnemonas/tmp"
-                      value={settings.tempDir}
-                      onValueChange={(v) => setSettings(s => ({ ...s, tempDir: v }))}
+                      placeholder="~/.mnemonas"
+                      value={settings.storageRoot}
+                      onValueChange={(v) => setSettings(s => ({ ...s, storageRoot: v }))}
                       isReadOnly
                       startContent={<Folder size={16} className="text-default-500" />}
                       classNames={{ 

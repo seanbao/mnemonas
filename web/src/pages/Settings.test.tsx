@@ -8,7 +8,7 @@ vi.mock('@/api/settings', () => ({
   getSettings: vi.fn().mockResolvedValue({
     data: {
       server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
-      storage: { data_dir: '/root/.mnemonas/.mnemonas/objects', metadata_dir: '/root/.mnemonas/.mnemonas', temp_dir: '/root/.mnemonas/.mnemonas/tmp' },
+      storage: { root: '/root/.mnemonas' },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
       webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
