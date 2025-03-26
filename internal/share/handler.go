@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
@@ -685,34 +686,15 @@ func isWithinSharePath(basePath, targetPath string) bool {
 	return false
 }
 
-// Context helpers
-
-type contextKey string
-
-const (
-	ctxKeyUserID  contextKey = "user_id"
-	ctxKeyIsAdmin contextKey = "is_admin"
-)
-
 func getUserIDFromContext(ctx context.Context) string {
-	if v := ctx.Value(ctxKeyUserID); v != nil {
-		return v.(string)
+	if claims := auth.GetClaimsFromContext(ctx); claims != nil {
+		return claims.UserID
 	}
 	return ""
 }
 
 func getIsAdminFromContext(ctx context.Context) bool {
-	if v := ctx.Value(ctxKeyIsAdmin); v != nil {
-		return v.(bool)
-	}
-	return false
-}
-
-// SetUserContext sets user info in context
-func SetUserContext(ctx context.Context, userID string, isAdmin bool) context.Context {
-	ctx = context.WithValue(ctx, ctxKeyUserID, userID)
-	ctx = context.WithValue(ctx, ctxKeyIsAdmin, isAdmin)
-	return ctx
+	return auth.IsAdmin(ctx)
 }
 
 func hashPassword(password string) (string, error) {

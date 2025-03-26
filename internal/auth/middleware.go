@@ -194,6 +194,14 @@ func GetClaimsFromContext(ctx context.Context) *TokenClaims {
 	return claims
 }
 
+// WithClaimsContext adds claims to the context for testing or internal use.
+func WithClaimsContext(ctx context.Context, claims *TokenClaims) context.Context {
+	if claims == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ContextKeyClaims, claims)
+}
+
 // IsAdmin checks if the user in context is admin
 func IsAdmin(ctx context.Context) bool {
 	user := GetUserFromContext(ctx)

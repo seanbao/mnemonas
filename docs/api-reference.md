@@ -377,7 +377,14 @@ GET /api/v1/metrics
       "mb_per_s": 0.5
     },
     "uptime_secs": 3600,
-    "slow_requests": 0
+    "slow_requests": [
+      {
+        "method": "GET",
+        "path": "/api/v1/files/",
+        "duration_ms": 180,
+        "time": "2024-01-15T10:00:00Z"
+      }
+    ]
   },
   "timestamp": "2024-01-15T10:00:00Z"
 }
@@ -1260,6 +1267,9 @@ GET /api/v1/settings/webdav-credentials
 ---
 
 ## 维护操作
+
+**说明**:
+- 启用认证时，维护操作仅管理员可用。
 
 ### 获取数据校验结果
 
