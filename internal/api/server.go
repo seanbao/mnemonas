@@ -1534,10 +1534,22 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		}
 		defer reader.Close()
 
+		versionETag := fmt.Sprintf(`"%s"`, versionHash)
+		w.Header().Set("ETag", versionETag)
+		w.Header().Set("Cache-Control", "private, no-cache")
+		if apiETagMatch(r.Header.Get("If-None-Match"), versionETag) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+
 		if forceDownload {
 			w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		contentType := mime.TypeByExtension(strings.ToLower(path.Ext(filePath)))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
 		if err := streamAPIResponse(w, reader); err != nil {
 			if apiStreamResponseStarted(err) {
 				return
@@ -1545,6 +1557,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 			s.respondInternalError(w, "download file version", err)
 			return
 		}
+		s.LogActivity(r, activity.ActionDownload, filePath, map[string]string{"hash": versionHash})
 		return
 	}
 
@@ -1586,7 +1599,11 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use http.ServeContent for proper Range support and content type detection
-	http.ServeContent(w, r, path.Base(filePath), info.ModTime, file)
+	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
+	http.ServeContent(trackingWriter, r, path.Base(filePath), info.ModTime, file)
+	if trackingWriter.writeErr == nil && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
+		s.LogActivity(r, activity.ActionDownload, filePath, nil)
+	}
 }
 
 // MoveRequest represents a move/rename request
@@ -1660,8 +1677,13 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	action := activity.ActionMove
+	if path.Dir(fromPath) == path.Dir(toPath) {
+		action = activity.ActionRename
+	}
+
 	// Log activity
-	s.LogActivityWithWarning(w, r, activity.ActionMove, fromPath, map[string]string{"to": toPath})
+	s.LogActivityWithWarning(w, r, action, fromPath, map[string]string{"to": toPath})
 
 	NewAPIResponse(map[string]any{
 		"from": fromPath,
@@ -2613,17 +2635,27 @@ func apiStreamResponseStarted(err error) bool {
 
 type apiDownloadResponseWriter struct {
 	http.ResponseWriter
-	started bool
+	started    bool
+	statusCode int
+	writeErr   error
 }
 
 func (w *apiDownloadResponseWriter) WriteHeader(statusCode int) {
 	w.started = true
+	w.statusCode = statusCode
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (w *apiDownloadResponseWriter) Write(p []byte) (int, error) {
 	w.started = true
-	return w.ResponseWriter.Write(p)
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	if err != nil {
+		w.writeErr = err
+	}
+	return n, err
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

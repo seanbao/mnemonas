@@ -1478,6 +1478,47 @@ func TestServer_DownloadFile_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	}
 }
 
+func TestServer_DownloadFile_LogsDownloadActivity(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := fs.WriteFile(ctx, "/download-activity.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/download-activity.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("download status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 1 {
+		t.Fatalf("expected one download activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed download activity entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/download-activity.txt" {
+		t.Fatalf("expected download activity path %q, got %q", "/download-activity.txt", entries[0].Path)
+	}
+	if entries[0].Action != activity.ActionDownload {
+		t.Fatalf("expected action %q, got %q", activity.ActionDownload, entries[0].Action)
+	}
+	if entries[0].Details != nil {
+		t.Fatalf("expected plain download to omit details, got %+v", entries[0].Details)
+	}
+	if entries[0].User != "anonymous" {
+		t.Fatalf("expected anonymous download user, got %q", entries[0].User)
+	}
+}
+
 func TestServer_DownloadFile_RefreshesAfterFileContentChanges(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2201,6 +2242,158 @@ func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) 
 	contentDisposition := w.Header().Get("Content-Disposition")
 	if !strings.Contains(contentDisposition, `filename="quote\"name.txt"`) {
 		t.Fatalf("expected escaped version Content-Disposition filename, got %q", contentDisposition)
+	}
+}
+
+func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/preview.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/preview.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/preview.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/preview.txt?version="+historicalHash, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("download version preview status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if contentType := w.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
+		t.Fatalf("version preview Content-Type = %q, want %q", contentType, "text/plain; charset=utf-8")
+	}
+	if body := w.Body.String(); body != "v1" {
+		t.Fatalf("version preview body = %q, want %q", body, "v1")
+	}
+}
+
+func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/cache.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/cache.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/cache.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/cache.txt?version="+historicalHash, nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("initial version download status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if cacheControl := w.Header().Get("Cache-Control"); cacheControl != "private, no-cache" {
+		t.Fatalf("version download Cache-Control = %q, want %q", cacheControl, "private, no-cache")
+	}
+	etag := w.Header().Get("ETag")
+	if etag != fmt.Sprintf(`"%s"`, historicalHash) {
+		t.Fatalf("version download ETag = %q, want %q", etag, fmt.Sprintf(`"%s"`, historicalHash))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/cache.txt?version="+historicalHash, nil)
+	req.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotModified {
+		t.Fatalf("version download If-None-Match status = %d, want %d", w.Code, http.StatusNotModified)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("expected 304 response body to be empty, got %q", w.Body.String())
+	}
+}
+
+func TestServer_DownloadVersion_LogsDownloadActivityWithHash(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := fs.WriteFile(ctx, "/versions/activity.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/activity.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/activity.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/activity.txt?version="+historicalHash, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("download version status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionDownload, "")
+	if total != 1 {
+		t.Fatalf("expected one version download activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed version download activity entry, got %d", len(entries))
+	}
+	if entries[0].Path != "/versions/activity.txt" {
+		t.Fatalf("expected version download activity path %q, got %q", "/versions/activity.txt", entries[0].Path)
+	}
+	if entries[0].Details["hash"] != historicalHash {
+		t.Fatalf("expected version download hash %q, got %+v", historicalHash, entries[0].Details)
 	}
 }
 
