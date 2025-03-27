@@ -14,6 +14,8 @@ const (
 	ContextKeyClaims contextKey = "claims"
 )
 
+const DownloadSessionCookieName = "mnemonas_download_access"
+
 // Middleware provides authentication middleware
 type Middleware struct {
 	tokenManager *TokenManager
@@ -60,7 +62,7 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			}
 		}
 
-		// Get token from header or query (download/thumbnail only)
+		// Get token from header or download-session cookie.
 		tokenString := ""
 		authHeader := r.Header.Get("Authorization")
 		if authHeader != "" {
@@ -70,8 +72,10 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 				return
 			}
 			tokenString = parts[1]
-		} else if allowQueryAuth(r) {
-			tokenString = r.URL.Query().Get("auth")
+		} else if allowDownloadSessionCookie(r) {
+			if cookie, err := r.Cookie(DownloadSessionCookieName); err == nil {
+				tokenString = cookie.Value
+			}
 		}
 		if tokenString == "" {
 			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
@@ -111,8 +115,7 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
-
-func allowQueryAuth(r *http.Request) bool {
+func allowDownloadSessionCookie(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}

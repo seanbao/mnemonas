@@ -13,12 +13,6 @@ vi.mock('@heroui/react', () => ({
   Spinner: () => <div>loading</div>,
 }))
 
-let tokenValue: string | null = 'token-123'
-
-vi.mock('@/api/auth', () => ({
-  getStoredToken: () => tokenValue,
-}))
-
 vi.mock('@/api/files', async () => {
   const actual = await vi.importActual<typeof import('@/api/files')>('@/api/files')
   return {
@@ -31,19 +25,16 @@ vi.mock('@/lib/preview-utils', async () => {
   const actual = await vi.importActual<typeof import('@/lib/preview-utils')>('@/lib/preview-utils')
   return {
     ...actual,
-    buildPreviewUrl: (path: string) => tokenValue
-      ? `/api/v1/download${path}?auth=${tokenValue}`
-      : `/api/v1/download${path}`,
+    buildPreviewUrl: (path: string) => `/api/v1/download${path}`,
   }
 })
 
 describe('PreviewModal', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
-    tokenValue = 'token-123'
   })
 
-  it('renders video preview with auth query', () => {
+  it('renders video preview without auth query', () => {
     const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
 
     render(
@@ -57,10 +48,10 @@ describe('PreviewModal', () => {
 
     const video = document.querySelector('video') as HTMLVideoElement | null
     expect(video).toBeTruthy()
-    expect(video?.getAttribute('src')).toContain('auth=token-123')
+    expect(video?.getAttribute('src')).toBe('/api/v1/download/video.mp4')
   })
 
-  it('renders audio preview with auth query', () => {
+  it('renders audio preview without auth query', () => {
     const file: PreviewFile = { path: '/audio.mp3', name: 'audio.mp3' }
 
     render(
@@ -74,10 +65,10 @@ describe('PreviewModal', () => {
 
     const audio = document.querySelector('audio') as HTMLAudioElement | null
     expect(audio).toBeTruthy()
-    expect(audio?.getAttribute('src')).toContain('auth=token-123')
+    expect(audio?.getAttribute('src')).toBe('/api/v1/download/audio.mp3')
   })
 
-  it('opens external link with auth query', () => {
+  it('opens external link without auth query', () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
     const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
 
@@ -94,27 +85,9 @@ describe('PreviewModal', () => {
     externalButton.click()
 
     expect(openSpy).toHaveBeenCalledWith(
-      expect.stringContaining('auth=token-123'),
+      '/api/v1/download/video.mp4',
       '_blank',
       'noopener,noreferrer'
     )
-  })
-
-  it('renders video preview without auth when no token', () => {
-    tokenValue = null
-    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
-
-    render(
-      <PreviewModal
-        isOpen={true}
-        onClose={() => {}}
-        file={file}
-        files={[file]}
-      />
-    )
-
-    const video = document.querySelector('video') as HTMLVideoElement | null
-    expect(video).toBeTruthy()
-    expect(video?.getAttribute('src')).not.toContain('auth=')
   })
 })

@@ -343,7 +343,8 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 		t.Fatalf("failed to parse login response: %v", err)
 	}
 
-	downloadReq := httptest.NewRequest("GET", "/api/v1/download/auth/file.txt?auth="+loginResp.AccessToken, nil)
+	downloadReq := httptest.NewRequest("GET", "/api/v1/download/auth/file.txt", nil)
+	downloadReq.AddCookie(&http.Cookie{Name: auth.DownloadSessionCookieName, Value: loginResp.AccessToken})
 	downloadRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(downloadRec, downloadReq)
 

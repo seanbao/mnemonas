@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestUserStore(t *testing.T) {
@@ -386,13 +388,49 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
-	t.Run("require auth - query token allowed for download", func(t *testing.T) {
+	t.Run("require auth - query token rejected for download", func(t *testing.T) {
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler should not be called")
+		}))
+
+		req := httptest.NewRequest("GET", "/api/v1/download/test.txt?auth="+userToken.AccessToken, nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401, got %d", rec.Code)
+		}
+	})
+
+	t.Run("require auth - download session cookie allowed for download", func(t *testing.T) {
 		called := false
 		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			called = true
 		}))
 
-		req := httptest.NewRequest("GET", "/api/v1/download/test.txt?auth="+userToken.AccessToken, nil)
+		req := httptest.NewRequest("GET", "/api/v1/download/test.txt", nil)
+		req.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: userToken.AccessToken})
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler was not called")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("require auth - download session cookie allowed for thumbnails", func(t *testing.T) {
+		called := false
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		}))
+
+		req := httptest.NewRequest("GET", "/api/v1/thumbnails/test.jpg?size=medium", nil)
+		req.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: userToken.AccessToken})
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)
@@ -620,6 +658,40 @@ func TestAuthHandler(t *testing.T) {
 
 		if rec.Code != http.StatusOK {
 			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("download session endpoint", func(t *testing.T) {
+		user, _ := store.GetByUsername("handleruser")
+		pair, _ := tm.GenerateTokenPair(user)
+
+		req := httptest.NewRequest("POST", "/api/v1/auth/download-session", nil)
+		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+		ctx := context.WithValue(req.Context(), ContextKeyUser, user)
+		ctx = context.WithValue(ctx, ContextKeyClaims, &TokenClaims{
+			RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute))},
+			UserID:           user.ID,
+			Username:         user.Username,
+			Role:             user.Role,
+		})
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+
+		h.HandleCreateDownloadSession(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		cookies := rec.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("expected one cookie, got %d", len(cookies))
+		}
+		if cookies[0].Name != DownloadSessionCookieName {
+			t.Fatalf("expected cookie %q, got %q", DownloadSessionCookieName, cookies[0].Name)
+		}
+		if cookies[0].Path != "/api/v1" {
+			t.Fatalf("expected download cookie path, got %q", cookies[0].Path)
 		}
 	})
 
