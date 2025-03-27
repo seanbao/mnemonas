@@ -19,26 +19,22 @@ test.describe('版本历史页面', () => {
 
   test('应显示版本历史标题', async ({ page }) => {
     const title = page.getByText('版本历史').first()
-    const isVisible = await title.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('应显示文件路径输入框', async ({ page }) => {
     const pathInput = page.getByPlaceholder(/文件路径|输入文件/i)
-    const isVisible = await pathInput.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(pathInput).toBeVisible({ timeout: 5000 })
   })
 
   test('应显示查询按钮', async ({ page }) => {
     const queryBtn = page.getByRole('button', { name: /查询|搜索/i })
-    const isVisible = await queryBtn.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(queryBtn).toBeVisible({ timeout: 5000 })
   })
 
   test('空状态应显示引导信息', async ({ page }) => {
     const emptyGuide = page.getByText(/查看文件版本|输入文件路径|历史版本/i)
-    const isVisible = await emptyGuide.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(emptyGuide).toBeVisible({ timeout: 5000 })
   })
 })
 
@@ -49,40 +45,40 @@ test.describe('版本历史查询', () => {
 
   test('输入路径后应能查询', async ({ page }) => {
     const pathInput = page.getByPlaceholder(/文件路径|输入文件/i)
-    if (await pathInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await pathInput.fill('/test/file.txt')
-      
-      const queryBtn = page.getByRole('button', { name: /查询|搜索/i })
-      await queryBtn.click()
-      
-      await page.waitForTimeout(1000)
-      
-      // 应显示结果或错误信息
-      const body = page.locator('body')
-      await expect(body).toBeVisible()
-    }
+    await expect(pathInput).toBeVisible({ timeout: 2000 })
+    await pathInput.fill('/test/file.txt')
+
+    const queryBtn = page.getByRole('button', { name: /查询|搜索/i })
+    await expect(queryBtn).toBeVisible({ timeout: 2000 })
+    await queryBtn.click()
+
+    await page.waitForTimeout(1000)
+
+    // 应显示结果或错误信息
+    const body = page.locator('body')
+    await expect(body).toBeVisible()
   })
 
   test('查询不存在的文件应显示提示', async ({ page }) => {
     const pathInput = page.getByPlaceholder(/文件路径|输入文件/i)
-    if (await pathInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await pathInput.fill('/nonexistent/path/xyz123.txt')
-      
-      const queryBtn = page.getByRole('button', { name: /查询|搜索/i })
-      await queryBtn.click()
-      
-      await page.waitForTimeout(2000)
-      
-      // 应显示无结果或错误提示
-      const noHistory = page.getByText(/暂无版本|不存在|失败|没有/i)
-      const hasNoHistory = await noHistory.isVisible({ timeout: 3000 }).catch(() => false)
-      
-      // 或者显示错误消息
-      const errorMsg = page.locator('[class*="error"], [class*="danger"]')
-      const hasError = await errorMsg.isVisible({ timeout: 1000 }).catch(() => false)
-      
-      expect(hasNoHistory || hasError).toBe(true)
-    }
+    await expect(pathInput).toBeVisible({ timeout: 2000 })
+    await pathInput.fill('/nonexistent/path/xyz123.txt')
+
+    const queryBtn = page.getByRole('button', { name: /查询|搜索/i })
+    await expect(queryBtn).toBeVisible({ timeout: 2000 })
+    await queryBtn.click()
+
+    await page.waitForTimeout(2000)
+
+    // 应显示无结果或错误提示
+    const noHistory = page.getByText(/暂无版本|不存在|失败|没有/i)
+    const hasNoHistory = await noHistory.isVisible({ timeout: 3000 }).catch(() => false)
+
+    // 或者显示错误消息
+    const errorMsg = page.locator('[class*="error"], [class*="danger"]')
+    const hasError = await errorMsg.isVisible({ timeout: 1000 }).catch(() => false)
+
+    expect(hasNoHistory || hasError).toBe(true)
   })
 })
 
@@ -107,8 +103,7 @@ test.describe('版本历史页面响应式', () => {
 
     // 标题应可见
     const title = page.getByText('版本历史').first()
-    const isVisible = await title.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('平板端布局', async ({ page }) => {

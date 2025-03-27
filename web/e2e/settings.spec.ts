@@ -19,8 +19,7 @@ test.describe('设置页面', () => {
 
   test('应显示设置页面标题', async ({ page }) => {
     const title = page.getByRole('heading', { name: /系统设置|设置/i })
-    const isVisible = await title.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('应显示设置选项卡', async ({ page }) => {
@@ -43,11 +42,8 @@ test.describe('设置页面', () => {
     const saveBtn = page.getByRole('button', { name: /保存|保存设置/i })
     const resetBtn = page.getByRole('button', { name: /重置/i })
 
-    const isSaveVisible = await saveBtn.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isSaveVisible) { console.log('Save button not found') }
-    
-    const isResetVisible = await resetBtn.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isResetVisible) { console.log('Reset button not found') }
+    await expect(saveBtn).toBeVisible({ timeout: 5000 })
+    await expect(resetBtn).toBeVisible({ timeout: 5000 })
   })
 })
 
@@ -64,8 +60,7 @@ test.describe('设置选项卡切换', () => {
 
       // 检查 WebDAV 相关设置项
       const webdavSwitch = page.getByText(/启用 WebDAV/i)
-      const isVisible = await webdavSwitch.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+      await expect(webdavSwitch).toBeVisible({ timeout: 5000 })
     }
   })
 
@@ -77,8 +72,7 @@ test.describe('设置选项卡切换', () => {
 
       // 检查版本相关设置项
       const maxVersions = page.getByText(/最大版本数/i)
-      const isVisible = await maxVersions.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+      await expect(maxVersions).toBeVisible({ timeout: 5000 })
     }
   })
 
@@ -90,8 +84,7 @@ test.describe('设置选项卡切换', () => {
 
       // 检查 CDC 相关设置项
       const cdcSection = page.getByText(/CDC 分块|内容定义分块/i)
-      const isVisible = await cdcSection.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+      await expect(cdcSection).toBeVisible({ timeout: 5000 })
     }
   })
 })

@@ -29,6 +29,42 @@ declare const global: typeof globalThis & { fetch: typeof fetch }
 const mockFetch = vi.fn()
 global.fetch = mockFetch
 
+function expectFetchCall(
+  index: number,
+  url: string,
+  options: {
+    method?: string
+    body?: string
+    headers?: Record<string, string>
+  } = {}
+) {
+  const call = mockFetch.mock.calls[index - 1]
+  expect(call?.[0]).toBe(url)
+
+  const requestInit = (call?.[1] ?? {}) as RequestInit & { headers?: Headers }
+
+  if (options.method !== undefined) {
+    expect(requestInit.method).toBe(options.method)
+  }
+
+  if (options.body !== undefined) {
+    expect(requestInit.body).toBe(options.body)
+  }
+
+  if (options.headers !== undefined) {
+    expect(requestInit.headers).toBeInstanceOf(Headers)
+    const headers = requestInit.headers as Headers
+    const entries = Array.from(headers.entries())
+      .map(([key, value]) => [key.toLowerCase(), value] as const)
+      .sort(([a], [b]) => a.localeCompare(b))
+    const expectedEntries = Object.entries(options.headers)
+      .map(([key, value]) => [key.toLowerCase(), value] as const)
+      .sort(([a], [b]) => a.localeCompare(b))
+
+    expect(entries).toEqual(expectedEntries)
+  }
+}
+
 describe('API: files', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -108,9 +144,7 @@ describe('API: files', () => {
       const result = await listFiles('/')
       expect(result.files).toHaveLength(1)
       expect(result.path).toBe('/')
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/', {
-        headers: {},
-      })
+      expectFetchCall(1, '/api/v1/files/', { headers: {} })
     })
 
     it('handles path normalization', async () => {
@@ -126,9 +160,7 @@ describe('API: files', () => {
       })
 
       await listFiles('documents')
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/documents', {
-        headers: {},
-      })
+      expectFetchCall(1, '/api/v1/files/documents', { headers: {} })
     })
 
     it('throws ApiError on failure', async () => {
@@ -174,7 +206,7 @@ describe('API: files', () => {
       })
 
       await expect(deleteFile('/test.txt')).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files/test.txt', {
+      expectFetchCall(1, '/api/v1/files/test.txt', {
         method: 'DELETE',
         headers: {},
       })
@@ -214,6 +246,15 @@ describe('API: files', () => {
       expect(result.uniqueSize).toBe(536870912)
       expect(result.dedupRatio).toBe(1.5)
     })
+
+    it('rejects invalid wrapped response for storage stats', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ total_size: 1 }),
+      })
+
+      await expect(getStorageStats()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getHealth', () => {
@@ -246,7 +287,7 @@ describe('API: files', () => {
       })
 
       await expect(createDirectory('/new-folder')).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/directories/new-folder', {
+      expectFetchCall(1, '/api/v1/directories/new-folder', {
         method: 'POST',
         headers: {},
       })
@@ -260,7 +301,7 @@ describe('API: files', () => {
       })
 
       await expect(moveFile('/old.txt', '/new.txt')).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/files-move', {
+      expectFetchCall(1, '/api/v1/files-move', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -277,10 +318,10 @@ describe('API: files', () => {
       })
 
       await expect(restoreVersion('/test.txt', 'abc123')).resolves.toBeUndefined()
-      expect(mockFetch).toHaveBeenCalledWith(
-        '/api/v1/versions/abc123/restore?path=%2Ftest.txt',
-        { method: 'POST', headers: {} }
-      )
+      expectFetchCall(1, '/api/v1/versions/abc123/restore?path=%2Ftest.txt', {
+        method: 'POST',
+        headers: {},
+      })
     })
   })
 
@@ -325,7 +366,7 @@ describe('API: files', () => {
         })
 
         await expect(restoreFromTrash('item1')).resolves.toBeUndefined()
-        expect(mockFetch).toHaveBeenCalledWith('/api/v1/trash/item1/restore', {
+        expectFetchCall(1, '/api/v1/trash/item1/restore', {
           method: 'POST',
           headers: {},
         })
@@ -337,10 +378,10 @@ describe('API: files', () => {
         })
 
         await restoreFromTrash('item1', '/new-location/file.txt')
-        expect(mockFetch).toHaveBeenCalledWith(
-          '/api/v1/trash/item1/restore?path=%2Fnew-location%2Ffile.txt',
-          { method: 'POST', headers: {} }
-        )
+        expectFetchCall(1, '/api/v1/trash/item1/restore?path=%2Fnew-location%2Ffile.txt', {
+          method: 'POST',
+          headers: {},
+        })
       })
     })
 
@@ -351,7 +392,7 @@ describe('API: files', () => {
         })
 
         await expect(deleteFromTrash('item1')).resolves.toBeUndefined()
-        expect(mockFetch).toHaveBeenCalledWith('/api/v1/trash/item1', {
+        expectFetchCall(1, '/api/v1/trash/item1', {
           method: 'DELETE',
           headers: {},
         })
@@ -411,9 +452,9 @@ describe('API: files', () => {
 
         await downloadFile('/docs/report.txt')
 
-        expect(mockFetch).toHaveBeenCalledWith('/api/v1/download/docs/report.txt?download=true', expect.objectContaining({
+        expectFetchCall(1, '/api/v1/download/docs/report.txt?download=true', {
           headers: { Authorization: 'Bearer test-token' },
-        }))
+        })
         expect(clickSpy).toHaveBeenCalled()
         expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
         expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:test')
@@ -530,6 +571,15 @@ describe('API: files', () => {
       expect(result.storage).toBeUndefined()
       expect(result.dataplane).toBeUndefined()
     })
+
+    it('rejects invalid wrapped response for diagnostics', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ timestamp: '2024-01-15T10:00:00Z' }),
+      })
+
+      await expect(getDiagnostics()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getScrubResult', () => {
@@ -599,7 +649,7 @@ describe('API: files', () => {
       const hashes = ['hash1', 'hash2']
       await runScrub(hashes)
       
-      expect(mockFetch).toHaveBeenCalledWith('/api/v1/maintenance/scrub', {
+      expectFetchCall(1, '/api/v1/maintenance/scrub', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hashes }),
@@ -617,6 +667,17 @@ describe('API: files', () => {
       })
 
       await expect(listFiles('/test')).rejects.toThrow('参数错误')
+    })
+
+    it('handles JSON error response with structured error field', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        json: () => Promise.resolve({ error: { message: '结构化参数错误', code: 'INVALID_ARGUMENT' } }),
+      })
+
+      await expect(listFiles('/test')).rejects.toThrow('结构化参数错误')
     })
 
     it('handles JSON error response with message field', async () => {

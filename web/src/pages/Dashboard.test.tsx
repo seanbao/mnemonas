@@ -154,6 +154,14 @@ describe('DashboardPage', () => {
         expect(screen.getAllByText(/150.*%/i).length).toBeGreaterThan(0)
       })
     })
+
+    it('shows unknown capacity guidance instead of a full usage bar', async () => {
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('总容量未配置，无法计算占用比例')).toBeTruthy()
+      })
+    })
   })
 
   describe('quick actions', () => {

@@ -22,6 +22,10 @@ interface ApiResponseWrapper<T> {
   success: boolean
   data: T
   message?: string
+  error?: {
+    code?: string
+    message: string
+  }
 }
 
 // Handle API response
@@ -29,8 +33,14 @@ async function handleResponse<T>(response: Response, errorMessage: string): Prom
   if (!response.ok) {
     let message = errorMessage
     try {
-      const body = await response.json()
-      if (body.message) message = body.message
+      const body = await response.json() as ApiResponseWrapper<never> | { error?: string; message?: string }
+      if (typeof (body as { error?: string }).error === 'string') {
+        message = (body as { error?: string }).error || errorMessage
+      } else if ('error' in body && body.error?.message) {
+        message = body.error.message
+      } else if (body.message) {
+        message = body.message
+      }
     } catch { /* ignore */ }
     throw new ApiError(message, response.status, response.statusText)
   }
@@ -127,7 +137,7 @@ export async function clearActivity(): Promise<void> {
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError('清除活动日志失败', response.status, response.statusText)
+    await handleResponse(response, '清除活动日志失败')
   }
 }
 

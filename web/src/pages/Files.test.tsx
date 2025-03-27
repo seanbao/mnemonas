@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { FilesPage } from './Files'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
@@ -42,26 +45,52 @@ const mockFilesStoreState = {
   toggleSortOrder: vi.fn(),
 }
 
+const mockClipboardState = {
+  paths: [] as string[],
+  operation: null as 'copy' | 'cut' | null,
+  sourcePath: null as string | null,
+  copy: vi.fn(),
+  cut: vi.fn(),
+  clear: vi.fn(),
+  hasPaths: vi.fn(() => false),
+}
+
 // Mock stores
 vi.mock('@/stores/files', () => ({
   useFilesStore: () => mockFilesStoreState,
 }))
 
-import { listFiles, createDirectory, deleteFile, moveFile } from '@/api/files'
+vi.mock('@/stores/clipboard', () => ({
+  useClipboardStore: () => mockClipboardState,
+}))
+
+import { listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
+import { downloadFile } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
 const mockDeleteFile = vi.mocked(deleteFile)
 const mockMoveFile = vi.mocked(moveFile)
+const mockCopyFile = vi.mocked(copyFile)
+const mockDownloadFile = vi.mocked(downloadFile)
 
 describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockFilesStoreState.selectedFiles = new Set<string>()
     mockFilesStoreState.currentPath = '/'
     mockFilesStoreState.viewMode = 'list'
     mockFilesStoreState.sortBy = 'name'
     mockFilesStoreState.sortOrder = 'asc'
+    mockClipboardState.paths = []
+    mockClipboardState.operation = null
+    mockClipboardState.sourcePath = null
+    mockClipboardState.copy.mockClear()
+    mockClipboardState.cut.mockClear()
+    mockClipboardState.clear.mockClear()
+    mockClipboardState.hasPaths.mockReturnValue(false)
+    mockDownloadFile.mockResolvedValue(undefined)
     // Default mock response
     mockListFiles.mockResolvedValue({
       files: [
@@ -323,6 +352,174 @@ describe('FilesPage', () => {
       // Should not crash on error
       await waitFor(() => {
         expect(mockListFiles).toHaveBeenCalled()
+      })
+    })
+
+    it('shows danger toast when batch download fully fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile.mockRejectedValue(new Error('download failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载（仅文件）'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量下载失败',
+          description: '共 2 个文件下载失败',
+          color: 'danger',
+        })
+      })
+    })
+
+    it('keeps failed items selected after partial batch delete failure', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDeleteFile
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('delete failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      mockFilesStoreState.clearSelection.mockClear()
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/video.mp4'])
+      })
+
+      expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '批量删除部分完成',
+        description: '成功 1 个，失败 1 个',
+        color: 'warning',
+      })
+    })
+
+    it('shows danger toast and preserves selection when batch delete fully fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDeleteFile.mockRejectedValue(new Error('delete failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      mockFilesStoreState.clearSelection.mockClear()
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'])
+      })
+
+      expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '批量删除失败',
+        description: '共 2 个项目删除失败',
+        color: 'danger',
+      })
+    })
+
+    it('shows warning toast when batch download partially fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('download failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载（仅文件）'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '部分文件开始下载',
+          description: '已开始 1 个，失败 1 个',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('keeps failed cut items in clipboard after partial paste failure', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockMoveFile
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('move failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockMoveFile).toHaveBeenCalledTimes(2)
+      })
+
+      expect(mockClipboardState.cut).toHaveBeenCalledWith(['/source/video.mp4'], '/source')
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '批量移动部分完成',
+        description: '成功 1 个，失败 1 个',
+        color: 'warning',
+      })
+    })
+
+    it('shows danger toast when copy paste fully fails', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
+      mockClipboardState.operation = 'copy'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockCopyFile.mockRejectedValue(new Error('copy failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量复制失败',
+          description: '共 2 个项目失败',
+          color: 'danger',
+        })
       })
     })
   })

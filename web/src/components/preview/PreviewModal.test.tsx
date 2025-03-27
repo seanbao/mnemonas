@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { PreviewModal, type PreviewFile } from './PreviewModal'
 
+const mockAddToast = vi.fn()
+
 vi.mock('@heroui/react', () => ({
   Modal: ({ children, isOpen }: { children: React.ReactNode; isOpen: boolean }) =>
     isOpen ? <div data-testid="modal">{children}</div> : null,
@@ -11,6 +13,7 @@ vi.mock('@heroui/react', () => ({
     <button disabled={isDisabled || isLoading} onClick={onPress} title={title} aria-hidden={isIconOnly}>{children}</button>
   ),
   Spinner: () => <div>loading</div>,
+  addToast: (...args: unknown[]) => mockAddToast(...args),
 }))
 
 vi.mock('@/api/files', async () => {
@@ -89,5 +92,26 @@ describe('PreviewModal', () => {
       '_blank',
       'noopener,noreferrer'
     )
+  })
+
+  it('shows toast when browser blocks external preview', () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    screen.getByTitle('在新标签页打开').click()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '浏览器拦截了新标签页，请允许弹窗后重试',
+      color: 'warning',
+    })
   })
 })

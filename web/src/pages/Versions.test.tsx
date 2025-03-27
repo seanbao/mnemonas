@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
 
 const mockUseIsAdmin = vi.fn(() => true)
 
@@ -27,6 +30,7 @@ const mockRestoreVersion = vi.mocked(restoreVersion)
 describe('VersionsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     window.history.pushState({}, '', '/')
     mockUseIsAdmin.mockReturnValue(true)
     mockGetVersions.mockResolvedValue([
@@ -256,6 +260,26 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         const downloadButtons = screen.queryAllByTitle('下载此版本')
         expect(downloadButtons.length).toBeGreaterThan(0)
+      })
+    })
+
+    it('shows warning toast when browser blocks version preview', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      vi.spyOn(window, 'open').mockReturnValue(null)
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('预览')[0])
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '浏览器拦截了新标签页，请允许弹窗后重试',
+        color: 'warning',
       })
     })
 

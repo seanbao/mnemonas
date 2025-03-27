@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -33,13 +33,21 @@ export function MoveDialog({
   const [isPickerOpen, setIsPickerOpen] = useState(false)
   const [targetPath, setTargetPath] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [pendingFiles, setPendingFiles] = useState(files)
 
   const title = mode === 'move' ? '移动到' : '复制到'
   const actionText = mode === 'move' ? '移动' : '复制'
   const Icon = mode === 'move' ? Move : Move // Could use different icons
 
+  useEffect(() => {
+    if (!isOpen) return
+    setPendingFiles(files)
+    setTargetPath(null)
+    setIsPickerOpen(false)
+  }, [isOpen, files])
+
   // Exclude paths that cannot be moved into (self and descendants)
-  const excludePaths = files.map(f => f.path)
+  const excludePaths = pendingFiles.map(f => f.path)
 
   const handleSelectTarget = useCallback((path: string) => {
     setTargetPath(path)
@@ -52,9 +60,9 @@ export function MoveDialog({
     setIsProcessing(true)
     let successCount = 0
     let errorCount = 0
-    const errors: string[] = []
+    const failedFiles: typeof pendingFiles = []
 
-    for (const file of files) {
+    for (const file of pendingFiles) {
       const fileName = file.path.split('/').pop() || ''
       const destPath = targetPath === '/' ? `/${fileName}` : `${targetPath}/${fileName}`
 
@@ -65,9 +73,9 @@ export function MoveDialog({
           await copyFile(file.path, destPath)
         }
         successCount++
-      } catch (error) {
+      } catch {
         errorCount++
-        errors.push(file.name)
+        failedFiles.push(file)
       }
     }
 
@@ -75,34 +83,40 @@ export function MoveDialog({
     queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
     queryClient.invalidateQueries({ queryKey: ['files', targetPath] })
 
-    setIsProcessing(false)
-    onClose()
-
     // Show result
     if (errorCount === 0) {
+      setIsProcessing(false)
+      onClose()
       addToast({
         title: `成功${actionText} ${successCount} 个项目`,
         color: 'success',
       })
-    } else if (successCount > 0) {
+      return
+    }
+
+    setPendingFiles(failedFiles)
+    setIsProcessing(false)
+
+    if (successCount > 0) {
       addToast({
-        title: `${successCount} 个成功，${errorCount} 个失败`,
-        description: `失败项: ${errors.join(', ')}`,
+        title: `批量${actionText}部分完成`,
+        description: `成功 ${successCount} 个，失败 ${errorCount} 个`,
         color: 'warning',
       })
     } else {
       addToast({
-        title: `${actionText}失败`,
-        description: errors.join(', '),
+        title: `批量${actionText}失败`,
+        description: `共 ${errorCount} 个项目失败`,
         color: 'danger',
       })
     }
-  }, [targetPath, files, mode, currentPath, queryClient, onClose, actionText])
+  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText])
 
   const handleClose = useCallback(() => {
     setTargetPath(null)
+    setPendingFiles(files)
     onClose()
-  }, [onClose])
+  }, [files, onClose])
 
   return (
     <>
@@ -125,7 +139,7 @@ export function MoveDialog({
             <div>
               <h3 className="text-lg font-semibold text-foreground">{title}</h3>
               <p className="text-xs text-default-500 font-normal">
-                {files.length === 1 ? files[0].name : `${files.length} 个项目`}
+                {pendingFiles.length === 1 ? pendingFiles[0].name : `${pendingFiles.length} 个项目`}
               </p>
             </div>
           </ModalHeader>
@@ -137,15 +151,15 @@ export function MoveDialog({
                 {actionText}以下项目:
               </div>
               <div className="max-h-32 overflow-y-auto space-y-1 border border-divider rounded-lg p-2">
-                {files.slice(0, 5).map(file => (
+                {pendingFiles.slice(0, 5).map(file => (
                   <div key={file.path} className="flex items-center gap-2 py-1">
                     <FileIcon name={file.name} isDir={file.isDir} size={20} variant="bare" />
                     <span className="text-sm truncate">{file.name}</span>
                   </div>
                 ))}
-                {files.length > 5 && (
+                {pendingFiles.length > 5 && (
                   <div className="text-xs text-default-500 py-1">
-                    ...还有 {files.length - 5} 个项目
+                    ...还有 {pendingFiles.length - 5} 个项目
                   </div>
                 )}
               </div>

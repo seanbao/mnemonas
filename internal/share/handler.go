@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,21 +39,102 @@ type FileStatProvider interface {
 	ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error)
 }
 
-// Handler provides HTTP handlers for share operations
-type Handler struct {
-	store   *ShareStore
-	fs      FileOpener
-	baseURL string
+type responseEnvelope struct {
+	Success bool         `json:"success"`
+	Data    interface{}  `json:"data,omitempty"`
+	Message string       `json:"message,omitempty"`
+	Error   *errorDetail `json:"error,omitempty"`
 }
 
-const shareAccessCookiePrefix = "mnemonas_share_"
+type errorDetail struct {
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message"`
+}
+
+// Handler provides HTTP handlers for share operations
+type Handler struct {
+	store                *ShareStore
+	fs                   FileOpener
+	baseURL              string
+	passwordAttempts     *passwordAttemptTracker
+	passwordFailureLimit int
+	passwordFailureDelay time.Duration
+	passwordLockDuration time.Duration
+}
+
+type passwordAttemptTracker struct {
+	mu       sync.Mutex
+	attempts map[string]passwordAttemptState
+	now      func() time.Time
+}
+
+type passwordAttemptState struct {
+	failures    int
+	lockedUntil time.Time
+}
+
+const (
+	shareAccessCookiePrefix      = "mnemonas_share_"
+	defaultPasswordFailureLimit  = 5
+	defaultPasswordFailureDelay  = 200 * time.Millisecond
+	defaultPasswordLockDuration  = 5 * time.Minute
+	defaultRateLimitErrorMessage = "too many attempts, try later"
+)
+
+func newPasswordAttemptTracker() *passwordAttemptTracker {
+	return &passwordAttemptTracker{
+		attempts: make(map[string]passwordAttemptState),
+		now:      time.Now,
+	}
+}
+
+func (t *passwordAttemptTracker) isLocked(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state, ok := t.attempts[key]
+	if !ok {
+		return false
+	}
+	if state.lockedUntil.After(t.now()) {
+		return true
+	}
+	if !state.lockedUntil.IsZero() {
+		delete(t.attempts, key)
+	}
+	return false
+}
+
+func (t *passwordAttemptTracker) recordFailure(key string, limit int, lockDuration time.Duration) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state := t.attempts[key]
+	state.failures++
+	if state.failures >= limit {
+		state.lockedUntil = t.now().Add(lockDuration)
+	}
+	t.attempts[key] = state
+
+	return !state.lockedUntil.IsZero()
+}
+
+func (t *passwordAttemptTracker) reset(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.attempts, key)
+}
 
 // NewHandler creates a new share handler
 // fs can be nil if file download is not needed
 func NewHandler(store *ShareStore, fs FileOpener) *Handler {
 	return &Handler{
-		store: store,
-		fs:    fs,
+		store:                store,
+		fs:                   fs,
+		passwordAttempts:     newPasswordAttemptTracker(),
+		passwordFailureLimit: defaultPasswordFailureLimit,
+		passwordFailureDelay: defaultPasswordFailureDelay,
+		passwordLockDuration: defaultPasswordLockDuration,
 	}
 }
 
@@ -94,12 +177,12 @@ type CreateShareRequest struct {
 func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	var req CreateShareRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
 
 	if req.Path == "" {
-		http.Error(w, "path is required", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
 		return
 	}
 
@@ -123,7 +206,7 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresIn != "" {
 		duration, err := parseDuration(req.ExpiresIn)
 		if err != nil {
-			http.Error(w, "invalid expires_in format", http.StatusBadRequest)
+			writeShareError(w, http.StatusBadRequest, "invalid expires_in format", "INVALID_EXPIRES_IN")
 			return
 		}
 		opts.ExpiresIn = &duration
@@ -138,16 +221,14 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 
 	share, err := h.store.Create(opts)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to create share", "CREATE_SHARE_FAILED")
 		return
 	}
 
 	info := share.ToInfo()
 	info.URL = h.buildShareURL(share.ID)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(info)
+	writeShareSuccess(w, http.StatusCreated, info, "")
 }
 
 // ListShares lists shares for the current user
@@ -168,8 +249,7 @@ func (h *Handler) ListShares(w http.ResponseWriter, r *http.Request) {
 		infos[i].URL = h.buildShareURL(s.ID)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(infos)
+	writeShareSuccess(w, http.StatusOK, infos, "")
 }
 
 // GetShare gets a share by ID
@@ -179,25 +259,24 @@ func (h *Handler) GetShare(w http.ResponseWriter, r *http.Request) {
 	share, err := h.store.Get(id)
 	if err != nil {
 		if errors.Is(err, ErrShareNotFound) {
-			http.Error(w, "share not found", http.StatusNotFound)
+			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to get share", "GET_SHARE_FAILED")
 		return
 	}
 
 	userID := getUserIDFromContext(r.Context())
 	isAdmin := getIsAdminFromContext(r.Context())
 	if share.CreatedBy != userID && !isAdmin {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
 
 	info := share.ToInfo()
 	info.URL = h.buildShareURL(share.ID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	writeShareSuccess(w, http.StatusOK, info, "")
 }
 
 // UpdateShareRequest represents a share update request
@@ -216,24 +295,24 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 
 	var req UpdateShareRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
 
 	share, err := h.store.Get(id)
 	if err != nil {
 		if errors.Is(err, ErrShareNotFound) {
-			http.Error(w, "share not found", http.StatusNotFound)
+			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to get share", "GET_SHARE_FAILED")
 		return
 	}
 
 	userID := getUserIDFromContext(r.Context())
 	isAdmin := getIsAdminFromContext(r.Context())
 	if share.CreatedBy != userID && !isAdmin {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
 
@@ -282,7 +361,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to update share", "UPDATE_SHARE_FAILED")
 		return
 	}
 
@@ -290,8 +369,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 	info := share.ToInfo()
 	info.URL = h.buildShareURL(share.ID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	writeShareSuccess(w, http.StatusOK, info, "")
 }
 
 // DeleteShare deletes a share
@@ -301,26 +379,26 @@ func (h *Handler) DeleteShare(w http.ResponseWriter, r *http.Request) {
 	share, err := h.store.Get(id)
 	if err != nil {
 		if errors.Is(err, ErrShareNotFound) {
-			http.Error(w, "share not found", http.StatusNotFound)
+			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to get share", "GET_SHARE_FAILED")
 		return
 	}
 
 	userID := getUserIDFromContext(r.Context())
 	isAdmin := getIsAdminFromContext(r.Context())
 	if share.CreatedBy != userID && !isAdmin {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
 
 	if err := h.store.Delete(id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeShareError(w, http.StatusInternalServerError, "failed to delete share", "DELETE_SHARE_FAILED")
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	writeShareSuccess(w, http.StatusOK, nil, "share deleted successfully")
 }
 
 // PublicShareInfo is the info returned for public share access
@@ -350,17 +428,30 @@ type PublicShareListResponse struct {
 	Items []*PublicShareItem `json:"items"`
 }
 
+func writePublicShareAccessError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrShareNotFound):
+		http.Error(w, "share not found", http.StatusNotFound)
+	case errors.Is(err, ErrInvalidPassword):
+		http.Error(w, "password required", http.StatusUnauthorized)
+	case errors.Is(err, ErrShareAccessLimit):
+		http.Error(w, "share access limit reached", http.StatusGone)
+	case errors.Is(err, ErrShareExpired):
+		http.Error(w, "share expired", http.StatusGone)
+	case errors.Is(err, ErrShareDisabled):
+		http.Error(w, "share disabled", http.StatusGone)
+	default:
+		http.Error(w, "failed to access share", http.StatusInternalServerError)
+	}
+}
+
 // AccessShare handles public share access
 func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	share, err := h.store.Get(id)
 	if err != nil {
-		if errors.Is(err, ErrShareNotFound) {
-			http.Error(w, "share not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writePublicShareAccessError(w, err)
 		return
 	}
 
@@ -382,14 +473,7 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := share.CanAccess(); err != nil {
-			switch {
-			case errors.Is(err, ErrShareAccessLimit):
-				http.Error(w, "share access limit reached", http.StatusGone)
-			case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
-				http.Error(w, err.Error(), http.StatusGone)
-			default:
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
+			writePublicShareAccessError(w, err)
 			return
 		}
 
@@ -407,14 +491,7 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := share.CanAccess(); err != nil {
-		switch {
-		case errors.Is(err, ErrShareAccessLimit):
-			http.Error(w, "share access limit reached", http.StatusGone)
-		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
-			http.Error(w, err.Error(), http.StatusGone)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writePublicShareAccessError(w, err)
 		return
 	}
 
@@ -449,29 +526,36 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 
 	share, err := h.store.Get(id)
 	if err != nil {
-		if errors.Is(err, ErrShareNotFound) {
-			http.Error(w, "share not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writePublicShareAccessError(w, err)
 		return
 	}
 
 	if err := share.CanAccess(); err != nil {
-		switch {
-		case errors.Is(err, ErrShareAccessLimit):
-			http.Error(w, "share access limit reached", http.StatusGone)
-		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
-			http.Error(w, err.Error(), http.StatusGone)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writePublicShareAccessError(w, err)
 		return
 	}
 
-	if share.HasPassword() && !share.CheckPassword(req.Password) {
-		http.Error(w, "invalid password", http.StatusUnauthorized)
-		return
+	if share.HasPassword() {
+		attemptKey := sharePasswordAttemptKey(id, r)
+		if h.passwordAttempts.isLocked(attemptKey) {
+			http.Error(w, defaultRateLimitErrorMessage, http.StatusTooManyRequests)
+			return
+		}
+
+		if !share.CheckPassword(req.Password) {
+			locked := h.passwordAttempts.recordFailure(attemptKey, h.passwordFailureLimit, h.passwordLockDuration)
+			if h.passwordFailureDelay > 0 {
+				time.Sleep(h.passwordFailureDelay)
+			}
+			if locked {
+				http.Error(w, defaultRateLimitErrorMessage, http.StatusTooManyRequests)
+				return
+			}
+			http.Error(w, "invalid password", http.StatusUnauthorized)
+			return
+		}
+
+		h.passwordAttempts.reset(attemptKey)
 	}
 
 	h.setShareAccessCookie(w, r, share)
@@ -489,24 +573,36 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(info)
 }
 
+func sharePasswordAttemptKey(id string, r *http.Request) string {
+	return id + "|" + clientIdentifier(r)
+}
+
+func clientIdentifier(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		if len(parts) > 0 {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil && host != "" {
+		return host
+	}
+
+	if remoteAddr := strings.TrimSpace(r.RemoteAddr); remoteAddr != "" {
+		return remoteAddr
+	}
+
+	return "unknown"
+}
+
 // DownloadShare handles file download for shares
 func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	share, err := h.accessAuthorizedShare(r, id)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrShareNotFound):
-			http.Error(w, "share not found", http.StatusNotFound)
-		case errors.Is(err, ErrInvalidPassword):
-			http.Error(w, "password required", http.StatusUnauthorized)
-		case errors.Is(err, ErrShareAccessLimit):
-			http.Error(w, "share access limit reached", http.StatusGone)
-		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
-			http.Error(w, err.Error(), http.StatusGone)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writePublicShareAccessError(w, err)
 		return
 	}
 
@@ -551,18 +647,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 
 	share, err := h.accessAuthorizedShare(r, id)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrShareNotFound):
-			http.Error(w, "share not found", http.StatusNotFound)
-		case errors.Is(err, ErrInvalidPassword):
-			http.Error(w, "password required", http.StatusUnauthorized)
-		case errors.Is(err, ErrShareAccessLimit):
-			http.Error(w, "share access limit reached", http.StatusGone)
-		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
-			http.Error(w, err.Error(), http.StatusGone)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writePublicShareAccessError(w, err)
 		return
 	}
 
@@ -615,18 +700,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 
 	share, err := h.accessAuthorizedShare(r, id)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrShareNotFound):
-			http.Error(w, "share not found", http.StatusNotFound)
-		case errors.Is(err, ErrInvalidPassword):
-			http.Error(w, "password required", http.StatusUnauthorized)
-		case errors.Is(err, ErrShareAccessLimit):
-			http.Error(w, "share access limit reached", http.StatusGone)
-		case errors.Is(err, ErrShareExpired), errors.Is(err, ErrShareDisabled):
-			http.Error(w, err.Error(), http.StatusGone)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		writePublicShareAccessError(w, err)
 		return
 	}
 
@@ -656,7 +730,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "file not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to list share items", http.StatusInternalServerError)
 		return
 	}
 
@@ -787,6 +861,28 @@ func requestIsHTTPS(r *http.Request) bool {
 		return true
 	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(responseEnvelope{
+		Success: true,
+		Data:    data,
+		Message: message,
+	})
+}
+
+func writeShareError(w http.ResponseWriter, status int, message, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(responseEnvelope{
+		Success: false,
+		Error: &errorDetail{
+			Code:    code,
+			Message: message,
+		},
+	})
 }
 
 func shareRelativePath(basePath, entryPath string) (string, error) {

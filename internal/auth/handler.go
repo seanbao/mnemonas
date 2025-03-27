@@ -29,7 +29,6 @@ type LoginRequest struct {
 
 // LoginResponse is the login response body
 type LoginResponse struct {
-	Success      bool      `json:"success"`
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	ExpiresAt    time.Time `json:"expires_at"`
@@ -51,11 +50,16 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// ErrorResponse is an error response body
-type ErrorResponse struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error"`
+type ResponseEnvelope struct {
+	Success bool         `json:"success"`
+	Data    interface{}  `json:"data,omitempty"`
+	Message string       `json:"message,omitempty"`
+	Error   *ErrorDetail `json:"error,omitempty"`
+}
+
+type ErrorDetail struct {
 	Code    string `json:"code,omitempty"`
+	Message string `json:"message"`
 }
 
 // HandleLogin handles POST /api/v1/auth/login
@@ -96,7 +100,6 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := LoginResponse{
-		Success:      true,
 		AccessToken:  tokenPair.AccessToken,
 		RefreshToken: tokenPair.RefreshToken,
 		ExpiresAt:    tokenPair.ExpiresAt,
@@ -110,8 +113,7 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeSuccess(w, http.StatusOK, resp, "")
 }
 
 // HandleRefresh handles POST /api/v1/auth/refresh
@@ -163,7 +165,6 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := LoginResponse{
-		Success:      true,
 		AccessToken:  tokenPair.AccessToken,
 		RefreshToken: tokenPair.RefreshToken,
 		ExpiresAt:    tokenPair.ExpiresAt,
@@ -177,8 +178,7 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeSuccess(w, http.StatusOK, resp, "")
 }
 
 // HandleLogout handles POST /api/v1/auth/logout
@@ -194,11 +194,7 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearDownloadSessionCookie(w, r)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "logged out successfully",
-	})
+	writeSuccess(w, http.StatusOK, nil, "logged out successfully")
 }
 
 // HandleCreateDownloadSession handles POST /api/v1/auth/download-session.
@@ -237,10 +233,7 @@ func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Req
 		MaxAge:   maxAge,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-	})
+	writeSuccess(w, http.StatusOK, nil, "")
 }
 
 func clearDownloadSessionCookie(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +270,6 @@ func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"success": true,
 		"user": UserInfo{
 			ID:       user.ID,
 			Username: user.Username,
@@ -287,8 +279,7 @@ func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeSuccess(w, http.StatusOK, resp, "")
 }
 
 // ChangePasswordRequest is the change password request body
@@ -336,11 +327,7 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// Revoke all tokens for this user
 	h.tokenManager.RevokeByUser(user.ID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "password changed successfully",
-	})
+	writeSuccess(w, http.StatusOK, nil, "password changed successfully")
 }
 
 // Admin endpoints
@@ -387,12 +374,10 @@ func (h *Handler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
 		userInfos = append(userInfos, info)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"users":   userInfos,
-		"total":   len(userInfos),
-	})
+	writeSuccess(w, http.StatusOK, map[string]interface{}{
+		"users": userInfos,
+		"total": len(userInfos),
+	}, "")
 }
 
 // HandleCreateUser handles POST /api/v1/admin/users
@@ -440,10 +425,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
+	writeSuccess(w, http.StatusCreated, map[string]interface{}{
 		"user": UserInfo{
 			ID:       user.ID,
 			Username: user.Username,
@@ -451,7 +433,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 			Role:     user.Role,
 			HomeDir:  user.HomeDir,
 		},
-	})
+	}, "")
 }
 
 // HandleDeleteUser handles DELETE /api/v1/admin/users/{id}
@@ -485,11 +467,7 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "user deleted successfully",
-	})
+	writeSuccess(w, http.StatusOK, nil, "user deleted successfully")
 }
 
 // HandleResetUserPassword handles POST /api/v1/admin/users/{id}/reset-password
@@ -532,11 +510,7 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 	// Revoke all tokens for this user
 	h.tokenManager.RevokeByUser(userID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "password reset successfully",
-	})
+	writeSuccess(w, http.StatusOK, nil, "password reset successfully")
 }
 
 // HandleToggleUserStatus handles PUT /api/v1/admin/users/{id}/status
@@ -598,20 +572,29 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 		h.tokenManager.RevokeByUser(userID)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":  true,
+	writeSuccess(w, http.StatusOK, map[string]interface{}{
 		"disabled": req.Disabled,
-		"message":  "user status updated successfully",
-	})
+	}, "user status updated successfully")
 }
 
 func writeError(w http.ResponseWriter, status int, message, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(ErrorResponse{
+	json.NewEncoder(w).Encode(ResponseEnvelope{
 		Success: false,
-		Error:   message,
-		Code:    code,
+		Error: &ErrorDetail{
+			Code:    code,
+			Message: message,
+		},
+	})
+}
+
+func writeSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(ResponseEnvelope{
+		Success: true,
+		Data:    data,
+		Message: message,
 	})
 }

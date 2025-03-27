@@ -1,10 +1,21 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { accessShareWithPassword, getPublicShareItems, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
+import { accessShareWithPassword, copyShareUrl, createShare, getPublicShare, getPublicShareItems, listShares, getShareDownloadUrl, getShareFileDownloadUrl } from './share'
+
+const mockCopyTextToClipboard = vi.fn()
+
+vi.mock('@/lib/utils', async () => {
+  const actual = await vi.importActual('@/lib/utils')
+  return {
+    ...actual,
+    copyTextToClipboard: (...args: unknown[]) => mockCopyTextToClipboard(...args),
+  }
+})
 
 describe('Share API', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     global.fetch = vi.fn()
+    mockCopyTextToClipboard.mockResolvedValue(undefined)
   })
 
   describe('URL helpers', () => {
@@ -52,6 +63,101 @@ describe('Share API', () => {
         status: 404,
       })
     })
+
+    it('reads structured public share item errors', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ success: false, error: { message: 'folder unavailable' } }),
+      })
+
+      await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
+        message: 'folder unavailable',
+        status: 500,
+      })
+    })
+  })
+
+  describe('getPublicShare', () => {
+    it('reads wrapped public share errors', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ success: false, error: { message: 'share missing' } }),
+      })
+
+      await expect(getPublicShare('missing')).rejects.toMatchObject({
+        message: 'share missing',
+        status: 404,
+      })
+    })
+  })
+
+  describe('authenticated share APIs', () => {
+    it('unwraps share list responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: [{ id: 'share-1', path: '/docs/a.txt', type: 'file', created_by: 'u1', created_at: '2026-03-13T00:00:00Z', has_password: false, permission: 'read', enabled: true, access_count: 0, url: '/s/share-1' }],
+        }),
+      })
+
+      const result = await listShares()
+
+      expect(result).toHaveLength(1)
+      expect(result[0].id).toBe('share-1')
+    })
+
+    it('unwraps create share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({
+          success: true,
+          data: { id: 'share-2', path: '/docs/b.txt', type: 'file', created_by: 'u1', created_at: '2026-03-13T00:00:00Z', has_password: false, permission: 'read', enabled: true, access_count: 0, url: '/s/share-2' },
+        }),
+      })
+
+      const result = await createShare({ path: '/docs/b.txt' })
+
+      expect(result.id).toBe('share-2')
+    })
+
+    it('reads structured share errors', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        json: () => Promise.resolve({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'forbidden' },
+        }),
+      })
+
+      await expect(listShares()).rejects.toMatchObject({
+        message: 'forbidden',
+        status: 403,
+      })
+    })
+
+    it('copies relative share URLs as absolute URLs', async () => {
+      vi.stubGlobal('location', { origin: 'https://nas.example.com' })
+
+      await copyShareUrl({
+        id: 'share-1',
+        path: '/docs/a.txt',
+        type: 'file',
+        created_by: 'u1',
+        created_at: '2026-03-13T00:00:00Z',
+        has_password: false,
+        permission: 'read',
+        enabled: true,
+        access_count: 0,
+        url: '/s/share-1',
+      })
+
+      expect(mockCopyTextToClipboard).toHaveBeenCalledWith('https://nas.example.com/s/share-1')
+    })
   })
 
   describe('accessShareWithPassword', () => {
@@ -67,6 +173,19 @@ describe('Share API', () => {
         method: 'POST',
         credentials: 'same-origin',
       }))
+    })
+
+    it('uses wrapped password error details', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ success: false, error: { message: 'password rejected' } }),
+      })
+
+      await expect(accessShareWithPassword('share-1', 'bad')).rejects.toMatchObject({
+        message: 'password rejected',
+        status: 401,
+      })
     })
   })
 })

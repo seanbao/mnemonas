@@ -46,23 +46,26 @@ Authorization: Bearer <access_token>
 
 ### 认证端点响应（auth 模块）
 
-认证模块使用 `success` + `error` 结构返回错误：
+认证模块成功响应与多数 `/api/v1` 端点一致，业务数据位于 `data` 字段；错误响应使用 `success: false` 和结构化 `error` 对象：
 
 ```json
 {
   "success": false,
-  "error": "错误描述",
-  "code": "ERROR_CODE"
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "错误描述"
+  }
 }
 ```
 
 ### 分享/收藏端点响应
 
-分享与收藏端点返回原始 JSON 对象或数组，错误响应为：
+认证后的分享管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 `/s/*` 保持原始 JSON 对象或数组，错误场景仍可能返回纯文本错误页或简单错误对象。
 
 ```json
 {
-  "error": "错误描述"
+  "success": true,
+  "data": { ... }
 }
 ```
 
@@ -102,15 +105,17 @@ POST /api/v1/auth/login
 ```json
 {
   "success": true,
-  "access_token": "eyJ...",
-  "refresh_token": "eyJ...",
-  "expires_at": "2024-01-15T10:15:00Z",
-  "token_type": "Bearer",
-  "user": {
-    "id": "user-123",
-    "username": "admin",
-    "role": "admin",
-    "home_dir": "/"
+  "data": {
+    "access_token": "eyJ...",
+    "refresh_token": "eyJ...",
+    "expires_at": "2024-01-15T10:15:00Z",
+    "token_type": "Bearer",
+    "user": {
+      "id": "user-123",
+      "username": "admin",
+      "role": "admin",
+      "home_dir": "/"
+    }
   }
 }
 ```
@@ -137,6 +142,21 @@ GET /api/v1/auth/me
 ```
 
 **需要认证**: 是
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "user-123",
+      "username": "admin",
+      "role": "admin",
+      "home_dir": "/"
+    }
+  }
+}
+```
 
 ### 退出登录
 
@@ -167,6 +187,25 @@ POST /api/v1/auth/password
 **列出用户**:
 ```
 GET /api/v1/admin/users
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "users": [
+      {
+        "id": "user-123",
+        "username": "admin",
+        "role": "admin",
+        "disabled": false,
+        "home_dir": "/"
+      }
+    ],
+    "total": 1
+  }
+}
 ```
 
 **创建用户**:
@@ -806,36 +845,8 @@ POST /api/v1/shares
 **响应示例**:
 ```json
 {
-  "id": "share-abc123",
-  "path": "/documents/report.pdf",
-  "type": "file",
-  "created_by": "user-123",
-  "created_at": "2024-01-15T10:00:00Z",
-  "expires_at": "2024-02-15T00:00:00Z",
-  "has_password": true,
-  "permission": "read",
-  "enabled": true,
-  "access_count": 0,
-  "max_access": 0,
-  "last_access": null,
-  "description": "",
-  "url": "http://localhost:8080/s/share-abc123"
-}
-```
-
-### 列出分享
-
-```
-GET /api/v1/shares
-```
-
-**查询参数**:
-- `all=true`: 管理员查看所有用户的分享
-
-**响应示例**:
-```json
-[
-  {
+  "success": true,
+  "data": {
     "id": "share-abc123",
     "path": "/documents/report.pdf",
     "type": "file",
@@ -851,7 +862,41 @@ GET /api/v1/shares
     "description": "",
     "url": "http://localhost:8080/s/share-abc123"
   }
-]
+}
+```
+
+### 列出分享
+
+```
+GET /api/v1/shares
+```
+
+**查询参数**:
+- `all=true`: 管理员查看所有用户的分享
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "share-abc123",
+      "path": "/documents/report.pdf",
+      "type": "file",
+      "created_by": "user-123",
+      "created_at": "2024-01-15T10:00:00Z",
+      "expires_at": "2024-02-15T00:00:00Z",
+      "has_password": true,
+      "permission": "read",
+      "enabled": true,
+      "access_count": 0,
+      "max_access": 0,
+      "last_access": null,
+      "description": "",
+      "url": "http://localhost:8080/s/share-abc123"
+    }
+  ]
+}
 ```
 
 ### 获取分享详情
@@ -869,20 +914,23 @@ PUT /api/v1/shares/{id}
 **响应示例**:
 ```json
 {
-  "id": "share-abc123",
-  "path": "/documents/report.pdf",
-  "type": "file",
-  "created_by": "user-123",
-  "created_at": "2024-01-15T10:00:00Z",
-  "expires_at": null,
-  "has_password": false,
-  "permission": "read",
-  "enabled": true,
-  "access_count": 0,
-  "max_access": 0,
-  "last_access": null,
-  "description": "",
-  "url": "http://localhost:8080/s/share-abc123"
+  "success": true,
+  "data": {
+    "id": "share-abc123",
+    "path": "/documents/report.pdf",
+    "type": "file",
+    "created_by": "user-123",
+    "created_at": "2024-01-15T10:00:00Z",
+    "expires_at": null,
+    "has_password": false,
+    "permission": "read",
+    "enabled": true,
+    "access_count": 0,
+    "max_access": 0,
+    "last_access": null,
+    "description": "",
+    "url": "http://localhost:8080/s/share-abc123"
+  }
 }
 ```
 
@@ -892,7 +940,13 @@ PUT /api/v1/shares/{id}
 DELETE /api/v1/shares/{id}
 ```
 
-**响应**: `204 No Content`
+**响应示例**:
+```json
+{
+  "success": true,
+  "message": "share deleted successfully"
+}
+```
 
 ### 访问分享链接（公开）
 
@@ -975,15 +1029,18 @@ GET /api/v1/favorites
 **响应示例**:
 ```json
 {
-  "favorites": [
-    {
-      "path": "/documents/important.pdf",
-      "user_id": "user-123",
-      "created_at": "2024-01-15T10:00:00Z",
-      "note": ""
-    }
-  ],
-  "count": 1
+  "success": true,
+  "data": {
+    "favorites": [
+      {
+        "path": "/documents/important.pdf",
+        "user_id": "user-123",
+        "created_at": "2024-01-15T10:00:00Z",
+        "note": ""
+      }
+    ],
+    "count": 1
+  }
 }
 ```
 
@@ -1004,10 +1061,13 @@ POST /api/v1/favorites
 **响应示例**:
 ```json
 {
-  "path": "/documents/important.pdf",
-  "user_id": "user-123",
-  "created_at": "2024-01-15T10:00:00Z",
-  "note": "可选备注"
+  "success": true,
+  "data": {
+    "path": "/documents/important.pdf",
+    "user_id": "user-123",
+    "created_at": "2024-01-15T10:00:00Z",
+    "note": "可选备注"
+  }
 }
 ```
 
@@ -1020,8 +1080,11 @@ GET /api/v1/favorites/check?path=/documents/file.pdf
 **响应示例**:
 ```json
 {
-  "path": "/documents/file.pdf",
-  "is_favorite": true
+  "success": true,
+  "data": {
+    "path": "/documents/file.pdf",
+    "is_favorite": true
+  }
 }
 ```
 
@@ -1041,9 +1104,12 @@ POST /api/v1/favorites/check-batch
 **响应示例**:
 ```json
 {
-  "favorites": {
-    "/file1.txt": true,
-    "/file2.pdf": false
+  "success": true,
+  "data": {
+    "favorites": {
+      "/file1.txt": true,
+      "/file2.pdf": false
+    }
   }
 }
 ```
@@ -1057,7 +1123,13 @@ DELETE /api/v1/favorites/{path}
 **说明**:
 - `{path}` 需要 URL 编码，支持包含 `/` 的完整路径
 
-**响应**: `204 No Content`
+**响应示例**:
+```json
+{
+  "success": true,
+  "message": "favorite removed successfully"
+}
+```
 
 ### 更新备注
 
@@ -1068,7 +1140,13 @@ PATCH /api/v1/favorites/{path}
 **说明**:
 - `{path}` 需要 URL 编码，支持包含 `/` 的完整路径
 
-**响应**: `204 No Content`
+**响应示例**:
+```json
+{
+  "success": true,
+  "message": "favorite note updated successfully"
+}
+```
 
 ---
 

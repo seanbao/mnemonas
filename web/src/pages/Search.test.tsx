@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
@@ -166,6 +166,23 @@ describe('SearchPage', () => {
       await waitFor(() => {
         expect(screen.getByText('未找到匹配的文件')).toBeInTheDocument()
       }, { timeout: 1000 })
+    })
+
+    it('syncs query state when URL search params change', async () => {
+      renderSearchPage('report')
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('report')).toBeInTheDocument()
+      })
+
+      act(() => {
+        window.history.pushState({}, '', '/search?q=archive')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      })
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('archive')).toBeInTheDocument()
+      })
     })
   })
 

@@ -21,20 +21,17 @@ test.describe('文件浏览页面', () => {
   test('应显示面包屑导航', async ({ page }) => {
     // 检查根目录面包屑
     const rootBreadcrumb = page.getByText('根目录')
-    const isVisible = await rootBreadcrumb.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+    await expect(rootBreadcrumb).toBeVisible({ timeout: 5000 })
   })
 
   test('应显示工具栏按钮', async ({ page }) => {
     // 检查上传按钮（保存记忆）
     const uploadBtn = page.getByRole('button', { name: /保存记忆|上传/i })
-    const isUploadVisible = await uploadBtn.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isUploadVisible) { console.log('Upload button not found') }
+    await expect(uploadBtn).toBeVisible({ timeout: 5000 })
 
     // 检查新建文件夹按钮
     const newFolderBtn = page.getByRole('button', { name: /新建空间|新建文件夹/i })
-    const isFolderVisible = await newFolderBtn.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isFolderVisible) { console.log('New folder button not found') }
+    await expect(newFolderBtn).toBeVisible({ timeout: 5000 })
   })
 
   test('应支持列表和网格视图切换', async ({ page }) => {
@@ -74,8 +71,7 @@ test.describe('文件批量操作', () => {
       
       // 检查批量操作按钮
       const batchDeleteBtn = page.getByRole('button', { name: /批量删除/i })
-      const isVisible = await batchDeleteBtn.isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+      await expect(batchDeleteBtn).toBeVisible({ timeout: 5000 })
     }
   })
 })
@@ -89,8 +85,7 @@ test.describe('新建文件夹功能', () => {
       await newFolderBtn.click()
       
       // 检查模态框出现
-      const isVisible = await page.getByText(/新建文件夹|文件夹名称/i).isVisible({ timeout: 5000 }).catch(() => false)
-    if (!isVisible) { console.log('Element not found') }
+      await expect(page.getByText(/新建文件夹|文件夹名称/i)).toBeVisible({ timeout: 5000 })
     }
   })
 })
