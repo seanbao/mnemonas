@@ -171,7 +171,7 @@ export function Header({ onMenuClick }: HeaderProps) {
                 </div>
               </div>
             </DropdownItem>
-            {isAdmin && <DropdownItem key="settings">设置</DropdownItem>}
+            {isAdmin ? <DropdownItem key="settings">设置</DropdownItem> : null}
             <DropdownItem key="help" onPress={handleHelp}>帮助文档</DropdownItem>
             <DropdownItem key="logout" className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10">
               退出登录

@@ -227,7 +227,7 @@ export function DashboardPage() {
       statsResult.error,
       versionResult.error,
       recentActivityResult.error,
-    ].filter((error): error is unknown => Boolean(error))
+    ].filter((error): error is Error => Boolean(error))
 
     if (refreshErrors.length > 0) {
       addToast(getDashboardRefreshErrorToast(refreshErrors))

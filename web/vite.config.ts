@@ -21,11 +21,27 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        // Manual chunk splitting for better caching
-        manualChunks: {
-          vendor: ['react', 'react-dom', 'react-router-dom'],
-          query: ['@tanstack/react-query'],
-          ui: ['@heroui/react', 'framer-motion'],
+        // Keep only coarse-grained chunks for the heaviest stable dependencies.
+        // Let Vite/Rollup split UI libraries with the route graph instead of forcing
+        // all HeroUI code into a single shared chunk.
+        manualChunks(id) {
+          if (id.includes('node_modules/framer-motion')) {
+            return 'motion'
+          }
+
+          if (
+            id.includes('node_modules/react/') ||
+            id.includes('node_modules/react-dom/') ||
+            id.includes('node_modules/react-router-dom/')
+          ) {
+            return 'vendor'
+          }
+
+          if (id.includes('node_modules/@tanstack/react-query')) {
+            return 'query'
+          }
+
+          return undefined
         },
       },
     },

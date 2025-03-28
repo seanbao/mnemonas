@@ -683,10 +683,41 @@ export function SettingsPage() {
 
   if (isLoading) {
     return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载设置...</p>
+      <div className="h-full overflow-auto custom-scrollbar">
+        <div className="max-w-4xl mx-auto p-7">
+          <PageHeader
+            title="系统设置"
+            subtitle="配置 MnemoNAS 系统参数"
+            actions={
+              <>
+                <Button
+                  variant="bordered"
+                  className="btn-secondary btn-md rounded-xl"
+                  startContent={<RefreshCw size={16} />}
+                  isDisabled
+                >
+                  重置
+                </Button>
+                <Button
+                  className="btn-primary btn-md rounded-xl"
+                  startContent={<Save size={16} />}
+                  isDisabled
+                >
+                  保存设置
+                </Button>
+              </>
+            }
+            className="mb-8"
+          />
+
+          <Card className="card-meridian">
+            <CardBody className="py-16">
+              <div className="text-center">
+                <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                <p className="text-default-500">加载设置...</p>
+              </div>
+            </CardBody>
+          </Card>
         </div>
       </div>
     )
@@ -697,8 +728,8 @@ export function SettingsPage() {
       <div className="h-full flex items-center justify-center p-6">
         <EmptyState
           icon={AlertCircle}
-          title={settingsLoadErrorPresentation?.title}
-          description={settingsLoadErrorPresentation?.description}
+          title={settingsLoadErrorPresentation!.title}
+          description={settingsLoadErrorPresentation!.description}
           action={
 		    <Button variant="bordered" className="rounded-xl" onPress={handleRefreshSettings} isLoading={isRefetching}>
               重新加载

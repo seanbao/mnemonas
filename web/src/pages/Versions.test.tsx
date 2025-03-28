@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
 
@@ -161,6 +161,29 @@ describe('VersionsPage', () => {
       })
       expect(mockGetVersions).not.toHaveBeenCalled()
       expect(input).toHaveValue('/tester')
+    })
+
+    it('syncs the selected path when the URL query changes after mount', async () => {
+      window.history.pushState({}, '', '/versions?path=/first.txt')
+      render(<VersionsPage />)
+
+      await waitFor(() => {
+        expect(mockGetVersions).toHaveBeenCalledWith('/first.txt')
+      })
+
+      mockGetVersions.mockClear()
+
+      await act(async () => {
+        window.history.pushState({}, '', '/versions?path=/second.txt')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      })
+
+      await waitFor(() => {
+        expect(mockGetVersions).toHaveBeenCalledWith('/second.txt')
+      })
+
+      expect(screen.getByPlaceholderText(/输入文件路径/)).toHaveValue('/second.txt')
+      expect(screen.getByText('/second.txt')).toBeTruthy()
     })
   })
 

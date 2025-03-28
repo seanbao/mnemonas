@@ -78,7 +78,7 @@ func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *t
 	}
 }
 
-func TestWorkspace_Copy_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
+func TestWorkspace_Copy_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 	w := setupWorkspace(t)
 	if err := w.WriteFile(context.Background(), "/source.txt", []byte("copy content")); err != nil {
 		t.Fatalf("WriteFile(source.txt) error: %v", err)
@@ -100,19 +100,15 @@ func TestWorkspace_Copy_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
 		t.Fatalf("expected directory sync error, got %v", err)
 	}
 
-	data, readErr := os.ReadFile(filepath.Join(w.Root(), "copied.txt"))
+	if _, statErr := os.Stat(filepath.Join(w.Root(), "copied.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected copied destination to be removed after sync failure, got %v", statErr)
+	}
+	data, readErr := os.ReadFile(filepath.Join(w.Root(), "source.txt"))
 	if readErr != nil {
-		t.Fatalf("expected copied file to remain readable after sync failure, got %v", readErr)
+		t.Fatalf("expected source file to remain readable after copy rollback, got %v", readErr)
 	}
 	if string(data) != "copy content" {
-		t.Fatalf("expected copied content to be preserved, got %q", string(data))
-	}
-	info, statErr := os.Stat(filepath.Join(w.Root(), "copied.txt"))
-	if statErr != nil {
-		t.Fatalf("Stat(copied.txt) error: %v", statErr)
-	}
-	if info.Mode().Perm() != 0644 {
-		t.Fatalf("expected copied.txt permissions 0644, got %o", info.Mode().Perm())
+		t.Fatalf("expected source content to remain unchanged, got %q", string(data))
 	}
 }
 
@@ -823,6 +819,46 @@ func TestWorkspace_Copy_ReturnsContextCanceledAndCleansUpTempFile(t *testing.T) 
 		t.Fatalf("Glob(.workspace-*.tmp) error: %v", globErr)
 	} else if len(matches) != 0 {
 		t.Fatalf("expected no leftover temp files after canceled copy, got %v", matches)
+	}
+}
+
+func TestWorkspace_Copy_DoesNotOverwriteFileCreatedDuringCopy(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/source.txt", []byte("source")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	originalCopyWorkspaceData := copyWorkspaceData
+	copyWorkspaceData = func(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+		n, err := io.Copy(dst, src)
+		if err != nil {
+			return n, err
+		}
+		if writeErr := os.WriteFile(filepath.Join(w.Root(), "dest.txt"), []byte("dest"), 0644); writeErr != nil {
+			return n, writeErr
+		}
+		return n, nil
+	}
+	t.Cleanup(func() {
+		copyWorkspaceData = originalCopyWorkspaceData
+	})
+
+	err := w.Copy(ctx, "/source.txt", "/dest.txt")
+	if err != ErrAlreadyExists {
+		t.Fatalf("Copy() error = %v, want ErrAlreadyExists", err)
+	}
+
+	destData, readErr := os.ReadFile(filepath.Join(w.Root(), "dest.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(dest.txt) error: %v", readErr)
+	}
+	if string(destData) != "dest" {
+		t.Fatalf("destination content = %q, want %q", string(destData), "dest")
+	}
+	if !w.Exists(ctx, "/source.txt") {
+		t.Fatal("source should remain after copy conflict")
 	}
 }
 

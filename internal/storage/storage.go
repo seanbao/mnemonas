@@ -941,6 +941,59 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 	return nil
 }
 
+// Copy copies a file without overwriting an existing destination.
+func (fs *FileSystem) Copy(ctx context.Context, srcName, dstName string) error {
+	release := fs.beginMutation()
+	defer release()
+
+	var err error
+	srcName, err = normalizeStorageWorkspacePath(srcName)
+	if err != nil {
+		return err
+	}
+	dstName, err = normalizeStorageWorkspacePath(dstName)
+	if err != nil {
+		return err
+	}
+
+	if err := fs.workspace.Copy(ctx, srcName, dstName); err != nil {
+		if errors.Is(err, workspace.ErrAlreadyExists) {
+			return ErrAlreadyExists
+		}
+		if errors.Is(err, workspace.ErrNotDir) {
+			return ErrNotDir
+		}
+		if errors.Is(err, workspace.ErrNotFound) {
+			return ErrNotFound
+		}
+		if errors.Is(err, workspace.ErrIsDir) {
+			return ErrIsDir
+		}
+		return err
+	}
+
+	if err := fs.syncFileIndexFromWorkspace(ctx, dstName); err != nil {
+		rollbackDeleteErr := fs.workspace.Delete(ctx, dstName)
+		rollbackIndexErr := fs.deleteFileIndex(ctx, dstName)
+		if errors.Is(rollbackIndexErr, versionstore.ErrNotFound) {
+			rollbackIndexErr = nil
+		}
+		if rollbackDeleteErr != nil || rollbackIndexErr != nil {
+			errList := []error{fmt.Errorf("failed to update file index: %w", err)}
+			if rollbackDeleteErr != nil {
+				errList = append(errList, fmt.Errorf("failed to rollback copied file: %w", rollbackDeleteErr))
+			}
+			if rollbackIndexErr != nil {
+				errList = append(errList, fmt.Errorf("failed to rollback copied file index: %w", rollbackIndexErr))
+			}
+			return errors.Join(errList...)
+		}
+		return fmt.Errorf("failed to update file index: %w", err)
+	}
+
+	return nil
+}
+
 func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) (func() error, error) {
 	fs.hookMu.RLock()
 	hook := fs.onPathDeleted
@@ -1018,7 +1071,6 @@ func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionR
 			Comment:   v.Comment,
 		})
 	}
-
 	return result, nil
 }
 
@@ -1039,8 +1091,16 @@ func mapWorkspaceOpenFileError(err error) error {
 	return mapWorkspaceReadablePathError(err)
 }
 
+type readSeekNopCloser struct {
+	*bytes.Reader
+}
+
+func (r readSeekNopCloser) Close() error {
+	return nil
+}
+
 // GetVersion reads a specific version of a file
-func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.ReadCloser, error) {
+func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.ReadSeekCloser, error) {
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
@@ -1087,7 +1147,7 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 		return nil, err
 	}
 
-	return io.NopCloser(bytes.NewReader(data)), nil
+	return readSeekNopCloser{Reader: bytes.NewReader(data)}, nil
 }
 
 func (fs *FileSystem) hashWorkspaceFile(ctx context.Context, name string) (string, error) {

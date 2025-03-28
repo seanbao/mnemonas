@@ -175,4 +175,25 @@ test.describe('响应式侧边栏', () => {
     // 移动端至少应存在一种导航入口
     expect(hasHamburger || sidebarVisible).toBe(true)
   })
+
+  test('移动端点击导航链接后应关闭侧边栏', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 })
+    await ensureAuthenticatedAt(page, '/')
+
+    const openButton = page.getByRole('button', { name: '打开导航菜单' })
+    const sidebarShell = page.getByTestId('app-sidebar-shell')
+    const overlay = page.getByTestId('mobile-sidebar-overlay')
+
+    await openButton.click()
+
+    await expect(overlay).toBeVisible({ timeout: 2000 })
+    await expect(sidebarShell).toHaveClass(/translate-x-0/, { timeout: 2000 })
+
+    await page.getByRole('link', { name: /搜索|Search/i }).click()
+
+    await expect(page).toHaveURL(/\/search/)
+    await expect(overlay).toHaveCount(0)
+    await expect(sidebarShell).toHaveClass(/-translate-x-full/, { timeout: 2000 })
+    await expect(openButton).toBeVisible({ timeout: 2000 })
+  })
 })
