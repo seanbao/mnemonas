@@ -519,7 +519,7 @@ export function ShareAccessPage() {
               {isListing && (
                 <div className="text-sm text-default-500">加载文件夹内容...</div>
               )}
-              {listError && (
+              {Boolean(listError) && (
                 <div className="space-y-2">
                   <div className="space-y-1">
                     <div className="text-sm font-medium text-danger">{listErrorPresentation.title}</div>

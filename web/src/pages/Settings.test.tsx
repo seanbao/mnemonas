@@ -135,6 +135,17 @@ describe('SettingsPage', () => {
   }
 
   describe('rendering', () => {
+    it('keeps the page header and actions visible while settings are loading', () => {
+      mockGetSettings.mockReturnValue(new Promise(() => {}) as ReturnType<typeof getSettings>)
+
+      render(<SettingsPage />)
+
+      expect(screen.getByRole('heading', { name: '系统设置' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '重置' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '保存设置' })).toBeTruthy()
+      expect(screen.getByText('加载设置...')).toBeTruthy()
+    })
+
     it('renders page header', async () => {
       render(<SettingsPage />)
       await waitFor(() => {

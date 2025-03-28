@@ -276,19 +276,6 @@ function ImagePreview({
     })
   }, [currentImage])
 
-  useEffect(() => {
-    if (!isOpen || !currentImage?.path) {
-      return
-    }
-
-    setZoom(1)
-    setRotation(0)
-    setLoading(true)
-    setLoadError(false)
-    setHasRetried(false)
-    setImageUrl(getDownloadUrl(currentImage.path))
-  }, [currentImage?.path, isOpen])
-
   // Preload adjacent images
   useEffect(() => {
     if (!isOpen || images.length === 0) return
@@ -575,12 +562,12 @@ function ImagePreview({
 
 export function AlbumPage() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
-  const [hasThumbnailLoadFailures, setHasThumbnailLoadFailures] = useState(false)
+  const [thumbnailFailureScope, setThumbnailFailureScope] = useState<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   const user = useUser()
   const rootPath = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : '/'
   
-  const { data, isLoading, error, refetch } = useQuery<AlbumQueryResult>({
+  const { data, dataUpdatedAt, isLoading, error, refetch } = useQuery<AlbumQueryResult>({
     queryKey: ['album-images', rootPath],
     queryFn: async () => {
       // Cancel previous request if any
@@ -596,7 +583,9 @@ export function AlbumPage() {
     staleTime: 1000 * 60 * 5, // Cache for 5 minutes
   })
 
+  const albumScope = `${rootPath}:${dataUpdatedAt}`
   const images = data?.images
+  const hasThumbnailLoadFailures = thumbnailFailureScope === albumScope
   
   // Cleanup on unmount
   useEffect(() => {
@@ -604,10 +593,6 @@ export function AlbumPage() {
       abortControllerRef.current?.abort()
     }
   }, [])
-
-  useEffect(() => {
-    setHasThumbnailLoadFailures(false)
-  }, [rootPath, data?.images])
 
   const handleOpenPreview = useCallback((index: number) => {
     setPreviewIndex(index)
@@ -712,7 +697,7 @@ export function AlbumPage() {
                   file={image}
                   index={index}
                   onClick={() => handleOpenPreview(index)}
-                  onThumbnailLoadFailure={() => setHasThumbnailLoadFailures(true)}
+                  onThumbnailLoadFailure={() => setThumbnailFailureScope(albumScope)}
                 />
               ))}
             </div>

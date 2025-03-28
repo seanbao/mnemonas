@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -220,6 +220,27 @@ export function TrashPage() {
     queryFn: listTrash,
   })
 
+  const items = useMemo(() => data?.items ?? [], [data?.items])
+  const visibleSelectedItems = useMemo(() => {
+    if (selectedItems.size === 0) {
+      return selectedItems
+    }
+
+    const validIds = new Set(items.map((item) => item.id))
+    let changed = false
+    const next = new Set<string>()
+
+    for (const id of selectedItems) {
+      if (validIds.has(id)) {
+        next.add(id)
+        continue
+      }
+      changed = true
+    }
+
+    return changed ? next : selectedItems
+  }, [items, selectedItems])
+
   const removeSelectedIds = useCallback((ids: string[]) => {
     if (ids.length === 0) {
       return
@@ -356,13 +377,13 @@ export function TrashPage() {
 
   const handleSelectAll = useCallback(() => {
     if (!canWrite) return
-    if (!data?.items) return
-    if (selectedItems.size === data.items.length) {
+    if (items.length === 0) return
+    if (visibleSelectedItems.size === items.length) {
       setSelectedItems(new Set())
     } else {
-      setSelectedItems(new Set(data.items.map(item => item.id)))
+      setSelectedItems(new Set(items.map(item => item.id)))
     }
-  }, [canWrite, data, selectedItems.size])
+  }, [canWrite, items, visibleSelectedItems.size])
 
   // Batch restore using custom hook
   const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation({
@@ -385,10 +406,10 @@ export function TrashPage() {
 
   const handleBatchRestore = useCallback(async () => {
     if (!canWrite) return
-    const ids = Array.from(selectedItems)
+    const ids = Array.from(visibleSelectedItems)
     if (ids.length === 0) return
     await executeBatchRestore(ids)
-  }, [canWrite, selectedItems, executeBatchRestore])
+  }, [canWrite, visibleSelectedItems, executeBatchRestore])
 
   // Batch delete using custom hook
   const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation({
@@ -410,11 +431,11 @@ export function TrashPage() {
 
   const handleBatchDelete = useCallback(async () => {
     if (!canWrite) return
-    const ids = Array.from(selectedItems)
+    const ids = Array.from(visibleSelectedItems)
     if (ids.length === 0) return
     await executeBatchDelete(ids)
     onBatchDeleteClose()
-  }, [canWrite, selectedItems, executeBatchDelete, onBatchDeleteClose])
+  }, [canWrite, visibleSelectedItems, executeBatchDelete, onBatchDeleteClose])
 
   const handleDeleteClick = useCallback((item: TrashItem) => {
     if (!canWrite) return
@@ -428,29 +449,6 @@ export function TrashPage() {
       deleteMutation.mutate(actionItem.id)
     }
   }, [canWrite, actionItem, deleteMutation])
-
-  const items = data?.items ?? []
-
-  useEffect(() => {
-    const validIds = new Set(items.map((item) => item.id))
-    setSelectedItems((prev) => {
-      if (prev.size === 0) {
-        return prev
-      }
-
-      let changed = false
-      const next = new Set<string>()
-      for (const id of prev) {
-        if (validIds.has(id)) {
-          next.add(id)
-          continue
-        }
-        changed = true
-      }
-
-      return changed ? next : prev
-    })
-  }, [items])
 
   if (isLoading) {
     return (
@@ -523,12 +521,12 @@ export function TrashPage() {
       />
 
       {/* Selection bar */}
-      {canWrite && selectedItems.size > 0 && (
+      {canWrite && visibleSelectedItems.size > 0 && (
         <div className="flex items-center gap-4 px-4 py-2.5 bg-accent-primary/10 backdrop-blur-sm rounded-xl border border-divider shadow-[var(--shadow-soft)]">
           <div className="w-8 h-8 rounded-full bg-accent-primary/15 flex items-center justify-center">
-            <span className="text-sm font-bold text-accent-primary">{selectedItems.size}</span>
+            <span className="text-sm font-bold text-accent-primary">{visibleSelectedItems.size}</span>
           </div>
-          <span className="text-sm font-medium">已选择 {selectedItems.size} 项</span>
+          <span className="text-sm font-medium">已选择 {visibleSelectedItems.size} 项</span>
           <div className="flex-1" />
           <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-xl">
             取消选择
@@ -563,8 +561,8 @@ export function TrashPage() {
         <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
           {canWrite ? (
             <Checkbox
-              isSelected={selectedItems.size === items.length && items.length > 0}
-              isIndeterminate={selectedItems.size > 0 && selectedItems.size < items.length}
+              isSelected={visibleSelectedItems.size === items.length && items.length > 0}
+              isIndeterminate={visibleSelectedItems.size > 0 && visibleSelectedItems.size < items.length}
               onValueChange={handleSelectAll}
               classNames={{
                 wrapper: "before:border-divider",
@@ -588,13 +586,13 @@ export function TrashPage() {
             <TrashRow
               key={item.id}
               item={item}
-              isSelected={selectedItems.has(item.id)}
+              isSelected={visibleSelectedItems.has(item.id)}
               retentionDays={retentionDays ?? 0}
               retentionEnabled={retentionEnabled ?? false}
               canWrite={canWrite}
               onSelect={() => {
                 if (!canWrite) return
-                const newSet = new Set(selectedItems)
+                const newSet = new Set(visibleSelectedItems)
                 if (newSet.has(item.id)) {
                   newSet.delete(item.id)
                 } else {
@@ -687,7 +685,7 @@ export function TrashPage() {
             </div>
           </ModalHeader>
           <ModalBody className="px-6 py-4">
-            <p className="text-foreground">确定要永久删除已选择的 <strong>{selectedItems.size}</strong> 项吗？</p>
+            <p className="text-foreground">确定要永久删除已选择的 <strong>{visibleSelectedItems.size}</strong> 项吗？</p>
             <p className="text-xs text-default-500 mt-2">
               所选项目将从回收站中彻底移除，无法找回。
             </p>
