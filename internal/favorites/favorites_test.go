@@ -608,6 +608,65 @@ func TestStore_UpdatePathReferences_RenamesDescendantFavorites(t *testing.T) {
 	}
 }
 
+func TestStore_UpdatePathReferences_PreservesAllDescendantsForSingleUser(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	paths := []string{
+		"/docs",
+		"/docs/a.txt",
+		"/docs/b.txt",
+		"/docs/sub/c.txt",
+		"/docs/sub/deeper/d.txt",
+	}
+	for _, favoritePath := range paths {
+		if _, err := store.Add("user1", favoritePath, favoritePath); err != nil {
+			t.Fatalf("Add(%s) error: %v", favoritePath, err)
+		}
+	}
+
+	if err := store.UpdatePathReferences("/docs", "/archive/docs"); err != nil {
+		t.Fatalf("UpdatePathReferences() error: %v", err)
+	}
+
+	if store.Count("user1") != len(paths) {
+		t.Fatalf("expected %d favorites after rename, got %d", len(paths), store.Count("user1"))
+	}
+
+	expected := []string{
+		"/archive/docs",
+		"/archive/docs/a.txt",
+		"/archive/docs/b.txt",
+		"/archive/docs/sub/c.txt",
+		"/archive/docs/sub/deeper/d.txt",
+	}
+	for _, favoritePath := range expected {
+		if !store.IsFavorite("user1", favoritePath) {
+			t.Fatalf("expected favorite path %s to be updated", favoritePath)
+		}
+	}
+	for _, oldPath := range paths {
+		if store.IsFavorite("user1", oldPath) {
+			t.Fatalf("expected old favorite path %s to be removed", oldPath)
+		}
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	for _, favoritePath := range expected {
+		if !reloaded.IsFavorite("user1", favoritePath) {
+			t.Fatalf("expected reloaded favorite path %s to be updated", favoritePath)
+		}
+	}
+}
+
 func TestStore_RemoveFavoritesUnderPath_RemovesExactAndDescendantFavorites(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")

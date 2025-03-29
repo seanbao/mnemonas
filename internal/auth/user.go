@@ -530,7 +530,7 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 		snapshot.byName[normalizedUsername] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
-			authenticatedUser = cloneUser(user)
+			authenticatedUser = cloneUser(updated)
 			break
 		}
 		if s.commitSnapshot(snapshot) {
