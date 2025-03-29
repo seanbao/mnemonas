@@ -151,6 +151,35 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	if len(listed) != 1 || listed[0].Path != "/docs/report.pdf" {
 		t.Fatalf("expected normalized favorite path in list output, got %+v", listed)
 	}
+
+	data, err = os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(favorites.json) error: %v", err)
+	}
+	var persisted []Favorite
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(persisted favorites) error: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected normalized favorites file to contain one entry, got %d", len(persisted))
+	}
+	if persisted[0].Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized favorite path to be persisted, got %q", persisted[0].Path)
+	}
+}
+
+func TestNewStore_RejectsNullFavoriteEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	if err := os.WriteFile(storePath, []byte("[null]"), 0600); err != nil {
+		t.Fatalf("WriteFile(favorites.json) error: %v", err)
+	}
+
+	if _, err := NewStore(storePath); err == nil {
+		t.Fatal("expected NewStore() to reject null favorite entries")
+	} else if !strings.Contains(err.Error(), "null entry") {
+		t.Fatalf("expected null entry error, got %v", err)
+	}
 }
 
 func TestNewStore_ReturnsErrorWhenCorruptFavoritesBackupSyncFails(t *testing.T) {

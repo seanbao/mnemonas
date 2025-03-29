@@ -362,6 +362,18 @@ describe('API: files', () => {
 
       await expect(listFiles('/')).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it('rejects malformed successful file list payloads', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { files: null, path: '/' },
+        }),
+      })
+
+      await expect(listFiles('/')).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getVersions', () => {
@@ -401,6 +413,21 @@ describe('API: files', () => {
         code: 'SERVICE_UNAVAILABLE',
         isUnavailable: true,
       })
+    })
+
+    it('rejects malformed successful version history payloads', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+            versions: { invalid: true },
+          },
+        }),
+      })
+
+      await expect(getVersions('/test.txt')).rejects.toThrow('服务器返回了无效的数据')
     })
   })
 
@@ -516,6 +543,22 @@ describe('API: files', () => {
         code: 'SERVICE_UNAVAILABLE',
         isUnavailable: true,
       })
+    })
+
+    it('rejects malformed successful storage stats payloads', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            total_size: 'not-a-number',
+            total_chunks: null,
+            dedup_ratio: 'invalid',
+          },
+        }),
+      })
+
+      await expect(getStorageStats()).rejects.toThrow('服务器返回了无效的数据')
     })
   })
 
@@ -875,6 +918,30 @@ describe('API: files', () => {
         expect(result.count).toBe(2)
         expect(result.totalSize).toBe(124)
       })
+
+      it('rejects malformed successful trash list payloads', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              items: [{
+                id: 'item1',
+                originalPath: '/deleted.txt',
+                deletedAt: '2024-01-01T00:00:00Z',
+                name: 'deleted.txt',
+                isDir: false,
+                size: '100',
+              }],
+              count: 1,
+              totalSize: 100,
+            },
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(listTrash()).rejects.toThrow('服务器返回了无效的数据')
+      })
     })
 
     describe('restoreFromTrash', () => {
@@ -1044,6 +1111,19 @@ describe('API: files', () => {
 
         const result = await emptyTrash()
         expect(result).toEqual({ deletedCount: 2, partial: true })
+      })
+
+      it('rejects malformed successful empty trash responses', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: { deleted_count: '2', partial: true },
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(emptyTrash()).rejects.toThrow('服务器返回了无效的数据')
       })
     })
   })

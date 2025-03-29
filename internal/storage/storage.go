@@ -39,6 +39,9 @@ var (
 
 var syncStoragePathDir = syncStorageDir
 var storageRandomRead = rand.Read
+var movePathRename = os.Rename
+var movePathRemove = os.Remove
+var movePathRemoveAll = os.RemoveAll
 var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
 	return ws.Walk(ctx, root, fn)
 }
@@ -1216,22 +1219,29 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 				return fmt.Errorf("failed to check current version object before restore: %w", err)
 			}
 			rollbackObjectCreated := !hasObject
+			_, versionErr := fs.versions.GetVersion(ctx, name, currentHash)
+			versionAlreadyRecorded := versionErr == nil
+			if versionErr != nil && !errors.Is(versionErr, versionstore.ErrNotFound) {
+				return fmt.Errorf("failed to check current version before restore: %w", versionErr)
+			}
 			storedHash, err := fs.putVersionObject(ctx, previousData)
 			if err != nil {
 				return fmt.Errorf("failed to store current version before restore: %w", err)
 			}
 			rollbackVersionHash = storedHash
 			rollbackVersionObjectCreated = rollbackObjectCreated
-			if err := fs.addFileVersion(ctx, name, storedHash, int64(len(previousData)), "before restore"); err != nil {
-				if rollbackErr := fs.rollbackWriteVersion(ctx, name, storedHash, false, rollbackObjectCreated); rollbackErr != nil {
-					return errors.Join(
-						fmt.Errorf("failed to record current version before restore: %w", err),
-						fmt.Errorf("failed to cleanup current snapshot version during rollback: %w", rollbackErr),
-					)
+			if !versionAlreadyRecorded {
+				if err := fs.addFileVersion(ctx, name, storedHash, int64(len(previousData)), "before restore"); err != nil {
+					if rollbackErr := fs.rollbackWriteVersion(ctx, name, storedHash, false, rollbackObjectCreated); rollbackErr != nil {
+						return errors.Join(
+							fmt.Errorf("failed to record current version before restore: %w", err),
+							fmt.Errorf("failed to cleanup current snapshot version during rollback: %w", rollbackErr),
+						)
+					}
+					return fmt.Errorf("failed to record current version before restore: %w", err)
 				}
-				return fmt.Errorf("failed to record current version before restore: %w", err)
+				rollbackVersionRecorded = true
 			}
-			rollbackVersionRecorded = true
 		}
 	}
 
@@ -1451,6 +1461,15 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 		}
 		return err
 	}
+	if item.HadVersions && newPath != item.OriginalPath {
+		sharedMetadata, err := fs.hasOtherTrashItemWithOriginalPath(ctx, item.OriginalPath, id)
+		if err != nil {
+			return err
+		}
+		if sharedMetadata {
+			return fmt.Errorf("cannot restore %s to a custom path while another trash item still references its version metadata: %w", item.OriginalPath, ErrAlreadyExists)
+		}
+	}
 
 	// Check if target path already exists
 	if _, err := fs.workspace.Stat(ctx, newPath); err == nil {
@@ -1526,6 +1545,33 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	}
 
 	return nil
+}
+
+func (fs *FileSystem) hasOtherTrashItemWithOriginalPath(ctx context.Context, originalPath, excludedID string) (bool, error) {
+	items, err := fs.versions.ListTrash(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, item := range items {
+		if item.ID == excludedID {
+			continue
+		}
+		if item.OriginalPath == originalPath {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (fs *FileSystem) workspacePathExists(ctx context.Context, targetPath string) (bool, error) {
+	_, err := fs.workspace.Stat(ctx, targetPath)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, workspace.ErrNotFound) || errors.Is(err, workspace.ErrNotDir) {
+		return false, nil
+	}
+	return false, err
 }
 
 // DeleteFromTrash permanently deletes an item from trash
@@ -1630,6 +1676,20 @@ func (fs *FileSystem) permanentlyDeleteTrashItem(ctx context.Context, item *vers
 	}
 	if durabilityErr != nil {
 		visibleDeleted = true
+	}
+	sharedMetadata, sharedErr := fs.hasOtherTrashItemWithOriginalPath(ctx, item.OriginalPath, item.ID)
+	if sharedErr != nil {
+		return visibleDeleted, errors.Join(err, sharedErr)
+	}
+	if sharedMetadata {
+		return visibleDeleted, err
+	}
+	livePathExists, pathErr := fs.workspacePathExists(ctx, item.OriginalPath)
+	if pathErr != nil {
+		return visibleDeleted, errors.Join(err, pathErr)
+	}
+	if livePathExists {
+		return visibleDeleted, err
 	}
 
 	cleanupErr := fs.cleanupDeletedTrashVersions(ctx, item)
@@ -2349,9 +2409,9 @@ func movePath(src, dst string) error {
 		return err
 	}
 
-	if err := os.Rename(src, dst); err == nil {
+	if err := movePathRename(src, dst); err == nil {
 		if syncErr := syncStorageRenameDirs(src, dst); syncErr != nil {
-			if rollbackErr := os.Rename(dst, src); rollbackErr != nil {
+			if rollbackErr := movePathRename(dst, src); rollbackErr != nil {
 				return errors.Join(
 					fmt.Errorf("failed to sync renamed path: %w", syncErr),
 					fmt.Errorf("failed to rollback renamed path: %w", rollbackErr),
@@ -2377,9 +2437,8 @@ func movePath(src, dst string) error {
 		if err := copyDir(src, dst); err != nil {
 			return err
 		}
-		if err := os.RemoveAll(src); err != nil {
-			_ = os.RemoveAll(dst)
-			return err
+		if err := movePathRemoveAll(src); err != nil {
+			return fmt.Errorf("failed to remove copied source directory: %w", err)
 		}
 		return nil
 	}
@@ -2387,8 +2446,8 @@ func movePath(src, dst string) error {
 	if err := copyFile(src, dst); err != nil {
 		return err
 	}
-	if err := os.Remove(src); err != nil {
-		_ = os.Remove(dst)
+	if err := movePathRemove(src); err != nil {
+		_ = movePathRemove(dst)
 		return err
 	}
 	return nil

@@ -10,11 +10,103 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, instrument};
 
 use crate::cas::{CasConfig, CasStore};
-use crate::cdc::{ChunkRef, Chunker, ChunkerConfig, FileManifest, StreamingChunker};
+use crate::cdc::{Chunk, ChunkRef, Chunker, ChunkerConfig, FileManifest, StreamingChunker};
 
 // Include generated protobuf code
 pub mod proto {
     include!("proto/mnemonas.dataplane.v1.rs");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proto::data_plane_client::DataPlaneClient;
+    use super::proto::put_file_request::Payload;
+    use super::proto::{FileMetadata, PutFileRequest};
+    use super::*;
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_stream::iter;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::{Channel, Server};
+    use tonic::Code;
+
+    async fn setup_test_client(
+        service: DataPlaneService,
+    ) -> (DataPlaneClient<Channel>, oneshot::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let incoming = TcpListenerStream::new(listener);
+            Server::builder()
+                .add_service(service.into_server())
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("server run");
+        });
+
+        let endpoint = format!("http://{}", addr);
+        let client = DataPlaneClient::connect(endpoint)
+            .await
+            .expect("connect client");
+
+        (client, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn test_put_file_rolls_back_created_chunks_on_store_failure() {
+        let temp = tempdir().expect("tempdir");
+        let cas = Arc::new(
+            CasStore::new(CasConfig {
+                root: temp.path().join("cas"),
+                compression_enabled: false,
+                ..Default::default()
+            })
+            .await
+            .expect("cas init"),
+        );
+        cas.set_fail_put_after(2);
+
+        let service = DataPlaneService::with_cas(
+            Arc::clone(&cas),
+            ChunkerConfig {
+                min_size: 1024,
+                avg_size: 2048,
+                max_size: 4096,
+            },
+        );
+        let (mut client, shutdown_tx) = setup_test_client(service).await;
+
+        let data: Vec<u8> = (0..(16 * 1024)).map(|i| (i % 251) as u8).collect();
+        let requests = vec![
+            PutFileRequest {
+                payload: Some(Payload::Metadata(FileMetadata {
+                    path: "/docs/fail.bin".to_string(),
+                    content_type: None,
+                })),
+            },
+            PutFileRequest {
+                payload: Some(Payload::Chunk(data)),
+            },
+        ];
+
+        let err = client
+            .put_file(iter(requests))
+            .await
+            .expect_err("put_file should fail after the injected CAS write error");
+
+        assert_eq!(err.code(), Code::Internal);
+        assert!(
+            cas.list_hashes().is_empty(),
+            "expected failed put_file upload to leave no orphaned chunks"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
 }
 
 use proto::data_plane_server::{DataPlane, DataPlaneServer};
@@ -54,6 +146,65 @@ impl DataPlaneService {
     pub fn into_server(self) -> DataPlaneServer<Self> {
         DataPlaneServer::new(self)
     }
+
+    async fn store_uploaded_chunk(
+        &self,
+        chunk: Chunk,
+        chunk_refs: &mut Vec<ChunkRef>,
+        chunk_hashes: &mut Vec<String>,
+        created_hashes: &mut Vec<String>,
+        unique_size: &mut u64,
+    ) -> Result<(), Status> {
+        let put_result = self
+            .cas
+            .put_with_status(&chunk.data)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !put_result.deduplicated {
+            created_hashes.push(put_result.hash.clone());
+            *unique_size += chunk.length as u64;
+        }
+
+        chunk_refs.push(ChunkRef {
+            hash: put_result.hash.clone(),
+            size: chunk.length,
+            offset: chunk.offset,
+        });
+        chunk_hashes.push(put_result.hash);
+
+        Ok(())
+    }
+
+    async fn rollback_put_file_failure(
+        &self,
+        created_hashes: &[String],
+        status: Status,
+    ) -> Status {
+        if created_hashes.is_empty() {
+            return status;
+        }
+
+        let mut cleanup_errors = Vec::new();
+        for hash in created_hashes.iter().rev() {
+            if let Err(err) = self.cas.delete(hash).await {
+                cleanup_errors.push(format!("delete {}: {}", hash, err));
+            }
+        }
+
+        if cleanup_errors.is_empty() {
+            return status;
+        }
+
+        Status::new(
+            status.code(),
+            format!(
+                "{}; rollback failed: {}",
+                status.message(),
+                cleanup_errors.join("; ")
+            ),
+        )
+    }
 }
 
 #[tonic::async_trait]
@@ -78,21 +229,16 @@ impl DataPlane for DataPlaneService {
             }
         }
 
-        // Check if deduplication will happen
-        let hash = crate::cas::compute_hash(data);
-        let deduplicated = self.cas.has(&hash);
-
-        // Store
-        let hash = self
+        let put_result = self
             .cas
-            .put(data)
+            .put_with_status(data)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(PutChunkResponse {
-            hash,
+            hash: put_result.hash,
             size: data.len() as u64,
-            deduplicated,
+            deduplicated: put_result.deduplicated,
         }))
     }
 
@@ -159,39 +305,69 @@ impl DataPlane for DataPlaneService {
         let mut total_size: u64 = 0;
         let mut chunk_refs: Vec<ChunkRef> = Vec::new();
         let mut chunk_hashes: Vec<String> = Vec::new();
+        let mut created_hashes: Vec<String> = Vec::new();
         let mut unique_size: u64 = 0;
 
         // Process stream incrementally
         while let Some(req) = stream.next().await {
-            let req = req?;
+            let req = match req {
+                Ok(req) => req,
+                Err(status) => {
+                    return Err(self.rollback_put_file_failure(&created_hashes, status).await);
+                }
+            };
             match req.payload {
                 Some(put_file_request::Payload::Metadata(m)) => {
                     if metadata.is_some() {
-                        return Err(Status::invalid_argument(
-                            "File metadata must be provided exactly once",
-                        ));
+                        return Err(
+                            self.rollback_put_file_failure(
+                                &created_hashes,
+                                Status::invalid_argument(
+                                    "File metadata must be provided exactly once",
+                                ),
+                            )
+                            .await,
+                        );
                     }
                     if total_size > 0 {
-                        return Err(Status::invalid_argument(
-                            "File metadata must be sent before file chunks",
-                        ));
+                        return Err(
+                            self.rollback_put_file_failure(
+                                &created_hashes,
+                                Status::invalid_argument(
+                                    "File metadata must be sent before file chunks",
+                                ),
+                            )
+                            .await,
+                        );
                     }
                     metadata = Some(m);
                 }
                 Some(put_file_request::Payload::Chunk(data)) => {
                     if metadata.is_none() {
-                        return Err(Status::invalid_argument(
-                            "File metadata must be sent before file chunks",
-                        ));
+                        return Err(
+                            self.rollback_put_file_failure(
+                                &created_hashes,
+                                Status::invalid_argument(
+                                    "File metadata must be sent before file chunks",
+                                ),
+                            )
+                            .await,
+                        );
                     }
 
                     // Check total size limit
                     total_size += data.len() as u64;
                     if total_size > MAX_FILE_SIZE {
-                        return Err(Status::resource_exhausted(format!(
-                            "File too large (max: {} bytes)",
-                            MAX_FILE_SIZE
-                        )));
+                        return Err(
+                            self.rollback_put_file_failure(
+                                &created_hashes,
+                                Status::resource_exhausted(format!(
+                                    "File too large (max: {} bytes)",
+                                    MAX_FILE_SIZE
+                                )),
+                            )
+                            .await,
+                        );
                     }
 
                     // Feed data to streaming chunker
@@ -199,22 +375,19 @@ impl DataPlane for DataPlaneService {
 
                     // Store completed chunks immediately
                     for chunk in chunks {
-                        let deduplicated = self.cas.has(&chunk.hash);
-
-                        self.cas
-                            .put(&chunk.data)
+                        if let Err(status) = self
+                            .store_uploaded_chunk(
+                                chunk,
+                                &mut chunk_refs,
+                                &mut chunk_hashes,
+                                &mut created_hashes,
+                                &mut unique_size,
+                            )
                             .await
-                            .map_err(|e| Status::internal(e.to_string()))?;
-
-                        chunk_refs.push(ChunkRef {
-                            hash: chunk.hash.clone(),
-                            size: chunk.length,
-                            offset: chunk.offset,
-                        });
-                        chunk_hashes.push(chunk.hash);
-
-                        if !deduplicated {
-                            unique_size += chunk.length as u64;
+                        {
+                            return Err(
+                                self.rollback_put_file_failure(&created_hashes, status).await,
+                            );
                         }
                     }
                 }
@@ -226,32 +399,39 @@ impl DataPlane for DataPlaneService {
         if let Some(ref m) = metadata {
             info!(path = %m.path, total_size, "processing file upload");
         } else {
-            return Err(Status::invalid_argument("File metadata is required"));
+            return Err(
+                self.rollback_put_file_failure(
+                    &created_hashes,
+                    Status::invalid_argument("File metadata is required"),
+                )
+                .await,
+            );
         }
 
         if total_size == 0 {
-            return Err(Status::invalid_argument("No data provided"));
+            return Err(
+                self.rollback_put_file_failure(
+                    &created_hashes,
+                    Status::invalid_argument("No data provided"),
+                )
+                .await,
+            );
         }
 
         // Process remaining data in buffer
         let final_chunks = streaming_chunker.finish();
         for chunk in final_chunks {
-            let deduplicated = self.cas.has(&chunk.hash);
-
-            self.cas
-                .put(&chunk.data)
+            if let Err(status) = self
+                .store_uploaded_chunk(
+                    chunk,
+                    &mut chunk_refs,
+                    &mut chunk_hashes,
+                    &mut created_hashes,
+                    &mut unique_size,
+                )
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            chunk_refs.push(ChunkRef {
-                hash: chunk.hash.clone(),
-                size: chunk.length,
-                offset: chunk.offset,
-            });
-            chunk_hashes.push(chunk.hash);
-
-            if !deduplicated {
-                unique_size += chunk.length as u64;
+            {
+                return Err(self.rollback_put_file_failure(&created_hashes, status).await);
             }
         }
 
@@ -264,13 +444,27 @@ impl DataPlane for DataPlaneService {
 
         let manifest_json = manifest
             .to_json()
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::internal(e.to_string()));
 
-        let manifest_hash = self
+        let manifest_json = match manifest_json {
+            Ok(manifest_json) => manifest_json,
+            Err(status) => {
+                return Err(self.rollback_put_file_failure(&created_hashes, status).await);
+            }
+        };
+
+        let manifest_result = self
             .cas
-            .put(&manifest_json)
+            .put_with_status(&manifest_json)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::internal(e.to_string()));
+
+        let manifest_hash = match manifest_result {
+            Ok(result) => result.hash,
+            Err(status) => {
+                return Err(self.rollback_put_file_failure(&created_hashes, status).await);
+            }
+        };
 
         let dedup_ratio = manifest.dedup_ratio(unique_size);
 
