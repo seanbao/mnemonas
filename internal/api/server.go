@@ -58,6 +58,8 @@ var getFileCount = func(fs *storage.FileSystem, ctx context.Context) (int, error
 	return fs.GetFileCount(ctx)
 }
 
+var apiTimeNow = time.Now
+
 type prependReadCloser struct {
 	io.Reader
 	io.Closer
@@ -118,13 +120,16 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 		return nil
 	}
 	cloned := *cfg
+	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
+	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
+	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
 	return &cloned
 }
 
 func (s *Server) currentConfig() *config.Config {
 	s.configMu.RLock()
 	defer s.configMu.RUnlock()
-	return s.config
+	return cloneConfigSnapshot(s.config)
 }
 
 func (s *Server) storeConfig(cfg *config.Config) {
@@ -3290,7 +3295,8 @@ func buildActivityStats(entries []activity.Entry) map[string]any {
 
 	actionCounts := make(map[activity.ActionType]int)
 	userCounts := make(map[string]int)
-	today := time.Now().Truncate(24 * time.Hour)
+	currentTime := apiTimeNow()
+	today := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), 0, 0, 0, 0, currentTime.Location())
 	todayCount := 0
 
 	for _, entry := range entries {
@@ -3298,7 +3304,7 @@ func buildActivityStats(entries []activity.Entry) map[string]any {
 		if entry.User != "" {
 			userCounts[entry.User]++
 		}
-		if entry.Timestamp.After(today) {
+		if !entry.Timestamp.Before(today) {
 			todayCount++
 		}
 	}

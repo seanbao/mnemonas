@@ -887,10 +887,10 @@ export function FilesPage() {
   useEffect(() => {
     if (!location.pathname.startsWith('/files')) return
     const routePath = location.pathname.replace(/^\/files/, '')
-    let decodedPath = '/'
+    let finalPath = '/'
     if (routePath) {
       try {
-        decodedPath = decodeURI(routePath)
+        finalPath = normalizePath(decodeURI(routePath))
       } catch {
         const fallbackPath = currentPath || '/'
         const fallbackRoute = fallbackPath === '/' ? '/files' : `/files${encodeURI(fallbackPath)}`
@@ -904,8 +904,6 @@ export function FilesPage() {
         return
       }
     }
-    const normalizedPath = decodedPath.startsWith('/') ? decodedPath : `/${decodedPath}`
-    const finalPath = normalizedPath === '' ? '/' : normalizedPath
     if (scopedHomeDir && scopedHomeDir !== '/' && !pathWithinBase(scopedHomeDir, finalPath)) {
       addToast({
         title: '仅可访问主目录内的文件',
@@ -922,10 +920,10 @@ export function FilesPage() {
   }, [location.pathname, currentPath, navigate, scopedHomeDir, setCurrentPath])
 
   useEffect(() => {
-    if (!user || user.role === 'admin' || user.homeDir === '/') return
+    if (!user || user.role === 'admin' || !scopedHomeDir || scopedHomeDir === '/') return
     if (location.pathname !== '/files' || currentPath !== '/') return
-    setCurrentPath(user.homeDir)
-  }, [user, location.pathname, currentPath, setCurrentPath])
+    setCurrentPath(scopedHomeDir)
+  }, [user, location.pathname, currentPath, scopedHomeDir, setCurrentPath])
 
   const currentPathAllowed = !scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath)
 

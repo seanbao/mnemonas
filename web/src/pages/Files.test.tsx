@@ -226,6 +226,16 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/')
     })
 
+    it('normalizes valid route paths before syncing page state', async () => {
+      mockLocationPathname = '/files//documents//'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/documents')
+      })
+    })
+
     it('redirects non-admin root browsing to the assigned home directory', async () => {
       mockUser.id = 'u2'
       mockUser.username = 'tester'

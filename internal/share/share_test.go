@@ -187,6 +187,34 @@ func TestShareStore_Create(t *testing.T) {
 	}
 }
 
+func TestShareStore_Create_NormalizesPathIndex(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      `docs\\report.pdf`,
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if share.Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized share path, got %q", share.Path)
+	}
+
+	shares := store.GetByPath("/docs/report.pdf")
+	if len(shares) != 1 || shares[0].ID != share.ID {
+		t.Fatalf("expected normalized path index lookup to return created share, got %+v", shares)
+	}
+}
+
 func TestShareStore_CreateRejectsInvalidInvariants(t *testing.T) {
 	testCases := []struct {
 		name    string
@@ -345,6 +373,38 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	}
 	if shares := store.GetByPath("/docs/report.pdf"); len(shares) != 1 || shares[0].ID != "valid" {
 		t.Fatalf("expected only normalized valid share in path index, got %+v", shares)
+	}
+
+	data, err = os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(shares.json) error: %v", err)
+	}
+	var persisted []*Share
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(persisted shares) error: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected normalized shares file to contain one entry, got %d", len(persisted))
+	}
+	if persisted[0].Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized share path to be persisted, got %q", persisted[0].Path)
+	}
+	if persisted[0].Permission != PermissionRead {
+		t.Fatalf("expected normalized share permission to be persisted as read, got %q", persisted[0].Permission)
+	}
+}
+
+func TestNewShareStore_RejectsNullShareEntry(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	if err := os.WriteFile(storePath, []byte("[null]"), 0600); err != nil {
+		t.Fatalf("WriteFile(shares.json) error: %v", err)
+	}
+
+	if _, err := NewShareStore(storePath); err == nil {
+		t.Fatal("expected NewShareStore() to reject null share entries")
+	} else if !strings.Contains(err.Error(), "null entry") {
+		t.Fatalf("expected null entry error, got %v", err)
 	}
 }
 
@@ -814,6 +874,19 @@ func TestShareStore_GetByPath(t *testing.T) {
 	}
 }
 
+func TestShareStore_GetByPath_NormalizesInput(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, _ := NewShareStore(storePath)
+	share, _ := store.Create(CreateShareOptions{Path: "/docs/report.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+
+	shares := store.GetByPath(`docs\\report.txt`)
+	if len(shares) != 1 || shares[0].ID != share.ID {
+		t.Fatalf("expected normalized lookup to find created share, got %+v", shares)
+	}
+}
+
 func TestShare_ToInfo(t *testing.T) {
 	now := time.Now()
 	exp := now.Add(24 * time.Hour)
@@ -1136,6 +1209,33 @@ func TestShareStore_UpdatePathReferences_RenamesDescendantShares(t *testing.T) {
 	}
 }
 
+func TestShareStore_UpdatePathReferences_NormalizesInputPaths(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := store.UpdatePathReferences(`docs`, `archive\\docs`); err != nil {
+		t.Fatalf("UpdatePathReferences() error: %v", err)
+	}
+
+	updated, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("Get(share) error: %v", err)
+	}
+	if updated.Path != "/archive/docs/a.txt" {
+		t.Fatalf("expected normalized rewritten path, got %q", updated.Path)
+	}
+}
+
 func TestShareStore_DisableSharesUnderPath_DisablesExactAndDescendantShares(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1252,6 +1352,33 @@ func TestShareStore_DisableSharesUnderPathWithRestore_RestoresDisabledShares(t *
 	}
 	if !reloadedFolder.Enabled {
 		t.Fatal("expected restored enabled state to persist for folder share")
+	}
+}
+
+func TestShareStore_DisableSharesUnderPath_NormalizesInputPath(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := store.DisableSharesUnderPath(`docs`); err != nil {
+		t.Fatalf("DisableSharesUnderPath() error: %v", err)
+	}
+
+	disabled, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("Get(share) error: %v", err)
+	}
+	if disabled.Enabled {
+		t.Fatal("expected normalized target path to disable descendant share")
 	}
 }
 

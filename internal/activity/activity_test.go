@@ -828,6 +828,39 @@ func TestStatistics(t *testing.T) {
 	}
 }
 
+func TestStatistics_UsesLocalCalendarDayBoundary(t *testing.T) {
+	loc := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, time.April, 7, 10, 0, 0, 0, loc)
+	originalNow := activityTimeNow
+	activityTimeNow = func() time.Time { return now }
+	defer func() {
+		activityTimeNow = originalNow
+	}()
+
+	store := &Store{
+		entries: []Entry{
+			{Action: ActionUpload, User: "admin", Timestamp: time.Date(2026, time.April, 7, 0, 0, 0, 0, loc)},
+			{Action: ActionDelete, User: "admin", Timestamp: time.Date(2026, time.April, 6, 23, 59, 59, 0, loc)},
+		},
+	}
+
+	stats := store.Statistics()
+	today, ok := stats["today"].(int)
+	if !ok {
+		t.Fatalf("today type assertion failed: %#v", stats["today"])
+	}
+	if today != 1 {
+		t.Fatalf("expected exactly one entry in today's local calendar bucket, got %d", today)
+	}
+	byAction, ok := stats["by_action"].(map[ActionType]int)
+	if !ok {
+		t.Fatal("by_action type assertion failed")
+	}
+	if byAction[ActionUpload] != 1 || byAction[ActionDelete] != 1 {
+		t.Fatalf("expected both actions to remain counted in totals, got %#v", byAction)
+	}
+}
+
 func TestPersistence(t *testing.T) {
 	tmpDir := t.TempDir()
 

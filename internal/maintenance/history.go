@@ -161,7 +161,11 @@ func (s *HistoryStore) loadLastScrubResult() error {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return err
 	}
-	recoverInterruptedScrubResult(&result, time.Now())
+	if recoverInterruptedScrubResult(&result, time.Now()) {
+		if err := s.persistScrubResult(&result); err != nil {
+			return fmt.Errorf("persist recovered scrub result: %w", err)
+		}
+	}
 	s.scrubResult = cloneScrubResult(&result)
 	return nil
 }
@@ -211,9 +215,9 @@ func isRecoverableHistoryLoadError(err error) bool {
 	return errors.As(err, &typeErr)
 }
 
-func recoverInterruptedScrubResult(result *ScrubResult, now time.Time) {
+func recoverInterruptedScrubResult(result *ScrubResult, now time.Time) bool {
 	if result == nil || result.Status != "running" {
-		return
+		return false
 	}
 
 	result.Status = "failed"
@@ -230,6 +234,7 @@ func recoverInterruptedScrubResult(result *ScrubResult, now time.Time) {
 	if result.DurationMs == 0 && !result.StartTime.IsZero() && !result.EndTime.Before(result.StartTime) {
 		result.DurationMs = uint64(result.EndTime.Sub(result.StartTime).Milliseconds())
 	}
+	return true
 }
 
 func (s *HistoryStore) lastScrubPath() string {
