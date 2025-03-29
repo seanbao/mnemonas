@@ -581,6 +581,12 @@ func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
 	for {
 		snapshot := s.snapshotState()
 		changed := false
+		type pendingFavoriteRewrite struct {
+			userID      string
+			currentPath string
+			updated     *Favorite
+		}
+		pendingRewrites := make([]pendingFavoriteRewrite, 0)
 
 		for userID, userFavs := range snapshot.data {
 			for currentPath, fav := range userFavs {
@@ -591,10 +597,18 @@ func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
 
 				updated := copyFavorite(fav)
 				updated.Path = updatedPath
-				delete(snapshot.data[userID], currentPath)
-				snapshot.data[userID][updatedPath] = updated
+				pendingRewrites = append(pendingRewrites, pendingFavoriteRewrite{
+					userID:      userID,
+					currentPath: currentPath,
+					updated:     updated,
+				})
 				changed = true
 			}
+		}
+
+		for _, rewrite := range pendingRewrites {
+			delete(snapshot.data[rewrite.userID], rewrite.currentPath)
+			snapshot.data[rewrite.userID][rewrite.updated.Path] = rewrite.updated
 		}
 
 		if !changed {

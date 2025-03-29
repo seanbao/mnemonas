@@ -888,6 +888,107 @@ func TestUpdateShare_ReturnsUpdatedShare(t *testing.T) {
 	}
 }
 
+func TestUpdateShare_ReturnsNotFoundWhenShareDeletedAfterAuthorization(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	hookCalled := false
+	handler.beforeMutateShare = func(id string) error {
+		if hookCalled {
+			return nil
+		}
+		hookCalled = true
+		return store.Delete(id)
+	}
+
+	body := []byte(`{"enabled":false}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if !hookCalled {
+		t.Fatal("expected beforeMutateShare hook to run")
+	}
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != "SHARE_NOT_FOUND" {
+		t.Fatalf("expected SHARE_NOT_FOUND, got %+v", payload.Error)
+	}
+}
+
+func TestDeleteShare_ReturnsNotFoundWhenShareDeletedAfterAuthorization(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	hookCalled := false
+	handler.beforeMutateShare = func(id string) error {
+		if hookCalled {
+			return nil
+		}
+		hookCalled = true
+		return store.Delete(id)
+	}
+
+	req := newRouteRequest(http.MethodDelete, "/api/v1/shares/"+share.ID, share.ID, nil)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.DeleteShare(recorder, req)
+
+	if !hookCalled {
+		t.Fatal("expected beforeMutateShare hook to run")
+	}
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != "SHARE_NOT_FOUND" {
+		t.Fatalf("expected SHARE_NOT_FOUND, got %+v", payload.Error)
+	}
+}
+
 func TestUpdateShare_InvalidPermissionReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

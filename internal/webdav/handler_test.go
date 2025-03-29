@@ -1167,6 +1167,61 @@ func TestHandler_COPY_OverwriteFalseValidatesDestinationUnderLock(t *testing.T) 
 	}
 }
 
+func TestHandler_COPY_OverwriteFalseDoesNotOverwriteFileCreatedAfterPrecheck(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+	targetPath := "/dst/race-after-precheck.txt"
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src/file.txt) error: %v", err)
+	}
+
+	hookCalled := false
+	handler.beforeCopyFile = func(srcPath, dstPath string) error {
+		if hookCalled || dstPath != targetPath {
+			return nil
+		}
+		hookCalled = true
+		return fs.WriteFile(ctx, targetPath, bytes.NewReader([]byte("existing")))
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/race-after-precheck.txt")
+	req.Header.Set("Overwrite", "F")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if !hookCalled {
+		t.Fatal("expected beforeCopyFile hook to run")
+	}
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("COPY overwrite=false post-precheck destination create status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+
+	f, err := fs.OpenFile(ctx, targetPath)
+	if err != nil {
+		t.Fatalf("OpenFile(dst/race-after-precheck.txt) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(dst/race-after-precheck.txt) error: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("expected destination content unchanged after post-precheck create, got %q", string(data))
+	}
+	if _, err := fs.Stat(ctx, "/src/file.txt"); err != nil {
+		t.Fatalf("expected source file to remain after COPY rejection, got %v", err)
+	}
+}
+
 func TestHandler_COPY_OverwriteTrueReturnsNoContent(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -3025,6 +3080,50 @@ func TestHandler_LOCK_RefreshWithinCollectionScopeWithMatchingIfToken(t *testing
 	handler.locksMu.Unlock()
 	if !after.After(before) {
 		t.Fatalf("expected scope refresh expiry to move forward: before=%v after=%v", before, after)
+	}
+}
+
+func TestHandler_LOCK_RefreshDepthZeroCollectionOutsideScopeFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/lock-refresh-depth-zero"); err != nil {
+		t.Fatalf("Mkdir(lock-refresh-depth-zero) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/lock-refresh-depth-zero/child.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(child.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-depth-zero", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockReq.Header.Set("Depth", "0")
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("initial depth-zero collection LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	handler.locksMu.Lock()
+	before := handler.locks["/lock-refresh-depth-zero"].expiresAt
+	handler.locksMu.Unlock()
+
+	refreshReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-depth-zero/child.txt", nil)
+	refreshReq.Header.Set("If", "</dav/lock-refresh-depth-zero/child.txt> ("+lockToken+")")
+	refreshW := httptest.NewRecorder()
+	handler.ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusPreconditionFailed {
+		t.Fatalf("depth-zero collection refresh outside scope status = %d, want %d", refreshW.Code, http.StatusPreconditionFailed)
+	}
+	if !strings.Contains(refreshW.Body.String(), errLockTokenMatchesRequestURI.Error()) {
+		t.Fatalf("expected lock-token-matches-request-uri failure, got %q", refreshW.Body.String())
+	}
+
+	handler.locksMu.Lock()
+	after := handler.locks["/lock-refresh-depth-zero"].expiresAt
+	handler.locksMu.Unlock()
+	if !after.Equal(before) {
+		t.Fatalf("expected failed out-of-scope refresh not to move expiry: before=%v after=%v", before, after)
 	}
 }
 

@@ -514,6 +514,46 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("returns updated last login when persist fails", func(t *testing.T) {
+		storeDir := t.TempDir()
+		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		user, err := store.Create("persistfail", "password123", "persistfail@example.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		originalWriter := userStoreWriter
+		userStoreWriter = func(path string, data []byte) error {
+			return errors.New("persist failed")
+		}
+		t.Cleanup(func() {
+			userStoreWriter = originalWriter
+		})
+
+		authUser, err := store.Authenticate("persistfail", "password123")
+		if err != nil {
+			t.Fatalf("Authenticate() error: %v", err)
+		}
+		if authUser == nil || authUser.ID != user.ID {
+			t.Fatalf("expected Authenticate() to return user %s, got %+v", user.ID, authUser)
+		}
+		if authUser.LastLoginAt == nil {
+			t.Fatal("expected Authenticate() result to include last_login_at even when persist fails")
+		}
+
+		loaded, err := store.GetByUsername("persistfail")
+		if err != nil {
+			t.Fatalf("GetByUsername() error: %v", err)
+		}
+		if loaded.LastLoginAt != nil {
+			t.Fatalf("expected failed persist to leave stored last_login_at unset, got %v", loaded.LastLoginAt)
+		}
+	})
+
 	t.Run("concurrent writes serialize persistence", func(t *testing.T) {
 		storeDir := t.TempDir()
 		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))

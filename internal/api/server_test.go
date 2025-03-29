@@ -5375,6 +5375,67 @@ func TestServer_Thumbnail_RefreshesAfterFileContentChanges(t *testing.T) {
 	}
 }
 
+func TestServer_Thumbnail_BindsETagAndContentToOpenedFile(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	initialContent := createGIFThumbnailSource(24, 24)
+	updatedContent := createPNGThumbnailSourceWithAlpha(24, 24)
+	if err := fs.WriteFile(ctx, "/racy.png", bytes.NewReader(initialContent)); err != nil {
+		t.Fatalf("WriteFile(initial racy.png) error: %v", err)
+	}
+	initialInfo, err := fs.Stat(ctx, "/racy.png")
+	if err != nil {
+		t.Fatalf("Stat(initial racy.png) error: %v", err)
+	}
+	server.beforeThumbnailRead = func(filePath string) error {
+		server.beforeThumbnailRead = nil
+		return fs.WriteFile(ctx, filePath, bytes.NewReader(updatedContent))
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/racy.png", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("thumbnail status with in-flight replacement = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("thumbnail Content-Type with in-flight replacement = %q, want %q", w.Header().Get("Content-Type"), "image/jpeg")
+	}
+	if w.Header().Get("ETag") != fmt.Sprintf(`"thumb-%s-medium"`, initialInfo.ContentHash) {
+		t.Fatalf("thumbnail ETag with in-flight replacement = %q, want %q", w.Header().Get("ETag"), fmt.Sprintf(`"thumb-%s-medium"`, initialInfo.ContentHash))
+	}
+
+	updatedInfo, err := fs.Stat(ctx, "/racy.png")
+	if err != nil {
+		t.Fatalf("Stat(updated racy.png) error: %v", err)
+	}
+	if updatedInfo.ContentHash == initialInfo.ContentHash {
+		t.Fatal("expected updated file content hash to differ from initial hash")
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/thumbnails/racy.png", nil)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("thumbnail status after replacement = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("thumbnail Content-Type after replacement = %q, want %q", w.Header().Get("Content-Type"), "image/png")
+	}
+	if w.Header().Get("ETag") != fmt.Sprintf(`"thumb-%s-medium"`, updatedInfo.ContentHash) {
+		t.Fatalf("thumbnail ETag after replacement = %q, want %q", w.Header().Get("ETag"), fmt.Sprintf(`"thumb-%s-medium"`, updatedInfo.ContentHash))
+	}
+}
+
 func TestServer_Thumbnail_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
@@ -6363,6 +6424,29 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalAuthType := server.config.WebDAV.AuthType
+
+	body := `{"webdav":{"auth_type":"token"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid webdav auth type status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if server.config.WebDAV.AuthType != originalAuthType {
+		t.Fatalf("expected invalid webdav auth type update to leave config unchanged")
+	}
+}
+
 func TestServer_UpdateSettings_SerializesConcurrentRuntimeApply(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -6700,6 +6784,29 @@ func TestServer_UpdateSettings_NegativeMaxAgeRejected(t *testing.T) {
 	}
 	if server.config.Storage.Retention.MaxAge != originalMaxAge {
 		t.Fatalf("expected negative max_age to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_NegativeMaxVersionsRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalMaxVersions := server.config.Storage.Retention.MaxVersions
+
+	body := `{"retention":{"max_versions":-1}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings negative max_versions status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid retention.max_versions") {
+		t.Fatalf("expected invalid retention.max_versions message, got %s", w.Body.String())
+	}
+	if server.config.Storage.Retention.MaxVersions != originalMaxVersions {
+		t.Fatalf("expected negative max_versions to leave in-memory config unchanged")
 	}
 }
 

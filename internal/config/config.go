@@ -609,11 +609,30 @@ func (c *Config) Validate() error {
 	if c.Storage.Trash.RetentionDays < 0 {
 		errs = append(errs, errors.New("storage.trash.retention_days cannot be negative"))
 	}
+	if c.Storage.Retention.MaxVersions < 0 {
+		errs = append(errs, errors.New("storage.retention.max_versions cannot be negative"))
+	}
+	if c.Storage.Retention.MaxAge < 0 {
+		errs = append(errs, errors.New("storage.retention.max_age cannot be negative"))
+	}
+	if c.Storage.Retention.GCInterval < 0 {
+		errs = append(errs, errors.New("storage.retention.gc_interval cannot be negative"))
+	}
 	if c.Storage.Trash.MaxSize <= 0 {
 		errs = append(errs, errors.New("storage.trash.max_size must be positive"))
 	}
 	if c.Storage.Versioning.MaxVersionedSize <= 0 {
 		errs = append(errs, errors.New("storage.versioning.max_versioned_size must be positive"))
+	}
+	webdavAuthType := strings.ToLower(strings.TrimSpace(c.WebDAV.AuthType))
+	if webdavAuthType != "" && webdavAuthType != "none" && webdavAuthType != "basic" {
+		errs = append(errs, fmt.Errorf("invalid webdav.auth_type: %q", c.WebDAV.AuthType))
+	}
+	if c.Auth.AccessTokenTTL <= 0 {
+		errs = append(errs, errors.New("auth.access_token_ttl must be positive"))
+	}
+	if c.Auth.RefreshTokenTTL <= 0 {
+		errs = append(errs, errors.New("auth.refresh_token_ttl must be positive"))
 	}
 	for _, ext := range c.Storage.Versioning.AutoVersionedExtensions {
 		trimmed := strings.TrimSpace(ext)
@@ -629,6 +648,12 @@ func (c *Config) Validate() error {
 
 	if c.DataPlane.GRPCAddress == "" {
 		errs = append(errs, errors.New("dataplane.grpc_address cannot be empty"))
+	}
+	if c.DataPlane.Timeout <= 0 {
+		errs = append(errs, errors.New("dataplane.timeout must be positive"))
+	}
+	if c.DataPlane.MaxRetries < 0 {
+		errs = append(errs, errors.New("dataplane.max_retries cannot be negative"))
 	}
 
 	// CDC configuration validation
@@ -667,6 +692,17 @@ func (c *Config) Validate() error {
 		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
 			errs = append(errs, fmt.Errorf("invalid alerts.webhook_headers entry: %q", header))
 		}
+	}
+	logLevel := strings.ToLower(strings.TrimSpace(c.Log.Level))
+	if logLevel != "debug" && logLevel != "info" && logLevel != "warn" && logLevel != "error" {
+		errs = append(errs, fmt.Errorf("invalid log.level: %q", c.Log.Level))
+	}
+	logFormat := strings.ToLower(strings.TrimSpace(c.Log.Format))
+	if logFormat != "json" && logFormat != "console" {
+		errs = append(errs, fmt.Errorf("invalid log.format: %q", c.Log.Format))
+	}
+	if strings.TrimSpace(c.Log.Output) == "" {
+		errs = append(errs, errors.New("log.output cannot be empty"))
 	}
 
 	return errors.Join(errs...)

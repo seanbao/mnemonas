@@ -86,9 +86,10 @@ type Handler struct {
 	lockCleanupDone      chan struct{}
 	newLockToken         func() (string, error)
 	// REM-1 fix: Authentication
-	authType string
-	username string
-	password string
+	authType       string
+	username       string
+	password       string
+	beforeCopyFile func(srcPath, dstPath string) error
 }
 
 // Config holds WebDAV handler configuration
@@ -664,7 +665,12 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	affectedPaths := []string{path.Dir(dst), dst}
 	h.invalidatePropCache(affectedPaths...)
 
-	if err := h.copyResource(ctx, srcPath, dst, copyDepth); err != nil {
+	allowOverwrite := dstExists && !srcInfo.IsDir
+	if err := h.copyResource(ctx, srcPath, dst, copyDepth, allowOverwrite); err != nil {
+		if strings.EqualFold(r.Header.Get("Overwrite"), "F") && errors.Is(err, storage.ErrAlreadyExists) {
+			writeKnownWebDAVError(w, errOverwriteDisabled, http.StatusPreconditionFailed)
+			return
+		}
 		if h.writeParentNotDirectoryConflict(w, err) {
 			return
 		}
@@ -681,7 +687,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth string) error {
+func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) error {
 	info, err := h.fs.Stat(ctx, srcPath)
 	if err != nil {
 		return err
@@ -702,11 +708,21 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 
 		for _, child := range children {
 			childName := path.Base(child.Path)
-			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName), "infinity"); err != nil {
+			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName), "infinity", false); err != nil {
 				return h.rollbackCopiedDirectory(dstPath, err)
 			}
 		}
 		return nil
+	}
+
+	if h.beforeCopyFile != nil {
+		if err := h.beforeCopyFile(srcPath, dstPath); err != nil {
+			return err
+		}
+	}
+
+	if !allowOverwrite {
+		return h.fs.Copy(ctx, srcPath, dstPath)
 	}
 
 	reader, err := h.fs.OpenFile(ctx, srcPath)
@@ -1564,11 +1580,10 @@ func (h *Handler) findRefreshLockLocked(filePath string, providedTokens []provid
 	}
 
 	current := path.Dir(filePath)
-	immediateParent := true
 	for {
 		lockInfo, exists := h.locks[current]
 		if exists && hasMatchingLockToken(providedTokens, lockInfo.token, current, lockInfo) {
-			if lockInfo.depth == webdavLockDepthInfinity || immediateParent {
+			if lockInfo.depth == webdavLockDepthInfinity {
 				return current, lockInfo, true
 			}
 		}
@@ -1576,7 +1591,6 @@ func (h *Handler) findRefreshLockLocked(filePath string, providedTokens []provid
 			break
 		}
 		current = path.Dir(current)
-		immediateParent = false
 	}
 
 	return "", webdavLock{}, false

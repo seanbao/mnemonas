@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -68,8 +69,9 @@ type Version struct {
 
 // Store is the SQLite-based version store
 type Store struct {
-	db      *sql.DB
-	objects *ObjectStore
+	db          *sql.DB
+	objects     *ObjectStore
+	fileLocksMu sync.Mutex
 
 	getChunkRefSizeFn func(ctx context.Context, hash string) (int64, error)
 	deleteObjectFn    func(ctx context.Context, hash string) error
@@ -274,6 +276,59 @@ func createTables(db *sql.DB) error {
 	`
 
 	_, err := db.Exec(schema)
+	if err != nil {
+		return err
+	}
+	return ensureFileLocksTableSchema(db)
+}
+
+func ensureFileLocksTableSchema(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(file_locks)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	hasPathPK := false
+	hasHolderPK := false
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "path" && pk > 0 {
+			hasPathPK = true
+		}
+		if name == "holder" && pk > 0 {
+			hasHolderPK = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasPathPK && hasHolderPK {
+		_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_locks_path ON file_locks(path)`)
+		return err
+	}
+
+	_, err = db.Exec(`
+		DROP TABLE IF EXISTS file_locks;
+		CREATE TABLE file_locks (
+			path TEXT NOT NULL,
+			holder TEXT NOT NULL,
+			lock_type INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (path, holder)
+		);
+		CREATE INDEX IF NOT EXISTS idx_locks_expires ON file_locks(expires_at);
+		CREATE INDEX IF NOT EXISTS idx_locks_path ON file_locks(path);
+	`)
 	return err
 }
 
@@ -577,6 +632,9 @@ func (s *Store) DeleteVersioningOverride(ctx context.Context, path string) error
 
 // RenamePath updates all metadata paths after a file or directory rename.
 func (s *Store) RenamePath(ctx context.Context, oldPath, newPath string) error {
+	s.fileLocksMu.Lock()
+	defer s.fileLocksMu.Unlock()
+
 	oldPath, err := normalizeVersionStorePath(oldPath)
 	if err != nil {
 		return err
@@ -803,6 +861,9 @@ func (s *Store) GetTrashStats(ctx context.Context) (count int, totalSize int64, 
 
 // AcquireLock tries to acquire a lock on a path
 func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType LockType, duration time.Duration) error {
+	s.fileLocksMu.Lock()
+	defer s.fileLocksMu.Unlock()
+
 	path, err := normalizeVersionStorePath(path)
 	if err != nil {
 		return err
@@ -813,27 +874,27 @@ func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType L
 	// Clean up expired locks first
 	s.db.ExecContext(ctx, `DELETE FROM file_locks WHERE expires_at < ?`, now.Unix())
 
-	// Check for existing lock
-	var existingHolder string
-	var existingType int
-	var existingExpires int64
-
-	err = s.db.QueryRowContext(ctx,
-		`SELECT holder, lock_type, expires_at FROM file_locks WHERE path = ?`,
-		path).Scan(&existingHolder, &existingType, &existingExpires)
-
-	// Lock exists
-	if err == nil {
-		// Lock still valid
-		if time.Unix(existingExpires, 0).After(now) {
-			// Conflict: either we want write lock or existing is write lock
-			if lockType == WriteLock || LockType(existingType) == WriteLock {
-				if existingHolder != holder {
-					return ErrFileLocked
-				}
-			}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT holder, lock_type FROM file_locks WHERE path = ? AND expires_at >= ?`,
+		path, now.Unix())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var existingHolder string
+		var existingType int
+		if err := rows.Scan(&existingHolder, &existingType); err != nil {
+			return err
 		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
+		if existingHolder == holder {
+			continue
+		}
+		if lockType == WriteLock || LockType(existingType) == WriteLock {
+			return ErrFileLocked
+		}
+	}
+	if err := rows.Err(); err != nil {
 		return err
 	}
 
@@ -848,6 +909,9 @@ func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType L
 
 // ReleaseLock releases a lock
 func (s *Store) ReleaseLock(ctx context.Context, path, holder string) error {
+	s.fileLocksMu.Lock()
+	defer s.fileLocksMu.Unlock()
+
 	path, err := normalizeVersionStorePath(path)
 	if err != nil {
 		return err
@@ -866,6 +930,9 @@ func (s *Store) ReleaseLock(ctx context.Context, path, holder string) error {
 
 // GetLock returns the lock info for a path
 func (s *Store) GetLock(ctx context.Context, path string) (*FileLock, error) {
+	s.fileLocksMu.Lock()
+	defer s.fileLocksMu.Unlock()
+
 	path, err := normalizeVersionStorePath(path)
 	if err != nil {
 		return nil, err
@@ -873,12 +940,25 @@ func (s *Store) GetLock(ctx context.Context, path string) (*FileLock, error) {
 	var lock FileLock
 	var lockType int
 	var expiresAt, createdAt int64
+	now := time.Now().Unix()
 
 	err = s.db.QueryRowContext(ctx,
-		`SELECT path, holder, lock_type, expires_at, created_at FROM file_locks WHERE path = ?`,
-		path).Scan(&lock.Path, &lock.Holder, &lockType, &expiresAt, &createdAt)
+		`SELECT path, holder, lock_type, expires_at, created_at
+		 FROM file_locks
+		 WHERE path = ? AND expires_at >= ?
+		 ORDER BY lock_type DESC, created_at ASC
+		 LIMIT 1`,
+		path, now).Scan(&lock.Path, &lock.Holder, &lockType, &expiresAt, &createdAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			result, cleanupErr := s.db.ExecContext(ctx, `DELETE FROM file_locks WHERE path = ? AND expires_at < ?`, path, now)
+			if cleanupErr != nil {
+				return nil, cleanupErr
+			}
+			affected, _ := result.RowsAffected()
+			if affected > 0 {
+				return nil, ErrLockExpired
+			}
 			return nil, ErrNotFound
 		}
 		return nil, err
@@ -888,18 +968,14 @@ func (s *Store) GetLock(ctx context.Context, path string) (*FileLock, error) {
 	lock.ExpiresAt = time.Unix(expiresAt, 0)
 	lock.CreatedAt = time.Unix(createdAt, 0)
 
-	// Check if expired
-	if lock.ExpiresAt.Before(time.Now()) {
-		// Clean up expired lock
-		s.db.ExecContext(ctx, `DELETE FROM file_locks WHERE path = ?`, path)
-		return nil, ErrLockExpired
-	}
-
 	return &lock, nil
 }
 
 // CleanupExpiredLocks removes expired locks
 func (s *Store) CleanupExpiredLocks(ctx context.Context) (int, error) {
+	s.fileLocksMu.Lock()
+	defer s.fileLocksMu.Unlock()
+
 	result, err := s.db.ExecContext(ctx,
 		`DELETE FROM file_locks WHERE expires_at < ?`, time.Now().Unix())
 	if err != nil {

@@ -64,6 +64,7 @@ type Handler struct {
 	passwordFailureWindow time.Duration
 	passwordFailureDelay  time.Duration
 	passwordLockDuration  time.Duration
+	beforeMutateShare     func(id string) error
 }
 
 type shareOwnerStore interface {
@@ -480,6 +481,12 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
+	if h.beforeMutateShare != nil {
+		if err := h.beforeMutateShare(id); err != nil {
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
+			return
+		}
+	}
 
 	var updatedShare *Share
 	err = h.store.Update(id, func(s *Share) error {
@@ -525,6 +532,10 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusBadRequest, "invalid permission", "INVALID_PERMISSION")
 			return
 		}
+		if errors.Is(err, ErrShareNotFound) {
+			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
 		return
 	}
@@ -559,8 +570,18 @@ func (h *Handler) DeleteShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
+	if h.beforeMutateShare != nil {
+		if err := h.beforeMutateShare(id); err != nil {
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "DELETE_SHARE_FAILED")
+			return
+		}
+	}
 
 	if err := h.store.Delete(id); err != nil {
+		if errors.Is(err, ErrShareNotFound) {
+			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DELETE_SHARE_FAILED")
 		return
 	}

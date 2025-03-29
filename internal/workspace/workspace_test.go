@@ -862,6 +862,48 @@ func TestWorkspace_Copy_DoesNotOverwriteFileCreatedDuringCopy(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Copy_PreservesDestinationWhenTempCleanupFailsAfterLink(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/source.txt", []byte("source")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	originalFinalizeWorkspaceCopyTemp := finalizeWorkspaceCopyTemp
+	finalizeCalls := 0
+	finalizeWorkspaceCopyTemp = func(root *os.Root, tmpPath string) error {
+		finalizeCalls++
+		if finalizeCalls == 1 {
+			return errors.New("remove temp link failed")
+		}
+		return originalFinalizeWorkspaceCopyTemp(root, tmpPath)
+	}
+	t.Cleanup(func() {
+		finalizeWorkspaceCopyTemp = originalFinalizeWorkspaceCopyTemp
+	})
+
+	err := w.Copy(ctx, "/source.txt", "/dest.txt")
+	if err == nil || !strings.Contains(err.Error(), "failed to finalize copied file") {
+		t.Fatalf("Copy() error = %v, want finalize cleanup failure", err)
+	}
+	if !w.Exists(ctx, "/dest.txt") {
+		t.Fatal("destination should remain after temp cleanup failure")
+	}
+	destData, readErr := w.ReadFile(ctx, "/dest.txt")
+	if readErr != nil {
+		t.Fatalf("ReadFile(dest.txt) error: %v", readErr)
+	}
+	if string(destData) != "source" {
+		t.Fatalf("destination content = %q, want %q", string(destData), "source")
+	}
+	if matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-*.tmp")); globErr != nil {
+		t.Fatalf("Glob(.workspace-*.tmp) error: %v", globErr)
+	} else if len(matches) != 0 {
+		t.Fatalf("expected no leftover temp files after finalize cleanup failure, got %v", matches)
+	}
+}
+
 func TestWorkspace_Copy_ReturnsErrNotFoundWhenDestinationParentMissing(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()

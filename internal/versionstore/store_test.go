@@ -5,6 +5,7 @@ package versionstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -554,6 +555,83 @@ func TestStore_FileLock(t *testing.T) {
 	err = s.AcquireLock(ctx, "/locked.txt", "user2", WriteLock, time.Hour)
 	if err != nil {
 		t.Errorf("AcquireLock() after release error: %v", err)
+	}
+}
+
+func TestStore_FileLock_AllowsConcurrentReadersAndBlocksWriterUntilReleased(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if err := s.AcquireLock(ctx, "/shared.txt", "reader1", ReadLock, time.Hour); err != nil {
+		t.Fatalf("AcquireLock(reader1) error: %v", err)
+	}
+	if err := s.AcquireLock(ctx, "/shared.txt", "reader2", ReadLock, time.Hour); err != nil {
+		t.Fatalf("AcquireLock(reader2) error: %v", err)
+	}
+	if err := s.AcquireLock(ctx, "/shared.txt", "writer", WriteLock, time.Hour); err != ErrFileLocked {
+		t.Fatalf("AcquireLock(writer with active readers) error = %v, want %v", err, ErrFileLocked)
+	}
+	if err := s.ReleaseLock(ctx, "/shared.txt", "reader1"); err != nil {
+		t.Fatalf("ReleaseLock(reader1) error: %v", err)
+	}
+	if err := s.AcquireLock(ctx, "/shared.txt", "writer", WriteLock, time.Hour); err != ErrFileLocked {
+		t.Fatalf("AcquireLock(writer with remaining reader) error = %v, want %v", err, ErrFileLocked)
+	}
+	if err := s.ReleaseLock(ctx, "/shared.txt", "reader2"); err != nil {
+		t.Fatalf("ReleaseLock(reader2) error: %v", err)
+	}
+	if err := s.AcquireLock(ctx, "/shared.txt", "writer", WriteLock, time.Hour); err != nil {
+		t.Fatalf("AcquireLock(writer after readers released) error: %v", err)
+	}
+	lock, err := s.GetLock(ctx, "/shared.txt")
+	if err != nil {
+		t.Fatalf("GetLock() error: %v", err)
+	}
+	if lock.Holder != "writer" || lock.LockType != WriteLock {
+		t.Fatalf("GetLock() = (%q, %v), want (%q, %v)", lock.Holder, lock.LockType, "writer", WriteLock)
+	}
+}
+
+func TestNew_UpgradesLegacyFileLocksSchema(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "legacy-locks.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE file_locks (
+			path TEXT PRIMARY KEY,
+			holder TEXT NOT NULL,
+			lock_type INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			created_at INTEGER NOT NULL
+		);
+	`); err != nil {
+		db.Close()
+		t.Fatalf("create legacy file_locks schema error: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("legacy db close error: %v", err)
+	}
+
+	s, err := New(Config{DBPath: dbPath, Dataplane: client})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	if err := s.AcquireLock(ctx, "/shared.txt", "reader1", ReadLock, time.Hour); err != nil {
+		t.Fatalf("AcquireLock(reader1) error: %v", err)
+	}
+	if err := s.AcquireLock(ctx, "/shared.txt", "reader2", ReadLock, time.Hour); err != nil {
+		t.Fatalf("AcquireLock(reader2) error after schema upgrade: %v", err)
 	}
 }
 

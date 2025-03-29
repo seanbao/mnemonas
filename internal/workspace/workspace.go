@@ -21,6 +21,9 @@ var readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
 }
 
 var copyWorkspaceData = copyWithContext
+var finalizeWorkspaceCopyTemp = func(root *os.Root, tmpPath string) error {
+	return root.Remove(tmpPath)
+}
 var syncWorkspaceDir = syncWorkspaceParentDir
 var afterValidateWorkspacePaths = func() error { return nil }
 
@@ -886,14 +889,7 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 		}
 		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
-	if err := w.rootHandle.Remove(tmpPath); err != nil {
-		rollbackErr := w.rootHandle.Remove(dstRootName)
-		if rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
-			return errors.Join(
-				fmt.Errorf("failed to finalize copied file: %w", err),
-				fmt.Errorf("failed to rollback copied file: %w", rollbackErr),
-			)
-		}
+	if err := finalizeWorkspaceCopyTemp(w.rootHandle, tmpPath); err != nil {
 		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, fmt.Errorf("failed to finalize copied file: %w", err))
 	}
 	if err := syncWorkspaceDir(filepath.Dir(dstPath)); err != nil {
