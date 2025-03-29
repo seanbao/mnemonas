@@ -710,6 +710,12 @@ func TestHandler_ConditionalGET(t *testing.T) {
 		if w.Code != http.StatusNotModified {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusNotModified)
 		}
+		if got := w.Header().Get("ETag"); got != etag {
+			t.Fatalf("ETag on 304 = %q, want %q", got, etag)
+		}
+		if got := w.Header().Get("Last-Modified"); got != info.ModTime.UTC().Format(http.TimeFormat) {
+			t.Fatalf("Last-Modified on 304 = %q, want %q", got, info.ModTime.UTC().Format(http.TimeFormat))
+		}
 	})
 
 	t.Run("If-None-Match_Miss", func(t *testing.T) {
@@ -776,6 +782,12 @@ func TestHandler_ConditionalGET(t *testing.T) {
 
 		if w.Code != http.StatusNotModified {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotModified)
+		}
+		if got := w.Header().Get("ETag"); got != etag {
+			t.Fatalf("ETag on If-Modified-Since 304 = %q, want %q", got, etag)
+		}
+		if got := w.Header().Get("Last-Modified"); got != info.ModTime.UTC().Format(http.TimeFormat) {
+			t.Fatalf("Last-Modified on If-Modified-Since 304 = %q, want %q", got, info.ModTime.UTC().Format(http.TimeFormat))
 		}
 	})
 

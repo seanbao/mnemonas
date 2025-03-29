@@ -271,11 +271,15 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	// Check If-None-Match (conditional GET)
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
 		if h.matchETag(inm, etag) {
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
 	} else if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 		if modifiedSince, err := http.ParseTime(ims); err == nil && !isHTTPTimeAfter(info.ModTime, modifiedSince) {
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
