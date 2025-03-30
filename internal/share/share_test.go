@@ -495,6 +495,75 @@ func TestShareStore_UpdateRollbackOnSaveFailure(t *testing.T) {
 	}
 }
 
+func TestShareStore_UpdatePathMaintainsIndex(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := store.Update(share.ID, func(s *Share) error {
+		s.Path = "/test/renamed.txt"
+		return nil
+	}); err != nil {
+		t.Fatalf("failed to update share path: %v", err)
+	}
+
+	if shares := store.GetByPath("/test/file.txt"); len(shares) != 0 {
+		t.Fatalf("expected old path index to be empty, got %d shares", len(shares))
+	}
+	shares := store.GetByPath("/test/renamed.txt")
+	if len(shares) != 1 {
+		t.Fatalf("expected new path index to contain share, got %d shares", len(shares))
+	}
+	if shares[0].ID != share.ID {
+		t.Fatalf("expected renamed share id %s, got %s", share.ID, shares[0].ID)
+	}
+}
+
+func TestShareStore_CreateRollbackOnSaveFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	store.filePath = tempDir
+	created, createErr := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if createErr == nil {
+		t.Fatalf("expected create to fail")
+	}
+	if created != nil {
+		t.Fatalf("expected failed create to return nil share")
+	}
+	if len(store.shares) != 0 {
+		t.Fatalf("expected shares map to remain empty, got %d entries", len(store.shares))
+	}
+	if ids := store.pathIdx["/test/file.txt"]; len(ids) != 0 {
+		t.Fatalf("expected path index rollback to remove stale ids, got %v", ids)
+	}
+	if shares := store.GetByPath("/test/file.txt"); len(shares) != 0 {
+		t.Fatalf("expected no shares by path after rollback, got %d", len(shares))
+	}
+}
+
 func TestShareStore_AccessRollbackOnSaveFailure(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

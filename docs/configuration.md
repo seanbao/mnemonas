@@ -174,8 +174,8 @@ root = "~/.mnemonas"
 |------|------|--------|------|
 | `max_versions` | int | `50` | 每个文件最大保留版本数（0 = 无限制） |
 | `max_age` | duration | `"2160h"` (90天) | 版本最大保留时间（0 = 永久保留） |
-| `min_free_space` | uint64 | `10737418240` (10GB) | 最小剩余磁盘空间（字节），低于此值触发强制 GC |
-| `gc_interval` | duration | `"24h"` | 自动 GC 运行间隔 |
+| `min_free_space` | uint64 | `10737418240` (10GB) | 最小剩余磁盘空间（字节），低于此值时写入后触发一次强制版本清理 |
+| `gc_interval` | duration | `"24h"` | 自动版本清理运行间隔，设为 `"0"` 表示禁用 |
 
 **保留规则优先级：**
 
@@ -190,7 +190,7 @@ root = "~/.mnemonas"
 max_versions = 50        # 保留最近 50 个版本
 max_age = "2160h"        # 保留 90 天
 min_free_space = 53687091200  # 至少保留 50GB 空间
-gc_interval = "12h"      # 每 12 小时运行 GC
+gc_interval = "12h"      # 每 12 小时运行一次版本清理
 ```
 
 ---
@@ -538,7 +538,7 @@ read_only = true
 auth_type = "none"
 
 [storage.retention]
-gc_interval = "0"  # 禁用自动 GC
+gc_interval = "0"  # 禁用自动版本清理
 ```
 
 ---

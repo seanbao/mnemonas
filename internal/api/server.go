@@ -25,6 +25,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
+	"github.com/seanbao/mnemonas/internal/requestip"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
@@ -52,9 +53,10 @@ type Server struct {
 	authEnabled        bool
 	initialWebPassword string // Set when admin user is first created
 	// Share components
-	shareStore   *share.ShareStore
-	shareHandler *share.Handler
-	alertMonitor AlertMonitor
+	shareStore       *share.ShareStore
+	shareHandler     *share.Handler
+	alertMonitor     AlertMonitor
+	retentionMonitor RetentionMonitor
 	// Favorites components
 	favoritesStore   *favorites.Store
 	favoritesHandler *favorites.Handler
@@ -77,6 +79,17 @@ type AlertMonitor interface {
 	UpdateConfig(cfg alerts.Config)
 }
 
+type RetentionMonitor interface {
+	UpdateConfig(cfg storage.RetentionMonitorConfig)
+}
+
+func formatSettingsDuration(d time.Duration) string {
+	if d == 0 {
+		return "0"
+	}
+	return d.String()
+}
+
 // ServerConfig holds server configuration
 type ServerConfig struct {
 	DataplaneAddr string
@@ -93,10 +106,11 @@ type ServerConfig struct {
 	AuthAccessTTL  time.Duration
 	AuthRefreshTTL time.Duration
 	// Share configuration
-	ShareEnabled   bool
-	ShareStoreFile string
-	ShareBaseURL   string
-	AlertMonitor   AlertMonitor
+	ShareEnabled     bool
+	ShareStoreFile   string
+	ShareBaseURL     string
+	AlertMonitor     AlertMonitor
+	RetentionMonitor RetentionMonitor
 	// Favorites configuration
 	FavoritesEnabled   bool
 	FavoritesStoreFile string
@@ -144,6 +158,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	}
 	if cfg != nil {
 		s.alertMonitor = cfg.AlertMonitor
+		s.retentionMonitor = cfg.RetentionMonitor
 	}
 
 	// Initialize thumbnail service
@@ -1848,9 +1863,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Generate or retrieve cached thumbnail
 	data, err := s.thumbnail.GetThumbnail(r.Context(), filePath, size, reader)
 	if err != nil {
-		// Log the error but return a generic message
-		s.logger.Warn().Err(err).Str("path", filePath).Msg("Failed to generate thumbnail")
-		InternalError(w, "failed to generate thumbnail")
+		s.respondInternalError(w, "generate thumbnail", err)
 		return
 	}
 
@@ -1934,8 +1947,7 @@ func (s *Server) handleClearActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.activity.Clear(); err != nil {
-		s.logger.Error().Err(err).Msg("failed to clear activity log")
-		InternalError(w, "failed to clear activity log")
+		s.respondInternalError(w, "clear activity log", err)
 		return
 	}
 
@@ -1957,10 +1969,7 @@ func (s *Server) LogActivity(r *http.Request, action activity.ActionType, path s
 		}
 	}
 
-	ip := r.RemoteAddr
-	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		ip = realIP
-	}
+	ip := requestip.ClientIP(r)
 
 	if err := s.activity.Log(action, path, user, ip, details); err != nil {
 		s.logger.Warn().Err(err).Msg("Failed to log activity")
@@ -1983,10 +1992,7 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionLogin, "", user, ip, nil)
 	}
@@ -2001,10 +2007,7 @@ func (s *Server) handleLogoutWithActivity(w http.ResponseWriter, r *http.Request
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionLogout, "", user, ip, nil)
 	}
@@ -2045,9 +2048,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		},
 		"retention": map[string]interface{}{
 			"max_versions":   s.config.Storage.Retention.MaxVersions,
-			"max_age":        s.config.Storage.Retention.MaxAge.String(),
+			"max_age":        formatSettingsDuration(s.config.Storage.Retention.MaxAge),
 			"min_free_space": s.config.Storage.Retention.MinFreeSpace,
-			"gc_interval":    s.config.Storage.Retention.GCInterval.String(),
+			"gc_interval":    formatSettingsDuration(s.config.Storage.Retention.GCInterval),
 		},
 		"versioning": map[string]interface{}{
 			"auto_versioned_extensions": s.config.Storage.Versioning.AutoVersionedExtensions,
@@ -2273,16 +2276,24 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Retention.GCInterval != nil {
 			d, err := time.ParseDuration(*req.Retention.GCInterval)
-			if err != nil || d <= 0 {
+			if err != nil || d < 0 {
 				BadRequest(w, "invalid retention.gc_interval")
 				return
 			}
 			updatedConfig.Storage.Retention.GCInterval = d
 		}
-		if s.fs != nil {
+		if s.retentionMonitor != nil {
+			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
+				MaxVersions:   updatedConfig.Storage.Retention.MaxVersions,
+				MaxVersionAge: updatedConfig.Storage.Retention.MaxAge,
+				MinFreeSpace:  updatedConfig.Storage.Retention.MinFreeSpace,
+				SweepInterval: updatedConfig.Storage.Retention.GCInterval,
+			})
+		} else if s.fs != nil {
 			s.fs.UpdateRetentionSettings(
 				updatedConfig.Storage.Retention.MaxVersions,
 				updatedConfig.Storage.Retention.MaxAge,
+				updatedConfig.Storage.Retention.MinFreeSpace,
 			)
 		}
 	}
@@ -2489,8 +2500,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Save to file
 	if err := updatedConfig.Save(s.configPath); err != nil {
-		s.logger.Error().Err(err).Msg("failed to save config")
-		InternalError(w, "failed to save settings")
+		s.respondInternalError(w, "save settings", err)
 		return
 	}
 
@@ -2601,8 +2611,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 // handleAcknowledgeSetup marks the setup as shown
 func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
 	if err := config.MarkSetupShown(s.config.Storage.Root); err != nil {
-		s.logger.Error().Err(err).Msg("failed to mark setup as shown")
-		InternalError(w, "failed to acknowledge setup")
+		s.respondInternalError(w, "acknowledge setup", err)
 		return
 	}
 
@@ -2761,10 +2770,7 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionShare, "", user, ip, nil)
 	}
@@ -2782,10 +2788,7 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 			user = claims.Username
 		}
 
-		ip := r.RemoteAddr
-		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-			ip = realIP
-		}
+		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionUnshare, "", user, ip, nil)
 	}

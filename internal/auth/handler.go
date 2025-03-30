@@ -4,20 +4,113 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/seanbao/mnemonas/internal/requestip"
 )
 
 // Handler provides HTTP handlers for authentication
 type Handler struct {
-	userStore    *UserStore
-	tokenManager *TokenManager
+	userStore          *UserStore
+	tokenManager       *TokenManager
+	loginAttempts      *loginAttemptTracker
+	loginFailureLimit  int
+	loginFailureWindow time.Duration
+	loginLockDuration  time.Duration
+}
+
+type loginAttemptTracker struct {
+	mu       sync.Mutex
+	attempts map[string]loginAttemptState
+	now      func() time.Time
+}
+
+type loginAttemptState struct {
+	failures    int
+	lastFailure time.Time
+	lockedUntil time.Time
+}
+
+const (
+	defaultLoginFailureLimit     = 5
+	defaultLoginFailureWindow    = 15 * time.Minute
+	defaultLoginLockDuration     = 5 * time.Minute
+	defaultLoginRateLimitMessage = "too many login attempts, try later"
+)
+
+func newLoginAttemptTracker() *loginAttemptTracker {
+	return &loginAttemptTracker{
+		attempts: make(map[string]loginAttemptState),
+		now:      time.Now,
+	}
+}
+
+func (t *loginAttemptTracker) isLocked(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.now()
+	state, ok := t.attempts[key]
+	if !ok {
+		return false
+	}
+	if state.lockedUntil.After(now) {
+		return true
+	}
+	if !state.lockedUntil.IsZero() {
+		delete(t.attempts, key)
+	}
+	return false
+}
+
+func (t *loginAttemptTracker) recordFailure(key string, limit int, failureWindow, lockDuration time.Duration) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.now()
+	t.pruneExpiredLocked(now, failureWindow)
+	state := t.attempts[key]
+	if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
+		state = loginAttemptState{}
+	}
+	state.failures++
+	state.lastFailure = now
+	if state.failures >= limit {
+		state.lockedUntil = now.Add(lockDuration)
+	}
+	t.attempts[key] = state
+
+	return !state.lockedUntil.IsZero()
+}
+
+func (t *loginAttemptTracker) pruneExpiredLocked(now time.Time, failureWindow time.Duration) {
+	for key, state := range t.attempts {
+		if !state.lockedUntil.IsZero() && !state.lockedUntil.After(now) {
+			delete(t.attempts, key)
+			continue
+		}
+		if failureWindow > 0 && !state.lastFailure.IsZero() && now.Sub(state.lastFailure) > failureWindow {
+			delete(t.attempts, key)
+		}
+	}
+}
+
+func (t *loginAttemptTracker) reset(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.attempts, key)
 }
 
 // NewHandler creates a new auth handler
 func NewHandler(us *UserStore, tm *TokenManager) *Handler {
 	return &Handler{
-		userStore:    us,
-		tokenManager: tm,
+		userStore:          us,
+		tokenManager:       tm,
+		loginAttempts:      newLoginAttemptTracker(),
+		loginFailureLimit:  defaultLoginFailureLimit,
+		loginFailureWindow: defaultLoginFailureWindow,
+		loginLockDuration:  defaultLoginLockDuration,
 	}
 }
 
@@ -80,22 +173,43 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	attemptKey := loginAttemptKey(r, req.Username)
+	if h.loginAttempts != nil && h.loginAttempts.isLocked(attemptKey) {
+		writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
+		return
+	}
+
 	user, err := h.userStore.Authenticate(req.Username, req.Password)
 	if err != nil {
 		switch err {
 		case ErrInvalidCredentials:
+			if h.loginAttempts != nil {
+				if locked := h.loginAttempts.recordFailure(attemptKey, h.loginFailureLimit, h.loginFailureWindow, h.loginLockDuration); locked {
+					writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
+					return
+				}
+			}
 			writeError(w, http.StatusUnauthorized, "invalid username or password", "INVALID_CREDENTIALS")
 		case ErrUserDisabled:
-			writeError(w, http.StatusForbidden, "user account is disabled", "USER_DISABLED")
+			if h.loginAttempts != nil {
+				if locked := h.loginAttempts.recordFailure(attemptKey, h.loginFailureLimit, h.loginFailureWindow, h.loginLockDuration); locked {
+					writeError(w, http.StatusTooManyRequests, defaultLoginRateLimitMessage, "LOGIN_RATE_LIMITED")
+					return
+				}
+			}
+			writeError(w, http.StatusUnauthorized, "invalid username or password", "INVALID_CREDENTIALS")
 		default:
-			writeError(w, http.StatusInternalServerError, "authentication failed", "AUTH_ERROR")
+			writeError(w, http.StatusInternalServerError, "internal server error", "AUTH_ERROR")
 		}
 		return
+	}
+	if h.loginAttempts != nil {
+		h.loginAttempts.reset(attemptKey)
 	}
 
 	tokenPair, err := h.tokenManager.GenerateTokenPair(user)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token", "TOKEN_ERROR")
+		writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
 		return
 	}
 
@@ -114,6 +228,10 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccess(w, http.StatusOK, resp, "")
+}
+
+func loginAttemptKey(r *http.Request, username string) string {
+	return normalizeUsername(strings.TrimSpace(username)) + "|" + requestip.ClientIP(r)
 }
 
 // HandleRefresh handles POST /api/v1/auth/refresh
@@ -160,7 +278,7 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	tokenPair, err := h.tokenManager.GenerateTokenPair(user)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token", "TOKEN_ERROR")
+		writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
 		return
 	}
 
@@ -253,7 +371,10 @@ func requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	if !requestip.IsTrustedForwardedSource(requestip.RemoteIP(r.RemoteAddr)) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
 // HandleMe handles GET /api/v1/auth/me
@@ -319,7 +440,7 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 		case ErrPasswordTooShort:
 			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
 		default:
-			writeError(w, http.StatusInternalServerError, "failed to change password", "PASSWORD_ERROR")
+			writeError(w, http.StatusInternalServerError, "internal server error", "PASSWORD_ERROR")
 		}
 		return
 	}
@@ -420,7 +541,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		case ErrPasswordTooShort:
 			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
 		default:
-			writeError(w, http.StatusInternalServerError, "failed to create user", "CREATE_ERROR")
+			writeError(w, http.StatusInternalServerError, "internal server error", "CREATE_ERROR")
 		}
 		return
 	}
@@ -462,7 +583,7 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 		case ErrLastAdmin:
 			writeError(w, http.StatusBadRequest, "cannot delete last admin user", "LAST_ADMIN")
 		default:
-			writeError(w, http.StatusInternalServerError, "failed to delete user", "DELETE_ERROR")
+			writeError(w, http.StatusInternalServerError, "internal server error", "DELETE_ERROR")
 		}
 		return
 	}
@@ -502,7 +623,7 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 		case ErrPasswordTooShort:
 			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
 		default:
-			writeError(w, http.StatusInternalServerError, "failed to reset password", "RESET_ERROR")
+			writeError(w, http.StatusInternalServerError, "internal server error", "RESET_ERROR")
 		}
 		return
 	}
@@ -563,7 +684,7 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 
 	user.Disabled = req.Disabled
 	if err := h.userStore.Update(user); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update user status", "UPDATE_ERROR")
+		writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
 		return
 	}
 

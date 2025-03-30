@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -423,6 +424,45 @@ func TestAccessShareWithPassword_FolderInfo(t *testing.T) {
 	}
 	if len(recorder.Result().Cookies()) != 1 {
 		t.Fatalf("expected access cookie to be set")
+	}
+}
+
+func TestAccessShareWithPassword_IgnoresSpoofedForwardedProtoForCookie(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{statInfo: &storage.FileInfo{Name: "docs", IsDir: true}})
+	body := []byte(`{"password":"secret"}`)
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	recorder := httptest.NewRecorder()
+
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+	cookies := recorder.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected one cookie, got %d", len(cookies))
+	}
+	if cookies[0].Secure {
+		t.Fatal("expected spoofed forwarded proto to leave share cookie insecure")
 	}
 }
 
@@ -1202,6 +1242,84 @@ func TestAccessShareWithPassword_StaleFailuresExpire(t *testing.T) {
 
 	if lockedRecorder.Code != http.StatusOK {
 		t.Fatalf("expected valid password after stale failures expiry, got %d", lockedRecorder.Code)
+	}
+}
+
+func TestPasswordAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {
+	tracker := newPasswordAttemptTracker()
+	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	tracker.now = func() time.Time { return now }
+	tracker.attempts["stale"] = passwordAttemptState{failures: 1, lastFailure: now.Add(-2 * time.Minute)}
+
+	tracker.recordFailure("fresh", 5, time.Minute, time.Minute)
+
+	if _, ok := tracker.attempts["stale"]; ok {
+		t.Fatal("expected stale tracker entry to be pruned")
+	}
+	if _, ok := tracker.attempts["fresh"]; !ok {
+		t.Fatal("expected fresh tracker entry to remain")
+	}
+}
+
+func TestClientIdentifier_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/s/share-1", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20")
+	req.Header.Set("X-Real-IP", "198.51.100.21")
+
+	if got := clientIdentifier(req); got != "203.0.113.5" {
+		t.Fatalf("clientIdentifier() = %q, want %q", got, "203.0.113.5")
+	}
+}
+
+func TestClientIdentifier_UsesForwardedHeadersFromTrustedProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/s/share-1", nil)
+	req.RemoteAddr = "127.0.0.1:8080"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20, 127.0.0.1")
+
+	if got := clientIdentifier(req); got != "198.51.100.20" {
+		t.Fatalf("clientIdentifier() = %q, want %q", got, "198.51.100.20")
+	}
+}
+
+func TestAccessShareWithPassword_SpoofedForwardedHeaderDoesNotBypassRateLimit(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/secret.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.passwordFailureDelay = 0
+
+	body := []byte(`{"password":"wrong"}`)
+	for attempt := 0; attempt < handler.passwordFailureLimit; attempt++ {
+		req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+		req.Header.Set("X-Forwarded-For", net.IPv4(198, 51, 100, byte(20+attempt)).String())
+		recorder := httptest.NewRecorder()
+
+		handler.AccessShareWithPassword(recorder, req)
+	}
+
+	bypassReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, []byte(`{"password":"secret"}`))
+	bypassReq.Header.Set("X-Forwarded-For", "198.51.100.250")
+	bypassRecorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(bypassRecorder, bypassReq)
+
+	if bypassRecorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected spoofed forwarded header to stay rate limited, got %d", bypassRecorder.Code)
 	}
 }
 

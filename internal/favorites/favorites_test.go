@@ -175,3 +175,62 @@ func TestStoreEmptyFile(t *testing.T) {
 		t.Error("expected 0 favorites for new user")
 	}
 }
+
+func TestStore_ReturnedFavoritesAreDetachedCopies(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/file.txt", "original note"); err != nil {
+		t.Fatalf("failed to add favorite: %v", err)
+	}
+
+	listed := store.List("user1")
+	if len(listed) != 1 {
+		t.Fatalf("expected 1 favorite, got %d", len(listed))
+	}
+	listed[0].Note = "mutated note"
+
+	fresh := store.List("user1")
+	if fresh[0].Note != "original note" {
+		t.Fatalf("expected stored note to remain original, got %q", fresh[0].Note)
+	}
+}
+
+func TestStore_RollsBackFailedMutations(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/file.txt", "original note"); err != nil {
+		t.Fatalf("failed to add favorite: %v", err)
+	}
+
+	store.filePath = tmpDir
+
+	if err := store.UpdateNote("user1", "/docs/file.txt", "updated note"); err == nil {
+		t.Fatal("expected update note save failure")
+	}
+	listed := store.List("user1")
+	if len(listed) != 1 {
+		t.Fatalf("expected 1 favorite after failed note update, got %d", len(listed))
+	}
+	if listed[0].Note != "original note" {
+		t.Fatalf("expected note rollback to keep original note, got %q", listed[0].Note)
+	}
+
+	if err := store.Remove("user1", "/docs/file.txt"); err == nil {
+		t.Fatal("expected remove save failure")
+	}
+	if !store.IsFavorite("user1", "/docs/file.txt") {
+		t.Fatal("expected failed remove to keep favorite in store")
+	}
+}
