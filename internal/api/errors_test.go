@@ -279,6 +279,26 @@ func TestAPIResponse_Write(t *testing.T) {
 	}
 }
 
+func TestAPIResponse_Write_IncludesNullDataForNilPayload(t *testing.T) {
+	w := httptest.NewRecorder()
+	resp := NewAPIResponse(nil).WithMessage("operation completed")
+	if writeErr := resp.Write(w, http.StatusOK); writeErr != nil {
+		t.Fatalf("Write() error: %v", writeErr)
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	data, ok := payload["data"]
+	if !ok {
+		t.Fatalf("expected response to include data field, got %s", w.Body.String())
+	}
+	if string(data) != "null" {
+		t.Fatalf("expected data field to be null, got %s", string(data))
+	}
+}
+
 func TestAPIResponse_Write_ReturnsEncodingError(t *testing.T) {
 	w := &failingResponseWriter{}
 	resp := NewAPIResponse(map[string]string{"status": "ok"})

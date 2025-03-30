@@ -105,6 +105,9 @@ type APIResponse struct {
 
 // NewAPIResponse creates a new API response
 func NewAPIResponse(data any) *APIResponse {
+	if data == nil {
+		data = json.RawMessage("null")
+	}
 	return &APIResponse{
 		Success:   true,
 		Data:      data,

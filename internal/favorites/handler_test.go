@@ -372,6 +372,55 @@ func TestHandler_RemoveFavoriteAndUpdateNote_NormalizeRoutePath(t *testing.T) {
 	}
 }
 
+func TestHandler_RemoveFavoriteAndUpdateNote_IncludeNullDataOnSuccess(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/report.pdf","note":"first"}`))
+	addReq = addReq.WithContext(auth.WithClaimsContext(addReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	addRec := httptest.NewRecorder()
+	handler.AddFavorite(addRec, addReq)
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", addRec.Code, addRec.Body.String())
+	}
+
+	assertNullData := func(t *testing.T, body []byte) {
+		t.Helper()
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		data, ok := payload["data"]
+		if !ok {
+			t.Fatalf("expected success response to include data field, got %s", string(body))
+		}
+		if string(data) != "null" {
+			t.Fatalf("expected success response data to be null, got %s", string(data))
+		}
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/docs/report.pdf", strings.NewReader(`{"note":"updated"}`))
+	updateReq = updateReq.WithContext(auth.WithClaimsContext(updateReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	updateRec := httptest.NewRecorder()
+	handler.UpdateNote(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+	assertNullData(t, updateRec.Body.Bytes())
+
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/report.pdf", nil)
+	removeReq = removeReq.WithContext(auth.WithClaimsContext(removeReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	removeRec := httptest.NewRecorder()
+	handler.RemoveFavorite(removeRec, removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", removeRec.Code, removeRec.Body.String())
+	}
+	assertNullData(t, removeRec.Body.Bytes())
+}
+
 func TestHandler_CheckFavorite_TrimsSurroundingWhitespace(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
 	if err != nil {

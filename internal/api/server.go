@@ -237,6 +237,13 @@ func formatSettingsDuration(d time.Duration) string {
 	return d.String()
 }
 
+func settingsStringSlice(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
 const (
 	auditStatusHeaderName  = "X-Mnemonas-Audit-Status"
 	auditStatusFailedValue = "failed"
@@ -2041,15 +2048,28 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		limit = l
 	}
 
-	results, err := s.fs.Search(r.Context(), query, limit)
+	homeDir, scoped, err := s.currentUserHomeDir(r.Context())
+	if err != nil {
+		forbiddenPathOutsideHome(w)
+		return
+	}
+
+	var results []*storage.SearchResult
+	if scoped {
+		results, err = s.fs.SearchWithinBase(r.Context(), homeDir, query, limit)
+	} else {
+		results, err = s.fs.Search(r.Context(), query, limit)
+	}
 	if err != nil {
 		s.respondInternalError(w, "search files", err)
 		return
 	}
-	results, err = s.filterSearchResultsByHomeDir(r.Context(), results)
-	if err != nil {
-		forbiddenPathOutsideHome(w)
-		return
+	if !scoped {
+		results, err = s.filterSearchResultsByHomeDir(r.Context(), results)
+		if err != nil {
+			forbiddenPathOutsideHome(w)
+			return
+		}
 	}
 
 	// Convert to API response format
@@ -3501,8 +3521,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"gc_interval":    formatSettingsDuration(cfg.Storage.Retention.GCInterval),
 		},
 		"versioning": map[string]interface{}{
-			"auto_versioned_extensions": cfg.Storage.Versioning.AutoVersionedExtensions,
-			"auto_versioned_filenames":  cfg.Storage.Versioning.AutoVersionedFilenames,
+			"auto_versioned_extensions": settingsStringSlice(cfg.Storage.Versioning.AutoVersionedExtensions),
+			"auto_versioned_filenames":  settingsStringSlice(cfg.Storage.Versioning.AutoVersionedFilenames),
 			"max_versioned_size":        cfg.Storage.Versioning.MaxVersionedSize,
 		},
 		"webdav": map[string]interface{}{
@@ -3528,7 +3548,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"cooldown_period": cfg.Alerts.CooldownPeriod.String(),
 			"webhook_url":     cfg.Alerts.WebhookURL,
 			"webhook_method":  cfg.Alerts.WebhookMethod,
-			"webhook_headers": cfg.Alerts.WebhookHeaders,
+			"webhook_headers": settingsStringSlice(cfg.Alerts.WebhookHeaders),
 		},
 		"dataplane": map[string]interface{}{
 			"grpc_address": cfg.DataPlane.GRPCAddress,
@@ -4717,9 +4737,20 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 
 	sharePath := ""
 	if s.shareStore != nil {
-		if shareInfo, err := s.ensureShareWithinOwnerHome(chi.URLParam(r, "id")); err == nil {
+		shareID := chi.URLParam(r, "id")
+		if auth.IsAdmin(r.Context()) {
+			if shareInfo, err := s.shareStore.Get(shareID); err == nil {
+				sharePath = shareInfo.Path
+			} else if errors.Is(err, share.ErrShareNotFound) {
+				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+				return
+			} else {
+				s.respondInternalError(w, "load share for delete", err)
+				return
+			}
+		} else if shareInfo, err := s.ensureShareWithinOwnerHome(shareID); err == nil {
 			sharePath = shareInfo.Path
-		} else if !auth.IsAdmin(r.Context()) {
+		} else {
 			if errors.Is(err, share.ErrShareNotFound) {
 				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 				return
