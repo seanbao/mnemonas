@@ -102,3 +102,100 @@ func TestHandler_AddFavorite_WrapsConflictError(t *testing.T) {
 		t.Fatalf("expected wrapped conflict error, got %s", rec.Body.String())
 	}
 }
+
+func TestHandler_AddFavorite_EmptyPathReturnsBadRequest(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	handler := NewHandler(store, zerolog.Nop())
+
+	tests := []string{"", "   ", "/", "."}
+	for _, favoritePath := range tests {
+		t.Run(favoritePath, func(t *testing.T) {
+			body := strings.NewReader(`{"path":"` + favoritePath + `"}`)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", body)
+			req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user-123"}))
+			rec := httptest.NewRecorder()
+
+			handler.AddFavorite(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			var payload struct {
+				Success bool `json:"success"`
+				Error   *struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if payload.Success || payload.Error == nil {
+				t.Fatalf("expected wrapped validation error, got %s", rec.Body.String())
+			}
+			if payload.Error.Code != "MISSING_PATH" {
+				t.Fatalf("expected MISSING_PATH error, got %s", payload.Error.Code)
+			}
+		})
+	}
+}
+
+func TestHandler_InternalErrorsHideOperationDetails(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := store.Add("user-123", "/docs/report.pdf", "note"); err != nil {
+		t.Fatalf("seed favorite error: %v", err)
+	}
+	store.filePath = t.TempDir()
+	handler := NewHandler(store, zerolog.Nop())
+
+	assertInternal := func(t *testing.T, rec *httptest.ResponseRecorder, wantCode string) {
+		t.Helper()
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected status 500, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			Success bool `json:"success"`
+			Error   *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if payload.Success || payload.Error == nil {
+			t.Fatalf("expected wrapped internal error, got %s", rec.Body.String())
+		}
+		if payload.Error.Code != wantCode {
+			t.Fatalf("expected error code %s, got %s", wantCode, payload.Error.Code)
+		}
+		if payload.Error.Message != "internal server error" {
+			t.Fatalf("expected generic internal message, got %q", payload.Error.Message)
+		}
+	}
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/new.pdf"}`))
+	addReq = addReq.WithContext(auth.WithClaimsContext(addReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	addRec := httptest.NewRecorder()
+	handler.AddFavorite(addRec, addReq)
+	assertInternal(t, addRec, "ADD_FAVORITE_FAILED")
+
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/report.pdf", nil)
+	removeReq = removeReq.WithContext(auth.WithClaimsContext(removeReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	removeRec := httptest.NewRecorder()
+	handler.RemoveFavorite(removeRec, removeReq)
+	assertInternal(t, removeRec, "REMOVE_FAVORITE_FAILED")
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/docs/report.pdf", strings.NewReader(`{"note":"updated"}`))
+	updateReq = updateReq.WithContext(auth.WithClaimsContext(updateReq.Context(), &auth.TokenClaims{UserID: "user-123"}))
+	updateRec := httptest.NewRecorder()
+	handler.UpdateNote(updateRec, updateReq)
+	assertInternal(t, updateRec, "UPDATE_NOTE_FAILED")
+}

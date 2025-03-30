@@ -56,7 +56,7 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if path is excluded
 		for _, path := range m.excludePaths {
-			if strings.HasPrefix(r.URL.Path, path) {
+			if pathMatches(r.URL.Path, path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -120,7 +120,20 @@ func allowDownloadSessionCookie(r *http.Request) bool {
 		return false
 	}
 	path := r.URL.Path
-	return strings.HasPrefix(path, "/api/v1/download") || strings.HasPrefix(path, "/api/v1/thumbnails")
+	return pathMatches(path, "/api/v1/download") || pathMatches(path, "/api/v1/thumbnails")
+}
+
+func pathMatches(requestPath, prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	if requestPath == prefix {
+		return true
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return strings.HasPrefix(requestPath, prefix)
+	}
+	return strings.HasPrefix(requestPath, prefix+"/")
 }
 
 // RequireRole middleware that requires a specific role

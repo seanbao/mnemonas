@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -244,7 +245,7 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 
 	share, err := h.store.Create(opts)
 	if err != nil {
-		writeShareError(w, http.StatusInternalServerError, "failed to create share", "CREATE_SHARE_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
 		return
 	}
 
@@ -285,7 +286,7 @@ func (h *Handler) GetShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 			return
 		}
-		writeShareError(w, http.StatusInternalServerError, "failed to get share", "GET_SHARE_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
 		return
 	}
 
@@ -343,7 +344,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 			return
 		}
-		writeShareError(w, http.StatusInternalServerError, "failed to get share", "GET_SHARE_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
 		return
 	}
 
@@ -390,7 +391,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		writeShareError(w, http.StatusInternalServerError, "failed to update share", "UPDATE_SHARE_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
 		return
 	}
 
@@ -411,7 +412,7 @@ func (h *Handler) DeleteShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 			return
 		}
-		writeShareError(w, http.StatusInternalServerError, "failed to get share", "GET_SHARE_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
 		return
 	}
 
@@ -423,7 +424,7 @@ func (h *Handler) DeleteShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.Delete(id); err != nil {
-		writeShareError(w, http.StatusInternalServerError, "failed to delete share", "DELETE_SHARE_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DELETE_SHARE_FAILED")
 		return
 	}
 
@@ -470,7 +471,7 @@ func writePublicShareAccessError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrShareDisabled):
 		writeShareError(w, http.StatusGone, "share disabled", "SHARE_DISABLED")
 	default:
-		writeShareError(w, http.StatusInternalServerError, "failed to access share", "ACCESS_SHARE_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "ACCESS_SHARE_FAILED")
 	}
 }
 
@@ -632,7 +633,11 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 
 	reader, err := h.fs.OpenFile(r.Context(), share.Path)
 	if err != nil {
-		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+		if errors.Is(err, storage.ErrNotFound) {
+			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+			return
+		}
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
 	if reader == nil {
@@ -642,9 +647,12 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	defer reader.Close()
 
 	filename := path.Base(share.Path)
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, reader)
+	if err := streamDownload(w, reader); err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
+		return
+	}
 }
 
 // DownloadShareFile handles file download from shared folder
@@ -688,7 +696,11 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 
 	reader, err := h.fs.OpenFile(r.Context(), fullPath)
 	if err != nil {
-		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+		if errors.Is(err, storage.ErrNotFound) {
+			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+			return
+		}
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
 	if reader == nil {
@@ -698,9 +710,44 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	defer reader.Close()
 
 	filename := path.Base(fullPath)
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, reader)
+	if err := streamDownload(w, reader); err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
+		return
+	}
+}
+
+func contentDispositionAttachment(filename string) string {
+	value := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if value == "" {
+		return "attachment"
+	}
+	return value
+}
+
+func streamDownload(w http.ResponseWriter, reader io.Reader) error {
+	trackingWriter := &downloadResponseWriter{ResponseWriter: w}
+	_, err := io.Copy(trackingWriter, reader)
+	if err != nil && !trackingWriter.started {
+		return err
+	}
+	return nil
+}
+
+type downloadResponseWriter struct {
+	http.ResponseWriter
+	started bool
+}
+
+func (w *downloadResponseWriter) WriteHeader(statusCode int) {
+	w.started = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *downloadResponseWriter) Write(p []byte) (int, error) {
+	w.started = true
+	return w.ResponseWriter.Write(p)
 }
 
 // ListShareItems lists items within a shared folder.
@@ -744,7 +791,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 			return
 		}
-		writeShareError(w, http.StatusInternalServerError, "failed to list share items", "LIST_SHARE_ITEMS_FAILED")
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 		return
 	}
 
