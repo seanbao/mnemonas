@@ -33,7 +33,8 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
 
   // If not authenticated, redirect to login
   if (!isAuthenticated) {
-    return <Navigate to="/login" state={{ from: location.pathname }} replace />
+    const attemptedPath = `${location.pathname}${location.search}${location.hash}`
+    return <Navigate to="/login" state={{ from: attemptedPath }} replace />
   }
 
   return <>{children}</>

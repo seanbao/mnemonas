@@ -5,10 +5,17 @@ import {
   login as apiLogin, 
   logout as apiLogout, 
   getCurrentUser,
-  getStoredUser,
   getStoredToken,
 } from '@/api/auth'
 import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
+
+let authStateEpoch = 0
+let initializeRunId = 0
+
+function bumpAuthStateEpoch(): number {
+  authStateEpoch += 1
+  return authStateEpoch
+}
 
 interface AuthState {
   user: User | null
@@ -36,11 +43,19 @@ export const useAuthStore = create<AuthState>((set) => ({
   authEnabled: true,
   
   initialize: async () => {
+    const runId = ++initializeRunId
+    const startEpoch = authStateEpoch
+    const isCurrent = () => runId === initializeRunId && authStateEpoch === startEpoch
+
     set({ isLoading: true, error: null })
     
     // First, check if auth is enabled on the server
     try {
       const setupStatus = await getSetupStatus()
+      if (!isCurrent()) {
+        return
+      }
+
       if (!setupStatus.auth_enabled) {
         // Auth is disabled on server, skip login requirement
         set({ 
@@ -58,13 +73,19 @@ export const useAuthStore = create<AuthState>((set) => ({
     // Check if there's a stored token
     const token = getStoredToken()
     if (!token) {
-      set({ isLoading: false, isAuthenticated: false, user: null })
+      if (isCurrent()) {
+        set({ isLoading: false, isAuthenticated: false, user: null })
+      }
       return
     }
     
     // Try to get current user (validates token)
     try {
       const user = await getCurrentUser()
+      if (!isCurrent()) {
+        return
+      }
+
       if (user) {
         set({ user, isAuthenticated: true, isLoading: false })
       } else {
@@ -72,17 +93,18 @@ export const useAuthStore = create<AuthState>((set) => ({
         set({ user: null, isAuthenticated: false, isLoading: false })
       }
     } catch {
-      // Use stored user as fallback
-      const storedUser = getStoredUser()
-      if (storedUser) {
-        set({ user: storedUser, isAuthenticated: true, isLoading: false })
-      } else {
-        set({ user: null, isAuthenticated: false, isLoading: false })
+      if (!isCurrent()) {
+        return
       }
+
+      // Fail closed when token validation cannot complete.
+      // Using a cached user here would let stale auth state bypass ProtectedRoute.
+      set({ user: null, isAuthenticated: false, isLoading: false })
     }
   },
   
   login: async (username: string, password: string) => {
+    bumpAuthStateEpoch()
     set({ isLoading: true, error: null })
     
     try {
@@ -110,6 +132,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
   
   logout: async () => {
+    bumpAuthStateEpoch()
     set({ isLoading: true })
     
     try {
@@ -152,6 +175,7 @@ if (typeof window !== 'undefined') {
 
   if (!markerWindow[AUTH_CLEARED_LISTENER_KEY]) {
     window.addEventListener(AUTH_CLEARED_EVENT, () => {
+      bumpAuthStateEpoch()
       const state = useAuthStore.getState()
       if (!state.isAuthenticated && !state.user && !state.isLoading) {
         return
