@@ -1814,6 +1814,15 @@ func (fs *FileSystem) GetFileCount(ctx context.Context) (int, error) {
 
 // Search searches for files matching the query
 func (fs *FileSystem) Search(ctx context.Context, query string, limit int) ([]*SearchResult, error) {
+	return fs.search(ctx, "/", query, limit)
+}
+
+// SearchWithinBase returns search results under a specific workspace root.
+func (fs *FileSystem) SearchWithinBase(ctx context.Context, root, query string, limit int) ([]*SearchResult, error) {
+	return fs.search(ctx, workspace.CleanPath(root), query, limit)
+}
+
+func (fs *FileSystem) search(ctx context.Context, root, query string, limit int) ([]*SearchResult, error) {
 	if query == "" {
 		return nil, errors.New("search query cannot be empty")
 	}
@@ -1830,7 +1839,7 @@ func (fs *FileSystem) Search(ctx context.Context, query string, limit int) ([]*S
 	var results []*SearchResult
 
 	// Walk through workspace
-	err := walkStorageWorkspace(ctx, workspaceRef, "/", func(filePath string, info *workspace.FileInfo) error {
+	err := walkStorageWorkspace(ctx, workspaceRef, root, func(filePath string, info *workspace.FileInfo) error {
 		if len(results) >= limit {
 			return io.EOF // Stop walking
 		}

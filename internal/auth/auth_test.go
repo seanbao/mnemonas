@@ -2018,6 +2018,24 @@ func TestWriteSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
 	}
 }
 
+func TestWriteSuccess_IncludesNullDataForNilPayload(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	writeSuccess(rec, http.StatusOK, nil, "ok")
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	data, ok := payload["data"]
+	if !ok {
+		t.Fatalf("expected response to include data field, got %s", rec.Body.String())
+	}
+	if string(data) != "null" {
+		t.Fatalf("expected data field to be null, got %s", string(data))
+	}
+}
+
 func TestLoginAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {
 	tracker := newLoginAttemptTracker()
 	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)

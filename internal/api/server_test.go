@@ -3202,6 +3202,43 @@ func TestServer_Search_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_Search_RespectsHomeDirBeforeLimitForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/report-outside.txt", bytes.NewReader([]byte("outside"))); err != nil {
+		t.Fatalf("WriteFile(/other/report-outside.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/report-home.txt", bytes.NewReader([]byte("home"))); err != nil {
+		t.Fatalf("WriteFile(/tester/report-home.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=report&limit=1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("search with scoped limit status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "/tester/report-home.txt") {
+		t.Fatalf("expected in-home result to survive limit, got %s", body)
+	}
+	if strings.Contains(body, "/other/report-outside.txt") {
+		t.Fatalf("expected outside-home result to remain hidden, got %s", body)
+	}
+}
+
 func TestServer_Metrics(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -5968,6 +6005,74 @@ func TestServer_DeleteShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testi
 	}
 }
 
+func TestServer_DeleteShare_AdminLogsOriginalPathForDisabledOwner(t *testing.T) {
+	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	user.HomeDir = "/tester"
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(%s) error: %v", username, err)
+	}
+
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create share error: %v", err)
+	}
+
+	user.Disabled = true
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(disabled user) error: %v", err)
+	}
+
+	adminUsername := "share-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+fileShare.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin delete disabled-owner share status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if _, err := server.shareStore.Get(fileShare.ID); err != share.ErrShareNotFound {
+		t.Fatalf("expected disabled-owner share to be deleted, got %v", err)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionUnshare, "")
+	if total != 1 {
+		t.Fatalf("expected one unshare activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed unshare activity entry, got %d", len(entries))
+	}
+	if entries[0].User != adminUsername {
+		t.Fatalf("expected unshare activity user %q, got %q", adminUsername, entries[0].User)
+	}
+	if entries[0].Path != "/tester/own.txt" {
+		t.Fatalf("expected unshare activity path %q, got %q", "/tester/own.txt", entries[0].Path)
+	}
+}
+
 func TestServer_ListShares_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
@@ -7534,6 +7639,59 @@ func TestServer_GetSettings_NormalizesZeroRetentionDurations(t *testing.T) {
 	}
 	if resp.Data.Retention.GCInterval != "0" {
 		t.Fatalf("expected gc_interval to be normalized to 0, got %q", resp.Data.Retention.GCInterval)
+	}
+}
+
+func TestServer_GetSettings_NormalizesNilSliceFields(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Storage.Versioning.AutoVersionedExtensions = nil
+	server.config.Storage.Versioning.AutoVersionedFilenames = nil
+	server.config.Alerts.WebhookHeaders = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Versioning struct {
+				AutoVersionedExtensions []string `json:"auto_versioned_extensions"`
+				AutoVersionedFilenames  []string `json:"auto_versioned_filenames"`
+			} `json:"versioning"`
+			Alerts struct {
+				WebhookHeaders []string `json:"webhook_headers"`
+			} `json:"alerts"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if resp.Data.Versioning.AutoVersionedExtensions == nil {
+		t.Fatal("expected auto_versioned_extensions to serialize as an empty array, got null")
+	}
+	if resp.Data.Versioning.AutoVersionedFilenames == nil {
+		t.Fatal("expected auto_versioned_filenames to serialize as an empty array, got null")
+	}
+	if resp.Data.Alerts.WebhookHeaders == nil {
+		t.Fatal("expected webhook_headers to serialize as an empty array, got null")
+	}
+	if len(resp.Data.Versioning.AutoVersionedExtensions) != 0 {
+		t.Fatalf("expected empty auto_versioned_extensions, got %v", resp.Data.Versioning.AutoVersionedExtensions)
+	}
+	if len(resp.Data.Versioning.AutoVersionedFilenames) != 0 {
+		t.Fatalf("expected empty auto_versioned_filenames, got %v", resp.Data.Versioning.AutoVersionedFilenames)
+	}
+	if len(resp.Data.Alerts.WebhookHeaders) != 0 {
+		t.Fatalf("expected empty webhook_headers, got %v", resp.Data.Alerts.WebhookHeaders)
 	}
 }
 

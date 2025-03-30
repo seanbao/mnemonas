@@ -46,6 +46,15 @@ func TestDefault(t *testing.T) {
 	if cfg.Favorites.StoreFile != filepath.Join(internalRoot, "favorites.json") {
 		t.Errorf("Default favorites store = %s, want %s", cfg.Favorites.StoreFile, filepath.Join(internalRoot, "favorites.json"))
 	}
+	if cfg.Storage.Versioning.AutoVersionedExtensions == nil {
+		t.Error("Default versioning extensions should be initialized to an empty or populated slice")
+	}
+	if cfg.Storage.Versioning.AutoVersionedFilenames == nil {
+		t.Error("Default versioning filenames should be initialized to an empty or populated slice")
+	}
+	if cfg.Alerts.WebhookHeaders == nil {
+		t.Error("Default alerts webhook headers should be initialized to an empty slice")
+	}
 }
 
 func TestConfig_Validate(t *testing.T) {

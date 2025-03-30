@@ -293,6 +293,10 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 		cfg.Storage.Root = defaultRoot
 	}
 
+	cfg.Storage.Versioning.AutoVersionedExtensions = normalizeStringSlice(cfg.Storage.Versioning.AutoVersionedExtensions)
+	cfg.Storage.Versioning.AutoVersionedFilenames = normalizeStringSlice(cfg.Storage.Versioning.AutoVersionedFilenames)
+	cfg.Alerts.WebhookHeaders = normalizeStringSlice(cfg.Alerts.WebhookHeaders)
+
 	defaultInternal := filepath.Join(defaultRoot, ".mnemonas")
 	internal := filepath.Join(cfg.Storage.Root, ".mnemonas")
 
@@ -315,6 +319,13 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	if cfg.Favorites.StoreFile == "" || cfg.Favorites.StoreFile == defaultFavoritesFile {
 		cfg.Favorites.StoreFile = filepath.Join(internal, "favorites.json")
 	}
+}
+
+func normalizeStringSlice(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 // Load loads configuration from file
