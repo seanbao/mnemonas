@@ -179,6 +179,156 @@ func TestCreateShare_InvalidNegativeExpiresInReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestCreateShare_NegativeMaxAccessReturnsBadRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"path":"/docs/report.pdf","type":"file","max_access":-1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_MAX_ACCESS" {
+		t.Fatalf("expected INVALID_MAX_ACCESS code, got %v", errorPayload["code"])
+	}
+}
+
+func TestCreateShare_WhitespaceOnlyPathReturnsBadRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"path":"   ","type":"file"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "MISSING_PATH" {
+		t.Fatalf("expected MISSING_PATH code, got %v", errorPayload["code"])
+	}
+}
+
+func TestCreateShare_NormalizesRelativePath(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"path":"docs/report.pdf","type":"file"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	payload := decodeEnvelopeData(t, recorder)
+	pathValue, ok := payload["path"].(string)
+	if !ok {
+		t.Fatalf("expected path in response, got %v", payload)
+	}
+	if pathValue != "/docs/report.pdf" {
+		t.Fatalf("expected normalized absolute path, got %q", pathValue)
+	}
+}
+
+func TestCreateShare_InvalidTypeReturnsBadRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"path":"/docs/report.pdf","type":"symlink"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_SHARE_TYPE" {
+		t.Fatalf("expected INVALID_SHARE_TYPE code, got %v", errorPayload["code"])
+	}
+}
+
+func TestCreateShare_InvalidPermissionReturnsBadRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"path":"/docs/report.pdf","type":"file","permission":"admin"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_PERMISSION" {
+		t.Fatalf("expected INVALID_PERMISSION code, got %v", errorPayload["code"])
+	}
+}
+
 func TestListShares_WrapsResponseData(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -268,6 +418,51 @@ func TestUpdateShare_InvalidExpiresInReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestUpdateShare_InvalidPermissionReturnsBadRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"permission":"admin"}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil {
+		t.Fatalf("expected error payload, got %s", recorder.Body.String())
+	}
+	if payload.Error.Code != "INVALID_PERMISSION" {
+		t.Fatalf("expected INVALID_PERMISSION, got %q", payload.Error.Code)
+	}
+	if payload.Error.Message != "invalid permission" {
+		t.Fatalf("unexpected error message: %q", payload.Error.Message)
+	}
+}
+
 func TestUpdateShare_NonPositiveExpiresInReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -303,6 +498,59 @@ func TestUpdateShare_NonPositiveExpiresInReturnsBadRequest(t *testing.T) {
 	}
 	if payload.Error == nil || payload.Error.Code != "INVALID_EXPIRES_IN" {
 		t.Fatalf("expected INVALID_EXPIRES_IN error, got %s", recorder.Body.String())
+	}
+}
+
+func TestUpdateShare_NegativeMaxAccessReturnsBadRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"max_access":-1}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil {
+		t.Fatalf("expected error payload, got %s", recorder.Body.String())
+	}
+	if payload.Error.Code != "INVALID_MAX_ACCESS" {
+		t.Fatalf("expected INVALID_MAX_ACCESS, got %q", payload.Error.Code)
+	}
+	if payload.Error.Message != "invalid max_access" {
+		t.Fatalf("unexpected error message: %q", payload.Error.Message)
+	}
+
+	updated, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if updated.MaxAccess != 0 {
+		t.Fatalf("expected max_access to remain unchanged, got %d", updated.MaxAccess)
 	}
 }
 
@@ -1277,6 +1525,59 @@ func TestListShareItems_PreservesWhitespaceInPath(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
 	}
+	var payload struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Path != " report " {
+		t.Fatalf("expected whitespace path to be preserved, got %q", payload.Path)
+	}
+}
+
+func TestListShareItems_NormalizesReturnedPath(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/a.txt", Name: "a.txt", Size: 1, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items?path=sub/..", share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Path != "" {
+		t.Fatalf("expected normalized root path, got %q", payload.Path)
+	}
 }
 
 func TestAccessShare_AccessLimitReached(t *testing.T) {
@@ -1651,5 +1952,52 @@ func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
 	}
 	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
 		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
+	}
+}
+
+func TestListShareItems_RejectsEntriesOutsideShareRoot(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/other/secret.txt", Name: "secret.txt", Size: 1, IsDir: false},
+			},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
+		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
+	}
+	if errorPayload["message"] != "internal server error" {
+		t.Fatalf("expected generic message, got %v", errorPayload["message"])
 	}
 }

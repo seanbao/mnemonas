@@ -811,6 +811,18 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("login trims surrounding username whitespace", func(t *testing.T) {
+		body := `{"username":"  handleruser  ","password":"password123"}`
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("login failure", func(t *testing.T) {
 		body := `{"username":"handleruser","password":"wrongpassword"}`
 		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
@@ -1135,6 +1147,28 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("admin create user rejects whitespace-only username", func(t *testing.T) {
+		body := `{"username":"   ","password":"newpass123","email":"new@test.com","role":"user"}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		ctx := context.WithValue(req.Context(), ContextKeyUser, admin)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create user envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "MISSING_FIELDS" {
+			t.Fatalf("expected MISSING_FIELDS error, got %+v", envelope.Error)
+		}
+	})
+
 	t.Run("non-admin cannot list users", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/v1/admin/users", nil)
 		user, _ := store.GetByUsername("handleruser")
@@ -1228,6 +1262,43 @@ func TestAuthHandler(t *testing.T) {
 		toggleRec := httptest.NewRecorder()
 		brokenHandler.HandleToggleUserStatus(toggleRec, toggleReq, toggleUser.ID)
 		assertInternalError(t, toggleRec, "UPDATE_ERROR")
+	})
+
+	t.Run("toggle user status requires disabled field", func(t *testing.T) {
+		toggleUser, err := store.Create("toggle-missing-field", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create toggle user: %v", err)
+		}
+		toggleUser.Disabled = true
+		if err := store.Update(toggleUser); err != nil {
+			t.Fatalf("failed to disable toggle user: %v", err)
+		}
+
+		admin, _ := store.GetByUsername("handleradmin")
+		toggleReq := httptest.NewRequest("PUT", "/api/v1/admin/users/"+toggleUser.ID+"/status", bytes.NewBufferString(`{}`))
+		toggleReq = toggleReq.WithContext(context.WithValue(toggleReq.Context(), ContextKeyUser, admin))
+		toggleRec := httptest.NewRecorder()
+		h.HandleToggleUserStatus(toggleRec, toggleReq, toggleUser.ID)
+
+		if toggleRec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", toggleRec.Code, toggleRec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(toggleRec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal toggle envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "MISSING_DISABLED" {
+			t.Fatalf("expected MISSING_DISABLED error, got %+v", envelope.Error)
+		}
+
+		refreshed, err := store.GetByID(toggleUser.ID)
+		if err != nil {
+			t.Fatalf("failed to reload toggle user: %v", err)
+		}
+		if !refreshed.Disabled {
+			t.Fatal("expected missing disabled field to leave user disabled")
+		}
 	})
 }
 

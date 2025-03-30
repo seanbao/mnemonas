@@ -320,10 +320,12 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 			}
 		}
 
-		// If-None-Match: prevent update if file exists (for create-only)
-		if inm := r.Header.Get("If-None-Match"); inm == "*" {
-			http.Error(w, errFileAlreadyExists.Error(), http.StatusPreconditionFailed)
-			return
+		// If-None-Match: prevent update when any provided validator matches the current representation.
+		if inm := r.Header.Get("If-None-Match"); inm != "" {
+			if h.matchETag(inm, etag) {
+				http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+				return
+			}
 		}
 	} else {
 		// If-Match with non-existent file should fail
@@ -784,6 +786,11 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 		return
 	}
 
+	if _, err := h.fs.Stat(ctx, filePath); err != nil {
+		h.handleError(w, err)
+		return
+	}
+
 	// Simple implementation: ignore property modification requests
 	w.WriteHeader(http.StatusMultiStatus)
 	fmt.Fprint(w, xml.Header)
@@ -805,7 +812,14 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 
 	h.locksMu.Lock()
 	h.removeExpiredLocksLocked(time.Now())
-	if _, exists := h.locks[filePath]; exists {
+	if existing, exists := h.locks[filePath]; exists {
+		if hasMatchingLockToken(extractLockTokens(r), existing.token) {
+			existing.expiresAt = time.Now().Add(webdavLockTimeout)
+			h.locks[filePath] = existing
+			h.locksMu.Unlock()
+			h.writeLockResponse(w, existing.token)
+			return
+		}
 		h.locksMu.Unlock()
 		http.Error(w, "resource is locked", http.StatusLocked)
 		return
@@ -819,6 +833,10 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	h.locksMu.Unlock()
 
+	h.writeLockResponse(w, token)
+}
+
+func (h *Handler) writeLockResponse(w http.ResponseWriter, token string) {
 	w.Header().Set("Lock-Token", "<"+token+">")
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -875,8 +893,55 @@ func normalizeLockToken(token string) string {
 	return token
 }
 
+func extractLockTokens(r *http.Request) []string {
+	seen := make(map[string]struct{})
+	tokens := make([]string, 0, 2)
+
+	appendToken := func(token string) {
+		token = normalizeLockToken(token)
+		if token == "" {
+			return
+		}
+		if _, exists := seen[token]; exists {
+			return
+		}
+		seen[token] = struct{}{}
+		tokens = append(tokens, token)
+	}
+
+	appendToken(r.Header.Get("Lock-Token"))
+
+	ifHeader := r.Header.Get("If")
+	for {
+		start := strings.IndexByte(ifHeader, '<')
+		if start == -1 {
+			break
+		}
+		ifHeader = ifHeader[start+1:]
+
+		end := strings.IndexByte(ifHeader, '>')
+		if end == -1 {
+			break
+		}
+
+		appendToken(ifHeader[:end])
+		ifHeader = ifHeader[end+1:]
+	}
+
+	return tokens
+}
+
+func hasMatchingLockToken(providedTokens []string, expected string) bool {
+	for _, token := range providedTokens {
+		if token == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, paths ...string) bool {
-	providedToken := normalizeLockToken(r.Header.Get("Lock-Token"))
+	providedTokens := extractLockTokens(r)
 
 	h.locksMu.Lock()
 	defer h.locksMu.Unlock()
@@ -887,7 +952,7 @@ func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, pat
 		if !locked {
 			continue
 		}
-		if providedToken == "" || providedToken != lockInfo.token {
+		if !hasMatchingLockToken(providedTokens, lockInfo.token) {
 			http.Error(w, "resource is locked", http.StatusLocked)
 			return false
 		}
