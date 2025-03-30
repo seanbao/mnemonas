@@ -568,7 +568,7 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 			return nil, ErrInvalidCredentials
 		}
 
-		if err := removeInitialPasswordFile(snapshot.filePath); err != nil {
+		if err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username); err != nil {
 			return nil, fmt.Errorf("failed to remove initial password file: %w", err)
 		}
 
@@ -591,8 +591,27 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 	return authenticatedUser, nil
 }
 
-func removeInitialPasswordFile(usersFilePath string) error {
+func removeInitialPasswordFileForUser(usersFilePath, username string) error {
 	passwordFile := filepath.Join(filepath.Dir(usersFilePath), "initial-password.txt")
+	content, err := os.ReadFile(passwordFile)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	matchedUsername := false
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == "Username: "+username {
+			matchedUsername = true
+			break
+		}
+	}
+	if !matchedUsername {
+		return nil
+	}
+
 	if err := os.Remove(passwordFile); err != nil && !os.IsNotExist(err) {
 		return err
 	}
