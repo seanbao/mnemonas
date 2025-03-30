@@ -2880,6 +2880,20 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	newPath := r.URL.Query().Get("path")
+	if newPath != "" {
+		var err error
+		newPath, err = validatePath(newPath)
+		if err != nil {
+			badRequestInvalidPath(w)
+			return
+		}
+		if err := s.authorizeUserPath(r.Context(), newPath); err != nil {
+			forbiddenPathOutsideHome(w)
+			return
+		}
+	}
+
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		BadRequest(w, "id is required")
@@ -2900,21 +2914,10 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Check if custom restore path is provided
-	newPath := r.URL.Query().Get("path")
 	activityPath := item.OriginalPath
 
 	if newPath != "" {
 		// Restore to custom path
-		newPath, err = validatePath(newPath)
-		if err != nil {
-			badRequestInvalidPath(w)
-			return
-		}
-		if err := s.authorizeUserPath(r.Context(), newPath); err != nil {
-			forbiddenPathOutsideHome(w)
-			return
-		}
 		activityPath = newPath
 		err = s.fs.RestoreFromTrashTo(r.Context(), id, newPath)
 	} else {

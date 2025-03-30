@@ -643,6 +643,8 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
+	h.tokenManager.RevokeByUser(userID)
+
 	writeSuccess(w, http.StatusOK, nil, "user deleted successfully")
 }
 
