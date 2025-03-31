@@ -283,6 +283,73 @@ func TestHandler_COPY(t *testing.T) {
 	}
 }
 
+func TestHandler_COPY_OverwriteFalse(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/dst/copied.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(dst) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "http://localhost/dav/dst/copied.txt")
+	req.Header.Set("Overwrite", "F")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("COPY overwrite=false status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+
+	f, err := fs.OpenFile(ctx, "/dst/copied.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(dst) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(dst) error: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("Expected destination content unchanged, got %q", string(data))
+	}
+}
+
+func TestHandler_COPY_InvalidDestinationPrefix(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "http://localhost/other/copied.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("COPY invalid destination status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if _, err := fs.Stat(ctx, "/other/copied.txt"); err == nil {
+		t.Fatal("Expected destination outside WebDAV prefix to be rejected")
+	}
+}
+
 func TestHandler_MOVE(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -311,6 +378,157 @@ func TestHandler_MOVE(t *testing.T) {
 	if err != nil {
 		t.Errorf("Destination should exist: %v", err)
 	}
+}
+
+func TestHandler_MOVE_OverwriteFalse(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://localhost/dav/movetest/existing.txt")
+	req.Header.Set("Overwrite", "F")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("MOVE overwrite=false status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+		t.Fatalf("Expected source file to remain after failed MOVE, got %v", err)
+	}
+	f, err := fs.OpenFile(ctx, "/movetest/existing.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(existing) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(existing) error: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("Expected destination content unchanged, got %q", string(data))
+	}
+}
+
+func TestHandler_MOVE_InvalidDestinationPrefix(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://localhost/other/moved.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("MOVE invalid destination status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+		t.Fatalf("Expected source file to remain after rejected MOVE, got %v", err)
+	}
+}
+
+func TestHandler_LOCK(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/locktest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/locktest/file.txt", bytes.NewReader([]byte("lock me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	t.Run("ExistingResource", func(t *testing.T) {
+		req := httptest.NewRequest("LOCK", "/dav/locktest/file.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("LOCK status = %d, want %d", w.Code, http.StatusOK)
+		}
+		if lockToken := w.Header().Get("Lock-Token"); lockToken == "" {
+			t.Fatal("LOCK should return Lock-Token header")
+		}
+	})
+
+	t.Run("MissingResource", func(t *testing.T) {
+		req := httptest.NewRequest("LOCK", "/dav/locktest/missing.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("LOCK missing status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+}
+
+func TestHandler_UNLOCK(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/unlocktest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/unlocktest/file.txt", bytes.NewReader([]byte("unlock me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	t.Run("ExistingResourceWithToken", func(t *testing.T) {
+		req := httptest.NewRequest("UNLOCK", "/dav/unlocktest/file.txt", nil)
+		req.Header.Set("Lock-Token", "<opaquelocktoken:test>")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("UNLOCK status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("MissingToken", func(t *testing.T) {
+		req := httptest.NewRequest("UNLOCK", "/dav/unlocktest/file.txt", nil)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("UNLOCK missing token status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("MissingResource", func(t *testing.T) {
+		req := httptest.NewRequest("UNLOCK", "/dav/unlocktest/missing.txt", nil)
+		req.Header.Set("Lock-Token", "<opaquelocktoken:test>")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("UNLOCK missing resource status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
 }
 
 func TestHandler_PROPFIND(t *testing.T) {
