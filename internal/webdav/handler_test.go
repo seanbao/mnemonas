@@ -150,6 +150,27 @@ func TestHandler_PUT_GET(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_ToExistingDirectoryReturnsConflict(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/files/existing-dir"); err != nil {
+		t.Fatalf("Mkdir(existing-dir) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/existing-dir", strings.NewReader("content"))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("PUT to directory status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
 func TestHandler_ConditionalGET(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -249,6 +270,26 @@ func TestHandler_HandleError_DoesNotLeakInternalDetails(t *testing.T) {
 	}
 }
 
+func TestHandler_HandleError_MapsLockedAndTypeConflicts(t *testing.T) {
+	handler := NewHandler(Config{AuthType: "none"})
+
+	t.Run("Locked", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		handler.handleError(w, storage.ErrFileLocked)
+		if w.Code != http.StatusLocked {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
+	t.Run("IsDir", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		handler.handleError(w, storage.ErrIsDir)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusConflict)
+		}
+	})
+}
+
 func TestHandler_COPY(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -322,6 +363,96 @@ func TestHandler_COPY_OverwriteFalse(t *testing.T) {
 	}
 	if string(data) != "existing" {
 		t.Fatalf("Expected destination content unchanged, got %q", string(data))
+	}
+}
+
+func TestHandler_COPY_OverwriteTrueReturnsNoContent(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/dst/copied.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(dst) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "http://localhost/dav/dst/copied.txt")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("COPY overwrite=true status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+func TestHandler_COPY_DirectoryRecursive(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/srcdir/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/nested/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://localhost/dav/dst/copied-dir")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("COPY directory status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	if _, err := fs.Stat(ctx, "/dst/copied-dir"); err != nil {
+		t.Fatalf("Expected copied directory to exist, got %v", err)
+	}
+
+	rootFile, err := fs.OpenFile(ctx, "/dst/copied-dir/root.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(root copy) error: %v", err)
+	}
+	defer rootFile.Close()
+	rootData, err := io.ReadAll(rootFile)
+	if err != nil {
+		t.Fatalf("ReadAll(root copy) error: %v", err)
+	}
+	if string(rootData) != "root" {
+		t.Fatalf("Expected root file content, got %q", string(rootData))
+	}
+
+	childFile, err := fs.OpenFile(ctx, "/dst/copied-dir/nested/child.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(child copy) error: %v", err)
+	}
+	defer childFile.Close()
+	childData, err := io.ReadAll(childFile)
+	if err != nil {
+		t.Fatalf("ReadAll(child copy) error: %v", err)
+	}
+	if string(childData) != "child" {
+		t.Fatalf("Expected child file content, got %q", string(childData))
 	}
 }
 
@@ -419,6 +550,32 @@ func TestHandler_MOVE_OverwriteFalse(t *testing.T) {
 	}
 	if string(data) != "existing" {
 		t.Fatalf("Expected destination content unchanged, got %q", string(data))
+	}
+}
+
+func TestHandler_MOVE_OverwriteTrueReturnsNoContent(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://localhost/dav/movetest/existing.txt")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("MOVE overwrite=true status = %d, want %d", w.Code, http.StatusNoContent)
 	}
 }
 
@@ -570,6 +727,18 @@ func TestHandler_PROPFIND(t *testing.T) {
 		body := w.Body.String()
 		if !strings.Contains(body, "a.txt") || !strings.Contains(body, "b.txt") {
 			t.Error("Response should contain child files")
+		}
+	})
+
+	t.Run("InvalidDepth", func(t *testing.T) {
+		req := httptest.NewRequest("PROPFIND", "/dav/proptest", nil)
+		req.Header.Set("Depth", "2")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 		}
 	})
 }
