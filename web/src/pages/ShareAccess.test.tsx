@@ -655,4 +655,124 @@ describe('ShareAccessPage', () => {
 
     expect(screen.getByPlaceholderText('请输入密码')).toHaveValue('')
   })
+
+  it('ignores stale password verification responses after navigating to another share', async () => {
+    const verification = createDeferred<{
+      id: string
+      type: 'file'
+      has_password: boolean
+      permission: 'read'
+      file_name: string
+      file_size: number
+    }>()
+
+    mockGetPublicShare
+      .mockResolvedValueOnce({
+        id: 'first',
+        type: 'file',
+        has_password: true,
+        permission: 'read',
+      })
+      .mockResolvedValueOnce({
+        id: 'second',
+        type: 'file',
+        has_password: false,
+        permission: 'read',
+        file_name: 'second.txt',
+        file_size: 12,
+      })
+    mockAccessShareWithPassword.mockReturnValueOnce(verification.promise)
+
+    render(
+      <MemoryRouter initialEntries={[`/s/first`]}>
+        <Routes>
+          <Route path="/s/:id" element={<NavigatingWrapper nextId="second" />} />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('此分享需要密码')).toBeInTheDocument()
+    })
+
+    await userEvent.type(screen.getByPlaceholderText('请输入密码'), 'secret')
+    await userEvent.click(screen.getByText('验证密码'))
+
+    await waitFor(() => {
+      expect(mockAccessShareWithPassword).toHaveBeenCalledWith('first', 'secret')
+    })
+
+    await userEvent.click(screen.getByText('go'))
+
+    await waitFor(() => {
+      expect(screen.getByText('second.txt')).toBeInTheDocument()
+    })
+
+    verification.resolve({
+      id: 'first',
+      type: 'file',
+      has_password: true,
+      permission: 'read',
+      file_name: 'secret.txt',
+      file_size: 99,
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('second.txt')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('secret.txt')).not.toBeInTheDocument()
+  })
+
+  it('ignores stale download unauthorized responses after navigating to another share', async () => {
+    const download = createDeferred<void>()
+
+    mockGetPublicShare
+      .mockResolvedValueOnce({
+        id: 'first',
+        type: 'file',
+        has_password: false,
+        permission: 'read',
+        file_name: 'first.txt',
+        file_size: 10,
+      })
+      .mockResolvedValueOnce({
+        id: 'second',
+        type: 'file',
+        has_password: false,
+        permission: 'read',
+        file_name: 'second.txt',
+        file_size: 12,
+      })
+    mockDownloadShare.mockReturnValueOnce(download.promise)
+
+    render(
+      <MemoryRouter initialEntries={[`/s/first`]}>
+        <Routes>
+          <Route path="/s/:id" element={<NavigatingWrapper nextId="second" />} />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('first.txt')).toBeInTheDocument()
+    })
+
+    await userEvent.click(screen.getByText('下载文件'))
+    await waitFor(() => {
+      expect(mockDownloadShare).toHaveBeenCalledWith('first', { filename: 'first.txt' })
+    })
+
+    await userEvent.click(screen.getByText('go'))
+
+    await waitFor(() => {
+      expect(screen.getByText('second.txt')).toBeInTheDocument()
+    })
+
+    download.reject(new ShareError('unauthorized', 401))
+
+    await waitFor(() => {
+      expect(screen.getByText('second.txt')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('此分享需要密码')).not.toBeInTheDocument()
+  })
 })

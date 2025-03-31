@@ -120,7 +120,7 @@ export function SearchPage() {
     } else {
       // Navigate to parent directory and highlight the file
       const parentPath = result.path.substring(0, result.path.lastIndexOf('/')) || '/'
-      navigate(`/files${encodeURI(parentPath)}`)
+      navigate(`/files${encodeURI(parentPath)}`, { state: { highlightPath: result.path } })
     }
   }, [navigate])
 

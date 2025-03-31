@@ -296,7 +296,9 @@ describe('SearchPage', () => {
       
       await user.click(screen.getByText('document.pdf'))
       
-      expect(mockNavigate).toHaveBeenCalledWith('/files/documents')
+      expect(mockNavigate).toHaveBeenCalledWith('/files/documents', {
+        state: { highlightPath: '/documents/document.pdf' },
+      })
     })
 
     it('navigates to folder on click', async () => {
@@ -330,7 +332,9 @@ describe('SearchPage', () => {
       resultButton.focus()
       await user.keyboard('{Enter}')
 
-      expect(mockNavigate).toHaveBeenCalledWith('/files/documents')
+      expect(mockNavigate).toHaveBeenCalledWith('/files/documents', {
+        state: { highlightPath: '/documents/document.pdf' },
+      })
     })
   })
 

@@ -208,7 +208,9 @@ describe('FavoritesPage', () => {
     navigateButton.focus()
     await user.keyboard('{Enter}')
 
-    expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
+    expect(mockNavigate).toHaveBeenCalledWith('/files/docs', {
+      state: { highlightPath: '/docs/report.pdf' },
+    })
   })
 
   it('keeps failed favorites selected after partial batch removal', async () => {
@@ -256,7 +258,9 @@ describe('FavoritesPage', () => {
     const navigateButton = screen.getByRole('button', { name: '打开文件 /docs/report.pdf' })
     await user.click(navigateButton)
 
-    expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
+    expect(mockNavigate).toHaveBeenCalledWith('/files/docs', {
+      state: { highlightPath: '/docs/report.pdf' },
+    })
   })
 
   it('shows unavailable toast when removing a favorite is unavailable', async () => {

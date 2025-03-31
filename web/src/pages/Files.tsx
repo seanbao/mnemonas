@@ -821,6 +821,13 @@ export function FilesPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const location = useLocation()
+  const highlightedPathFromState =
+    typeof location.state === 'object' &&
+    location.state !== null &&
+    'highlightPath' in location.state &&
+    typeof location.state.highlightPath === 'string'
+      ? location.state.highlightPath
+      : null
   
   // Context menu state
   const contextMenu = useContextMenu()
@@ -856,6 +863,7 @@ export function FilesPage() {
   const [renameValue, setRenameValue] = useState('')
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
   const lastSelectedIndexRef = useRef<number | null>(null)
+  const appliedHighlightedPathRef = useRef<string | null>(null)
   const [multiSelectHintVisible, setMultiSelectHintVisible] = useState(false)
   const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   
@@ -868,6 +876,7 @@ export function FilesPage() {
   const [isUploading, setIsUploading] = useState(false)
   const [showUploadPanel, setShowUploadPanel] = useState(false)
   const uploadClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const uploadSessionRef = useRef(0)
   const [shareFeatureDisabled, setShareFeatureDisabled] = useState(false)
   
   const { 
@@ -1042,6 +1051,30 @@ export function FilesPage() {
       }
     }
   }, [sortedFiles, selectedFiles, setSelection])
+
+  useEffect(() => {
+    if (!highlightedPathFromState) {
+      appliedHighlightedPathRef.current = null
+      return
+    }
+    if (isLoading || appliedHighlightedPathRef.current === highlightedPathFromState) {
+      return
+    }
+
+    appliedHighlightedPathRef.current = highlightedPathFromState
+
+    const targetIndex = sortedFiles.findIndex(
+      (file) => !file.isDir && file.path === highlightedPathFromState
+    )
+    if (targetIndex >= 0) {
+      setSelection([highlightedPathFromState])
+      setActiveFilePath(highlightedPathFromState)
+      setFocusedIndex(targetIndex)
+      lastSelectedIndexRef.current = targetIndex
+    }
+
+    navigate(`${location.pathname}${location.search ?? ''}`, { replace: true, state: null })
+  }, [highlightedPathFromState, isLoading, location.pathname, location.search, navigate, setSelection, sortedFiles])
 
   // Favorites query
   const filePaths = useMemo(() => sortedFiles.map(f => f.path), [sortedFiles])
@@ -1305,6 +1338,10 @@ export function FilesPage() {
     if (!canWrite) return
     if (!files || files.length === 0) return
 
+    const uploadSession = uploadSessionRef.current + 1
+    uploadSessionRef.current = uploadSession
+    const isCurrentUploadSession = () => uploadSessionRef.current === uploadSession
+
     if (uploadClearTimeoutRef.current) {
       clearTimeout(uploadClearTimeoutRef.current)
       uploadClearTimeoutRef.current = null
@@ -1361,9 +1398,11 @@ export function FilesPage() {
       const file = item.file
       const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
       
-      setUploadQueue(prev => prev.map((item, j) => 
-        j === index ? { ...item, status: 'uploading' as const } : item
-      ))
+      if (isCurrentUploadSession()) {
+        setUploadQueue(prev => prev.map((item, j) => 
+          j === index ? { ...item, status: 'uploading' as const } : item
+        ))
+      }
       
       try {
         // For folder uploads, create parent directories first
@@ -1381,25 +1420,37 @@ export function FilesPage() {
         }
         
         await uploadFile(targetPath, file, (progress) => {
+          if (!isCurrentUploadSession()) {
+            return
+          }
           setUploadQueue(prev => prev.map((item, j) => 
             j === index ? { ...item, progress } : item
           ))
         })
         successCount++
-        setUploadQueue(prev => prev.map((item, j) => 
-          j === index ? { ...item, status: 'done' as const, progress: 100 } : item
-        ))
+        if (isCurrentUploadSession()) {
+          setUploadQueue(prev => prev.map((item, j) => 
+            j === index ? { ...item, status: 'done' as const, progress: 100 } : item
+          ))
+        }
       } catch (error) {
         errorCount++
         uploadErrors.push(error)
-        setUploadQueue(prev => prev.map((item, j) => 
-          j === index ? { ...item, status: 'error' as const, error: getUploadQueueErrorMessage(error) } : item
-        ))
+        if (isCurrentUploadSession()) {
+          setUploadQueue(prev => prev.map((item, j) => 
+            j === index ? { ...item, status: 'error' as const, error: getUploadQueueErrorMessage(error) } : item
+          ))
+        }
       }
     }
-    
-    setIsUploading(false)
+
     queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+
+    if (!isCurrentUploadSession()) {
+      return
+    }
+
+    setIsUploading(false)
     
     // Show summary toast for folder upload
     if (isFolderUpload) {

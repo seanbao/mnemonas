@@ -2,10 +2,10 @@
 //! Uses BLAKE3 as hash algorithm (10x faster than SHA256)
 //! Supports optional zstd compression for storage efficiency
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -77,6 +77,8 @@ pub struct CasStore {
     stats: CasStats,
     #[cfg(test)]
     fail_put_after: AtomicUsize,
+    #[cfg(test)]
+    fail_parent_sync: AtomicBool,
 }
 
 pub struct PutResult {
@@ -142,6 +144,8 @@ impl CasStore {
             stats: CasStats::default(),
             #[cfg(test)]
             fail_put_after: AtomicUsize::new(usize::MAX),
+            #[cfg(test)]
+            fail_parent_sync: AtomicBool::new(false),
         };
 
         // Rebuild index (background task)
@@ -161,9 +165,6 @@ impl CasStore {
     pub async fn put_with_status(&self, data: &[u8]) -> Result<PutResult> {
         let hash = compute_hash(data);
         let original_size = data.len() as u64;
-        self.stats
-            .logical_size
-            .fetch_add(original_size, Ordering::Relaxed);
 
         // Atomic check-and-insert using entry API (C3 fix - prevents TOCTOU race)
         use dashmap::mapref::entry::Entry;
@@ -171,6 +172,9 @@ impl CasStore {
             Entry::Occupied(_) => {
                 // Already exists - deduplication hit
                 debug!(hash = %hash, "dedup hit");
+				self.stats
+					.logical_size
+					.fetch_add(original_size, Ordering::Relaxed);
                 self.stats.hit_count.fetch_add(1, Ordering::Relaxed);
                 return Ok(PutResult {
                     hash,
@@ -215,9 +219,13 @@ impl CasStore {
                 file.write_all(&write_data).await?;
                 file.sync_all().await?;
                 fs::rename(&tmp_path, &path).await?;
+                self.sync_parent_dir(&path).await?;
 
                 // Update index and stats
                 entry.insert(original_size);
+				self.stats
+					.logical_size
+					.fetch_add(original_size, Ordering::Relaxed);
                 self.stats.total_chunks.fetch_add(1, Ordering::Relaxed);
                 self.stats
                     .total_size
@@ -248,6 +256,18 @@ impl CasStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_next_parent_sync(&self) {
+        self.fail_parent_sync.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn rollback_logical_size(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        self.stats.logical_size.fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
     fn maybe_fail_put(&self) -> Result<()> {
         let remaining = self.fail_put_after.load(Ordering::Relaxed);
         if remaining == usize::MAX {
@@ -260,6 +280,26 @@ impl CasStore {
             )));
         }
         self.fail_put_after.store(remaining - 1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn sync_parent_dir(&self, path: &Path) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_parent_sync.swap(false, Ordering::Relaxed) {
+            return Err(CasError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "test parent sync failure",
+            )));
+        }
+
+        let parent = path.parent().ok_or_else(|| {
+            CasError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "object path has no parent directory",
+            ))
+        })?;
+        let dir = fs::File::open(parent).await?;
+        dir.sync_all().await?;
         Ok(())
     }
 
@@ -327,6 +367,12 @@ impl CasStore {
                     .total_size
                     .fetch_sub(original_size, Ordering::Relaxed);
                 // Note: compressed_size tracking is approximate after delete
+                let deleted_path = if deleted_compressed {
+                    &compressed_path
+                } else {
+                    &base_path
+                };
+                self.sync_parent_dir(deleted_path).await?;
                 Ok(true)
             } else {
                 Ok(false)
@@ -718,6 +764,117 @@ mod tests {
         // Delete
         assert!(store.delete(&hash).await.unwrap());
         assert!(!store.has(&hash));
+    }
+
+    #[tokio::test]
+    async fn test_failed_put_does_not_inflate_logical_size() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        store.set_fail_put_after(0);
+
+        let err = store
+            .put(b"failed put should not count")
+            .await
+            .expect_err("expected injected put failure");
+
+        assert!(matches!(err, CasError::Io(_)));
+
+        let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
+        assert_eq!(chunks, 0);
+        assert_eq!(logical_size, 0);
+        assert_eq!(unique_size, 0);
+        assert_eq!(compressed_size, 0);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+    }
+
+    #[tokio::test]
+    async fn test_put_surfaces_parent_sync_failure_after_rename() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"parent sync failure";
+        let hash = compute_hash(data);
+        let path = store.hash_to_path(&hash);
+        let tmp_path = path.with_extension("tmp");
+
+        store.fail_next_parent_sync();
+
+        let err = store
+            .put(data)
+            .await
+            .expect_err("expected injected parent sync failure");
+
+        assert!(matches!(err, CasError::Io(_)));
+        assert!(path.exists(), "renamed object should remain visible on disk");
+        assert!(!tmp_path.exists(), "temporary file should not remain after rename");
+        assert!(!store.has(&hash), "index should not claim success after failed parent sync");
+
+        let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
+        assert_eq!(chunks, 0);
+        assert_eq!(logical_size, 0);
+        assert_eq!(unique_size, 0);
+        assert_eq!(compressed_size, 0);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+
+        store.rebuild_index().await.unwrap();
+
+        assert!(store.has(&hash), "rebuild should recover the on-disk object");
+        assert_eq!(store.get(&hash).await.unwrap(), data);
+
+        let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
+        assert_eq!(chunks, 1);
+        assert_eq!(logical_size, data.len() as u64);
+        assert_eq!(unique_size, data.len() as u64);
+        assert_eq!(compressed_size, data.len() as u64);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_surfaces_parent_sync_failure_after_remove() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"delete parent sync failure";
+        let hash = store.put(data).await.unwrap();
+        let path = store.hash_to_path(&hash);
+
+        store.fail_next_parent_sync();
+
+        let err = store
+            .delete(&hash)
+            .await
+            .expect_err("expected injected parent sync failure");
+
+        assert!(matches!(err, CasError::Io(_)));
+        assert!(!path.exists(), "deleted object should remain absent after sync failure");
+        assert!(!store.has(&hash), "index should reflect the visible deletion");
+
+        let (chunks, logical_size, unique_size, _, _, _) = store.stats();
+        assert_eq!(chunks, 0);
+        assert_eq!(logical_size, data.len() as u64);
+        assert_eq!(unique_size, 0);
+
+        assert!(matches!(store.get(&hash).await, Err(CasError::NotFound(_))));
+        assert!(!store.delete(&hash).await.unwrap(), "retry should observe already-deleted object");
     }
 
     #[tokio::test]
