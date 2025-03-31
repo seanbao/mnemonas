@@ -31,6 +31,8 @@ import (
 
 const maxObjectsCursorLength = 256
 
+const scrubFailurePublicMessage = "scrub failed; check server logs for details"
+
 // Server is the API server
 type Server struct {
 	router      *chi.Mux
@@ -1142,7 +1144,7 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		if s.maintenance != nil && scrubRecord != nil {
 			scrubRecord.Status = "failed"
 			scrubRecord.EndTime = time.Now()
-			scrubRecord.ErrorMessage = err.Error()
+			scrubRecord.ErrorMessage = scrubFailurePublicMessage
 			scrubRecord.DurationMs = uint64(time.Since(scrubRecord.StartTime).Milliseconds())
 			_ = s.maintenance.SaveScrubResult(scrubRecord)
 		}
@@ -1270,12 +1272,13 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	}
 	graceCutoff := time.Now().Add(-gracePeriod) // NEW-2 fix: actual cutoff time
 
-	// Step 1: Get all referenced hashes from metadata
-	referencedHashes, err := s.fs.GetAllReferencedHashes(ctx)
+	// Step 1: Block storage mutations for the duration of GC and snapshot referenced hashes.
+	referencedHashes, releaseGCLock, err := s.fs.AcquireGCLock(ctx)
 	if err != nil {
 		s.respondInternalError(w, "gc referenced hashes", err)
 		return
 	}
+	defer releaseGCLock()
 
 	// Step 2: Get all CAS objects
 	var allObjects []dataplane.ObjectInfo
@@ -1381,7 +1384,7 @@ func (s *Server) handleGetScrubResult(w http.ResponseWriter, r *http.Request) {
 		"total_size":        result.TotalSize,
 		"duration_ms":       result.DurationMs,
 		"errors":            errors,
-		"error_message":     result.ErrorMessage,
+		"error_message":     sanitizeScrubErrorMessage(result.ErrorMessage),
 	}).Write(w, http.StatusOK)
 }
 
@@ -1452,8 +1455,8 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 			if !result.EndTime.IsZero() {
 				scrubInfo["end_time"] = result.EndTime.Format(time.RFC3339)
 			}
-			if result.ErrorMessage != "" {
-				scrubInfo["error_message"] = result.ErrorMessage
+			if scrubError := sanitizeScrubErrorMessage(result.ErrorMessage); scrubError != "" {
+				scrubInfo["error_message"] = scrubError
 			}
 			if len(result.Errors) > 0 {
 				scrubInfo["error_count"] = len(result.Errors)
@@ -1466,6 +1469,13 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 	filename := fmt.Sprintf("mnemonas-diagnostics-%s.json", time.Now().Format("20060102-150405"))
 	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 	s.json(w, http.StatusOK, export)
+}
+
+func sanitizeScrubErrorMessage(message string) string {
+	if message == "" {
+		return ""
+	}
+	return scrubFailurePublicMessage
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

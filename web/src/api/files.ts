@@ -1,6 +1,6 @@
 import type { FileItem } from '@/stores/files'
 import { sanitizeFilename, normalizePath, encodePathForUrl } from '@/lib/utils'
-import { authFetch, getStoredToken } from './auth'
+import { authFetch, getStoredToken, refreshAuthSession } from './auth'
 
 export type { FileItem }
 
@@ -309,39 +309,57 @@ export async function uploadFile(
   const encodedPath = encodePathForUrl(normalizedPath)
   const encodedFilename = encodeURIComponent(safeFilename)
   
-  return new Promise((resolve, reject) => {
+  const url = `${API_BASE}/files${encodedPath}/${encodedFilename}`
+
+  const sendUpload = (retryCount: number): Promise<void> => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     const token = getStoredToken()
-    
+
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable && onProgress) {
         onProgress((e.loaded / e.total) * 100)
       }
     })
-    
-    xhr.addEventListener('load', () => {
+
+    xhr.addEventListener('load', async () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve()
-      } else {
-        reject(new ApiError('上传失败', xhr.status, xhr.statusText))
+        return
       }
+
+      if (xhr.status === 401 && retryCount === 0) {
+        const refreshed = await refreshAuthSession()
+        if (refreshed) {
+          try {
+            await sendUpload(retryCount + 1)
+            resolve()
+          } catch (error) {
+            reject(error)
+          }
+          return
+        }
+      }
+
+      reject(new ApiError('上传失败', xhr.status, xhr.statusText))
     })
-    
+
     xhr.addEventListener('error', () => {
       reject(new Error('网络错误，上传失败'))
     })
-    
+
     xhr.addEventListener('timeout', () => {
       reject(new Error('上传超时'))
     })
-    
+
     // Use REST API instead of WebDAV to avoid Basic Auth popup
-    xhr.open('POST', `${API_BASE}/files${encodedPath}/${encodedFilename}`)
+    xhr.open('POST', url)
     if (token) {
       xhr.setRequestHeader('Authorization', `Bearer ${token}`)
     }
     xhr.send(file)
   })
+
+  return sendUpload(0)
 }
 
 // Download file URL

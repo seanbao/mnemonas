@@ -980,6 +980,9 @@ func TestHandler_PROPFIND(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 		}
+		if !strings.Contains(w.Body.String(), errInvalidDepthHeader.Error()) {
+			t.Fatalf("expected invalid depth sentinel message, got %q", w.Body.String())
+		}
 	})
 }
 
@@ -1474,6 +1477,27 @@ func TestHandler_WriteExpectedWebDAVError_SanitizesUnexpectedError(t *testing.T)
 	}
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected recorder to remain untouched, got status %d", w.Code)
+	}
+}
+
+func TestHandler_WriteExpectedWebDAVError_UsesSentinelMessageForWrappedError(t *testing.T) {
+	handler := NewHandler(Config{AuthType: "none"})
+	w := httptest.NewRecorder()
+
+	err := errors.Join(errors.New("sensitive backend detail"), errDestinationInsideSourceDirectory)
+	matched := handler.writeExpectedWebDAVError(w, err, http.StatusConflict, errDestinationInsideSourceDirectory)
+
+	if !matched {
+		t.Fatal("expected wrapped sentinel error to be handled")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d", http.StatusConflict, w.Code)
+	}
+	if strings.Contains(w.Body.String(), "sensitive backend detail") {
+		t.Fatalf("expected wrapped internal detail to be hidden, got %q", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), errDestinationInsideSourceDirectory.Error()) {
+		t.Fatalf("expected sentinel message in response, got %q", w.Body.String())
 	}
 }
 
