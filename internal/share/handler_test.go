@@ -580,6 +580,14 @@ func TestDownloadShareFile_PathTraversal(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", recorder.Code)
 	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_PATH" {
+		t.Fatalf("expected INVALID_PATH code, got %v", errorPayload["code"])
+	}
 }
 
 func TestDownloadShare_NilReaderReturnsNotFound(t *testing.T) {
@@ -608,6 +616,14 @@ func TestDownloadShare_NilReaderReturnsNotFound(t *testing.T) {
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "FILE_NOT_FOUND" {
+		t.Fatalf("expected FILE_NOT_FOUND code, got %v", errorPayload["code"])
 	}
 }
 
@@ -808,6 +824,14 @@ func TestAccessShareWithPassword_RateLimitedAfterRepeatedFailures(t *testing.T) 
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected status 429 on lock, got %d", recorder.Code)
 	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "SHARE_PASSWORD_RATE_LIMITED" {
+		t.Fatalf("expected SHARE_PASSWORD_RATE_LIMITED code, got %v", errorPayload["code"])
+	}
 
 	lockedReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, []byte(`{"password":"secret"}`))
 	lockedRecorder := httptest.NewRecorder()
@@ -870,6 +894,62 @@ func TestAccessShareWithPassword_LockExpiresAndSuccessResetsFailures(t *testing.
 	}
 }
 
+func TestAccessShareWithPassword_StaleFailuresExpire(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/secret.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.passwordFailureDelay = 0
+	handler.passwordFailureWindow = time.Minute
+	handler.passwordLockDuration = time.Minute
+
+	now := time.Date(2026, 3, 13, 12, 0, 0, 0, time.UTC)
+	handler.passwordAttempts.now = func() time.Time { return now }
+
+	wrongBody := []byte(`{"password":"wrong"}`)
+	for attempt := 0; attempt < handler.passwordFailureLimit-1; attempt++ {
+		req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, wrongBody)
+		recorder := httptest.NewRecorder()
+		handler.AccessShareWithPassword(recorder, req)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d", attempt+1, recorder.Code)
+		}
+	}
+
+	now = now.Add(handler.passwordFailureWindow + time.Second)
+
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, wrongBody)
+	recorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected stale failures to expire and return 401, got %d", recorder.Code)
+	}
+
+	lockedReq := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, []byte(`{"password":"secret"}`))
+	lockedRecorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(lockedRecorder, lockedReq)
+
+	if lockedRecorder.Code != http.StatusOK {
+		t.Fatalf("expected valid password after stale failures expiry, got %d", lockedRecorder.Code)
+	}
+}
+
 func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -897,11 +977,19 @@ func TestListShareItems_DoesNotLeakInternalErrors(t *testing.T) {
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", recorder.Code)
 	}
+	payload := decodeResponseBody(t, recorder)
 	body := recorder.Body.String()
 	if strings.Contains(body, "database offline") {
 		t.Fatalf("expected internal error details to be hidden, got %q", body)
 	}
 	if !strings.Contains(body, "failed to list share items") {
 		t.Fatalf("expected generic public error message, got %q", body)
+	}
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "LIST_SHARE_ITEMS_FAILED" {
+		t.Fatalf("expected LIST_SHARE_ITEMS_FAILED code, got %v", errorPayload["code"])
 	}
 }

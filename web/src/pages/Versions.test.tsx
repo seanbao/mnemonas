@@ -314,6 +314,29 @@ describe('VersionsPage', () => {
         expect(screen.getByText('获取版本历史失败')).toBeTruthy()
       })
     })
+
+    it('retries loading versions from the error state', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetVersions
+        .mockRejectedValueOnce(new Error('文件不存在'))
+        .mockResolvedValueOnce([
+          { version: 1, hash: 'hash1', size: 1000, timestamp: '2024-01-01T00:00:00Z' },
+        ])
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/retry.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(screen.getByRole('table', { name: '版本历史' })).toBeTruthy()
+      })
+    })
   })
 
   describe('empty state', () => {

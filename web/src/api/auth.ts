@@ -103,6 +103,8 @@ export class AuthError extends Error {
 const TOKEN_KEY = 'mnemonas_token'
 const REFRESH_TOKEN_KEY = 'mnemonas_refresh_token'
 const USER_KEY = 'mnemonas_user'
+export const AUTH_CLEARED_EVENT = 'mnemonas:auth-cleared'
+let refreshPromise: Promise<boolean> | null = null
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -142,6 +144,10 @@ export function clearTokens(): void {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
   localStorage.removeItem(USER_KEY)
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(AUTH_CLEARED_EVENT))
+  }
 }
 
 async function syncDownloadSession(): Promise<void> {
@@ -214,34 +220,44 @@ export async function authFetch(url: string, options: RequestInit = {}, retryCou
 
 // Try to refresh the token
 async function tryRefreshToken(): Promise<boolean> {
+  if (refreshPromise) {
+    return refreshPromise
+  }
+
   const refreshToken = getStoredRefreshToken()
   if (!refreshToken) return false
-  
-  try {
-    const response = await fetch(`${API_BASE}/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    })
-    
-    if (!response.ok) {
+
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch(`${API_BASE}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      })
+
+      if (!response.ok) {
+        clearTokens()
+        return false
+      }
+
+      const body: AuthApiResponse<RefreshResponse> = await response.json()
+      if (!body.data) {
+        clearTokens()
+        return false
+      }
+      const data = body.data
+      storeTokens(data.access_token, data.refresh_token, normalizeUser(data.user))
+      await syncDownloadSession()
+      return true
+    } catch {
       clearTokens()
       return false
+    } finally {
+      refreshPromise = null
     }
-    
-    const body: AuthApiResponse<RefreshResponse> = await response.json()
-    if (!body.data) {
-      clearTokens()
-      return false
-    }
-    const data = body.data
-    storeTokens(data.access_token, data.refresh_token, normalizeUser(data.user))
-    await syncDownloadSession()
-    return true
-  } catch {
-    clearTokens()
-    return false
-  }
+  })()
+
+  return refreshPromise
 }
 
 // Login

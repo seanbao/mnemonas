@@ -16,7 +16,8 @@ import {
   Trash2,
   RotateCcw,
   AlertTriangle,
-  Clock
+  Clock,
+  AlertCircle,
 } from 'lucide-react'
 import {
   listTrash,
@@ -131,7 +132,7 @@ export function TrashPage() {
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
   const { isOpen: isEmptyOpen, onOpen: onEmptyOpen, onClose: onEmptyClose } = useDisclosure()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['trash'],
     queryFn: listTrash,
   })
@@ -242,6 +243,30 @@ export function TrashPage() {
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载回收站...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <PageHeader
+          title="回收站"
+          subtitle="加载失败"
+          icon={Trash2}
+        />
+        <div className="flex flex-1 items-center justify-center">
+          <EmptyState
+            icon={AlertCircle}
+            title="加载回收站失败"
+            description={(error as Error).message || '请稍后重试'}
+            action={
+              <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                重新加载
+              </Button>
+            }
+          />
         </div>
       </div>
     )

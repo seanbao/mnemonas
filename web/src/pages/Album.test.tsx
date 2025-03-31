@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
+import userEvent from '@testing-library/user-event'
 import { AlbumPage } from './Album'
 
 // Mock API
@@ -157,14 +158,15 @@ describe('AlbumPage', () => {
   })
 
   describe('error handling', () => {
-    it('handles API error gracefully', async () => {
+    it('shows a retryable error state when album loading fails', async () => {
       mockListFiles.mockRejectedValue(new Error('Network error'))
       
-      // Should not throw
       render(<AlbumPage />)
 
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalled()
+        expect(screen.getByText('加载相册失败')).toBeTruthy()
+        expect(screen.getByText('无法扫描图片目录，当前结果不可用。请检查连接状态后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
 
@@ -179,7 +181,27 @@ describe('AlbumPage', () => {
       render(<AlbumPage />)
 
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalled()
+        expect(screen.getByText('部分目录扫描失败')).toBeTruthy()
+        expect(screen.getByText('当前相册仅展示已成功加载的图片，结果可能不完整。')).toBeTruthy()
+      })
+    })
+
+    it('retries album loading from the error state', async () => {
+      const user = userEvent.setup()
+      mockListFiles
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({ files: mockImageFiles, path: '/' })
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('共 3 张图片')).toBeTruthy()
       })
     })
   })

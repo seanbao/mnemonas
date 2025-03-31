@@ -14,6 +14,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seanbao/mnemonas/internal/storage"
@@ -26,6 +27,8 @@ type Handler struct {
 	readOnly  bool
 	pathLock  *PathLock
 	propCache *PropfindCache
+	locksMu   sync.Mutex
+	locks     map[string]string
 	// REM-1 fix: Authentication
 	authType string
 	username string
@@ -51,6 +54,7 @@ func NewHandler(cfg Config) *Handler {
 		readOnly:  cfg.ReadOnly,
 		pathLock:  NewPathLock(),
 		propCache: NewPropfindCache(30*time.Second, 1000),
+		locks:     make(map[string]string),
 		authType:  strings.ToLower(cfg.AuthType),
 		username:  cfg.Username,
 		password:  cfg.Password,
@@ -228,6 +232,10 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 }
 
 func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	if !h.authorizeWriteLock(w, r, filePath) {
+		return
+	}
+
 	// Acquire write lock for exclusive access
 	h.pathLock.Lock(filePath)
 	defer h.pathLock.Unlock(filePath)
@@ -297,6 +305,10 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 }
 
 func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	if !h.authorizeWriteLock(w, r, filePath) {
+		return
+	}
+
 	// Acquire write lock for exclusive access
 	h.pathLock.Lock(filePath)
 	defer h.pathLock.Unlock(filePath)
@@ -318,6 +330,9 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 		http.Error(w, "MKCOL does not allow request body", http.StatusUnsupportedMediaType)
 		return
 	}
+	if !h.authorizeWriteLock(w, r, filePath) {
+		return
+	}
 
 	if err := h.fs.Mkdir(ctx, filePath); err != nil {
 		h.handleError(w, err)
@@ -334,6 +349,13 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	dst := h.getDestination(r)
 	if dst == "" {
 		http.Error(w, "missing Destination header", http.StatusBadRequest)
+		return
+	}
+	if srcPath == dst {
+		http.Error(w, "source and destination must differ", http.StatusConflict)
+		return
+	}
+	if !h.authorizeWriteLock(w, r, srcPath, dst) {
 		return
 	}
 
@@ -367,6 +389,15 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 			h.pathLock.Lock(second)
 			defer h.pathLock.Unlock(second)
 		}
+	}
+
+	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if err := h.rejectDirectoryCopyOverwrite(ctx, srcPath, dst, dstExists); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
 
 	if err := h.copyResource(ctx, srcPath, dst); err != nil {
@@ -425,6 +456,13 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "missing Destination header", http.StatusBadRequest)
 		return
 	}
+	if srcPath == dst {
+		http.Error(w, "source and destination must differ", http.StatusConflict)
+		return
+	}
+	if !h.authorizeWriteLock(w, r, srcPath, dst) {
+		return
+	}
 
 	dstExists := h.destinationExists(ctx, dst)
 
@@ -443,6 +481,11 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	if first != second {
 		h.pathLock.Lock(second)
 		defer h.pathLock.Unlock(second)
+	}
+
+	if err := h.rejectDirectoryDescendantDestination(ctx, srcPath, dst); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
 
 	if err := h.fs.Rename(ctx, srcPath, dst); err != nil {
@@ -479,6 +522,42 @@ func (h *Handler) checkOverwriteHeader(ctx context.Context, r *http.Request, dst
 	return nil
 }
 
+func (h *Handler) rejectDirectoryDescendantDestination(ctx context.Context, srcPath, dstPath string) error {
+	info, err := h.fs.Stat(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return nil
+	}
+	if isDescendantPath(srcPath, dstPath) {
+		return errors.New("destination cannot be inside source directory")
+	}
+	return nil
+}
+
+func (h *Handler) rejectDirectoryCopyOverwrite(ctx context.Context, srcPath, dstPath string, dstExists bool) error {
+	if !dstExists {
+		return nil
+	}
+
+	info, err := h.fs.Stat(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir {
+		return errors.New("overwriting an existing destination with a directory copy is not supported")
+	}
+	return nil
+}
+
+func isDescendantPath(parentPath, childPath string) bool {
+	if parentPath == "/" {
+		return childPath != "/" && strings.HasPrefix(childPath, "/")
+	}
+	return strings.HasPrefix(childPath, parentPath+"/")
+}
+
 func (h *Handler) destinationExists(ctx context.Context, dst string) bool {
 	_, err := h.fs.Stat(ctx, dst)
 	return err == nil
@@ -508,14 +587,9 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 	// Add current resource
 	responses = append(responses, h.propResponse(filePath, info))
 
-	// If directory and depth is not 0, add child resources
-	if info.IsDir && depth != "0" {
-		children, err := h.fs.ReadDir(ctx, filePath)
-		if err == nil {
-			for _, child := range children {
-				responses = append(responses, h.propResponse(child.Path, child))
-			}
-		}
+	if err := h.appendPropfindChildren(ctx, filePath, info, depth, &responses); err != nil {
+		h.handleError(w, err)
+		return
 	}
 
 	// Cache the result for large directories
@@ -524,6 +598,28 @@ func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	h.writePropfindResponse(w, responses)
+}
+
+func (h *Handler) appendPropfindChildren(ctx context.Context, filePath string, info *storage.FileInfo, depth string, responses *[]propfindResponse) error {
+	if !info.IsDir || depth == "0" {
+		return nil
+	}
+
+	children, err := h.fs.ReadDir(ctx, filePath)
+	if err != nil {
+		return err
+	}
+
+	for _, child := range children {
+		*responses = append(*responses, h.propResponse(child.Path, child))
+		if depth == "infinity" {
+			if err := h.appendPropfindChildren(ctx, child.Path, child, depth, responses); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func (h *Handler) parsePropfindDepth(depth string) (string, error) {
@@ -581,6 +677,10 @@ func (h *Handler) propResponse(filePath string, info *storage.FileInfo) propfind
 }
 
 func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
+	if !h.authorizeWriteLock(w, r, filePath) {
+		return
+	}
+
 	// Simple implementation: ignore property modification requests
 	w.WriteHeader(http.StatusMultiStatus)
 	fmt.Fprint(w, xml.Header)
@@ -600,8 +700,17 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	h.locksMu.Lock()
+	if _, exists := h.locks[filePath]; exists {
+		h.locksMu.Unlock()
+		http.Error(w, "resource is locked", http.StatusLocked)
+		return
+	}
+
 	// Simple implementation: return virtual lock
 	token := fmt.Sprintf("opaquelocktoken:%d", time.Now().UnixNano())
+	h.locks[filePath] = token
+	h.locksMu.Unlock()
 
 	w.Header().Set("Lock-Token", "<"+token+">")
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
@@ -627,12 +736,76 @@ func (h *Handler) handleUnlock(ctx context.Context, w http.ResponseWriter, r *ht
 		return
 	}
 
-	if r.Header.Get("Lock-Token") == "" {
+	lockToken := normalizeLockToken(r.Header.Get("Lock-Token"))
+	if lockToken == "" {
 		http.Error(w, "missing lock token", http.StatusBadRequest)
 		return
 	}
 
+	h.locksMu.Lock()
+	storedToken, exists := h.locks[filePath]
+	if !exists {
+		h.locksMu.Unlock()
+		http.Error(w, "resource is not locked", http.StatusConflict)
+		return
+	}
+	if storedToken != lockToken {
+		h.locksMu.Unlock()
+		http.Error(w, "lock token does not match", http.StatusConflict)
+		return
+	}
+	delete(h.locks, filePath)
+	h.locksMu.Unlock()
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func normalizeLockToken(token string) string {
+	token = strings.TrimSpace(token)
+	token = strings.TrimPrefix(token, "<")
+	token = strings.TrimSuffix(token, ">")
+	return token
+}
+
+func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, paths ...string) bool {
+	providedToken := normalizeLockToken(r.Header.Get("Lock-Token"))
+
+	h.locksMu.Lock()
+	defer h.locksMu.Unlock()
+
+	for _, filePath := range lockCheckPaths(paths...) {
+		storedToken, locked := h.locks[filePath]
+		if !locked {
+			continue
+		}
+		if providedToken == "" || providedToken != storedToken {
+			http.Error(w, "resource is locked", http.StatusLocked)
+			return false
+		}
+	}
+
+	return true
+}
+
+func lockCheckPaths(paths ...string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(paths)*2)
+
+	for _, filePath := range paths {
+		current := filePath
+		for {
+			if _, ok := seen[current]; !ok {
+				seen[current] = struct{}{}
+				result = append(result, current)
+			}
+			if current == "/" {
+				break
+			}
+			current = path.Dir(current)
+		}
+	}
+
+	return result
 }
 
 func (h *Handler) getDestination(r *http.Request) string {

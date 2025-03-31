@@ -20,6 +20,7 @@ import {
   Trash2,
   Edit3,
   Clock,
+  AlertCircle,
 } from 'lucide-react'
 import {
   listFavorites,
@@ -80,9 +81,11 @@ function FavoriteRow({
       <div className="w-8 flex items-center justify-center">
         <FileIcon name={fileName} isDir={isDir} size={24} variant="bare" />
       </div>
-      <div 
-        className="flex-1 min-w-0 cursor-pointer"
+      <button
+        type="button"
+        className="flex-1 min-w-0 text-left focus:outline-none"
         onClick={onNavigate}
+        aria-label={`${isDir ? '打开文件夹' : '打开文件'} ${item.path}`}
       >
         <p className="truncate font-medium text-foreground hover:text-accent-primary transition-colors">
           {fileName}
@@ -91,7 +94,7 @@ function FavoriteRow({
           <Folder size={10} />
           {parentPath || '/'}
         </p>
-      </div>
+      </button>
       {item.note && (
         <div className="max-w-[200px]">
           <p className="text-sm text-default-500 truncate" title={item.note}>
@@ -111,6 +114,7 @@ function FavoriteRow({
           size="sm"
           variant="light"
           onPress={onNavigate}
+          aria-label={`跳转到 ${item.path}`}
           title="跳转到文件"
           className="rounded-xl"
         >
@@ -121,6 +125,7 @@ function FavoriteRow({
           size="sm"
           variant="light"
           onPress={onEditNote}
+          aria-label={`编辑备注 ${item.path}`}
           title="编辑备注"
           className="rounded-xl"
         >
@@ -132,6 +137,7 @@ function FavoriteRow({
           variant="light"
           color="danger"
           onPress={onRemove}
+          aria-label={`取消收藏 ${item.path}`}
           title="取消收藏"
           className="rounded-xl"
         >
@@ -151,10 +157,12 @@ export function FavoritesPage() {
 
   const { isOpen: isEditOpen, onOpen: onEditOpen, onClose: onEditClose } = useDisclosure()
 
-  const { data: favorites = [], isLoading } = useQuery({
+  const { data: favorites, isLoading, error, refetch } = useQuery({
     queryKey: ['favorites'],
     queryFn: listFavorites,
   })
+
+  const favoriteItems = favorites ?? []
 
   // Remove mutation
   const removeMutation = useMutation({
@@ -184,12 +192,12 @@ export function FavoritesPage() {
   })
 
   const handleSelectAll = useCallback(() => {
-    if (selectedItems.size === favorites.length) {
+    if (selectedItems.size === favoriteItems.length) {
       setSelectedItems(new Set())
     } else {
-      setSelectedItems(new Set(favorites.map(item => item.path)))
+      setSelectedItems(new Set(favoriteItems.map(item => item.path)))
     }
-  }, [favorites, selectedItems.size])
+  }, [favoriteItems, selectedItems.size])
 
   // Batch remove using custom hook
   const { execute: executeBatchRemove, isLoading: isBatchRemoving } = useBatchOperation({
@@ -247,12 +255,36 @@ export function FavoritesPage() {
     )
   }
 
+  if (error) {
+    return (
+      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <PageHeader
+          title="收藏夹"
+          subtitle="加载失败"
+          icon={Star}
+        />
+        <div className="flex flex-1 items-center justify-center">
+          <EmptyState
+            icon={AlertCircle}
+            title="加载收藏列表失败"
+            description={(error as Error).message || '请稍后重试'}
+            action={
+              <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                重新加载
+              </Button>
+            }
+          />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
       {/* Header */}
       <PageHeader
         title="收藏夹"
-        subtitle={`${favorites.length} 项收藏`}
+        subtitle={`${favoriteItems.length} 项收藏`}
         icon={Star}
       />
 
@@ -282,11 +314,11 @@ export function FavoritesPage() {
       )}
 
       {/* List header */}
-      {favorites.length > 0 && (
+      {favoriteItems.length > 0 && (
         <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
           <Checkbox
-            isSelected={selectedItems.size === favorites.length && favorites.length > 0}
-            isIndeterminate={selectedItems.size > 0 && selectedItems.size < favorites.length}
+            isSelected={selectedItems.size === favoriteItems.length && favoriteItems.length > 0}
+            isIndeterminate={selectedItems.size > 0 && selectedItems.size < favoriteItems.length}
             onValueChange={handleSelectAll}
             classNames={{
               wrapper: "before:border-divider",
@@ -302,8 +334,8 @@ export function FavoritesPage() {
 
       {/* Item list */}
       <div className="flex-1 overflow-auto card-meridian rounded-xl">
-        {favorites.length > 0 ? (
-          favorites.map(item => (
+        {favoriteItems.length > 0 ? (
+          favoriteItems.map(item => (
             <FavoriteRow
               key={item.path}
               item={item}

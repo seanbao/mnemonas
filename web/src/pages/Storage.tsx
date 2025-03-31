@@ -10,11 +10,13 @@ import {
   Clock,
   Database,
   Sparkles,
-  TrendingUp
+  TrendingUp,
+  AlertCircle,
 } from 'lucide-react'
 import { getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { EmptyState } from '@/components/ui/EmptyState'
 
 // Action card for maintenance operations
 function MaintenanceCard({
@@ -81,7 +83,7 @@ function MaintenanceCard({
 
 export function StoragePage() {
   const navigate = useNavigate()
-  const { data: stats, isLoading, refetch } = useQuery({
+  const { data: stats, isLoading, error, refetch } = useQuery({
     queryKey: ['stats'],
     queryFn: getStorageStats,
   })
@@ -107,6 +109,39 @@ export function StoragePage() {
             </div>
           ))}
         </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="p-6 lg:p-8 space-y-6">
+        <div className="flex items-center justify-between">
+          <PageHeader
+            title="存储管理"
+            subtitle="CAS 内容寻址存储系统"
+            icon={HardDrive}
+          />
+          <Button
+            variant="flat"
+            startContent={<RefreshCw size={16} />}
+            onPress={() => refetch()}
+            className="rounded-xl"
+          >
+            刷新
+          </Button>
+        </div>
+
+        <EmptyState
+          icon={AlertCircle}
+          title="加载存储统计失败"
+          description={(error as Error).message || '请稍后重试'}
+          action={
+            <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+              重新加载
+            </Button>
+          }
+        />
       </div>
     )
   }

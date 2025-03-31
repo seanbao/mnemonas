@@ -122,7 +122,7 @@ export function ActivityPage() {
   const [actionFilter, setActionFilter] = useState<ActionType | ''>('')
   const pageSize = 20
 
-  const { data, isLoading, refetch, isRefetching } = useQuery({
+  const { data, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['activity', page, actionFilter],
     queryFn: () => listActivity({
       limit: pageSize,
@@ -142,6 +142,42 @@ export function ActivityPage() {
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载活动日志...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <PageHeader
+          title="活动日志"
+          subtitle="加载失败"
+          icon={Activity}
+          actions={
+            <Button
+              className="btn-secondary h-8 rounded-xl"
+              size="sm"
+              startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
+              onPress={() => refetch()}
+              isLoading={isRefetching}
+            >
+              刷新
+            </Button>
+          }
+        />
+
+        <div className="flex flex-1 items-center justify-center">
+          <EmptyState
+            icon={Activity}
+            title="加载活动日志失败"
+            description={(error as Error).message || '请稍后重试'}
+            action={
+              <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                重新加载
+              </Button>
+            }
+          />
         </div>
       </div>
     )

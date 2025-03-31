@@ -410,12 +410,12 @@ func validatePath(filePath string) (string, error) {
 
 	// Reject any path with .. components
 	if strings.Contains(filePath, "..") {
-		return "", fmt.Errorf("path traversal attempt detected")
+		return "", errors.New("invalid path")
 	}
 
 	// Reject paths outside root
 	if cleaned != "/" && !strings.HasPrefix(cleaned, "/") {
-		return "", fmt.Errorf("invalid path: must start with /")
+		return "", errors.New("invalid path")
 	}
 
 	return cleaned, nil
@@ -424,11 +424,11 @@ func validatePath(filePath string) (string, error) {
 // validateHash validates a BLAKE3 hash string (64 hex characters).
 func validateHash(hash string) error {
 	if len(hash) != 64 {
-		return fmt.Errorf("invalid hash length: expected 64 characters, got %d", len(hash))
+		return errors.New("invalid hash")
 	}
 	for _, c := range hash {
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return fmt.Errorf("invalid hash: contains non-hexadecimal character")
+			return errors.New("invalid hash")
 		}
 	}
 	return nil
@@ -454,9 +454,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 				"uptime":  dpHealth.UptimeSecs,
 			}
 		} else {
+			s.logger.Warn().Err(err).Msg("dataplane health check failed")
 			health["dataplane"] = map[string]any{
 				"healthy": false,
-				"error":   err.Error(),
+				"status":  "unavailable",
 			}
 		}
 	}
@@ -1096,7 +1097,7 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.ContentLength > 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			BadRequest(w, "invalid request body: "+err.Error())
+			BadRequest(w, "invalid request body")
 			return
 		}
 	}
@@ -1831,7 +1832,8 @@ func (s *Server) handleClearActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.activity.Clear(); err != nil {
-		InternalError(w, "failed to clear activity log: "+err.Error())
+		s.logger.Error().Err(err).Msg("failed to clear activity log")
+		InternalError(w, "failed to clear activity log")
 		return
 	}
 

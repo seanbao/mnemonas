@@ -165,6 +165,18 @@ describe('TrashPage', () => {
         expect(screen.queryByText('清空回收站')).toBeFalsy()
       })
     })
+
+    it('shows retryable error state when trash loading fails', async () => {
+      mockListTrash.mockRejectedValue(new Error('Network error'))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('加载回收站失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
   })
 
   describe('restore functionality', () => {

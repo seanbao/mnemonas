@@ -19,12 +19,13 @@ vi.mock('@/api/files', () => ({
 
 // Mock navigation
 const mockNavigate = vi.fn()
+let mockLocationPathname = '/files'
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual('react-router-dom')
   return {
     ...actual,
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: '/files' }),
+    useLocation: () => ({ pathname: mockLocationPathname }),
   }
 })
 
@@ -86,6 +87,7 @@ describe('FilesPage', () => {
     mockClipboardState.paths = []
     mockClipboardState.operation = null
     mockClipboardState.sourcePath = null
+    mockLocationPathname = '/files'
     mockClipboardState.copy.mockClear()
     mockClipboardState.cut.mockClear()
     mockClipboardState.clear.mockClear()
@@ -132,6 +134,21 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(screen.getByText('这里空空如也')).toBeTruthy()
       })
+    })
+
+    it('falls back to root when the route path has invalid URI encoding', async () => {
+      mockLocationPathname = '/files/%E0%A4%A'
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '路径格式无效，已返回根目录',
+          color: 'warning',
+        }))
+      })
+
+      expect(mockNavigate).toHaveBeenCalledWith('/files', { replace: true })
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/%E0%A4%A')
     })
   })
 
@@ -608,14 +625,35 @@ describe('FilesPage', () => {
       expect(screen.getByText('加载记忆中...')).toBeTruthy()
     })
 
+    it('shows retryable error state on API failure', async () => {
+      mockListFiles.mockRejectedValueOnce(new Error('Network error'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('当前目录加载失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('retries on API failure', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
       mockListFiles.mockRejectedValueOnce(new Error('Network error'))
       mockListFiles.mockResolvedValueOnce({ files: [], path: '/' })
       
       render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      mockListFiles.mockClear()
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
       
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalled()
+        expect(mockListFiles).toHaveBeenCalledTimes(1)
+        expect(screen.getByText('这里空空如也')).toBeTruthy()
       })
     })
   })

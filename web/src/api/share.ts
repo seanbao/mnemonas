@@ -88,6 +88,10 @@ export class ShareError extends Error {
   get isUnauthorized(): boolean {
     return this.status === 401
   }
+
+  get isRateLimited(): boolean {
+    return this.status === 429
+  }
 }
 
 interface ShareApiError {
@@ -113,6 +117,14 @@ function getShareErrorMessage(body: ShareApiResponse<never> | { error?: string; 
     return body.message
   }
   return fallback
+}
+
+function getShareErrorCode(body: ShareApiResponse<never> | { error?: string; message?: string }): string | undefined {
+  if (body.error && typeof body.error === 'object' && 'code' in body.error && typeof body.error.code === 'string') {
+    return body.error.code
+  }
+
+  return undefined
 }
 
 // === Authenticated Share APIs ===
@@ -273,16 +285,20 @@ export async function getPublicShareItems(
 
   if (!response.ok) {
     let message = '获取分享文件夹失败'
+    let code: string | undefined
     if (response.status === 410) {
       message = '分享已过期、已禁用或访问次数已达上限'
     } else if (response.status === 401) {
       message = '密码错误'
+    } else if (response.status === 429) {
+      message = '尝试次数过多，请稍后再试'
     }
     try {
       const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
       message = getShareErrorMessage(body, message)
+      code = getShareErrorCode(body)
     } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw new ShareError(message, response.status, code)
   }
 
   return response.json()
@@ -301,16 +317,20 @@ export async function accessShareWithPassword(id: string, password: string): Pro
   
   if (!response.ok) {
     let message = '访问失败'
+    let code: string | undefined
     if (response.status === 401) {
       message = '密码错误'
     } else if (response.status === 410) {
       message = '分享已过期、已禁用或访问次数已达上限'
+    } else if (response.status === 429) {
+      message = '尝试次数过多，请稍后再试'
     }
     try {
       const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
       message = getShareErrorMessage(body, message)
+      code = getShareErrorCode(body)
     } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw new ShareError(message, response.status, code)
   }
   
   return response.json()

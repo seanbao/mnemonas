@@ -2,6 +2,61 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { SettingsPage } from './Settings'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
+
+import { getSettings } from '@/api/settings'
+
+const mockGetSettings = vi.mocked(getSettings)
+
+vi.mock('@heroui/react', async () => {
+  const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
+  const React = await vi.importActual<typeof import('react')>('react')
+
+  const normalizeKey = (key: React.Key | null | undefined) => String(key ?? '').replace(/^\.\$/, '')
+
+  const Tab = ({ children }: { children: React.ReactNode }) => <>{children}</>
+
+  const Tabs = ({
+    children,
+    selectedKey,
+    onSelectionChange,
+  }: {
+    children: React.ReactNode
+    selectedKey?: React.Key
+    onSelectionChange?: (key: React.Key) => void
+  }) => {
+    const items = React.Children.toArray(children).filter(React.isValidElement)
+    const activeKey = selectedKey ?? items[0]?.key
+    const activeItem = items.find((item) => normalizeKey(item.key) === normalizeKey(activeKey)) ?? items[0]
+
+    return (
+      <div>
+        <div role="tablist">
+          {items.map((item) => (
+            <button
+              key={normalizeKey(item.key)}
+              type="button"
+              role="tab"
+              aria-selected={normalizeKey(item.key) === normalizeKey(activeKey)}
+              onClick={() => onSelectionChange?.(normalizeKey(item.key))}
+            >
+              {item.props.title}
+            </button>
+          ))}
+        </div>
+        <div>{activeItem}</div>
+      </div>
+    )
+  }
+
+  return {
+    ...actual,
+    Tabs,
+    Tab,
+  }
+})
 
 vi.mock('@/components/share', () => ({
   ShareManager: () => <div>ShareManager</div>,
@@ -33,7 +88,15 @@ vi.mock('@/api/settings', () => ({
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
   })
+
+  const openTab = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
+	await waitFor(() => {
+		expect(screen.getByRole('tab', { name: label })).toBeTruthy()
+	})
+	await user.click(screen.getByRole('tab', { name: label }))
+  }
 
   describe('rendering', () => {
     it('renders page header', async () => {
@@ -78,13 +141,11 @@ describe('SettingsPage', () => {
       })
     })
 
-    // Note: Tab switching tests are skipped because HeroUI Tabs component
-    // has compatibility issues with jsdom. Tab switching is covered in e2e tests.
-    it.skip('switches to retention tab', async () => {
+    it('switches to retention tab', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('版本保留'))
+      await openTab(user, '版本保留')
 
       await waitFor(() => {
         expect(screen.getByText('版本策略')).toBeTruthy()
@@ -92,11 +153,11 @@ describe('SettingsPage', () => {
       })
     })
 
-    it.skip('switches to WebDAV tab', async () => {
+    it('switches to WebDAV tab', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('WebDAV'))
+      await openTab(user, 'WebDAV')
 
       await waitFor(() => {
         expect(screen.getByText('WebDAV 服务')).toBeTruthy()
@@ -104,11 +165,11 @@ describe('SettingsPage', () => {
       })
     })
 
-    it.skip('switches to advanced tab', async () => {
+    it('switches to advanced tab', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('高级'))
+      await openTab(user, '高级')
 
       await waitFor(() => {
         expect(screen.getByText('CDC 分块参数')).toBeTruthy()
@@ -134,11 +195,11 @@ describe('SettingsPage', () => {
       })
     })
 
-    it('renders storage root input', async () => {
+    it('renders storage root as read-only display with guidance', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
-        const input = screen.getByDisplayValue('/root/.mnemonas')
-        expect(input).toBeTruthy()
+        expect(screen.getByText('/root/.mnemonas')).toBeTruthy()
+        expect(screen.getByText('当前值由服务端配置文件决定，界面中不可直接修改。如需调整，请修改配置文件并重启服务。')).toBeTruthy()
       })
     })
 
@@ -158,14 +219,12 @@ describe('SettingsPage', () => {
     })
   })
 
-  // Note: Tests requiring tab switching are skipped because HeroUI Tabs component
-  // has compatibility issues with jsdom. These are covered in e2e tests.
-  describe.skip('retention settings', () => {
+  describe('retention settings', () => {
     it('renders max versions input', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('版本保留'))
+      await openTab(user, '版本保留')
 
       await waitFor(() => {
         const input = screen.getByDisplayValue('100')
@@ -177,7 +236,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('版本保留'))
+      await openTab(user, '版本保留')
 
       await waitFor(() => {
         const input = screen.getByDisplayValue('8760h')
@@ -189,7 +248,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('版本保留'))
+      await openTab(user, '版本保留')
 
       await waitFor(() => {
         expect(screen.getByDisplayValue('100')).toBeTruthy()
@@ -203,12 +262,12 @@ describe('SettingsPage', () => {
     })
   })
 
-  describe.skip('WebDAV settings', () => {
+  describe('WebDAV settings', () => {
     it('renders WebDAV enabled toggle', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('WebDAV'))
+      await openTab(user, 'WebDAV')
 
       await waitFor(() => {
         expect(screen.getByText('启用 WebDAV')).toBeTruthy()
@@ -219,7 +278,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('WebDAV'))
+      await openTab(user, 'WebDAV')
 
       await waitFor(() => {
         const input = screen.getByDisplayValue('/dav')
@@ -231,7 +290,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('WebDAV'))
+      await openTab(user, 'WebDAV')
 
       await waitFor(() => {
         expect(screen.getByText('只读模式')).toBeTruthy()
@@ -242,21 +301,42 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('WebDAV'))
+      await openTab(user, 'WebDAV')
 
       await waitFor(() => {
         const input = screen.getByDisplayValue('admin')
         expect(input).toBeTruthy()
       })
     })
+
+    it('exposes accessible labels for WebDAV credential action buttons', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
+      })
+
+      expect(screen.getByText('复制 WebDAV 地址')).toBeTruthy()
+      expect(screen.getByText('复制 WebDAV 用户名')).toBeTruthy()
+      const showPasswordText = screen.getByText('显示 WebDAV 密码')
+      expect(showPasswordText).toBeTruthy()
+      expect(screen.getByText('复制 WebDAV 密码')).toBeTruthy()
+
+      await user.click(showPasswordText.closest('button') as HTMLButtonElement)
+
+      expect(screen.getByText('隐藏 WebDAV 密码')).toBeTruthy()
+    })
   })
 
-  describe.skip('advanced settings', () => {
+  describe('advanced settings', () => {
     it('renders CDC info box', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('高级'))
+      await openTab(user, '高级')
 
       await waitFor(() => {
         expect(screen.getByText('关于 CDC 分块')).toBeTruthy()
@@ -267,7 +347,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('高级'))
+      await openTab(user, '高级')
 
       await waitFor(() => {
         expect(screen.getByText('最小块大小')).toBeTruthy()
@@ -280,7 +360,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await user.click(screen.getByText('高级'))
+      await openTab(user, '高级')
 
       await waitFor(() => {
         expect(screen.getByText('gRPC 地址')).toBeTruthy()
@@ -308,7 +388,7 @@ describe('SettingsPage', () => {
       })
     })
 
-    it('shows toast on reset', async () => {
+    it('shows success toast on reset after refetch succeeds', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
@@ -319,13 +399,84 @@ describe('SettingsPage', () => {
       const resetBtn = screen.getByText('重置')
       await user.click(resetBtn)
 
-      // Toast should be triggered (mocked)
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '已恢复为服务端当前配置', color: 'success' })
+      })
+    })
+
+    it('shows danger toast on reset when refetch fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockResolvedValueOnce({
+          data: {
+            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            storage: { root: '/root/.mnemonas' },
+            retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
+            dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          },
+        })
+        .mockRejectedValueOnce(new Error('Network error'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('重置')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('重置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '重置失败',
+          description: 'Network error',
+          color: 'danger',
+        })
+      })
     })
   })
 
-  // Note: Additional input editing tests for WebDAV and Advanced tabs 
-  // timeout in jsdom environment due to HeroUI Tab component limitations.
-  // Input editing tests for general settings also timeout due to userEvent
-  // interactions being slow in jsdom. The basic rendering and tab switching
-  // tests above provide sufficient coverage.
+  describe('error state', () => {
+    it('shows retryable error state when initial settings load fails', async () => {
+      mockGetSettings.mockRejectedValueOnce(new Error('Network error'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('加载设置失败')).toBeTruthy()
+        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
+    it('retries loading settings from the error state', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({
+          data: {
+            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            storage: { root: '/root/.mnemonas' },
+            retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
+            dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          },
+        })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('系统设置')).toBeTruthy()
+      })
+    })
+  })
+
 })

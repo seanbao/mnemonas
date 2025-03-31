@@ -103,7 +103,8 @@ describe('HealthPage', () => {
       await user.click(screen.getByText('刷新'))
 
       await waitFor(() => {
-        expect(mockGetDiagnostics.mock.calls.length).toBeGreaterThanOrEqual(1)
+        expect(mockGetDiagnostics.mock.calls.length).toBeGreaterThanOrEqual(2)
+        expect(mockGetStorageStats.mock.calls.length).toBeGreaterThanOrEqual(2)
       })
     })
   })
