@@ -472,6 +472,11 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if share.HasPassword() {
+		if err := share.CanAccess(); err != nil {
+			writePublicShareAccessError(w, err)
+			return
+		}
+
 		if h.hasShareAccess(r, share) {
 			info := &PublicShareInfo{
 				ID:          share.ID,
@@ -485,11 +490,6 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(info)
-			return
-		}
-
-		if err := share.CanAccess(); err != nil {
-			writePublicShareAccessError(w, err)
 			return
 		}
 
@@ -957,13 +957,24 @@ func parseDuration(s string) (time.Duration, error) {
 		return 0, nil
 	}
 
+	validatePositiveDuration := func(duration time.Duration) (time.Duration, error) {
+		if duration <= 0 {
+			return 0, errors.New("duration must be greater than zero")
+		}
+		return duration, nil
+	}
+
 	if strings.HasSuffix(s, "d") {
 		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
 		if err != nil {
 			return 0, err
 		}
-		return time.Duration(days) * 24 * time.Hour, nil
+		return validatePositiveDuration(time.Duration(days) * 24 * time.Hour)
 	}
 
-	return time.ParseDuration(s)
+	duration, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, err
+	}
+	return validatePositiveDuration(duration)
 }

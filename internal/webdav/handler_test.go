@@ -108,6 +108,23 @@ func TestHandler_MKCOL(t *testing.T) {
 	}
 }
 
+func TestHandler_MKCOL_RejectsUnknownLengthBody(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("MKCOL", "/dav/testdir", io.NopCloser(strings.NewReader("body")))
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("MKCOL unknown-length body status = %d, want %d", w.Code, http.StatusUnsupportedMediaType)
+	}
+	if !strings.Contains(w.Body.String(), "MKCOL does not allow request body") {
+		t.Fatalf("expected MKCOL body rejection message, got %q", w.Body.String())
+	}
+}
+
 func TestHandler_PUT_GET(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 
@@ -1435,6 +1452,33 @@ func TestHandler_HeadRequest(t *testing.T) {
 	contentLen := w.Header().Get("Content-Length")
 	if contentLen != "12" {
 		t.Errorf("Content-Length = %s, want 12", contentLen)
+	}
+}
+
+func TestHandler_HeadDirectoryRequest(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/head-dir"); err != nil {
+		t.Fatalf("Mkdir(/head-dir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/head-dir/file.txt", bytes.NewReader([]byte("test content"))); err != nil {
+		t.Fatalf("WriteFile(/head-dir/file.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("HEAD", "/dav/head-dir/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("HEAD directory status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("HEAD directory response should have no body, got %q", w.Body.String())
+	}
+	if contentType := w.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("HEAD directory content type = %q, want %q", contentType, "text/html; charset=utf-8")
 	}
 }
 

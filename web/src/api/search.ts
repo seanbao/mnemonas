@@ -38,7 +38,15 @@ export interface SearchResponse {
  * @param limit - Maximum results to return (default 50, max 100)
  */
 export async function searchFiles(query: string, limit: number = 50): Promise<SearchResponse> {
-  const params = new URLSearchParams({ q: query })
+  const trimmedQuery = query.trim()
+  if (!trimmedQuery) {
+    throw new Error("Search query is required")
+  }
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 100) {
+    throw new Error("Search limit must be between 1 and 100")
+  }
+
+  const params = new URLSearchParams({ q: trimmedQuery })
   if (limit && limit !== 50) {
     params.set('limit', String(limit))
   }
