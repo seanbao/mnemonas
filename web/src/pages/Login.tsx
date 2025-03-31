@@ -45,7 +45,6 @@ export function LoginPage() {
   useEffect(() => {
     if (error) {
       setFormError(error)
-      addToast({ title: error, color: 'danger' })
       clearError()
     }
   }, [error, clearError])
@@ -55,12 +54,18 @@ export function LoginPage() {
     if (formError) {
       setFormError(null)
     }
+    if (error) {
+      clearError()
+    }
   }
 
   const handlePasswordChange = (value: string) => {
     setPassword(value)
     if (formError) {
       setFormError(null)
+    }
+    if (error) {
+      clearError()
     }
   }
 
@@ -69,7 +74,6 @@ export function LoginPage() {
     
     if (!username.trim() || !password.trim()) {
       setFormError('请输入用户名和密码')
-      addToast({ title: '请输入用户名和密码', color: 'warning' })
       return
     }
 

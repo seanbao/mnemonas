@@ -609,12 +609,14 @@ export function FilesPage() {
       try {
         decodedPath = decodeURI(routePath)
       } catch {
-        addToast({ title: '路径格式无效，已返回根目录', color: 'warning' })
-        if (currentPath !== '/') {
-          setCurrentPath('/')
-        }
-        if (location.pathname !== '/files') {
-          navigate('/files', { replace: true })
+        const fallbackPath = currentPath || '/'
+        const fallbackRoute = fallbackPath === '/' ? '/files' : `/files${encodeURI(fallbackPath)}`
+        addToast({
+          title: fallbackPath === '/' ? '路径格式无效，已返回根目录' : '路径格式无效，已返回上一个有效位置',
+          color: 'warning',
+        })
+        if (location.pathname !== fallbackRoute) {
+          navigate(fallbackRoute, { replace: true })
         }
         return
       }

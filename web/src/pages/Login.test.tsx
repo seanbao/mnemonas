@@ -4,6 +4,10 @@ import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { LoginPage } from './Login'
 
+const { mockAddToast } = vi.hoisted(() => ({
+  mockAddToast: vi.fn(),
+}))
+
 // Mock the auth store
 const mockLogin = vi.fn()
 const mockClearError = vi.fn()
@@ -34,7 +38,7 @@ vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual('@heroui/react')
   return {
     ...actual,
-    addToast: vi.fn(),
+    addToast: mockAddToast,
   }
 })
 
@@ -97,6 +101,7 @@ describe('LoginPage', () => {
 
       expect(screen.getByRole('alert')).toHaveTextContent('用户名或密码错误')
       expect(mockClearError).toHaveBeenCalled()
+      expect(mockAddToast).not.toHaveBeenCalled()
     })
   })
 
@@ -154,6 +159,19 @@ describe('LoginPage', () => {
       await user.click(screen.getByRole('button', { name: /登录/i }))
 
       expect(screen.getByRole('alert')).toHaveTextContent('请输入用户名和密码')
+      expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
+    it('clears inline validation error after user edits input', async () => {
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+      expect(screen.getByRole('alert')).toHaveTextContent('请输入用户名和密码')
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
 
     it('navigates to home on successful login', async () => {
@@ -166,6 +184,7 @@ describe('LoginPage', () => {
       await user.click(screen.getByRole('button', { name: /登录/i }))
       
       expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '登录成功', color: 'success' }))
     })
   })
 

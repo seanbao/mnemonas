@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
+import { act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SettingsPage } from './Settings'
 import * as HeroUI from '@heroui/react'
@@ -9,6 +10,19 @@ const mockAddToast = vi.fn()
 import { getSettings } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
+
+const { defaultSettingsResponse } = vi.hoisted(() => ({
+  defaultSettingsResponse: {
+    data: {
+      server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+      storage: { root: '/root/.mnemonas' },
+      retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+      webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+      cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
+      dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+    },
+  },
+}))
 
 vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
@@ -64,16 +78,7 @@ vi.mock('@/components/share', () => ({
 
 // Mock the settings API
 vi.mock('@/api/settings', () => ({
-  getSettings: vi.fn().mockResolvedValue({
-    data: {
-      server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
-      storage: { root: '/root/.mnemonas' },
-      retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
-      webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
-      cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
-      dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
-    },
-  }),
+  getSettings: vi.fn().mockResolvedValue(defaultSettingsResponse),
   updateSettings: vi.fn().mockResolvedValue({ success: true }),
   getWebDAVCredentials: vi.fn().mockResolvedValue({
     success: true,
@@ -88,6 +93,7 @@ vi.mock('@/api/settings', () => ({
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockGetSettings.mockResolvedValue(defaultSettingsResponse)
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
   })
 
@@ -216,6 +222,81 @@ describe('SettingsPage', () => {
       await user.type(input, '127.0.0.1')
 
       expect(input).toHaveValue('127.0.0.1')
+    })
+
+    it('keeps unsaved edits when settings refetch in background', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockResolvedValueOnce({
+          data: {
+            server: { host: '0.0.0.0', port: 8080, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            storage: { root: '/root/.mnemonas' },
+            retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
+            webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+            cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
+            dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          },
+        })
+        .mockResolvedValue({
+          data: {
+            server: { host: '10.0.0.1', port: 9090, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            storage: { root: '/srv/mnemonas' },
+            retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
+            webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
+            cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
+            dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          },
+        })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('0.0.0.0')).toBeTruthy()
+      })
+
+      const input = screen.getByDisplayValue('0.0.0.0')
+      await user.clear(input)
+      await user.type(input, '127.0.0.1')
+      expect(input).toHaveValue('127.0.0.1')
+
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'))
+      })
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('127.0.0.1')).toBeTruthy()
+      })
+    })
+
+    it('reset restores server values after local edits', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValue({
+        data: {
+          server: { host: '10.0.0.1', port: 9090, read_timeout_seconds: 60, write_timeout_seconds: 300 },
+          storage: { root: '/srv/mnemonas' },
+          retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },
+          webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
+          cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
+          dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('10.0.0.1')).toBeTruthy()
+      })
+
+      const input = screen.getByDisplayValue('10.0.0.1')
+      await user.clear(input)
+      await user.type(input, '127.0.0.1')
+      expect(input).toHaveValue('127.0.0.1')
+
+      await user.click(screen.getByText('重置'))
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('10.0.0.1')).toBeTruthy()
+      })
     })
   })
 

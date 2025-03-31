@@ -801,19 +801,11 @@ func (h *Handler) accessAuthorizedShare(r *http.Request, id string) (*Share, err
 		return nil, err
 	}
 
-	if err := share.CanAccess(); err != nil {
-		return nil, err
-	}
-
 	if share.HasPassword() && !h.hasShareAccess(r, share) {
 		return nil, ErrInvalidPassword
 	}
 
-	if err := h.store.RecordAccess(id); err != nil {
-		return nil, err
-	}
-
-	return h.store.Get(id)
+	return h.store.RecordAuthorizedAccess(id)
 }
 
 func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {

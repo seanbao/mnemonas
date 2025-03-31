@@ -282,6 +282,10 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 		return err
 	}
 
+	var rollbackVersionHash string
+	var rollbackVersionRecorded bool
+	var rollbackVersionObjectCreated bool
+
 	fullPath := fs.workspace.FullPath(name)
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
@@ -322,38 +326,74 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	// If versioning enabled and file exists, save old version first
 	if shouldVersion {
 		if oldData, err := fs.workspace.ReadFile(ctx, name); err == nil {
+			candidateHash := computeHash(oldData)
+			rollbackVersionHash = candidateHash
+			rollbackVersionObjectCreated = !fs.versions.HasObject(candidateHash)
+
+			_, versionErr := fs.versions.GetVersion(ctx, name, candidateHash)
+			versionAlreadyRecorded := versionErr == nil
+			if versionErr != nil && !errors.Is(versionErr, versionstore.ErrNotFound) {
+				os.Remove(tmpPath)
+				return fmt.Errorf("failed to check existing version: %w", versionErr)
+			}
+
 			oldHash, err := fs.versions.PutObject(oldData)
 			if err != nil {
 				os.Remove(tmpPath)
 				return fmt.Errorf("failed to store version: %w", err)
 			}
-			if err := fs.versions.AddVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
-				os.Remove(tmpPath)
-				return fmt.Errorf("failed to record version: %w", err)
-			}
-			if fs.config.MaxVersions > 0 || fs.config.MaxVersionAge > 0 {
-				if err := fs.cleanupVersions(ctx, name); err != nil {
+			rollbackVersionHash = oldHash
+
+			if !versionAlreadyRecorded {
+				if err := fs.versions.AddVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
 					os.Remove(tmpPath)
-					return fmt.Errorf("failed to cleanup old versions: %w", err)
+					if rollbackVersionObjectCreated {
+						_ = fs.deleteVersionObject(oldHash)
+					}
+					return fmt.Errorf("failed to record version: %w", err)
 				}
+				rollbackVersionRecorded = true
 			}
 		}
 	}
 
 	if err := os.Rename(tmpPath, fullPath); err != nil {
 		os.Remove(tmpPath)
+		if rollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to replace file: %w", err),
+				fmt.Errorf("failed to rollback version metadata: %w", rollbackErr),
+			)
+		}
 		return fmt.Errorf("failed to replace file: %w", err)
 	}
 
 	newHash := fmt.Sprintf("%x", hasher.Sum(nil))
 	if err := fs.updateFileIndex(ctx, name, written, time.Now(), newHash); err != nil {
+		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
 		if rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData); rollbackErr != nil {
-			return errors.Join(
+			joinedErr := errors.Join(
 				fmt.Errorf("failed to update file index: %w", err),
 				fmt.Errorf("failed to rollback file content: %w", rollbackErr),
 			)
+			if versionRollbackErr != nil {
+				joinedErr = errors.Join(joinedErr, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
+			}
+			return joinedErr
+		}
+		if versionRollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to update file index: %w", err),
+				fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr),
+			)
 		}
 		return fmt.Errorf("failed to update file index: %w", err)
+	}
+
+	if shouldVersion && (fs.config.MaxVersions > 0 || fs.config.MaxVersionAge > 0) {
+		if err := fs.cleanupVersions(ctx, name); err != nil {
+			return fmt.Errorf("failed to cleanup old versions: %w", err)
+		}
 	}
 
 	return nil
@@ -1278,6 +1318,26 @@ func (fs *FileSystem) restoreFileAfterIndexFailure(ctx context.Context, name str
 		return fs.workspace.WriteFile(ctx, name, previousData)
 	}
 	return fs.workspace.Delete(ctx, name)
+}
+
+func (fs *FileSystem) rollbackWriteVersion(ctx context.Context, name, hash string, versionRecorded, objectCreated bool) error {
+	if !versionRecorded && !objectCreated {
+		return nil
+	}
+
+	var rollbackErr error
+	if versionRecorded {
+		if err := fs.versions.DeleteVersion(ctx, name, hash); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete version metadata %s: %w", hash, err))
+		}
+	}
+	if objectCreated {
+		if err := fs.deleteVersionObject(hash); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete version object %s: %w", hash, err))
+		}
+	}
+
+	return rollbackErr
 }
 
 func (fs *FileSystem) rollbackDeletedPath(ctx context.Context, name string, hadPreviousFile bool, previousData []byte, hadPreviousDir bool) error {

@@ -171,6 +171,28 @@ func TestHandler_PUT_ToExistingDirectoryReturnsConflict(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_IfMatchStarOnMissingFileFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/missing.txt", strings.NewReader("content"))
+	req.Header.Set("If-Match", "*")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("PUT If-Match:* on missing file status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+	if _, err := fs.Stat(ctx, "/files/missing.txt"); err == nil {
+		t.Fatal("expected missing file to remain absent after failed conditional PUT")
+	}
+}
+
 func TestHandler_ConditionalGET(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1006,6 +1028,64 @@ func TestHandler_LOCK_UNLOCK(t *testing.T) {
 	}
 }
 
+func TestHandler_ExpiredLockIsIgnoredAndCleanedUp(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/expired-lock.txt", bytes.NewReader([]byte("initial"))); err != nil {
+		t.Fatalf("WriteFile(expired-lock.txt) error: %v", err)
+	}
+
+	handler.locksMu.Lock()
+	handler.locks["/expired-lock.txt"] = webdavLock{
+		token:     "opaquelocktoken:expired",
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	handler.locksMu.Unlock()
+
+	putReq := httptest.NewRequest("PUT", "/dav/expired-lock.txt", strings.NewReader("updated"))
+	putW := httptest.NewRecorder()
+	handler.ServeHTTP(putW, putReq)
+
+	if putW.Code != http.StatusNoContent {
+		t.Fatalf("PUT with expired lock status = %d, want %d", putW.Code, http.StatusNoContent)
+	}
+
+	handler.locksMu.Lock()
+	_, exists := handler.locks["/expired-lock.txt"]
+	handler.locksMu.Unlock()
+	if exists {
+		t.Fatal("expected expired lock to be cleaned up")
+	}
+}
+
+func TestHandler_LOCK_ReplacesExpiredLock(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/lock-replace.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(lock-replace.txt) error: %v", err)
+	}
+
+	handler.locksMu.Lock()
+	handler.locks["/lock-replace.txt"] = webdavLock{
+		token:     "opaquelocktoken:expired",
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	handler.locksMu.Unlock()
+
+	req := httptest.NewRequest("LOCK", "/dav/lock-replace.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("LOCK with expired existing lock status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Lock-Token") == "<opaquelocktoken:expired>" {
+		t.Fatal("expected a new lock token to be issued after expired lock cleanup")
+	}
+}
+
 func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1293,6 +1373,42 @@ func TestHandler_PathTraversal(t *testing.T) {
 	}
 }
 
+func TestHandler_LegalDoubleDotFilenameAllowed(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/dots"); err != nil {
+		t.Fatalf("Mkdir(dots) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/dots/foo..txt", bytes.NewReader([]byte("ok"))); err != nil {
+		t.Fatalf("WriteFile(foo..txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/dav/dots/foo..txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET legal double-dot filename status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.String() != "ok" {
+		t.Fatalf("GET legal double-dot filename body = %q, want %q", w.Body.String(), "ok")
+	}
+}
+
+func TestHandler_GetDestination_AllowsDoubleDotFilename(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Header.Set("Destination", "http://localhost/dav/dst/foo..txt")
+
+	dst := handler.getDestination(req)
+
+	if dst != "/dst/foo..txt" {
+		t.Fatalf("getDestination() = %q, want %q", dst, "/dst/foo..txt")
+	}
+}
+
 func TestHandler_HeadRequest(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1324,10 +1440,11 @@ func TestHandler_DirectoryListing(t *testing.T) {
 	ctx := context.Background()
 
 	fs.Mkdir(ctx, "/listing")
+	fs.Mkdir(ctx, "/listing/nested")
 	fs.WriteFile(ctx, "/listing/file1.txt", bytes.NewReader([]byte("a")))
 	fs.WriteFile(ctx, "/listing/file2.txt", bytes.NewReader([]byte("b")))
 
-	req := httptest.NewRequest("GET", "/dav/listing/", nil)
+	req := httptest.NewRequest("GET", "/dav/listing/nested/", nil)
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -1337,12 +1454,26 @@ func TestHandler_DirectoryListing(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	if !strings.Contains(body, "file1.txt") || !strings.Contains(body, "file2.txt") {
-		t.Error("Directory listing should contain file names")
+	if !strings.Contains(body, `<a href="/dav/listing">..</a>`) {
+		t.Error("Directory listing parent link should preserve WebDAV prefix")
 	}
 
 	if !strings.Contains(body, "Index of") {
 		t.Error("Directory listing should have title")
+	}
+}
+
+func TestHandler_WriteExpectedWebDAVError_SanitizesUnexpectedError(t *testing.T) {
+	handler := NewHandler(Config{AuthType: "none"})
+	w := httptest.NewRecorder()
+
+	matched := handler.writeExpectedWebDAVError(w, errors.New("sensitive backend detail"), http.StatusConflict, errDestinationInsideSourceDirectory)
+
+	if matched {
+		t.Fatal("expected unexpected error not to be treated as client error")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected recorder to remain untouched, got status %d", w.Code)
 	}
 }
 

@@ -417,6 +417,41 @@ func TestShareStore_AccessLimitReached(t *testing.T) {
 	}
 }
 
+func TestShareStore_RecordAuthorizedAccess_EnforcesLimitAtomically(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, _ := NewShareStore(storePath)
+
+	share, _ := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+
+	accessed, err := store.RecordAuthorizedAccess(share.ID)
+	if err != nil {
+		t.Fatalf("first authorized access failed: %v", err)
+	}
+	if accessed.AccessCount != 1 {
+		t.Fatalf("expected access count 1 after first access, got %d", accessed.AccessCount)
+	}
+
+	_, err = store.RecordAuthorizedAccess(share.ID)
+	if err != ErrShareAccessLimit {
+		t.Fatalf("expected ErrShareAccessLimit on second access, got %v", err)
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if loaded.AccessCount != 1 {
+		t.Fatalf("expected access_count to stay at limit boundary, got %d", loaded.AccessCount)
+	}
+}
+
 func TestShareStore_UpdateRollbackOnSaveFailure(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
