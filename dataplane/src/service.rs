@@ -104,6 +104,10 @@ mod tests {
             cas.list_hashes().is_empty(),
             "expected failed put_file upload to leave no orphaned chunks"
         );
+        let (chunks, logical_size, unique_size, _, _, _) = cas.stats();
+        assert_eq!(chunks, 0, "expected failed upload not to leave chunk stats behind");
+        assert_eq!(logical_size, 0, "expected failed upload not to inflate logical size");
+        assert_eq!(unique_size, 0, "expected failed upload not to inflate unique size");
 
         let _ = shutdown_tx.send(());
     }
@@ -153,6 +157,7 @@ impl DataPlaneService {
         chunk_refs: &mut Vec<ChunkRef>,
         chunk_hashes: &mut Vec<String>,
         created_hashes: &mut Vec<String>,
+        logical_size_added: &mut u64,
         unique_size: &mut u64,
     ) -> Result<(), Status> {
         let put_result = self
@@ -160,6 +165,8 @@ impl DataPlaneService {
             .put_with_status(&chunk.data)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        *logical_size_added += chunk.length as u64;
 
         if !put_result.deduplicated {
             created_hashes.push(put_result.hash.clone());
@@ -179,8 +186,11 @@ impl DataPlaneService {
     async fn rollback_put_file_failure(
         &self,
         created_hashes: &[String],
+        logical_size_added: u64,
         status: Status,
     ) -> Status {
+        self.cas.rollback_logical_size(logical_size_added);
+
         if created_hashes.is_empty() {
             return status;
         }
@@ -306,6 +316,7 @@ impl DataPlane for DataPlaneService {
         let mut chunk_refs: Vec<ChunkRef> = Vec::new();
         let mut chunk_hashes: Vec<String> = Vec::new();
         let mut created_hashes: Vec<String> = Vec::new();
+        let mut logical_size_added: u64 = 0;
         let mut unique_size: u64 = 0;
 
         // Process stream incrementally
@@ -313,7 +324,14 @@ impl DataPlane for DataPlaneService {
             let req = match req {
                 Ok(req) => req,
                 Err(status) => {
-                    return Err(self.rollback_put_file_failure(&created_hashes, status).await);
+                    return Err(
+                        self.rollback_put_file_failure(
+                            &created_hashes,
+                            logical_size_added,
+                            status,
+                        )
+                        .await,
+                    );
                 }
             };
             match req.payload {
@@ -322,6 +340,7 @@ impl DataPlane for DataPlaneService {
                         return Err(
                             self.rollback_put_file_failure(
                                 &created_hashes,
+                                logical_size_added,
                                 Status::invalid_argument(
                                     "File metadata must be provided exactly once",
                                 ),
@@ -333,6 +352,7 @@ impl DataPlane for DataPlaneService {
                         return Err(
                             self.rollback_put_file_failure(
                                 &created_hashes,
+                                logical_size_added,
                                 Status::invalid_argument(
                                     "File metadata must be sent before file chunks",
                                 ),
@@ -347,6 +367,7 @@ impl DataPlane for DataPlaneService {
                         return Err(
                             self.rollback_put_file_failure(
                                 &created_hashes,
+                                logical_size_added,
                                 Status::invalid_argument(
                                     "File metadata must be sent before file chunks",
                                 ),
@@ -361,6 +382,7 @@ impl DataPlane for DataPlaneService {
                         return Err(
                             self.rollback_put_file_failure(
                                 &created_hashes,
+                                logical_size_added,
                                 Status::resource_exhausted(format!(
                                     "File too large (max: {} bytes)",
                                     MAX_FILE_SIZE
@@ -381,12 +403,18 @@ impl DataPlane for DataPlaneService {
                                 &mut chunk_refs,
                                 &mut chunk_hashes,
                                 &mut created_hashes,
+                                &mut logical_size_added,
                                 &mut unique_size,
                             )
                             .await
                         {
                             return Err(
-                                self.rollback_put_file_failure(&created_hashes, status).await,
+                                self.rollback_put_file_failure(
+                                    &created_hashes,
+                                    logical_size_added,
+                                    status,
+                                )
+                                .await,
                             );
                         }
                     }
@@ -402,6 +430,7 @@ impl DataPlane for DataPlaneService {
             return Err(
                 self.rollback_put_file_failure(
                     &created_hashes,
+                    logical_size_added,
                     Status::invalid_argument("File metadata is required"),
                 )
                 .await,
@@ -412,6 +441,7 @@ impl DataPlane for DataPlaneService {
             return Err(
                 self.rollback_put_file_failure(
                     &created_hashes,
+                    logical_size_added,
                     Status::invalid_argument("No data provided"),
                 )
                 .await,
@@ -427,11 +457,15 @@ impl DataPlane for DataPlaneService {
                     &mut chunk_refs,
                     &mut chunk_hashes,
                     &mut created_hashes,
+                    &mut logical_size_added,
                     &mut unique_size,
                 )
                 .await
             {
-                return Err(self.rollback_put_file_failure(&created_hashes, status).await);
+                return Err(
+                    self.rollback_put_file_failure(&created_hashes, logical_size_added, status)
+                        .await,
+                );
             }
         }
 
@@ -449,7 +483,10 @@ impl DataPlane for DataPlaneService {
         let manifest_json = match manifest_json {
             Ok(manifest_json) => manifest_json,
             Err(status) => {
-                return Err(self.rollback_put_file_failure(&created_hashes, status).await);
+                return Err(
+                    self.rollback_put_file_failure(&created_hashes, logical_size_added, status)
+                        .await,
+                );
             }
         };
 
@@ -462,7 +499,10 @@ impl DataPlane for DataPlaneService {
         let manifest_hash = match manifest_result {
             Ok(result) => result.hash,
             Err(status) => {
-                return Err(self.rollback_put_file_failure(&created_hashes, status).await);
+                return Err(
+                    self.rollback_put_file_failure(&created_hashes, logical_size_added, status)
+                        .await,
+                );
             }
         };
 
@@ -520,9 +560,9 @@ impl DataPlane for DataPlaneService {
                     }
                     Err(e) => {
                         let status = match e {
-                            crate::cas::CasError::NotFound(_) => {
-                                Status::not_found("File chunk not found")
-                            }
+                            crate::cas::CasError::NotFound(_) => Status::data_loss(
+                                "File chunk missing from CAS",
+                            ),
                             _ => Status::internal(e.to_string()),
                         };
                         let _ = tx.send(Err(status)).await;

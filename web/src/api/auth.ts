@@ -447,10 +447,25 @@ export async function getCurrentUser(): Promise<User | null> {
   const response = await authFetch(`${API_BASE}/auth/me`)
   
   if (!response.ok) {
-    if (response.status === 401) {
-      clearTokens()
+    if (response.status === 401 || response.status === 403) {
+      return null
     }
-    return null
+
+    let message = '获取当前用户失败'
+    let code: string | undefined
+    try {
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) {
+        message = body.error.message
+      }
+      if (body.error?.code) {
+        code = body.error.code
+      }
+    } catch {
+      // Keep the generic error when the unavailable response body is invalid.
+    }
+
+    throw new AuthError(message, response.status, code)
   }
 
   let body: AuthApiResponse<{ user: ApiUser }>

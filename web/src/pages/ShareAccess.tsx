@@ -154,8 +154,8 @@ export function ShareAccessPage() {
       return
     }
 
-  const requestId = shareInfoRequestRef.current + 1
-  shareInfoRequestRef.current = requestId
+    const requestId = shareInfoRequestRef.current + 1
+    shareInfoRequestRef.current = requestId
     setIsLoading(true)
     setError(null)
     setNeedsPassword(false)
@@ -216,9 +216,14 @@ export function ShareAccessPage() {
       return
     }
 
+    const requestId = shareInfoRequestRef.current + 1
+    shareInfoRequestRef.current = requestId
     setIsVerifying(true)
     try {
       const info = await accessShareWithPassword(id, password)
+      if (requestId !== shareInfoRequestRef.current) {
+        return
+      }
       setShareInfo(info)
       setFolderItems([])
       setListError(null)
@@ -227,6 +232,9 @@ export function ShareAccessPage() {
       setNeedsPassword(false)
       setPassword('')
     } catch (err) {
+      if (requestId !== shareInfoRequestRef.current) {
+        return
+      }
       if (err instanceof ShareError && err.isUnauthorized) {
         addToast({ title: '密码错误', color: 'danger' })
       } else {
@@ -236,16 +244,23 @@ export function ShareAccessPage() {
         }))
       }
     } finally {
-      setIsVerifying(false)
+      if (requestId === shareInfoRequestRef.current) {
+        setIsVerifying(false)
+      }
     }
   }
 
   const handleDownload = async () => {
     if (!id) return
 
+    const requestId = shareInfoRequestRef.current
+
     try {
       await downloadShare(id, { filename: shareInfo?.file_name })
     } catch (err) {
+      if (requestId !== shareInfoRequestRef.current) {
+        return
+      }
       if (err instanceof ShareError && err.isUnauthorized) {
         setIsAuthenticated(false)
         setNeedsPassword(true)
@@ -263,10 +278,14 @@ export function ShareAccessPage() {
   const handleDownloadItem = async (itemPath: string) => {
     if (!id) return
 
+    const requestId = shareInfoRequestRef.current
     const item = folderItems.find((folderItem) => folderItem.path === itemPath)
     try {
       await downloadShare(id, { filePath: itemPath, filename: item?.name })
     } catch (err) {
+      if (requestId !== shareInfoRequestRef.current) {
+        return
+      }
       if (err instanceof ShareError && err.isUnauthorized) {
         setIsAuthenticated(false)
         setNeedsPassword(true)

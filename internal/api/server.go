@@ -2247,6 +2247,10 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		var err error
 		scrubRecord, err = s.maintenance.StartScrub()
 		if err != nil {
+			if errors.Is(err, maintenance.ErrScrubAlreadyRunning) {
+				Conflict(w, "scrub is already running")
+				return
+			}
 			s.respondInternalError(w, "persist scrub start", err)
 			return
 		}

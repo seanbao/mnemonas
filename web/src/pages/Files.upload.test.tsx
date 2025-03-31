@@ -184,6 +184,16 @@ describe('FilesPage upload queue', () => {
     })
   }
 
+  const createDeferred = <T,>() => {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
+
   it('clears successful uploads after timeout', async () => {
     render(<FilesPage />)
 
@@ -246,6 +256,59 @@ describe('FilesPage upload queue', () => {
     })
 
     expect(screen.queryByText('上传完成')).toBeNull()
+  })
+
+  it('ignores stale upload completion from an older session', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const firstUpload = createDeferred<void>()
+    const secondUpload = createDeferred<void>()
+    mockUploadFile
+      .mockImplementationOnce(() => firstUpload.promise)
+      .mockImplementationOnce(() => secondUpload.promise)
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const firstFile = new File(['data1'], 'first.txt', { type: 'text/plain' })
+    const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
+    await flushUi()
+
+    expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
+    expect(screen.getByText('first.txt')).toBeTruthy()
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
+    await flushUi()
+
+    expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
+    expect(screen.getByText('second.txt')).toBeTruthy()
+    expect(screen.queryByText('first.txt')).toBeNull()
+
+    firstUpload.resolve(undefined)
+    await flushUi()
+
+    expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
+    expect(screen.getByText('second.txt')).toBeTruthy()
+    expect(screen.queryByText('上传完成')).toBeNull()
+
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+
+    expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
+    expect(screen.getByText('second.txt')).toBeTruthy()
+
+    secondUpload.resolve(undefined)
+    await flushUi()
+
+    expect(screen.getByText('上传完成')).toBeTruthy()
+    expect(screen.getByText('second.txt')).toBeTruthy()
   })
 
   it('stops folder upload when creating parent directory fails', async () => {

@@ -47,12 +47,13 @@ vi.mock('@/api/share', async () => {
 // Mock navigation
 const mockNavigate = vi.fn()
 let mockLocationPathname = '/files'
+let mockLocationState: unknown = null
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual('react-router-dom')
   return {
     ...actual,
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: mockLocationPathname }),
+    useLocation: () => ({ pathname: mockLocationPathname, search: '', state: mockLocationState }),
   }
 })
 
@@ -140,6 +141,7 @@ describe('FilesPage', () => {
     mockClipboardState.operation = null
     mockClipboardState.sourcePath = null
     mockLocationPathname = '/files'
+    mockLocationState = null
     mockClipboardState.copy.mockClear()
     mockClipboardState.cut.mockClear()
     mockClipboardState.clear.mockClear()
@@ -477,6 +479,18 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith([])
       })
+    })
+
+    it('selects a highlighted file from search navigation state', async () => {
+      mockLocationState = { highlightPath: '/photo.jpg' }
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])
+      })
+
+      expect(mockNavigate).toHaveBeenCalledWith('/files', { replace: true, state: null })
     })
 
     it('keeps remaining selections when some files disappear', async () => {
