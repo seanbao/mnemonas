@@ -127,19 +127,19 @@ export function SearchPage() {
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       if (trimmedQuery) {
-        setSearchParams({ q: query })
+        setSearchParams({ q: query }, { replace: true })
       } else {
-        setSearchParams({})
+        setSearchParams({}, { replace: true })
       }
     }
   }, [query, setSearchParams, trimmedQuery])
 
   const handleQueryChange = useCallback((value: string) => {
     if (value.trim()) {
-      setSearchParams({ q: value })
+      setSearchParams({ q: value }, { replace: true })
       return
     }
-    setSearchParams({})
+    setSearchParams({}, { replace: true })
   }, [setSearchParams])
 
   return (

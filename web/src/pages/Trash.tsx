@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -210,6 +210,8 @@ export function TrashPage() {
   const canWrite = useCanWrite()
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
+  const actionItemRef = useRef(actionItem)
+  actionItemRef.current = actionItem
 
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
@@ -343,7 +345,9 @@ export function TrashPage() {
       removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       addToast({ title: '已永久删除', color: 'success' })
-      onDeleteClose()
+      if (actionItemRef.current?.id === id) {
+        onDeleteClose()
+      }
       setActionItem((current) => current?.id === id ? null : current)
     },
     onError: (error) => {

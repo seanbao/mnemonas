@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { FilesPage } from './Files'
 import * as HeroUI from '@heroui/react'
@@ -120,6 +120,16 @@ const mockDownloadFile = vi.mocked(downloadFile)
 const mockCheckFavorites = vi.mocked(checkFavorites)
 const mockToggleFavorite = vi.mocked(toggleFavorite)
 const mockListShares = vi.mocked(listShares)
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 describe('FilesPage', () => {
   beforeEach(() => {
@@ -389,6 +399,52 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockCreateDirectory.mock.calls[0][0]).toBe('/spaced-folder')
+      })
+    })
+
+    it('keeps a newer create folder modal open when an older request resolves', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstCreate = createDeferred<void>()
+      mockCreateDirectory.mockImplementation((path) => {
+        if (path === '/first-folder') {
+          return firstCreate.promise
+        }
+        return Promise.resolve(undefined)
+      })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新建空间')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('新建空间'))
+
+      const input = await screen.findByPlaceholderText('请输入文件夹名称')
+      await user.type(input, 'first-folder')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockCreateDirectory.mock.calls[0][0]).toBe('/first-folder')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('新建文件夹')).toBeFalsy()
+      })
+
+      await user.click(screen.getByText('新建空间'))
+
+      const reopenedInput = await screen.findByPlaceholderText('请输入文件夹名称')
+      await user.clear(reopenedInput)
+      await user.type(reopenedInput, 'second-folder')
+
+      firstCreate.resolve(undefined)
+
+      await waitFor(() => {
+        expect(screen.getByText('新建文件夹')).toBeTruthy()
+        expect(screen.getByDisplayValue('second-folder')).toBeTruthy()
       })
     })
 
@@ -849,6 +905,63 @@ describe('FilesPage', () => {
           description: '共 2 个项目失败',
           color: 'danger',
         })
+      })
+    })
+
+    it('keeps a newer rename modal open when an older rename request resolves', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstRename = createDeferred<void>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockMoveFile.mockImplementation((from) => {
+        if (from === '/photo.jpg') {
+          return firstRename.promise
+        }
+        return Promise.resolve(undefined)
+      })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, 'photo-renamed.jpg')
+      await user.click(screen.getByRole('button', { name: '确定' }))
+
+      await waitFor(() => {
+        expect(mockMoveFile).toHaveBeenCalledWith('/photo.jpg', '/photo-renamed.jpg')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('重命名')).toBeFalsy()
+      })
+
+      mockFilesStoreState.selectedFiles.clear()
+      mockFilesStoreState.selectedFiles.add('/documents')
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const reopenedRenameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(reopenedRenameInput)
+      await user.type(reopenedRenameInput, 'documents-renamed')
+
+      await act(async () => {
+        firstRename.resolve(undefined)
+        await firstRename.promise
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('重命名')).toBeTruthy()
+        expect(screen.getByDisplayValue('documents-renamed')).toBeTruthy()
       })
     })
   })

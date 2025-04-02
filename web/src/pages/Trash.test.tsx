@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { TrashPage } from './Trash'
 import * as HeroUI from '@heroui/react'
@@ -58,6 +58,16 @@ const mockListTrash = vi.mocked(listTrash)
 const mockRestoreFromTrash = vi.mocked(restoreFromTrash)
 const mockDeleteFromTrash = vi.mocked(deleteFromTrash)
 const mockEmptyTrash = vi.mocked(emptyTrash)
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 describe('TrashPage', () => {
   const pendingTrashRefetch = () => new Promise<Awaited<ReturnType<typeof listTrash>>>(() => {})
@@ -485,6 +495,48 @@ describe('TrashPage', () => {
           description: '文件系统当前不可用，请稍后重试',
           color: 'warning',
         })
+      })
+    })
+
+    it('keeps a newer delete modal open when an older delete request resolves', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<void>()
+      mockDeleteFromTrash.mockImplementationOnce(() => pendingDelete.promise)
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+        expect(screen.getByText('deleted-folder')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
+
+      await waitFor(() => {
+        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-folder' }))
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '取消' })).toBeTruthy()
+        expect(screen.getAllByText('deleted-folder').length).toBeGreaterThan(1)
+      })
+
+      await act(async () => {
+        pendingDelete.resolve(undefined)
+      })
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '取消' })).toBeTruthy()
+        expect(screen.getAllByText('deleted-folder').length).toBeGreaterThan(1)
       })
     })
   })

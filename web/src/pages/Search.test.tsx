@@ -206,6 +206,23 @@ describe('SearchPage', () => {
       expect(searchApi.searchFiles).not.toHaveBeenCalled()
     })
 
+    it('keeps live search updates from adding browser history entries for every keystroke', async () => {
+      const user = userEvent.setup()
+      renderSearchPage()
+
+      const initialHistoryLength = window.history.length
+      const input = screen.getByPlaceholderText('输入文件名搜索...')
+
+      await user.type(input, 'test')
+      await user.keyboard('{Enter}')
+
+      await waitFor(() => {
+        expect(searchApi.searchFiles).toHaveBeenCalledWith('test')
+      })
+
+      expect(window.history.length).toBe(initialHistoryLength)
+    })
+
     it('shows unavailable state when search backend is unavailable', async () => {
       vi.mocked(searchApi.searchFiles).mockRejectedValue(new SearchError(
         'filesystem not initialized',

@@ -162,6 +162,7 @@ function ErrorList({ errors }: { errors: ScrubError[] }) {
 export default function Maintenance() {
   const queryClient = useQueryClient()
   const [isExporting, setIsExporting] = useState(false)
+  const [isAwaitingRunningState, setIsAwaitingRunningState] = useState(false)
   
   // Fetch last scrub result
   const { data: scrubResult, isLoading, error, refetch } = useQuery({
@@ -199,12 +200,20 @@ export default function Maintenance() {
   const scrubMutation = useMutation({
     mutationFn: () => runScrub(),
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['scrub-result'] })
+      if (result.status === 'running') {
+        void queryClient.refetchQueries({ queryKey: ['scrub-result'], type: 'active' }).finally(() => {
+          setIsAwaitingRunningState(false)
+        })
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ['scrub-result'] })
+        setIsAwaitingRunningState(false)
+      }
 
       const title = result.status === 'running' ? '数据校验已启动' : '数据校验已完成'
       addToast({ title, color: 'success' })
     },
     onError: (error: unknown) => {
+      setIsAwaitingRunningState(false)
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
         '启动校验失败',
@@ -216,6 +225,9 @@ export default function Maintenance() {
         description: errorPresentation.description,
         color: errorPresentation.color,
       })
+    },
+    onMutate: () => {
+      setIsAwaitingRunningState(true)
     },
   })
   
@@ -242,7 +254,7 @@ export default function Maintenance() {
     }
   }
   
-  const isRunning = scrubResult?.status === 'running'
+  const isRunning = scrubResult?.status === 'running' || isAwaitingRunningState
   
   return (
     <div className="h-full overflow-auto custom-scrollbar">

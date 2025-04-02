@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -61,6 +61,7 @@ export function MoveDialog({
   const [targetPath, setTargetPath] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [pendingFiles, setPendingFiles] = useState(files)
+  const dialogSessionRef = useRef(0)
 
   const title = mode === 'move' ? '移动到' : '复制到'
   const actionText = mode === 'move' ? '移动' : '复制'
@@ -69,12 +70,18 @@ export function MoveDialog({
   // Exclude paths that cannot be moved into (self and descendants)
   const excludePaths = pendingFiles.map(f => f.path)
 
-  const resetState = useCallback(() => {
-    setPendingFiles(files)
+  const resetState = useCallback((nextFiles: typeof files) => {
+    setPendingFiles(nextFiles)
     setTargetPath(null)
     setIsPickerOpen(false)
     setIsProcessing(false)
-  }, [files])
+  }, [])
+
+  useEffect(() => {
+    if (!isOpen) return
+    dialogSessionRef.current += 1
+    resetState(files)
+  }, [files, isOpen, resetState])
 
   const handleSelectTarget = useCallback((path: string) => {
     setTargetPath(path)
@@ -84,15 +91,20 @@ export function MoveDialog({
   const handleConfirm = useCallback(async () => {
     if (!targetPath) return
 
+    const sessionId = dialogSessionRef.current
+    const filesToProcess = pendingFiles
+    const sourcePath = currentPath
+    const destinationPath = targetPath
+
     setIsProcessing(true)
     let successCount = 0
     let errorCount = 0
-    const failedFiles: typeof pendingFiles = []
+    const failedFiles: typeof filesToProcess = []
     const failedErrors: unknown[] = []
 
-    for (const file of pendingFiles) {
+    for (const file of filesToProcess) {
       const fileName = file.path.split('/').pop() || ''
-      const destPath = targetPath === '/' ? `/${fileName}` : `${targetPath}/${fileName}`
+      const destPath = destinationPath === '/' ? `/${fileName}` : `${destinationPath}/${fileName}`
 
       try {
         if (mode === 'move') {
@@ -109,13 +121,15 @@ export function MoveDialog({
     }
 
     // Invalidate queries
-    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-    queryClient.invalidateQueries({ queryKey: ['files', targetPath] })
+    queryClient.invalidateQueries({ queryKey: ['files', sourcePath] })
+    queryClient.invalidateQueries({ queryKey: ['files', destinationPath] })
 
     // Show result
     if (errorCount === 0) {
-      resetState()
-      onClose()
+      if (dialogSessionRef.current === sessionId) {
+        resetState(files)
+        onClose()
+      }
       addToast({
         title: `成功${actionText} ${successCount} 个项目`,
         color: 'success',
@@ -123,8 +137,10 @@ export function MoveDialog({
       return
     }
 
-    setPendingFiles(failedFiles)
-    setIsProcessing(false)
+    if (dialogSessionRef.current === sessionId) {
+      setPendingFiles(failedFiles)
+      setIsProcessing(false)
+    }
 
     if (successCount > 0) {
       addToast({
@@ -135,12 +151,12 @@ export function MoveDialog({
     } else {
       addToast(getMoveDialogFailureToast(mode, successCount, errorCount, failedErrors))
     }
-  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText, resetState])
+  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText, files, resetState])
 
   const handleClose = useCallback(() => {
-    resetState()
+    resetState(files)
     onClose()
-  }, [onClose, resetState])
+  }, [files, onClose, resetState])
 
   return (
     <>
