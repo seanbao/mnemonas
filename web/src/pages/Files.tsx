@@ -862,6 +862,11 @@ export function FilesPage() {
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
+  const newFolderSessionRef = useRef(0)
+  const currentNewFolderNameRef = useRef('')
+  const renameSessionRef = useRef(0)
+  const currentRenameValueRef = useRef('')
+  const currentRenameFileRef = useRef<FileItem | null>(null)
   const lastSelectedIndexRef = useRef<number | null>(null)
   const appliedHighlightedPathRef = useRef<string | null>(null)
   const [multiSelectHintVisible, setMultiSelectHintVisible] = useState(false)
@@ -951,6 +956,18 @@ export function FilesPage() {
     setFocusedIndex(-1)
   }, [currentPath, clearSelection])
 
+  useEffect(() => {
+    currentNewFolderNameRef.current = newFolderName
+  }, [newFolderName])
+
+  useEffect(() => {
+    currentRenameValueRef.current = renameValue
+  }, [renameValue])
+
+  useEffect(() => {
+    currentRenameFileRef.current = actionFile
+  }, [actionFile])
+
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['files', currentPath],
     queryFn: () => listFiles(currentPath),
@@ -973,11 +990,16 @@ export function FilesPage() {
   })
   
   const createFolderMutation = useMutation({
-    mutationFn: createDirectory,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-      onNewFolderClose()
-      setNewFolderName('')
+    mutationFn: ({ path }: { path: string; directoryPath: string; folderName: string; sessionId: number }) => createDirectory(path),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
+      if (
+        newFolderSessionRef.current === variables.sessionId
+        && currentNewFolderNameRef.current.trim() === variables.folderName
+      ) {
+        onNewFolderClose()
+        setNewFolderName('')
+      }
       addToast({ title: '文件夹创建成功', color: 'success' })
     },
     onError: (error) => {
@@ -989,11 +1011,17 @@ export function FilesPage() {
   })
   
   const renameMutation = useMutation({
-    mutationFn: ({ from, to }: { from: string; to: string }) => moveFile(from, to),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-      onRenameClose()
-      setActionFile(null)
+    mutationFn: ({ from, to }: { from: string; to: string; directoryPath: string; targetPath: string; submittedName: string; sessionId: number }) => moveFile(from, to),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
+      if (
+        renameSessionRef.current === variables.sessionId
+        && currentRenameFileRef.current?.path === variables.targetPath
+        && currentRenameValueRef.current.trim() === variables.submittedName
+      ) {
+        onRenameClose()
+        setActionFile(null)
+      }
       addToast({ title: '重命名成功', color: 'success' })
     },
     onError: (error) => {
@@ -1194,7 +1222,12 @@ export function FilesPage() {
     const trimmedFolderName = newFolderName.trim()
     if (!trimmedFolderName) return
     const path = currentPath === '/' ? `/${trimmedFolderName}` : `${currentPath}/${trimmedFolderName}`
-    createFolderMutation.mutate(path)
+    createFolderMutation.mutate({
+      path,
+      directoryPath: currentPath,
+      folderName: trimmedFolderName,
+      sessionId: newFolderSessionRef.current,
+    })
   }, [canWrite, newFolderName, currentPath, createFolderMutation])
 
   const handleRename = useCallback(() => {
@@ -1204,7 +1237,14 @@ export function FilesPage() {
     if (trimmedRenameValue === actionFile.name) return
     const parentPath = actionFile.path.substring(0, actionFile.path.lastIndexOf('/')) || '/'
     const newPath = parentPath === '/' ? `/${trimmedRenameValue}` : `${parentPath}/${trimmedRenameValue}`
-    renameMutation.mutate({ from: actionFile.path, to: newPath })
+    renameMutation.mutate({
+      from: actionFile.path,
+      to: newPath,
+      directoryPath: currentPath,
+      targetPath: actionFile.path,
+      submittedName: trimmedRenameValue,
+      sessionId: renameSessionRef.current,
+    })
   }, [canWrite, actionFile, renameValue, renameMutation])
 
   const handleDelete = useCallback(() => {
@@ -1215,9 +1255,15 @@ export function FilesPage() {
     setActionFile(null)
   }, [canWrite, actionFile, deleteMutation, onDeleteClose])
 
+  const handleOpenNewFolderModal = useCallback(() => {
+    newFolderSessionRef.current += 1
+    onNewFolderOpen()
+  }, [onNewFolderOpen])
+
   // Action handlers for context menu
   const handleOpenRenameModal = useCallback((file: FileItem) => {
     if (!canWrite) return
+    renameSessionRef.current += 1
     setActionFile(file)
     setRenameValue(file.name)
     onRenameOpen()
@@ -1794,7 +1840,7 @@ export function FilesPage() {
     onArrowDown: handleKeyboardArrowDown,
     onArrowUp: handleKeyboardArrowUp,
     onRefresh: handleKeyboardRefresh,
-    onNewFolder: canWrite ? onNewFolderOpen : undefined,
+    onNewFolder: canWrite ? handleOpenNewFolderModal : undefined,
   })
 
   // Determine active file for preview (prioritize activeFilePath, then single selection)
@@ -2201,7 +2247,7 @@ export function FilesPage() {
                       variant="bordered" 
                       className="btn-secondary btn-md rounded-xl"
                       startContent={<FolderPlus size={16} />}
-                      onPress={onNewFolderOpen}
+                      onPress={handleOpenNewFolderModal}
                     >
                       新建空间
                     </Button>

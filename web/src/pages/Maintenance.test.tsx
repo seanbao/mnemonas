@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { act } from '@testing-library/react'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import Maintenance from './Maintenance'
@@ -37,6 +38,16 @@ import { ApiError, getScrubResult, runScrub, downloadDiagnosticsExport } from '@
 const mockGetScrubResult = getScrubResult as ReturnType<typeof vi.fn>
 const mockRunScrub = runScrub as ReturnType<typeof vi.fn>
 const mockDownloadDiagnosticsExport = downloadDiagnosticsExport as ReturnType<typeof vi.fn>
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 describe('MaintenancePage', () => {
   const mockCompletedResult = {
@@ -294,6 +305,48 @@ describe('MaintenancePage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '数据校验已完成',
         color: 'success',
+      })
+    })
+
+    it('keeps the start button disabled until the running result refresh completes', async () => {
+      const user = userEvent.setup()
+      const runningRefresh = createDeferred<typeof mockRunningResult>()
+
+      mockGetScrubResult
+        .mockResolvedValueOnce(mockNoResult)
+        .mockImplementationOnce(() => runningRefresh.promise)
+      mockRunScrub.mockResolvedValue(mockRunningResult)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('开始校验')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('开始校验'))
+
+      await waitFor(() => {
+        expect(mockRunScrub).toHaveBeenCalledTimes(1)
+        const runningButtons = screen.getAllByText('校验中...')
+        expect(runningButtons.length).toBeGreaterThan(0)
+        const startButton = runningButtons.find((button) => button.closest('button'))?.closest('button') as HTMLButtonElement | undefined
+        expect(startButton?.disabled).toBe(true)
+      })
+
+      const runningButtons = screen.getAllByText('校验中...')
+      const pendingStartButton = runningButtons.find((button) => button.closest('button'))?.closest('button') as HTMLButtonElement | undefined
+      if (pendingStartButton) {
+        await user.click(pendingStartButton)
+      }
+      expect(mockRunScrub).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        runningRefresh.resolve(mockRunningResult)
+        await runningRefresh.promise
+      })
+
+      await waitFor(() => {
+        expect(mockGetScrubResult).toHaveBeenCalledTimes(2)
       })
     })
   })

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Button,
@@ -194,9 +194,23 @@ export function DirectoryPicker({
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [isCreating, setIsCreating] = useState(false)
+  const pickerSessionRef = useRef(0)
+  const currentSelectedPathRef = useRef(normalizeInitialPath(initialPath))
+  const currentNewFolderNameRef = useRef('')
+  const currentOpenRef = useRef(isOpen)
 
   useEffect(() => {
+    currentSelectedPathRef.current = selectedPath
+  }, [selectedPath])
+
+  useEffect(() => {
+    currentNewFolderNameRef.current = newFolderName
+  }, [newFolderName])
+
+  useEffect(() => {
+    currentOpenRef.current = isOpen
     if (!isOpen) return
+    pickerSessionRef.current += 1
     setSelectedPath(normalizeInitialPath(initialPath))
     setExpandedPaths(new Set([rootPath]))
     setLoadedPaths(new Set())
@@ -214,7 +228,7 @@ export function DirectoryPicker({
   })
 
   useEffect(() => {
-    if (!rootData?.files) {
+    if (!isOpen || !rootData?.files) {
       return
     }
 
@@ -224,7 +238,7 @@ export function DirectoryPicker({
       return next
     })
     setLoadedPaths((prev) => new Set(prev).add(rootPath))
-  }, [rootData, rootPath])
+  }, [isOpen, rootData, rootPath])
 
   const handleRetryRoot = useCallback(async () => {
   const result = await refetchRoot()
@@ -238,9 +252,13 @@ export function DirectoryPicker({
   // Load expanded directories
   const loadDirectory = useCallback(async (path: string) => {
     if (loadedPaths.has(path)) return true
+    const sessionId = pickerSessionRef.current
     
     try {
       const data = await listFiles(path)
+      if (pickerSessionRef.current !== sessionId || !currentOpenRef.current) {
+        return false
+      }
       setFolderContents(prev => new Map(prev).set(path, data.files))
       setLoadedPaths(prev => new Set(prev).add(path))
       return true
@@ -291,33 +309,47 @@ export function DirectoryPicker({
   }, [buildTree, folderContents, rootPath])
 
   const handleCreateFolder = useCallback(async () => {
-    if (!newFolderName.trim()) return
+    const trimmedFolderName = newFolderName.trim()
+    if (!trimmedFolderName) return
+
+    const sessionId = pickerSessionRef.current
+    const parentPath = selectedPath
     
     setIsCreating(true)
     try {
-      const newPath = selectedPath === '/' 
-        ? `/${newFolderName}` 
-        : `${selectedPath}/${newFolderName}`
+      const newPath = parentPath === '/' 
+        ? `/${trimmedFolderName}` 
+        : `${parentPath}/${trimmedFolderName}`
       await createDirectory(newPath)
       
       // Reload parent directory
-      const parentFiles = await listFiles(selectedPath)
-      setFolderContents(prev => new Map(prev).set(selectedPath, parentFiles.files))
-      setLoadedPaths(prev => new Set(prev).add(selectedPath))
-      
-      // Select the new folder
-      setSelectedPath(newPath)
-      setExpandedPaths(prev => new Set(prev).add(selectedPath))
-      
-      setNewFolderName('')
-      setIsCreatingFolder(false)
+      const parentFiles = await listFiles(parentPath)
+
+      if (
+        pickerSessionRef.current === sessionId
+        && currentOpenRef.current
+        && currentSelectedPathRef.current === parentPath
+        && currentNewFolderNameRef.current.trim() === trimmedFolderName
+      ) {
+        setFolderContents(prev => new Map(prev).set(parentPath, parentFiles.files))
+        setLoadedPaths(prev => new Set(prev).add(parentPath))
+        
+        // Select the new folder
+        setSelectedPath(newPath)
+        setExpandedPaths(prev => new Set(prev).add(parentPath))
+        
+        setNewFolderName('')
+        setIsCreatingFolder(false)
+      }
     } catch (error) {
       addToast(getDirectoryPickerErrorPresentation(error, {
         unavailable: '创建目录暂不可用',
         failure: '创建文件夹失败',
       }))
     } finally {
-      setIsCreating(false)
+      if (pickerSessionRef.current === sessionId && currentOpenRef.current) {
+        setIsCreating(false)
+      }
     }
   }, [newFolderName, selectedPath])
 

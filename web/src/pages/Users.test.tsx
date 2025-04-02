@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
@@ -74,6 +74,16 @@ const mockUsers = [
     used_bytes: 0,
   },
 ]
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -280,6 +290,44 @@ describe('UsersPage', () => {
         expect(createButton).toBeDisabled()
       })
     })
+
+    it('keeps a newer create form open when an older create request resolves', async () => {
+      const user = userEvent.setup()
+      const pendingCreate = createDeferred<{ success: boolean }>()
+      vi.mocked(usersApi.createUser).mockImplementationOnce(() => pendingCreate.promise)
+
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+      await user.type(screen.getByLabelText(/用户名/i), 'alice')
+      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      await user.type(screen.getByLabelText(/邮箱/i), 'alice@example.com')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(vi.mocked(usersApi.createUser).mock.calls[0]?.[0]).toMatchObject({
+          username: 'alice',
+          password: 'password123',
+          email: 'alice@example.com',
+        })
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+      await user.type(screen.getByLabelText(/用户名/i), 'bob')
+      await user.type(screen.getByLabelText(/密码/i), 'password456')
+      await user.type(screen.getByLabelText(/邮箱/i), 'bob@example.com')
+
+      await act(async () => {
+        pendingCreate.resolve({ success: true })
+      })
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '创建' })).toBeInTheDocument()
+        expect(screen.getByLabelText(/用户名/i)).toHaveValue('bob')
+        expect(screen.getByLabelText(/邮箱/i)).toHaveValue('bob@example.com')
+      })
+    })
   })
 
   describe('delete user', () => {
@@ -340,6 +388,53 @@ describe('UsersPage', () => {
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'admin 用户操作' })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'testuser 用户操作' })).toBeInTheDocument()
+      })
+    })
+
+    it('keeps reset-password modal target after an older delete request resolves', async () => {
+      const user = userEvent.setup()
+      const pendingDelete = createDeferred<{ success: boolean }>()
+      vi.mocked(usersApi.deleteUser).mockImplementationOnce(() => pendingDelete.promise)
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: '删除' }))
+
+      await waitFor(() => {
+        expect(vi.mocked(usersApi.deleteUser).mock.calls[0]?.[0]).toBe('user-2')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+      await user.click(screen.getByRole('button', { name: 'guest 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+
+      await user.type(screen.getByLabelText('新密码'), 'guestpass123')
+
+      await act(async () => {
+        pendingDelete.resolve({ success: true })
+      })
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+        expect(screen.getByLabelText('新密码')).toHaveValue('guestpass123')
       })
     })
   })

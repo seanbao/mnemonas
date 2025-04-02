@@ -127,6 +127,16 @@ describe('SettingsPage', () => {
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
   })
 
+  const createDeferred = <T,>() => {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
+
   const openTab = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
 	await waitFor(() => {
 		expect(screen.getByRole('tab', { name: label })).toBeTruthy()
@@ -322,7 +332,7 @@ describe('SettingsPage', () => {
           webdav: expect.objectContaining({
             auth_type: 'none',
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -370,7 +380,7 @@ describe('SettingsPage', () => {
             timeout: '45s',
             max_retries: 5,
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -397,7 +407,7 @@ describe('SettingsPage', () => {
             enabled: true,
             base_url: 'https://share.example.com',
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -437,7 +447,7 @@ describe('SettingsPage', () => {
               cert_dir: '/etc/mnemonas/tls',
             }),
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -498,7 +508,7 @@ describe('SettingsPage', () => {
             webhook_method: 'GET',
             webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'],
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -522,7 +532,7 @@ describe('SettingsPage', () => {
           trash: expect.objectContaining({
             enabled: false,
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -570,7 +580,7 @@ describe('SettingsPage', () => {
             auto_versioned_filenames: ['README', 'Dockerfile', 'Cargo.toml'],
             max_versioned_size: 268435456,
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -603,7 +613,7 @@ describe('SettingsPage', () => {
         retention_days: 7,
         max_size: 2147483648,
       }),
-      }), expect.anything())
+      }))
     })
     })
   })
@@ -627,7 +637,7 @@ describe('SettingsPage', () => {
           favorites: expect.objectContaining({
             enabled: false,
           }),
-        }), expect.anything())
+        }))
       })
     })
   })
@@ -662,7 +672,7 @@ describe('SettingsPage', () => {
             write_timeout: '90s',
             idle_timeout: '5m',
           }),
-        }), expect.anything())
+        }))
       })
     })
 
@@ -802,6 +812,68 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByDisplayValue('9000')).toBeTruthy()
+      })
+    })
+
+    it('preserves newer local edits when an older save resolves', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstSave = createDeferred<{ success: boolean; message: string }>()
+
+      mockGetSettings
+        .mockResolvedValueOnce(defaultSettingsResponse)
+        .mockResolvedValueOnce({
+          data: {
+            ...defaultSettingsResponse.data,
+            server: {
+              ...defaultSettingsResponse.data.server,
+              port: 9000,
+            },
+          },
+        })
+      mockUpdateSettings
+        .mockImplementationOnce(() => firstSave.promise)
+        .mockResolvedValueOnce({ success: true, message: 'ok' })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('8080')).toBeTruthy()
+      })
+
+      const input = screen.getByDisplayValue('8080')
+      await user.clear(input)
+      await user.type(input, '9000')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          server: expect.objectContaining({
+            port: 9000,
+          }),
+        }))
+      })
+
+      await user.clear(input)
+      await user.type(input, '9001')
+      expect(screen.getByDisplayValue('9001')).toBeTruthy()
+
+      await act(async () => {
+        firstSave.resolve({ success: true, message: 'ok' })
+      })
+
+      await waitFor(() => {
+        expect(mockGetSettings).toHaveBeenCalledTimes(2)
+        expect(screen.getByDisplayValue('9001')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+          server: expect.objectContaining({
+            port: 9001,
+          }),
+        }))
       })
     })
 

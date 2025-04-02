@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
@@ -45,6 +45,15 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
 
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
+
+function shallowEqualStringRecord<T extends Record<string, string>>(left: T, right: T): boolean {
+  const leftKeys = Object.keys(left)
+  if (leftKeys.length !== Object.keys(right).length) {
+    return false
+  }
+
+  return leftKeys.every((key) => left[key] === right[key])
+}
 
 function getUsersLoadErrorPresentation(error: unknown): {
   title: string
@@ -249,12 +258,21 @@ export function UsersPage() {
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isResetOpen, onOpen: onResetOpen, onClose: onResetClose } = useDisclosure()
 
-  const [actionUser, setActionUser] = useState<User | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<User | null>(null)
+  const [resetTarget, setResetTarget] = useState<User | null>(null)
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newEmail, setNewEmail] = useState('')
   const [newRole, setNewRole] = useState<'admin' | 'user' | 'guest'>('user')
   const [resetPassword, setResetPassword] = useState('')
+  const createSessionRef = useRef(0)
+  const createDraftRef = useRef({ username: '', password: '', email: '', role: 'user' })
+  createDraftRef.current = {
+    username: newUsername,
+    password: newPassword,
+    email: newEmail,
+    role: newRole,
+  }
 
   const { data, isLoading, isRefetching, error, refetch } = useQuery({
     queryKey: ['users'],
@@ -262,11 +280,20 @@ export function UsersPage() {
   })
 
   const createMutation = useMutation({
-    mutationFn: createUser,
-    onSuccess: () => {
+    mutationFn: ({ request }: {
+      request: Parameters<typeof createUser>[0]
+      submittedDraft: typeof createDraftRef.current
+      createSession: number
+    }) => createUser(request),
+    onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
-      onCreateClose()
-      resetCreateForm()
+      if (
+        createSessionRef.current === variables.createSession
+        && shallowEqualStringRecord(createDraftRef.current, variables.submittedDraft)
+      ) {
+        onCreateClose()
+        resetCreateForm()
+      }
       addToast({ title: '用户创建成功', color: 'success' })
     },
     onError: (error) => {
@@ -282,7 +309,7 @@ export function UsersPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
       onDeleteClose()
-      setActionUser(null)
+      setDeleteTarget(null)
       addToast({ title: '用户已删除', color: 'success' })
     },
     onError: (error) => {
@@ -299,7 +326,7 @@ export function UsersPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
       onResetClose()
-      setActionUser(null)
+      setResetTarget(null)
       setResetPassword('')
       addToast({ title: '密码已重置', color: 'success' })
     },
@@ -333,6 +360,17 @@ export function UsersPage() {
     setNewRole('user')
   }, [])
 
+  const handleOpenCreateModal = useCallback(() => {
+    createSessionRef.current += 1
+    onCreateOpen()
+  }, [onCreateOpen])
+
+  const handleCloseCreateModal = useCallback(() => {
+    createSessionRef.current += 1
+    onCreateClose()
+    resetCreateForm()
+  }, [onCreateClose, resetCreateForm])
+
   const handleCreate = useCallback(() => {
     if (!newUsername.trim() || !newPassword.trim()) {
       addToast({ title: '请输入用户名和密码', color: 'warning' })
@@ -343,20 +381,24 @@ export function UsersPage() {
       return
     }
     createMutation.mutate({
-      username: newUsername.trim(),
-      password: newPassword,
-      email: newEmail.trim() || undefined,
-      role: newRole,
+      request: {
+        username: newUsername.trim(),
+        password: newPassword,
+        email: newEmail.trim() || undefined,
+        role: newRole,
+      },
+      submittedDraft: { ...createDraftRef.current },
+      createSession: createSessionRef.current,
     })
   }, [newUsername, newPassword, newEmail, newRole, createMutation])
 
   const handleDelete = useCallback(() => {
-    if (!actionUser) return
-    deleteMutation.mutate(actionUser.id)
-  }, [actionUser, deleteMutation])
+    if (!deleteTarget) return
+    deleteMutation.mutate(deleteTarget.id)
+  }, [deleteTarget, deleteMutation])
 
   const handleResetPassword = useCallback(() => {
-    if (!actionUser) return
+    if (!resetTarget) return
     if (!resetPassword.trim()) {
       addToast({ title: '请输入新密码', color: 'warning' })
       return
@@ -365,16 +407,16 @@ export function UsersPage() {
       addToast({ title: '新密码长度至少为 8 位', color: 'warning' })
       return
     }
-    resetPasswordMutation.mutate({ userId: actionUser.id, password: resetPassword })
-  }, [actionUser, resetPassword, resetPasswordMutation])
+    resetPasswordMutation.mutate({ userId: resetTarget.id, password: resetPassword })
+  }, [resetTarget, resetPassword, resetPasswordMutation])
 
   const handleOpenDeleteModal = useCallback((user: User) => {
-    setActionUser(user)
+    setDeleteTarget(user)
     onDeleteOpen()
   }, [onDeleteOpen])
 
   const handleOpenResetModal = useCallback((user: User) => {
-    setActionUser(user)
+    setResetTarget(user)
     setResetPassword('')
     onResetOpen()
   }, [onResetOpen])
@@ -423,7 +465,7 @@ export function UsersPage() {
             <Button
               className="bg-accent-primary text-white rounded-xl"
               startContent={<UserPlus size={16} />}
-              onPress={onCreateOpen}
+              onPress={handleOpenCreateModal}
             >
               添加用户
             </Button>
@@ -504,10 +546,7 @@ export function UsersPage() {
       {/* Create User Modal */}
       <Modal
         isOpen={isCreateOpen}
-        onClose={() => {
-          onCreateClose()
-          resetCreateForm()
-        }}
+        onClose={handleCloseCreateModal}
         size="md"
         placement="center"
         classNames={{
@@ -608,10 +647,7 @@ export function UsersPage() {
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
               variant="flat"
-              onPress={() => {
-                onCreateClose()
-                resetCreateForm()
-              }}
+              onPress={handleCloseCreateModal}
               className="text-default-600 rounded-xl"
             >
               取消
@@ -634,7 +670,7 @@ export function UsersPage() {
         isOpen={isDeleteOpen}
         onClose={() => {
           onDeleteClose()
-          setActionUser(null)
+          setDeleteTarget(null)
         }}
         size="md"
         placement="center"
@@ -656,7 +692,7 @@ export function UsersPage() {
           </ModalHeader>
           <ModalBody className="px-6 py-4">
             <p className="text-default-600">
-              确定要删除用户 <strong className="text-foreground">{actionUser?.username}</strong> 吗？
+              确定要删除用户 <strong className="text-foreground">{deleteTarget?.username}</strong> 吗？
             </p>
             <p className="text-xs text-default-500 mt-2">
               此操作不可逆，该用户的所有数据将被保留但无法访问。
@@ -667,7 +703,7 @@ export function UsersPage() {
               variant="flat"
               onPress={() => {
                 onDeleteClose()
-                setActionUser(null)
+                setDeleteTarget(null)
               }}
               className="text-default-600 rounded-xl"
             >
@@ -690,7 +726,7 @@ export function UsersPage() {
         isOpen={isResetOpen}
         onClose={() => {
           onResetClose()
-          setActionUser(null)
+          setResetTarget(null)
           setResetPassword('')
         }}
         size="md"
@@ -708,7 +744,7 @@ export function UsersPage() {
             </div>
             <div>
               <h3 className="text-lg font-semibold text-foreground">重置密码</h3>
-              <p className="text-xs text-default-500 font-normal">为用户 <strong>{actionUser?.username}</strong> 设置新密码</p>
+              <p className="text-xs text-default-500 font-normal">为用户 <strong>{resetTarget?.username}</strong> 设置新密码</p>
             </div>
           </ModalHeader>
           <ModalBody className="px-6 py-4">
@@ -736,7 +772,7 @@ export function UsersPage() {
               variant="flat"
               onPress={() => {
                 onResetClose()
-                setActionUser(null)
+                setResetTarget(null)
                 setResetPassword('')
               }}
               className="text-default-600 rounded-xl"

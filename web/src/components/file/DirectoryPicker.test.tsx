@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { DirectoryPicker } from './DirectoryPicker'
@@ -49,6 +49,16 @@ import { ApiError, listFiles, createDirectory } from '@/api/files'
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 function renderPicker(props?: Partial<React.ComponentProps<typeof DirectoryPicker>>) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -63,11 +73,14 @@ function renderPicker(props?: Partial<React.ComponentProps<typeof DirectoryPicke
     onSelect: vi.fn(),
   }
 
-  return render(
+  return {
+    queryClient,
+    ...render(
     <QueryClientProvider client={queryClient}>
       <DirectoryPicker {...defaultProps} {...props} />
     </QueryClientProvider>
-  )
+    ),
+  }
 }
 
 describe('DirectoryPicker', () => {
@@ -312,6 +325,141 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('主目录')).toBeTruthy()
       expect(screen.getByText('/tester/projects')).toBeTruthy()
       expect(screen.getByText('docs')).toBeTruthy()
+    })
+  })
+
+  it('keeps a reopened picker focused on the new path when an older create request resolves', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const pendingCreate = createDeferred<void>()
+    mockListFiles.mockImplementation(async (path) => {
+      if (path === '/') {
+        return {
+          path: '/',
+          files: [
+            { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+            { name: 'old', path: '/old', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+          ],
+        }
+      }
+
+      return { path: '/docs', files: [] }
+    })
+    mockCreateDirectory.mockImplementation((path) => {
+      if (path === '/old') {
+        return pendingCreate.promise
+      }
+      return Promise.resolve(undefined)
+    })
+
+    const view = renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'old')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockCreateDirectory).toHaveBeenCalledWith('/old')
+    })
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <DirectoryPicker isOpen={false} onClose={vi.fn()} onSelect={vi.fn()} />
+      </QueryClientProvider>,
+    )
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <DirectoryPicker isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} initialPath="/docs" />
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('/docs')).toBeTruthy()
+    })
+
+    await act(async () => {
+      pendingCreate.resolve(undefined)
+      await pendingCreate.promise
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('/docs')).toBeTruthy()
+      expect(screen.queryAllByText('/old')).toHaveLength(0)
+    })
+  })
+
+  it('reloads a directory after reopen instead of using a stale older expansion result', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const firstLoad = createDeferred<{ path: string; files: { name: string; path: string; isDir: boolean; size: number; modTime: string }[] }>()
+    let docsLoadCount = 0
+    mockListFiles.mockImplementation((path) => {
+      if (path === '/docs') {
+        docsLoadCount += 1
+        if (docsLoadCount === 1) {
+          return firstLoad.promise as ReturnType<typeof listFiles>
+        }
+        return Promise.resolve({
+          path: '/docs',
+          files: [{ name: 'fresh-child', path: '/docs/fresh-child', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+        }) as ReturnType<typeof listFiles>
+      }
+
+      return Promise.resolve({
+        path: '/',
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      }) as ReturnType<typeof listFiles>
+    })
+
+    const view = renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
+    expect(docsToggle).toBeTruthy()
+    await user.click(docsToggle as HTMLButtonElement)
+
+    await waitFor(() => {
+      expect(mockListFiles).toHaveBeenCalledWith('/docs')
+    })
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <DirectoryPicker isOpen={false} onClose={vi.fn()} onSelect={vi.fn()} />
+      </QueryClientProvider>,
+    )
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <DirectoryPicker isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />
+      </QueryClientProvider>,
+    )
+
+    await act(async () => {
+      firstLoad.resolve({
+        path: '/docs',
+        files: [{ name: 'stale-child', path: '/docs/stale-child', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      })
+      await firstLoad.promise
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    const reopenedDocsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
+    expect(reopenedDocsToggle).toBeTruthy()
+    await user.click(reopenedDocsToggle as HTMLButtonElement)
+
+    await waitFor(() => {
+      expect(mockListFiles.mock.calls.filter(([calledPath]) => calledPath === '/docs')).toHaveLength(2)
+      expect(screen.getByText('fresh-child')).toBeTruthy()
+      expect(screen.queryByText('stale-child')).toBeNull()
     })
   })
 })
