@@ -1211,7 +1211,7 @@ func TestFileSystem_Delete_RollsBackWhenPathDeleteHookFails(t *testing.T) {
 		t.Fatalf("Stat() before delete error: %v", err)
 	}
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (func() error, error) {
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
 		return nil, errors.New("favorite cleanup failed")
 	})
 
@@ -1262,7 +1262,7 @@ func TestFileSystem_Delete_CompletesWhenDeleteHookRegistered(t *testing.T) {
 	}
 
 	hookCalled := make(chan struct{}, 1)
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (func() error, error) {
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
 		hookCalled <- struct{}{}
 		return nil, nil
 	})
@@ -1462,7 +1462,7 @@ func TestFileSystem_PermanentDelete_RollsBackWhenPathDeleteHookFails(t *testing.
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (func() error, error) {
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
 		return nil, errors.New("favorite cleanup failed")
 	})
 

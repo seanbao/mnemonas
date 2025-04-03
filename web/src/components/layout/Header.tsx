@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Button, Avatar, Dropdown, DropdownTrigger, DropdownMenu, DropdownItem, addToast } from '@heroui/react'
 import { Search, Bell, Menu, RefreshCw } from 'lucide-react'
 import { useAuthStore, useIsAdmin, useUser } from '@/stores/auth'
@@ -15,6 +15,7 @@ const HELP_DOCS_URL = 'https://github.com/seanbao/mnemonas/tree/main/docs'
 
 export function Header({ onMenuClick }: HeaderProps) {
   const navigate = useNavigate()
+  const location = useLocation()
   const user = useUser()
   const isAdmin = useIsAdmin()
   const logout = useAuthStore((state) => state.logout)
@@ -65,17 +66,17 @@ export function Header({ onMenuClick }: HeaderProps) {
 
   const handleSearch = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && searchQuery.trim()) {
-      navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`)
+      navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`, { replace: location.pathname === '/search' })
     }
-  }, [searchQuery, navigate])
+  }, [location.pathname, navigate, searchQuery])
 
   const handleSearchClick = useCallback(() => {
     if (searchQuery.trim()) {
-      navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`)
+      navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`, { replace: location.pathname === '/search' })
     } else {
-      navigate('/search')
+      navigate('/search', { replace: location.pathname === '/search' })
     }
-  }, [searchQuery, navigate])
+  }, [location.pathname, navigate, searchQuery])
 
   // Generate avatar URL based on username
   const avatarUrl = user?.username 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, fireEvent } from '@testing-library/react'
 import React from 'react'
 import { Header } from './Header'
 
@@ -8,6 +8,7 @@ const useIsAdminMock = vi.fn(() => true)
 const mockAddToast = vi.fn()
 const openUrlInNewTabMock = vi.fn(() => true)
 const navigateMock = vi.fn()
+let locationPathname = '/'
 
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ invalidateQueries }),
@@ -21,6 +22,7 @@ vi.mock('@/stores/auth', () => ({
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => navigateMock,
+  useLocation: () => ({ pathname: locationPathname }),
 }))
 
 vi.mock('@/components/ThemeToggle', () => ({
@@ -52,6 +54,7 @@ describe('Header', () => {
     vi.clearAllMocks()
     useIsAdminMock.mockReturnValue(true)
     openUrlInNewTabMock.mockReturnValue(true)
+    locationPathname = '/'
   })
 
   it('triggers refresh invalidation', async () => {
@@ -119,6 +122,17 @@ describe('Header', () => {
     screen.getByRole('button', { name: '帮助文档' }).click()
 
     expect(openUrlInNewTabMock).toHaveBeenCalledWith('https://github.com/seanbao/mnemonas/tree/main/docs')
+  })
+
+  it('replaces search history when quick search is submitted from the search page', () => {
+    locationPathname = '/search'
+    render(<Header />)
+
+    const searchInput = screen.getByPlaceholderText('搜索文件与记忆')
+    fireEvent.change(searchInput, { target: { value: 'report' } })
+    fireEvent.keyDown(searchInput, { key: 'Enter' })
+
+    expect(navigateMock).toHaveBeenCalledWith('/search?q=report', { replace: true })
   })
 
   it('shows a warning toast when the browser blocks the docs tab', () => {

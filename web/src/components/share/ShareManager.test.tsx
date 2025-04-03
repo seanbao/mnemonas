@@ -299,20 +299,20 @@ describe('ShareManager', () => {
     await user.click(screen.getByRole('button', { name: '取消' }))
     await user.click(screen.getByLabelText('notes.txt 分享操作'))
 
-    const visibleDeleteAction = screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除分享'))
-    expect(visibleDeleteAction).toBeTruthy()
-    await user.click(visibleDeleteAction!)
+    const deleteActions = screen.getAllByRole('menuitem').filter((item) => item.textContent?.includes('删除分享'))
+    expect(deleteActions.length).toBeGreaterThan(0)
+    await user.click(deleteActions[deleteActions.length - 1])
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
-      expect(screen.getByText('/docs/notes.txt')).toBeInTheDocument()
+      expect(screen.getByText('/docs/notes.txt', { selector: 'span' })).toBeInTheDocument()
     })
 
     firstDelete.resolve(undefined)
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
-      expect(screen.getByText('/docs/notes.txt')).toBeInTheDocument()
+      expect(screen.getByText('/docs/notes.txt', { selector: 'span' })).toBeInTheDocument()
       expect(screen.queryByLabelText('report.pdf 分享操作')).not.toBeInTheDocument()
     })
   })

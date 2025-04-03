@@ -48,7 +48,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     const startEpoch = authStateEpoch
     const isCurrent = () => runId === initializeRunId && authStateEpoch === startEpoch
 
-    set({ isLoading: true, error: null })
+    set({ isLoading: true, error: null, authEnabled: true })
     
     // First, check if auth is enabled on the server
     try {

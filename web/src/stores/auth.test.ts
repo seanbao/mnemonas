@@ -185,6 +185,66 @@ describe('authStore', () => {
     expect(state.isLoading).toBe(false)
   })
 
+  it('restores secure authEnabled state when initialize runs after guest mode and auth is enabled again', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'guest',
+        username: 'guest',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: false,
+    })
+
+    getStoredTokenMock.mockReturnValue(null)
+    getSetupStatusMock.mockResolvedValue({
+      success: true,
+      is_first_run: false,
+      auth_enabled: true,
+      webdav_enabled: true,
+      webdav_auth_type: 'basic',
+    })
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.authEnabled).toBe(true)
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+  })
+
+  it('falls back to secure authEnabled=true when setup status refresh fails after guest mode', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'guest',
+        username: 'guest',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: false,
+    })
+
+    getStoredTokenMock.mockReturnValue(null)
+    getSetupStatusMock.mockRejectedValue(new Error('setup unavailable'))
+
+    await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
+
+    const state = useAuthStore.getState()
+    expect(state.authEnabled).toBe(true)
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+  })
+
   it('does not let a stale initialize result overwrite a successful login', async () => {
     let resolveSetupStatus: ((value: {
       success: boolean
