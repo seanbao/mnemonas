@@ -75,6 +75,12 @@ type TrashItem struct {
 	DeletedAt    time.Time `json:"deleted_at"`
 	IsDir        bool      `json:"is_dir"`
 	HadVersions  bool      `json:"had_versions"`
+	RestoreData  []byte    `json:"-"`
+}
+
+type PathDeleteHookResult struct {
+	Rollback    func() error
+	RestoreData []byte
 }
 
 // SearchResult represents a search result
@@ -115,30 +121,31 @@ type Config struct {
 
 // FileSystem provides unified storage operations
 type FileSystem struct {
-	workspace            *workspace.Workspace
-	versions             *versionstore.Store
-	policy               *versionstore.VersioningPolicy
-	trashRoot            string
-	config               *Config
-	onPathRenamed        func(ctx context.Context, oldPath, newPath string) error
-	onPathDeleted        func(ctx context.Context, path string) (func() error, error)
-	listReferencedHashes func(ctx context.Context) ([]string, error)
-	getVersions          func(ctx context.Context, path string) ([]versionstore.Version, error)
-	deleteFileIndex      func(ctx context.Context, path string) error
-	updateFileIndex      func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
-	hasVersionObject     func(ctx context.Context, hash string) (bool, error)
-	getVersionObject     func(ctx context.Context, hash string) ([]byte, error)
-	putVersionObject     func(ctx context.Context, data []byte) (string, error)
-	addFileVersion       func(ctx context.Context, path, hash string, size int64, comment string) error
-	deleteVersionObject  func(ctx context.Context, hash string) error
-	addTrashMetadata     func(ctx context.Context, item *versionstore.TrashItem) error
-	removeTrashMetadata  func(ctx context.Context, id string) error
-	renameWorkspacePath  func(ctx context.Context, oldName, newName string) error
-	renameMetadataPath   func(ctx context.Context, oldName, newName string) error
-	removeTrashPath      func(path string) error
-	hookMu               sync.RWMutex
-	gcMu                 sync.RWMutex
-	mu                   sync.RWMutex
+	workspace              *workspace.Workspace
+	versions               *versionstore.Store
+	policy                 *versionstore.VersioningPolicy
+	trashRoot              string
+	config                 *Config
+	onPathRenamed          func(ctx context.Context, oldPath, newPath string) error
+	onPathDeleted          func(ctx context.Context, path string) (*PathDeleteHookResult, error)
+	listReferencedHashes   func(ctx context.Context) ([]string, error)
+	getVersions            func(ctx context.Context, path string) ([]versionstore.Version, error)
+	deleteFileIndex        func(ctx context.Context, path string) error
+	updateFileIndex        func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
+	hasVersionObject       func(ctx context.Context, hash string) (bool, error)
+	getVersionObject       func(ctx context.Context, hash string) ([]byte, error)
+	putVersionObject       func(ctx context.Context, data []byte) (string, error)
+	addFileVersion         func(ctx context.Context, path, hash string, size int64, comment string) error
+	deleteVersionObject    func(ctx context.Context, hash string) error
+	addTrashMetadata       func(ctx context.Context, item *versionstore.TrashItem) error
+	updateTrashRestoreData func(ctx context.Context, id string, restoreData []byte) error
+	removeTrashMetadata    func(ctx context.Context, id string) error
+	renameWorkspacePath    func(ctx context.Context, oldName, newName string) error
+	renameMetadataPath     func(ctx context.Context, oldName, newName string) error
+	removeTrashPath        func(path string) error
+	hookMu                 sync.RWMutex
+	gcMu                   sync.RWMutex
+	mu                     sync.RWMutex
 }
 
 // UpdateTrashSettings applies trash settings to the running filesystem.
@@ -201,7 +208,7 @@ func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
 }
 
 // SetPathChangeHooks registers callbacks for committed rename/delete operations.
-func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string) error, onDelete func(ctx context.Context, path string) (func() error, error)) {
+func (fs *FileSystem) SetPathChangeHooks(onRename func(ctx context.Context, oldPath, newPath string) error, onDelete func(ctx context.Context, path string) (*PathDeleteHookResult, error)) {
 	fs.hookMu.Lock()
 	defer fs.hookMu.Unlock()
 	fs.onPathRenamed = onRename
@@ -262,25 +269,26 @@ func New(cfg *Config) (*FileSystem, error) {
 	}
 
 	return &FileSystem{
-		workspace:            ws,
-		versions:             vs,
-		policy:               policy,
-		trashRoot:            cfg.TrashRoot,
-		config:               cfg,
-		listReferencedHashes: vs.GetAllVersionHashes,
-		getVersions:          vs.GetVersions,
-		deleteFileIndex:      vs.DeleteFileIndex,
-		updateFileIndex:      vs.UpdateFileIndex,
-		hasVersionObject:     vs.HasObject,
-		getVersionObject:     vs.GetObject,
-		putVersionObject:     vs.PutObject,
-		addFileVersion:       vs.AddVersion,
-		deleteVersionObject:  vs.DeleteObject,
-		addTrashMetadata:     vs.AddToTrash,
-		removeTrashMetadata:  vs.RemoveFromTrash,
-		renameWorkspacePath:  ws.Rename,
-		renameMetadataPath:   vs.RenamePath,
-		removeTrashPath:      os.RemoveAll,
+		workspace:              ws,
+		versions:               vs,
+		policy:                 policy,
+		trashRoot:              cfg.TrashRoot,
+		config:                 cfg,
+		listReferencedHashes:   vs.GetAllVersionHashes,
+		getVersions:            vs.GetVersions,
+		deleteFileIndex:        vs.DeleteFileIndex,
+		updateFileIndex:        vs.UpdateFileIndex,
+		hasVersionObject:       vs.HasObject,
+		getVersionObject:       vs.GetObject,
+		putVersionObject:       vs.PutObject,
+		addFileVersion:         vs.AddVersion,
+		deleteVersionObject:    vs.DeleteObject,
+		addTrashMetadata:       vs.AddToTrash,
+		updateTrashRestoreData: vs.UpdateTrashRestoreData,
+		removeTrashMetadata:    vs.RemoveFromTrash,
+		renameWorkspacePath:    ws.Rename,
+		renameMetadataPath:     vs.RenamePath,
+		removeTrashPath:        os.RemoveAll,
 	}, nil
 }
 
@@ -725,7 +733,8 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		}
 		return fmt.Errorf("failed to delete file index: %w", err)
 	}
-	if _, err := fs.notifyPathDeleted(ctx, name); err != nil {
+	hookResult, err := fs.notifyPathDeleted(ctx, name)
+	if err != nil {
 		if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, true); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to sync delete hooks: %w", err),
@@ -733,6 +742,23 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 			)
 		}
 		return fmt.Errorf("failed to sync delete hooks: %w", err)
+	}
+	if hookResult != nil && len(hookResult.RestoreData) > 0 {
+		if err := fs.updateTrashRestoreData(ctx, id, hookResult.RestoreData); err != nil {
+			var rollbackErrs []error
+			if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, true); rollbackErr != nil {
+				rollbackErrs = append(rollbackErrs, rollbackErr)
+			}
+			if hookResult.Rollback != nil {
+				if rollbackErr := hookResult.Rollback(); rollbackErr != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback delete hooks: %w", rollbackErr))
+				}
+			}
+			if len(rollbackErrs) > 0 {
+				return errors.Join(append([]error{fmt.Errorf("failed to persist trash restore metadata: %w", err)}, rollbackErrs...)...)
+			}
+			return fmt.Errorf("failed to persist trash restore metadata: %w", err)
+		}
 	}
 
 	return nil
@@ -852,8 +878,8 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 	if !info.IsDir {
 		if err := fs.versions.DeleteVersions(ctx, name); err != nil {
 			var rollbackErr error
-			if rollbackDeleteHook != nil {
-				rollbackErr = rollbackDeleteHook()
+			if rollbackDeleteHook != nil && rollbackDeleteHook.Rollback != nil {
+				rollbackErr = rollbackDeleteHook.Rollback()
 			}
 			if pathRollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); pathRollbackErr != nil {
 				return errors.Join(
@@ -997,7 +1023,7 @@ func (fs *FileSystem) Copy(ctx context.Context, srcName, dstName string) error {
 	return nil
 }
 
-func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) (func() error, error) {
+func (fs *FileSystem) notifyPathDeleted(ctx context.Context, name string) (*PathDeleteHookResult, error) {
 	fs.hookMu.RLock()
 	hook := fs.onPathDeleted
 	fs.hookMu.RUnlock()
@@ -1338,6 +1364,7 @@ func (fs *FileSystem) ListTrash(ctx context.Context) ([]*TrashItem, error) {
 			DeletedAt:    item.DeletedAt,
 			IsDir:        item.IsDir,
 			HadVersions:  item.HadVersions,
+			RestoreData:  item.RestoreData,
 		}
 	}
 
@@ -1364,6 +1391,7 @@ func (fs *FileSystem) GetTrashItem(ctx context.Context, id string) (*TrashItem, 
 		DeletedAt:    item.DeletedAt,
 		IsDir:        item.IsDir,
 		HadVersions:  item.HadVersions,
+		RestoreData:  item.RestoreData,
 	}, nil
 }
 

@@ -395,6 +395,7 @@ func TestStore_Trash(t *testing.T) {
 		ExpiresAt:    time.Now().Add(30 * 24 * time.Hour),
 		IsDir:        false,
 		HadVersions:  true,
+		RestoreData:  []byte(`{"shares":[{"id":"share-1"}]}`),
 	}
 
 	// Add to trash
@@ -417,6 +418,21 @@ func TestStore_Trash(t *testing.T) {
 	}
 	if !got.HadVersions {
 		t.Error("HadVersions should be true")
+	}
+	if string(got.RestoreData) != string(item.RestoreData) {
+		t.Fatalf("RestoreData = %q, want %q", string(got.RestoreData), string(item.RestoreData))
+	}
+
+	updatedRestoreData := []byte(`{"favorites":[{"path":"/deleted.txt"}]}`)
+	if err := s.UpdateTrashRestoreData(ctx, item.ID, updatedRestoreData); err != nil {
+		t.Fatalf("UpdateTrashRestoreData() error: %v", err)
+	}
+	updatedItem, err := s.GetTrashItem(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("GetTrashItem() after update error: %v", err)
+	}
+	if string(updatedItem.RestoreData) != string(updatedRestoreData) {
+		t.Fatalf("updated RestoreData = %q, want %q", string(updatedItem.RestoreData), string(updatedRestoreData))
 	}
 
 	// List trash

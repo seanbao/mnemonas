@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Button,
@@ -161,6 +161,12 @@ export function ActivityPage() {
     return Math.ceil(data.total / pageSize)
   }, [data?.total])
   const errorState = getActivityErrorState(error)
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages)
+    }
+  }, [page, totalPages])
 
   const handleRefresh = async () => {
     const result = await refetch()
