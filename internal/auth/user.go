@@ -49,6 +49,18 @@ type UserStore struct {
 	filePath string
 }
 
+func cloneUser(user *User) *User {
+	if user == nil {
+		return nil
+	}
+	clone := *user
+	if user.LastLoginAt != nil {
+		lastLoginAt := *user.LastLoginAt
+		clone.LastLoginAt = &lastLoginAt
+	}
+	return &clone
+}
+
 // Errors
 var (
 	ErrUserNotFound       = errors.New("user not found")
@@ -201,7 +213,7 @@ func (s *UserStore) GetByID(id string) (*User, error) {
 	if !ok {
 		return nil, ErrUserNotFound
 	}
-	return user, nil
+	return cloneUser(user), nil
 }
 
 // GetByUsername retrieves a user by username (case-insensitive)
@@ -213,35 +225,46 @@ func (s *UserStore) GetByUsername(username string) (*User, error) {
 	if !ok {
 		return nil, ErrUserNotFound
 	}
-	return user, nil
+	return cloneUser(user), nil
 }
 
 // Authenticate verifies username and password
 func (s *UserStore) Authenticate(username, password string) (*User, error) {
-	user, err := s.GetByUsername(username)
-	if err != nil {
+	s.mu.Lock()
+	user, ok := s.byName[normalizeUsername(username)]
+	if !ok {
+		s.mu.Unlock()
 		return nil, ErrInvalidCredentials
 	}
 
 	if user.Disabled {
+		s.mu.Unlock()
 		return nil, ErrUserDisabled
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		s.mu.Unlock()
 		return nil, ErrInvalidCredentials
 	}
 
-	s.mu.Lock()
+	original := cloneUser(user)
+	updated := cloneUser(user)
 	now := time.Now()
-	user.LastLoginAt = &now
-	s.save()
+	updated.LastLoginAt = &now
+	s.users[user.ID] = updated
+	s.byName[normalizeUsername(updated.Username)] = updated
+	if err := s.save(); err != nil {
+		s.users[user.ID] = original
+		s.byName[normalizeUsername(original.Username)] = original
+		updated = original
+	}
 	s.mu.Unlock()
 
 	// Remove initial password file after successful login (if exists)
 	passwordFile := filepath.Join(filepath.Dir(s.filePath), "initial-password.txt")
 	os.Remove(passwordFile) // Ignore error - file may not exist
 
-	return user, nil
+	return cloneUser(updated), nil
 }
 
 // Create creates a new user
@@ -282,7 +305,7 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 		return nil, err
 	}
 
-	return user, nil
+	return cloneUser(user), nil
 }
 
 // Update updates user information
@@ -290,28 +313,26 @@ func (s *UserStore) Update(user *User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.users[user.ID]; !ok {
+	existing, ok := s.users[user.ID]
+	if !ok {
 		return ErrUserNotFound
 	}
 
-	oldName := ""
-	for name, u := range s.byName {
-		if u.ID == user.ID {
-			oldName = name
-			break
-		}
+	updated := cloneUser(user)
+	updated.UpdatedAt = time.Now()
+	oldName := normalizeUsername(existing.Username)
+	newName := normalizeUsername(updated.Username)
+	s.users[user.ID] = updated
+	delete(s.byName, oldName)
+	s.byName[newName] = updated
+	if err := s.save(); err != nil {
+		s.users[user.ID] = existing
+		delete(s.byName, newName)
+		s.byName[oldName] = existing
+		return err
 	}
 
-	user.UpdatedAt = time.Now()
-	s.users[user.ID] = user
-
-	newName := normalizeUsername(user.Username)
-	if oldName != newName {
-		delete(s.byName, oldName)
-		s.byName[newName] = user
-	}
-
-	return s.save()
+	return nil
 }
 
 // ChangePassword changes a user's password
@@ -337,10 +358,19 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	user.PasswordHash = string(hash)
-	user.UpdatedAt = time.Now()
+	original := cloneUser(user)
+	updated := cloneUser(user)
+	updated.PasswordHash = string(hash)
+	updated.UpdatedAt = time.Now()
+	s.users[id] = updated
+	s.byName[normalizeUsername(updated.Username)] = updated
+	if err := s.save(); err != nil {
+		s.users[id] = original
+		s.byName[normalizeUsername(original.Username)] = original
+		return err
+	}
 
-	return s.save()
+	return nil
 }
 
 // ResetPassword resets a user's password (admin only)
@@ -362,10 +392,19 @@ func (s *UserStore) ResetPassword(id, newPassword string) error {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	user.PasswordHash = string(hash)
-	user.UpdatedAt = time.Now()
+	original := cloneUser(user)
+	updated := cloneUser(user)
+	updated.PasswordHash = string(hash)
+	updated.UpdatedAt = time.Now()
+	s.users[id] = updated
+	s.byName[normalizeUsername(updated.Username)] = updated
+	if err := s.save(); err != nil {
+		s.users[id] = original
+		s.byName[normalizeUsername(original.Username)] = original
+		return err
+	}
 
-	return s.save()
+	return nil
 }
 
 // Delete removes a user
@@ -390,10 +429,16 @@ func (s *UserStore) Delete(id string) error {
 		}
 	}
 
+	original := user
 	delete(s.users, id)
 	delete(s.byName, normalizeUsername(user.Username))
+	if err := s.save(); err != nil {
+		s.users[id] = original
+		s.byName[normalizeUsername(original.Username)] = original
+		return err
+	}
 
-	return s.save()
+	return nil
 }
 
 // List returns all users
@@ -403,7 +448,7 @@ func (s *UserStore) List() []*User {
 
 	users := make([]*User, 0, len(s.users))
 	for _, u := range s.users {
-		users = append(users, u)
+		users = append(users, cloneUser(u))
 	}
 	return users
 }

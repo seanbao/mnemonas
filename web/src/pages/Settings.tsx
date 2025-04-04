@@ -783,7 +783,7 @@ export function SettingsPage() {
             <div className="space-y-6 mt-6">
               <SettingsSection
                 title="版本策略"
-                description="配置文件历史版本保留规则；max_versions 和 max_age 保存后会影响后续版本清理"
+                description="配置文件历史版本保留规则；保存后会立即更新运行中的保留阈值，gc_interval 设为 0 表示禁用周期清理"
                 icon={Clock}
               >
                 <div className="space-y-4">
@@ -866,7 +866,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="最小空闲空间"
-                    description="触发自动清理的磁盘空间阈值"
+                    description="剩余空间低于该阈值时，写入后会强制执行一次全局历史版本清理"
                   >
                     <Input
                       value={settings.minFreeSpace}
@@ -880,7 +880,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="GC 运行间隔"
-                    description="垃圾回收任务的执行周期"
+                    description="后台历史版本清理任务的执行周期；设为 0 表示禁用周期清理"
                   >
                     <Input
                       value={settings.gcInterval}

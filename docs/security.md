@@ -244,6 +244,7 @@ location /api/ {
 - 文件下载、版本预览、音视频预览与外部打开使用短期 `HttpOnly` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
 - 该 cookie 由已认证会话在登录、初始化或刷新令牌后同步到 `/api/v1` 路径，并覆盖下载与缩略图请求
 - 内部文件预览与缩略图链路不再依赖 `auth` 查询参数
+- `Secure` 标记只会在实际 HTTPS 或请求直接来自 loopback / 私有网段代理且 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
 
 #### 公开分享密码验证
 
@@ -251,6 +252,8 @@ location /api/ {
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码
 - 同一 share 与客户端地址组合连续 5 次口令失败后，会锁定 5 分钟并返回 `429 Too Many Requests`
+- 客户端地址默认使用直连来源；仅当请求直接来自 loopback 或私有网段代理时，才信任 `X-Forwarded-For` / `X-Real-IP` 提供的来源地址
+- `Secure` cookie 标记同样只在实际 HTTPS 或受信代理转发的 HTTPS 请求上启用
 
 ### 路线图
 

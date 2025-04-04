@@ -84,7 +84,7 @@ type RetentionConfig struct {
 	MaxVersions  int           `toml:"max_versions"`   // max versions per file, 0=unlimited
 	MaxAge       time.Duration `toml:"max_age"`        // max retention time, 0=forever
 	MinFreeSpace uint64        `toml:"min_free_space"` // minimum free space (bytes)
-	GCInterval   time.Duration `toml:"gc_interval"`    // GC run interval
+	GCInterval   time.Duration `toml:"gc_interval"`    // retention sweep interval, 0=disabled
 }
 
 // DataPlaneConfig holds Rust data plane configuration

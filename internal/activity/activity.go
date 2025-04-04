@@ -52,6 +52,23 @@ type Store struct {
 	maxSize int // Maximum number of entries to keep in memory
 }
 
+func copyDetails(details map[string]string) map[string]string {
+	if details == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(details))
+	for key, value := range details {
+		clone[key] = value
+	}
+	return clone
+}
+
+func copyEntry(entry Entry) Entry {
+	clone := entry
+	clone.Details = copyDetails(entry.Details)
+	return clone
+}
+
 // NewStore creates a new activity store
 func NewStore(root string) (*Store, error) {
 	if err := os.MkdirAll(root, 0750); err != nil {
@@ -179,7 +196,7 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 		Path:      path,
 		User:      user,
 		IP:        ip,
-		Details:   details,
+		Details:   copyDetails(details),
 	}
 
 	// Prepend entry (newest first)
@@ -211,7 +228,7 @@ func (s *Store) List(limit, offset int, actionFilter ActionType, userFilter stri
 		if userFilter != "" && e.User != userFilter {
 			continue
 		}
-		filtered = append(filtered, e)
+		filtered = append(filtered, copyEntry(e))
 	}
 
 	total := len(filtered)
@@ -257,7 +274,8 @@ func (s *Store) GetByID(id string) (*Entry, error) {
 
 	for _, e := range s.entries {
 		if e.ID == id {
-			return &e, nil
+			entry := copyEntry(e)
+			return &entry, nil
 		}
 	}
 	return nil, fmt.Errorf("entry not found: %s", id)

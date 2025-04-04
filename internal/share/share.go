@@ -230,6 +230,16 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 
 	if err := s.save(); err != nil {
 		delete(s.shares, id)
+		ids := s.pathIdx[opts.Path]
+		for i, sid := range ids {
+			if sid == id {
+				s.pathIdx[opts.Path] = append(ids[:i], ids[i+1:]...)
+				break
+			}
+		}
+		if len(s.pathIdx[opts.Path]) == 0 {
+			delete(s.pathIdx, opts.Path)
+		}
 		return nil, err
 	}
 
@@ -305,12 +315,44 @@ func (s *ShareStore) Update(id string, fn func(*Share) error) error {
 	}
 
 	prev := copyShare(share)
-	if err := fn(share); err != nil {
+	updated := copyShare(share)
+	if err := fn(updated); err != nil {
 		return err
 	}
 
+	oldPath := prev.Path
+	newPath := updated.Path
+	prevOldIDs := append([]string(nil), s.pathIdx[oldPath]...)
+	prevNewIDs := append([]string(nil), s.pathIdx[newPath]...)
+	s.shares[id] = updated
+	if oldPath != newPath {
+		ids := s.pathIdx[oldPath]
+		for i, sid := range ids {
+			if sid == id {
+				s.pathIdx[oldPath] = append(ids[:i], ids[i+1:]...)
+				break
+			}
+		}
+		if len(s.pathIdx[oldPath]) == 0 {
+			delete(s.pathIdx, oldPath)
+		}
+		s.pathIdx[newPath] = append(s.pathIdx[newPath], id)
+	}
+
 	if err := s.save(); err != nil {
-		*share = *prev
+		s.shares[id] = prev
+		if oldPath != newPath {
+			if len(prevOldIDs) == 0 {
+				delete(s.pathIdx, oldPath)
+			} else {
+				s.pathIdx[oldPath] = prevOldIDs
+			}
+			if len(prevNewIDs) == 0 {
+				delete(s.pathIdx, newPath)
+			} else {
+				s.pathIdx[newPath] = prevNewIDs
+			}
+		}
 		return err
 	}
 

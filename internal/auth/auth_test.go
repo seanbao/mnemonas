@@ -101,6 +101,95 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("returned users are detached copies", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users5-copy.json"))
+		user, _ := store.Create("copyuser", "password123", "copy@test.com", RoleUser)
+
+		fetched, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("failed to get user: %v", err)
+		}
+		fetched.Disabled = true
+		fetched.Email = "mutated@test.com"
+
+		fresh, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("failed to get fresh user: %v", err)
+		}
+		if fresh.Disabled {
+			t.Fatal("expected detached copy mutation to leave store state unchanged")
+		}
+		if fresh.Email != "copy@test.com" {
+			t.Fatalf("expected stored email copy@test.com, got %s", fresh.Email)
+		}
+	})
+
+	t.Run("failed mutations roll back in-memory state", func(t *testing.T) {
+		storeDir := t.TempDir()
+		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		changeUser, err := store.Create("rollback-change", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create change user: %v", err)
+		}
+		deleteUser, err := store.Create("rollback-delete", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create delete user: %v", err)
+		}
+		resetUser, err := store.Create("rollback-reset", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create reset user: %v", err)
+		}
+		updateUser, err := store.Create("rollback-update", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create update user: %v", err)
+		}
+
+		store.filePath = storeDir
+
+		updateUser.Disabled = true
+		if err := store.Update(updateUser); err == nil {
+			t.Fatal("expected update save failure")
+		}
+		freshUpdated, err := store.GetByID(updateUser.ID)
+		if err != nil {
+			t.Fatalf("failed to reload updated user: %v", err)
+		}
+		if freshUpdated.Disabled {
+			t.Fatal("expected failed update to roll back disabled flag")
+		}
+
+		if err := store.ChangePassword(changeUser.ID, "password123", "newpassword456"); err == nil {
+			t.Fatal("expected change password save failure")
+		}
+		if _, err := store.Authenticate("rollback-change", "newpassword456"); err == nil {
+			t.Fatal("expected failed password change to leave new password unusable")
+		}
+		if _, err := store.Authenticate("rollback-change", "password123"); err != nil {
+			t.Fatalf("expected old password to remain valid after rollback, got %v", err)
+		}
+
+		if err := store.ResetPassword(resetUser.ID, "resetpass456"); err == nil {
+			t.Fatal("expected reset password save failure")
+		}
+		if _, err := store.Authenticate("rollback-reset", "resetpass456"); err == nil {
+			t.Fatal("expected failed reset password to leave new password unusable")
+		}
+		if _, err := store.Authenticate("rollback-reset", "password123"); err != nil {
+			t.Fatalf("expected original password to remain valid after failed reset, got %v", err)
+		}
+
+		if err := store.Delete(deleteUser.ID); err == nil {
+			t.Fatal("expected delete save failure")
+		}
+		if _, err := store.GetByID(deleteUser.ID); err != nil {
+			t.Fatalf("expected failed delete to keep user in store, got %v", err)
+		}
+	})
+
 	t.Run("delete user", func(t *testing.T) {
 		store, _, _ := NewUserStore(filepath.Join(dir, "users6.json"))
 		user, _ := store.Create("todelete", "password123", "", RoleUser)
@@ -690,6 +779,127 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("disabled user login does not reveal account state", func(t *testing.T) {
+		disabledUser, err := store.Create("disabled-login", "password123", "disabled-login@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("create disabled user error: %v", err)
+		}
+		disabledUser.Disabled = true
+		if err := store.Update(disabledUser); err != nil {
+			t.Fatalf("disable user error: %v", err)
+		}
+
+		body := `{"username":"disabled-login","password":"password123"}`
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected status 401, got %d", rec.Code)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_CREDENTIALS" {
+			t.Fatalf("expected INVALID_CREDENTIALS error, got %+v", envelope.Error)
+		}
+	})
+
+	t.Run("login rate limited after repeated failures", func(t *testing.T) {
+		h.loginFailureLimit = 3
+		h.loginFailureWindow = time.Minute
+		h.loginLockDuration = time.Minute
+		h.loginAttempts = newLoginAttemptTracker()
+		now := time.Date(2026, 3, 19, 11, 0, 0, 0, time.UTC)
+		h.loginAttempts.now = func() time.Time { return now }
+
+		body := `{"username":"handleruser","password":"wrongpassword"}`
+		for attempt := 1; attempt < h.loginFailureLimit; attempt++ {
+			req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+			req.RemoteAddr = "203.0.113.5:1234"
+			rec := httptest.NewRecorder()
+
+			h.HandleLogin(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("attempt %d: expected status 401, got %d", attempt, rec.Code)
+			}
+		}
+
+		lockedReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		lockedReq.RemoteAddr = "203.0.113.5:1234"
+		lockedRec := httptest.NewRecorder()
+		h.HandleLogin(lockedRec, lockedReq)
+
+		if lockedRec.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected status 429, got %d", lockedRec.Code)
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(lockedRec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "LOGIN_RATE_LIMITED" {
+			t.Fatalf("expected LOGIN_RATE_LIMITED error, got %+v", envelope.Error)
+		}
+
+		now = now.Add(h.loginLockDuration + time.Second)
+		successReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(`{"username":"handleruser","password":"password123"}`))
+		successReq.RemoteAddr = "203.0.113.5:1234"
+		successRec := httptest.NewRecorder()
+		h.HandleLogin(successRec, successReq)
+
+		if successRec.Code != http.StatusOK {
+			t.Fatalf("expected status 200 after lock expiry, got %d", successRec.Code)
+		}
+
+		postSuccessReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		postSuccessReq.RemoteAddr = "203.0.113.5:1234"
+		postSuccessRec := httptest.NewRecorder()
+		h.HandleLogin(postSuccessRec, postSuccessReq)
+
+		if postSuccessRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected failures to reset after successful login, got %d", postSuccessRec.Code)
+		}
+	})
+
+	t.Run("login rate limiting normalizes username casing", func(t *testing.T) {
+		h.loginFailureLimit = 2
+		h.loginFailureWindow = time.Minute
+		h.loginLockDuration = time.Minute
+		h.loginAttempts = newLoginAttemptTracker()
+		now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+		h.loginAttempts.now = func() time.Time { return now }
+
+		firstReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(`{"username":"HANDLERUSER","password":"wrongpassword"}`))
+		firstReq.RemoteAddr = "203.0.113.6:1234"
+		firstRec := httptest.NewRecorder()
+		h.HandleLogin(firstRec, firstReq)
+
+		if firstRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected first mixed-case attempt to return 401, got %d", firstRec.Code)
+		}
+
+		secondReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(`{"username":"handleruser","password":"wrongpassword"}`))
+		secondReq.RemoteAddr = "203.0.113.6:1234"
+		secondRec := httptest.NewRecorder()
+		h.HandleLogin(secondRec, secondReq)
+
+		if secondRec.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected second differently-cased attempt to return 429, got %d", secondRec.Code)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(secondRec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "LOGIN_RATE_LIMITED" {
+			t.Fatalf("expected LOGIN_RATE_LIMITED error, got %+v", envelope.Error)
+		}
+	})
+
 	t.Run("login missing credentials", func(t *testing.T) {
 		body := `{"username":"handleruser"}`
 		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
@@ -795,6 +1005,35 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("download session cookie ignores spoofed forwarded proto from untrusted source", func(t *testing.T) {
+		user, _ := store.GetByUsername("handleruser")
+		pair, _ := tm.GenerateTokenPair(user)
+
+		req := httptest.NewRequest("POST", "/api/v1/auth/download-session", nil)
+		req.RemoteAddr = "203.0.113.5:1234"
+		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		ctx := context.WithValue(req.Context(), ContextKeyUser, user)
+		ctx = context.WithValue(ctx, ContextKeyClaims, &TokenClaims{
+			RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute))},
+			UserID:           user.ID,
+			Username:         user.Username,
+			Role:             user.Role,
+		})
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+
+		h.HandleCreateDownloadSession(rec, req)
+
+		cookies := rec.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("expected one cookie, got %d", len(cookies))
+		}
+		if cookies[0].Secure {
+			t.Fatal("expected spoofed forwarded proto to leave cookie insecure")
+		}
+	})
+
 	t.Run("admin list users", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/v1/admin/users", nil)
 		admin, _ := store.GetByUsername("handleradmin")
@@ -856,6 +1095,104 @@ func TestAuthHandler(t *testing.T) {
 			t.Errorf("expected status 403, got %d", rec.Code)
 		}
 	})
+
+	t.Run("admin mutation internal errors are hidden", func(t *testing.T) {
+		assertInternalError := func(t *testing.T, rec *httptest.ResponseRecorder, wantCode string) {
+			t.Helper()
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("expected status 500, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			var envelope authEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("unmarshal envelope error: %v", err)
+			}
+			if envelope.Error == nil {
+				t.Fatalf("expected error payload, got %s", rec.Body.String())
+			}
+			if envelope.Error.Code != wantCode {
+				t.Fatalf("expected error code %s, got %s", wantCode, envelope.Error.Code)
+			}
+			if envelope.Error.Message != "internal server error" {
+				t.Fatalf("expected generic internal error message, got %q", envelope.Error.Message)
+			}
+		}
+
+		brokenStoreDir := t.TempDir()
+		brokenStore, _, err := NewUserStore(filepath.Join(brokenStoreDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to create broken store fixture: %v", err)
+		}
+		admin, err := brokenStore.GetByUsername("admin")
+		if err != nil {
+			t.Fatalf("failed to get admin user: %v", err)
+		}
+		changeUser, err := brokenStore.Create("managed-change", "password123", "managed-change@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create change user: %v", err)
+		}
+		deleteUser, err := brokenStore.Create("managed-delete", "password123", "managed-delete@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create delete user: %v", err)
+		}
+		resetUser, err := brokenStore.Create("managed-reset", "password123", "managed-reset@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create reset user: %v", err)
+		}
+		toggleUser, err := brokenStore.Create("managed-toggle", "password123", "managed-toggle@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create toggle user: %v", err)
+		}
+		brokenStore.filePath = brokenStoreDir
+		brokenHandler := NewHandler(brokenStore, tm)
+
+		createReq := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(`{"username":"brokencreate","password":"password123","email":"broken@test.com","role":"user"}`))
+		createReq = createReq.WithContext(context.WithValue(createReq.Context(), ContextKeyUser, admin))
+		createRec := httptest.NewRecorder()
+		brokenHandler.HandleCreateUser(createRec, createReq)
+		assertInternalError(t, createRec, "CREATE_ERROR")
+
+		changeReq := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		changeReq = changeReq.WithContext(context.WithValue(changeReq.Context(), ContextKeyUser, changeUser))
+		changeRec := httptest.NewRecorder()
+		brokenHandler.HandleChangePassword(changeRec, changeReq)
+		assertInternalError(t, changeRec, "PASSWORD_ERROR")
+
+		deleteReq := httptest.NewRequest("DELETE", "/api/v1/admin/users/"+deleteUser.ID, nil)
+		deleteReq = deleteReq.WithContext(context.WithValue(deleteReq.Context(), ContextKeyUser, admin))
+		deleteRec := httptest.NewRecorder()
+		brokenHandler.HandleDeleteUser(deleteRec, deleteReq, deleteUser.ID)
+		assertInternalError(t, deleteRec, "DELETE_ERROR")
+
+		resetReq := httptest.NewRequest("POST", "/api/v1/admin/users/"+resetUser.ID+"/reset-password", bytes.NewBufferString(`{"new_password":"resetpass123"}`))
+		resetReq = resetReq.WithContext(context.WithValue(resetReq.Context(), ContextKeyUser, admin))
+		resetRec := httptest.NewRecorder()
+		brokenHandler.HandleResetUserPassword(resetRec, resetReq, resetUser.ID)
+		assertInternalError(t, resetRec, "RESET_ERROR")
+
+		toggleReq := httptest.NewRequest("PUT", "/api/v1/admin/users/"+toggleUser.ID+"/status", bytes.NewBufferString(`{"disabled":true}`))
+		toggleReq = toggleReq.WithContext(context.WithValue(toggleReq.Context(), ContextKeyUser, admin))
+		toggleRec := httptest.NewRecorder()
+		brokenHandler.HandleToggleUserStatus(toggleRec, toggleReq, toggleUser.ID)
+		assertInternalError(t, toggleRec, "UPDATE_ERROR")
+	})
+}
+
+func TestLoginAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {
+	tracker := newLoginAttemptTracker()
+	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	tracker.now = func() time.Time { return now }
+	tracker.attempts["stale"] = loginAttemptState{failures: 1, lastFailure: now.Add(-2 * time.Minute)}
+
+	tracker.recordFailure("fresh", 5, time.Minute, time.Minute)
+
+	if _, ok := tracker.attempts["stale"]; ok {
+		t.Fatal("expected stale tracker entry to be pruned")
+	}
+	if _, ok := tracker.attempts["fresh"]; !ok {
+		t.Fatal("expected fresh tracker entry to remain")
+	}
 }
 
 func TestDefaultAdminCreation(t *testing.T) {

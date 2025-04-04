@@ -33,6 +33,14 @@ type Store struct {
 	filePath string
 }
 
+func copyFavorite(fav *Favorite) *Favorite {
+	if fav == nil {
+		return nil
+	}
+	clone := *fav
+	return &clone
+}
+
 // NewStore creates a new favorites store
 func NewStore(filePath string) (*Store, error) {
 	store := &Store{
@@ -127,7 +135,7 @@ func (s *Store) Add(userID, path, note string) (*Favorite, error) {
 		return nil, err
 	}
 
-	return fav, nil
+	return copyFavorite(fav), nil
 }
 
 // Remove removes a path from favorites
@@ -143,9 +151,14 @@ func (s *Store) Remove(userID, path string) error {
 		return ErrFavoriteNotFound
 	}
 
+	removed := s.data[userID][path]
 	delete(s.data[userID], path)
+	if err := s.save(); err != nil {
+		s.data[userID][path] = removed
+		return err
+	}
 
-	return s.save()
+	return nil
 }
 
 // List returns all favorites for a user, sorted by creation time (newest first)
@@ -160,7 +173,7 @@ func (s *Store) List(userID string) []*Favorite {
 
 	favorites := make([]*Favorite, 0, len(userFavs))
 	for _, fav := range userFavs {
-		favorites = append(favorites, fav)
+		favorites = append(favorites, copyFavorite(fav))
 	}
 
 	// Sort by creation time, newest first
@@ -217,9 +230,14 @@ func (s *Store) UpdateNote(userID, path, note string) error {
 		return ErrFavoriteNotFound
 	}
 
+	prev := copyFavorite(fav)
 	fav.Note = note
+	if err := s.save(); err != nil {
+		*fav = *prev
+		return err
+	}
 
-	return s.save()
+	return nil
 }
 
 // Count returns the number of favorites for a user

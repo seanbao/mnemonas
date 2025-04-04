@@ -1321,6 +1321,34 @@ func TestFileSystem_WriteFile_FailsWhenCleanupVersionsObjectDeleteFails(t *testi
 	}
 }
 
+func TestFileSystem_WriteFile_ForcesRetentionSweepWhenFreeSpaceBelowThreshold(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	fs.config.MaxVersions = 3
+	fs.config.MaxVersionAge = 365 * 24 * time.Hour
+	fs.config.MinFreeSpace = ^uint64(0)
+
+	for _, content := range []string{"v1", "v2", "v3", "v4"} {
+		if err := fs.WriteFile(ctx, "/retention-sweep.txt", bytes.NewReader([]byte(content))); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", content, err)
+		}
+	}
+
+	fs.UpdateRetentionSettings(1, 365*24*time.Hour, ^uint64(0))
+	if err := fs.WriteFile(ctx, "/trigger.txt", bytes.NewReader([]byte("trigger"))); err != nil {
+		t.Fatalf("WriteFile(trigger) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/retention-sweep.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("expected current version plus one retained historical version after forced sweep, got %d", len(versions))
+	}
+}
+
 func TestMovePath_NonEmptyDirectory(t *testing.T) {
 	tempDir := t.TempDir()
 	src := filepath.Join(tempDir, "src")
