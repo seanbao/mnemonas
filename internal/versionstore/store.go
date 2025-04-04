@@ -65,6 +65,9 @@ type Version struct {
 type Store struct {
 	db      *sql.DB
 	objects *ObjectStore
+
+	deleteObjectFn   func(hash string) error
+	deleteChunkRefFn func(ctx context.Context, chunkHash string) error
 }
 
 // Config holds store configuration
@@ -97,10 +100,18 @@ func New(cfg Config) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{
+	store := &Store{
 		db:      db,
 		objects: NewObjectStore(cfg.Dataplane),
-	}, nil
+	}
+	store.deleteObjectFn = func(hash string) error {
+		return store.DeleteObject(hash)
+	}
+	store.deleteChunkRefFn = func(ctx context.Context, chunkHash string) error {
+		return store.DeleteChunkRef(ctx, chunkHash)
+	}
+
+	return store, nil
 }
 
 func createTables(db *sql.DB) error {
@@ -875,6 +886,7 @@ func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
 
 	var deleted int
 	var freedBytes int64
+	var gcErr error
 
 	for _, hash := range orphans {
 		// Get size before deleting
@@ -882,13 +894,14 @@ func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
 		_ = s.db.QueryRowContext(ctx, `SELECT size FROM chunk_refs WHERE hash = ?`, hash).Scan(&size)
 
 		// Delete from CAS
-		if err := s.DeleteObject(hash); err != nil {
-			// Log but continue
+		if err := s.deleteObjectFn(hash); err != nil {
+			gcErr = errors.Join(gcErr, fmt.Errorf("delete object %s: %w", hash, err))
 			continue
 		}
 
 		// Delete reference record
-		if err := s.DeleteChunkRef(ctx, hash); err != nil {
+		if err := s.deleteChunkRefFn(ctx, hash); err != nil {
+			gcErr = errors.Join(gcErr, fmt.Errorf("delete chunk ref %s: %w", hash, err))
 			continue
 		}
 
@@ -896,5 +909,5 @@ func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
 		freedBytes += size
 	}
 
-	return deleted, freedBytes, nil
+	return deleted, freedBytes, gcErr
 }

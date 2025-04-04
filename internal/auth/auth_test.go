@@ -708,6 +708,58 @@ func TestMiddleware(t *testing.T) {
 			t.Error("handler should be called for excluded prefix")
 		}
 	})
+
+	t.Run("path boundary matching", func(t *testing.T) {
+		mwWithExclude := NewMiddlewareWithExclude(store, tm, []string{"/health", "/api/v1/version", "/public/"})
+
+		handler := mwWithExclude.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		for _, allowedPath := range []string{"/health", "/health/ready", "/api/v1/version", "/public/files/test.txt"} {
+			req := httptest.NewRequest(http.MethodGet, allowedPath, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected excluded path %s to bypass auth, got status %d", allowedPath, rec.Code)
+			}
+		}
+
+		for _, blockedPath := range []string{"/healthz", "/api/v1/version-extra", "/publicity"} {
+			req := httptest.NewRequest(http.MethodGet, blockedPath, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected same-prefix path %s to require auth, got status %d", blockedPath, rec.Code)
+			}
+		}
+	})
+
+	t.Run("download session cookie path boundaries", func(t *testing.T) {
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		for _, allowedPath := range []string{"/api/v1/download/test.txt", "/api/v1/thumbnails/test.jpg", "/api/v1/download"} {
+			req := httptest.NewRequest(http.MethodGet, allowedPath, nil)
+			req.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: userToken.AccessToken})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected download cookie path %s to be allowed, got status %d", allowedPath, rec.Code)
+			}
+		}
+
+		for _, blockedPath := range []string{"/api/v1/download-anything", "/api/v1/thumbnails-extra"} {
+			req := httptest.NewRequest(http.MethodGet, blockedPath, nil)
+			req.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: userToken.AccessToken})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected same-prefix cookie path %s to require bearer auth, got status %d", blockedPath, rec.Code)
+			}
+		}
+	})
 }
 
 func TestAuthHandler(t *testing.T) {
