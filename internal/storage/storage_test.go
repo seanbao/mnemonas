@@ -380,6 +380,63 @@ func TestFileSystem_Delete_BypassesTrashWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Delete_EvictsOldestTrashWhenMaxSizeExceeded(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.config.MaxTrashSize = 10
+
+	if err := fs.WriteFile(ctx, "/old.txt", bytes.NewReader([]byte("123456"))); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/old.txt"); err != nil {
+		t.Fatalf("Delete(old) error: %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	if err := fs.WriteFile(ctx, "/new.txt", bytes.NewReader([]byte("1234567"))); err != nil {
+		t.Fatalf("WriteFile(new) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/new.txt"); err != nil {
+		t.Fatalf("Delete(new) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("ListTrash() returned %d items, want 1", len(items))
+	}
+	if items[0].OriginalPath != "/new.txt" {
+		t.Fatalf("expected newest item to remain in trash, got %s", items[0].OriginalPath)
+	}
+
+	count, totalSize, err := fs.GetTrashStats(ctx)
+	if err != nil {
+		t.Fatalf("GetTrashStats() error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Trash count = %d, want 1", count)
+	}
+	if totalSize != 7 {
+		t.Fatalf("Trash size = %d, want 7", totalSize)
+	}
+	if _, err := fs.GetTrashItem(ctx, items[0].ID); err != nil {
+		t.Fatalf("GetTrashItem() error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); err != nil {
+		t.Fatalf("expected remaining trash content to exist: %v", err)
+	}
+	entries, err := os.ReadDir(fs.trashRoot)
+	if err != nil {
+		t.Fatalf("ReadDir(trashRoot) error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("trash root entries = %d, want 1", len(entries))
+	}
+}
+
 func TestFileSystem_DeleteAndRestore_EmptyDirectory(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

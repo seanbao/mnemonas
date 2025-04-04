@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 	"github.com/seanbao/mnemonas/internal/activity"
+	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
@@ -53,12 +54,27 @@ type Server struct {
 	// Share components
 	shareStore   *share.ShareStore
 	shareHandler *share.Handler
+	alertMonitor AlertMonitor
 	// Favorites components
 	favoritesStore   *favorites.Store
 	favoritesHandler *favorites.Handler
 	// Config
-	config     *config.Config
-	configPath string
+	config       *config.Config
+	configPath   string
+	activeWebDAV WebDAVRuntimeConfig
+}
+
+type WebDAVRuntimeConfig struct {
+	Enabled             bool
+	Prefix              string
+	AuthType            string
+	Username            string
+	Password            string
+	PasswordIsGenerated bool
+}
+
+type AlertMonitor interface {
+	UpdateConfig(cfg alerts.Config)
 }
 
 // ServerConfig holds server configuration
@@ -80,12 +96,14 @@ type ServerConfig struct {
 	ShareEnabled   bool
 	ShareStoreFile string
 	ShareBaseURL   string
+	AlertMonitor   AlertMonitor
 	// Favorites configuration
 	FavoritesEnabled   bool
 	FavoritesStoreFile string
 	// Config (for settings API)
-	Config     *config.Config
-	ConfigPath string
+	Config       *config.Config
+	ConfigPath   string
+	ActiveWebDAV *WebDAVRuntimeConfig
 }
 
 // NewServer creates a new API server
@@ -123,6 +141,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	// Initialize filesystem (from pre-created instance)
 	if cfg != nil && cfg.FileSystem != nil {
 		s.fs = cfg.FileSystem
+	}
+	if cfg != nil {
+		s.alertMonitor = cfg.AlertMonitor
 	}
 
 	// Initialize thumbnail service
@@ -199,8 +220,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		logger.Info().Msg("Authentication enabled")
 	}
 
-	// Initialize share if enabled
-	if cfg != nil && cfg.ShareEnabled && cfg.ShareStoreFile != "" {
+	// Initialize share handler whenever a share store is configured so runtime
+	// settings can enable or disable public access without rebuilding routes.
+	if cfg != nil && cfg.ShareStoreFile != "" {
 		shareStore, err := share.NewShareStore(cfg.ShareStoreFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize share store: %w", err)
@@ -215,18 +237,27 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		if cfg.ShareBaseURL != "" {
 			s.shareHandler.SetBaseURL(cfg.ShareBaseURL)
 		}
-		logger.Info().Msg("File sharing enabled")
+		if cfg.ShareEnabled {
+			logger.Info().Msg("File sharing enabled")
+		} else {
+			logger.Info().Msg("File sharing configured but currently disabled")
+		}
 	}
 
-	// Initialize favorites store
-	if cfg != nil && cfg.FavoritesEnabled && cfg.FavoritesStoreFile != "" {
+	// Initialize favorites handler whenever a store is configured so runtime
+	// settings can enable or disable the feature without rebuilding routes.
+	if cfg != nil && cfg.FavoritesStoreFile != "" {
 		favStore, err := favorites.NewStore(cfg.FavoritesStoreFile)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Failed to initialize favorites store")
 		} else {
 			s.favoritesStore = favStore
 			s.favoritesHandler = favorites.NewHandler(favStore, logger)
-			logger.Info().Msg("Favorites feature enabled")
+			if cfg.FavoritesEnabled {
+				logger.Info().Msg("Favorites feature enabled")
+			} else {
+				logger.Info().Msg("Favorites feature configured but currently disabled")
+			}
 		}
 	}
 
@@ -234,6 +265,16 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	if cfg != nil && cfg.Config != nil {
 		s.config = cfg.Config
 		s.configPath = cfg.ConfigPath
+		s.activeWebDAV = WebDAVRuntimeConfig{
+			Enabled:  cfg.Config.WebDAV.Enabled,
+			Prefix:   cfg.Config.WebDAV.Prefix,
+			AuthType: cfg.Config.WebDAV.AuthType,
+			Username: cfg.Config.WebDAV.Username,
+			Password: cfg.Config.WebDAV.Password,
+		}
+	}
+	if cfg != nil && cfg.ActiveWebDAV != nil {
+		s.activeWebDAV = *cfg.ActiveWebDAV
 	}
 
 	s.setupRoutes()
@@ -261,7 +302,11 @@ func (s *Server) setupRoutes() {
 	// Public share access (no auth required)
 	if s.shareHandler != nil {
 		s.router.Route("/s", func(r chi.Router) {
-			s.shareHandler.PublicRoutes(r)
+			r.Get("/{id}", s.handleAccessShare)
+			r.Post("/{id}", s.handleAccessShareWithPassword)
+			r.Get("/{id}/items", s.handleListShareItems)
+			r.Get("/{id}/download", s.handleDownloadShare)
+			r.Get("/{id}/download/*", s.handleDownloadShareFile)
 		})
 	}
 
@@ -315,12 +360,12 @@ func (s *Server) setupRoutes() {
 		// Favorites endpoints
 		if s.favoritesHandler != nil {
 			r.Route("/favorites", func(r chi.Router) {
-				r.Get("/", s.favoritesHandler.ListFavorites)
-				r.Post("/", s.favoritesHandler.AddFavorite)
-				r.Get("/check", s.favoritesHandler.CheckFavorite)
-				r.Post("/check-batch", s.favoritesHandler.CheckFavorites)
-				r.Delete("/*", s.favoritesHandler.RemoveFavorite)
-				r.Patch("/*", s.favoritesHandler.UpdateNote)
+				r.Get("/", s.handleListFavorites)
+				r.Post("/", s.handleAddFavorite)
+				r.Get("/check", s.handleCheckFavorite)
+				r.Post("/check-batch", s.handleCheckFavorites)
+				r.Delete("/*", s.handleRemoveFavorite)
+				r.Patch("/*", s.handleUpdateFavoriteNote)
 			})
 		}
 
@@ -1977,8 +2022,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 	settings := map[string]interface{}{
 		"server": map[string]interface{}{
-			"host": s.config.Server.Host,
-			"port": s.config.Server.Port,
+			"host":          s.config.Server.Host,
+			"port":          s.config.Server.Port,
+			"read_timeout":  s.config.Server.ReadTimeout.String(),
+			"write_timeout": s.config.Server.WriteTimeout.String(),
+			"idle_timeout":  s.config.Server.IdleTimeout.String(),
 			"tls": map[string]interface{}{
 				"enabled":       s.config.Server.TLS.Enabled,
 				"cert_file":     s.config.Server.TLS.CertFile,
@@ -1990,11 +2038,21 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"storage": map[string]interface{}{
 			"root": s.config.Storage.Root,
 		},
+		"trash": map[string]interface{}{
+			"enabled":        s.config.Storage.Trash.Enabled,
+			"retention_days": s.config.Storage.Trash.RetentionDays,
+			"max_size":       s.config.Storage.Trash.MaxSize,
+		},
 		"retention": map[string]interface{}{
 			"max_versions":   s.config.Storage.Retention.MaxVersions,
 			"max_age":        s.config.Storage.Retention.MaxAge.String(),
 			"min_free_space": s.config.Storage.Retention.MinFreeSpace,
 			"gc_interval":    s.config.Storage.Retention.GCInterval.String(),
+		},
+		"versioning": map[string]interface{}{
+			"auto_versioned_extensions": s.config.Storage.Versioning.AutoVersionedExtensions,
+			"auto_versioned_filenames":  s.config.Storage.Versioning.AutoVersionedFilenames,
+			"max_versioned_size":        s.config.Storage.Versioning.MaxVersionedSize,
 		},
 		"webdav": map[string]interface{}{
 			"enabled":   s.config.WebDAV.Enabled,
@@ -2007,6 +2065,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"enabled":  s.config.Share.Enabled,
 			"base_url": s.config.Share.BaseURL,
 		},
+		"favorites": map[string]interface{}{
+			"enabled": s.config.Favorites.Enabled,
+		},
 		"alerts": map[string]interface{}{
 			"enabled":         s.config.Alerts.Enabled,
 			"check_interval":  s.config.Alerts.CheckInterval.String(),
@@ -2015,6 +2076,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"min_free_bytes":  s.config.Alerts.MinFreeBytes,
 			"cooldown_period": s.config.Alerts.CooldownPeriod.String(),
 			"webhook_url":     s.config.Alerts.WebhookURL,
+			"webhook_method":  s.config.Alerts.WebhookMethod,
+			"webhook_headers": s.config.Alerts.WebhookHeaders,
 		},
 		"dataplane": map[string]interface{}{
 			"grpc_address": s.config.DataPlane.GRPCAddress,
@@ -2033,19 +2096,25 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 // UpdateSettingsRequest represents settings update request
 type UpdateSettingsRequest struct {
-	Server    *ServerSettingsUpdate    `json:"server,omitempty"`
-	Retention *RetentionSettingsUpdate `json:"retention,omitempty"`
-	DataPlane *DataPlaneSettingsUpdate `json:"dataplane,omitempty"`
-	CDC       *CDCSettingsUpdate       `json:"cdc,omitempty"`
-	Share     *ShareSettingsUpdate     `json:"share,omitempty"`
-	Alerts    *AlertsSettingsUpdate    `json:"alerts,omitempty"`
-	WebDAV    *WebDAVSettingsUpdate    `json:"webdav,omitempty"`
+	Server     *ServerSettingsUpdate     `json:"server,omitempty"`
+	Trash      *TrashSettingsUpdate      `json:"trash,omitempty"`
+	Retention  *RetentionSettingsUpdate  `json:"retention,omitempty"`
+	Versioning *VersioningSettingsUpdate `json:"versioning,omitempty"`
+	DataPlane  *DataPlaneSettingsUpdate  `json:"dataplane,omitempty"`
+	CDC        *CDCSettingsUpdate        `json:"cdc,omitempty"`
+	Share      *ShareSettingsUpdate      `json:"share,omitempty"`
+	Favorites  *FavoritesSettingsUpdate  `json:"favorites,omitempty"`
+	Alerts     *AlertsSettingsUpdate     `json:"alerts,omitempty"`
+	WebDAV     *WebDAVSettingsUpdate     `json:"webdav,omitempty"`
 }
 
 type ServerSettingsUpdate struct {
-	Host *string `json:"host,omitempty"`
-	Port *int    `json:"port,omitempty"`
-	TLS  *ServerTLSSettingsUpdate `json:"tls,omitempty"`
+	Host         *string                  `json:"host,omitempty"`
+	Port         *int                     `json:"port,omitempty"`
+	ReadTimeout  *string                  `json:"read_timeout,omitempty"`
+	WriteTimeout *string                  `json:"write_timeout,omitempty"`
+	IdleTimeout  *string                  `json:"idle_timeout,omitempty"`
+	TLS          *ServerTLSSettingsUpdate `json:"tls,omitempty"`
 }
 
 type ServerTLSSettingsUpdate struct {
@@ -2063,6 +2132,18 @@ type RetentionSettingsUpdate struct {
 	GCInterval   *string `json:"gc_interval,omitempty"`
 }
 
+type VersioningSettingsUpdate struct {
+	AutoVersionedExtensions *[]string `json:"auto_versioned_extensions,omitempty"`
+	AutoVersionedFilenames  *[]string `json:"auto_versioned_filenames,omitempty"`
+	MaxVersionedSize        *int64    `json:"max_versioned_size,omitempty"`
+}
+
+type TrashSettingsUpdate struct {
+	Enabled       *bool  `json:"enabled,omitempty"`
+	RetentionDays *int   `json:"retention_days,omitempty"`
+	MaxSize       *int64 `json:"max_size,omitempty"`
+}
+
 type DataPlaneSettingsUpdate struct {
 	GRPCAddress *string `json:"grpc_address,omitempty"`
 	Timeout     *string `json:"timeout,omitempty"`
@@ -2074,14 +2155,20 @@ type ShareSettingsUpdate struct {
 	BaseURL *string `json:"base_url,omitempty"`
 }
 
+type FavoritesSettingsUpdate struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 type AlertsSettingsUpdate struct {
-	Enabled        *bool    `json:"enabled,omitempty"`
-	CheckInterval  *string  `json:"check_interval,omitempty"`
-	ThresholdPct   *float64 `json:"threshold_pct,omitempty"`
-	CriticalPct    *float64 `json:"critical_pct,omitempty"`
-	MinFreeBytes   *uint64  `json:"min_free_bytes,omitempty"`
-	CooldownPeriod *string  `json:"cooldown_period,omitempty"`
-	WebhookURL     *string  `json:"webhook_url,omitempty"`
+	Enabled        *bool     `json:"enabled,omitempty"`
+	CheckInterval  *string   `json:"check_interval,omitempty"`
+	ThresholdPct   *float64  `json:"threshold_pct,omitempty"`
+	CriticalPct    *float64  `json:"critical_pct,omitempty"`
+	MinFreeBytes   *uint64   `json:"min_free_bytes,omitempty"`
+	CooldownPeriod *string   `json:"cooldown_period,omitempty"`
+	WebhookURL     *string   `json:"webhook_url,omitempty"`
+	WebhookMethod  *string   `json:"webhook_method,omitempty"`
+	WebhookHeaders *[]string `json:"webhook_headers,omitempty"`
 }
 
 type WebDAVSettingsUpdate struct {
@@ -2126,6 +2213,30 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Server.Port = *req.Server.Port
 		}
+		if req.Server.ReadTimeout != nil {
+			d, err := time.ParseDuration(*req.Server.ReadTimeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid server.read_timeout")
+				return
+			}
+			updatedConfig.Server.ReadTimeout = d
+		}
+		if req.Server.WriteTimeout != nil {
+			d, err := time.ParseDuration(*req.Server.WriteTimeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid server.write_timeout")
+				return
+			}
+			updatedConfig.Server.WriteTimeout = d
+		}
+		if req.Server.IdleTimeout != nil {
+			d, err := time.ParseDuration(*req.Server.IdleTimeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid server.idle_timeout")
+				return
+			}
+			updatedConfig.Server.IdleTimeout = d
+		}
 		if req.Server.TLS != nil {
 			if req.Server.TLS.Enabled != nil {
 				updatedConfig.Server.TLS.Enabled = *req.Server.TLS.Enabled
@@ -2168,6 +2279,71 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Storage.Retention.GCInterval = d
 		}
+		if s.fs != nil {
+			s.fs.UpdateRetentionSettings(
+				updatedConfig.Storage.Retention.MaxVersions,
+				updatedConfig.Storage.Retention.MaxAge,
+			)
+		}
+	}
+
+	if req.Versioning != nil {
+		if req.Versioning.AutoVersionedExtensions != nil {
+			cleaned := make([]string, 0, len(*req.Versioning.AutoVersionedExtensions))
+			for _, ext := range *req.Versioning.AutoVersionedExtensions {
+				trimmed := strings.TrimSpace(ext)
+				if trimmed == "" {
+					continue
+				}
+				cleaned = append(cleaned, trimmed)
+			}
+			updatedConfig.Storage.Versioning.AutoVersionedExtensions = cleaned
+		}
+		if req.Versioning.AutoVersionedFilenames != nil {
+			cleaned := make([]string, 0, len(*req.Versioning.AutoVersionedFilenames))
+			for _, name := range *req.Versioning.AutoVersionedFilenames {
+				trimmed := strings.TrimSpace(name)
+				if trimmed == "" {
+					continue
+				}
+				cleaned = append(cleaned, trimmed)
+			}
+			updatedConfig.Storage.Versioning.AutoVersionedFilenames = cleaned
+		}
+		if req.Versioning.MaxVersionedSize != nil {
+			if *req.Versioning.MaxVersionedSize <= 0 {
+				BadRequest(w, "invalid versioning.max_versioned_size")
+				return
+			}
+			updatedConfig.Storage.Versioning.MaxVersionedSize = *req.Versioning.MaxVersionedSize
+		}
+	}
+
+	if req.Trash != nil {
+		if req.Trash.Enabled != nil {
+			updatedConfig.Storage.Trash.Enabled = *req.Trash.Enabled
+		}
+		if req.Trash.RetentionDays != nil {
+			if *req.Trash.RetentionDays < 0 {
+				BadRequest(w, "invalid trash.retention_days")
+				return
+			}
+			updatedConfig.Storage.Trash.RetentionDays = *req.Trash.RetentionDays
+		}
+		if req.Trash.MaxSize != nil {
+			if *req.Trash.MaxSize <= 0 {
+				BadRequest(w, "invalid trash.max_size")
+				return
+			}
+			updatedConfig.Storage.Trash.MaxSize = *req.Trash.MaxSize
+		}
+		if s.fs != nil {
+			s.fs.UpdateTrashSettings(
+				updatedConfig.Storage.Trash.Enabled,
+				updatedConfig.Storage.Trash.RetentionDays,
+				updatedConfig.Storage.Trash.MaxSize,
+			)
+		}
 	}
 
 	if req.DataPlane != nil {
@@ -2197,6 +2373,15 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Share.BaseURL != nil {
 			updatedConfig.Share.BaseURL = *req.Share.BaseURL
+			if s.shareHandler != nil {
+				s.shareHandler.SetBaseURL(updatedConfig.Share.BaseURL)
+			}
+		}
+	}
+
+	if req.Favorites != nil {
+		if req.Favorites.Enabled != nil {
+			updatedConfig.Favorites.Enabled = *req.Favorites.Enabled
 		}
 	}
 
@@ -2231,6 +2416,33 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Alerts.WebhookURL != nil {
 			updatedConfig.Alerts.WebhookURL = *req.Alerts.WebhookURL
+		}
+		if req.Alerts.WebhookMethod != nil {
+			updatedConfig.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(*req.Alerts.WebhookMethod))
+		}
+		if req.Alerts.WebhookHeaders != nil {
+			cleaned := make([]string, 0, len(*req.Alerts.WebhookHeaders))
+			for _, header := range *req.Alerts.WebhookHeaders {
+				trimmed := strings.TrimSpace(header)
+				if trimmed == "" {
+					continue
+				}
+				cleaned = append(cleaned, trimmed)
+			}
+			updatedConfig.Alerts.WebhookHeaders = cleaned
+		}
+		if s.alertMonitor != nil {
+			s.alertMonitor.UpdateConfig(alerts.Config{
+				Enabled:        updatedConfig.Alerts.Enabled,
+				CheckInterval:  updatedConfig.Alerts.CheckInterval,
+				ThresholdPct:   updatedConfig.Alerts.ThresholdPct,
+				CriticalPct:    updatedConfig.Alerts.CriticalPct,
+				MinFreeBytes:   updatedConfig.Alerts.MinFreeBytes,
+				CooldownPeriod: updatedConfig.Alerts.CooldownPeriod,
+				WebhookURL:     updatedConfig.Alerts.WebhookURL,
+				WebhookMethod:  updatedConfig.Alerts.WebhookMethod,
+				WebhookHeaders: updatedConfig.Alerts.WebhookHeaders,
+			})
 		}
 	}
 
@@ -2305,19 +2517,22 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	runtimeCfg := s.activeWebDAV
 	resp := WebDAVCredentialsResponse{
-		Enabled:  s.config.WebDAV.Enabled,
-		URL:      formatWebDAVPrefix(s.config.WebDAV.Prefix),
-		AuthType: s.config.WebDAV.AuthType,
+		Enabled:  runtimeCfg.Enabled,
+		URL:      formatWebDAVPrefix(runtimeCfg.Prefix),
+		AuthType: runtimeCfg.AuthType,
 	}
 
 	// Only include credentials if WebDAV is enabled and using basic auth
-	if s.config.WebDAV.Enabled && s.config.WebDAV.AuthType == "basic" {
-		resp.Username = s.config.WebDAV.Username
+	if runtimeCfg.Enabled && runtimeCfg.AuthType == "basic" {
+		resp.Username = runtimeCfg.Username
 		if resp.Username == "" {
 			resp.Username = "admin"
 		}
-		if s.config.WebDAV.Password == "" {
+		if runtimeCfg.PasswordIsGenerated && runtimeCfg.Password != "" {
+			resp.Password = runtimeCfg.Password
+		} else if runtimeCfg.Password == "" {
 			// Get password from secrets (auto-generated only)
 			secrets, err := config.LoadSecrets(s.config.Storage.Root)
 			if err == nil && secrets != nil {
@@ -2387,12 +2602,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
 	if err := config.MarkSetupShown(s.config.Storage.Root); err != nil {
 		s.logger.Error().Err(err).Msg("failed to mark setup as shown")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "failed to acknowledge setup",
-		})
+		InternalError(w, "failed to acknowledge setup")
 		return
 	}
 
@@ -2414,8 +2624,133 @@ func (r *responseRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+func writeShareErrorResponse(w http.ResponseWriter, status int, message, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": false,
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+func writeFavoritesErrorResponse(w http.ResponseWriter, status int, message, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": false,
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+func (s *Server) isShareFeatureEnabled() bool {
+	return s.config != nil && s.config.Share.Enabled
+}
+
+func (s *Server) isFavoritesFeatureEnabled() bool {
+	return s.config != nil && s.config.Favorites.Enabled
+}
+
+func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		return
+	}
+	s.shareHandler.AccessShare(w, r)
+}
+
+func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		return
+	}
+	s.shareHandler.AccessShareWithPassword(w, r)
+}
+
+func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		return
+	}
+	s.shareHandler.DownloadShare(w, r)
+}
+
+func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		return
+	}
+	s.shareHandler.DownloadShareFile(w, r)
+}
+
+func (s *Server) handleListShareItems(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		return
+	}
+	s.shareHandler.ListShareItems(w, r)
+}
+
+func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
+	if !s.isFavoritesFeatureEnabled() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	s.favoritesHandler.ListFavorites(w, r)
+}
+
+func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
+	if !s.isFavoritesFeatureEnabled() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	s.favoritesHandler.AddFavorite(w, r)
+}
+
+func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
+	if !s.isFavoritesFeatureEnabled() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	s.favoritesHandler.CheckFavorite(w, r)
+}
+
+func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
+	if !s.isFavoritesFeatureEnabled() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	s.favoritesHandler.CheckFavorites(w, r)
+}
+
+func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
+	if !s.isFavoritesFeatureEnabled() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	s.favoritesHandler.RemoveFavorite(w, r)
+}
+
+func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request) {
+	if !s.isFavoritesFeatureEnabled() {
+		writeFavoritesErrorResponse(w, http.StatusServiceUnavailable, "favorites feature disabled", "FAVORITES_FEATURE_DISABLED")
+		return
+	}
+	s.favoritesHandler.UpdateNote(w, r)
+}
+
 // handleCreateShareWithActivity wraps share creation to log activity
 func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		writeShareErrorResponse(w, http.StatusServiceUnavailable, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		return
+	}
+
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 	s.shareHandler.CreateShare(rec, r)
 
