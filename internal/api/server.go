@@ -81,6 +81,7 @@ type ServerConfig struct {
 	ShareStoreFile string
 	ShareBaseURL   string
 	// Favorites configuration
+	FavoritesEnabled   bool
 	FavoritesStoreFile string
 	// Config (for settings API)
 	Config     *config.Config
@@ -218,7 +219,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	}
 
 	// Initialize favorites store
-	if cfg != nil && cfg.FavoritesStoreFile != "" {
+	if cfg != nil && cfg.FavoritesEnabled && cfg.FavoritesStoreFile != "" {
 		favStore, err := favorites.NewStore(cfg.FavoritesStoreFile)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Failed to initialize favorites store")
@@ -1978,6 +1979,13 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"server": map[string]interface{}{
 			"host": s.config.Server.Host,
 			"port": s.config.Server.Port,
+			"tls": map[string]interface{}{
+				"enabled":       s.config.Server.TLS.Enabled,
+				"cert_file":     s.config.Server.TLS.CertFile,
+				"key_file":      s.config.Server.TLS.KeyFile,
+				"auto_generate": s.config.Server.TLS.AutoGenerate,
+				"cert_dir":      s.config.Server.TLS.CertDir,
+			},
 		},
 		"storage": map[string]interface{}{
 			"root": s.config.Storage.Root,
@@ -1994,6 +2002,19 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"read_only": s.config.WebDAV.ReadOnly,
 			"auth_type": s.config.WebDAV.AuthType,
 			"username":  s.config.WebDAV.Username,
+		},
+		"share": map[string]interface{}{
+			"enabled":  s.config.Share.Enabled,
+			"base_url": s.config.Share.BaseURL,
+		},
+		"alerts": map[string]interface{}{
+			"enabled":         s.config.Alerts.Enabled,
+			"check_interval":  s.config.Alerts.CheckInterval.String(),
+			"threshold_pct":   s.config.Alerts.ThresholdPct,
+			"critical_pct":    s.config.Alerts.CriticalPct,
+			"min_free_bytes":  s.config.Alerts.MinFreeBytes,
+			"cooldown_period": s.config.Alerts.CooldownPeriod.String(),
+			"webhook_url":     s.config.Alerts.WebhookURL,
 		},
 		"dataplane": map[string]interface{}{
 			"grpc_address": s.config.DataPlane.GRPCAddress,
@@ -2014,13 +2035,25 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 type UpdateSettingsRequest struct {
 	Server    *ServerSettingsUpdate    `json:"server,omitempty"`
 	Retention *RetentionSettingsUpdate `json:"retention,omitempty"`
+	DataPlane *DataPlaneSettingsUpdate `json:"dataplane,omitempty"`
 	CDC       *CDCSettingsUpdate       `json:"cdc,omitempty"`
+	Share     *ShareSettingsUpdate     `json:"share,omitempty"`
+	Alerts    *AlertsSettingsUpdate    `json:"alerts,omitempty"`
 	WebDAV    *WebDAVSettingsUpdate    `json:"webdav,omitempty"`
 }
 
 type ServerSettingsUpdate struct {
 	Host *string `json:"host,omitempty"`
 	Port *int    `json:"port,omitempty"`
+	TLS  *ServerTLSSettingsUpdate `json:"tls,omitempty"`
+}
+
+type ServerTLSSettingsUpdate struct {
+	Enabled      *bool   `json:"enabled,omitempty"`
+	CertFile     *string `json:"cert_file,omitempty"`
+	KeyFile      *string `json:"key_file,omitempty"`
+	AutoGenerate *bool   `json:"auto_generate,omitempty"`
+	CertDir      *string `json:"cert_dir,omitempty"`
 }
 
 type RetentionSettingsUpdate struct {
@@ -2028,6 +2061,27 @@ type RetentionSettingsUpdate struct {
 	MaxAge       *string `json:"max_age,omitempty"`
 	MinFreeSpace *uint64 `json:"min_free_space,omitempty"`
 	GCInterval   *string `json:"gc_interval,omitempty"`
+}
+
+type DataPlaneSettingsUpdate struct {
+	GRPCAddress *string `json:"grpc_address,omitempty"`
+	Timeout     *string `json:"timeout,omitempty"`
+	MaxRetries  *int    `json:"max_retries,omitempty"`
+}
+
+type ShareSettingsUpdate struct {
+	Enabled *bool   `json:"enabled,omitempty"`
+	BaseURL *string `json:"base_url,omitempty"`
+}
+
+type AlertsSettingsUpdate struct {
+	Enabled        *bool    `json:"enabled,omitempty"`
+	CheckInterval  *string  `json:"check_interval,omitempty"`
+	ThresholdPct   *float64 `json:"threshold_pct,omitempty"`
+	CriticalPct    *float64 `json:"critical_pct,omitempty"`
+	MinFreeBytes   *uint64  `json:"min_free_bytes,omitempty"`
+	CooldownPeriod *string  `json:"cooldown_period,omitempty"`
+	WebhookURL     *string  `json:"webhook_url,omitempty"`
 }
 
 type WebDAVSettingsUpdate struct {
@@ -2066,7 +2120,28 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			updatedConfig.Server.Host = *req.Server.Host
 		}
 		if req.Server.Port != nil {
+			if *req.Server.Port < 1 || *req.Server.Port > 65535 {
+				BadRequest(w, "invalid server.port")
+				return
+			}
 			updatedConfig.Server.Port = *req.Server.Port
+		}
+		if req.Server.TLS != nil {
+			if req.Server.TLS.Enabled != nil {
+				updatedConfig.Server.TLS.Enabled = *req.Server.TLS.Enabled
+			}
+			if req.Server.TLS.CertFile != nil {
+				updatedConfig.Server.TLS.CertFile = *req.Server.TLS.CertFile
+			}
+			if req.Server.TLS.KeyFile != nil {
+				updatedConfig.Server.TLS.KeyFile = *req.Server.TLS.KeyFile
+			}
+			if req.Server.TLS.AutoGenerate != nil {
+				updatedConfig.Server.TLS.AutoGenerate = *req.Server.TLS.AutoGenerate
+			}
+			if req.Server.TLS.CertDir != nil {
+				updatedConfig.Server.TLS.CertDir = *req.Server.TLS.CertDir
+			}
 		}
 	}
 
@@ -2076,7 +2151,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Retention.MaxAge != nil {
 			d, err := time.ParseDuration(*req.Retention.MaxAge)
-			if err != nil {
+			if err != nil || d < 0 {
 				BadRequest(w, "invalid retention.max_age")
 				return
 			}
@@ -2087,11 +2162,75 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Retention.GCInterval != nil {
 			d, err := time.ParseDuration(*req.Retention.GCInterval)
-			if err != nil {
+			if err != nil || d <= 0 {
 				BadRequest(w, "invalid retention.gc_interval")
 				return
 			}
 			updatedConfig.Storage.Retention.GCInterval = d
+		}
+	}
+
+	if req.DataPlane != nil {
+		if req.DataPlane.GRPCAddress != nil {
+			updatedConfig.DataPlane.GRPCAddress = *req.DataPlane.GRPCAddress
+		}
+		if req.DataPlane.Timeout != nil {
+			d, err := time.ParseDuration(*req.DataPlane.Timeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid dataplane.timeout")
+				return
+			}
+			updatedConfig.DataPlane.Timeout = d
+		}
+		if req.DataPlane.MaxRetries != nil {
+			if *req.DataPlane.MaxRetries < 0 {
+				BadRequest(w, "invalid dataplane.max_retries")
+				return
+			}
+			updatedConfig.DataPlane.MaxRetries = *req.DataPlane.MaxRetries
+		}
+	}
+
+	if req.Share != nil {
+		if req.Share.Enabled != nil {
+			updatedConfig.Share.Enabled = *req.Share.Enabled
+		}
+		if req.Share.BaseURL != nil {
+			updatedConfig.Share.BaseURL = *req.Share.BaseURL
+		}
+	}
+
+	if req.Alerts != nil {
+		if req.Alerts.Enabled != nil {
+			updatedConfig.Alerts.Enabled = *req.Alerts.Enabled
+		}
+		if req.Alerts.CheckInterval != nil {
+			d, err := time.ParseDuration(*req.Alerts.CheckInterval)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid alerts.check_interval")
+				return
+			}
+			updatedConfig.Alerts.CheckInterval = d
+		}
+		if req.Alerts.ThresholdPct != nil {
+			updatedConfig.Alerts.ThresholdPct = *req.Alerts.ThresholdPct
+		}
+		if req.Alerts.CriticalPct != nil {
+			updatedConfig.Alerts.CriticalPct = *req.Alerts.CriticalPct
+		}
+		if req.Alerts.MinFreeBytes != nil {
+			updatedConfig.Alerts.MinFreeBytes = *req.Alerts.MinFreeBytes
+		}
+		if req.Alerts.CooldownPeriod != nil {
+			d, err := time.ParseDuration(*req.Alerts.CooldownPeriod)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid alerts.cooldown_period")
+				return
+			}
+			updatedConfig.Alerts.CooldownPeriod = d
+		}
+		if req.Alerts.WebhookURL != nil {
+			updatedConfig.Alerts.WebhookURL = *req.Alerts.WebhookURL
 		}
 	}
 

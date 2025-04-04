@@ -132,6 +132,7 @@ func main() {
 		MaxVersionedSize:        cfg.Storage.Versioning.MaxVersionedSize,
 		MaxVersions:             cfg.Storage.Retention.MaxVersions,
 		MaxVersionAge:           cfg.Storage.Retention.MaxAge,
+		TrashEnabled:            &cfg.Storage.Trash.Enabled,
 		TrashRetentionDays:      cfg.Storage.Trash.RetentionDays,
 		Dataplane:               dataplaneClient,
 	})
@@ -171,6 +172,7 @@ func main() {
 		ShareStoreFile: cfg.Share.StoreFile,
 		ShareBaseURL:   cfg.Share.BaseURL,
 		// Favorites configuration
+		FavoritesEnabled:   cfg.Favorites.Enabled,
 		FavoritesStoreFile: cfg.Favorites.StoreFile,
 		// Config for settings API
 		Config:     cfg,

@@ -4,6 +4,14 @@ import { FavoritesPage } from './Favorites'
 import * as favoritesApi from '@/api/favorites'
 
 const mockNavigate = vi.fn()
+const mockBatchExecute = vi.fn()
+let mockBatchResult = {
+  succeeded: 1,
+  failed: 0,
+  total: 1,
+  succeededItems: ['/docs/report.pdf'] as string[],
+  failedItems: [] as string[],
+}
 
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
@@ -20,8 +28,16 @@ vi.mock('@/api/favorites', () => ({
 }))
 
 vi.mock('@/lib/useBatchOperation', () => ({
-  useBatchOperation: () => ({
-    execute: vi.fn(),
+  useBatchOperation: (options: { onComplete?: (result: typeof mockBatchResult) => void }) => ({
+    execute: vi.fn(async (items: string[]) => {
+      const result = {
+        ...mockBatchResult,
+        total: items.length,
+      }
+      mockBatchExecute(items)
+      options.onComplete?.(result)
+      return result
+    }),
     isLoading: false,
   }),
 }))
@@ -44,6 +60,14 @@ describe('FavoritesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockNavigate.mockClear()
+    mockBatchExecute.mockClear()
+    mockBatchResult = {
+      succeeded: 1,
+      failed: 0,
+      total: 1,
+      succeededItems: ['/docs/report.pdf'],
+      failedItems: [],
+    }
     vi.mocked(favoritesApi.listFavorites).mockResolvedValue(mockFavorites)
   })
 
@@ -109,5 +133,33 @@ describe('FavoritesPage', () => {
     await user.keyboard('{Enter}')
 
     expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
+  })
+
+  it('keeps failed favorites selected after partial batch removal', async () => {
+    const user = userEvent.setup()
+    mockBatchResult = {
+      succeeded: 1,
+      failed: 1,
+      total: 2,
+      succeededItems: ['/docs/report.pdf'],
+      failedItems: ['/photos/'],
+    }
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+    await user.click(screen.getByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockBatchExecute).toHaveBeenCalledWith(['/docs/report.pdf', '/photos/'])
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
+    })
   })
 })

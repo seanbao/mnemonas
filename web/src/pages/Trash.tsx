@@ -101,6 +101,7 @@ function TrashRow({
           size="sm"
           variant="light"
           color="success"
+          aria-label={`恢复 ${item.name}`}
           onPress={onRestore}
           title="恢复"
           className="rounded-xl"
@@ -112,6 +113,7 @@ function TrashRow({
           size="sm"
           variant="light"
           color="danger"
+          aria-label={`永久删除 ${item.name}`}
           onPress={onDelete}
           title="永久删除"
           className="rounded-xl"

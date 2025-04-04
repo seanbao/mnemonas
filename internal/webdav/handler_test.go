@@ -205,6 +205,9 @@ func TestHandler_PUT_IfMatchStarOnMissingFileFails(t *testing.T) {
 	if w.Code != http.StatusPreconditionFailed {
 		t.Fatalf("PUT If-Match:* on missing file status = %d, want %d", w.Code, http.StatusPreconditionFailed)
 	}
+	if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+		t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+	}
 	if _, err := fs.Stat(ctx, "/files/missing.txt"); err == nil {
 		t.Fatal("expected missing file to remain absent after failed conditional PUT")
 	}
@@ -264,6 +267,9 @@ func TestHandler_ConditionalGET(t *testing.T) {
 
 		if w.Code != http.StatusPreconditionFailed {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+			t.Fatalf("expected precondition failed message, got %q", w.Body.String())
 		}
 	})
 }

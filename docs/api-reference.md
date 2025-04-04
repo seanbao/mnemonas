@@ -241,6 +241,30 @@ POST /api/v1/admin/users/{id}/reset-password
 PUT /api/v1/admin/users/{id}/status
 ```
 
+**请求体**:
+```json
+{
+  "disabled": true
+}
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "disabled": true
+  },
+  "message": "user status updated successfully"
+}
+```
+
+**约束**:
+- 仅管理员可调用
+- 不允许禁用当前登录用户自身，错误码为 `SELF_DISABLE`
+- 不允许禁用最后一个仍处于启用状态的管理员，错误码为 `LAST_ADMIN`
+- 当用户被禁用时，服务端会撤销其现有令牌
+
 ---
 
 ## 系统端点
@@ -310,13 +334,6 @@ GET /api/v1/setup/
 **说明**:
 - 该接口不再返回任何初始密码或用户名
 - 首次启动生成的初始密码仅写入启动日志和 `secrets.json`
-- `POST /api/v1/setup/acknowledge` 需要管理员登录后调用
-
-标记初始化已完成：
-
-```
-POST /api/v1/setup/acknowledge
-```
 
 ### 存储统计
 
@@ -400,6 +417,8 @@ GET /api/v1/diagnostics
 ### 指标信息
 
 获取 JSON 格式的指标数据。
+
+**需要认证**: 当 `auth.enabled = true` 时需要 JWT 认证
 
 ```
 GET /api/v1/metrics
@@ -1280,7 +1299,14 @@ GET /api/v1/settings
   "data": {
     "server": {
       "host": "0.0.0.0",
-      "port": 8080
+      "port": 8080,
+      "tls": {
+        "enabled": false,
+        "cert_file": "",
+        "key_file": "",
+        "auto_generate": true,
+        "cert_dir": "~/.mnemonas/.mnemonas/certs"
+      }
     },
     "storage": {
       "root": "~/.mnemonas"
@@ -1297,6 +1323,10 @@ GET /api/v1/settings
       "read_only": false,
       "auth_type": "basic",
       "username": "admin"
+    },
+    "share": {
+      "enabled": false,
+      "base_url": ""
     },
     "dataplane": {
       "grpc_address": "127.0.0.1:9090",
@@ -1324,10 +1354,26 @@ PUT /api/v1/settings
 **请求体**:
 ```json
 {
+  "server": {
+    "tls": {
+      "enabled": true,
+      "auto_generate": true,
+      "cert_dir": "/etc/mnemonas/tls"
+    }
+  },
   "retention": {
     "max_versions": 10,
     "max_age": "720h",
     "min_free_space": 10737418240
+  },
+  "share": {
+    "enabled": true,
+    "base_url": "https://share.example.com"
+  },
+  "dataplane": {
+    "grpc_address": "127.0.0.1:9090",
+    "timeout": "30s",
+    "max_retries": 3
   },
   "cdc": {
     "min_chunk_size": 262144,
@@ -1350,7 +1396,11 @@ PUT /api/v1/settings
 ```
 
 **失败行为**:
+- `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`
+- `share` 支持更新 `enabled`、`base_url`
+- `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`
+- 请求中的 `dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
 - 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
 - 非法设置请求不会修改进程内当前生效配置
 

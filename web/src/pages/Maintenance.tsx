@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { StatCard } from '@/components/ui/StatCard'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { getScrubResult, runScrub, downloadDiagnosticsExport, type ScrubResult, type ScrubError } from '@/api/files'
 import { formatBytes, formatDuration } from '@/lib/utils'
 
@@ -117,7 +118,7 @@ export default function Maintenance() {
   const [isExporting, setIsExporting] = useState(false)
   
   // Fetch last scrub result
-  const { data: scrubResult, isLoading } = useQuery({
+  const { data: scrubResult, isLoading, error, refetch } = useQuery({
     queryKey: ['scrub-result'],
     queryFn: getScrubResult,
     refetchInterval: (query) => {
@@ -211,6 +212,19 @@ export default function Maintenance() {
           {isLoading ? (
             <div className="flex items-center justify-center py-8">
               <RefreshCw size={24} className="animate-spin text-default-400" />
+            </div>
+          ) : error ? (
+            <div className="flex items-center justify-center py-8">
+              <EmptyState
+                icon={AlertCircle}
+                title="加载校验结果失败"
+                description={error instanceof Error ? error.message : '请稍后重试'}
+                action={
+                  <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                    重新加载
+                  </Button>
+                }
+              />
             </div>
           ) : scrubResult?.has_result ? (
             <>

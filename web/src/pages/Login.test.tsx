@@ -152,6 +152,18 @@ describe('LoginPage', () => {
       expect(mockLogin).toHaveBeenCalledWith('admin', 'password')
     })
 
+    it('trims username before submitting login', async () => {
+      mockLogin.mockResolvedValue(true)
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), '  admin  ')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockLogin).toHaveBeenCalledWith('admin', 'password')
+    })
+
     it('shows inline validation feedback for empty credentials', async () => {
       const user = userEvent.setup()
       renderLogin()
