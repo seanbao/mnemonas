@@ -247,6 +247,13 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     }
   }
 
+  const handleCloseDeleteModal = () => {
+    if (isDeleting) {
+      return
+    }
+    setDeleteTarget(null)
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -347,7 +354,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       {/* Delete confirmation modal */}
       <Modal 
         isOpen={!!deleteTarget} 
-        onClose={() => setDeleteTarget(null)}
+        onClose={handleCloseDeleteModal}
         placement="center"
         size="md"
         classNames={{
@@ -379,7 +386,12 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
             )}
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={() => setDeleteTarget(null)} className="text-default-600 rounded-xl">
+            <Button
+              variant="flat"
+              onPress={handleCloseDeleteModal}
+              isDisabled={isDeleting}
+              className="text-default-600 rounded-xl"
+            >
               取消
             </Button>
             <Button 

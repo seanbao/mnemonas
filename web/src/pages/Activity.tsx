@@ -163,8 +163,19 @@ export function ActivityPage() {
   const errorState = getActivityErrorState(error)
 
   useEffect(() => {
-    if (page > totalPages) {
-      setPage(totalPages)
+    if (page <= totalPages) {
+      return
+    }
+
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setPage(totalPages)
+      }
+    })
+
+    return () => {
+      cancelled = true
     }
   }, [page, totalPages])
 

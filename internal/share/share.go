@@ -849,13 +849,11 @@ func (s *ShareStore) RestoreShares(shares []*Share) error {
 
 		for _, original := range shares {
 			current, ok := snapshot.shares[original.ID]
-			if !ok || current.Enabled == original.Enabled {
+			if ok && sharesEqual(current, original) {
 				continue
 			}
 
-			updated := copyShare(current)
-			updated.Enabled = original.Enabled
-			snapshot.shares[original.ID] = updated
+			snapshot.shares[original.ID] = copyShare(original)
 			changed = true
 		}
 
@@ -869,6 +867,33 @@ func (s *ShareStore) RestoreShares(shares []*Share) error {
 			return nil
 		}
 	}
+}
+
+func sharesEqual(a, b *Share) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return a.ID == b.ID &&
+		a.Path == b.Path &&
+		a.Type == b.Type &&
+		a.PasswordHash == b.PasswordHash &&
+		timePtrEqual(a.ExpiresAt, b.ExpiresAt) &&
+		a.CreatedAt.Equal(b.CreatedAt) &&
+		a.CreatedBy == b.CreatedBy &&
+		a.Permission == b.Permission &&
+		a.Enabled == b.Enabled &&
+		a.AccessCount == b.AccessCount &&
+		a.MaxAccess == b.MaxAccess &&
+		a.Description == b.Description &&
+		timePtrEqual(a.LastAccess, b.LastAccess)
+}
+
+func timePtrEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
 }
 
 // RecordAccess records an access to the share

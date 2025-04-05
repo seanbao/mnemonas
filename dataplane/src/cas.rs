@@ -274,10 +274,7 @@ impl CasStore {
             return Ok(());
         }
         if remaining == 0 {
-            return Err(CasError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "test put failure",
-            )));
+            return Err(CasError::Io(std::io::Error::other("test put failure")));
         }
         self.fail_put_after.store(remaining - 1, Ordering::Relaxed);
         Ok(())
@@ -286,17 +283,13 @@ impl CasStore {
     async fn sync_parent_dir(&self, path: &Path) -> Result<()> {
         #[cfg(test)]
         if self.fail_parent_sync.swap(false, Ordering::Relaxed) {
-            return Err(CasError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(CasError::Io(std::io::Error::other(
                 "test parent sync failure",
             )));
         }
 
         let parent = path.parent().ok_or_else(|| {
-            CasError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "object path has no parent directory",
-            ))
+            CasError::Io(std::io::Error::other("object path has no parent directory"))
         })?;
         let dir = fs::File::open(parent).await?;
         dir.sync_all().await?;

@@ -619,6 +619,9 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 
 	srcInfo, err := h.fs.Stat(ctx, srcPath)
 	if err != nil {
+		if h.writeParentNotDirectoryConflict(w, err) {
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
@@ -789,6 +792,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 
 	srcInfo, err := h.fs.Stat(ctx, srcPath)
 	if err != nil {
+		if h.writeParentNotDirectoryConflict(w, err) {
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
@@ -800,6 +806,20 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	dstExists := h.destinationExists(ctx, dst)
+	if dstExists {
+		dstInfo, err := h.fs.Stat(ctx, dst)
+		if err != nil {
+			if h.writeParentNotDirectoryConflict(w, err) {
+				return
+			}
+			h.handleError(w, err)
+			return
+		}
+		if srcInfo.IsDir != dstInfo.IsDir {
+			http.Error(w, "resource type conflict", http.StatusConflict)
+			return
+		}
+	}
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
 		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
@@ -1007,9 +1027,6 @@ func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, sta
 }
 
 func (h *Handler) handlePropfind(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
-	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
-	defer releaseLocks()
-
 	depth, err := h.parsePropfindDepth(r.Header.Get("Depth"))
 	if err != nil {
 		writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
@@ -1156,9 +1173,6 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 }
 
 func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
-	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
-	defer releaseLocks()
-
 	info, err := h.fs.Stat(ctx, filePath)
 	if err != nil {
 		h.handleError(w, err)
@@ -1244,9 +1258,6 @@ func (h *Handler) writeLockResponse(w http.ResponseWriter, token, depth string, 
 }
 
 func (h *Handler) handleUnlock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
-	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: false})
-	defer releaseLocks()
-
 	if _, err := h.fs.Stat(ctx, filePath); err != nil {
 		h.handleError(w, err)
 		return
@@ -1427,6 +1438,9 @@ func hasMatchingLockToken(providedTokens []providedLockToken, expected, lockPath
 
 func lockScopeContainsPath(lockPath string, lockInfo webdavLock, candidatePath string) bool {
 	if candidatePath == lockPath {
+		return true
+	}
+	if pathMatchesOrDescendant(candidatePath, lockPath) {
 		return true
 	}
 	if lockInfo.depth == webdavLockDepthInfinity {

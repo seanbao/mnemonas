@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { 
@@ -297,7 +297,10 @@ export function SettingsPage() {
   const [savedSettingsOverride, setSavedSettingsOverride] = useState<typeof defaultSettings | null>(null)
   const [savedSettingsOverrideUpdatedAt, setSavedSettingsOverrideUpdatedAt] = useState<number | null>(null)
   const draftSettingsRef = useRef(draftSettings)
-  draftSettingsRef.current = draftSettings
+
+  useLayoutEffect(() => {
+    draftSettingsRef.current = draftSettings
+  }, [draftSettings])
 
   const handleTabSelectionChange = useCallback((key: React.Key) => {
     const nextTab = normalizeSettingsTab(String(key))
@@ -373,9 +376,22 @@ export function SettingsPage() {
       return
     }
 
-    setDraftSettings(mapServerSettings(settingsData.data))
-    setSavedSettingsOverride(null)
-    setSavedSettingsOverrideUpdatedAt(null)
+    const nextDraftSettings = mapServerSettings(settingsData.data)
+    let cancelled = false
+
+    queueMicrotask(() => {
+      if (cancelled) {
+        return
+      }
+
+      setDraftSettings(nextDraftSettings)
+      setSavedSettingsOverride(null)
+      setSavedSettingsOverrideUpdatedAt(null)
+    })
+
+    return () => {
+      cancelled = true
+    }
   }, [isDirty, mapServerSettings, savedSettingsOverride, savedSettingsOverrideUpdatedAt, settingsData, settingsDataUpdatedAt])
 
   const settings = useMemo(() => {
@@ -394,6 +410,9 @@ export function SettingsPage() {
   }
 
   const handleReset = async () => {
+    if (saveMutation.isPending) {
+      return
+    }
     const result = await refetch()
     if (result.error) {
       addToast(getSettingsActionErrorToast(result.error, {
@@ -808,6 +827,7 @@ export function SettingsPage() {
                 startContent={<RefreshCw size={16} />}
                 onPress={handleReset}
                 isLoading={isRefetching}
+                isDisabled={saveMutation.isPending}
               >
                 重置
               </Button>

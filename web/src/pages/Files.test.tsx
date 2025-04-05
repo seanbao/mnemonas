@@ -402,7 +402,7 @@ describe('FilesPage', () => {
       })
     })
 
-    it('keeps a newer create folder modal open when an older request resolves', async () => {
+    it('keeps the create folder modal open while a pending request is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const firstCreate = createDeferred<void>()
       mockCreateDirectory.mockImplementation((path) => {
@@ -430,22 +430,56 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
-      await waitFor(() => {
-        expect(screen.queryByText('新建文件夹')).toBeFalsy()
-      })
-
-      await user.click(screen.getByText('新建空间'))
-
-      const reopenedInput = await screen.findByPlaceholderText('请输入文件夹名称')
-      await user.clear(reopenedInput)
-      await user.type(reopenedInput, 'second-folder')
+      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByDisplayValue('first-folder')).toBeTruthy()
 
       firstCreate.resolve(undefined)
 
       await waitFor(() => {
-        expect(screen.getByText('新建文件夹')).toBeTruthy()
-        expect(screen.getByDisplayValue('second-folder')).toBeTruthy()
+        expect(screen.queryByText('新建文件夹')).toBeFalsy()
       })
+    })
+
+    it('keeps the create folder modal open when a pending request later fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstCreate = createDeferred<void>()
+      mockCreateDirectory.mockImplementationOnce(() => firstCreate.promise)
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新建空间')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('新建空间'))
+
+      const input = await screen.findByPlaceholderText('请输入文件夹名称')
+      await user.type(input, 'failed-folder')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockCreateDirectory.mock.calls[0][0]).toBe('/failed-folder')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByDisplayValue('failed-folder')).toBeTruthy()
+
+      await act(async () => {
+        firstCreate.reject(new Error('create failed'))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '创建失败',
+          description: 'create failed',
+          color: 'danger',
+        })
+      })
+
+      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByDisplayValue('failed-folder')).toBeTruthy()
     })
 
     it('closes modal on cancel', async () => {
@@ -784,6 +818,90 @@ describe('FilesPage', () => {
       })
     })
 
+    it('keeps the batch delete modal open while a pending batch delete is in flight', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<void>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockDeleteFile.mockImplementationOnce(() => pendingDelete.promise)
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockDeleteFile).toHaveBeenCalledWith('/photo.jpg')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
+
+      await act(async () => {
+        pendingDelete.resolve(undefined)
+        await pendingDelete.promise
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: '删除全部' })).toBeFalsy()
+      })
+    })
+
+    it('keeps the batch delete modal open when a pending batch delete later fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<void>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockDeleteFile.mockImplementationOnce(() => pendingDelete.promise)
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockDeleteFile).toHaveBeenCalledWith('/photo.jpg')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
+
+      await act(async () => {
+        pendingDelete.reject(new Error('delete failed'))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '批量删除失败',
+          description: '共 1 个项目删除失败',
+          color: 'danger',
+        })
+      })
+
+      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
+    })
+
     it('shows warning toast when batch download partially fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
@@ -908,7 +1026,7 @@ describe('FilesPage', () => {
       })
     })
 
-    it('keeps a newer rename modal open when an older rename request resolves', async () => {
+    it('keeps the rename modal open while a pending rename is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const firstRename = createDeferred<void>()
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
@@ -940,19 +1058,8 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
-      await waitFor(() => {
-        expect(screen.queryByText('重命名')).toBeFalsy()
-      })
-
-      mockFilesStoreState.selectedFiles.clear()
-      mockFilesStoreState.selectedFiles.add('/documents')
-      await act(async () => {
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
-      })
-
-      const reopenedRenameInput = await screen.findByPlaceholderText('请输入新名称')
-      await user.clear(reopenedRenameInput)
-      await user.type(reopenedRenameInput, 'documents-renamed')
+      expect(screen.getByText('重命名')).toBeTruthy()
+      expect(screen.getByDisplayValue('photo-renamed.jpg')).toBeTruthy()
 
       await act(async () => {
         firstRename.resolve(undefined)
@@ -960,9 +1067,54 @@ describe('FilesPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.getByText('重命名')).toBeTruthy()
-        expect(screen.getByDisplayValue('documents-renamed')).toBeTruthy()
+        expect(screen.queryByText('重命名')).toBeFalsy()
       })
+    })
+
+    it('keeps the rename modal open when a pending rename later fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstRename = createDeferred<void>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockMoveFile.mockImplementationOnce(() => firstRename.promise)
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, 'photo-failed.jpg')
+      await user.click(screen.getByRole('button', { name: '确定' }))
+
+      await waitFor(() => {
+        expect(mockMoveFile).toHaveBeenCalledWith('/photo.jpg', '/photo-failed.jpg')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByText('重命名')).toBeTruthy()
+      expect(screen.getByDisplayValue('photo-failed.jpg')).toBeTruthy()
+
+      await act(async () => {
+        firstRename.reject(new Error('rename failed'))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '重命名失败',
+          description: 'rename failed',
+          color: 'danger',
+        })
+      })
+
+      expect(screen.getByText('重命名')).toBeTruthy()
+      expect(screen.getByDisplayValue('photo-failed.jpg')).toBeTruthy()
     })
   })
 

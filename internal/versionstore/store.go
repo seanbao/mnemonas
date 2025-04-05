@@ -777,6 +777,9 @@ func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error {
 		return err
 	}
 	item.OriginalPath = cleanOriginalPath
+	if item.RestoreData == nil {
+		item.RestoreData = []byte{}
+	}
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data) 
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1078,6 +1081,23 @@ func (s *Store) DeleteFileIndex(ctx context.Context, path string) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path)
+	return err
+}
+
+// DeleteFileIndexPrefix removes all indexed files at or under a path.
+func (s *Store) DeleteFileIndexPrefix(ctx context.Context, path string) error {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+
+	prefix := path + "/"
+	_, err = s.db.ExecContext(ctx,
+		`DELETE FROM files WHERE path = ? OR (path >= ? AND path < ?)`,
+		path,
+		prefix,
+		prefix+"\uffff",
+	)
 	return err
 }
 
