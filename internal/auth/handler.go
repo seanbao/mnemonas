@@ -167,6 +167,7 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
 
 	if req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "username and password required", "MISSING_CREDENTIALS")
@@ -518,6 +519,9 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(req.Email)
+	req.Role = strings.TrimSpace(req.Role)
 
 	if req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "username and password required", "MISSING_FIELDS")
@@ -647,10 +651,14 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 	}
 
 	var req struct {
-		Disabled bool `json:"disabled"`
+		Disabled *bool `json:"disabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return
+	}
+	if req.Disabled == nil {
+		writeError(w, http.StatusBadRequest, "disabled field is required", "MISSING_DISABLED")
 		return
 	}
 
@@ -662,13 +670,13 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 
 	// Prevent disabling self
 	currentUser := GetUserFromContext(r.Context())
-	if currentUser != nil && currentUser.ID == userID && req.Disabled {
+	if currentUser != nil && currentUser.ID == userID && *req.Disabled {
 		writeError(w, http.StatusBadRequest, "cannot disable your own account", "SELF_DISABLE")
 		return
 	}
 
 	// Prevent disabling last admin
-	if user.Role == RoleAdmin && req.Disabled {
+	if user.Role == RoleAdmin && *req.Disabled {
 		// Count active admins
 		activeAdmins := 0
 		for _, u := range h.userStore.List() {
@@ -682,14 +690,14 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	user.Disabled = req.Disabled
+	user.Disabled = *req.Disabled
 	if err := h.userStore.Update(user); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
 		return
 	}
 
 	// If disabling, revoke all tokens
-	if req.Disabled {
+	if *req.Disabled {
 		h.tokenManager.RevokeByUser(userID)
 	}
 

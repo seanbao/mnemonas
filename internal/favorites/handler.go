@@ -129,7 +129,11 @@ func (h *Handler) CheckFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := path.Clean("/" + checkPath)
+	cleanPath := path.Clean("/" + strings.TrimSpace(checkPath))
+	if cleanPath == "/" {
+		h.error(w, http.StatusBadRequest, "path query parameter is required", "MISSING_PATH")
+		return
+	}
 	isFavorite := h.store.IsFavorite(userID, cleanPath)
 
 	h.success(w, http.StatusOK, map[string]any{
@@ -155,7 +159,11 @@ func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
 	// Clean paths
 	cleanPaths := make([]string, len(req.Paths))
 	for i, p := range req.Paths {
-		cleanPaths[i] = path.Clean("/" + p)
+		cleanPaths[i] = path.Clean("/" + strings.TrimSpace(p))
+		if cleanPaths[i] == "/" {
+			h.error(w, http.StatusBadRequest, "paths must not contain empty values", "MISSING_PATH")
+			return
+		}
 	}
 
 	result := h.store.CheckPaths(userID, cleanPaths)
