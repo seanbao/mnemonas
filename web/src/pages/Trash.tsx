@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
@@ -211,7 +211,10 @@ export function TrashPage() {
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [actionItem, setActionItem] = useState<TrashItem | null>(null)
   const actionItemRef = useRef(actionItem)
-  actionItemRef.current = actionItem
+
+  useLayoutEffect(() => {
+    actionItemRef.current = actionItem
+  }, [actionItem])
 
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isBatchDeleteOpen, onOpen: onBatchDeleteOpen, onClose: onBatchDeleteClose } = useDisclosure()
@@ -379,6 +382,20 @@ export function TrashPage() {
     },
   })
 
+  const handleCloseDeleteModal = useCallback(() => {
+    if (deleteMutation.isPending) {
+      return
+    }
+    onDeleteClose()
+  }, [deleteMutation.isPending, onDeleteClose])
+
+  const handleCloseEmptyModal = useCallback(() => {
+    if (emptyMutation.isPending) {
+      return
+    }
+    onEmptyClose()
+  }, [emptyMutation.isPending, onEmptyClose])
+
   const handleSelectAll = useCallback(() => {
     if (!canWrite) return
     if (items.length === 0) return
@@ -432,6 +449,13 @@ export function TrashPage() {
       queryClient.invalidateQueries({ queryKey: ['trash'] })
     },
   })
+
+  const handleCloseBatchDeleteModal = useCallback(() => {
+    if (isBatchDeleting) {
+      return
+    }
+    onBatchDeleteClose()
+  }, [isBatchDeleting, onBatchDeleteClose])
 
   const handleBatchDelete = useCallback(async () => {
     if (!canWrite) return
@@ -625,7 +649,7 @@ export function TrashPage() {
       {/* Delete Confirmation Modal */}
       <Modal 
         isOpen={isDeleteOpen} 
-        onClose={onDeleteClose}
+        onClose={handleCloseDeleteModal}
         placement="center"
         size="md"
         classNames={{
@@ -651,7 +675,12 @@ export function TrashPage() {
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onDeleteClose} className="text-default-600 rounded-xl">
+            <Button
+              variant="flat"
+              onPress={handleCloseDeleteModal}
+              isDisabled={deleteMutation.isPending}
+              className="text-default-600 rounded-xl"
+            >
               取消
             </Button>
             <Button
@@ -669,7 +698,7 @@ export function TrashPage() {
       {/* Batch Delete Confirmation Modal */}
       <Modal
         isOpen={isBatchDeleteOpen}
-        onClose={onBatchDeleteClose}
+        onClose={handleCloseBatchDeleteModal}
         placement="center"
         size="md"
         classNames={{
@@ -695,7 +724,12 @@ export function TrashPage() {
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onBatchDeleteClose} className="text-default-600 rounded-xl">
+            <Button
+              variant="flat"
+              onPress={handleCloseBatchDeleteModal}
+              isDisabled={isBatchDeleting}
+              className="text-default-600 rounded-xl"
+            >
               取消
             </Button>
             <Button
@@ -713,7 +747,7 @@ export function TrashPage() {
       {/* Empty Trash Confirmation Modal */}
       <Modal 
         isOpen={isEmptyOpen} 
-        onClose={onEmptyClose}
+        onClose={handleCloseEmptyModal}
         placement="center"
         size="md"
         classNames={{
@@ -742,7 +776,12 @@ export function TrashPage() {
             </p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onEmptyClose} className="text-default-600 rounded-xl">
+            <Button
+              variant="flat"
+              onPress={handleCloseEmptyModal}
+              isDisabled={emptyMutation.isPending}
+              className="text-default-600 rounded-xl"
+            >
               取消
             </Button>
             <Button

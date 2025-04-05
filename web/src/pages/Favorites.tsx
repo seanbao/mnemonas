@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -268,8 +268,14 @@ export function FavoritesPage() {
   const editSessionRef = useRef(0)
   const editingItemRef = useRef(editingItem)
   const noteValueRef = useRef(noteValue)
-  editingItemRef.current = editingItem
-  noteValueRef.current = noteValue
+
+  useLayoutEffect(() => {
+    editingItemRef.current = editingItem
+  }, [editingItem])
+
+  useLayoutEffect(() => {
+    noteValueRef.current = noteValue
+  }, [noteValue])
 
   const { isOpen: isEditOpen, onOpen: onEditOpen, onClose: onEditClose } = useDisclosure()
 
@@ -432,10 +438,11 @@ export function FavoritesPage() {
   }, [canWrite, onEditOpen])
 
   const handleCloseEditModal = useCallback(() => {
+    if (updateNoteMutation.isPending) return
     editSessionRef.current += 1
     onEditClose()
     setEditingItem(null)
-  }, [onEditClose])
+  }, [onEditClose, updateNoteMutation.isPending])
 
   const handleSaveNote = useCallback(() => {
     if (!canWrite) return
@@ -663,7 +670,12 @@ export function FavoritesPage() {
             />
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleCloseEditModal} className="text-default-600 rounded-xl">
+            <Button
+              variant="flat"
+              onPress={handleCloseEditModal}
+              isDisabled={updateNoteMutation.isPending}
+              className="text-default-600 rounded-xl"
+            >
               取消
             </Button>
             <Button

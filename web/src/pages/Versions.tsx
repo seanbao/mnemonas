@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useCallback } from 'react'
 import { useSearchParams, type SetURLSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
@@ -341,6 +342,13 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
     }
   }
 
+  const handleCloseRestoreModal = useCallback(() => {
+    if (restoreMutation.isPending) {
+      return
+    }
+    onClose()
+  }, [onClose, restoreMutation.isPending])
+
   const handleDownload = (version: VersionInfo) => {
     void downloadFile(selectedPath!, { version: version.hash }).catch((error: unknown) => {
       addToast(getVersionsActionErrorToast(error, {
@@ -485,7 +493,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
       {/* Restore Confirmation Modal */}
       <Modal 
         isOpen={isOpen} 
-        onClose={onClose}
+        onClose={handleCloseRestoreModal}
         classNames={{
           base: "bg-content1 border border-divider",
         }}
@@ -525,7 +533,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
             </div>
           </ModalBody>
           <ModalFooter>
-            <Button variant="light" onPress={onClose} className="rounded-xl">
+            <Button variant="light" onPress={handleCloseRestoreModal} isDisabled={restoreMutation.isPending} className="rounded-xl">
               取消
             </Button>
             {isAdmin && (

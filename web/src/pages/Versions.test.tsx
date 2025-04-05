@@ -369,28 +369,10 @@ describe('VersionsPage', () => {
       })
     })
 
-    it('keeps a newer restore modal open when an older restore request resolves', async () => {
+    it('keeps the restore modal open while a pending restore is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const firstRestore = createDeferred<void>()
-      mockGetVersions.mockImplementation(async (path) => {
-        if (path === '/other.txt') {
-          return [
-            { version: 2, hash: 'other-hash2', size: 2200, timestamp: '2024-01-05T00:00:00Z' },
-            { version: 1, hash: 'other-hash1', size: 1200, timestamp: '2024-01-04T00:00:00Z' },
-          ]
-        }
-        return [
-          { version: 3, hash: 'hash3', size: 3000, timestamp: '2024-01-03T00:00:00Z' },
-          { version: 2, hash: 'hash2', size: 2000, timestamp: '2024-01-02T00:00:00Z' },
-          { version: 1, hash: 'hash1', size: 1000, timestamp: '2024-01-01T00:00:00Z' },
-        ]
-      })
-      mockRestoreVersion.mockImplementation((path, hash) => {
-        if (path === '/test.txt' && hash === 'hash2') {
-          return firstRestore.promise
-        }
-        return Promise.resolve(undefined)
-      })
+      mockRestoreVersion.mockImplementationOnce(() => firstRestore.promise)
 
       render(<VersionsPage />)
 
@@ -410,24 +392,8 @@ describe('VersionsPage', () => {
 
       await user.click(screen.getByText('取消'))
 
-      await waitFor(() => {
-        expect(screen.queryByText('确认恢复版本')).toBeFalsy()
-      })
-
-      const refreshedInput = screen.getByPlaceholderText(/输入文件路径/)
-      await user.click(refreshedInput)
-      await user.clear(refreshedInput)
-      await user.type(refreshedInput, '/other.txt{enter}')
-
-      await waitFor(() => {
-        expect(mockGetVersions).toHaveBeenCalledWith('/other.txt')
-      })
-
-      await user.click(screen.getAllByTitle('恢复到此版本')[0])
-
-      await waitFor(() => {
-        expect(screen.getByText('确认恢复版本')).toBeTruthy()
-      })
+      expect(screen.getByText('确认恢复版本')).toBeTruthy()
+      expect(screen.getByText('确定要将文件恢复到以下版本吗？')).toBeTruthy()
 
       await act(async () => {
         firstRestore.resolve(undefined)
@@ -435,9 +401,50 @@ describe('VersionsPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.getByText('确认恢复版本')).toBeTruthy()
-        expect(screen.getByText('确定要将文件恢复到以下版本吗？')).toBeTruthy()
+        expect(screen.queryByText('确认恢复版本')).toBeFalsy()
       })
+    })
+
+    it('keeps the restore modal open when a pending restore later fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstRestore = createDeferred<void>()
+      mockRestoreVersion.mockImplementationOnce(() => firstRestore.promise)
+
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(await screen.findByText('确认恢复'))
+
+      await waitFor(() => {
+        expect(mockRestoreVersion).toHaveBeenCalledWith('/test.txt', 'hash2')
+      })
+
+      await user.click(screen.getByText('取消'))
+
+      expect(screen.getByText('确认恢复版本')).toBeTruthy()
+      expect(screen.getByText('确定要将文件恢复到以下版本吗？')).toBeTruthy()
+
+      await act(async () => {
+        firstRestore.reject(new Error('restore failed'))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '恢复版本失败',
+          description: 'restore failed',
+          color: 'danger',
+        })
+      })
+
+      expect(screen.getByText('确认恢复版本')).toBeTruthy()
+      expect(screen.getByText('确定要将文件恢复到以下版本吗？')).toBeTruthy()
     })
   })
 

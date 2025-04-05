@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useLayoutEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
@@ -267,12 +267,15 @@ export function UsersPage() {
   const [resetPassword, setResetPassword] = useState('')
   const createSessionRef = useRef(0)
   const createDraftRef = useRef({ username: '', password: '', email: '', role: 'user' })
-  createDraftRef.current = {
-    username: newUsername,
-    password: newPassword,
-    email: newEmail,
-    role: newRole,
-  }
+
+  useLayoutEffect(() => {
+    createDraftRef.current = {
+      username: newUsername,
+      password: newPassword,
+      email: newEmail,
+      role: newRole,
+    }
+  }, [newEmail, newPassword, newRole, newUsername])
 
   const { data, isLoading, isRefetching, error, refetch } = useQuery({
     queryKey: ['users'],
@@ -366,10 +369,11 @@ export function UsersPage() {
   }, [onCreateOpen])
 
   const handleCloseCreateModal = useCallback(() => {
+    if (createMutation.isPending) return
     createSessionRef.current += 1
     onCreateClose()
     resetCreateForm()
-  }, [onCreateClose, resetCreateForm])
+  }, [createMutation.isPending, onCreateClose, resetCreateForm])
 
   const handleCreate = useCallback(() => {
     if (!newUsername.trim() || !newPassword.trim()) {
@@ -415,11 +419,24 @@ export function UsersPage() {
     onDeleteOpen()
   }, [onDeleteOpen])
 
+  const handleCloseDeleteModal = useCallback(() => {
+    if (deleteMutation.isPending) return
+    onDeleteClose()
+    setDeleteTarget(null)
+  }, [deleteMutation.isPending, onDeleteClose])
+
   const handleOpenResetModal = useCallback((user: User) => {
     setResetTarget(user)
     setResetPassword('')
     onResetOpen()
   }, [onResetOpen])
+
+  const handleCloseResetModal = useCallback(() => {
+    if (resetPasswordMutation.isPending) return
+    onResetClose()
+    setResetTarget(null)
+    setResetPassword('')
+  }, [resetPasswordMutation.isPending, onResetClose])
 
   // Get current user from stored auth state
   const currentUserId = getStoredUser()?.id
@@ -648,6 +665,7 @@ export function UsersPage() {
             <Button
               variant="flat"
               onPress={handleCloseCreateModal}
+              isDisabled={createMutation.isPending}
               className="text-default-600 rounded-xl"
             >
               取消
@@ -668,10 +686,7 @@ export function UsersPage() {
       {/* Delete Confirmation Modal */}
       <Modal
         isOpen={isDeleteOpen}
-        onClose={() => {
-          onDeleteClose()
-          setDeleteTarget(null)
-        }}
+        onClose={handleCloseDeleteModal}
         size="md"
         placement="center"
         classNames={{
@@ -701,10 +716,8 @@ export function UsersPage() {
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
               variant="flat"
-              onPress={() => {
-                onDeleteClose()
-                setDeleteTarget(null)
-              }}
+              onPress={handleCloseDeleteModal}
+              isDisabled={deleteMutation.isPending}
               className="text-default-600 rounded-xl"
             >
               取消
@@ -724,11 +737,7 @@ export function UsersPage() {
       {/* Reset Password Modal */}
       <Modal
         isOpen={isResetOpen}
-        onClose={() => {
-          onResetClose()
-          setResetTarget(null)
-          setResetPassword('')
-        }}
+        onClose={handleCloseResetModal}
         size="md"
         placement="center"
         classNames={{
@@ -770,11 +779,8 @@ export function UsersPage() {
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
               variant="flat"
-              onPress={() => {
-                onResetClose()
-                setResetTarget(null)
-                setResetPassword('')
-              }}
+              onPress={handleCloseResetModal}
+              isDisabled={resetPasswordMutation.isPending}
               className="text-default-600 rounded-xl"
             >
               取消

@@ -471,13 +471,15 @@ func TestStore_ClearTrash(t *testing.T) {
 
 	// Add multiple items
 	for i := 0; i < 5; i++ {
-		s.AddToTrash(ctx, &TrashItem{
+		if err := s.AddToTrash(ctx, &TrashItem{
 			ID:           "trash" + string(rune('0'+i)),
 			OriginalPath: "/file" + string(rune('0'+i)) + ".txt",
 			Size:         100,
 			DeletedAt:    time.Now(),
 			ExpiresAt:    time.Now().Add(time.Hour),
-		})
+		}); err != nil {
+			t.Fatalf("AddToTrash() error: %v", err)
+		}
 	}
 
 	count, err := s.ClearTrash(ctx)
@@ -500,22 +502,26 @@ func TestStore_CleanupExpiredTrash(t *testing.T) {
 	ctx := context.Background()
 
 	// Add expired item
-	s.AddToTrash(ctx, &TrashItem{
+	if err := s.AddToTrash(ctx, &TrashItem{
 		ID:           "expired",
 		OriginalPath: "/expired.txt",
 		Size:         100,
 		DeletedAt:    time.Now().Add(-48 * time.Hour),
 		ExpiresAt:    time.Now().Add(-24 * time.Hour), // Already expired
-	})
+	}); err != nil {
+		t.Fatalf("AddToTrash() error: %v", err)
+	}
 
 	// Add non-expired item
-	s.AddToTrash(ctx, &TrashItem{
+	if err := s.AddToTrash(ctx, &TrashItem{
 		ID:           "valid",
 		OriginalPath: "/valid.txt",
 		Size:         100,
 		DeletedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(24 * time.Hour),
-	})
+	}); err != nil {
+		t.Fatalf("AddToTrash() error: %v", err)
+	}
 
 	ids, err := s.CleanupExpiredTrash(ctx)
 	if err != nil {
@@ -529,6 +535,39 @@ func TestStore_CleanupExpiredTrash(t *testing.T) {
 	items, _ := s.ListTrash(ctx)
 	if len(items) != 1 {
 		t.Errorf("After cleanup: %d items, want 1", len(items))
+	}
+}
+
+func TestStore_AddToTrash_DefaultsNilRestoreDataToEmptyBlob(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	item := &TrashItem{
+		ID:           "trash-empty-restore-data",
+		OriginalPath: "/empty.txt",
+		Size:         42,
+		DeletedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	if err := s.AddToTrash(ctx, item); err != nil {
+		t.Fatalf("AddToTrash() error: %v", err)
+	}
+
+	if item.RestoreData == nil {
+		t.Fatal("RestoreData should be normalized to an empty blob")
+	}
+
+	stored, err := s.GetTrashItem(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("GetTrashItem() error: %v", err)
+	}
+
+	if len(stored.RestoreData) != 0 {
+		t.Fatalf("RestoreData length = %d, want 0", len(stored.RestoreData))
+	}
+	if stored.RestoreData == nil {
+		t.Fatal("stored RestoreData should not be nil")
 	}
 }
 
@@ -721,6 +760,44 @@ func TestStore_CountFiles(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("CountFiles() = %d, want 2", count)
+	}
+}
+
+func TestStore_DeleteFileIndexPrefix(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	if err := s.UpdateFileIndex(ctx, "/docs/readme.md", 100, now, "hash1"); err != nil {
+		t.Fatalf("UpdateFileIndex(readme) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docs/nested/guide.md", 200, now, "hash2"); err != nil {
+		t.Fatalf("UpdateFileIndex(guide) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docs-archive/keep.md", 300, now, "hash3"); err != nil {
+		t.Fatalf("UpdateFileIndex(keep) error: %v", err)
+	}
+
+	if err := s.DeleteFileIndexPrefix(ctx, "/docs"); err != nil {
+		t.Fatalf("DeleteFileIndexPrefix() error: %v", err)
+	}
+
+	if _, _, _, err := s.GetFileIndex(ctx, "/docs/readme.md"); err != ErrNotFound {
+		t.Fatalf("GetFileIndex(/docs/readme.md) error = %v, want ErrNotFound", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/docs/nested/guide.md"); err != ErrNotFound {
+		t.Fatalf("GetFileIndex(/docs/nested/guide.md) error = %v, want ErrNotFound", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/docs-archive/keep.md"); err != nil {
+		t.Fatalf("GetFileIndex(/docs-archive/keep.md) error: %v", err)
+	}
+
+	count, err := s.CountFiles(ctx)
+	if err != nil {
+		t.Fatalf("CountFiles() error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("CountFiles() = %d, want 1", count)
 	}
 }
 

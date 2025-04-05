@@ -353,15 +353,33 @@ export function DirectoryPicker({
     }
   }, [newFolderName, selectedPath])
 
+  const handleCancelCreateFolder = useCallback(() => {
+    if (isCreating) {
+      return
+    }
+    setIsCreatingFolder(false)
+    setNewFolderName('')
+  }, [isCreating])
+
+  const handleClosePicker = useCallback(() => {
+    if (isCreating) {
+      return
+    }
+    onClose()
+  }, [isCreating, onClose])
+
   const handleConfirm = useCallback(() => {
+    if (isCreating) {
+      return
+    }
     onSelect(selectedPath)
     onClose()
-  }, [selectedPath, onSelect, onClose])
+  }, [isCreating, onClose, onSelect, selectedPath])
 
   return (
     <Modal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleClosePicker}
       placement="center"
       size="md"
       scrollBehavior="inside"
@@ -473,8 +491,7 @@ export function DirectoryPicker({
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') handleCreateFolder()
                       if (e.key === 'Escape') {
-                        setIsCreatingFolder(false)
-                        setNewFolderName('')
+                        handleCancelCreateFolder()
                       }
                     }}
                   />
@@ -491,10 +508,8 @@ export function DirectoryPicker({
                   <Button
                     size="sm"
                     variant="flat"
-                    onPress={() => {
-                      setIsCreatingFolder(false)
-                      setNewFolderName('')
-                    }}
+                    onPress={handleCancelCreateFolder}
+                    isDisabled={isCreating}
                     className="rounded-lg"
                   >
                     取消
@@ -516,12 +531,13 @@ export function DirectoryPicker({
         </ModalBody>
         
         <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-          <Button variant="flat" onPress={onClose} className="text-default-600 rounded-xl">
+          <Button variant="flat" onPress={handleClosePicker} isDisabled={isCreating} className="text-default-600 rounded-xl">
             取消
           </Button>
           <Button 
             color="primary" 
             onPress={handleConfirm}
+            isDisabled={isCreating}
             className="rounded-xl"
           >
             选择此目录

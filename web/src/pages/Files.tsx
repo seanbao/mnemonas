@@ -858,10 +858,12 @@ export function FilesPage() {
   // Preview modal state
   const { isOpen: isPreviewOpen, onOpen: onPreviewOpen, onClose: onPreviewClose } = useDisclosure()
   const [previewFile, setPreviewFile] = useState<PreviewFile | null>(null)
+  const [isBatchDeleting, setIsBatchDeleting] = useState(false)
   
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<FileItem | null>(null)
   const newFolderSessionRef = useRef(0)
   const currentNewFolderNameRef = useRef('')
   const renameSessionRef = useRef(0)
@@ -979,6 +981,8 @@ export function FilesPage() {
     mutationFn: deleteFile,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+      onDeleteClose()
+      setDeleteTarget(null)
       addToast({ title: '删除成功', color: 'success' })
     },
     onError: (error) => {
@@ -1245,20 +1249,23 @@ export function FilesPage() {
       submittedName: trimmedRenameValue,
       sessionId: renameSessionRef.current,
     })
-  }, [canWrite, actionFile, renameValue, renameMutation])
+  }, [canWrite, actionFile, currentPath, renameValue, renameMutation])
 
   const handleDelete = useCallback(() => {
     if (!canWrite) return
-    if (!actionFile) return
-    deleteMutation.mutate(actionFile.path)
-    onDeleteClose()
-    setActionFile(null)
-  }, [canWrite, actionFile, deleteMutation, onDeleteClose])
+    if (!deleteTarget) return
+    deleteMutation.mutate(deleteTarget.path)
+  }, [canWrite, deleteTarget, deleteMutation])
 
   const handleOpenNewFolderModal = useCallback(() => {
     newFolderSessionRef.current += 1
     onNewFolderOpen()
   }, [onNewFolderOpen])
+
+  const handleCloseNewFolderModal = useCallback(() => {
+    if (createFolderMutation.isPending) return
+    onNewFolderClose()
+  }, [createFolderMutation.isPending, onNewFolderClose])
 
   // Action handlers for context menu
   const handleOpenRenameModal = useCallback((file: FileItem) => {
@@ -1271,9 +1278,25 @@ export function FilesPage() {
 
   const handleOpenDeleteModal = useCallback((file: FileItem) => {
     if (!canWrite) return
-    setActionFile(file)
+    setDeleteTarget(file)
     onDeleteOpen()
   }, [canWrite, onDeleteOpen])
+
+  const handleCloseRenameModal = useCallback(() => {
+    if (renameMutation.isPending) return
+    onRenameClose()
+  }, [renameMutation.isPending, onRenameClose])
+
+  const handleCloseDeleteModal = useCallback(() => {
+    if (deleteMutation.isPending) return
+    onDeleteClose()
+    setDeleteTarget(null)
+  }, [deleteMutation.isPending, onDeleteClose])
+
+  const handleCloseBatchDeleteModal = useCallback(() => {
+    if (isBatchDeleting) return
+    onBatchDeleteClose()
+  }, [isBatchDeleting, onBatchDeleteClose])
 
   const handleViewVersions = useCallback((file: FileItem) => {
     if (file.isDir) return
@@ -1510,6 +1533,11 @@ export function FilesPage() {
     }, 3000)
   }, [canWrite, currentPath, queryClient, ensureDirectoryExists])
 
+  const handleUploadInputChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    void handleUpload(event.target.files)
+    event.target.value = ''
+  }, [handleUpload])
+
   useEffect(() => {
     return () => {
       if (uploadClearTimeoutRef.current) {
@@ -1566,48 +1594,53 @@ export function FilesPage() {
   // Batch delete handler
   const handleBatchDelete = useCallback(async () => {
     if (!canWrite) return
+    setIsBatchDeleting(true)
     const paths = Array.from(selectedFiles)
     let successCount = 0
     let errorCount = 0
     const failedPaths: string[] = []
     const failedErrors: unknown[] = []
-    
-    for (const path of paths) {
-      try {
-        await deleteFile(path)
-        successCount++
-      } catch (error) {
-        errorCount++
-        failedPaths.push(path)
-        failedErrors.push(error)
+
+    try {
+      for (const path of paths) {
+        try {
+          await deleteFile(path)
+          successCount++
+        } catch (error) {
+          errorCount++
+          failedPaths.push(path)
+          failedErrors.push(error)
+        }
       }
-    }
-    
-    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-    onBatchDeleteClose()
 
-    if (errorCount === 0) {
-      clearSelection()
-      addToast({ title: `成功删除 ${successCount} 个文件`, color: 'success' })
-      return
-    }
+      queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
 
-    setSelection(failedPaths)
-
-    if (successCount === 0) {
-      if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
-        addToast({
-          title: '批量删除暂不可用',
-          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
-          color: 'warning',
-        })
-      } else {
-        addToast({ title: '批量删除失败', description: `共 ${errorCount} 个项目删除失败`, color: 'danger' })
+      if (errorCount === 0) {
+        onBatchDeleteClose()
+        clearSelection()
+        addToast({ title: `成功删除 ${successCount} 个文件`, color: 'success' })
+        return
       }
-      return
-    }
 
-    addToast({ title: '批量删除部分完成', description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
+      setSelection(failedPaths)
+
+      if (successCount === 0) {
+        if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
+          addToast({
+            title: '批量删除暂不可用',
+            description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+            color: 'warning',
+          })
+        } else {
+          addToast({ title: '批量删除失败', description: `共 ${errorCount} 个项目删除失败`, color: 'danger' })
+        }
+        return
+      }
+
+      addToast({ title: '批量删除部分完成', description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
+    } finally {
+      setIsBatchDeleting(false)
+    }
   }, [canWrite, selectedFiles, queryClient, currentPath, clearSelection, onBatchDeleteClose, setSelection])
 
   // Batch download handler
@@ -2103,9 +2136,9 @@ export function FilesPage() {
       )}
 
       <div className="flex-1 flex flex-col min-w-0 p-7">
-        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
+        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUploadInputChange} />
         {/* @ts-expect-error - webkitdirectory is a non-standard attribute */}
-        <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
+        <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={handleUploadInputChange} />
         
         {/* Breadcrumbs */}
         <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
@@ -2511,7 +2544,7 @@ export function FilesPage() {
       {/* Modals */}
       <Modal
         isOpen={isNewFolderOpen}
-        onClose={onNewFolderClose}
+        onClose={handleCloseNewFolderModal}
         placement="center"
         size="md"
         classNames={{
@@ -2551,7 +2584,7 @@ export function FilesPage() {
             </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onNewFolderClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button variant="flat" onPress={handleCloseNewFolderModal} isDisabled={createFolderMutation.isPending} className="text-default-600 rounded-xl">取消</Button>
             <Button color="primary" onPress={handleCreateFolder} isLoading={createFolderMutation.isPending} isDisabled={!newFolderName.trim()} className="rounded-xl">创建</Button>
           </ModalFooter>
         </ModalContent>
@@ -2559,7 +2592,7 @@ export function FilesPage() {
 
       <Modal
         isOpen={isRenameOpen}
-        onClose={onRenameClose}
+        onClose={handleCloseRenameModal}
         placement="center"
         size="md"
         classNames={{
@@ -2595,7 +2628,7 @@ export function FilesPage() {
             </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onRenameClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button variant="flat" onPress={handleCloseRenameModal} isDisabled={renameMutation.isPending} className="text-default-600 rounded-xl">取消</Button>
             <Button color="primary" onPress={handleRename} isLoading={renameMutation.isPending} isDisabled={!renameValue.trim() || renameValue.trim() === actionFile?.name} className="rounded-xl">确定</Button>
           </ModalFooter>
         </ModalContent>
@@ -2603,7 +2636,7 @@ export function FilesPage() {
 
       <Modal
         isOpen={isDeleteOpen}
-        onClose={onDeleteClose}
+        onClose={handleCloseDeleteModal}
         placement="center"
         size="md"
         classNames={{
@@ -2623,11 +2656,11 @@ export function FilesPage() {
             </div>
           </ModalHeader>
           <ModalBody className="px-6 py-4">
-            <p className="text-default-600">确定要删除 <strong className="text-foreground">{actionFile?.name}</strong> 吗？</p>
+            <p className="text-default-600">确定要删除 <strong className="text-foreground">{deleteTarget?.name}</strong> 吗？</p>
             <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在回收站中恢复。</p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onDeleteClose} className="text-default-600 rounded-xl">取消</Button>
+            <Button variant="flat" onPress={handleCloseDeleteModal} isDisabled={deleteMutation.isPending} className="text-default-600 rounded-xl">取消</Button>
             <Button color="danger" onPress={handleDelete} isLoading={deleteMutation.isPending} className="rounded-xl">删除</Button>
           </ModalFooter>
         </ModalContent>
@@ -2635,7 +2668,7 @@ export function FilesPage() {
 
       <Modal
         isOpen={isBatchDeleteOpen}
-        onClose={onBatchDeleteClose}
+        onClose={handleCloseBatchDeleteModal}
         placement="center"
         size="md"
         classNames={{
@@ -2659,8 +2692,8 @@ export function FilesPage() {
             <p className="text-xs text-default-500 mt-2">文件将被移入回收站，可在回收站中恢复。</p>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onBatchDeleteClose} className="text-default-600 rounded-xl">取消</Button>
-            <Button color="danger" onPress={handleBatchDelete} className="rounded-xl">删除全部</Button>
+            <Button variant="flat" onPress={handleCloseBatchDeleteModal} isDisabled={isBatchDeleting} className="text-default-600 rounded-xl">取消</Button>
+            <Button color="danger" onPress={handleBatchDelete} isLoading={isBatchDeleting} className="rounded-xl">删除全部</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

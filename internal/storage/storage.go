@@ -129,8 +129,10 @@ type FileSystem struct {
 	onPathRenamed          func(ctx context.Context, oldPath, newPath string) error
 	onPathDeleted          func(ctx context.Context, path string) (*PathDeleteHookResult, error)
 	listReferencedHashes   func(ctx context.Context) ([]string, error)
+	listVersionPaths       func(ctx context.Context) ([]string, error)
 	getVersions            func(ctx context.Context, path string) ([]versionstore.Version, error)
 	deleteFileIndex        func(ctx context.Context, path string) error
+	deleteFileIndexPrefix  func(ctx context.Context, path string) error
 	updateFileIndex        func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
 	hasVersionObject       func(ctx context.Context, hash string) (bool, error)
 	getVersionObject       func(ctx context.Context, hash string) ([]byte, error)
@@ -275,8 +277,10 @@ func New(cfg *Config) (*FileSystem, error) {
 		trashRoot:              cfg.TrashRoot,
 		config:                 cfg,
 		listReferencedHashes:   vs.GetAllVersionHashes,
+		listVersionPaths:       vs.ListVersionPaths,
 		getVersions:            vs.GetVersions,
 		deleteFileIndex:        vs.DeleteFileIndex,
+		deleteFileIndexPrefix:  vs.DeleteFileIndexPrefix,
 		updateFileIndex:        vs.UpdateFileIndex,
 		hasVersionObject:       vs.HasObject,
 		getVersionObject:       vs.GetObject,
@@ -351,9 +355,6 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 
 // ReadDir reads directory contents
 func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, error) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
@@ -650,23 +651,17 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		return err
 	}
 
-	// Check if directory is empty
-	if info.IsDir {
-		entries, err := fs.workspace.ReadDir(ctx, name)
-		if err != nil {
-			return err
-		}
-		if len(entries) > 0 {
-			return ErrDirNotEmpty
-		}
+	targetSize, hadVersions, err := fs.describeDeleteTarget(ctx, name, info)
+	if err != nil {
+		return err
 	}
 
-	if err := fs.ensureTrashCapacityLocked(ctx, info.Size); err != nil {
+	if err := fs.ensureTrashCapacityLocked(ctx, targetSize); err != nil {
 		return err
 	}
 	rollbackInfo := &FileInfo{
 		IsDir:   info.IsDir,
-		Size:    info.Size,
+		Size:    targetSize,
 		ModTime: info.ModTime,
 	}
 
@@ -676,19 +671,12 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		return fmt.Errorf("generate trash ID: %w", err)
 	}
 
-	// Check if file had versioning
-	hadVersions := false
 	if !info.IsDir {
 		contentHash, hashErr := fs.hashWorkspaceFile(ctx, name)
 		if hashErr != nil {
 			return hashErr
 		}
 		rollbackInfo.ContentHash = contentHash
-		versions, err := fs.versions.GetVersions(ctx, name)
-		if err != nil {
-			return fmt.Errorf("failed to read version metadata: %w", err)
-		}
-		hadVersions = len(versions) > 0
 	}
 
 	// Move file to trash
@@ -706,7 +694,7 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	trashItem := &versionstore.TrashItem{
 		ID:           id,
 		OriginalPath: name,
-		Size:         info.Size,
+		Size:         targetSize,
 		DeletedAt:    time.Now(),
 		ExpiresAt:    time.Now().AddDate(0, 0, fs.config.TrashRetentionDays),
 		IsDir:        info.IsDir,
@@ -724,7 +712,7 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	}
 
 	// Remove from file index
-	if err := fs.deleteFileIndex(ctx, name); err != nil {
+	if err := fs.deleteIndexEntriesForDeleteTarget(ctx, name, info.IsDir); err != nil {
 		if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, false); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to delete file index: %w", err),
@@ -1440,31 +1428,22 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to remove trash metadata: %w", err)
 	}
 	os.RemoveAll(path.Join(fs.trashRoot, id))
-	if !item.IsDir {
-		if err := fs.syncFileIndexFromWorkspace(ctx, item.OriginalPath); err != nil {
-			rollbackErr := movePath(destPath, trashContentPath)
-			metadataErr := fs.versions.AddToTrash(ctx, item)
-			if rollbackErr != nil && metadataErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to update file index: %w", err),
-					fmt.Errorf("failed to rollback restored content: %w", rollbackErr),
-					fmt.Errorf("failed to restore trash metadata: %w", metadataErr),
-				)
-			}
-			if rollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to update file index: %w", err),
-					fmt.Errorf("failed to rollback restored content: %w", rollbackErr),
-				)
-			}
-			if metadataErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to update file index: %w", err),
-					fmt.Errorf("failed to restore trash metadata: %w", metadataErr),
-				)
-			}
-			return fmt.Errorf("failed to update file index: %w", err)
+	if err := fs.syncRestoredIndexEntries(ctx, item.OriginalPath, item.IsDir); err != nil {
+		rollbackErr := movePath(destPath, trashContentPath)
+		metadataErr := fs.versions.AddToTrash(ctx, item)
+		indexRollbackErr := fs.deleteFileIndexPrefix(ctx, item.OriginalPath)
+		var errs []error
+		errs = append(errs, fmt.Errorf("failed to update file index: %w", err))
+		if rollbackErr != nil {
+			errs = append(errs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
 		}
+		if metadataErr != nil {
+			errs = append(errs, fmt.Errorf("failed to restore trash metadata: %w", metadataErr))
+		}
+		if indexRollbackErr != nil {
+			errs = append(errs, fmt.Errorf("failed to rollback restored file index: %w", indexRollbackErr))
+		}
+		return errors.Join(errs...)
 	}
 
 	return nil
@@ -1550,26 +1529,26 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	}
 
 	os.RemoveAll(path.Join(fs.trashRoot, id))
-	if !item.IsDir {
-		if err := fs.syncFileIndexFromWorkspace(ctx, newPath); err != nil {
-			var rollbackErrs []error
-			if metadataRenamed {
-				if revertErr := fs.renameMetadataPath(ctx, newPath, item.OriginalPath); revertErr != nil {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback version metadata: %w", revertErr))
-				}
+	if err := fs.syncRestoredIndexEntries(ctx, newPath, item.IsDir); err != nil {
+		var rollbackErrs []error
+		if metadataRenamed {
+			if revertErr := fs.renameMetadataPath(ctx, newPath, item.OriginalPath); revertErr != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback version metadata: %w", revertErr))
 			}
-			rollbackErr := movePath(destPath, trashContentPath)
-			if rollbackErr != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
-			}
-			if metadataErr := fs.addTrashMetadata(ctx, item); metadataErr != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to restore trash metadata: %w", metadataErr))
-			}
-			if len(rollbackErrs) > 0 {
-				return errors.Join(append([]error{fmt.Errorf("failed to update file index: %w", err)}, rollbackErrs...)...)
-			}
-			return fmt.Errorf("failed to update file index: %w", err)
 		}
+		if rollbackErr := movePath(destPath, trashContentPath); rollbackErr != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
+		}
+		if metadataErr := fs.addTrashMetadata(ctx, item); metadataErr != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to restore trash metadata: %w", metadataErr))
+		}
+		if cleanupErr := fs.deleteFileIndexPrefix(ctx, newPath); cleanupErr != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored file index: %w", cleanupErr))
+		}
+		if len(rollbackErrs) > 0 {
+			return errors.Join(append([]error{fmt.Errorf("failed to update file index: %w", err)}, rollbackErrs...)...)
+		}
+		return fmt.Errorf("failed to update file index: %w", err)
 	}
 
 	return nil
@@ -2043,6 +2022,68 @@ func (fs *FileSystem) shouldForceRetentionSweepLocked() bool {
 
 func (fs *FileSystem) refreshFileIndex(ctx context.Context, name string) {
 	_ = fs.syncFileIndexFromWorkspace(ctx, name)
+}
+
+func (fs *FileSystem) describeDeleteTarget(ctx context.Context, name string, info *workspace.FileInfo) (int64, bool, error) {
+	if !info.IsDir {
+		versions, err := fs.getVersions(ctx, name)
+		if err != nil {
+			return 0, false, fmt.Errorf("failed to read version metadata: %w", err)
+		}
+		return info.Size, len(versions) > 0, nil
+	}
+
+	var totalSize int64
+	if err := walkStorageWorkspace(ctx, fs.workspace, name, func(_ string, entry *workspace.FileInfo) error {
+		if entry != nil && !entry.IsDir {
+			totalSize += entry.Size
+		}
+		return nil
+	}); err != nil {
+		return 0, false, err
+	}
+
+	versionPaths, err := fs.listVersionPaths(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to list version metadata paths: %w", err)
+	}
+	for _, versionPath := range versionPaths {
+		if pathMatchesOrDescendant(name, versionPath) {
+			return totalSize, true, nil
+		}
+	}
+
+	return totalSize, false, nil
+}
+
+func (fs *FileSystem) deleteIndexEntriesForDeleteTarget(ctx context.Context, name string, isDir bool) error {
+	if isDir {
+		return fs.deleteFileIndexPrefix(ctx, name)
+	}
+	return fs.deleteFileIndex(ctx, name)
+}
+
+func (fs *FileSystem) syncRestoredIndexEntries(ctx context.Context, name string, isDir bool) error {
+	if !isDir {
+		return fs.syncFileIndexFromWorkspace(ctx, name)
+	}
+
+	return walkStorageWorkspace(ctx, fs.workspace, name, func(filePath string, entry *workspace.FileInfo) error {
+		if entry == nil || entry.IsDir {
+			return nil
+		}
+		return fs.syncFileIndexFromWorkspace(ctx, filePath)
+	})
+}
+
+func pathMatchesOrDescendant(rootPath, candidatePath string) bool {
+	if candidatePath == rootPath {
+		return true
+	}
+	if rootPath == "/" {
+		return strings.HasPrefix(candidatePath, "/")
+	}
+	return strings.HasPrefix(candidatePath, rootPath+"/")
 }
 
 func (fs *FileSystem) syncFileIndexFromWorkspace(ctx context.Context, name string) error {

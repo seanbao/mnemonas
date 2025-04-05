@@ -877,6 +877,40 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('disables reset while a save request is pending', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingSave = createDeferred<{ success: boolean; message: string }>()
+
+      mockGetSettings.mockResolvedValue(defaultSettingsResponse)
+      mockUpdateSettings.mockImplementationOnce(() => pendingSave.promise)
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('8080')).toBeTruthy()
+      })
+
+      const input = screen.getByDisplayValue('8080')
+      await user.clear(input)
+      await user.type(input, '9000')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalled()
+      })
+
+      const resetButton = screen.getByRole('button', { name: '重置' })
+      expect(resetButton).toBeDisabled()
+
+      await user.click(resetButton)
+
+      expect(mockGetSettings).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        pendingSave.resolve({ success: true, message: 'ok' })
+      })
+    })
+
     it('reset restores server values after local edits', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSettings.mockResolvedValue({

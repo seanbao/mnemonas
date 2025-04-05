@@ -498,6 +498,53 @@ describe('TrashPage', () => {
       })
     })
 
+    it('keeps the delete modal open when a pending permanent delete later fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<void>()
+      mockDeleteFromTrash.mockImplementationOnce(() => pendingDelete.promise)
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
+
+      await waitFor(() => {
+        expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+
+      await act(async () => {
+        pendingDelete.reject(new ApiError(
+          'filesystem not initialized',
+          503,
+          'Service Unavailable',
+          'SERVICE_UNAVAILABLE'
+        ))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '永久删除暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
+      })
+
+      expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+    })
+
     it('keeps a newer delete modal open when an older delete request resolves', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const pendingDelete = createDeferred<void>()
@@ -661,6 +708,56 @@ describe('TrashPage', () => {
           color: 'warning',
         })
       })
+    })
+
+    it('keeps the empty trash modal open when a pending request later fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingEmpty = createDeferred<{ deletedCount: number; partial: boolean }>()
+      mockEmptyTrash.mockImplementationOnce(() => pendingEmpty.promise)
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('清空回收站'))
+
+      await waitFor(() => {
+        expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+      })
+
+      const confirmButtons = screen.getAllByText('清空回收站')
+      const confirmButton = confirmButtons.find(btn => btn.closest('[class*="ModalFooter"], footer')) ?? confirmButtons[confirmButtons.length - 1]
+
+      await user.click(confirmButton)
+
+      await waitFor(() => {
+        expect(mockEmptyTrash).toHaveBeenCalled()
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
+
+      await act(async () => {
+        pendingEmpty.reject(new ApiError(
+          'filesystem not initialized',
+          503,
+          'Service Unavailable',
+          'SERVICE_UNAVAILABLE'
+        ))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '清空回收站暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
+      })
+
+      expect(screen.getByText('确定要清空回收站吗？')).toBeTruthy()
     })
   })
 
