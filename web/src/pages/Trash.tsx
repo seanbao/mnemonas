@@ -46,6 +46,26 @@ function daysUntilDelete(deletedAt: string, retentionDays: number): number | nul
   return Math.max(0, Math.ceil((autoDelete.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
 }
 
+function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number, retentionEnabled: boolean): string | null {
+  if (!retentionEnabled) {
+    return null
+  }
+
+  if (retentionDays === 0) {
+    return '已过期，等待清理'
+  }
+
+  const daysLeft = daysUntilDelete(deletedAt, retentionDays)
+  if (daysLeft === null || daysLeft > 7) {
+    return null
+  }
+  if (daysLeft === 0) {
+    return '已过期，等待清理'
+  }
+
+  return `${daysLeft} 天后自动删除`
+}
+
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
 
 function getTrashLoadErrorPresentation(error: unknown): {
@@ -133,7 +153,8 @@ function TrashRow({
   retentionEnabled: boolean
   canWrite: boolean
 }) {
-  const daysLeft = retentionEnabled ? daysUntilDelete(item.deletedAt, retentionDays) : null
+  const autoDeleteBadgeLabel = getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled)
+  const isExpiredForCleanup = autoDeleteBadgeLabel === '已过期，等待清理'
   
   return (
     <div
@@ -165,9 +186,9 @@ function TrashRow({
           <Clock size={12} />
           {formatRelativeTime(item.deletedAt)}
         </div>
-        {daysLeft !== null && daysLeft <= 7 && (
-          <Chip size="sm" variant="flat" color="warning" className="mt-1">
-            {daysLeft} 天后自动删除
+        {autoDeleteBadgeLabel && (
+          <Chip size="sm" variant="flat" color={isExpiredForCleanup ? 'danger' : 'warning'} className="mt-1">
+            {autoDeleteBadgeLabel}
           </Chip>
         )}
       </div>
@@ -522,8 +543,10 @@ export function TrashPage() {
   const retentionKnown = retentionEnabled !== undefined || retentionDays !== undefined
   const retentionLabel = !retentionKnown
     ? '自动清理设置未知'
-    : retentionEnabled && retentionDays !== undefined && retentionDays > 0
-      ? `${retentionDays} 天后自动清理`
+    : retentionEnabled && retentionDays !== undefined
+      ? retentionDays === 0
+        ? '立即过期，等待清理'
+        : `${retentionDays} 天后自动清理`
       : '自动清理未启用'
 
   return (

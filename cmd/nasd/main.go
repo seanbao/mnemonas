@@ -36,6 +36,11 @@ var (
 	buildTime = "unknown"
 )
 
+var startupDataplaneContext = dataplane.WithTimeout
+var startupDataplaneConnect = func(client *dataplane.Client, ctx context.Context) error {
+	return client.Connect(ctx)
+}
+
 type switchableWebDAVHandler struct {
 	mu      sync.RWMutex
 	prefix  string
@@ -82,6 +87,19 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		Username:   cfg.Username,
 		Password:   cfg.Password,
 	})
+}
+
+func connectStartupDataplane(addr string) (*dataplane.Client, error) {
+	ctx, cancel := startupDataplaneContext(api.DefaultDataplaneConnectTimeout * time.Second)
+	defer cancel()
+
+	client := dataplane.NewClient(addr)
+	if err := startupDataplaneConnect(client, ctx); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+
+	return client, nil
 }
 
 func main() {
@@ -171,16 +189,16 @@ func main() {
 		log.Info().Msg("🔐 WebDAV using auto-generated password from secrets.json")
 	}
 
-	// Create background context for initialization
-	ctx := context.Background()
-
 	// Create data plane client for storage operations
-	dataplaneClient := dataplane.NewClient(cfg.DataPlane.Address())
-	if err := dataplaneClient.Connect(ctx); err != nil {
+	dataplaneClient, err := connectStartupDataplane(cfg.DataPlane.Address())
+	if err != nil {
 		log.Fatal().Err(err).Str("address", cfg.DataPlane.Address()).Msg("failed to connect to dataplane")
 	}
 	defer dataplaneClient.Close()
 	log.Info().Str("address", cfg.DataPlane.Address()).Msg("connected to dataplane")
+
+	// Create background context for initialization
+	ctx := context.Background()
 
 	// Create filesystem with new storage architecture
 	fs, err := storage.New(&storage.Config{
