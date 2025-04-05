@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,30 @@ func TestNewHistoryStore_ReturnsErrorWhenDirectoryTreeSyncFails(t *testing.T) {
 
 	if _, statErr := os.Stat(filepath.Join(nestedDir, "last_scrub.json")); !os.IsNotExist(statErr) {
 		t.Fatalf("expected no history file to be created, got %v", statErr)
+	}
+}
+
+func TestEnsureHistoryDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	nestedDir := filepath.Join(tmpDir, "nested", "dir")
+
+	originalSyncHistoryFileDir := syncHistoryFileDir
+	var synced []string
+	syncHistoryFileDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncHistoryFileDir = originalSyncHistoryFileDir
+	}()
+
+	if err := ensureHistoryDir(nestedDir, 0755); err != nil {
+		t.Fatalf("ensureHistoryDir() error: %v", err)
+	}
+
+	expected := []string{filepath.Join(tmpDir, "nested"), tmpDir}
+	if !reflect.DeepEqual(synced, expected) {
+		t.Fatalf("syncHistoryFileDir() order = %#v, want %#v", synced, expected)
 	}
 }
 

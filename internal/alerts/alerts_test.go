@@ -2,6 +2,8 @@ package alerts
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -311,5 +313,39 @@ func TestCheck_ConcurrentConfigUpdates(t *testing.T) {
 
 	for err := range errCh {
 		t.Fatalf("unexpected concurrent Check()/UpdateConfig() error: %v", err)
+	}
+}
+
+func TestSendWebhook_TrimsConfiguredHeaders(t *testing.T) {
+	reqCh := make(chan *http.Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCh <- r.Clone(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendWebhook(context.Background(), AlertPayload{Type: "storage_alert"}, Config{
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+		WebhookHeaders: []string{"Authorization: Bearer token", " X-MnemoNAS : alerts ", "InvalidHeader"},
+	})
+	if err != nil {
+		t.Fatalf("sendWebhook() error: %v", err)
+	}
+
+	select {
+	case req := <-reqCh:
+		if got := req.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization header = %q, want %q", got, "Bearer token")
+		}
+		if got := req.Header.Get("X-MnemoNAS"); got != "alerts" {
+			t.Fatalf("X-MnemoNAS header = %q, want %q", got, "alerts")
+		}
+		if got := req.Header.Get("InvalidHeader"); got != "" {
+			t.Fatalf("InvalidHeader = %q, want empty", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for webhook request")
 	}
 }

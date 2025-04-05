@@ -2405,9 +2405,12 @@ func (fs *FileSystem) rollbackDeletedPath(ctx context.Context, name string, hadP
 	return nil
 }
 
-func (fs *FileSystem) restoreDeletedFileIndex(ctx context.Context, name string, info *FileInfo) error {
-	if info == nil || info.IsDir {
+func (fs *FileSystem) restoreDeletedIndexEntries(ctx context.Context, name string, info *FileInfo) error {
+	if info == nil {
 		return nil
+	}
+	if info.IsDir {
+		return fs.syncRestoredIndexEntries(ctx, name, true)
 	}
 
 	hash := info.ContentHash
@@ -2436,7 +2439,7 @@ func (fs *FileSystem) rollbackSoftDelete(ctx context.Context, name string, info 
 
 	var restoreIndexErr error
 	if restoreIndex && rollbackErr == nil && metadataErr == nil {
-		restoreIndexErr = fs.restoreDeletedFileIndex(ctx, name, info)
+		restoreIndexErr = fs.restoreDeletedIndexEntries(ctx, name, info)
 	}
 
 	return errors.Join(

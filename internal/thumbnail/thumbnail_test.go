@@ -669,6 +669,45 @@ func TestGetThumbnail_RejectsSymlinkCachePath(t *testing.T) {
 	}
 }
 
+func TestGetThumbnail_RejectsCachePathSymlinkIntroducedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cacheKey := svc.cacheKey("/test/race.png", SizeSmall)
+	cachePath := svc.cachePath(cacheKey)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatalf("MkdirAll(cache dir) failed: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("cached-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(cachePath) failed: %v", err)
+	}
+	targetPath := filepath.Join(tmpDir, "secret-thumb.jpg")
+	if err := os.WriteFile(targetPath, []byte("secret-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(secret-thumb.jpg) failed: %v", err)
+	}
+
+	originalAfterValidateThumbnailCachePath := afterValidateThumbnailCachePath
+	afterValidateThumbnailCachePath = func() {
+		if err := os.Remove(cachePath); err != nil {
+			t.Fatalf("Remove(cachePath) failed: %v", err)
+		}
+		if err := os.Symlink(targetPath, cachePath); err != nil {
+			t.Fatalf("Symlink(cachePath) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateThumbnailCachePath = originalAfterValidateThumbnailCachePath
+	}()
+
+	_, err = svc.loadFromCache(cachePath)
+	if !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("expected symlink rejection after validation race, got %v", err)
+	}
+}
+
 func TestGetThumbnail_RejectsSymlinkCacheParentDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	realCacheDir := filepath.Join(tmpDir, "real-cache")

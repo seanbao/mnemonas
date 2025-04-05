@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { StoragePage } from './Storage'
 import * as HeroUI from '@heroui/react'
@@ -48,6 +48,10 @@ describe('StoragePage', () => {
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
     mockGetStorageStats.mockResolvedValue(mockStats)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   describe('loading state', () => {
@@ -100,6 +104,32 @@ describe('StoragePage', () => {
       await waitFor(() => {
         expect(mockGetStorageStats.mock.calls.length).toBeGreaterThanOrEqual(1)
       })
+    })
+
+    it('auto-refreshes storage stats every 30 seconds', async () => {
+      vi.useFakeTimers()
+
+      const flushUi = async () => {
+        await act(async () => {
+          await Promise.resolve()
+          await Promise.resolve()
+        })
+        act(() => {
+          vi.advanceTimersByTime(0)
+        })
+      }
+
+      render(<StoragePage />)
+
+      await flushUi()
+      expect(mockGetStorageStats).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30000)
+      })
+
+      await flushUi()
+      expect(mockGetStorageStats).toHaveBeenCalledTimes(2)
     })
   })
 
