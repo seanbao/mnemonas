@@ -301,18 +301,40 @@ start_frontend() {
 # 显示 WebDAV 凭据
 show_credentials() {
     local secrets_file="$HOME/.mnemonas/secrets.json"
+    local config_file="$HOME/.mnemonas/config.toml"
     
     if [ ! -f "$secrets_file" ]; then
         log_error "凭据文件不存在: $secrets_file"
         log_info "请先启动服务以生成凭据: ./scripts/dev.sh"
         return 1
     fi
+
+    local username="admin"
+    if [ -f "$config_file" ]; then
+        local configured_username
+        configured_username=$(awk '
+            /^\[webdav\]$/ { in_webdav = 1; next }
+            /^\[/ { in_webdav = 0 }
+            in_webdav && /^[[:space:]]*username[[:space:]]*=/ {
+                line = $0
+                sub(/^[^=]*=[[:space:]]*/, "", line)
+                sub(/[[:space:]]*#.*$/, "", line)
+                gsub(/^"/, "", line)
+                gsub(/"$/, "", line)
+                print line
+                exit
+            }
+        ' "$config_file")
+        if [ -n "$configured_username" ]; then
+            username="$configured_username"
+        fi
+    fi
     
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}🔐 WebDAV 凭据:${NC}"
     local password=$(cat "$secrets_file" | grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
-    echo -e "   用户名: ${GREEN}admin${NC}"
+    echo -e "   用户名: ${GREEN}${username}${NC}"
     echo -e "   密码:   ${GREEN}${password}${NC}"
     echo -e "   存储于: $secrets_file"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

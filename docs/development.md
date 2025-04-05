@@ -536,6 +536,8 @@ curl http://localhost:9091/stats            # dataplane 统计
 ./scripts/e2e-test.sh --quick
 ```
 
+脚本会在认证测试阶段自动尝试使用 bootstrap admin 凭据登录；启用认证但当前环境没有可用 bootstrap 凭据时，依赖管理员权限的 maintenance / diagnostics 检查会标记为 `skip`，避免把权限前置条件误报成产品故障。
+
 测试覆盖：
 
 - 基础功能：健康检查、版本 API、WebDAV OPTIONS
@@ -559,7 +561,12 @@ curl http://localhost:9091/stats            # dataplane 统计
 
 # 测试其他地址
 ./scripts/benchmark.sh http://192.168.1.100:8080
+
+# 若服务的 storage.root 不是默认 ~/.mnemonas，可显式指定
+MNEMONAS_STORAGE_ROOT=/data/mnemonas ./scripts/benchmark.sh
 ```
+
+脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件；若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
 
 测试内容：
 

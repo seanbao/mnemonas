@@ -1098,9 +1098,10 @@ func (h *Handler) parsePropfindDepth(depth string) (string, error) {
 		return "infinity", nil
 	}
 
-	switch strings.ToLower(depth) {
+	normalized := strings.ToLower(strings.TrimSpace(depth))
+	switch normalized {
 	case "0", "1", "infinity":
-		return strings.ToLower(depth), nil
+		return normalized, nil
 	default:
 		return "", errInvalidDepthHeader
 	}

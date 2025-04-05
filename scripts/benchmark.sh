@@ -2,14 +2,37 @@
 # Performance benchmark script for MnemoNAS WebDAV
 # Tests PROPFIND response time with varying directory sizes
 
-set -e
+set -euo pipefail
 
 BASE_URL="${1:-http://localhost:8080}"
 DAV_URL="$BASE_URL/dav"
-TEST_DIR="$HOME/.mnemonas/metadata/benchmark-test"
+STORAGE_ROOT="${MNEMONAS_STORAGE_ROOT:-$HOME/.mnemonas}"
+TEST_DIR="$STORAGE_ROOT/files/benchmark-test"
+
+cleanup() {
+    rm -rf "$TEST_DIR"
+}
+
+trap cleanup EXIT
+
+run_propfind() {
+    local path=$1
+    local depth=$2
+    local status
+
+    if ! status=$(curl -sS -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: $depth" "$DAV_URL$path"); then
+        echo "PROPFIND $path failed to reach $DAV_URL$path" >&2
+        return 1
+    fi
+    if [ "$status" != "207" ]; then
+        echo "PROPFIND $path returned unexpected HTTP status: $status" >&2
+        return 1
+    fi
+}
 
 echo "=== MnemoNAS WebDAV Performance Benchmark ==="
 echo "Base URL: $BASE_URL"
+echo "Storage Root: $STORAGE_ROOT"
 echo ""
 
 # Function to create test files
@@ -21,10 +44,7 @@ create_test_files() {
     mkdir -p "$dir"
     
     for i in $(seq 1 $count); do
-        # Create minimal metadata files
-        cat > "$dir/file-$(printf '%05d' $i).json" << EOF
-{"name":"file-$(printf '%05d' $i).txt","isDir":false,"size":1024,"modTime":"$(date -Iseconds)","contentHash":"test$i"}
-EOF
+        printf 'benchmark file %05d\n' "$i" > "$dir/file-$(printf '%05d' $i).txt"
     done
 }
 
@@ -37,13 +57,13 @@ benchmark_propfind() {
     echo -n "PROPFIND $desc (Depth: $depth): "
     
     # Warm up cache
-    curl -s -X PROPFIND -H "Depth: $depth" "$DAV_URL$path" > /dev/null 2>&1 || true
+    run_propfind "$path" "$depth"
     
     # Measure time (3 runs, take average)
     local total=0
     for i in 1 2 3; do
         local start=$(date +%s%N)
-        curl -s -X PROPFIND -H "Depth: $depth" "$DAV_URL$path" > /dev/null 2>&1 || true
+        run_propfind "$path" "$depth"
         local end=$(date +%s%N)
         local duration=$(( (end - start) / 1000000 ))
         total=$((total + duration))
@@ -69,7 +89,7 @@ benchmark_get() {
 }
 
 # Clean up old test data
-rm -rf "$TEST_DIR"
+cleanup
 mkdir -p "$TEST_DIR"
 
 echo "--- Creating test directories ---"
@@ -99,20 +119,21 @@ echo "--- Cache Effect Test ---"
 echo "Testing cache effect on 1000-file directory..."
 echo -n "First request (cold): "
 start=$(date +%s%N)
-curl -s -X PROPFIND -H "Depth: 1" "$DAV_URL/benchmark-test/dir-1000" > /dev/null 2>&1 || true
+run_propfind "/benchmark-test/dir-1000" "1"
 end=$(date +%s%N)
 echo "$(( (end - start) / 1000000 ))ms"
 
 # Second request (cache hit)
 echo -n "Second request (cached): "
 start=$(date +%s%N)
-curl -s -X PROPFIND -H "Depth: 1" "$DAV_URL/benchmark-test/dir-1000" > /dev/null 2>&1 || true
+run_propfind "/benchmark-test/dir-1000" "1"
 end=$(date +%s%N)
 echo "$(( (end - start) / 1000000 ))ms"
 
 echo ""
 echo "--- API Metrics ---"
-curl -s "$BASE_URL/api/v1/metrics" | python3 -c "
+if metrics_json=$(curl -fsS "$BASE_URL/api/v1/metrics"); then
+    printf '%s' "$metrics_json" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)['data']
 print(f\"Total requests: {data['requests']['total']}\")
@@ -120,10 +141,13 @@ print(f\"Avg latency: {data['latency']['avg_ms']:.2f}ms\")
 print(f\"Max latency: {data['latency']['max_ms']:.2f}ms\")
 print(f\"Error rate: {data['requests']['error_rate']*100:.2f}%\")
 " 2>/dev/null || echo "(metrics parsing failed)"
+else
+    echo "(metrics request failed)"
+fi
 
 echo ""
 echo "--- Cleanup ---"
-rm -rf "$TEST_DIR"
+cleanup
 echo "Test files removed."
 
 echo ""

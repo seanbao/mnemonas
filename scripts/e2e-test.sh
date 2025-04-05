@@ -36,6 +36,10 @@ done
 PASSED=0
 FAILED=0
 SKIPPED=0
+ADMIN_ACCESS_TOKEN=""
+ADMIN_REFRESH_TOKEN=""
+ADMIN_API_BODY=""
+ADMIN_API_STATUS=""
 
 # Utility functions
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -64,6 +68,21 @@ setup() {
         exit 1
     fi
     log_info "Service is healthy"
+}
+
+admin_api_request() {
+    local method=$1
+    local url=$2
+    local response=""
+    local curl_args=(-s -X "$method" "$url")
+
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        curl_args+=(-H "Authorization: Bearer $ADMIN_ACCESS_TOKEN")
+    fi
+
+    response=$(curl "${curl_args[@]}" -w $'\n%{http_code}' 2>/dev/null || true)
+    ADMIN_API_STATUS="${response##*$'\n'}"
+    ADMIN_API_BODY="${response%$'\n'*}"
 }
 
 # ==============================================================================
@@ -356,41 +375,49 @@ test_concurrent_same_file() {
 
 test_metrics_api() {
     log_info "Testing metrics API..."
-    local resp=$(curl -sf "$API_URL/metrics" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "requests"; then
+    admin_api_request GET "$API_URL/metrics"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Metrics API requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "requests"; then
         log_ok "Metrics API returns request statistics"
     else
-        log_fail "Metrics API failed: $resp"
+        log_fail "Metrics API failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
 test_scrub_api() {
     log_info "Testing scrub API..."
-    local resp=$(curl -sf "$API_URL/scrub" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "success\|has_result\|running"; then
+    admin_api_request GET "$API_URL/maintenance/scrub"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Scrub API requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "success\|has_result\|running"; then
         log_ok "Scrub API returns status"
     else
-        log_fail "Scrub API failed: $resp"
+        log_fail "Scrub API failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
 test_scrub_trigger() {
     log_info "Testing scrub trigger (POST)..."
-    local resp=$(curl -sf -X POST "$API_URL/scrub" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "success\|started\|running"; then
+    admin_api_request POST "$API_URL/maintenance/scrub"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Scrub trigger API requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "success\|started\|running"; then
         log_ok "Scrub trigger API works"
     else
-        log_fail "Scrub trigger API failed: $resp"
+        log_fail "Scrub trigger API failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
 test_diagnostics_export() {
     log_info "Testing diagnostics export..."
-    local resp=$(curl -sf "$API_URL/diagnostics" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "system\|storage\|success"; then
+    admin_api_request GET "$API_URL/diagnostics"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Diagnostics export requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "system\|storage\|success"; then
         log_ok "Diagnostics export returns system info"
     else
-        log_fail "Diagnostics export failed: $resp"
+        log_fail "Diagnostics export failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
@@ -515,6 +542,8 @@ test_auth_login_success() {
         -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null || echo "error")
     
     if echo "$resp" | grep -q '"success":true'; then
+        ADMIN_ACCESS_TOKEN=$(echo "$resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+        ADMIN_REFRESH_TOKEN=$(echo "$resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
         log_ok "Auth login with initial password successful"
     else
         log_fail "Auth login failed: $resp"
@@ -577,6 +606,7 @@ test_auth_token_refresh() {
     log_info "Testing token refresh flow..."
     
     local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+    local refresh_token="$ADMIN_REFRESH_TOKEN"
     
     # Need to get a valid token first
     # This test requires auth to be enabled and initial password available
@@ -584,23 +614,27 @@ test_auth_token_refresh() {
         log_skip "Auth not configured for token refresh test"
         return
     fi
-    
-    # Try to login and get refresh token
-    local password=""
-    if [[ -f "$password_file" ]]; then
-        password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+
+    if [[ -z "$refresh_token" ]]; then
+        # Try to login and get refresh token
+        local password=""
+        if [[ -f "$password_file" ]]; then
+            password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+        fi
+
+        if [[ -z "$password" ]]; then
+            log_skip "No password available for token refresh test"
+            return
+        fi
+
+        local login_resp=$(curl -sf -X POST "$API_URL/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null)
+
+        ADMIN_ACCESS_TOKEN=$(echo "$login_resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+        ADMIN_REFRESH_TOKEN=$(echo "$login_resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
+        refresh_token="$ADMIN_REFRESH_TOKEN"
     fi
-    
-    if [[ -z "$password" ]]; then
-        log_skip "No password available for token refresh test"
-        return
-    fi
-    
-    local login_resp=$(curl -sf -X POST "$API_URL/auth/login" \
-        -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null)
-    
-    local refresh_token=$(echo "$login_resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
     
     if [[ -z "$refresh_token" ]]; then
         log_skip "Could not get refresh token from login response"
@@ -662,12 +696,6 @@ main() {
     test_concurrent_writes
     test_concurrent_same_file
 
-    # Group 6: Maintenance
-    test_metrics_api
-    test_scrub_api
-    test_scrub_trigger
-    test_diagnostics_export
-
     # Group 7: Large Files
     test_large_file_upload
     test_large_file_download
@@ -685,6 +713,12 @@ main() {
     test_auth_password_file_deleted_after_login
     test_auth_protected_endpoint
     test_auth_token_refresh
+
+    # Group 6: Maintenance (admin token available after auth tests when enabled)
+    test_metrics_api
+    test_scrub_api
+    test_scrub_trigger
+    test_diagnostics_export
 
     # Summary
     echo ""
