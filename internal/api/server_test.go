@@ -1360,6 +1360,54 @@ func TestServer_DeleteFile_RollsBackWhenFavoriteCleanupFails(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteDirectory_RollbackRestoresChildIndexesWhenDeleteHookFails(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
+		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/readme.md", bytes.NewReader([]byte("readme"))); err != nil {
+		t.Fatalf("WriteFile(readme) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report"))); err != nil {
+		t.Fatalf("WriteFile(report) error: %v", err)
+	}
+
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*storage.PathDeleteHookResult, error) {
+		return nil, errors.New("favorite cleanup failed")
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete directory with hook failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/docs"); err != nil {
+		t.Fatalf("expected directory to be restored after rollback, got %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected trash to remain empty after directory rollback, got %d items", len(items))
+	}
+	count, err := fs.GetFileCount(ctx)
+	if err != nil {
+		t.Fatalf("GetFileCount() error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("GetFileCount() after directory rollback = %d, want 2", count)
+	}
+}
+
 func TestServer_DeleteFile_RollsBackWhenFavoriteCleanupFailsWithTrashDisabled(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()

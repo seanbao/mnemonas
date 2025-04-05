@@ -357,7 +357,7 @@ func collectMissingFavoritesDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedFavoritesDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncFavoritesStoreDir(filepath.Dir(createdDirs[i])); err != nil {
 			return fmt.Errorf("failed to sync favorites directory tree: %w", err)
 		}

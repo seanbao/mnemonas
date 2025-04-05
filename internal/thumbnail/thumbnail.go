@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/disintegration/imaging"
@@ -29,6 +30,7 @@ import (
 var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")
 var syncThumbnailCacheDir = syncThumbnailDir
 var walkThumbnailCache = filepath.Walk
+var afterValidateThumbnailCachePath = func() {}
 var ErrThumbnailSourceTooLarge = errors.New("source image too large for thumbnail generation")
 
 // Size represents thumbnail size preset
@@ -352,8 +354,18 @@ func (s *Service) loadFromCache(cachePath string) ([]byte, error) {
 	if err := validateThumbnailCachePath(cachePath); err != nil {
 		return nil, err
 	}
+	afterValidateThumbnailCachePath()
 
-	data, err := os.ReadFile(cachePath)
+	cacheFile, err := os.OpenFile(cachePath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, errThumbnailCacheSymlink
+		}
+		return nil, err
+	}
+	defer cacheFile.Close()
+
+	data, err := io.ReadAll(cacheFile)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +446,7 @@ func collectMissingThumbnailDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedThumbnailDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncThumbnailCacheDir(filepath.Dir(createdDirs[i])); err != nil {
 			return fmt.Errorf("failed to sync thumbnail cache directory tree: %w", err)
 		}

@@ -368,7 +368,7 @@ func collectMissingHistoryDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedHistoryDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncHistoryFileDir(filepath.Dir(createdDirs[i])); err != nil {
 			return fmt.Errorf("failed to sync maintenance history directory tree: %w", err)
 		}

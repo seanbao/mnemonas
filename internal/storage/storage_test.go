@@ -1337,6 +1337,125 @@ func TestFileSystem_Delete_RollsBackWhenPathDeleteHookFails(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenPathDeleteHookFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
+		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/readme.md", bytes.NewReader([]byte("readme"))); err != nil {
+		t.Fatalf("WriteFile(readme) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report"))); err != nil {
+		t.Fatalf("WriteFile(report) error: %v", err)
+	}
+
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(readme before delete) error: %v", err)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/nested/report.txt"); err != nil {
+		t.Fatalf("GetFileIndex(report before delete) error: %v", err)
+	}
+
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+		return nil, errors.New("favorite cleanup failed")
+	})
+
+	err := fs.Delete(ctx, "/docs")
+	if err == nil {
+		t.Fatal("Expected Delete() to fail when directory delete hook fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync delete hooks") {
+		t.Fatalf("expected delete hook failure in error, got %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/docs"); statErr != nil {
+		t.Fatalf("expected directory to be restored after rollback, got %v", statErr)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(readme after rollback) error: %v", err)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/nested/report.txt"); err != nil {
+		t.Fatalf("GetFileIndex(report after rollback) error: %v", err)
+	}
+
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Expected trash to remain empty after directory rollback, got %d items", len(items))
+	}
+
+	count, countErr := fs.GetFileCount(ctx)
+	if countErr != nil {
+		t.Fatalf("GetFileCount() error: %v", countErr)
+	}
+	if count != 2 {
+		t.Fatalf("GetFileCount() after directory rollback = %d, want 2", count)
+	}
+}
+
+func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenTrashRestoreMetadataPersistsFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
+		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/readme.md", bytes.NewReader([]byte("readme"))); err != nil {
+		t.Fatalf("WriteFile(readme) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report"))); err != nil {
+		t.Fatalf("WriteFile(report) error: %v", err)
+	}
+
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+		return &PathDeleteHookResult{RestoreData: []byte(`{"favorites":[{"user_id":"tester","path":"/docs/readme.md","type":"file"}]}`)}, nil
+	})
+
+	originalUpdateTrashRestoreData := fs.updateTrashRestoreData
+	fs.updateTrashRestoreData = func(ctx context.Context, id string, restoreData []byte) error {
+		return errors.New("persist restore metadata failed")
+	}
+	t.Cleanup(func() {
+		fs.updateTrashRestoreData = originalUpdateTrashRestoreData
+	})
+
+	err := fs.Delete(ctx, "/docs")
+	if err == nil {
+		t.Fatal("Expected Delete() to fail when trash restore metadata persistence fails")
+	}
+	if !strings.Contains(err.Error(), "failed to persist trash restore metadata") {
+		t.Fatalf("expected restore metadata failure in error, got %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/docs"); statErr != nil {
+		t.Fatalf("expected directory to be restored after rollback, got %v", statErr)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(readme after rollback) error: %v", err)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/nested/report.txt"); err != nil {
+		t.Fatalf("GetFileIndex(report after rollback) error: %v", err)
+	}
+
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Expected trash to remain empty after directory rollback, got %d items", len(items))
+	}
+}
+
 func TestFileSystem_Delete_CompletesWhenDeleteHookRegistered(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

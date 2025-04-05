@@ -764,6 +764,77 @@ func TestTokenManager(t *testing.T) {
 		}
 	})
 
+	t.Run("revoke token blocks concurrent validation until revocation is recorded", func(t *testing.T) {
+		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+
+		user := &User{
+			ID:       "user-456-race",
+			Username: "revoke-race",
+			Role:     RoleUser,
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(user)
+		if err != nil {
+			t.Fatalf("failed to generate token pair: %v", err)
+		}
+		claims, err := tm.ValidateAccessToken(tokenPair.AccessToken)
+		if err != nil {
+			t.Fatalf("failed to validate access token before revoke: %v", err)
+		}
+
+		enteredCleanup := make(chan struct{})
+		releaseCleanup := make(chan struct{})
+		originalAfterRevokeTokenCleanup := afterRevokeTokenCleanup
+		afterRevokeTokenCleanup = func() {
+			close(enteredCleanup)
+			<-releaseCleanup
+		}
+		defer func() {
+			afterRevokeTokenCleanup = originalAfterRevokeTokenCleanup
+		}()
+
+		revokeDone := make(chan struct{})
+		go func() {
+			tm.RevokeToken(claims.TokenID)
+			close(revokeDone)
+		}()
+
+		select {
+		case <-enteredCleanup:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for revoke cleanup hook")
+		}
+
+		validateResult := make(chan error, 1)
+		go func() {
+			_, err := tm.ValidateAccessToken(tokenPair.AccessToken)
+			validateResult <- err
+		}()
+
+		select {
+		case err := <-validateResult:
+			t.Fatalf("expected validation to block until revoke completes, got %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		close(releaseCleanup)
+
+		select {
+		case <-revokeDone:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for revoke completion")
+		}
+
+		select {
+		case err := <-validateResult:
+			if err != ErrTokenRevoked {
+				t.Fatalf("expected ErrTokenRevoked after revoke completes, got %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for blocked validation result")
+		}
+	})
+
 	t.Run("revoke by user", func(t *testing.T) {
 		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
 
