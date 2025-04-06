@@ -166,16 +166,33 @@ impl CasStore {
         let hash = compute_hash(data);
         let original_size = data.len() as u64;
 
+        if let Some(existing_size) = self.index.get(&hash).map(|r| *r) {
+            if self.object_exists(&hash).await? {
+                debug!(hash = %hash, "dedup hit");
+                self.record_dedup_hit(original_size);
+                return Ok(PutResult {
+                    hash,
+                    deduplicated: true,
+                });
+            }
+
+            let stale_disk_size = self.prepare_write_target(&hash, data)?.0.len() as u64;
+            if self.index.remove(&hash).is_some() {
+                warn!(hash = %hash, "stale CAS index entry detected; recreating missing object");
+                self.stats.total_chunks.fetch_sub(1, Ordering::Relaxed);
+                self.stats.total_size.fetch_sub(existing_size, Ordering::Relaxed);
+                self.stats
+                    .compressed_size
+                    .fetch_sub(stale_disk_size, Ordering::Relaxed);
+            }
+        }
+
         // Atomic check-and-insert using entry API (C3 fix - prevents TOCTOU race)
         use dashmap::mapref::entry::Entry;
         match self.index.entry(hash.clone()) {
             Entry::Occupied(_) => {
-                // Already exists - deduplication hit
                 debug!(hash = %hash, "dedup hit");
-				self.stats
-					.logical_size
-					.fetch_add(original_size, Ordering::Relaxed);
-                self.stats.hit_count.fetch_add(1, Ordering::Relaxed);
+                self.record_dedup_hit(original_size);
                 return Ok(PutResult {
                     hash,
                     deduplicated: true,
@@ -185,26 +202,7 @@ impl CasStore {
                 #[cfg(test)]
                 self.maybe_fail_put()?;
 
-                // Determine if we should compress
-                let should_compress =
-                    self.config.compression_enabled && data.len() >= self.config.min_compress_size;
-
-                // Prepare data to write (possibly compressed)
-                let (write_data, path) = if should_compress {
-                    let compressed =
-                        zstd::encode_all(std::io::Cursor::new(data), self.config.compression_level)
-                            .map_err(|e| CasError::Compression(e.to_string()))?;
-
-                    // Only use compression if it actually saves space
-                    if compressed.len() < data.len() {
-                        let path = self.hash_to_path(&hash).with_extension("zst");
-                        (compressed, path)
-                    } else {
-                        (data.to_vec(), self.hash_to_path(&hash))
-                    }
-                } else {
-                    (data.to_vec(), self.hash_to_path(&hash))
-                };
+                let (write_data, path) = self.prepare_write_target(&hash, data)?;
 
                 let disk_size = write_data.len() as u64;
 
@@ -223,9 +221,9 @@ impl CasStore {
 
                 // Update index and stats
                 entry.insert(original_size);
-				self.stats
-					.logical_size
-					.fetch_add(original_size, Ordering::Relaxed);
+                self.stats
+                    .logical_size
+                    .fetch_add(original_size, Ordering::Relaxed);
                 self.stats.total_chunks.fetch_add(1, Ordering::Relaxed);
                 self.stats
                     .total_size
@@ -246,6 +244,51 @@ impl CasStore {
                     deduplicated: false,
                 })
             }
+        }
+    }
+
+    fn record_dedup_hit(&self, original_size: u64) {
+        self.stats
+            .logical_size
+            .fetch_add(original_size, Ordering::Relaxed);
+        self.stats.hit_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn prepare_write_target(&self, hash: &str, data: &[u8]) -> Result<(Vec<u8>, PathBuf)> {
+        let should_compress =
+            self.config.compression_enabled && data.len() >= self.config.min_compress_size;
+
+        if should_compress {
+            let compressed = zstd::encode_all(std::io::Cursor::new(data), self.config.compression_level)
+                .map_err(|e| CasError::Compression(e.to_string()))?;
+
+            if compressed.len() < data.len() {
+                let path = self.hash_to_path(hash).with_extension("zst");
+                Ok((compressed, path))
+            } else {
+                Ok((data.to_vec(), self.hash_to_path(hash)))
+            }
+        } else {
+            Ok((data.to_vec(), self.hash_to_path(hash)))
+        }
+    }
+
+    async fn object_exists(&self, hash: &str) -> Result<bool> {
+        let base_path = self.hash_to_path(hash);
+        let compressed_path = base_path.with_extension("zst");
+
+        if self.path_exists(&compressed_path).await? {
+            return Ok(true);
+        }
+
+        self.path_exists(&base_path).await
+    }
+
+    async fn path_exists(&self, path: &Path) -> Result<bool> {
+        match fs::metadata(path).await {
+            Ok(metadata) => Ok(metadata.is_file()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(CasError::Io(err)),
         }
     }
 
@@ -757,6 +800,36 @@ mod tests {
         // Delete
         assert!(store.delete(&hash).await.unwrap());
         assert!(!store.has(&hash));
+    }
+
+    #[tokio::test]
+    async fn test_put_recreates_missing_object_instead_of_returning_false_dedup() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"stale index should be repaired";
+        let hash = store.put(data).await.unwrap();
+        let path = store.hash_to_path(&hash);
+
+        tokio::fs::remove_file(&path).await.unwrap();
+
+        let result = store.put_with_status(data).await.unwrap();
+
+        assert!(!result.deduplicated, "missing object should be recreated, not treated as a dedup hit");
+        assert_eq!(store.get(&hash).await.unwrap(), data);
+
+        let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
+        assert_eq!(chunks, 1);
+        assert_eq!(logical_size, data.len() as u64 * 2);
+        assert_eq!(unique_size, data.len() as u64);
+        assert_eq!(compressed_size, data.len() as u64);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
     }
 
     #[tokio::test]

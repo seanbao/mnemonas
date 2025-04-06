@@ -152,7 +152,7 @@ func collectMissingVersionStoreDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedVersionStoreDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncVersionStoreDir(filepath.Dir(createdDirs[i])); err != nil {
 			return fmt.Errorf("failed to sync version store directory tree: %w", err)
 		}

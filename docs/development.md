@@ -255,7 +255,7 @@ make proto
 #   dataplane/src/proto/mnemonas.dataplane.v1.rs
 
 # 2. 构建 Go 控制面
-go build -o bin/nasd ./cmd/nasd
+CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd
 
 # 3. 构建 Rust 数据面
 cd dataplane && cargo build --release
@@ -273,7 +273,7 @@ cd web && npm run build
 make dev
 
 # 单独构建各组件
-go build -o bin/nasd ./cmd/nasd                    # Go
+CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd     # Go (required for SQLite-backed version store)
 cd dataplane && cargo build                         # Rust (debug)
 cd web && npm run build                             # 前端
 ```
@@ -509,14 +509,18 @@ npm run test:e2e:ui
 ### 集成测试
 
 ```bash
+# 当前默认配置启用 WebDAV Basic Auth；可通过 ./scripts/dev.sh --creds 查看凭据
+WEBDAV_USER="<webdav-username>"
+WEBDAV_PASS="<webdav-password>"
+
 # WebDAV 功能测试
-curl -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
+curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"
 
 # 上传文件
-curl -X PUT http://localhost:8080/dav/test.txt -d "Hello World"
+curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PUT http://localhost:8080/dav/test.txt -d "Hello World"
 
 # 下载文件
-curl http://localhost:8080/dav/test.txt
+curl -u "$WEBDAV_USER:$WEBDAV_PASS" http://localhost:8080/dav/test.txt
 
 # 健康检查
 curl http://localhost:8080/health           # nasd
@@ -564,9 +568,15 @@ curl http://localhost:9091/stats            # dataplane 统计
 
 # 若服务的 storage.root 不是默认 ~/.mnemonas，可显式指定
 MNEMONAS_STORAGE_ROOT=/data/mnemonas ./scripts/benchmark.sh
+
+# 若未使用默认 WebDAV 凭据或需要显式抓取受保护的 metrics
+MNEMONAS_WEBDAV_USERNAME="family" \
+MNEMONAS_WEBDAV_PASSWORD="secret" \
+MNEMONAS_ACCESS_TOKEN="<access-token>" \
+./scripts/benchmark.sh http://localhost:8080
 ```
 
-脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件；若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
+脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件，并优先从 `config.toml` / `secrets.json` 自动读取 WebDAV Basic Auth。若认证已初始化且 bootstrap admin 凭据不可用，可通过 `MNEMONAS_ACCESS_TOKEN` 显式传入管理员 token；否则 metrics 段会标记为 `skip`。若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
 
 测试内容：
 

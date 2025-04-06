@@ -4,6 +4,7 @@
 FROM rust:1.92 AS rust-builder
 
 WORKDIR /build/dataplane
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
 COPY dataplane/Cargo.toml dataplane/Cargo.lock ./
 COPY proto ../proto
 
@@ -18,16 +19,17 @@ RUN cargo build --release
 FROM golang:1.25 AS go-builder
 
 WORKDIR /build
+RUN apt-get update && apt-get install -y gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o nasd ./cmd/nasd
+RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o nasd ./cmd/nasd
 
 # === 最终镜像 ===
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -47,19 +49,7 @@ RUN sed -i 's|^root = ".*"|root = "/root/.mnemonas"|' /root/.mnemonas/config.tom
 EXPOSE 8080 9090 9091
 
 # 启动脚本
-COPY <<EOF /app/start.sh
-#!/bin/bash
-set -e
-
-# 启动Rust数据面
-/app/dataplane --listen 127.0.0.1:9091 --grpc 127.0.0.1:9090 --data-dir /root/.mnemonas/.mnemonas/objects &
-
-# 等待数据面启动
-sleep 1
-
-# 启动Go控制面
-exec /app/nasd --config /root/.mnemonas/config.toml
-EOF
+COPY scripts/docker-start.sh /app/start.sh
 
 RUN chmod +x /app/start.sh
 

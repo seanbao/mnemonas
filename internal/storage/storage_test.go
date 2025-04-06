@@ -134,6 +134,34 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestEnsureStorageDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "files", "nested", "dir")
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	var synced []string
+	syncStoragePathDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	}()
+
+	if err := ensureStorageDir(targetDir, 0755); err != nil {
+		t.Fatalf("ensureStorageDir() error: %v", err)
+	}
+
+	want := []string{
+		filepath.Join(tmpDir, "files", "nested"),
+		filepath.Join(tmpDir, "files"),
+		tmpDir,
+	}
+	if strings.Join(synced, "|") != strings.Join(want, "|") {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+}
+
 func TestNew_RequiresDataplane(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &Config{

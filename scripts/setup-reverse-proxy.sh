@@ -326,7 +326,9 @@ main() {
     echo ""
     echo "验证命令:"
     echo "  curl -I https://$DOMAIN/health"
-    echo "  curl -X PROPFIND https://$DOMAIN/dav/ -H 'Depth: 0'"
+    echo "  WEBDAV_USER=<webdav-username>"
+    echo "  WEBDAV_PASS=<webdav-password>"
+    echo "  curl -u \"\$WEBDAV_USER:\$WEBDAV_PASS\" -X PROPFIND https://$DOMAIN/dav/ -H 'Depth: 0'"
     echo ""
     
     if [[ "$PROXY_TYPE" == "caddy" ]]; then

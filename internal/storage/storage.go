@@ -2252,7 +2252,7 @@ func collectMissingStorageDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedStorageDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncStoragePathDir(filepath.Dir(createdDirs[i])); err != nil {
 			return err
 		}

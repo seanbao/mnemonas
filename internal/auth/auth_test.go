@@ -144,6 +144,30 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid stored home dir", func(t *testing.T) {
+		usersPath := filepath.Join(dir, "users-invalid-home-dir.json")
+		content := `[
+		  {
+		    "id": "u-invalid-home",
+		    "username": "broken-user",
+		    "password_hash": "$2a$10$dummy",
+		    "role": "user",
+		    "created_at": "2024-01-01T00:00:00Z",
+		    "updated_at": "2024-01-01T00:00:00Z",
+		    "home_dir": ""
+		  }
+		]`
+		if err := os.WriteFile(usersPath, []byte(content), 0600); err != nil {
+			t.Fatalf("failed to seed users file: %v", err)
+		}
+
+		if _, _, err := NewUserStore(usersPath); err == nil {
+			t.Fatal("expected invalid home_dir in users file to fail")
+		} else if !strings.Contains(err.Error(), "invalid home_dir") {
+			t.Fatalf("expected invalid home_dir error, got %v", err)
+		}
+	})
+
 	t.Run("create returns entropy failure", func(t *testing.T) {
 		store, _, err := NewUserStore(filepath.Join(dir, "users3-rand-fail.json"))
 		if err != nil {

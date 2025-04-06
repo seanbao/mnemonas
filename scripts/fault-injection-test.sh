@@ -22,6 +22,9 @@ BASE_URL="${BASE_URL:-http://localhost:8080}"
 WEBDAV_URL="${BASE_URL}/dav"
 STORAGE_ROOT="${STORAGE_ROOT:-$HOME/.mnemonas}"
 INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
+CONFIG_FILE="${CONFIG_FILE:-$STORAGE_ROOT/config.toml}"
+SECRETS_FILE="${SECRETS_FILE:-$STORAGE_ROOT/secrets.json}"
+INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
 OBJECTS_DIR="${OBJECTS_DIR:-$INTERNAL_DIR/objects}"
 INDEX_DB="${INDEX_DB:-$INTERNAL_DIR/index.db}"
 NASD_BIN="${NASD_BIN:-./bin/nasd}"
@@ -30,11 +33,142 @@ TEST_DIR="/tmp/mnemonas-fault-$$"
 # Counters
 PASSED=0
 FAILED=0
+SKIPPED=0
+ADMIN_ACCESS_TOKEN=""
+WEBDAV_AUTH_ARGS=()
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED++)); }
 log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED++)); }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED++)); }
+
+read_config_value() {
+    local section=$1
+    local key=$2
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        return 0
+    fi
+
+    awk -v section="[$section]" -v key="$key" '
+        $0 == section { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            line = $0
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^"/, "", line)
+            gsub(/"$/, "", line)
+            print line
+            exit
+        }
+    ' "$CONFIG_FILE"
+}
+
+read_secret_value() {
+    local key=$1
+
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        return 0
+    fi
+
+    grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$SECRETS_FILE" | sed 's/.*: *"//' | sed 's/"$//' || true
+}
+
+configure_webdav_auth() {
+    local auth_type=$(read_config_value webdav auth_type)
+    local username
+    local password
+
+    if [[ -z "$auth_type" ]]; then
+        auth_type="basic"
+    fi
+
+    if [[ "$auth_type" != "basic" ]]; then
+        return 0
+    fi
+
+    username=$(read_config_value webdav username)
+    password=$(read_config_value webdav password)
+
+    if [[ -z "$username" ]]; then
+        username="admin"
+    fi
+    if [[ -z "$password" ]]; then
+        password=$(read_secret_value webdav_password)
+    fi
+
+    if [[ -z "$password" ]]; then
+        log_warn "WebDAV basic auth is enabled but no password was found; WebDAV fault tests may fail"
+        return 0
+    fi
+
+    WEBDAV_AUTH_ARGS=(-u "$username:$password")
+    log_info "Using WebDAV basic auth credentials for user: $username"
+}
+
+load_initial_admin_password() {
+    if [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
+        return 1
+    fi
+
+    grep '^Password:' "$INITIAL_PASSWORD_FILE" | awk '{print $2}' || true
+}
+
+configure_admin_auth() {
+    if [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
+        return 0
+    fi
+
+    local password=$(load_initial_admin_password)
+    if [[ -z "$password" ]]; then
+        log_warn "Could not extract bootstrap admin password; protected API checks may be skipped"
+        return 0
+    fi
+
+    local resp=$(command curl -sf -X POST "$BASE_URL/api/v1/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null || echo "")
+
+    if echo "$resp" | grep -q '"success":true'; then
+        ADMIN_ACCESS_TOKEN=$(echo "$resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+        log_info "Using bootstrap admin token for protected API checks"
+        return 0
+    fi
+
+    log_warn "Bootstrap admin login failed; protected API checks may be skipped"
+}
+
+authenticated_api_curl() {
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"
+        return
+    fi
+
+    command curl "$@"
+}
+
+curl() {
+    local args=("$@")
+    local needs_webdav_auth=false
+
+    for arg in "${args[@]}"; do
+        case "$arg" in
+            "$WEBDAV_URL"|"$WEBDAV_URL"/*)
+                needs_webdav_auth=true
+                break
+                ;;
+        esac
+    done
+
+    if $needs_webdav_auth && [[ ${#WEBDAV_AUTH_ARGS[@]} -gt 0 ]]; then
+        command curl "${WEBDAV_AUTH_ARGS[@]}" "${args[@]}"
+        return
+    fi
+
+    command curl "${args[@]}"
+}
 
 cleanup() {
     log_info "Cleaning up..."
@@ -57,6 +191,9 @@ setup() {
         echo -e "${RED}ERROR: MnemoNAS service not running${NC}"
         exit 1
     fi
+
+    configure_webdav_auth
+    configure_admin_auth
     
     # Create test directory in WebDAV
     curl -sf -X MKCOL "$WEBDAV_URL/fault-test/" > /dev/null 2>&1 || true
@@ -160,17 +297,27 @@ test_object_corruption() {
     log_info "Object file corrupted: $object_file"
     
     # Run scrub to detect corruption
-    local scrub_result=$(curl -sf -X POST "$BASE_URL/api/v1/maintenance/scrub" 2>/dev/null)
-    
-    if echo "$scrub_result" | grep -qi "corrupt\|error\|failed"; then
+    local scrub_response=$(authenticated_api_curl -s -X POST "$BASE_URL/api/v1/maintenance/scrub" -w $'\n%{http_code}' 2>/dev/null || true)
+    local scrub_status="${scrub_response##*$'\n'}"
+    local scrub_result="${scrub_response%$'\n'*}"
+
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$scrub_status" == "401" || "$scrub_status" == "403" ) ]]; then
+        log_skip "Scrub verification requires admin authentication"
+    elif echo "$scrub_result" | grep -qi "corrupt\|error\|failed"; then
         log_ok "Scrub detected corruption"
     else
         log_warn "Scrub may not have detected corruption: $scrub_result"
     fi
     
     # Check diagnostics
-    local diag=$(curl -sf "$BASE_URL/api/v1/diagnostics" 2>/dev/null)
-    log_info "Diagnostics after corruption: $(echo $diag | head -c 200)..."
+    local diag_response=$(authenticated_api_curl -s "$BASE_URL/api/v1/diagnostics" -w $'\n%{http_code}' 2>/dev/null || true)
+    local diag_status="${diag_response##*$'\n'}"
+    local diag="${diag_response%$'\n'*}"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$diag_status" == "401" || "$diag_status" == "403" ) ]]; then
+        log_skip "Diagnostics export requires admin authentication"
+    else
+        log_info "Diagnostics after corruption: $(echo $diag | head -c 200)..."
+    fi
     
     # Restore the object
     cp "$TEST_DIR/backup.bin" "$object_file"
@@ -266,9 +413,11 @@ test_recovery_verification() {
     done
     
     # Get version history
-    local history=$(curl -sf "$BASE_URL/api/v1/versions/fault-test/versioned.txt" 2>/dev/null || echo "{}")
+    local history_response=$(authenticated_api_curl -s "$BASE_URL/api/v1/versions/fault-test/versioned.txt" -w $'\n%{http_code}' 2>/dev/null || true)
+    local history_status="${history_response##*$'\n'}"
+    local history="${history_response%$'\n'*}"
     
-    if echo "$history" | grep -q "versions\|hash"; then
+    if [[ "$history_status" == "200" ]] && echo "$history" | grep -q "versions\|hash"; then
         log_ok "Version history available"
         
         # Current should be version 3
@@ -278,6 +427,8 @@ test_recovery_verification() {
         else
             log_fail "Current version mismatch: $current"
         fi
+    elif [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$history_status" == "401" || "$history_status" == "403" ) ]]; then
+        log_skip "Version history verification requires admin authentication"
     else
         log_warn "Version history not available: $history"
     fi
@@ -331,6 +482,7 @@ main() {
     echo "=============================================="
     echo -e " ${GREEN}Passed:${NC} $PASSED"
     echo -e " ${RED}Failed:${NC} $FAILED"
+    echo -e " ${YELLOW}Skipped:${NC} $SKIPPED"
     echo "=============================================="
     echo ""
 

@@ -20,6 +20,12 @@ NC='\033[0m' # No Color
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 WEBDAV_URL="${BASE_URL}/dav"
 API_URL="${BASE_URL}/api/v1"
+STORAGE_ROOT="${STORAGE_ROOT:-$HOME/.mnemonas}"
+INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
+CONFIG_FILE="${CONFIG_FILE:-$STORAGE_ROOT/config.toml}"
+SECRETS_FILE="${SECRETS_FILE:-$STORAGE_ROOT/secrets.json}"
+INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
+USERS_FILE="${USERS_FILE:-$INTERNAL_DIR/users.json}"
 TEST_DIR="/tmp/mnemonas-e2e-$$"
 QUICK_MODE=false
 
@@ -40,12 +46,117 @@ ADMIN_ACCESS_TOKEN=""
 ADMIN_REFRESH_TOKEN=""
 ADMIN_API_BODY=""
 ADMIN_API_STATUS=""
+WEBDAV_AUTH_ARGS=()
 
 # Utility functions
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED++)); }
 log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED++)); }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED++)); }
+
+read_config_value() {
+    local section=$1
+    local key=$2
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        return 0
+    fi
+
+    awk -v section="[$section]" -v key="$key" '
+        $0 == section { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            line = $0
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^"/, "", line)
+            gsub(/"$/, "", line)
+            print line
+            exit
+        }
+    ' "$CONFIG_FILE"
+}
+
+read_secret_value() {
+    local key=$1
+
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        return 0
+    fi
+
+    grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$SECRETS_FILE" | sed 's/.*: *"//' | sed 's/"$//' || true
+}
+
+configure_webdav_auth() {
+    local auth_type=$(read_config_value webdav auth_type)
+    local username
+    local password
+
+    if [[ -z "$auth_type" ]]; then
+        auth_type="basic"
+    fi
+
+    if [[ "$auth_type" != "basic" ]]; then
+        return 0
+    fi
+
+    username=$(read_config_value webdav username)
+    password=$(read_config_value webdav password)
+
+    if [[ -z "$username" ]]; then
+        username="admin"
+    fi
+    if [[ -z "$password" ]]; then
+        password=$(read_secret_value webdav_password)
+    fi
+
+    if [[ -z "$password" ]]; then
+        log_warn "WebDAV basic auth is enabled but no password was found; WebDAV tests may fail"
+        return 0
+    fi
+
+    WEBDAV_AUTH_ARGS=(-u "$username:$password")
+    log_info "Using WebDAV basic auth credentials for user: $username"
+}
+
+load_initial_admin_password() {
+    if [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
+        return 1
+    fi
+
+    grep '^Password:' "$INITIAL_PASSWORD_FILE" | awk '{print $2}' || true
+}
+
+authenticated_api_curl() {
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"
+        return
+    fi
+
+    command curl "$@"
+}
+
+curl() {
+    local args=("$@")
+    local needs_webdav_auth=false
+
+    for arg in "${args[@]}"; do
+        case "$arg" in
+            "$WEBDAV_URL"|"$WEBDAV_URL"/*)
+                needs_webdav_auth=true
+                break
+                ;;
+        esac
+    done
+
+    if $needs_webdav_auth && [[ ${#WEBDAV_AUTH_ARGS[@]} -gt 0 ]]; then
+        command curl "${WEBDAV_AUTH_ARGS[@]}" "${args[@]}"
+        return
+    fi
+
+    command curl "${args[@]}"
+}
 
 cleanup() {
     log_info "Cleaning up test directory..."
@@ -60,6 +171,7 @@ trap 'cleanup' EXIT
 setup() {
     log_info "Setting up test environment..."
     mkdir -p "$TEST_DIR"
+    configure_webdav_auth
     
     # Check service health
     if ! curl -sf "$BASE_URL/health" > /dev/null; then
@@ -288,11 +400,15 @@ test_version_history() {
         sleep 0.1
     done
     
-    local resp=$(curl -sf "$API_URL/versions/e2e-test/versioned.txt" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "versions\|hash"; then
+    local history_file="$TEST_DIR/version-history.json"
+    local status=$(authenticated_api_curl -s -w "%{http_code}" -o "$history_file" "$API_URL/versions/e2e-test/versioned.txt")
+    local resp=$(cat "$history_file" 2>/dev/null || echo "")
+    if [[ "$status" == "200" ]] && echo "$resp" | grep -q "versions\|hash"; then
         log_ok "Version history API returns data"
+    elif [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$status" == "401" || "$status" == "403" ) ]]; then
+        log_skip "Version history API requires admin authentication"
     else
-        log_fail "Version history API failed: $resp"
+        log_fail "Version history API failed (status: $status): $resp"
     fi
 }
 
@@ -524,16 +640,15 @@ test_auth_login_success() {
     log_info "Testing auth login with valid credentials..."
     
     # Check if initial password file exists (fresh install)
-    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
-    if [[ ! -f "$password_file" ]]; then
+    if [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
         log_skip "Auth login test - no initial password file (auth may be disabled or already logged in)"
         return
     fi
     
     # Extract password from file
-    local password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+    local password=$(load_initial_admin_password)
     if [[ -z "$password" ]]; then
-        log_fail "Could not extract password from $password_file"
+        log_fail "Could not extract password from $INITIAL_PASSWORD_FILE"
         return
     fi
     
@@ -570,7 +685,7 @@ test_auth_login_failure() {
 test_auth_password_file_deleted_after_login() {
     log_info "Testing password file deletion after login..."
     
-    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+    local password_file="$INITIAL_PASSWORD_FILE"
     
     # If auth is enabled and we just logged in, file should be deleted
     if [[ -f "$password_file" ]]; then
@@ -579,7 +694,7 @@ test_auth_password_file_deleted_after_login() {
     else
         # File doesn't exist - could be already deleted, or auth disabled
         # Check if users.json exists to confirm auth is set up
-        if [[ -f "$HOME/.mnemonas/.mnemonas/users.json" ]]; then
+        if [[ -f "$USERS_FILE" ]]; then
             log_ok "Password file correctly deleted after login"
         else
             log_skip "Auth not initialized (no users.json)"
@@ -605,12 +720,12 @@ test_auth_protected_endpoint() {
 test_auth_token_refresh() {
     log_info "Testing token refresh flow..."
     
-    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+    local password_file="$INITIAL_PASSWORD_FILE"
     local refresh_token="$ADMIN_REFRESH_TOKEN"
     
     # Need to get a valid token first
     # This test requires auth to be enabled and initial password available
-    if [[ ! -f "$password_file" ]] && [[ ! -f "$HOME/.mnemonas/.mnemonas/users.json" ]]; then
+    if [[ ! -f "$password_file" ]] && [[ ! -f "$USERS_FILE" ]]; then
         log_skip "Auth not configured for token refresh test"
         return
     fi
@@ -619,7 +734,7 @@ test_auth_token_refresh() {
         # Try to login and get refresh token
         local password=""
         if [[ -f "$password_file" ]]; then
-            password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+            password=$(load_initial_admin_password)
         fi
 
         if [[ -z "$password" ]]; then
@@ -688,6 +803,13 @@ main() {
     test_if_match_success
     test_if_match_failure
 
+    # Group 10: Authentication
+    test_auth_login_failure
+    test_auth_login_success
+    test_auth_password_file_deleted_after_login
+    test_auth_protected_endpoint
+    test_auth_token_refresh
+
     # Group 4: Versions
     test_version_history
 
@@ -706,13 +828,6 @@ main() {
     # Group 9: Security
     test_path_traversal
     test_localhost_binding
-
-    # Group 10: Authentication
-    test_auth_login_failure
-    test_auth_login_success
-    test_auth_password_file_deleted_after_login
-    test_auth_protected_endpoint
-    test_auth_token_refresh
 
     # Group 6: Maintenance (admin token available after auth tests when enabled)
     test_metrics_api

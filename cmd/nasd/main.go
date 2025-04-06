@@ -89,8 +89,8 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 	})
 }
 
-func connectStartupDataplane(addr string) (*dataplane.Client, error) {
-	ctx, cancel := startupDataplaneContext(api.DefaultDataplaneConnectTimeout * time.Second)
+func connectStartupDataplane(addr string, timeout time.Duration) (*dataplane.Client, error) {
+	ctx, cancel := startupDataplaneContext(timeout)
 	defer cancel()
 
 	client := dataplane.NewClient(addr)
@@ -105,6 +105,7 @@ func connectStartupDataplane(addr string) (*dataplane.Client, error) {
 func main() {
 	// Command line arguments
 	configPath := flag.String("config", "", "config file path")
+	checkConfig := flag.Bool("check-config", false, "validate config and exit")
 	showVersion := flag.Bool("version", false, "show version info")
 	flag.Parse()
 
@@ -112,6 +113,13 @@ func main() {
 		fmt.Printf("MnemoNAS %s\n", version)
 		fmt.Printf("  Commit:     %s\n", commit)
 		fmt.Printf("  Build Time: %s\n", buildTime)
+		return
+	}
+
+	if *checkConfig {
+		if err := validateConfigOnly(*configPath, os.Stdout); err != nil {
+			log.Fatal().Err(err).Msg("failed to validate config")
+		}
 		return
 	}
 
@@ -190,7 +198,7 @@ func main() {
 	}
 
 	// Create data plane client for storage operations
-	dataplaneClient, err := connectStartupDataplane(cfg.DataPlane.Address())
+	dataplaneClient, err := connectStartupDataplane(cfg.DataPlane.Address(), cfg.DataPlane.Timeout)
 	if err != nil {
 		log.Fatal().Err(err).Str("address", cfg.DataPlane.Address()).Msg("failed to connect to dataplane")
 	}
@@ -519,6 +527,15 @@ func resolveJSONLogTimeFormat(timeFormat string) string {
 }
 
 func loadConfig(path string) (*config.Config, string, error) {
+	if path != "" {
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return nil, path, fmt.Errorf("config file does not exist: %s", path)
+			}
+			return nil, path, fmt.Errorf("failed to stat config file %s: %w", path, err)
+		}
+	}
+
 	if path == "" {
 		// Try default paths
 		home, _ := os.UserHomeDir()
@@ -542,6 +559,41 @@ func loadConfig(path string) (*config.Config, string, error) {
 
 	log.Info().Msg("using default config")
 	return config.Default(), "", nil
+}
+
+func validateConfigOnly(path string, output io.Writer) error {
+	if path != "" {
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("config file does not exist: %s", path)
+			}
+			return fmt.Errorf("failed to stat config file %s: %w", path, err)
+		}
+	}
+
+	resolvedPath := path
+	if resolvedPath == "" {
+		home, _ := os.UserHomeDir()
+		candidate := filepath.Join(home, ".mnemonas", "config.toml")
+		if _, err := os.Stat(candidate); err == nil {
+			resolvedPath = candidate
+		}
+	}
+
+	if resolvedPath == "" {
+		cfg := config.Default()
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(output, "configuration is valid (using built-in defaults)")
+		return nil
+	}
+
+	if _, err := config.Load(resolvedPath); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(output, "configuration is valid: %s\n", resolvedPath)
+	return nil
 }
 
 func matchesWebDAVPrefix(prefix, requestPath string) bool {
