@@ -284,6 +284,24 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/shared')
       expect(mockListFiles).not.toHaveBeenCalled()
     })
+
+    it('shows an invalid-home error instead of browsing root for non-admin users without a home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = ''
+      mockFilesStoreState.currentPath = '/'
+      mockLocationPathname = '/files'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('主目录配置无效')).toBeTruthy()
+        expect(screen.getByText('当前账户未配置有效的主目录，无法浏览文件。请联系管理员修复账户 home_dir。')).toBeTruthy()
+      })
+
+      expect(mockListFiles).not.toHaveBeenCalled()
+    })
   })
 
   describe('toolbar', () => {

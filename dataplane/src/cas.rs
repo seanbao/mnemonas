@@ -75,6 +75,7 @@ pub struct CasStore {
     index: DashMap<String, u64>,
     /// Statistics
     stats: CasStats,
+    temp_nonce: AtomicU64,
     #[cfg(test)]
     fail_put_after: AtomicUsize,
     #[cfg(test)]
@@ -142,6 +143,7 @@ impl CasStore {
             config,
             index: DashMap::new(),
             stats: CasStats::default(),
+            temp_nonce: AtomicU64::new(0),
             #[cfg(test)]
             fail_put_after: AtomicUsize::new(usize::MAX),
             #[cfg(test)]
@@ -212,11 +214,20 @@ impl CasStore {
                 }
 
                 // Atomic write
-                let tmp_path = path.with_extension("tmp");
-                let mut file = fs::File::create(&tmp_path).await?;
-                file.write_all(&write_data).await?;
-                file.sync_all().await?;
-                fs::rename(&tmp_path, &path).await?;
+                let (mut file, tmp_path) = self.create_temp_file(&path).await?;
+                if let Err(err) = file.write_all(&write_data).await {
+                    let _ = fs::remove_file(&tmp_path).await;
+                    return Err(CasError::Io(err));
+                }
+                if let Err(err) = file.sync_all().await {
+                    let _ = fs::remove_file(&tmp_path).await;
+                    return Err(CasError::Io(err));
+                }
+                drop(file);
+                if let Err(err) = fs::rename(&tmp_path, &path).await {
+                    let _ = fs::remove_file(&tmp_path).await;
+                    return Err(CasError::Io(err));
+                }
                 self.sync_parent_dir(&path).await?;
 
                 // Update index and stats
@@ -271,6 +282,48 @@ impl CasStore {
         } else {
             Ok((data.to_vec(), self.hash_to_path(hash)))
         }
+    }
+
+    fn next_temp_path(&self, path: &Path) -> PathBuf {
+        let nonce = self.temp_nonce.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("object");
+        let temp_name = format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            timestamp + nonce as u128
+        );
+
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(temp_name)
+    }
+
+    async fn create_temp_file(&self, path: &Path) -> Result<(fs::File, PathBuf)> {
+        for _ in 0..8 {
+            let tmp_path = self.next_temp_path(path);
+            match fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp_path)
+                .await
+            {
+                Ok(file) => return Ok((file, tmp_path)),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(CasError::Io(err)),
+            }
+        }
+
+        Err(CasError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "failed to allocate unique temp object path",
+        )))
     }
 
     async fn object_exists(&self, hash: &str) -> Result<bool> {
@@ -613,9 +666,46 @@ impl CasStore {
         path
     }
 
+    fn parse_index_hash_from_path(&self, path: &Path) -> Option<(String, bool)> {
+        let relative = path.strip_prefix(&self.config.root).ok()?;
+        let components: Vec<&str> = relative
+            .iter()
+            .map(|component| component.to_str())
+            .collect::<Option<Vec<_>>>()?;
+
+        if components.len() != self.config.shard_levels + 1 {
+            return None;
+        }
+
+        let file_name = *components.last()?;
+        let (hash, compressed) = match file_name.strip_suffix(".zst") {
+            Some(hash) => (hash, true),
+            None => (file_name, false),
+        };
+
+        if hash.len() != blake3::OUT_LEN * 2 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+
+        for (index, shard) in components[..self.config.shard_levels].iter().enumerate() {
+            if shard.len() != self.config.shard_size {
+                return None;
+            }
+            let start = index * self.config.shard_size;
+            let end = start + self.config.shard_size;
+            if &hash[start..end] != *shard {
+                return None;
+            }
+        }
+
+        Some((hash.to_string(), compressed))
+    }
+
     /// Rebuild memory index
     async fn rebuild_index(&self) -> Result<()> {
         info!("rebuilding CAS index...");
+
+        self.index.clear();
 
         let mut count = 0u64;
         let mut original_size = 0u64;
@@ -632,11 +722,15 @@ impl CasStore {
 
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
-                let metadata = entry.metadata().await?;
+                let file_type = entry.file_type().await?;
 
-                if metadata.is_dir() {
+                if file_type.is_symlink() {
+                    continue;
+                }
+
+                if file_type.is_dir() {
                     stack.push(path);
-                } else if metadata.is_file() {
+                } else if file_type.is_file() {
                     let file_name = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -647,14 +741,21 @@ impl CasStore {
                         continue;
                     }
 
+                    let Some((hash, compressed)) = self.parse_index_hash_from_path(&path) else {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "ignoring non-object file during index rebuild"
+                        );
+                        continue;
+                    };
+
+                    let metadata = entry.metadata().await?;
+
                     let file_size = metadata.len();
                     disk_size += file_size;
 
                     // Handle compressed vs uncompressed files
-                    if file_name.ends_with(".zst") {
-                        // Extract hash from filename (remove .zst extension)
-                        let hash = file_name.strip_suffix(".zst").unwrap_or(file_name);
-
+                    if compressed {
                         // Try to get original size from zstd frame header
                         match std::fs::read(&path) {
                             Ok(data) => {
@@ -673,7 +774,7 @@ impl CasStore {
                                             "failed to decompress file during index rebuild"
                                         );
                                         // Store file size as fallback
-                                        self.index.insert(hash.to_string(), file_size);
+                                        self.index.insert(hash.clone(), file_size);
                                         original_size += file_size;
                                     }
                                 }
@@ -690,7 +791,7 @@ impl CasStore {
                         count += 1;
                     } else {
                         // Uncompressed file
-                        self.index.insert(file_name.to_string(), file_size);
+                        self.index.insert(hash, file_size);
                         original_size += file_size;
                         count += 1;
                     }
@@ -765,6 +866,19 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    fn list_tmp_files(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with(".tmp"))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
 
     #[tokio::test]
     async fn test_cas_basic() {
@@ -873,7 +987,7 @@ mod tests {
         let data = b"parent sync failure";
         let hash = compute_hash(data);
         let path = store.hash_to_path(&hash);
-        let tmp_path = path.with_extension("tmp");
+        let parent = path.parent().unwrap().to_path_buf();
 
         store.fail_next_parent_sync();
 
@@ -884,7 +998,7 @@ mod tests {
 
         assert!(matches!(err, CasError::Io(_)));
         assert!(path.exists(), "renamed object should remain visible on disk");
-        assert!(!tmp_path.exists(), "temporary file should not remain after rename");
+    assert!(list_tmp_files(&parent).is_empty(), "temporary files should not remain after rename");
         assert!(!store.has(&hash), "index should not claim success after failed parent sync");
 
         let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
@@ -905,6 +1019,110 @@ mod tests {
         assert_eq!(logical_size, data.len() as u64);
         assert_eq!(unique_size, data.len() as u64);
         assert_eq!(compressed_size, data.len() as u64);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+    }
+
+    #[tokio::test]
+    async fn test_put_uses_unique_temp_paths_when_fixed_tmp_name_exists() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"stale tmp collision";
+        let hash = compute_hash(data);
+        let path = store.hash_to_path(&hash);
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+
+        let fixed_tmp_path = path.with_extension("tmp");
+        std::fs::write(&fixed_tmp_path, b"stale temp").unwrap();
+
+        let stored_hash = store.put(data).await.unwrap();
+
+        assert_eq!(stored_hash, hash);
+        assert_eq!(store.get(&hash).await.unwrap(), data);
+        assert!(fixed_tmp_path.exists(), "existing fixed temp path should remain untouched");
+
+        let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
+        assert_eq!(chunks, 1);
+        assert_eq!(logical_size, data.len() as u64);
+        assert_eq!(unique_size, data.len() as u64);
+        assert_eq!(compressed_size, data.len() as u64);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_index_replaces_stale_entries_and_ignores_non_object_files() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"valid object";
+        let hash = store.put(data).await.unwrap();
+
+        let stale_hash = compute_hash(b"stale object");
+        store.index.insert(stale_hash, 123);
+
+        std::fs::write(dir.path().join("notes.txt"), b"not an object").unwrap();
+
+        let wrong_shard_path = dir.path().join("ff").join("ee").join(&hash);
+        std::fs::create_dir_all(wrong_shard_path.parent().unwrap()).unwrap();
+        std::fs::write(&wrong_shard_path, b"wrong shard object").unwrap();
+
+        store.rebuild_index().await.unwrap();
+
+        let mut hashes = store.list_hashes();
+        hashes.sort();
+        assert_eq!(hashes, vec![hash.clone()]);
+        assert_eq!(store.get(&hash).await.unwrap(), data);
+
+        let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
+        assert_eq!(chunks, 1);
+        assert_eq!(logical_size, data.len() as u64);
+        assert_eq!(unique_size, data.len() as u64);
+        assert_eq!(compressed_size, data.len() as u64);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_rebuild_index_ignores_symlinked_objects() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"external symlinked object";
+        let hash = compute_hash(data);
+        let external_path = dir.path().join("external-object");
+        std::fs::write(&external_path, data).unwrap();
+
+        let symlink_path = store.hash_to_path(&hash);
+        std::fs::create_dir_all(symlink_path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&external_path, &symlink_path).unwrap();
+
+        store.rebuild_index().await.unwrap();
+
+        assert!(!store.has(&hash));
+        let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
+        assert_eq!(chunks, 0);
+        assert_eq!(logical_size, 0);
+        assert_eq!(unique_size, 0);
+        assert_eq!(compressed_size, 0);
         assert_eq!(hits, 0);
         assert_eq!(misses, 0);
     }

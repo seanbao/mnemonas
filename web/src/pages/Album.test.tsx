@@ -165,6 +165,22 @@ describe('AlbumPage', () => {
         expect(mockListFiles).toHaveBeenCalledWith('/tester')
       })
     })
+
+    it('shows an invalid-home error instead of scanning root for non-admin users without a home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = ''
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('主目录配置无效').length).toBeGreaterThan(0)
+        expect(screen.getByText('当前账户未配置有效的主目录，无法加载相册。请联系管理员修复账户 home_dir。')).toBeTruthy()
+      })
+
+      expect(mockListFiles).not.toHaveBeenCalled()
+    })
   })
 
   describe('empty state', () => {

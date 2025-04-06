@@ -21,8 +21,10 @@ import {
   AlertCircle,
 } from 'lucide-react'
 import { listFiles, createDirectory, ApiError, type FileItem } from '@/api/files'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
 import { cn, normalizePath } from '@/lib/utils'
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
 export interface DirectoryPickerProps {
   isOpen: boolean
@@ -180,15 +182,19 @@ export function DirectoryPicker({
   allowCreateFolder = true,
 }: DirectoryPickerProps) {
   const user = useUser()
-  const rootPath = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : '/'
-  const rootLabel = rootPath === '/' ? '根目录' : '主目录'
+  const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const effectiveRootPath = rootPath ?? '/'
+  const rootLabel = effectiveRootPath === '/' ? '根目录' : '主目录'
   const normalizeInitialPath = useCallback((path: string) => {
+    if (!rootPath) {
+      return '/'
+    }
     const normalized = normalizePath(path || rootPath)
     return pathWithinBase(rootPath, normalized) ? normalized : rootPath
   }, [rootPath])
 
   const [selectedPath, setSelectedPath] = useState(() => normalizeInitialPath(initialPath))
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set([rootPath]))
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set([effectiveRootPath]))
   const [loadedPaths, setLoadedPaths] = useState<Set<string>>(new Set())
   const [folderContents, setFolderContents] = useState<Map<string, FileItem[]>>(new Map())
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
@@ -212,19 +218,19 @@ export function DirectoryPicker({
     if (!isOpen) return
     pickerSessionRef.current += 1
     setSelectedPath(normalizeInitialPath(initialPath))
-    setExpandedPaths(new Set([rootPath]))
+    setExpandedPaths(new Set([effectiveRootPath]))
     setLoadedPaths(new Set())
     setFolderContents(new Map())
     setIsCreatingFolder(false)
     setNewFolderName('')
-  }, [isOpen, initialPath, normalizeInitialPath, rootPath])
+  }, [isOpen, initialPath, normalizeInitialPath, effectiveRootPath])
 
   
   // Load root directory
   const { data: rootData, error: rootError, isLoading: isLoadingRoot, refetch: refetchRoot } = useQuery({
-    queryKey: ['files', rootPath],
-    queryFn: () => listFiles(rootPath),
-    enabled: isOpen,
+    queryKey: ['files', effectiveRootPath],
+    queryFn: () => listFiles(effectiveRootPath),
+    enabled: isOpen && !hasInvalidHomeDir,
   })
 
   useEffect(() => {
@@ -234,11 +240,11 @@ export function DirectoryPicker({
 
     setFolderContents((prev) => {
       const next = new Map(prev)
-      next.set(rootPath, rootData.files)
+      next.set(effectiveRootPath, rootData.files)
       return next
     })
-    setLoadedPaths((prev) => new Set(prev).add(rootPath))
-  }, [isOpen, rootData, rootPath])
+    setLoadedPaths((prev) => new Set(prev).add(effectiveRootPath))
+  }, [isOpen, rootData, effectiveRootPath])
 
   const handleRetryRoot = useCallback(async () => {
   const result = await refetchRoot()
@@ -303,10 +309,10 @@ export function DirectoryPicker({
   }, [expandedPaths, folderContents, loadedPaths])
 
   const rootFolders = useMemo(() => {
-    const rootFiles = folderContents.get(rootPath)
+    const rootFiles = folderContents.get(effectiveRootPath)
     if (!rootFiles) return []
     return buildTree(rootFiles)
-  }, [buildTree, folderContents, rootPath])
+  }, [buildTree, folderContents, effectiveRootPath])
 
   const handleCreateFolder = useCallback(async () => {
     const trimmedFolderName = newFolderName.trim()
@@ -405,13 +411,22 @@ export function DirectoryPicker({
           <div className="flex items-center gap-2 mb-4 p-2 bg-content2 rounded-lg">
             <Home size={14} className="text-default-500" />
             <span className="text-sm text-default-600 truncate">
-              {selectedPath === rootPath ? rootLabel : selectedPath}
+              {selectedPath === effectiveRootPath ? rootLabel : selectedPath}
             </span>
           </div>
           
           {/* Directory tree */}
           <div className="border border-divider rounded-xl p-2 min-h-[200px] max-h-[300px] overflow-auto custom-scrollbar">
-            {isLoadingRoot ? (
+            {hasInvalidHomeDir ? (
+              <div className="flex items-center justify-center h-32">
+                <EmptyState
+                  icon={AlertCircle}
+                  title={invalidHomeDirTitle}
+                  description={getInvalidHomeDirDescription('选择目录')}
+                  className="max-w-md"
+                />
+              </div>
+            ) : isLoadingRoot ? (
               <div className="flex items-center justify-center h-32">
                 <Spinner size="sm" />
               </div>
@@ -474,7 +489,7 @@ export function DirectoryPicker({
           </div>
           
           {/* Create folder section */}
-          {allowCreateFolder && (
+          {allowCreateFolder && !hasInvalidHomeDir && (
             <div className="mt-4">
               {isCreatingFolder ? (
                 <div className="flex items-center gap-2">
@@ -537,7 +552,7 @@ export function DirectoryPicker({
           <Button 
             color="primary" 
             onPress={handleConfirm}
-            isDisabled={isCreating}
+            isDisabled={isCreating || hasInvalidHomeDir}
             className="rounded-xl"
           >
             选择此目录

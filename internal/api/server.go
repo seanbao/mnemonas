@@ -155,17 +155,18 @@ func (s *Server) storeActiveWebDAV(cfg WebDAVRuntimeConfig) {
 }
 
 func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) error {
-	shareUpdated := false
+	var renamedShares []*share.Share
 	if s.shareStore != nil {
-		if err := s.shareStore.UpdatePathReferences(oldPath, newPath); err != nil {
+		var err error
+		renamedShares, err = s.shareStore.UpdatePathReferencesWithRestore(oldPath, newPath)
+		if err != nil {
 			return fmt.Errorf("sync share paths after rename: %w", err)
 		}
-		shareUpdated = true
 	}
 	if s.favoritesStore != nil {
 		if err := s.favoritesStore.UpdatePathReferences(oldPath, newPath); err != nil {
-			if shareUpdated {
-				if rollbackErr := s.shareStore.UpdatePathReferences(newPath, oldPath); rollbackErr != nil {
+			if len(renamedShares) > 0 {
+				if rollbackErr := s.shareStore.RestoreShares(renamedShares); rollbackErr != nil {
 					return errors.Join(
 						fmt.Errorf("sync favorite paths after rename: %w", err),
 						fmt.Errorf("rollback share paths after rename: %w", rollbackErr),
@@ -182,6 +183,11 @@ func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) e
 type deletedPathRestoreState struct {
 	Shares    []*share.Share        `json:"shares,omitempty"`
 	Favorites []*favorites.Favorite `json:"favorites,omitempty"`
+}
+
+type deletedPathShareRestoreSnapshot struct {
+	shares    []*share.Share
+	absentIDs []string
 }
 
 func relocateDeletedPathRestorePath(sourcePath, restoredPath, currentPath string) (string, bool) {
@@ -248,6 +254,56 @@ func relocateDeletedPathRestoreState(state deletedPathRestoreState, sourcePath, 
 	return relocated
 }
 
+func (s *Server) snapshotDeletedPathShareRestoreState(shares []*share.Share) (deletedPathShareRestoreSnapshot, error) {
+	if len(shares) == 0 || s.shareStore == nil {
+		return deletedPathShareRestoreSnapshot{}, nil
+	}
+
+	snapshot := deletedPathShareRestoreSnapshot{}
+	seenIDs := make(map[string]struct{}, len(shares))
+	for _, item := range shares {
+		if item == nil {
+			continue
+		}
+		if _, seen := seenIDs[item.ID]; seen {
+			continue
+		}
+		seenIDs[item.ID] = struct{}{}
+
+		current, err := s.shareStore.Get(item.ID)
+		if err != nil {
+			if errors.Is(err, share.ErrShareNotFound) {
+				snapshot.absentIDs = append(snapshot.absentIDs, item.ID)
+				continue
+			}
+			return deletedPathShareRestoreSnapshot{}, err
+		}
+		snapshot.shares = append(snapshot.shares, current)
+	}
+
+	return snapshot, nil
+}
+
+func (s *Server) rollbackDeletedPathShareRestoreState(snapshot deletedPathShareRestoreSnapshot) error {
+	if s.shareStore == nil {
+		return nil
+	}
+
+	var rollbackErr error
+	if len(snapshot.shares) > 0 {
+		if err := s.shareStore.RestoreShares(snapshot.shares); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore share snapshot after trash metadata failure: %w", err))
+		}
+	}
+	for _, id := range snapshot.absentIDs {
+		if err := s.shareStore.Delete(id); err != nil && !errors.Is(err, share.ErrShareNotFound) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete restored share after trash metadata failure: %w", err))
+		}
+	}
+
+	return rollbackErr
+}
+
 func (s *Server) restoreDeletedPathState(sourcePath, restoredPath string, restoreData []byte) error {
 	if len(restoreData) == 0 {
 		return nil
@@ -263,16 +319,33 @@ func (s *Server) restoreDeletedPathState(sourcePath, restoredPath string, restor
 	if len(state.Shares) > 0 && s.shareStore == nil {
 		return errors.New("share store unavailable for trash restore metadata")
 	}
+	if len(state.Favorites) > 0 && s.favoritesStore == nil {
+		return errors.New("favorites store unavailable for trash restore metadata")
+	}
+
+	shareSnapshot := deletedPathShareRestoreSnapshot{}
+	if len(state.Shares) > 0 && len(state.Favorites) > 0 {
+		var err error
+		shareSnapshot, err = s.snapshotDeletedPathShareRestoreState(state.Shares)
+		if err != nil {
+			return fmt.Errorf("snapshot shares before trash metadata restore: %w", err)
+		}
+	}
 	if len(state.Shares) > 0 && s.shareStore != nil {
 		if err := s.shareStore.RestoreShares(state.Shares); err != nil {
 			return fmt.Errorf("restore shares from trash metadata: %w", err)
 		}
 	}
-	if len(state.Favorites) > 0 && s.favoritesStore == nil {
-		return errors.New("favorites store unavailable for trash restore metadata")
-	}
 	if len(state.Favorites) > 0 && s.favoritesStore != nil {
 		if err := s.favoritesStore.RestoreFavorites(state.Favorites); err != nil {
+			if len(state.Shares) > 0 {
+				if rollbackErr := s.rollbackDeletedPathShareRestoreState(shareSnapshot); rollbackErr != nil {
+					return errors.Join(
+						fmt.Errorf("restore favorites from trash metadata: %w", err),
+						fmt.Errorf("rollback shares after trash metadata failure: %w", rollbackErr),
+					)
+				}
+			}
 			return fmt.Errorf("restore favorites from trash metadata: %w", err)
 		}
 	}
