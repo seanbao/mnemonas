@@ -690,6 +690,11 @@ func (s *UserStore) Update(user *User) error {
 		}
 
 		updated := cloneUser(user)
+		homeDir, err := normalizeHomeDir(updated.HomeDir)
+		if err != nil {
+			return err
+		}
+		updated.HomeDir = homeDir
 		updated.UpdatedAt = time.Now()
 		oldName := normalizeUsername(existing.Username)
 		newName := normalizeUsername(updated.Username)

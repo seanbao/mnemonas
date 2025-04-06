@@ -1236,6 +1236,61 @@ func TestShareStore_UpdatePathReferences_NormalizesInputPaths(t *testing.T) {
 	}
 }
 
+func TestShareStore_UpdatePathReferencesWithRestore_RestoresOnlyMovedShares(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	movedShare, err := store.Create(CreateShareOptions{Path: "/docs/report.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create moved share: %v", err)
+	}
+	unrelatedShare, err := store.Create(CreateShareOptions{Path: "/archive/docs/report.txt", Type: ShareTypeFile, CreatedBy: "user2"})
+	if err != nil {
+		t.Fatalf("failed to create unrelated share: %v", err)
+	}
+
+	originalShares, err := store.UpdatePathReferencesWithRestore("/docs/report.txt", "/archive/docs/report.txt")
+	if err != nil {
+		t.Fatalf("UpdatePathReferencesWithRestore() error: %v", err)
+	}
+	if len(originalShares) != 1 {
+		t.Fatalf("expected one moved share in restore state, got %d", len(originalShares))
+	}
+	if originalShares[0].ID != movedShare.ID {
+		t.Fatalf("expected restore state for moved share %q, got %q", movedShare.ID, originalShares[0].ID)
+	}
+
+	if err := store.RestoreShares(originalShares); err != nil {
+		t.Fatalf("RestoreShares() error: %v", err)
+	}
+
+	restoredMovedShare, err := store.Get(movedShare.ID)
+	if err != nil {
+		t.Fatalf("Get(movedShare) error: %v", err)
+	}
+	if restoredMovedShare.Path != "/docs/report.txt" {
+		t.Fatalf("expected moved share path rollback to /docs/report.txt, got %q", restoredMovedShare.Path)
+	}
+	restoredUnrelatedShare, err := store.Get(unrelatedShare.ID)
+	if err != nil {
+		t.Fatalf("Get(unrelatedShare) error: %v", err)
+	}
+	if restoredUnrelatedShare.Path != "/archive/docs/report.txt" {
+		t.Fatalf("expected unrelated destination share path to remain unchanged, got %q", restoredUnrelatedShare.Path)
+	}
+	if shares := store.GetByPath("/docs/report.txt"); len(shares) != 1 || shares[0].ID != movedShare.ID {
+		t.Fatalf("expected original path index to contain only moved share after restore, got %+v", shares)
+	}
+	if shares := store.GetByPath("/archive/docs/report.txt"); len(shares) != 1 || shares[0].ID != unrelatedShare.ID {
+		t.Fatalf("expected destination path index to contain only unrelated share after restore, got %+v", shares)
+	}
+}
+
 func TestShareStore_DisableSharesUnderPath_DisablesExactAndDescendantShares(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

@@ -744,17 +744,25 @@ func (s *ShareStore) Delete(id string) error {
 
 // UpdatePathReferences rewrites share paths when a filesystem path is renamed.
 func (s *ShareStore) UpdatePathReferences(oldPath, newPath string) error {
+	_, err := s.UpdatePathReferencesWithRestore(oldPath, newPath)
+	return err
+}
+
+// UpdatePathReferencesWithRestore rewrites share paths when a filesystem path
+// is renamed and returns the original share states needed to restore the
+// change if a later step fails.
+func (s *ShareStore) UpdatePathReferencesWithRestore(oldPath, newPath string) ([]*Share, error) {
 	var err error
 	oldPath, err = normalizeStoredSharePath(oldPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	newPath, err = normalizeStoredSharePath(newPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if oldPath == newPath {
-		return nil
+		return nil, nil
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -762,6 +770,7 @@ func (s *ShareStore) UpdatePathReferences(oldPath, newPath string) error {
 	for {
 		snapshot := s.snapshotState()
 		changed := false
+		var renamed []*Share
 
 		for id, share := range snapshot.shares {
 			updatedPath, ok := relocateSharePath(share.Path, oldPath, newPath)
@@ -769,6 +778,7 @@ func (s *ShareStore) UpdatePathReferences(oldPath, newPath string) error {
 				continue
 			}
 
+			renamed = append(renamed, copyShare(share))
 			updated := copyShare(share)
 			updated.Path = updatedPath
 			snapshot.shares[id] = updated
@@ -777,13 +787,13 @@ func (s *ShareStore) UpdatePathReferences(oldPath, newPath string) error {
 		}
 
 		if !changed {
-			return nil
+			return nil, nil
 		}
 		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
-			return err
+			return nil, err
 		}
 		if s.commitSnapshot(snapshot) {
-			return nil
+			return renamed, nil
 		}
 	}
 }
@@ -851,6 +861,13 @@ func (s *ShareStore) RestoreShares(shares []*Share) error {
 			current, ok := snapshot.shares[original.ID]
 			if ok && sharesEqual(current, original) {
 				continue
+			}
+			if ok {
+				if current.Path != original.Path {
+					moveSharePathIndex(snapshot.pathIdx, current.Path, original.Path, original.ID)
+				}
+			} else {
+				snapshot.pathIdx[original.Path] = append(snapshot.pathIdx[original.Path], original.ID)
 			}
 
 			snapshot.shares[original.ID] = copyShare(original)

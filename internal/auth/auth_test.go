@@ -262,6 +262,37 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("update validates and normalizes home dir", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users5-home-dir.json"))
+		user, _ := store.Create("homefix", "password123", "", RoleUser)
+
+		user.HomeDir = " \\homefix\\docs// "
+		if err := store.Update(user); err != nil {
+			t.Fatalf("expected normalized home_dir update to succeed, got %v", err)
+		}
+
+		fresh, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("failed to reload updated user: %v", err)
+		}
+		if fresh.HomeDir != "/homefix/docs" {
+			t.Fatalf("expected normalized home_dir /homefix/docs, got %s", fresh.HomeDir)
+		}
+
+		user.HomeDir = "../secret"
+		if err := store.Update(user); !errors.Is(err, errInvalidUserHomeDir) {
+			t.Fatalf("expected invalid home_dir error, got %v", err)
+		}
+
+		fresh, err = store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("failed to reload user after rejected update: %v", err)
+		}
+		if fresh.HomeDir != "/homefix/docs" {
+			t.Fatalf("expected stored home_dir to remain /homefix/docs, got %s", fresh.HomeDir)
+		}
+	})
+
 	t.Run("returned users are detached copies", func(t *testing.T) {
 		store, _, _ := NewUserStore(filepath.Join(dir, "users5-copy.json"))
 		user, _ := store.Create("copyuser", "password123", "copy@test.com", RoleUser)

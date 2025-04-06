@@ -61,6 +61,15 @@ export function normalizePath(path: string): string {
   return normalized
 }
 
+export function normalizeUserHomeDir(homeDir: string): string {
+  const trimmed = homeDir.trim()
+  if (!trimmed) {
+    throw new Error('非法主目录')
+  }
+
+  return normalizePath(trimmed.replace(/\\/g, '/'))
+}
+
 /**
  * Normalize WebDAV prefix input for config updates.
  */
