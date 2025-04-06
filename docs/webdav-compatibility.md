@@ -136,14 +136,16 @@ type = webdav
 url = http://localhost:8080/dav
 vendor = other
 user = admin
-pass = <your-token>
+pass = <obscured-webdav-password>
 ```
+
+使用 `rclone obscure <webdav-password>` 生成 `pass` 字段的值。
 
 ### davfs2 挂载
 
 ```bash
 # /etc/davfs2/secrets
-http://localhost:8080/dav admin <your-token>
+http://localhost:8080/dav admin <your-webdav-password>
 
 # 挂载命令
 sudo mount -t davfs http://localhost:8080/dav /mnt/nas

@@ -117,6 +117,8 @@ MnemoNAS 通过 WebDAV 协议提供文件访问，支持所有主流客户端：
 | Android | Solid Explorer | `http://your-ip:8080/dav` |
 | CLI | rclone | `webdav:` remote |
 
+默认配置启用 WebDAV Basic Auth；连接客户端时需要使用当前配置的 WebDAV 用户名和密码。
+
 详见 [挂载指南](docs/mounting-guide.md)。
 
 ## 📁 项目结构
@@ -166,6 +168,7 @@ nvm use
 
 # 或使用选项
 ./scripts/dev.sh --backend   # 仅启动后端 (nasd + dataplane)
+./scripts/dev.sh --creds     # 显示当前 WebDAV 登录凭据
 ./scripts/dev.sh --frontend  # 仅启动前端 (localhost:5173)
 ./scripts/dev.sh --status    # 查看服务状态
 ./scripts/dev.sh --kill      # 停止所有组件

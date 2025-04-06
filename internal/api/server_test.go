@@ -809,6 +809,39 @@ func TestServer_Health_DataplaneFailureDoesNotExposeInternalError(t *testing.T) 
 	}
 }
 
+func TestNewServer_UsesConfiguredDataplaneTimeoutForInitialConnect(t *testing.T) {
+	originalConnect := serverConnectDataplaneClient
+	t.Cleanup(func() {
+		serverConnectDataplaneClient = originalConnect
+	})
+
+	settings := config.Default()
+	settings.DataPlane.Timeout = 41 * time.Second
+
+	var observedTimeout time.Duration
+	serverConnectDataplaneClient = func(_ *Server, _ context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
+		if client == nil {
+			t.Fatal("expected dataplane client")
+		}
+		observedTimeout = totalTimeout
+		return nil
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:        settings,
+		DataplaneAddr: "127.0.0.1:9090",
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+	if server == nil {
+		t.Fatal("expected server instance")
+	}
+	if observedTimeout != settings.DataPlane.Timeout {
+		t.Fatalf("initial connect timeout = %s, want %s", observedTimeout, settings.DataPlane.Timeout)
+	}
+}
+
 func TestServer_Health_DegradedWhenConfiguredSubsystemsFailInitialization(t *testing.T) {
 	tmpDir := t.TempDir()
 	thumbnailRoot := filepath.Join(tmpDir, "thumbnail-root")
@@ -910,6 +943,47 @@ func TestServer_Health_ReconnectsDataplaneOnDemand(t *testing.T) {
 	}
 	if !strings.Contains(body, `"dataplane":{"healthy":true`) {
 		t.Fatalf("expected health response to include dataplane health after reconnect, got %q", body)
+	}
+}
+
+func TestServer_Health_UsesConfiguredDataplaneTimeoutForReconnect(t *testing.T) {
+	originalConnect := serverConnectDataplaneClient
+	t.Cleanup(func() {
+		serverConnectDataplaneClient = originalConnect
+	})
+
+	settings := config.Default()
+	settings.DataPlane.Timeout = 37 * time.Second
+
+	var observedTimeout time.Duration
+	serverConnectDataplaneClient = func(_ *Server, _ context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
+		if client == nil {
+			t.Fatal("expected dataplane client")
+		}
+		observedTimeout = totalTimeout
+		return context.DeadlineExceeded
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: settings})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+	server.dataplane = dataplane.NewClient("127.0.0.1:1")
+	defer server.dataplane.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Health status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if observedTimeout != settings.DataPlane.Timeout {
+		t.Fatalf("reconnect timeout = %s, want %s", observedTimeout, settings.DataPlane.Timeout)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"degraded"`) {
+		t.Fatalf("expected degraded health response when reconnect fails, got %q", w.Body.String())
 	}
 }
 
@@ -3293,6 +3367,30 @@ func TestServer_ListFiles_EnforcesHomeDirForNonAdmin(t *testing.T) {
 
 	if forbiddenRec.Code != http.StatusForbidden {
 		t.Fatalf("outside home list status = %d, want %d", forbiddenRec.Code, http.StatusForbidden)
+	}
+}
+
+func TestServer_ListFiles_EmptyUserHomeDirReturnsForbidden(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	setUserHomeDirForTest(t, server, username, "")
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/tester", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list files with empty home_dir status = %d, want %d", w.Code, http.StatusForbidden)
 	}
 }
 

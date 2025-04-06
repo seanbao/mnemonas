@@ -291,11 +291,20 @@ func Default() *Config {
 func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	if cfg.Storage.Root == "" {
 		cfg.Storage.Root = defaultRoot
+	} else {
+		cfg.Storage.Root = expandUserPath(cfg.Storage.Root)
 	}
 
 	cfg.Storage.Versioning.AutoVersionedExtensions = normalizeStringSlice(cfg.Storage.Versioning.AutoVersionedExtensions)
 	cfg.Storage.Versioning.AutoVersionedFilenames = normalizeStringSlice(cfg.Storage.Versioning.AutoVersionedFilenames)
 	cfg.Alerts.WebhookHeaders = normalizeStringSlice(cfg.Alerts.WebhookHeaders)
+	cfg.Server.TLS.CertDir = expandUserPath(cfg.Server.TLS.CertDir)
+	cfg.Server.TLS.CertFile = expandUserPath(cfg.Server.TLS.CertFile)
+	cfg.Server.TLS.KeyFile = expandUserPath(cfg.Server.TLS.KeyFile)
+	cfg.Auth.UsersFile = expandUserPath(cfg.Auth.UsersFile)
+	cfg.Share.StoreFile = expandUserPath(cfg.Share.StoreFile)
+	cfg.Favorites.StoreFile = expandUserPath(cfg.Favorites.StoreFile)
+	cfg.Log.Output = expandUserPath(cfg.Log.Output)
 
 	defaultInternal := filepath.Join(defaultRoot, ".mnemonas")
 	internal := filepath.Join(cfg.Storage.Root, ".mnemonas")
@@ -319,6 +328,28 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	if cfg.Favorites.StoreFile == "" || cfg.Favorites.StoreFile == defaultFavoritesFile {
 		cfg.Favorites.StoreFile = filepath.Join(internal, "favorites.json")
 	}
+}
+
+func expandUserPath(path string) string {
+	if path == "" {
+		return ""
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+
+	switch path {
+	case "~":
+		return home
+	default:
+		if strings.HasPrefix(path, "~/") {
+			return filepath.Join(home, path[2:])
+		}
+	}
+
+	return path
 }
 
 func normalizeStringSlice(values []string) []string {

@@ -127,7 +127,7 @@ func collectMissingWorkspaceDirs(fullPath string) ([]string, error) {
 }
 
 func syncCreatedWorkspaceDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncWorkspaceDir(filepath.Dir(createdDirs[i])); err != nil {
 			return err
 		}

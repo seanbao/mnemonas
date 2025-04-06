@@ -87,6 +87,34 @@ func TestNewStore_ReturnsErrorWhenActivityDirectorySyncFails(t *testing.T) {
 	}
 }
 
+func TestEnsureActivityDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "nested", "activity", "logs")
+
+	originalSyncActivityLogDir := syncActivityLogDir
+	var synced []string
+	syncActivityLogDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncActivityLogDir = originalSyncActivityLogDir
+	}()
+
+	if err := ensureActivityDir(targetDir, 0700); err != nil {
+		t.Fatalf("ensureActivityDir() error: %v", err)
+	}
+
+	want := []string{
+		filepath.Join(tmpDir, "nested", "activity"),
+		filepath.Join(tmpDir, "nested"),
+		tmpDir,
+	}
+	if strings.Join(synced, "|") != strings.Join(want, "|") {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+}
+
 func TestNewStore_RecoversFromCorruptLogFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "activity.json")

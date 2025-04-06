@@ -241,6 +241,7 @@ start_nasd() {
         log_info "nasd 已启动 (PID: $pid, 端口: 8080)"
         log_info "  健康检查: curl http://127.0.0.1:8080/health"
         log_info "  WebDAV:   http://127.0.0.1:8080/dav/"
+        log_info "  凭据:     ./scripts/dev.sh --creds"
         log_info "  API:      http://127.0.0.1:8080/api/v1/"
         
         # 检查并显示自动生成的 WebDAV 密码
@@ -310,6 +311,7 @@ show_credentials() {
     fi
 
     local username="admin"
+    local configured_password=""
     if [ -f "$config_file" ]; then
         local configured_username
         configured_username=$(awk '
@@ -328,12 +330,34 @@ show_credentials() {
         if [ -n "$configured_username" ]; then
             username="$configured_username"
         fi
+
+        configured_password=$(awk '
+            /^\[webdav\]$/ { in_webdav = 1; next }
+            /^\[/ { in_webdav = 0 }
+            in_webdav && /^[[:space:]]*password[[:space:]]*=/ {
+                line = $0
+                sub(/^[^=]*=[[:space:]]*/, "", line)
+                sub(/[[:space:]]*#.*$/, "", line)
+                gsub(/^"/, "", line)
+                gsub(/"$/, "", line)
+                print line
+                exit
+            }
+        ' "$config_file")
+    fi
+
+    local password="$configured_password"
+    if [ -z "$password" ]; then
+        password=$(grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$secrets_file" | sed 's/.*: *"//' | sed 's/"$//' || true)
+    fi
+    if [ -z "$password" ]; then
+        log_warn "未找到 WebDAV 密码；请检查 $config_file 或 $secrets_file"
+        return 1
     fi
     
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}🔐 WebDAV 凭据:${NC}"
-    local password=$(cat "$secrets_file" | grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"//' | sed 's/"$//')
     echo -e "   用户名: ${GREEN}${username}${NC}"
     echo -e "   密码:   ${GREEN}${password}${NC}"
     echo -e "   存储于: $secrets_file"
@@ -417,6 +441,7 @@ main() {
             echo "选项:"
             echo "  (无)        启动所有组件 (默认)"
             echo "  -b, --backend   仅启动后端 (nasd + dataplane)"
+            echo "  -c, --creds     显示 WebDAV 登录凭据"
             echo "  -f, --frontend  仅启动前端开发服务器"
             echo "  -s, --status    查看服务状态"
             echo "  -k, --kill      停止所有组件"

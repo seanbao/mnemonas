@@ -1,0 +1,12 @@
+.git
+.github
+.pids
+.vscode
+bin/
+coverage.out
+dataplane/bin/
+dataplane/target/
+docs/
+logs/
+nasd
+web/

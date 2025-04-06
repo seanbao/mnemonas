@@ -58,6 +58,10 @@ var getFileCount = func(fs *storage.FileSystem, ctx context.Context) (int, error
 	return fs.GetFileCount(ctx)
 }
 
+var serverConnectDataplaneClient = func(s *Server, parent context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
+	return s.connectDataplaneClient(parent, client, totalTimeout)
+}
+
 var apiTimeNow = time.Now
 
 type prependReadCloser struct {
@@ -598,7 +602,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	// Initialize data plane client if address provided
 	if cfg != nil && cfg.DataplaneAddr != "" {
 		s.dataplane = dataplane.NewClient(cfg.DataplaneAddr)
-		if err := s.connectDataplaneClient(context.Background(), s.dataplane, DefaultDataplaneConnectTimeout*time.Second); err != nil {
+		if err := serverConnectDataplaneClient(s, context.Background(), s.dataplane, s.dataplaneConnectTimeout()); err != nil {
 			logger.Warn().Err(err).Msg("Failed to connect to data plane, will retry later")
 		} else {
 			logger.Info().Str("addr", cfg.DataplaneAddr).Msg("Connected to data plane")
@@ -1055,6 +1059,9 @@ func (s *Server) currentUserHomeDir(ctx context.Context) (string, bool, error) {
 	if user == nil {
 		return "", false, nil
 	}
+	if strings.TrimSpace(user.HomeDir) == "" {
+		return "", true, errPathOutsideHomeDir
+	}
 
 	homeDir, err := validatePath(user.HomeDir)
 	if err != nil {
@@ -1240,6 +1247,14 @@ func (s *Server) dataplaneConnectRetries() int {
 	return cfg.DataPlane.MaxRetries
 }
 
+func (s *Server) dataplaneConnectTimeout() time.Duration {
+	cfg := s.currentConfig()
+	if cfg == nil || cfg.DataPlane.Timeout <= 0 {
+		return DefaultDataplaneConnectTimeout * time.Second
+	}
+	return cfg.DataPlane.Timeout
+}
+
 func (s *Server) connectDataplaneClient(parent context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
 	if client == nil {
 		return fmt.Errorf("dataplane not configured")
@@ -1292,7 +1307,7 @@ func (s *Server) connectDataplaneClient(parent context.Context, client *dataplan
 	return totalCtx.Err()
 }
 
-func (s *Server) ensureDataplaneConnected(ctx context.Context, timeout time.Duration) bool {
+func (s *Server) ensureDataplaneConnected(ctx context.Context) bool {
 	if s.dataplane == nil {
 		return false
 	}
@@ -1300,7 +1315,7 @@ func (s *Server) ensureDataplaneConnected(ctx context.Context, timeout time.Dura
 		return true
 	}
 
-	if err := s.connectDataplaneClient(ctx, s.dataplane, timeout); err != nil {
+	if err := serverConnectDataplaneClient(s, ctx, s.dataplane, s.dataplaneConnectTimeout()); err != nil {
 		s.logger.Warn().Err(err).Msg("Failed to connect to data plane")
 		return false
 	}
@@ -1319,7 +1334,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Reflect dataplane availability in the overall health status when configured.
 	if s.dataplane != nil {
-		if !s.ensureDataplaneConnected(r.Context(), DefaultHealthCheckTimeout*time.Second) {
+		if !s.ensureDataplaneConnected(r.Context()) {
 			health["status"] = "degraded"
 			health["dataplane"] = map[string]any{
 				"healthy": false,
@@ -2232,7 +2247,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get stats from data plane if connected
-	if s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second) {
+	if s.ensureDataplaneConnected(r.Context()) {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		defer cancel()
 		if dpStats, err := s.dataplane.Stats(ctx); err == nil {
@@ -2250,7 +2265,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
-	dataplaneConnected := s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second)
+	dataplaneConnected := s.ensureDataplaneConnected(r.Context())
 
 	// Collect diagnostic information
 	diag := map[string]any{
@@ -2351,7 +2366,7 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
+	if !s.ensureDataplaneConnected(r.Context()) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -2459,7 +2474,7 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		limit = l
 	}
 
-	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
+	if !s.ensureDataplaneConnected(r.Context()) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -2507,7 +2522,7 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 		gracePeriod = time.Duration(hours) * time.Hour
 	}
 
-	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
+	if !s.ensureDataplaneConnected(r.Context()) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -2708,7 +2723,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Dataplane stats (sanitized)
-	if s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second) {
+	if s.ensureDataplaneConnected(r.Context()) {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		dpInfo := map[string]any{"status": "connected"}
 		if dpHealth, err := s.dataplane.Health(ctx); err == nil {
