@@ -180,6 +180,13 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 		}
 	}
 
+	if ius := r.Header.Get("If-Unmodified-Since"); ius != "" {
+		if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(info.ModTime, unmodifiedSince) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return
+		}
+	}
+
 	// Check If-None-Match (conditional GET)
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
 		if h.matchETag(inm, etag) {
@@ -189,13 +196,6 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	} else if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 		if modifiedSince, err := http.ParseTime(ims); err == nil && !isHTTPTimeAfter(info.ModTime, modifiedSince) {
 			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-	}
-
-	if ius := r.Header.Get("If-Unmodified-Since"); ius != "" {
-		if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(info.ModTime, unmodifiedSince) {
-			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 			return
 		}
 	}
@@ -311,7 +311,15 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 
 	// Check conditional headers for existing file
 	existingInfo, statErr := h.fs.Stat(ctx, filePath)
-	isCreate := statErr != nil
+	isCreate := false
+	if statErr != nil {
+		if errors.Is(statErr, storage.ErrNotFound) {
+			isCreate = true
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	if !isCreate {
 		etag := fmt.Sprintf(`"%s"`, existingInfo.ContentHash)

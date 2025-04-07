@@ -1286,6 +1286,28 @@ func TestServer_RestoreVersion_MissingPath(t *testing.T) {
 	}
 }
 
+func TestServer_RestoreVersion_DirectoryPathReturnsBadRequest(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/restore-dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	validHash := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	req := httptest.NewRequest("POST", "/api/v1/versions/"+validHash+"/restore?path=/restore-dir", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("RestoreVersion directory path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "cannot restore version for directory") {
+		t.Fatalf("expected directory restore validation message, got %s", w.Body.String())
+	}
+}
+
 func TestShouldSkipGCObjectByGrace(t *testing.T) {
 	graceCutoff := time.Date(2026, 3, 17, 10, 0, 0, 0, time.UTC)
 
@@ -2796,7 +2818,7 @@ func TestServer_RestoreVersion_RequiresAdmin(t *testing.T) {
 }
 
 func TestServer_UploadFile_ErrorCases(t *testing.T) {
-	server, _, _ := setupTestServer(t)
+	server, fs, _ := setupTestServer(t)
 
 	t.Run("UploadToNonExistentDir", func(t *testing.T) {
 		content := "test content"
@@ -2822,10 +2844,48 @@ func TestServer_UploadFile_ErrorCases(t *testing.T) {
 			t.Errorf("Upload to invalid path status = %d", w.Code)
 		}
 	})
+
+	t.Run("UploadToDirectoryReturnsBadRequest", func(t *testing.T) {
+		ctx := context.Background()
+		if err := fs.Mkdir(ctx, "/upload-dir"); err != nil {
+			t.Fatalf("Mkdir() error: %v", err)
+		}
+
+		req := httptest.NewRequest("POST", "/api/v1/files/upload-dir", strings.NewReader("content"))
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("Upload to directory status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+		if !strings.Contains(w.Body.String(), "cannot upload to directory") {
+			t.Fatalf("expected upload-to-directory validation message, got %s", w.Body.String())
+		}
+	})
+
+	t.Run("UploadUnderFileReturnsConflict", func(t *testing.T) {
+		ctx := context.Background()
+		if err := fs.WriteFile(ctx, "/upload-parent-file", bytes.NewReader([]byte("content"))); err != nil {
+			t.Fatalf("WriteFile() error: %v", err)
+		}
+
+		req := httptest.NewRequest("POST", "/api/v1/files/upload-parent-file/child.txt", strings.NewReader("nested"))
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusConflict {
+			t.Fatalf("Upload under file status = %d, want %d", w.Code, http.StatusConflict)
+		}
+		if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+			t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+		}
+	})
 }
 
 func TestServer_DeleteFile_ErrorCases(t *testing.T) {
-	server, _, _ := setupTestServer(t)
+	server, fs, _ := setupTestServer(t)
 
 	t.Run("DeleteNonExistent", func(t *testing.T) {
 		req := httptest.NewRequest("DELETE", "/api/v1/files/nonexistent/file.txt", nil)
@@ -2837,6 +2897,49 @@ func TestServer_DeleteFile_ErrorCases(t *testing.T) {
 			t.Errorf("Delete nonexistent file status = %d", w.Code)
 		}
 	})
+
+	t.Run("DeleteNonEmptyDirectoryReturnsConflict", func(t *testing.T) {
+		ctx := context.Background()
+		if err := fs.Mkdir(ctx, "/non-empty-dir"); err != nil {
+			t.Fatalf("Mkdir() error: %v", err)
+		}
+		if err := fs.WriteFile(ctx, "/non-empty-dir/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+			t.Fatalf("WriteFile() error: %v", err)
+		}
+
+		req := httptest.NewRequest("DELETE", "/api/v1/files/non-empty-dir", nil)
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusConflict {
+			t.Fatalf("Delete non-empty directory status = %d, want %d", w.Code, http.StatusConflict)
+		}
+		if !strings.Contains(w.Body.String(), "directory not empty") {
+			t.Fatalf("expected directory not empty conflict message, got %s", w.Body.String())
+		}
+	})
+}
+
+func TestServer_CreateDirectory_ReturnsConflictWhenParentIsNotDirectory(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/directories/parent-file/child", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("Create directory under file status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
 }
 
 func TestServer_ListVersions_ErrorCases(t *testing.T) {

@@ -259,6 +259,26 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if statProvider, ok := h.fs.(FileStatProvider); ok {
+		info, err := statProvider.Stat(r.Context(), cleanPath)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+				return
+			}
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
+			return
+		}
+		if opts.Type == ShareTypeFile && info.IsDir {
+			writeShareError(w, http.StatusBadRequest, "path is not a file", "INVALID_SHARE_TYPE")
+			return
+		}
+		if opts.Type == ShareTypeFolder && !info.IsDir {
+			writeShareError(w, http.StatusBadRequest, "path is not a folder", "INVALID_SHARE_TYPE")
+			return
+		}
+	}
+
 	share, err := h.store.Create(opts)
 	if err != nil {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
@@ -665,6 +685,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 			return
 		}
+		if errors.Is(err, storage.ErrIsDir) {
+			writeShareError(w, http.StatusBadRequest, "shared resource is a directory", "INVALID_SHARE_TYPE")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -726,6 +750,10 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+			return
+		}
+		if errors.Is(err, storage.ErrIsDir) {
+			writeShareError(w, http.StatusBadRequest, "path is a directory", "INVALID_PATH")
 			return
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
@@ -818,6 +846,10 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			writeShareError(w, http.StatusBadRequest, "path is not a directory", "INVALID_PATH")
 			return
 		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
