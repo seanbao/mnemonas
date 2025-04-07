@@ -11,12 +11,23 @@ export interface BatchOperationResult {
   succeededItems: unknown[]
   failedItems: unknown[]
   failedErrors: unknown[]
+	warningCount: number
+	warningMessages: string[]
 }
 
 export interface BatchOperationToast {
   title: string
   description?: string
   color: 'success' | 'warning' | 'danger'
+}
+
+interface WarningAwareActionResult {
+	warning?: boolean
+	message?: string
+}
+
+function isWarningAwareActionResult(value: unknown): value is WarningAwareActionResult {
+	return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
 /**
@@ -76,6 +87,8 @@ export function useBatchOperation<T, R = void>(
           succeededItems: [],
           failedItems: [],
           failedErrors: [],
+			warningCount: 0,
+			warningMessages: [],
         }
       }
 
@@ -94,15 +107,35 @@ export function useBatchOperation<T, R = void>(
         const failedErrors = results
           .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           .map((result) => result.reason)
+    const warningMessages = results
+      .filter((result): result is PromiseFulfilledResult<R> => result.status === 'fulfilled')
+      .map((result) => result.value)
+      .filter((value): value is WarningAwareActionResult => isWarningAwareActionResult(value) && value.warning === true)
+      .map((value) => typeof value.message === 'string' ? value.message : undefined)
+      .filter((message): message is string => !!message)
 
-        const result = { succeeded, failed, total, succeededItems, failedItems, failedErrors }
+    const result = {
+      succeeded,
+      failed,
+      total,
+      succeededItems,
+      failedItems,
+      failedErrors,
+      warningCount: warningMessages.length,
+      warningMessages,
+    }
 
         // Show appropriate toast
         const toast = getToast?.(result) ?? (failed === 0
-          ? {
-              title: messages.success.replace('{count}', String(succeeded)),
-              color: 'success' as const,
-            }
+      ? warningMessages.length > 0
+      ? {
+        title: warningMessages[0] ?? messages.success.replace('{count}', String(succeeded)),
+        color: 'warning' as const,
+        }
+      : {
+        title: messages.success.replace('{count}', String(succeeded)),
+        color: 'success' as const,
+        }
           : succeeded === 0
             ? {
                 title: messages.failure.replace('{count}', String(failed)),

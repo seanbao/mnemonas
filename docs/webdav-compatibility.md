@@ -6,6 +6,8 @@
 
 说明：本文档描述的是 WebDAV 协议能力。REST API `/api/v1/files-copy` 现已支持递归目录复制，但不提供 `Overwrite: T/F` 控制。
 
+补充：部分写请求在变更已经提交、但后续持久化或清理步骤失败时，会保持成功状态码并附带 HTTP `Warning` 响应头，而不是改写成整体失败。当前已覆盖的 warning 文案包括 `199 MnemoNAS "workspace mutation persistence incomplete"`、`199 MnemoNAS "delete cleanup incomplete"`、`199 MnemoNAS "trash delete cleanup incomplete"`。
+
 ## 协议实现状态
 
 ### 已实现 (RFC 4918)
@@ -19,8 +21,8 @@
 | `PUT` | ✅ 完整 | 支持 If-Match 条件写入 |
 | `DELETE` | ✅ 完整 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
 | `MKCOL` | ✅ 完整 | 创建目录 |
-| `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
-| `COPY` | ✅ 完整 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity` |
+| `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理）；覆盖目标已提交后若 backup cleanup 失败，返回 `204 + Warning` |
+| `COPY` | ✅ 完整 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在目标目录已创建、仅持久化失败时返回成功并附带 `Warning` |
 | `PROPPATCH` | ⚠️ 简化 | 接受请求但不实际修改属性 |
 | `LOCK` | ⚠️ 简化 | 返回虚拟锁 token，支持 `Depth: 0` / `Depth: infinity`，默认 1 小时过期 |
 | `UNLOCK` | ⚠️ 简化 | 需要匹配 `Lock-Token`，过期锁会自动清理 |

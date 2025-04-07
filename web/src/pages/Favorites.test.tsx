@@ -15,6 +15,8 @@ let mockBatchResult = {
   total: 1,
   succeededItems: ['/docs/report.pdf'] as string[],
   failedItems: [] as string[],
+	warningCount: 0,
+	warningMessages: [] as string[],
 }
 
 vi.mock('react-router-dom', async () => {

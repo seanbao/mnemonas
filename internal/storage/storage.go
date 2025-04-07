@@ -37,6 +37,36 @@ var (
 	errStoragePathSymlink = errors.New("storage path contains symlink")
 )
 
+// VisibleMutationWarningError reports that a storage mutation is already
+// externally visible, but the final durability step did not complete.
+type VisibleMutationWarningError struct {
+	err error
+}
+
+func (e *VisibleMutationWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *VisibleMutationWarningError) Unwrap() error {
+	return e.err
+}
+
+func wrapVisibleMutationWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warningErr *VisibleMutationWarningError
+	if errors.As(err, &warningErr) {
+		return err
+	}
+	return &VisibleMutationWarningError{err: err}
+}
+
+func isVisibleMutationWarning(err error) bool {
+	var warningErr *VisibleMutationWarningError
+	return errors.As(err, &warningErr)
+}
+
 var syncStoragePathDir = syncStorageDir
 var storageRandomRead = rand.Read
 var movePathRename = os.Rename
@@ -143,6 +173,9 @@ type FileSystem struct {
 	addTrashMetadata       func(ctx context.Context, item *versionstore.TrashItem) error
 	updateTrashRestoreData func(ctx context.Context, id string, restoreData []byte) error
 	removeTrashMetadata    func(ctx context.Context, id string) error
+	writeWorkspacePath     func(ctx context.Context, name string, data []byte) error
+	mkdirWorkspacePath     func(ctx context.Context, name string) error
+	deleteWorkspacePath    func(ctx context.Context, name string) error
 	renameWorkspacePath    func(ctx context.Context, oldName, newName string) error
 	renameMetadataPath     func(ctx context.Context, oldName, newName string) error
 	removeTrashPath        func(path string) error
@@ -292,6 +325,9 @@ func New(cfg *Config) (*FileSystem, error) {
 		addTrashMetadata:       vs.AddToTrash,
 		updateTrashRestoreData: vs.UpdateTrashRestoreData,
 		removeTrashMetadata:    vs.RemoveFromTrash,
+		writeWorkspacePath:     nil,
+		mkdirWorkspacePath:     ws.Mkdir,
+		deleteWorkspacePath:    ws.Delete,
 		renameWorkspacePath:    ws.Rename,
 		renameMetadataPath:     vs.RenamePath,
 		removeTrashPath:        os.RemoveAll,
@@ -612,13 +648,20 @@ func (fs *FileSystem) Mkdir(ctx context.Context, name string) error {
 		return err
 	}
 
-	err = fs.workspace.Mkdir(ctx, name)
+	mkdirWorkspacePath := fs.mkdirWorkspacePath
+	if mkdirWorkspacePath == nil {
+		mkdirWorkspacePath = fs.workspace.Mkdir
+	}
+	err = mkdirWorkspacePath(ctx, name)
 	if err != nil {
 		if errors.Is(err, workspace.ErrAlreadyExists) {
 			return ErrAlreadyExists
 		}
 		if errors.Is(err, workspace.ErrNotDir) {
 			return ErrNotDir
+		}
+		if workspace.IsVisibleMutationWarning(err) {
+			return wrapVisibleMutationWarning(err)
 		}
 		return err
 	}
@@ -658,9 +701,6 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		return err
 	}
 
-	if err := fs.ensureTrashCapacityLocked(ctx, targetSize); err != nil {
-		return err
-	}
 	rollbackInfo := &FileInfo{
 		IsDir:   info.IsDir,
 		Size:    targetSize,
@@ -750,13 +790,23 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 			return fmt.Errorf("failed to persist trash restore metadata: %w", err)
 		}
 	}
+	if err := fs.ensureTrashCapacityLocked(ctx, 0, id); err != nil {
+		return wrapTrashDeleteWarning(fmt.Errorf("failed to enforce trash capacity: %w", err))
+	}
 
 	return nil
 }
 
-func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSize int64) error {
+func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSize int64, protectedIDs ...string) error {
 	if fs.config == nil || fs.config.MaxTrashSize <= 0 {
 		return nil
+	}
+	protected := make(map[string]struct{}, len(protectedIDs))
+	for _, protectedID := range protectedIDs {
+		if protectedID == "" {
+			continue
+		}
+		protected[protectedID] = struct{}{}
 	}
 
 	_, totalSize, err := fs.versions.GetTrashStats(ctx)
@@ -774,6 +824,9 @@ func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSiz
 
 	for i := len(items) - 1; i >= 0 && totalSize+incomingSize > fs.config.MaxTrashSize; i-- {
 		item := items[i]
+		if _, skip := protected[item.ID]; skip {
+			continue
+		}
 		if err := fs.deleteTrashItem(ctx, &item); err != nil {
 			return fmt.Errorf("failed to evict trash item %s: %w", item.ID, err)
 		}
@@ -831,9 +884,19 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 		}
 	}
 
+	deleteWorkspacePath := fs.deleteWorkspacePath
+	if deleteWorkspacePath == nil {
+		deleteWorkspacePath = fs.workspace.Delete
+	}
+	var deleteWarning error
+
 	// Delete file
-	if err := fs.workspace.Delete(ctx, name); err != nil {
-		return err
+	if err := deleteWorkspacePath(ctx, name); err != nil {
+		if workspace.IsVisibleMutationWarning(err) {
+			deleteWarning = err
+		} else {
+			return err
+		}
 	}
 
 	// Remove from file index
@@ -896,8 +959,15 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 
 		objectDeleteErr := fs.deleteUnreferencedVersionObjects(ctx, versionHashes)
 		if objectDeleteErr != nil {
-			return fmt.Errorf("failed to delete version objects: %w", objectDeleteErr)
+			cleanupWarning := wrapDeleteCleanupWarning(fmt.Errorf("failed to delete version objects: %w", objectDeleteErr))
+			if deleteWarning != nil {
+				return errors.Join(wrapVisibleMutationWarning(deleteWarning), cleanupWarning)
+			}
+			return cleanupWarning
 		}
+	}
+	if deleteWarning != nil {
+		return wrapVisibleMutationWarning(deleteWarning)
 	}
 
 	return nil
@@ -1225,6 +1295,7 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	rollbackVersionHash := ""
 	rollbackVersionRecorded := false
 	rollbackVersionObjectCreated := false
+	var restoreWriteWarning error
 
 	// Save current as a version first
 	if hadPreviousFile {
@@ -1262,14 +1333,22 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	}
 
 	// Write restored version
-	if err := fs.workspace.WriteFile(ctx, name, data); err != nil {
-		if rollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated); rollbackErr != nil {
-			return errors.Join(
-				err,
-				fmt.Errorf("failed to rollback current snapshot version: %w", rollbackErr),
-			)
+	writeWorkspacePath := fs.writeWorkspacePath
+	if writeWorkspacePath == nil {
+		writeWorkspacePath = fs.writeWorkspaceFile
+	}
+	if err := writeWorkspacePath(ctx, name, data); err != nil {
+		if workspace.IsVisibleMutationWarning(err) || isVisibleMutationWarning(err) {
+			restoreWriteWarning = wrapVisibleMutationWarning(err)
+		} else {
+			if rollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated); rollbackErr != nil {
+				return errors.Join(
+					err,
+					fmt.Errorf("failed to rollback current snapshot version: %w", rollbackErr),
+				)
+			}
+			return err
 		}
-		return err
 	}
 
 	if err := fs.updateFileIndex(ctx, name, int64(len(data)), time.Now(), computeHash(data)); err != nil {
@@ -1295,6 +1374,9 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 			)
 		}
 		return fmt.Errorf("failed to update file index: %w", err)
+	}
+	if restoreWriteWarning != nil {
+		return restoreWriteWarning
 	}
 	return nil
 }
@@ -1591,7 +1673,10 @@ func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
 		return err
 	}
 
-	_, err = fs.permanentlyDeleteTrashItem(ctx, item)
+	visibleDeleted, err := fs.permanentlyDeleteTrashItem(ctx, item)
+	if err != nil && visibleDeleted {
+		return wrapTrashDeleteWarning(err)
+	}
 	return err
 }
 
@@ -1610,6 +1695,7 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 	}
 
 	deleted := 0
+	var warningErr error
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
@@ -1618,12 +1704,17 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 		if err != nil {
 			if visibleDeleted {
 				deleted++
+				warningErr = errors.Join(warningErr, err)
+				continue
 			}
 			return deleted, err
 		}
 		deleted++
 	}
 
+	if warningErr != nil {
+		return deleted, wrapTrashDeleteWarning(warningErr)
+	}
 	return deleted, nil
 }
 
@@ -1643,6 +1734,7 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 
 	now := time.Now()
 	deleted := 0
+	var warningErr error
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
@@ -1654,12 +1746,17 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 		if err != nil {
 			if visibleDeleted {
 				deleted++
+				warningErr = errors.Join(warningErr, err)
+				continue
 			}
 			return deleted, err
 		}
 		deleted++
 	}
 
+	if warningErr != nil {
+		return deleted, wrapTrashDeleteWarning(warningErr)
+	}
 	return deleted, nil
 }
 
@@ -1794,6 +1891,56 @@ func (e *trashDeleteDurabilityError) Error() string {
 
 func (e *trashDeleteDurabilityError) Unwrap() error {
 	return e.err
+}
+
+// TrashDeleteWarningError reports that a trash deletion became externally
+// visible, but a follow-up cleanup step still failed.
+type TrashDeleteWarningError struct {
+	err error
+}
+
+func (e *TrashDeleteWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *TrashDeleteWarningError) Unwrap() error {
+	return e.err
+}
+
+func wrapTrashDeleteWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warningErr *TrashDeleteWarningError
+	if errors.As(err, &warningErr) {
+		return err
+	}
+	return &TrashDeleteWarningError{err: err}
+}
+
+// DeleteCleanupWarningError reports that a delete operation already became
+// externally visible, but follow-up cleanup still failed.
+type DeleteCleanupWarningError struct {
+	err error
+}
+
+func (e *DeleteCleanupWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *DeleteCleanupWarningError) Unwrap() error {
+	return e.err
+}
+
+func wrapDeleteCleanupWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warningErr *DeleteCleanupWarningError
+	if errors.As(err, &warningErr) {
+		return err
+	}
+	return &DeleteCleanupWarningError{err: err}
 }
 
 // GetTrashStats returns trash statistics
@@ -2363,6 +2510,66 @@ func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name stri
 		return nil, false, mappedErr
 	}
 	return data, true, nil
+}
+
+func (fs *FileSystem) writeWorkspaceFile(ctx context.Context, name string, data []byte) error {
+	fullPath := fs.workspace.FullPath(name)
+	if err := validateStoragePath(fullPath); err != nil {
+		if errors.Is(err, errStoragePathSymlink) {
+			return ErrNotFound
+		}
+		if isPathNotDirError(err) {
+			return ErrNotDir
+		}
+		return fmt.Errorf("failed to validate path: %w", err)
+	}
+	if err := ensureStorageDir(filepath.Dir(fullPath), 0755); err != nil {
+		if isPathNotDirError(err) {
+			return ErrNotDir
+		}
+		return fmt.Errorf("failed to create parent directory: %w", err)
+	}
+
+	f, err := os.CreateTemp(filepath.Dir(fullPath), ".storage-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := f.Name()
+	if err := f.Chmod(0644); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to set temp file permissions: %w", err)
+	}
+
+	_, writeErr := f.Write(data)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	if writeErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to write file: %w", writeErr)
+	}
+	if syncErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync file: %w", syncErr)
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close file: %w", closeErr)
+	}
+
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		os.Remove(tmpPath)
+		if isPathNotDirError(err) {
+			return ErrNotDir
+		}
+		return fmt.Errorf("failed to replace file: %w", err)
+	}
+	if err := syncStoragePathDir(filepath.Dir(fullPath)); err != nil {
+		return wrapVisibleMutationWarning(fmt.Errorf("failed to sync parent directory: %w", err))
+	}
+
+	return nil
 }
 
 func (fs *FileSystem) restoreFileAfterIndexFailure(ctx context.Context, name string, hadPreviousFile bool, previousData []byte) error {

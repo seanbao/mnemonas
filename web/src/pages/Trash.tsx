@@ -120,6 +120,13 @@ function getTrashBatchActionToast(
     unavailable: string
   }
 ) {
+	if (result.failed === 0 && result.warningCount > 0) {
+		return {
+			title: result.warningMessages[0] ?? `已恢复 ${result.succeeded} 项，但存在警告`,
+			color: 'warning' as const,
+		}
+	}
+
   if (result.succeeded === 0 && result.failedErrors.length > 0 && result.failedErrors.every((error) => {
     return error instanceof ApiError && error.isUnavailable
   })) {
@@ -347,12 +354,16 @@ export function TrashPage() {
   // Mutations
   const restoreMutation = useMutation({
     mutationFn: (id: string) => restoreFromTrash(id),
-    onSuccess: (_, id) => {
+    onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
-      addToast({ title: '恢复成功', color: 'success' })
+		if (result.warning) {
+			addToast({ title: result.message ?? '恢复完成，但存在警告', color: 'warning' })
+		} else {
+			addToast({ title: '恢复成功', color: 'success' })
+		}
     },
     onError: (error) => {
       addToast(getTrashActionErrorPresentation(error, {
@@ -364,11 +375,15 @@ export function TrashPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteFromTrash(id),
-    onSuccess: (_, id) => {
+    onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
       queryClient.invalidateQueries({ queryKey: ['trash'] })
-      addToast({ title: '已永久删除', color: 'success' })
+		if (result.warning) {
+			addToast({ title: result.message ?? '已永久删除，但存在警告', color: 'warning' })
+		} else {
+			addToast({ title: '已永久删除', color: 'success' })
+		}
       if (actionItemRef.current?.id === id) {
         onDeleteClose()
       }

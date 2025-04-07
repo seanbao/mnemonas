@@ -38,6 +38,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
 	"github.com/seanbao/mnemonas/internal/versionstore"
+	"github.com/seanbao/mnemonas/internal/workspace"
 )
 
 func createOversizedPNGConfigOnly(width, height int) []byte {
@@ -1269,6 +1270,164 @@ func TestServer_DeleteFile(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteSyncFailsAfterVisibleDelete(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	trashEnabled := false
+	fs.UpdateTrashSettings(trashEnabled, 30, 1<<20)
+
+	if err := fs.WriteFile(ctx, "/delete-warning.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile(delete-warning.txt) error: %v", err)
+	}
+
+	originalDelete := getStorageHook[func(context.Context, string) error](t, fs, "deleteWorkspacePath")
+	setStorageHook(t, fs, "deleteWorkspacePath", func(ctx context.Context, name string) error {
+		if err := originalDelete(ctx, name); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/delete-warning.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	}
+	var envelope struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("failed to parse delete warning response: %v", err)
+	}
+	if !envelope.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if envelope.Message != "file deleted with persistence warning" {
+		t.Fatalf("unexpected delete warning message %q", envelope.Message)
+	}
+	if warning, ok := envelope.Data["warning"].(bool); !ok || !warning {
+		t.Fatalf("expected warning flag in delete response, got %+v", envelope.Data)
+	}
+	if _, err := fs.Stat(ctx, "/delete-warning.txt"); err != storage.ErrNotFound {
+		t.Fatalf("expected file to remain deleted after warning response, got %v", err)
+	}
+}
+
+func TestServer_DeleteFile_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisibleDelete(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	fs.UpdateTrashSettings(true, 30, 10)
+	if err := fs.WriteFile(ctx, "/old-trash.txt", bytes.NewReader([]byte("123456"))); err != nil {
+		t.Fatalf("WriteFile(old-trash.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/old-trash.txt"); err != nil {
+		t.Fatalf("Delete(old-trash.txt) error: %v", err)
+	}
+	setStorageHook(t, fs, "removeTrashMetadata", func(ctx context.Context, id string) error {
+		return errors.New("metadata delete failed")
+	})
+	if err := fs.WriteFile(ctx, "/delete-trash-warning.txt", bytes.NewReader([]byte("1234567"))); err != nil {
+		t.Fatalf("WriteFile(delete-trash-warning.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/delete-trash-warning.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete cleanup warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != trashDeleteCleanupWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, trashDeleteCleanupWarningHeader)
+	}
+	var envelope struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("failed to parse delete cleanup warning response: %v", err)
+	}
+	if !envelope.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if envelope.Message != "file deleted with trash cleanup warning" {
+		t.Fatalf("unexpected delete cleanup warning message %q", envelope.Message)
+	}
+	if warning, ok := envelope.Data["warning"].(bool); !ok || !warning {
+		t.Fatalf("expected warning flag in delete cleanup response, got %+v", envelope.Data)
+	}
+	if _, err := fs.Stat(ctx, "/delete-trash-warning.txt"); err != storage.ErrNotFound {
+		t.Fatalf("expected file to remain deleted after cleanup warning response, got %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected both trash items to remain after cleanup warning, got %d", len(items))
+	}
+}
+
+func TestServer_DeleteFile_ReturnsWarningWhenPermanentDeleteCleanupFailsAfterVisibleDelete(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	fs.UpdateTrashSettings(false, 30, 0)
+	if err := fs.WriteFile(ctx, "/delete-cleanup-warning.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/delete-cleanup-warning.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+		return errors.New("version object cleanup failed")
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/delete-cleanup-warning.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete cleanup warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != deleteCleanupWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, deleteCleanupWarningHeader)
+	}
+	var envelope struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("failed to parse delete cleanup warning response: %v", err)
+	}
+	if !envelope.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if envelope.Message != "file deleted with cleanup warning" {
+		t.Fatalf("unexpected delete cleanup warning message %q", envelope.Message)
+	}
+	if warning, ok := envelope.Data["warning"].(bool); !ok || !warning {
+		t.Fatalf("expected warning flag in delete cleanup response, got %+v", envelope.Data)
+	}
+	if _, err := fs.Stat(ctx, "/delete-cleanup-warning.txt"); err != storage.ErrNotFound {
+		t.Fatalf("expected file to remain deleted after cleanup warning response, got %v", err)
+	}
+}
+
 func TestServer_DeleteFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -1431,6 +1590,135 @@ func TestServer_DeleteFile_RollsBackWhenFavoriteCleanupFails(t *testing.T) {
 	}
 	if !server.favoritesStore.IsFavorite("tester", "/docs/a.txt") {
 		t.Fatal("expected favorite to remain after delete rollback")
+	}
+}
+
+func TestServer_HandlePathDeleted_RollbackPreservesRecreatedFavorite(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	favoritesDir := filepath.Join(tmpDir, "delete-rollback-favorites")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs/a.txt", "original"); err != nil {
+		t.Fatalf("Add(original) error: %v", err)
+	}
+
+	server.favoritesStore = favoritesStore
+
+	result, err := server.handlePathDeleted(context.Background(), "/docs/a.txt")
+	if err != nil {
+		t.Fatalf("handlePathDeleted() error: %v", err)
+	}
+	if result == nil || result.Rollback == nil {
+		t.Fatal("expected delete hook result with rollback")
+	}
+	if favoritesStore.IsFavorite("tester", "/docs/a.txt") {
+		t.Fatal("expected favorite to be removed before rollback")
+	}
+
+	if _, err := favoritesStore.Add("tester", "/docs/a.txt", "newer"); err != nil {
+		t.Fatalf("Add(newer) error: %v", err)
+	}
+
+	if err := result.Rollback(); err != nil {
+		t.Fatalf("Rollback() error: %v", err)
+	}
+
+	loadedFavorites := favoritesStore.List("tester")
+	if len(loadedFavorites) != 1 {
+		t.Fatalf("expected one favorite after rollback, got %d", len(loadedFavorites))
+	}
+	if loadedFavorites[0].Note != "newer" {
+		t.Fatalf("expected rollback to preserve newer favorite note, got %q", loadedFavorites[0].Note)
+	}
+
+	reloadedStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	reloadedFavorites := reloadedStore.List("tester")
+	if len(reloadedFavorites) != 1 {
+		t.Fatalf("expected one persisted favorite after reload, got %d", len(reloadedFavorites))
+	}
+	if reloadedFavorites[0].Note != "newer" {
+		t.Fatalf("expected persisted newer favorite note, got %q", reloadedFavorites[0].Note)
+	}
+}
+
+func TestServer_HandlePathDeleted_RollbackPreservesUpdatedShareMetadata(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	shareDir := filepath.Join(tmpDir, "delete-rollback-share")
+	if err := os.MkdirAll(shareDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(shareDir) error: %v", err)
+	}
+	shareStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs/a.txt", Type: share.ShareTypeFile, CreatedBy: "tester", Description: "original"})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+
+	server.shareStore = shareStore
+
+	result, err := server.handlePathDeleted(context.Background(), "/docs/a.txt")
+	if err != nil {
+		t.Fatalf("handlePathDeleted() error: %v", err)
+	}
+	if result == nil || result.Rollback == nil {
+		t.Fatal("expected delete hook result with rollback")
+	}
+
+	disabledShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(disabledShare) error: %v", err)
+	}
+	if disabledShare.Enabled {
+		t.Fatal("expected share to be disabled before rollback")
+	}
+
+	if err := shareStore.Update(createdShare.ID, func(updated *share.Share) error {
+		updated.Description = "newer"
+		return nil
+	}); err != nil {
+		t.Fatalf("Update() error: %v", err)
+	}
+
+	if err := result.Rollback(); err != nil {
+		t.Fatalf("Rollback() error: %v", err)
+	}
+
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected rollback to re-enable share")
+	}
+	if restoredShare.Description != "newer" {
+		t.Fatalf("expected rollback to preserve newer share description, got %q", restoredShare.Description)
+	}
+
+	reloadedStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloadedStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if !reloadedShare.Enabled {
+		t.Fatal("expected persisted share to stay enabled after reload")
+	}
+	if reloadedShare.Description != "newer" {
+		t.Fatalf("expected persisted newer share description, got %q", reloadedShare.Description)
 	}
 }
 
@@ -3010,6 +3298,72 @@ func TestServer_DeleteFromTrash_InternalErrorReturnsInternalServerError(t *testi
 	}
 }
 
+func TestServer_DeleteFromTrash_ReturnsWarningWhenCleanupFailsAfterVisibleDelete(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-delete-warning.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-delete-warning.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-delete-warning.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+		return errors.New("delete object failed")
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/"+items[0].ID, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("DeleteFromTrash warning status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	warningValues := w.Header().Values("Warning")
+	if len(warningValues) == 0 || warningValues[0] != trashDeleteCleanupWarningHeader {
+		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashDeleteCleanupWarningHeader)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Deleted bool `json:"deleted"`
+			Warning bool `json:"warning"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if !payload.Success || !payload.Data.Deleted || !payload.Data.Warning {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if payload.Message != "item permanently deleted with cleanup warning" {
+		t.Fatalf("unexpected message %q", payload.Message)
+	}
+
+	remainingItems, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after warning delete error: %v", listErr)
+	}
+	if len(remainingItems) != 0 {
+		t.Fatalf("expected trash item to be gone despite cleanup warning, got %d items", len(remainingItems))
+	}
+}
+
 func TestServer_Stats(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -4457,6 +4811,61 @@ func TestServer_CopyFile_CopiesDirectoryRecursively(t *testing.T) {
 	}
 }
 
+func TestServer_CopyFile_DirectoryReturnsCreatedWithWarningWhenDestinationCreateSyncFails(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/copy-warning-src"); err != nil {
+		t.Fatalf("Mkdir(copy-warning-src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/copy-warning-src/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/copy-warning-src/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/copy-warning-src/nested/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	originalMkdir := getStorageHook[func(context.Context, string) error](t, fs, "mkdirWorkspacePath")
+	setStorageHook(t, fs, "mkdirWorkspacePath", func(ctx context.Context, name string) error {
+		if err := originalMkdir(ctx, name); err != nil {
+			return err
+		}
+		if name == "/copy-warning-dst" {
+			return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+		}
+		return nil
+	})
+
+	body := `{"from":"/copy-warning-src","to":"/copy-warning-dst"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("copy directory warning status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	}
+	if _, err := fs.Stat(ctx, "/copy-warning-dst"); err != nil {
+		t.Fatalf("expected copied directory to exist, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/copy-warning-dst/root.txt"); err != nil {
+		t.Fatalf("expected copied root file to exist, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/copy-warning-dst/nested/child.txt"); err != nil {
+		t.Fatalf("expected copied child file to exist, got %v", err)
+	}
+	if !strings.Contains(w.Body.String(), "resource copied with persistence warning") {
+		t.Fatalf("expected warning message in response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_CopyFile_DirectoryIntoDescendantRejected(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -4653,14 +5062,23 @@ func TestServer_Trash_GetItem(t *testing.T) {
 	ctx := context.Background()
 
 	// Create and delete a file
-	fs.Mkdir(ctx, "/trash-get-test")
-	fs.WriteFile(ctx, "/trash-get-test/file.txt", bytes.NewReader([]byte("content")))
-	fs.Delete(ctx, "/trash-get-test/file.txt")
+	if err := fs.Mkdir(ctx, "/trash-get-test"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-get-test/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-get-test/file.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
 
 	// Get trash items to find the ID
-	items, _ := fs.ListTrash(ctx)
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
 	if len(items) == 0 {
-		t.Skip("No items in trash")
+		t.Fatal("expected at least one item in trash")
 	}
 
 	t.Run("GetExistingItem", func(t *testing.T) {
@@ -4696,14 +5114,23 @@ func TestServer_Trash_Restore(t *testing.T) {
 	ctx := context.Background()
 
 	// Create and delete a file
-	fs.Mkdir(ctx, "/trash-restore-test")
-	fs.WriteFile(ctx, "/trash-restore-test/restore.txt", bytes.NewReader([]byte("restore me")))
-	fs.Delete(ctx, "/trash-restore-test/restore.txt")
+	if err := fs.Mkdir(ctx, "/trash-restore-test"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-test/restore.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-restore-test/restore.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
 
 	// Get trash items to find the ID
-	items, _ := fs.ListTrash(ctx)
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
 	if len(items) == 0 {
-		t.Skip("No items in trash")
+		t.Fatal("expected at least one item in trash")
 	}
 	t.Run("RestoreToOriginal", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/v1/trash/"+items[0].ID+"/restore", nil)
@@ -4952,6 +5379,12 @@ func TestServer_Trash_Restore_RollsBackLinkedSharesWhenFavoriteRestoreFails(t *t
 	if len(warningValues) == 0 || warningValues[0] != trashRestoreMetadataWarningHeader {
 		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashRestoreMetadataWarningHeader)
 	}
+	if body := restoreRec.Body.String(); !strings.Contains(body, `"warning":true`) {
+		t.Fatalf("expected restore warning body, got %s", body)
+	}
+	if body := restoreRec.Body.String(); !strings.Contains(body, `"message":"file restored with metadata warning"`) {
+		t.Fatalf("expected restore warning message, got %s", body)
+	}
 
 	if _, err := fs.Stat(ctx, "/trash-restore-rollback/report.txt"); err != nil {
 		t.Fatalf("Stat(restored file) error: %v", err)
@@ -5056,14 +5489,23 @@ func TestServer_Trash_Delete(t *testing.T) {
 	ctx := context.Background()
 
 	// Create and delete a file
-	fs.Mkdir(ctx, "/trash-delete-test")
-	fs.WriteFile(ctx, "/trash-delete-test/delete.txt", bytes.NewReader([]byte("delete me")))
-	fs.Delete(ctx, "/trash-delete-test/delete.txt")
+	if err := fs.Mkdir(ctx, "/trash-delete-test"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-delete-test/delete.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-delete-test/delete.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
 
 	// Get trash items to find the ID
-	items, _ := fs.ListTrash(ctx)
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
 	if len(items) == 0 {
-		t.Skip("No items in trash")
+		t.Fatal("expected at least one item in trash")
 	}
 
 	t.Run("DeleteExistingItem", func(t *testing.T) {
@@ -5272,6 +5714,80 @@ func TestServer_Trash_EmptyPartialSuccessReturnsDeletedCount(t *testing.T) {
 	}
 }
 
+func TestServer_Trash_EmptyReturnsWarningWhenCleanupFailsAfterVisibleDelete(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(versioned v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-empty-warning-versioned.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(versioned v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-empty-warning-plain.txt", bytes.NewReader([]byte("plain"))); err != nil {
+		t.Fatalf("WriteFile(plain) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-empty-warning-versioned.txt"); err != nil {
+		t.Fatalf("Delete(versioned) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-empty-warning-plain.txt"); err != nil {
+		t.Fatalf("Delete(plain) error: %v", err)
+	}
+
+	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+		return errors.New("delete object failed")
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("EmptyTrash warning status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	warningValues := w.Header().Values("Warning")
+	if len(warningValues) == 0 || warningValues[0] != trashDeleteCleanupWarningHeader {
+		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashDeleteCleanupWarningHeader)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DeletedCount int  `json:"deleted_count"`
+			Partial      bool `json:"partial"`
+			Warning      bool `json:"warning"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if !payload.Success {
+		t.Fatal("expected success response for warning trash empty")
+	}
+	if payload.Data.DeletedCount != 2 {
+		t.Fatalf("expected deleted_count 2, got %d", payload.Data.DeletedCount)
+	}
+	if payload.Data.Partial {
+		t.Fatal("expected partial=false when all trash items were removed")
+	}
+	if !payload.Data.Warning {
+		t.Fatal("expected warning=true when cleanup warning occurs")
+	}
+	if payload.Message != "trash emptied with cleanup warning" {
+		t.Fatalf("unexpected message %q", payload.Message)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after warning empty error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected all trash items removed despite cleanup warning, got %d", len(items))
+	}
+}
+
 func TestServer_Scrub_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	server.dataplane = nil
@@ -5346,23 +5862,33 @@ func TestServer_Scrub_RejectsOversizedRequestBody(t *testing.T) {
 	}
 }
 
-func TestServer_Scrub_SaveCompletedResultFailureReturnsInternalServerError(t *testing.T) {
-	server, _, _ := setupTestServer(t)
-	if server.maintenance == nil {
-		t.Skip("maintenance history not available")
+func TestServer_Scrub_SaveCompletedResultFailureReturnsWarning(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	maintRoot := filepath.Join(tmpDir, "maintenance")
+	maint, err := maintenance.NewHistoryStore(maintRoot)
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
 	}
+	server.maintenance = maint
+	server.maintenanceConfigured = true
 
 	originalSaveScrubResult := saveScrubResult
 	callCount := 0
 	saveScrubResult = func(store *maintenance.HistoryStore, result *maintenance.ScrubResult) error {
 		callCount++
 		if callCount == 2 {
-			return errors.New("disk offline")
+			if chmodErr := os.Chmod(maintRoot, 0500); chmodErr != nil {
+				return chmodErr
+			}
+			defer func() {
+				_ = os.Chmod(maintRoot, 0700)
+			}()
 		}
 		return originalSaveScrubResult(store, result)
 	}
 	defer func() {
 		saveScrubResult = originalSaveScrubResult
+		_ = os.Chmod(maintRoot, 0700)
 	}()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", nil)
@@ -5370,17 +5896,58 @@ func TestServer_Scrub_SaveCompletedResultFailureReturnsInternalServerError(t *te
 
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("scrub save failure status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("scrub save failure status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "internal server error") {
-		t.Fatalf("expected generic internal error message, got %s", w.Body.String())
+	if got := w.Header().Get("Warning"); got != scrubResultPersistenceWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, scrubResultPersistenceWarningHeader)
 	}
 	if callCount != 2 {
 		t.Fatalf("expected saveScrubResult to be called twice, got %d", callCount)
 	}
-	if result := server.maintenance.GetLastScrubResult(); result == nil || result.Status != "running" {
-		t.Fatalf("expected persisted scrub state to remain pre-completion after save failure, got %#v", result)
+
+	var payload struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse scrub response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if payload.Message != "scrub completed with persistence warning" {
+		t.Fatalf("unexpected response message %q", payload.Message)
+	}
+	if warning, ok := payload.Data["warning"].(bool); !ok || !warning {
+		t.Fatalf("expected warning flag in response data, got %+v", payload.Data)
+	}
+
+	result := server.maintenance.GetLastScrubResult()
+	if result == nil || result.Status != "completed" {
+		t.Fatalf("expected in-memory scrub state to remain completed after persistence failure, got %#v", result)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance/scrub", nil)
+	getW := httptest.NewRecorder()
+	server.Router().ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("get scrub result status = %d, want %d: %s", getW.Code, http.StatusOK, getW.Body.String())
+	}
+	var getPayload struct {
+		Success bool           `json:"success"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(getW.Body.Bytes(), &getPayload); err != nil {
+		t.Fatalf("failed to parse get scrub response: %v", err)
+	}
+	if !getPayload.Success {
+		t.Fatalf("expected successful get scrub response, got %s", getW.Body.String())
+	}
+	getData := getPayload.Data
+	if status, ok := getData["status"].(string); !ok || status != "completed" {
+		t.Fatalf("expected completed scrub status after warning response, got %+v", getData)
 	}
 }
 
@@ -5554,6 +6121,50 @@ func TestServer_CreateDirectory_AddsAuditWarningHeaderWhenActivityLogSaveFails(t
 	}
 	if _, err := fs.Stat(ctx, "/audit-warning-dir"); err != nil {
 		t.Fatalf("expected directory creation to succeed despite audit failure, got %v", err)
+	}
+}
+
+func TestServer_CreateDirectory_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleCreate(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+
+	originalMkdir := getStorageHook[func(context.Context, string) error](t, fs, "mkdirWorkspacePath")
+	setStorageHook(t, fs, "mkdirWorkspacePath", func(ctx context.Context, name string) error {
+		if err := originalMkdir(ctx, name); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/directories/warning-dir", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create directory warning status = %d, want %d: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	}
+	var envelope struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("failed to parse create warning response: %v", err)
+	}
+	if !envelope.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if envelope.Message != "directory created with persistence warning" {
+		t.Fatalf("unexpected create warning message %q", envelope.Message)
+	}
+	if warning, ok := envelope.Data["warning"].(bool); !ok || !warning {
+		t.Fatalf("expected warning flag in create response, got %+v", envelope.Data)
+	}
+	if _, err := fs.Stat(context.Background(), "/warning-dir"); err != nil {
+		t.Fatalf("expected warning directory to exist, got %v", err)
 	}
 }
 
@@ -5745,18 +6356,66 @@ func TestServer_Objects_RejectsInvalidLimit(t *testing.T) {
 	}
 }
 
-func TestServer_ScrubResult(t *testing.T) {
-	server, _, _ := setupTestServer(t)
+func TestServer_ScrubResult_ReturnsNoResultWhenHistoryStoreIsConfigured(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	maint, err := maintenance.NewHistoryStore(path.Join(tmpDir, "maintenance"))
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+	server.maintenance = maint
 
 	req := httptest.NewRequest("GET", "/api/v1/maintenance/scrub", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
 
-	// Should return OK even if no result exists (with has_result: false)
-	// or ServiceUnavailable if maintenance not configured
-	if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
-		t.Errorf("GetScrubResult status = %d, want %d or %d", w.Code, http.StatusOK, http.StatusServiceUnavailable)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetScrubResult status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			HasResult bool   `json:"has_result"`
+			Message   string `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if payload.Data.HasResult {
+		t.Fatal("expected has_result=false when no scrub has been run")
+	}
+	if payload.Data.Message != "no scrub has been run yet" {
+		t.Fatalf("expected no-result message, got %q", payload.Data.Message)
+	}
+}
+
+func TestServer_ScrubResult_ReturnsServiceUnavailableWhenHistoryStoreMissing(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.maintenance = nil
+
+	req := httptest.NewRequest("GET", "/api/v1/maintenance/scrub", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GetScrubResult status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "maintenance history not initialized" {
+		t.Fatalf("expected maintenance unavailable message, got %q", payload.Message)
 	}
 }
 
@@ -8018,24 +8677,20 @@ func TestServer_UpdateSettings_CanceledDataplaneConnectDoesNotSaveOrSwap(t *test
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
-	server.Router().ServeHTTP(w, req)
+	server.handleUpdateSettings(w, req)
 
-	if w.Code != http.StatusServiceUnavailable && w.Code != http.StatusTooManyRequests {
-		t.Fatalf("update settings canceled dataplane status = %d, want %d or %d: %s", w.Code, http.StatusServiceUnavailable, http.StatusTooManyRequests, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("update settings canceled dataplane status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
 	}
-	if w.Code == http.StatusServiceUnavailable {
-		var payload APIError
-		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-			t.Fatalf("failed to parse response JSON: %v", err)
-		}
-		if payload.Code != ErrCodeServiceUnavail {
-			t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
-		}
-		if payload.Message != "unable to connect to configured dataplane" {
-			t.Fatalf("expected dataplane connectivity error message, got %q", payload.Message)
-		}
-	} else if !strings.Contains(w.Body.String(), "Context was canceled") {
-		t.Fatalf("expected canceled request body to mention context cancellation, got %s", w.Body.String())
+	var payload APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Code != ErrCodeServiceUnavail {
+		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+	}
+	if payload.Message != "unable to connect to configured dataplane" {
+		t.Fatalf("expected dataplane connectivity error message, got %q", payload.Message)
 	}
 	if server.dataplane != oldClient {
 		t.Fatal("expected running dataplane client to remain unchanged after canceled request")
@@ -9094,27 +9749,125 @@ func TestServer_RestoreVersion_Success(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a file and update it to create versions
-	fs.Mkdir(ctx, "/restore-version")
-	fs.WriteFile(ctx, "/restore-version/file.txt", bytes.NewReader([]byte("version 1")))
-	fs.WriteFile(ctx, "/restore-version/file.txt", bytes.NewReader([]byte("version 2")))
-
-	// Get versions to find a valid hash
-	versions, _ := fs.ListVersions(ctx, "/restore-version/file.txt")
-	if len(versions) < 2 {
-		t.Skip("Need at least 2 versions for test")
+	if err := fs.Mkdir(ctx, "/restore-version"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version/file.txt", bytes.NewReader([]byte("version 1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version/file.txt", bytes.NewReader([]byte("version 2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
 	}
 
-	// The first version in the list is usually the oldest
-	hashToRestore := versions[len(versions)-1].Hash
+	// Get versions to find a valid hash
+	versions, err := fs.ListVersions(ctx, "/restore-version/file.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("expected at least 2 versions, got %d", len(versions))
+	}
+
+	hashToRestore := ""
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			hashToRestore = version.Hash
+			break
+		}
+	}
+	if hashToRestore == "" {
+		t.Fatal("expected at least one historical version hash to restore")
+	}
 
 	req := httptest.NewRequest("POST", "/api/v1/versions/"+hashToRestore+"/restore?path=/restore-version/file.txt", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
 
-	// Should restore successfully or return appropriate error
-	if w.Code != http.StatusOK && w.Code != http.StatusNotFound {
-		t.Errorf("RestoreVersion status = %d, want %d or %d", w.Code, http.StatusOK, http.StatusNotFound)
+	if w.Code != http.StatusOK {
+		t.Errorf("RestoreVersion status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestServer_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleRestore(t *testing.T) {
+	server, fs, rootDir := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-version/file.txt", bytes.NewReader([]byte("version 1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version/file.txt", bytes.NewReader([]byte("version 2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/restore-version/file.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	hashToRestore := ""
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			hashToRestore = version.Hash
+			break
+		}
+	}
+	if hashToRestore == "" {
+		t.Fatal("expected at least one historical version")
+	}
+
+	setStorageHook(t, fs, "writeWorkspacePath", func(ctx context.Context, name string, data []byte) error {
+		fullPath := filepath.Join(rootDir, "files", strings.TrimPrefix(path.Clean(name), "/"))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(fullPath, data, 0644); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("failed to sync parent directory"))
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/versions/"+hashToRestore+"/restore?path=/restore-version/file.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("RestoreVersion warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != workspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, workspaceMutationWarningHeader)
+	}
+	var envelope struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("failed to parse warning response JSON: %v", err)
+	}
+	if !envelope.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if envelope.Message != "version restored with persistence warning" {
+		t.Fatalf("unexpected warning message %q", envelope.Message)
+	}
+	if warning, ok := envelope.Data["warning"].(bool); !ok || !warning {
+		t.Fatalf("expected warning flag in restore warning response, got %+v", envelope.Data)
+	}
+
+	reader, err := fs.OpenFile(ctx, "/restore-version/file.txt")
+	if err != nil {
+		t.Fatalf("OpenFile() after warning response error: %v", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() after warning response error: %v", err)
+	}
+	if string(data) != "version 1" {
+		t.Fatalf("expected restored content after warning response, got %q", string(data))
 	}
 }
 

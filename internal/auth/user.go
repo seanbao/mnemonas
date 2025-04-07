@@ -62,6 +62,30 @@ var userStoreWriter = func(path string, data []byte) error {
 var syncAuthFileDir = syncAuthDir
 var userRandomRead = rand.Read
 
+type authPersistenceWarningError struct {
+	err error
+}
+
+func (e *authPersistenceWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *authPersistenceWarningError) Unwrap() error {
+	return e.err
+}
+
+func wrapAuthPersistenceWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &authPersistenceWarningError{err: err}
+}
+
+func isAuthPersistenceWarning(err error) bool {
+	var warning *authPersistenceWarningError
+	return errors.As(err, &warning)
+}
+
 type userStoreSnapshot struct {
 	users    map[string]*User
 	byName   map[string]*User
@@ -287,6 +311,13 @@ func (s *UserStore) commitSnapshot(snapshot userStoreSnapshot) bool {
 	return true
 }
 
+func (s *UserStore) commitSnapshotOnPersistenceWarning(snapshot userStoreSnapshot, err error) bool {
+	if !isAuthPersistenceWarning(err) {
+		return false
+	}
+	return s.commitSnapshot(snapshot)
+}
+
 func validateAuthFilePath(path string, symlinkErr error) error {
 	cleaned := filepath.Clean(path)
 	if !filepath.IsAbs(cleaned) {
@@ -375,7 +406,7 @@ func writeAuthFileAtomically(path string, data []byte, symlinkErr error, pattern
 	}
 	cleanup = false
 	if err := syncAuthFileDir(dir); err != nil {
-		return fmt.Errorf("failed to sync %s directory: %w", label, err)
+		return wrapAuthPersistenceWarning(fmt.Errorf("failed to sync %s directory: %w", label, err))
 	}
 
 	return nil
@@ -586,6 +617,7 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 		snapshot.byName[normalizedUsername] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			_ = s.commitSnapshotOnPersistenceWarning(snapshot, err)
 			authenticatedUser = cloneUser(updated)
 			break
 		}
@@ -669,6 +701,9 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 		snapshot.byName[normalizedUsername] = snapshot.users[user.ID]
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
+				return cloneUser(user), err
+			}
 			return nil, err
 		}
 		if s.commitSnapshot(snapshot) {
@@ -703,6 +738,9 @@ func (s *UserStore) Update(user *User) error {
 		snapshot.byName[newName] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
+				return err
+			}
 			return err
 		}
 		if s.commitSnapshot(snapshot) {
@@ -742,6 +780,9 @@ func (s *UserStore) ChangePassword(id, oldPassword, newPassword string) error {
 		snapshot.byName[normalizeUsername(updated.Username)] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
+				return err
+			}
 			return err
 		}
 		if s.commitSnapshot(snapshot) {
@@ -777,6 +818,9 @@ func (s *UserStore) ResetPassword(id, newPassword string) error {
 		snapshot.byName[normalizeUsername(updated.Username)] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
+				return err
+			}
 			return err
 		}
 		if s.commitSnapshot(snapshot) {
@@ -813,6 +857,9 @@ func (s *UserStore) Delete(id string) error {
 		delete(snapshot.byName, normalizeUsername(user.Username))
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
+			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
+				return err
+			}
 			return err
 		}
 		if s.commitSnapshot(snapshot) {

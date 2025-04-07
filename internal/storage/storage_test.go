@@ -939,6 +939,32 @@ func TestFileSystem_Mkdir_AlreadyExists(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Mkdir_ReturnsWarningWhenWorkspaceSyncFailsAfterCreate(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	originalMkdir := fs.mkdirWorkspacePath
+	fs.mkdirWorkspacePath = func(ctx context.Context, name string) error {
+		if err := originalMkdir(ctx, name); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+	}
+
+	err := fs.Mkdir(ctx, "/warning-dir")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
+	}
+
+	info, statErr := fs.Stat(ctx, "/warning-dir")
+	if statErr != nil {
+		t.Fatalf("Stat(/warning-dir) error: %v", statErr)
+	}
+	if !info.IsDir {
+		t.Fatal("expected warning-dir to remain created after warning")
+	}
+}
+
 func TestFileSystem_ReadDir(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1167,7 +1193,58 @@ func TestFileSystem_Delete_EvictsExistingTrashBeforeKeepingOversizedNewestItem(t
 	}
 }
 
-func TestFileSystem_Delete_EvictionKeepsContentWhenMetadataDeleteFails(t *testing.T) {
+func TestFileSystem_Delete_DoesNotEvictExistingTrashWhenLaterDeleteStepFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.config.MaxTrashSize = 10
+
+	if err := fs.WriteFile(ctx, "/old-evict.txt", bytes.NewReader([]byte("123456"))); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/old-evict.txt"); err != nil {
+		t.Fatalf("Delete(old) error: %v", err)
+	}
+
+	itemsBefore, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() before failed delete error: %v", err)
+	}
+	if len(itemsBefore) != 1 {
+		t.Fatalf("expected one initial trash item, got %d", len(itemsBefore))
+	}
+	oldItem := itemsBefore[0]
+
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+		return nil, errors.New("delete hook failed")
+	})
+
+	if err := fs.WriteFile(ctx, "/new-evict.txt", bytes.NewReader([]byte("1234567"))); err != nil {
+		t.Fatalf("WriteFile(new) error: %v", err)
+	}
+	err = fs.Delete(ctx, "/new-evict.txt")
+	if err == nil {
+		t.Fatal("expected Delete() to fail when a later delete step fails")
+	}
+
+	itemsAfter, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed delete error: %v", listErr)
+	}
+	if len(itemsAfter) != 1 {
+		t.Fatalf("expected original trash item to remain after failed delete, got %d items", len(itemsAfter))
+	}
+	if itemsAfter[0].ID != oldItem.ID {
+		t.Fatalf("expected old trash item to remain after failed delete, got %s want %s", itemsAfter[0].ID, oldItem.ID)
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, oldItem.ID)); statErr != nil {
+		t.Fatalf("expected original trash content to remain after failed delete: %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/new-evict.txt"); statErr != nil {
+		t.Fatalf("expected new file to remain in place after failed delete, got %v", statErr)
+	}
+}
+
+func TestFileSystem_Delete_ReturnsWarningWhenTrashCapacityCleanupFailsAfterVisibleDelete(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 	fs.config.MaxTrashSize = 10
@@ -1196,25 +1273,35 @@ func TestFileSystem_Delete_EvictionKeepsContentWhenMetadataDeleteFails(t *testin
 		t.Fatalf("WriteFile(new) error: %v", err)
 	}
 	err = fs.Delete(ctx, "/new-evict.txt")
-	if err == nil {
-		t.Fatal("Expected Delete() to fail when max-size eviction metadata delete fails")
+	var warningErr *TrashDeleteWarningError
+	if !errors.As(err, &warningErr) {
+		t.Fatalf("expected trash delete warning when capacity cleanup fails, got %v", err)
 	}
 
 	itemsAfter, listErr := fs.ListTrash(ctx)
 	if listErr != nil {
 		t.Fatalf("ListTrash() after failed eviction error: %v", listErr)
 	}
-	if len(itemsAfter) != 1 {
-		t.Fatalf("expected original trash metadata to remain after failed eviction, got %d items", len(itemsAfter))
+	if len(itemsAfter) != 2 {
+		t.Fatalf("expected both trash items to remain after cleanup warning, got %d items", len(itemsAfter))
 	}
-	if itemsAfter[0].ID != oldItem.ID {
-		t.Fatalf("expected old trash item to remain after failed eviction, got %s want %s", itemsAfter[0].ID, oldItem.ID)
+	var foundOld, foundNew bool
+	for _, item := range itemsAfter {
+		if item.ID == oldItem.ID {
+			foundOld = true
+		}
+		if item.OriginalPath == "/new-evict.txt" {
+			foundNew = true
+		}
+	}
+	if !foundOld || !foundNew {
+		t.Fatalf("expected old and new trash items after cleanup warning, got %+v", itemsAfter)
 	}
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, oldItem.ID)); statErr != nil {
 		t.Fatalf("expected original trash content to remain after failed eviction: %v", statErr)
 	}
-	if _, statErr := fs.Stat(ctx, "/new-evict.txt"); statErr != nil {
-		t.Fatalf("expected new file to remain in place after failed eviction, got %v", statErr)
+	if _, statErr := fs.Stat(ctx, "/new-evict.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected new file to stay deleted after cleanup warning, got %v", statErr)
 	}
 }
 
@@ -1724,6 +1811,31 @@ func TestFileSystem_PermanentDelete(t *testing.T) {
 	}
 }
 
+func TestFileSystem_PermanentDelete_ReturnsWarningWhenWorkspaceSyncFailsAfterDelete(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/permanent-warning.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	originalDelete := fs.deleteWorkspacePath
+	fs.deleteWorkspacePath = func(ctx context.Context, name string) error {
+		if err := originalDelete(ctx, name); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+	}
+
+	err := fs.PermanentDelete(ctx, "/permanent-warning.txt")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/permanent-warning.txt"); err != ErrNotFound {
+		t.Fatalf("expected file to remain deleted after warning, got %v", err)
+	}
+}
+
 func TestFileSystem_PermanentDelete_RollsBackFileWhenMetadataDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1828,7 +1940,7 @@ func TestFileSystem_PermanentDelete_RollsBackDirectoryWhenIndexDeleteFails(t *te
 	}
 }
 
-func TestFileSystem_PermanentDelete_AttemptsAllVersionObjectDeletes(t *testing.T) {
+func TestFileSystem_PermanentDelete_ReturnsWarningWhenVersionObjectCleanupFailsAfterVisibleDelete(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -1857,11 +1969,12 @@ func TestFileSystem_PermanentDelete_AttemptsAllVersionObjectDeletes(t *testing.T
 	}
 
 	err = fs.PermanentDelete(ctx, "/permanent-objects.md")
-	if err == nil {
-		t.Fatal("expected PermanentDelete() to fail when version object cleanup fails")
+	var warningErr *DeleteCleanupWarningError
+	if !errors.As(err, &warningErr) {
+		t.Fatalf("expected DeleteCleanupWarningError, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "failed to delete version objects") {
-		t.Fatalf("expected version object cleanup error, got %v", err)
+		t.Fatalf("expected version object cleanup warning, got %v", err)
 	}
 
 	for _, version := range versions {
@@ -3094,6 +3207,10 @@ func TestFileSystem_DeleteFromTrash_AttemptsVersionObjectCleanup(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected DeleteFromTrash() to fail when version object cleanup fails")
 	}
+	var deleteWarningErr *TrashDeleteWarningError
+	if !errors.As(err, &deleteWarningErr) {
+		t.Fatalf("expected trash delete warning error, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "failed to delete version objects for trash item") {
 		t.Fatalf("expected trash version object cleanup error, got %v", err)
 	}
@@ -3157,6 +3274,10 @@ func TestFileSystem_EmptyTrash_AttemptsVersionObjectCleanup(t *testing.T) {
 	deleted, err := fs.EmptyTrash(ctx)
 	if err == nil {
 		t.Fatal("expected EmptyTrash() to fail when version object cleanup fails")
+	}
+	var emptyWarningErr *TrashDeleteWarningError
+	if !errors.As(err, &emptyWarningErr) {
+		t.Fatalf("expected trash delete warning error, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "failed to delete version objects for trash item") {
 		t.Fatalf("expected trash version object cleanup error, got %v", err)
@@ -3245,6 +3366,10 @@ func TestFileSystem_CleanupExpiredTrash_AttemptsVersionObjectCleanup(t *testing.
 	if err == nil {
 		t.Fatal("expected CleanupExpiredTrash() to fail when version object cleanup fails")
 	}
+	var cleanupWarningErr *TrashDeleteWarningError
+	if !errors.As(err, &cleanupWarningErr) {
+		t.Fatalf("expected trash delete warning error, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "failed to delete version objects for trash item") {
 		t.Fatalf("expected trash version object cleanup error, got %v", err)
 	}
@@ -3270,6 +3395,63 @@ func TestFileSystem_CleanupExpiredTrash_AttemptsVersionObjectCleanup(t *testing.
 	}
 	if len(remainingVersions) != 0 {
 		t.Fatalf("expected version metadata to be removed before object cleanup failure, got %d entries", len(remainingVersions))
+	}
+}
+
+func TestFileSystem_EmptyTrash_ContinuesAfterVisibleDeleteWarning(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/empty-trash-warning-versioned.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(versioned v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/empty-trash-warning-versioned.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(versioned v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/empty-trash-warning-plain.txt", bytes.NewReader([]byte("plain"))); err != nil {
+		t.Fatalf("WriteFile(plain) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/empty-trash-warning-versioned.md"); err != nil {
+		t.Fatalf("Delete(versioned) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/empty-trash-warning-plain.txt"); err != nil {
+		t.Fatalf("Delete(plain) error: %v", err)
+	}
+
+	versions, err := fs.versions.GetVersions(ctx, "/empty-trash-warning-versioned.md")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Fatal("expected historical versions for warning scenario")
+	}
+
+	called := 0
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
+		called++
+		return errors.New("delete object failed")
+	}
+
+	deleted, err := fs.EmptyTrash(ctx)
+	if err == nil {
+		t.Fatal("expected EmptyTrash() to return warning when visible delete cleanup fails")
+	}
+	var warningErr *TrashDeleteWarningError
+	if !errors.As(err, &warningErr) {
+		t.Fatalf("expected trash delete warning error, got %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("expected warning cleanup to continue deleting remaining items, got %d deletions", deleted)
+	}
+	if called != len(versions) {
+		t.Fatalf("expected deleteVersionObject to be attempted %d times, got %d", len(versions), called)
+	}
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after warning error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected all trash items removed despite cleanup warning, got %d items", len(items))
 	}
 }
 
@@ -4264,6 +4446,79 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 	}
 	if string(data) != string(currentContent) {
 		t.Fatalf("expected current content to remain after failed restore, got %q", string(data))
+	}
+}
+
+func TestFileSystem_RestoreVersion_ReturnsWarningWhenWorkspaceSyncFailsAfterVisibleRestore(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	historicalContent := []byte("restore-warning-old-" + mustGenerateStorageID(t))
+	currentContent := []byte("restore-warning-current-" + mustGenerateStorageID(t))
+
+	if err := fs.WriteFile(ctx, "/restore-warning.txt", bytes.NewReader(historicalContent)); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-warning.txt", bytes.NewReader(currentContent)); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versionsBefore, err := fs.ListVersions(ctx, "/restore-warning.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() before restore error: %v", err)
+	}
+
+	historicalHash := ""
+	for _, version := range versionsBefore {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected at least one historical version")
+	}
+
+	fs.writeWorkspacePath = func(ctx context.Context, name string, data []byte) error {
+		if err := os.WriteFile(fs.workspace.FullPath(name), data, 0644); err != nil {
+			return err
+		}
+		return workspace.WrapVisibleMutationWarning(errors.New("failed to sync parent directory"))
+	}
+
+	err = fs.RestoreVersion(ctx, "/restore-warning.txt", historicalHash)
+	var warningErr *VisibleMutationWarningError
+	if !errors.As(err, &warningErr) {
+		t.Fatalf("RestoreVersion() error = %v, want VisibleMutationWarningError", err)
+	}
+
+	reader, err := fs.OpenFile(ctx, "/restore-warning.txt")
+	if err != nil {
+		t.Fatalf("OpenFile() after warning error: %v", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() after warning error: %v", err)
+	}
+	if !bytes.Equal(data, historicalContent) {
+		t.Fatalf("expected restored content after warning, got %q", string(data))
+	}
+
+	versionsAfter, err := fs.ListVersions(ctx, "/restore-warning.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() after warning error: %v", err)
+	}
+	currentVersionHash := ""
+	for _, version := range versionsAfter {
+		if version.Comment == "(current)" {
+			currentVersionHash = version.Hash
+			break
+		}
+	}
+	if currentVersionHash != historicalHash {
+		t.Fatalf("expected current version hash %q after warning, got %q", historicalHash, currentVersionHash)
 	}
 }
 

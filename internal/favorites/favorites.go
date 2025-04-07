@@ -724,3 +724,44 @@ func (s *Store) RestoreFavorites(favorites []*Favorite) error {
 		}
 	}
 }
+
+// RestoreFavoritesIfMissing restores removed favorites only when the same path
+// has not been recreated during rollback.
+func (s *Store) RestoreFavoritesIfMissing(favorites []*Favorite) error {
+	if len(favorites) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for _, favorite := range favorites {
+			userFavs := snapshot.data[favorite.UserID]
+			if userFavs != nil {
+				if _, ok := userFavs[favorite.Path]; ok {
+					continue
+				}
+			} else {
+				userFavs = make(map[string]*Favorite)
+				snapshot.data[favorite.UserID] = userFavs
+			}
+
+			userFavs[favorite.Path] = copyFavorite(favorite)
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
+		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
+}

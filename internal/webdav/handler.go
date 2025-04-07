@@ -43,6 +43,9 @@ const webdavLockTimeout = time.Hour
 const webdavLockCleanupInterval = 5 * time.Minute
 const webdavLockTokenBytes = 16
 const maxWebDAVLockTokenAttempts = 8
+const webdavDeleteCleanupWarningHeader = `199 MnemoNAS "delete cleanup incomplete"`
+const webdavTrashDeleteCleanupWarningHeader = `199 MnemoNAS "trash delete cleanup incomplete"`
+const webdavWorkspaceMutationWarningHeader = `199 MnemoNAS "workspace mutation persistence incomplete"`
 const maxPropfindTraversalDepth = 64
 const webdavLockDepthZero = "0"
 const webdavLockDepthInfinity = "infinity"
@@ -514,8 +517,10 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 	h.invalidatePropCache(affectedPaths...)
 
 	if err := h.fs.Delete(ctx, filePath); err != nil {
-		h.handleError(w, err)
-		return
+		if !markDeleteWarningHeaders(w, err) {
+			h.handleError(w, err)
+			return
+		}
 	}
 	h.clearLocksUnderPath(filePath)
 
@@ -557,8 +562,12 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 			http.Error(w, "parent path is not a directory", http.StatusConflict)
 			return
 		}
-		h.handleError(w, err)
-		return
+		if isVisibleMutationWarning(err) {
+			markVisibleMutationWarningHeader(w)
+		} else {
+			h.handleError(w, err)
+			return
+		}
 	}
 
 	h.invalidatePropCache(affectedPaths...)
@@ -673,16 +682,20 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	h.invalidatePropCache(affectedPaths...)
 
 	allowOverwrite := dstExists && !srcInfo.IsDir
-	if err := h.copyResource(ctx, srcPath, dst, copyDepth, allowOverwrite); err != nil {
-		if strings.EqualFold(r.Header.Get("Overwrite"), "F") && errors.Is(err, storage.ErrAlreadyExists) {
+	copyErr := h.copyResource(ctx, srcPath, dst, copyDepth, allowOverwrite)
+	if copyErr != nil && !isVisibleMutationWarning(copyErr) {
+		if strings.EqualFold(r.Header.Get("Overwrite"), "F") && errors.Is(copyErr, storage.ErrAlreadyExists) {
 			writeKnownWebDAVError(w, errOverwriteDisabled, http.StatusPreconditionFailed)
 			return
 		}
-		if h.writeParentNotDirectoryConflict(w, err) {
+		if h.writeParentNotDirectoryConflict(w, copyErr) {
 			return
 		}
-		h.handleError(w, err)
+		h.handleError(w, copyErr)
 		return
+	}
+	if copyErr != nil {
+		markVisibleMutationWarningHeader(w)
 	}
 
 	h.invalidatePropCache(affectedPaths...)
@@ -701,11 +714,16 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 	}
 
 	if info.IsDir {
+		var copyWarning error
 		if err := h.fs.Mkdir(ctx, dstPath); err != nil {
-			return err
+			if isVisibleMutationWarning(err) {
+				copyWarning = mergeVisibleMutationWarning(copyWarning, err)
+			} else {
+				return err
+			}
 		}
 		if depth == "0" {
-			return nil
+			return copyWarning
 		}
 
 		children, err := h.fs.ReadDir(ctx, srcPath)
@@ -716,10 +734,14 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 		for _, child := range children {
 			childName := path.Base(child.Path)
 			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName), "infinity", false); err != nil {
+				if isVisibleMutationWarning(err) {
+					copyWarning = mergeVisibleMutationWarning(copyWarning, err)
+					continue
+				}
 				return h.rollbackCopiedDirectory(dstPath, err)
 			}
 		}
-		return nil
+		return copyWarning
 	}
 
 	if h.beforeCopyFile != nil {
@@ -739,6 +761,83 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 	defer reader.Close()
 
 	return h.fs.WriteFile(ctx, dstPath, reader)
+}
+
+func isVisibleMutationWarning(err error) bool {
+	var warningErr *storage.VisibleMutationWarningError
+	return errors.As(err, &warningErr)
+}
+
+func isTrashDeleteWarning(err error) bool {
+	var warningErr *storage.TrashDeleteWarningError
+	return errors.As(err, &warningErr)
+}
+
+func isDeleteCleanupWarning(err error) bool {
+	var warningErr *storage.DeleteCleanupWarningError
+	return errors.As(err, &warningErr)
+}
+
+func markDeleteWarningHeaders(w http.ResponseWriter, err error) bool {
+	if isTrashDeleteWarning(err) {
+		markTrashDeleteCleanupWarningHeader(w)
+	}
+	if isDeleteCleanupWarning(err) {
+		markDeleteCleanupWarningHeader(w)
+	}
+	if isVisibleMutationWarning(err) {
+		markVisibleMutationWarningHeader(w)
+	}
+	return isTrashDeleteWarning(err) || isDeleteCleanupWarning(err) || isVisibleMutationWarning(err)
+}
+
+func mergeVisibleMutationWarning(existing, err error) error {
+	if err == nil {
+		return existing
+	}
+	if existing == nil {
+		return err
+	}
+	return errors.Join(existing, err)
+}
+
+func markVisibleMutationWarningHeader(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == webdavWorkspaceMutationWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", webdavWorkspaceMutationWarningHeader)
+}
+
+func markTrashDeleteCleanupWarningHeader(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == webdavTrashDeleteCleanupWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", webdavTrashDeleteCleanupWarningHeader)
+}
+
+func markDeleteCleanupWarningHeader(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == webdavDeleteCleanupWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", webdavDeleteCleanupWarningHeader)
 }
 
 func (h *Handler) rollbackCopiedDirectory(dstPath string, copyErr error) error {
@@ -876,6 +975,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 			// The namespace move is already committed at this point. Cleanup failure
 			// should leave behind maintenance work, not turn a successful MOVE into
 			// a false failure for clients.
+			if !markDeleteWarningHeaders(w, err) {
+				h.handleError(w, err)
+				return
+			}
 		}
 	} else {
 		if err := h.fs.Rename(ctx, srcPath, dst); err != nil {
