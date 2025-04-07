@@ -21,6 +21,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
+	"github.com/seanbao/mnemonas/internal/workspace"
 )
 
 func setDeleteVersionObjectHook(t *testing.T, fs *storage.FileSystem, fn func(context.Context, string) error) {
@@ -140,6 +141,37 @@ func TestHandler_MKCOL(t *testing.T) {
 
 	if w.Code != http.StatusCreated {
 		t.Errorf("MKCOL status = %d, want %d", w.Code, http.StatusCreated)
+	}
+}
+
+func TestHandler_MKCOL_ReturnsCreatedWithWarningWhenDirectorySyncFailsAfterVisibleCreate(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	originalMkdir := getStorageHook[func(context.Context, string) error](t, fs, "mkdirWorkspacePath")
+	setStorageHook(t, fs, "mkdirWorkspacePath", func(ctx context.Context, name string) error {
+		if err := originalMkdir(ctx, name); err != nil {
+			return err
+		}
+		if name == "/warning-dir" {
+			return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+		}
+		return nil
+	})
+
+	req := httptest.NewRequest("MKCOL", "/dav/warning-dir", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("MKCOL warning status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	if got := w.Header().Get("Warning"); got != webdavWorkspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, webdavWorkspaceMutationWarningHeader)
+	}
+	if _, err := fs.Stat(ctx, "/warning-dir"); err != nil {
+		t.Fatalf("expected MKCOL warning directory to exist, got %v", err)
 	}
 }
 
@@ -846,6 +878,123 @@ func TestHandler_DELETE(t *testing.T) {
 	}
 }
 
+func TestHandler_DELETE_ReturnsNoContentWithWarningWhenPermanentDeleteSyncFailsAfterVisibleDelete(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	fs.UpdateTrashSettings(false, 30, 1<<20)
+	if err := fs.Mkdir(ctx, "/deltest"); err != nil {
+		t.Fatalf("Mkdir(deltest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/deltest/file.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile(file.txt) error: %v", err)
+	}
+
+	originalDelete := getStorageHook[func(context.Context, string) error](t, fs, "deleteWorkspacePath")
+	setStorageHook(t, fs, "deleteWorkspacePath", func(ctx context.Context, name string) error {
+		if err := originalDelete(ctx, name); err != nil {
+			return err
+		}
+		if name == "/deltest/file.txt" {
+			return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+		}
+		return nil
+	})
+
+	req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE warning status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if got := w.Header().Get("Warning"); got != webdavWorkspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, webdavWorkspaceMutationWarningHeader)
+	}
+	if _, err := fs.Stat(ctx, "/deltest/file.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected file to remain deleted after warning, got %v", err)
+	}
+}
+
+func TestHandler_DELETE_ReturnsNoContentWithWarningWhenTrashCapacityCleanupFailsAfterVisibleDelete(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	fs.UpdateTrashSettings(true, 30, 10)
+	if err := fs.WriteFile(ctx, "/old-trash.txt", bytes.NewReader([]byte("123456"))); err != nil {
+		t.Fatalf("WriteFile(old-trash.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/old-trash.txt"); err != nil {
+		t.Fatalf("Delete(old-trash.txt) error: %v", err)
+	}
+	setStorageHook(t, fs, "removeTrashMetadata", func(ctx context.Context, id string) error {
+		return errors.New("metadata delete failed")
+	})
+	if err := fs.Mkdir(ctx, "/deltest"); err != nil {
+		t.Fatalf("Mkdir(deltest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/deltest/file.txt", bytes.NewReader([]byte("1234567"))); err != nil {
+		t.Fatalf("WriteFile(file.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE cleanup warning status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if got := w.Header().Get("Warning"); got != webdavTrashDeleteCleanupWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, webdavTrashDeleteCleanupWarningHeader)
+	}
+	if _, err := fs.Stat(ctx, "/deltest/file.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected file to remain deleted after cleanup warning, got %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected both trash items to remain after cleanup warning, got %d", len(items))
+	}
+}
+
+func TestHandler_DELETE_ReturnsNoContentWithWarningWhenPermanentDeleteCleanupFailsAfterVisibleDelete(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	fs.UpdateTrashSettings(false, 30, 0)
+	if err := fs.Mkdir(ctx, "/deltest"); err != nil {
+		t.Fatalf("Mkdir(deltest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/deltest/file.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/deltest/file.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+		return errors.New("version object cleanup failed")
+	})
+
+	req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE cleanup warning status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if got := w.Header().Get("Warning"); got != webdavDeleteCleanupWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, webdavDeleteCleanupWarningHeader)
+	}
+	if _, err := fs.Stat(ctx, "/deltest/file.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected file to remain deleted after cleanup warning, got %v", err)
+	}
+}
+
 func TestHandler_DELETE_ConditionalHeaders(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1321,6 +1470,60 @@ func TestHandler_COPY_DirectoryRecursive(t *testing.T) {
 	}
 	if string(childData) != "child" {
 		t.Fatalf("Expected child file content, got %q", string(childData))
+	}
+}
+
+func TestHandler_COPY_DirectoryRecursiveReturnsCreatedWithWarningWhenDestinationCreateSyncFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/srcdir/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/nested/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	originalMkdir := getStorageHook[func(context.Context, string) error](t, fs, "mkdirWorkspacePath")
+	setStorageHook(t, fs, "mkdirWorkspacePath", func(ctx context.Context, name string) error {
+		if err := originalMkdir(ctx, name); err != nil {
+			return err
+		}
+		if name == "/dst/copied-dir" {
+			return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+		}
+		return nil
+	})
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied-dir")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("COPY directory warning status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	if got := w.Header().Get("Warning"); got != webdavWorkspaceMutationWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, webdavWorkspaceMutationWarningHeader)
+	}
+	if _, err := fs.Stat(ctx, "/dst/copied-dir"); err != nil {
+		t.Fatalf("expected copied directory to exist, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/dst/copied-dir/root.txt"); err != nil {
+		t.Fatalf("expected copied root file to exist, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/dst/copied-dir/nested/child.txt"); err != nil {
+		t.Fatalf("expected copied child file to exist, got %v", err)
 	}
 }
 
@@ -2017,7 +2220,7 @@ func TestHandler_MOVE_OverwriteFailureRestoresExistingDestination(t *testing.T) 
 	}
 }
 
-func TestHandler_MOVE_OverwriteCleanupFailureStillReturnsNoContent(t *testing.T) {
+func TestHandler_MOVE_OverwriteCleanupFailureReturnsNoContentWithWarning(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
 
@@ -2047,6 +2250,9 @@ func TestHandler_MOVE_OverwriteCleanupFailureStillReturnsNoContent(t *testing.T)
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("MOVE overwrite cleanup failure status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if got := w.Header().Get("Warning"); got != webdavDeleteCleanupWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, webdavDeleteCleanupWarningHeader)
 	}
 	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected source path removed after committed MOVE, got %v", err)

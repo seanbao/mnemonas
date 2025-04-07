@@ -886,6 +886,99 @@ func (s *ShareStore) RestoreShares(shares []*Share) error {
 	}
 }
 
+// RestoreDisabledSharesPreservingCurrent restores share availability after a
+// failed delete rollback while keeping newer share metadata changes.
+func (s *ShareStore) RestoreDisabledSharesPreservingCurrent(shares []*Share) error {
+	if len(shares) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for _, original := range shares {
+			current, ok := snapshot.shares[original.ID]
+			if !ok {
+				continue
+			}
+
+			updated := copyShare(current)
+			if updated.Path != original.Path {
+				moveSharePathIndex(snapshot.pathIdx, updated.Path, original.Path, original.ID)
+				updated.Path = original.Path
+			}
+			updated.Enabled = original.Enabled
+
+			if sharesEqual(updated, current) {
+				continue
+			}
+
+			snapshot.shares[original.ID] = updated
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
+}
+
+// RestoreMovedSharesPreservingCurrent restores share paths after a failed rename
+// rollback while keeping newer share metadata changes.
+func (s *ShareStore) RestoreMovedSharesPreservingCurrent(shares []*Share) error {
+	if len(shares) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for _, original := range shares {
+			current, ok := snapshot.shares[original.ID]
+			if !ok {
+				continue
+			}
+
+			updated := copyShare(current)
+			if updated.Path != original.Path {
+				moveSharePathIndex(snapshot.pathIdx, updated.Path, original.Path, original.ID)
+				updated.Path = original.Path
+			}
+
+			if sharesEqual(updated, current) {
+				continue
+			}
+
+			snapshot.shares[original.ID] = updated
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
+	}
+}
+
 func sharesEqual(a, b *Share) bool {
 	if a == nil || b == nil {
 		return a == b

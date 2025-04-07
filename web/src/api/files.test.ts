@@ -958,12 +958,34 @@ describe('API: files', () => {
           }),
         })
 
-        await expect(restoreFromTrash('item1')).resolves.toBeUndefined()
+    await expect(restoreFromTrash('item1')).resolves.toEqual({ warning: false, message: undefined })
         expectFetchCall(1, '/api/v1/trash/item1/restore', {
           method: 'POST',
           headers: {},
         })
       })
+
+    it('preserves warning-bearing successful restore responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ Warning: '199 MnemoNAS "trash restore metadata incomplete"' }),
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            id: 'item1',
+            restored: true,
+            warning: true,
+          },
+          message: 'file restored with metadata warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(restoreFromTrash('item1')).resolves.toEqual({
+        warning: true,
+        message: 'file restored with metadata warning',
+      })
+    })
 
       it('restores to custom path', async () => {
         mockFetch.mockResolvedValueOnce({
@@ -1046,12 +1068,33 @@ describe('API: files', () => {
           }),
         })
 
-        await expect(deleteFromTrash('item1')).resolves.toBeUndefined()
+    await expect(deleteFromTrash('item1')).resolves.toEqual({ warning: false, message: undefined })
         expectFetchCall(1, '/api/v1/trash/item1', {
           method: 'DELETE',
           headers: {},
         })
       })
+
+    it('preserves warning-bearing successful permanent delete responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            id: 'item1',
+            deleted: true,
+            warning: true,
+          },
+          message: 'item permanently deleted with cleanup warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(deleteFromTrash('item1')).resolves.toEqual({
+        warning: true,
+        message: 'item permanently deleted with cleanup warning',
+      })
+    })
 
       it('rejects malformed successful delete responses', async () => {
         mockFetch.mockResolvedValueOnce({
