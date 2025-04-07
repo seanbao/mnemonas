@@ -223,6 +223,27 @@ func TestHandler_PUT_ToExistingDirectoryReturnsConflict(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_ParentStatUnexpectedErrorReturnsInternalServerError(t *testing.T) {
+	handler, _, tmpDir := setupTestHandler(t)
+
+	loopPath := filepath.Join(tmpDir, "files", "loop")
+	if err := os.Symlink("loop", loopPath); err != nil {
+		t.Fatalf("Symlink() error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/loop/sub/file.txt", strings.NewReader("content"))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("PUT parent stat error status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(w.Body.String(), "parent directory not found") {
+		t.Fatalf("expected unexpected parent stat failure to avoid false not-found message, got %q", w.Body.String())
+	}
+}
+
 func TestHandler_PUT_IfMatchStarOnMissingFileFails(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()

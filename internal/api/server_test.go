@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -304,6 +305,12 @@ func (repeatingReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) {
+	return 0, errors.New("stream failed")
+}
+
 func TestServer_Health(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -340,6 +347,9 @@ func TestServer_Health_DataplaneFailureDoesNotExposeInternalError(t *testing.T) 
 	body := w.Body.String()
 	if strings.Contains(strings.ToLower(body), "connection refused") || strings.Contains(strings.ToLower(body), "rpc error") {
 		t.Fatalf("expected health response to hide internal dataplane errors, got %q", body)
+	}
+	if !strings.Contains(body, `"status":"degraded"`) {
+		t.Fatalf("expected health response to mark dataplane failure as degraded, got %q", body)
 	}
 	if !strings.Contains(body, "unavailable") {
 		t.Fatalf("expected health response to include generic dataplane status, got %q", body)
@@ -397,6 +407,34 @@ func TestServer_ListFiles(t *testing.T) {
 			t.Error("Response should contain 'file.txt'")
 		}
 	})
+}
+
+func TestServer_ListFiles_InternalReadDirErrorReturnsInternalServerError(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/locked"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	lockedDir := path.Join(tmpDir, "files", "locked")
+	if err := os.Chmod(lockedDir, 0); err != nil {
+		t.Fatalf("Chmod() error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(lockedDir, 0o755)
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/locked", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("ListFiles internal error status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
+		t.Fatalf("expected list files internal error to stay generic, got %s", w.Body.String())
+	}
 }
 
 func TestServer_UploadFile(t *testing.T) {
@@ -524,6 +562,28 @@ func TestServer_DeleteFile(t *testing.T) {
 	_, err := fs.Stat(ctx, "/delete/file.txt")
 	if err == nil {
 		t.Error("File still exists after delete")
+	}
+}
+
+func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/quote\"name.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/quote%22name.txt?download=true", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Download status = %d, want %d", w.Code, http.StatusOK)
+	}
+	contentDisposition := w.Header().Get("Content-Disposition")
+	if !strings.Contains(contentDisposition, `filename="quote\"name.txt"`) {
+		t.Fatalf("expected escaped Content-Disposition filename, got %q", contentDisposition)
 	}
 }
 
@@ -819,6 +879,72 @@ func TestServer_ListVersions(t *testing.T) {
 	}
 }
 
+func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/quote\"name.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/quote\"name.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/quote\"name.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/versions/quote%22name.txt?download=true&version="+historicalHash, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Download version status = %d, want %d", w.Code, http.StatusOK)
+	}
+	contentDisposition := w.Header().Get("Content-Disposition")
+	if !strings.Contains(contentDisposition, `filename="quote\"name.txt"`) {
+		t.Fatalf("expected escaped version Content-Disposition filename, got %q", contentDisposition)
+	}
+}
+
+func TestStreamAPIResponse_ReturnsErrorBeforeResponseStarts(t *testing.T) {
+	rec := httptest.NewRecorder()
+	err := streamAPIResponse(rec, errReader{})
+	if err == nil {
+		t.Fatal("expected streamAPIResponse to return pre-write stream error")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status after pre-write stream failure: %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("expected no response body on pre-write failure, got %q", rec.Body.String())
+	}
+}
+
+func TestStreamAPIResponse_IgnoresErrorAfterResponseStarts(t *testing.T) {
+	rec := httptest.NewRecorder()
+	err := streamAPIResponse(rec, io.MultiReader(strings.NewReader("partial"), errReader{}))
+	if err != nil {
+		t.Fatalf("expected streamAPIResponse to suppress post-write stream error, got %v", err)
+	}
+	if rec.Body.String() != "partial" {
+		t.Fatalf("expected partial body to remain written, got %q", rec.Body.String())
+	}
+}
+
 func TestServer_Trash(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -852,6 +978,80 @@ func TestServer_Trash(t *testing.T) {
 			t.Error("Response should include retentionDays")
 		}
 	})
+}
+
+func TestServer_GetTrashItem_InternalErrorReturnsInternalServerError(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/trash-read-error"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-read-error/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-read-error/file.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected at least one trash item")
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/trash/"+items[0].ID, nil).WithContext(canceledCtx)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("GetTrashItem internal error status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "context canceled") {
+		t.Fatalf("expected get trash item internal error to stay generic, got %s", w.Body.String())
+	}
+}
+
+func TestServer_DeleteFromTrash_InternalErrorReturnsInternalServerError(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/trash-delete-error"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-delete-error/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-delete-error/file.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected at least one trash item")
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/"+items[0].ID, nil).WithContext(canceledCtx)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("DeleteFromTrash internal error status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "context canceled") {
+		t.Fatalf("expected delete from trash internal error to stay generic, got %s", w.Body.String())
+	}
 }
 
 func TestServer_Stats(t *testing.T) {
@@ -1148,6 +1348,52 @@ func TestServer_MoveFile_InvalidSourcePathIsSanitized(t *testing.T) {
 	}
 	if strings.Contains(bodyStr, "..") || strings.Contains(strings.ToLower(bodyStr), "traversal") {
 		t.Fatalf("expected sanitized invalid source path error, got %s", bodyStr)
+	}
+}
+
+func TestServer_MoveFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/move-dest.txt", bytes.NewReader([]byte("dest"))); err != nil {
+		t.Fatalf("WriteFile(dest) error: %v", err)
+	}
+
+	body := `{"from":"/move-source.txt","to":"/move-dest.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("move file conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestServer_CopyFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/copy-dest.txt", bytes.NewReader([]byte("dest"))); err != nil {
+		t.Fatalf("WriteFile(dest) error: %v", err)
+	}
+
+	body := `{"from":"/copy-source.txt","to":"/copy-dest.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("copy file conflict status = %d, want %d", w.Code, http.StatusConflict)
 	}
 }
 
@@ -2617,4 +2863,35 @@ func TestServer_ListVersions_ErrorCases(t *testing.T) {
 			t.Errorf("Versions for invalid path status = %d", w.Code)
 		}
 	})
+}
+
+func TestServer_ListVersions_InternalStatErrorReturnsInternalServerError(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/locked-versions"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/locked-versions/file.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	lockedDir := path.Join(tmpDir, "files", "locked-versions")
+	if err := os.Chmod(lockedDir, 0); err != nil {
+		t.Fatalf("Chmod() error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(lockedDir, 0o755)
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/versions/locked-versions/file.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("ListVersions internal error status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
+		t.Fatalf("expected list versions internal error to stay generic, got %s", w.Body.String())
+	}
 }

@@ -610,11 +610,8 @@ func (fs *FileSystem) ensureTrashCapacityLocked(ctx context.Context, incomingSiz
 
 	for i := len(items) - 1; i >= 0 && totalSize+incomingSize > fs.config.MaxTrashSize; i-- {
 		item := items[i]
-		if err := fs.removeTrashPath(path.Join(fs.trashRoot, item.ID)); err != nil {
-			return fmt.Errorf("failed to evict trash content for %s: %w", item.ID, err)
-		}
-		if err := fs.versions.RemoveFromTrash(ctx, item.ID); err != nil {
-			return fmt.Errorf("failed to evict trash metadata for %s: %w", item.ID, err)
+		if err := fs.deleteTrashItem(ctx, &item); err != nil {
+			return fmt.Errorf("failed to evict trash item %s: %w", item.ID, err)
 		}
 		totalSize -= item.Size
 	}
@@ -723,6 +720,9 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 
 	err := fs.renameWorkspacePath(ctx, oldName, newName)
 	if err != nil {
+		if errors.Is(err, workspace.ErrAlreadyExists) {
+			return ErrAlreadyExists
+		}
 		if errors.Is(err, workspace.ErrNotFound) {
 			return ErrNotFound
 		}
@@ -1059,7 +1059,7 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 
 	metadataRenamed := false
 	if item.HadVersions {
-		if err := fs.versions.RenamePath(ctx, item.OriginalPath, newPath); err != nil {
+		if err := fs.renameMetadataPath(ctx, item.OriginalPath, newPath); err != nil {
 			if rollbackErr := movePath(destPath, trashContentPath); rollbackErr != nil {
 				return errors.Join(
 					fmt.Errorf("failed to update version metadata: %w", err),
@@ -1071,20 +1071,18 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 		metadataRenamed = true
 	}
 
-	if err := fs.versions.RemoveFromTrash(ctx, id); err != nil {
+	if err := fs.removeTrashMetadata(ctx, id); err != nil {
+		var rollbackErrs []error
 		if metadataRenamed {
-			if revertErr := fs.versions.RenamePath(ctx, newPath, item.OriginalPath); revertErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to remove trash metadata: %w", err),
-					fmt.Errorf("failed to rollback version metadata: %w", revertErr),
-				)
+			if revertErr := fs.renameMetadataPath(ctx, newPath, item.OriginalPath); revertErr != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback version metadata: %w", revertErr))
 			}
 		}
 		if rollbackErr := movePath(destPath, trashContentPath); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to remove trash metadata: %w", err),
-				fmt.Errorf("failed to rollback restored content: %w", rollbackErr),
-			)
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
+		}
+		if len(rollbackErrs) > 0 {
+			return errors.Join(append([]error{fmt.Errorf("failed to remove trash metadata: %w", err)}, rollbackErrs...)...)
 		}
 		return fmt.Errorf("failed to remove trash metadata: %w", err)
 	}
@@ -1092,34 +1090,21 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	os.RemoveAll(path.Join(fs.trashRoot, id))
 	if !item.IsDir {
 		if err := fs.syncFileIndexFromWorkspace(ctx, newPath); err != nil {
+			var rollbackErrs []error
 			if metadataRenamed {
-				if revertErr := fs.versions.RenamePath(ctx, newPath, item.OriginalPath); revertErr != nil {
-					return errors.Join(
-						fmt.Errorf("failed to update file index: %w", err),
-						fmt.Errorf("failed to rollback version metadata: %w", revertErr),
-					)
+				if revertErr := fs.renameMetadataPath(ctx, newPath, item.OriginalPath); revertErr != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback version metadata: %w", revertErr))
 				}
 			}
 			rollbackErr := movePath(destPath, trashContentPath)
-			metadataErr := fs.versions.AddToTrash(ctx, item)
-			if rollbackErr != nil && metadataErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to update file index: %w", err),
-					fmt.Errorf("failed to rollback restored content: %w", rollbackErr),
-					fmt.Errorf("failed to restore trash metadata: %w", metadataErr),
-				)
-			}
 			if rollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to update file index: %w", err),
-					fmt.Errorf("failed to rollback restored content: %w", rollbackErr),
-				)
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
 			}
-			if metadataErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to update file index: %w", err),
-					fmt.Errorf("failed to restore trash metadata: %w", metadataErr),
-				)
+			if metadataErr := fs.addTrashMetadata(ctx, item); metadataErr != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to restore trash metadata: %w", metadataErr))
+			}
+			if len(rollbackErrs) > 0 {
+				return errors.Join(append([]error{fmt.Errorf("failed to update file index: %w", err)}, rollbackErrs...)...)
 			}
 			return fmt.Errorf("failed to update file index: %w", err)
 		}
