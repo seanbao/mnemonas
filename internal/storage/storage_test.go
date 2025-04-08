@@ -139,6 +139,20 @@ func TestFileSystem_WriteFile_Read(t *testing.T) {
 	}
 }
 
+func TestFileSystem_WriteFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(parent-file) error: %v", err)
+	}
+
+	err := fs.WriteFile(ctx, "/parent-file/child.txt", bytes.NewReader([]byte("nested")))
+	if err != ErrNotDir {
+		t.Fatalf("WriteFile() error = %v, want ErrNotDir", err)
+	}
+}
+
 func TestFileSystem_WriteFile_RollsBackNewFileWhenIndexUpdateFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
