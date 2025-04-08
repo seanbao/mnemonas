@@ -790,3 +790,21 @@ func TestStore_RunGC_ReturnsChunkRefDeleteErrors(t *testing.T) {
 		t.Fatalf("expected orphan to remain when ref deletion fails, got %v", remaining)
 	}
 }
+
+func TestObjectStore_ReturnsErrUnavailableWhenDisconnected(t *testing.T) {
+	store := NewObjectStore(&dataplane.Client{})
+	ctx := context.Background()
+
+	if _, err := store.Get(ctx, "abc"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get() error = %v, want ErrUnavailable", err)
+	}
+	if _, err := store.Put(ctx, []byte("data")); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Put() error = %v, want ErrUnavailable", err)
+	}
+	if _, err := store.Has(ctx, "abc"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Has() error = %v, want ErrUnavailable", err)
+	}
+	if err := store.Delete(ctx, "abc"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Delete() error = %v, want ErrUnavailable", err)
+	}
+}

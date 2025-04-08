@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,15 +142,47 @@ func (s *UserStore) save() error {
 }
 
 func validateAuthFilePath(path string, symlinkErr error) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		absPath, err := filepath.Abs(cleaned)
+		if err != nil {
+			return fmt.Errorf("failed to resolve secure file path: %w", err)
 		}
-		return fmt.Errorf("failed to stat secure file: %w", err)
+		cleaned = absPath
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return symlinkErr
+
+	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(cleaned, root)
+	if trimmed == "" {
+		info, err := os.Lstat(cleaned)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat secure file: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkErr
+		}
+		return nil
+	}
+
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat secure file: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkErr
+		}
 	}
 	return nil
 }

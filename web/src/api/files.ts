@@ -517,6 +517,11 @@ export interface TrashItem {
   versions?: number
 }
 
+export interface EmptyTrashResult {
+  deletedCount: number
+  partial: boolean
+}
+
 export interface TrashListResponse {
   items: TrashItem[]
   count: number
@@ -596,12 +601,15 @@ export async function deleteFromTrash(id: string): Promise<void> {
 }
 
 // Empty trash (delete all items permanently)
-export async function emptyTrash(): Promise<number> {
+export async function emptyTrash(): Promise<EmptyTrashResult> {
   const response = await authFetch(`${API_BASE}/trash/`, {
     method: 'DELETE',
   })
-  const result = await handleResponse<ApiResponseWrapper<{deleted_count: number}>>(response, '清空回收站失败')
-  return result.data.deleted_count
+  const result = await handleResponse<ApiResponseWrapper<{deleted_count: number, partial?: boolean}>>(response, '清空回收站失败')
+  return {
+    deletedCount: result.data.deleted_count,
+    partial: !!result.data.partial,
+  }
 }
 
 // === Maintenance / Scrub APIs ===

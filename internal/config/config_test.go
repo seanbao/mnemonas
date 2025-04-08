@@ -322,6 +322,56 @@ func TestLoad_RejectsSymlinkPath(t *testing.T) {
 	}
 }
 
+func TestConfig_Save_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-config")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real config dir: %v", err)
+	}
+	targetPath := filepath.Join(realDir, "config.toml")
+	if err := os.WriteFile(targetPath, []byte("keep = 'original'\n"), 0644); err != nil {
+		t.Fatalf("failed to seed target config: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked-config")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create config dir symlink: %v", err)
+	}
+
+	err := Default().Save(filepath.Join(linkedDir, "config.toml"))
+	if !errors.Is(err, errConfigFileSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read target config: %v", err)
+	}
+	if string(data) != "keep = 'original'\n" {
+		t.Fatalf("expected target config to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestLoad_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-config")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real config dir: %v", err)
+	}
+	targetPath := filepath.Join(realDir, "config.toml")
+	if err := os.WriteFile(targetPath, []byte("[server]\nport = 8081\n"), 0644); err != nil {
+		t.Fatalf("failed to seed target config: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked-config")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create config dir symlink: %v", err)
+	}
+
+	_, err := Load(filepath.Join(linkedDir, "config.toml"))
+	if !errors.Is(err, errConfigFileSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+}
+
 func TestConfig_EnsureDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 
