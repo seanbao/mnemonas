@@ -941,6 +941,9 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 			Conflict(w, "destination cannot be inside source directory")
 			return
 		}
+	} else if errors.Is(err, storage.ErrNotDir) {
+		Conflict(w, "parent path is not a directory")
+		return
 	} else if !isStorageNotFound(err) {
 		s.respondInternalError(w, "stat move source", err)
 		return
@@ -994,6 +997,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 	toPath, err := validatePath(req.To)
 	if err != nil {
 		badRequestInvalidDestinationPath(w)
+		return
+	}
+	if fromPath == toPath {
+		Conflict(w, "source and destination must differ")
 		return
 	}
 

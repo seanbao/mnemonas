@@ -266,6 +266,10 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 				writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 				return
 			}
+			if errors.Is(err, storage.ErrNotDir) {
+				writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+				return
+			}
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "CREATE_SHARE_FAILED")
 			return
 		}
@@ -694,6 +698,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 			return
 		}
+		if errors.Is(err, storage.ErrNotDir) {
+			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+			return
+		}
 		if errors.Is(err, storage.ErrIsDir) {
 			writeShareError(w, http.StatusBadRequest, "shared resource is a directory", "INVALID_SHARE_TYPE")
 			return
@@ -712,7 +720,8 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
-	if _, err := h.store.RecordAuthorizedAccess(id); err != nil {
+	_, accessReservation, err := h.store.reserveAuthorizedAccess(id)
+	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
 	}
@@ -721,6 +730,7 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -793,7 +803,8 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
-	if _, err := h.store.RecordAuthorizedAccess(id); err != nil {
+	_, accessReservation, err := h.store.reserveAuthorizedAccess(id)
+	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
 	}
@@ -802,6 +813,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -832,7 +844,7 @@ func prefetchDownloadChunk(reader io.Reader) ([]byte, bool, error) {
 }
 
 func streamDownload(w http.ResponseWriter, reader io.Reader, firstChunk []byte, exhausted bool) error {
-	trackingWriter := &downloadResponseWriter{ResponseWriter: w}
+	trackingWriter := &responseStartTrackingWriter{ResponseWriter: w}
 	if len(firstChunk) > 0 {
 		if _, err := trackingWriter.Write(firstChunk); err != nil && !trackingWriter.started {
 			return err
@@ -848,19 +860,22 @@ func streamDownload(w http.ResponseWriter, reader io.Reader, firstChunk []byte, 
 	return nil
 }
 
-type downloadResponseWriter struct {
+type responseStartTrackingWriter struct {
 	http.ResponseWriter
 	started bool
 }
 
-func (w *downloadResponseWriter) WriteHeader(statusCode int) {
+func (w *responseStartTrackingWriter) WriteHeader(statusCode int) {
 	w.started = true
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
-func (w *downloadResponseWriter) Write(p []byte) (int, error) {
-	w.started = true
-	return w.ResponseWriter.Write(p)
+func (w *responseStartTrackingWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	if err == nil || n > 0 {
+		w.started = true
+	}
+	return n, err
 }
 
 // ListShareItems lists items within a shared folder.
@@ -913,11 +928,6 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.store.RecordAuthorizedAccess(id); err != nil {
-		writePublicShareAccessError(w, err)
-		return
-	}
-
 	items := make([]*PublicShareItem, 0, len(entries))
 	for _, entry := range entries {
 		relItemPath, relErr := shareRelativePath(share.Path, entry.Path)
@@ -942,8 +952,21 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		Items: items,
 	}
 
+	_, accessReservation, err := h.store.reserveAuthorizedAccess(id)
+	if err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	trackingWriter := &responseStartTrackingWriter{ResponseWriter: w}
+	if err := json.NewEncoder(trackingWriter).Encode(resp); err != nil {
+		if !trackingWriter.started {
+			_ = h.store.rollbackAuthorizedAccess(accessReservation)
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
+		}
+		return
+	}
 }
 
 func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareInfo, share *Share) error {
@@ -977,6 +1000,10 @@ func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareIn
 
 func (h *Handler) writePublicShareInfoError(w http.ResponseWriter, share *Share, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+		return
+	}
+	if share.Type == ShareTypeFile && errors.Is(err, storage.ErrNotDir) {
 		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 		return
 	}

@@ -133,6 +133,66 @@ func TestHandler_MKCOL_RejectsUnknownLengthBody(t *testing.T) {
 	}
 }
 
+func TestHandler_MKCOL_ExistingDirectoryReturnsMethodNotAllowed(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/testdir"); err != nil {
+		t.Fatalf("Mkdir(testdir) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MKCOL", "/dav/testdir", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("MKCOL existing directory status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandler_MKCOL_ExistingFileReturnsMethodNotAllowed(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/existing.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(existing.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MKCOL", "/dav/existing.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("MKCOL existing file status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandler_MKCOL_ReturnsConflictWhenParentPathIsFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(parent-file) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MKCOL", "/dav/parent-file/child", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MKCOL parent-file conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/parent-file/child"); !errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrNotDir) {
+		t.Fatalf("expected child collection to remain absent, got %v", err)
+	}
+}
+
 func TestHandler_PUT_GET(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 
@@ -226,6 +286,30 @@ func TestHandler_PUT_ToExistingDirectoryReturnsConflict(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("PUT to directory status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestHandler_PUT_ReturnsConflictWhenParentChainContainsFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/files/blocked", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(blocked) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/blocked/child/file.txt", strings.NewReader("content"))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("PUT nested under file status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory message, got %q", w.Body.String())
 	}
 }
 
@@ -780,6 +864,59 @@ func TestHandler_COPY_DirectoryOverwriteExistingDestinationRejected(t *testing.T
 	}
 }
 
+func TestHandler_COPY_ReturnsConflictWhenSourceParentIsFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(copy-parent-file) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/copy-parent-file/child.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/copied.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("COPY source parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/copied.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
+	}
+}
+
+func TestHandler_COPY_ReturnsConflictWhenDestinationParentIsFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/src-file.txt", bytes.NewReader([]byte("copy me"))); err != nil {
+		t.Fatalf("WriteFile(src-file.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/copy-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(copy-parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src-file.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/copy-parent/child.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("COPY destination parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/copy-parent/child.txt"); !errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrNotDir) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
+	}
+}
+
 func TestHandler_COPY_InvalidDestinationPrefix(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -822,8 +959,8 @@ func TestHandler_COPY_SameSourceAndDestinationRejected(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("COPY same source/destination status = %d, want %d", w.Code, http.StatusConflict)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("COPY same source/destination status = %d, want %d", w.Code, http.StatusForbidden)
 	}
 
 	f, err := fs.OpenFile(ctx, "/src/file.txt")
@@ -1025,8 +1162,8 @@ func TestHandler_MOVE_SameSourceAndDestinationRejected(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("MOVE same source/destination status = %d, want %d", w.Code, http.StatusConflict)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("MOVE same source/destination status = %d, want %d", w.Code, http.StatusForbidden)
 	}
 
 	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
@@ -1062,6 +1199,62 @@ func TestHandler_MOVE_DirectoryIntoDescendantRejected(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/movetest/nested/moved"); err == nil {
 		t.Fatal("Expected descendant destination to remain absent after rejected MOVE")
+	}
+}
+
+func TestHandler_MOVE_ReturnsConflictWhenSourceParentIsFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(move-parent-file) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/move-parent-file/child.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/moved.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE source parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/moved.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
+	}
+}
+
+func TestHandler_MOVE_ReturnsConflictWhenDestinationParentIsFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir(movetest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/move-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(move-parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/move-parent/child.txt")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE destination parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %q", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected move, got %v", err)
 	}
 }
 

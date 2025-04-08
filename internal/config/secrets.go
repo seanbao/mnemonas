@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,16 +22,26 @@ type Secrets struct {
 // SecretsFile is the default filename for secrets
 const SecretsFile = "secrets.json"
 
+const secretsFileMode = 0600
+
+var errSecretsFileSymlink = errors.New("secrets file path must not be a symlink")
+
 // LoadSecrets loads secrets from file without creating new ones.
 // Returns nil if file does not exist.
 func LoadSecrets(dataDir string) (*Secrets, error) {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
+	if err := validateSecretsFilePath(secretsPath); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(secretsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to read secrets file: %w", err)
+	}
+	if err := ensureSecretsFilePermissions(secretsPath); err != nil {
+		return nil, err
 	}
 
 	var secrets Secrets
@@ -54,8 +65,8 @@ func SaveSecrets(dataDir string, secrets *Secrets) error {
 		return fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 
-	if err := os.WriteFile(secretsPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write secrets file: %w", err)
+	if err := writeSecretsFile(secretsPath, data); err != nil {
+		return err
 	}
 	return nil
 }
@@ -78,10 +89,16 @@ func MarkSetupShown(dataDir string) error {
 // Returns the secrets and a boolean indicating if they were newly created.
 func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
+	if err := validateSecretsFilePath(secretsPath); err != nil {
+		return nil, false, err
+	}
 
 	// Try to load existing secrets
 	data, err := os.ReadFile(secretsPath)
 	if err == nil {
+		if err := ensureSecretsFilePermissions(secretsPath); err != nil {
+			return nil, false, err
+		}
 		var secrets Secrets
 		if err := json.Unmarshal(data, &secrets); err != nil {
 			return nil, false, fmt.Errorf("failed to parse secrets file: %w", err)
@@ -118,11 +135,75 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 		return nil, false, fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 
-	if err := os.WriteFile(secretsPath, secretsData, 0600); err != nil {
-		return nil, false, fmt.Errorf("failed to write secrets file: %w", err)
+	if err := writeSecretsFile(secretsPath, secretsData); err != nil {
+		return nil, false, err
 	}
 
 	return secrets, true, nil
+}
+
+func validateSecretsFilePath(secretsPath string) error {
+	info, err := os.Lstat(secretsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat secrets file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errSecretsFileSymlink
+	}
+	return nil
+}
+
+func writeSecretsFile(secretsPath string, data []byte) error {
+	if err := validateSecretsFilePath(secretsPath); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(secretsPath)
+	tmpFile, err := os.CreateTemp(dir, ".secrets-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp secrets file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(secretsFileMode); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to set temp secrets permissions: %w", err)
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write secrets file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync secrets file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp secrets file: %w", err)
+	}
+	if err := os.Rename(tmpPath, secretsPath); err != nil {
+		return fmt.Errorf("failed to replace secrets file: %w", err)
+	}
+	cleanup = false
+	if err := ensureSecretsFilePermissions(secretsPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureSecretsFilePermissions(secretsPath string) error {
+	if err := os.Chmod(secretsPath, secretsFileMode); err != nil {
+		return fmt.Errorf("failed to set secrets file permissions: %w", err)
+	}
+	return nil
 }
 
 // generateSecureKey generates a cryptographically secure random key

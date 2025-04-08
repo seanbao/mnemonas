@@ -300,6 +300,10 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 				http.Error(w, "parent directory not found", http.StatusConflict)
 				return
 			}
+			if errors.Is(err, storage.ErrNotDir) {
+				http.Error(w, "parent path is not a directory", http.StatusConflict)
+				return
+			}
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -398,8 +402,19 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 	if !h.authorizeWriteLock(w, r, filePath) {
 		return
 	}
+	if _, err := h.fs.Stat(ctx, filePath); err == nil {
+		http.Error(w, "resource already exists", http.StatusMethodNotAllowed)
+		return
+	} else if !errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrNotDir) {
+		h.handleError(w, err)
+		return
+	}
 
 	if err := h.fs.Mkdir(ctx, filePath); err != nil {
+		if errors.Is(err, storage.ErrNotDir) {
+			http.Error(w, "parent path is not a directory", http.StatusConflict)
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
@@ -436,7 +451,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	if srcPath == dst {
-		http.Error(w, "source and destination must differ", http.StatusConflict)
+		http.Error(w, "source and destination must differ", http.StatusForbidden)
 		return
 	}
 	if !h.authorizeWriteLock(w, r, srcPath, dst) {
@@ -447,6 +462,9 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
 		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
+			return
+		}
+		if h.writeParentNotDirectoryConflict(w, err) {
 			return
 		}
 		h.handleError(w, err)
@@ -482,6 +500,9 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDestinationInsideSourceDirectory) {
 			return
 		}
+		if h.writeParentNotDirectoryConflict(w, err) {
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
@@ -489,11 +510,17 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDirectoryCopyOverwriteNotSupported) {
 			return
 		}
+		if h.writeParentNotDirectoryConflict(w, err) {
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
 
 	if err := h.copyResource(ctx, srcPath, dst); err != nil {
+		if h.writeParentNotDirectoryConflict(w, err) {
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
@@ -578,7 +605,7 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	if srcPath == dst {
-		http.Error(w, "source and destination must differ", http.StatusConflict)
+		http.Error(w, "source and destination must differ", http.StatusForbidden)
 		return
 	}
 	if !h.authorizeWriteLock(w, r, srcPath, dst) {
@@ -589,6 +616,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 
 	if err := h.checkOverwriteHeader(ctx, r, dst); err != nil {
 		if h.writeExpectedWebDAVError(w, err, http.StatusPreconditionFailed, errInvalidOverwriteHeader, errOverwriteDisabled) {
+			return
+		}
+		if h.writeParentNotDirectoryConflict(w, err) {
 			return
 		}
 		h.handleError(w, err)
@@ -611,6 +641,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		if h.writeExpectedWebDAVError(w, err, http.StatusConflict, errDestinationInsideSourceDirectory) {
 			return
 		}
+		if h.writeParentNotDirectoryConflict(w, err) {
+			return
+		}
 		h.handleError(w, err)
 		return
 	}
@@ -622,6 +655,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 			return
 		}
 		if err := h.fs.Rename(ctx, dst, backupPath); err != nil {
+			if h.writeParentNotDirectoryConflict(w, err) {
+				return
+			}
 			h.handleError(w, err)
 			return
 		}
@@ -629,6 +665,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		if err := h.fs.Rename(ctx, srcPath, dst); err != nil {
 			if restoreErr := h.fs.Rename(ctx, backupPath, dst); restoreErr != nil {
 				h.handleError(w, errors.Join(err, fmt.Errorf("failed to restore overwritten destination: %w", restoreErr)))
+				return
+			}
+			if h.writeParentNotDirectoryConflict(w, err) {
 				return
 			}
 			h.handleError(w, err)
@@ -641,6 +680,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		}
 	} else {
 		if err := h.fs.Rename(ctx, srcPath, dst); err != nil {
+			if h.writeParentNotDirectoryConflict(w, err) {
+				return
+			}
 			h.handleError(w, err)
 			return
 		}
@@ -732,6 +774,14 @@ func (h *Handler) destinationExists(ctx context.Context, dst string) bool {
 
 func writeKnownWebDAVError(w http.ResponseWriter, known error, status int) {
 	http.Error(w, known.Error(), status)
+}
+
+func (h *Handler) writeParentNotDirectoryConflict(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, storage.ErrNotDir) {
+		http.Error(w, "parent path is not a directory", http.StatusConflict)
+		return true
+	}
+	return false
 }
 
 func (h *Handler) writeExpectedWebDAVError(w http.ResponseWriter, err error, status int, expected ...error) bool {
