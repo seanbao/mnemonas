@@ -84,6 +84,16 @@ function getDirectoryPickerErrorPresentation(
   }
 }
 
+function getDirectoryPickerCreateSuccessToast(message?: string): {
+  title: string
+  color: 'warning'
+} {
+  return {
+    title: message ?? '文件夹创建完成，但存在警告',
+    color: 'warning',
+  }
+}
+
 function pathWithinBase(basePath: string, targetPath: string): boolean {
   if (basePath === '/') {
     return targetPath.startsWith('/')
@@ -326,7 +336,7 @@ export function DirectoryPicker({
       const newPath = parentPath === '/' 
         ? `/${trimmedFolderName}` 
         : `${parentPath}/${trimmedFolderName}`
-      await createDirectory(newPath)
+      const result = await createDirectory(newPath)
       
       // Reload parent directory
       const parentFiles = await listFiles(parentPath)
@@ -346,6 +356,10 @@ export function DirectoryPicker({
         
         setNewFolderName('')
         setIsCreatingFolder(false)
+      }
+
+      if (result.warning) {
+        addToast(getDirectoryPickerCreateSuccessToast(result.message))
       }
     } catch (error) {
       addToast(getDirectoryPickerErrorPresentation(error, {

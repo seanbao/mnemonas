@@ -27,6 +27,27 @@ function formatCount(value: number | undefined): string {
   return value === undefined ? '--' : value.toLocaleString()
 }
 
+function areStorageStatsAvailable(stats: {
+  storageStatsAvailable?: boolean
+  totalSize?: number
+  totalObjects?: number
+  uniqueSize?: number
+  dedupRatio?: number
+} | undefined): boolean {
+  if (!stats) {
+    return false
+  }
+  if (stats.storageStatsAvailable !== undefined) {
+    return stats.storageStatsAvailable
+  }
+  return (
+    stats.totalSize !== undefined
+    || stats.totalObjects !== undefined
+    || stats.uniqueSize !== undefined
+    || stats.dedupRatio !== undefined
+  )
+}
+
 function getStorageErrorPresentation(error: unknown): { title: string; description: string } {
   if (error instanceof ApiError && error.isUnavailable) {
     return {
@@ -196,30 +217,31 @@ export function StoragePage() {
     )
   }
 
-  const usedBytes = stats?.totalSize
+  const storageStatsAvailable = areStorageStatsAvailable(stats)
+  const usedBytes = storageStatsAvailable ? stats?.totalSize : undefined
   const hasUsage = usedBytes !== undefined && usedBytes > 0
-  const storageKnown = stats?.totalSize !== undefined || stats?.totalObjects !== undefined || stats?.dedupRatio !== undefined
-  const uniqueBytes = stats?.uniqueSize ?? 0
-  const savedBytes = usedBytes !== undefined && stats?.uniqueSize !== undefined
+  const storageKnown = storageStatsAvailable
+  const uniqueBytes = storageStatsAvailable ? stats?.uniqueSize ?? 0 : 0
+  const savedBytes = storageStatsAvailable && usedBytes !== undefined && stats?.uniqueSize !== undefined
     ? Math.max(0, usedBytes - uniqueBytes)
     : undefined
 
   const statsCards = [
     {
       title: '对象总数',
-      value: formatCount(stats?.totalObjects),
+      value: storageStatsAvailable ? formatCount(stats?.totalObjects) : '--',
       icon: Database,
       gradient: 'from-blue-500/20 to-violet-500/20',
     },
     {
       title: '存储大小',
-      value: formatStorageSize(stats?.totalSize),
+      value: storageStatsAvailable ? formatStorageSize(stats?.totalSize) : '--',
       icon: HardDrive,
       gradient: 'from-emerald-500/20 to-cyan-500/20',
     },
     {
       title: '去重率',
-      value: stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--',
+      value: storageStatsAvailable && stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--',
       icon: Sparkles,
       gradient: 'from-violet-500/20 to-fuchsia-500/20',
     },

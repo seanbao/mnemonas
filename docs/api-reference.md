@@ -369,6 +369,8 @@ GET /api/v1/stats
 {
   "success": true,
   "data": {
+    "total_files_available": true,
+    "storage_stats_available": true,
     "total_files": 0,
     "total_size": 5368709120,
     "unique_size": 2147483648,
@@ -381,6 +383,8 @@ GET /api/v1/stats
 
 **说明**:
 - `total_files` 统计文件索引中的文件数量，不包含目录。
+- `total_chunks` 统计数据面中的存储对象（chunk）数量，不等同于用户文件数。
+- `total_files_available` 表示文件计数是否可用；`storage_stats_available` 表示数据面统计是否可用。
 - 当文件计数或数据面统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
 
 ### 诊断信息
@@ -571,6 +575,8 @@ DELETE /api/v1/files/{path}
 
 说明：当删除已经生效、但后续目录持久化或历史对象清理失败时，接口仍返回成功状态码，并附带 `Warning` 响应头；`message` 会区分 persistence warning 与 cleanup warning。
 
+常见 `message` 包括：`file deleted with persistence warning`、`file deleted with cleanup warning`、`file deleted with trash cleanup warning`。
+
 **响应示例**:
 ```json
 {
@@ -674,6 +680,8 @@ GET /api/v1/download/{path}
 ```
 POST /api/v1/directories/{path}
 ```
+
+说明：当目录已经创建成功、仅最后的工作区持久化失败时，接口返回 `201 Created` 并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `directory created with persistence warning`。
 
 **响应示例**:
 ```json
@@ -869,6 +877,8 @@ DELETE /api/v1/trash/{id}
 ```
 DELETE /api/v1/trash
 ```
+
+说明：当回收站已经清空、但部分历史对象 cleanup 仅部分完成时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `trash emptied with cleanup warning`。
 
 ---
 
@@ -1641,6 +1651,7 @@ POST /api/v1/maintenance/scrub
 **说明**:
 - 此接口为同步执行，不会先返回 `running` 再异步完成
 - 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
+- 当校验已完成、但结果持久化失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `scrub completed with persistence warning`
 
 **响应示例**:
 ```json

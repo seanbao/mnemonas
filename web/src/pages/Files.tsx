@@ -65,6 +65,7 @@ import {
   ApiError,
   MAX_UPLOAD_FILE_SIZE_BYTES,
   MAX_UPLOAD_FILE_SIZE_LABEL,
+  type ActionResult,
 } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
@@ -169,6 +170,29 @@ function getFilesActionErrorToast(
   }
 }
 
+function getFilesActionSuccessToast(
+  result: ActionResult,
+  titles: {
+    success: string
+    warning: string
+  }
+): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  if (result.warning) {
+    return {
+      title: result.message ?? titles.warning,
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: titles.success,
+    color: 'success',
+  }
+}
+
 function getFavoriteActionErrorToast(error: unknown): {
   title: string
   description: string
@@ -239,12 +263,25 @@ function getUploadQueueErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '上传失败'
 }
 
-function getFolderUploadSummaryToast(successCount: number, errorCount: number, errors: unknown[]): {
+function getFolderUploadSummaryToast(
+  successCount: number,
+  errorCount: number,
+  errors: unknown[],
+  warningMessages: string[]
+): {
   title: string
   description: string
   color: 'success' | 'warning' | 'danger'
 } {
   if (errorCount === 0) {
+    if (warningMessages.length > 0) {
+      return {
+        title: warningMessages[0] || '文件夹上传完成，但存在警告',
+        description: `成功上传 ${successCount} 个文件`,
+        color: 'warning',
+      }
+    }
+
     return {
       title: '文件夹上传完成',
       description: `成功上传 ${successCount} 个文件`,
@@ -287,6 +324,16 @@ function getShareUnavailableBannerContent(): { title: string; description: strin
     title: '分享功能暂不可用',
     description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
   }
+}
+
+function getShareActionLabel(state: 'disabled' | 'unavailable' | null): string {
+  if (state === 'disabled') {
+    return '分享功能已关闭'
+  }
+  if (state === 'unavailable') {
+    return '分享功能暂不可用'
+  }
+  return '创建分享链接'
 }
 
 function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
@@ -358,7 +405,9 @@ function FileRow({
   isSelected, 
   isFavorited,
   favoriteActionsAvailable,
+  favoriteUnavailableLabel,
   shareActionsAvailable,
+  shareActionLabel,
   isMultiSelection,
   canWrite,
   onSelect, 
@@ -375,7 +424,9 @@ function FileRow({
   isSelected: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
+  favoriteUnavailableLabel: string
   shareActionsAvailable: boolean
+  shareActionLabel: string
   isMultiSelection: boolean
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
@@ -520,7 +571,7 @@ function FileRow({
                     isDisabled={!favoriteActionsAvailable}
                     onPress={onToggleFavorite}
                   >
-                    {favoriteActionsAvailable ? (isFavorited ? '取消收藏' : '添加收藏') : '收藏状态不可用'}
+                    {favoriteActionsAvailable ? (isFavorited ? '取消收藏' : '添加收藏') : favoriteUnavailableLabel}
                   </DropdownItem>
                   <DropdownItem 
                     key="share" 
@@ -528,7 +579,7 @@ function FileRow({
                     isDisabled={!shareActionsAvailable}
                     onPress={onShare}
                   >
-                    {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
+                    {shareActionLabel}
                   </DropdownItem>
                 </DropdownSection>
               ) : null}
@@ -614,7 +665,9 @@ function FileCard({
   isSelected,
   isFavorited,
   favoriteActionsAvailable,
+  favoriteUnavailableLabel,
   shareActionsAvailable,
+  shareActionLabel,
   isMultiSelection,
   canWrite,
   onSelect,
@@ -631,7 +684,9 @@ function FileCard({
   isSelected: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
+  favoriteUnavailableLabel: string
   shareActionsAvailable: boolean
+  shareActionLabel: string
   isMultiSelection: boolean
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
@@ -760,7 +815,7 @@ function FileCard({
                     isDisabled={!favoriteActionsAvailable}
                     onPress={onToggleFavorite}
                   >
-                    {favoriteActionsAvailable ? (isFavorited ? '取消收藏' : '添加收藏') : '收藏状态不可用'}
+                    {favoriteActionsAvailable ? (isFavorited ? '取消收藏' : '添加收藏') : favoriteUnavailableLabel}
                   </DropdownItem>
                   <DropdownItem 
                     key="share" 
@@ -768,7 +823,7 @@ function FileCard({
                     isDisabled={!shareActionsAvailable}
                     onPress={onShare}
                   >
-                    {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
+                    {shareActionLabel}
                   </DropdownItem>
                 </DropdownSection>
               ) : null}
@@ -993,11 +1048,14 @@ export function FilesPage() {
   // Mutations (omitted for brevity, same as before)
   const deleteMutation = useMutation({
     mutationFn: deleteFile,
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
       onDeleteClose()
       setDeleteTarget(null)
-      addToast({ title: '删除成功', color: 'success' })
+      addToast(getFilesActionSuccessToast(result, {
+        success: '删除成功',
+        warning: '删除完成，但存在警告',
+      }))
     },
     onError: (error) => {
       addToast(getFilesActionErrorToast(error, {
@@ -1009,7 +1067,7 @@ export function FilesPage() {
   
   const createFolderMutation = useMutation({
     mutationFn: ({ path }: { path: string; directoryPath: string; folderName: string; sessionId: number }) => createDirectory(path),
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
       if (
         newFolderSessionRef.current === variables.sessionId
@@ -1018,7 +1076,10 @@ export function FilesPage() {
         onNewFolderClose()
         setNewFolderName('')
       }
-      addToast({ title: '文件夹创建成功', color: 'success' })
+      addToast(getFilesActionSuccessToast(result, {
+        success: '文件夹创建成功',
+        warning: '文件夹创建完成，但存在警告',
+      }))
     },
     onError: (error) => {
       addToast(getFilesActionErrorToast(error, {
@@ -1030,7 +1091,7 @@ export function FilesPage() {
   
   const renameMutation = useMutation({
     mutationFn: ({ from, to }: { from: string; to: string; directoryPath: string; targetPath: string; submittedName: string; sessionId: number }) => moveFile(from, to),
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
       if (
         renameSessionRef.current === variables.sessionId
@@ -1040,7 +1101,10 @@ export function FilesPage() {
         onRenameClose()
         setActionFile(null)
       }
-      addToast({ title: '重命名成功', color: 'success' })
+      addToast(getFilesActionSuccessToast(result, {
+        success: '重命名成功',
+        warning: '重命名完成，但存在警告',
+      }))
     },
     onError: (error) => {
       addToast(getFilesActionErrorToast(error, {
@@ -1143,8 +1207,10 @@ export function FilesPage() {
   })
   const favoriteActionsAvailable = !favoritesError
   const favoritesBanner = favoritesError ? getFavoritesBannerContent(favoritesError) : null
+  const favoriteUnavailableLabel = favoritesBanner?.title ?? '收藏状态不可用'
   const shareFeatureState = shareFeatureDisabled ? 'disabled' : getShareFeatureState(shareAvailabilityError)
   const shareActionsAvailable = shareFeatureState === null
+  const shareActionLabel = getShareActionLabel(shareFeatureState)
   const shareBanner = shareFeatureState === 'disabled'
     ? getShareBannerContent()
     : shareFeatureState === 'unavailable'
@@ -1320,12 +1386,12 @@ export function FilesPage() {
   const handleOpenShareModal = useCallback((file: FileItem) => {
     if (!canWrite) return
     if (!shareActionsAvailable) {
-      addToast({ title: '分享功能已关闭', color: 'warning' })
+      addToast({ title: shareActionLabel, color: 'warning' })
       return
     }
     setShareFile(file)
     onShareOpen()
-  }, [canWrite, onShareOpen, shareActionsAvailable])
+  }, [canWrite, onShareOpen, shareActionLabel, shareActionsAvailable])
 
   // Move/Copy handlers
   const handleOpenMoveModal = useCallback((files: FileItem[]) => {
@@ -1392,19 +1458,22 @@ export function FilesPage() {
   const createdDirsRef = useRef<Set<string>>(new Set())
 
   // Ensure a directory path exists (create parent directories recursively)
-  const ensureDirectoryExists = useCallback(async (dirPath: string) => {
+  const ensureDirectoryExists = useCallback(async (dirPath: string, warningMessages: string[]) => {
     if (dirPath === '/' || createdDirsRef.current.has(dirPath)) return
     
     // Get parent path
     const parentPath = dirPath.substring(0, dirPath.lastIndexOf('/')) || '/'
     
     // Ensure parent exists first
-    await ensureDirectoryExists(parentPath)
+    await ensureDirectoryExists(parentPath, warningMessages)
     
     // Create this directory if not already created
     if (!createdDirsRef.current.has(dirPath)) {
       try {
-        await createDirectory(dirPath)
+        const result = await createDirectory(dirPath)
+        if (result.warning) {
+          warningMessages.push(result.message ?? '')
+        }
         createdDirsRef.current.add(dirPath)
       } catch (error) {
         if (isDirectoryAlreadyExistsError(error)) {
@@ -1476,6 +1545,7 @@ export function FilesPage() {
     let successCount = 0
     let errorCount = rejectedEntries.length
     const uploadErrors: unknown[] = []
+    const uploadWarningMessages: string[] = []
     
     for (const { item, index } of uploadableEntries) {
       const file = item.file
@@ -1492,7 +1562,7 @@ export function FilesPage() {
         if (relativePath && relativePath.includes('/')) {
           const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
           const targetDir = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
-          await ensureDirectoryExists(targetDir)
+          await ensureDirectoryExists(targetDir, uploadWarningMessages)
         }
 
         // Calculate the target path for the file
@@ -1537,7 +1607,7 @@ export function FilesPage() {
     
     // Show summary toast for folder upload
     if (isFolderUpload) {
-      addToast(getFolderUploadSummaryToast(successCount, errorCount, uploadErrors))
+      addToast(getFolderUploadSummaryToast(successCount, errorCount, uploadErrors, uploadWarningMessages))
     }
     
     // Auto-clear successful uploads after 3 seconds
@@ -1614,12 +1684,16 @@ export function FilesPage() {
     let errorCount = 0
     const failedPaths: string[] = []
     const failedErrors: unknown[] = []
+    const warningMessages: string[] = []
 
     try {
       for (const path of paths) {
         try {
-          await deleteFile(path)
+          const result = await deleteFile(path)
           successCount++
+          if (result.warning) {
+            warningMessages.push(result.message ?? '')
+          }
         } catch (error) {
           errorCount++
           failedPaths.push(path)
@@ -1632,7 +1706,14 @@ export function FilesPage() {
       if (errorCount === 0) {
         onBatchDeleteClose()
         clearSelection()
-        addToast({ title: `成功删除 ${successCount} 个文件`, color: 'success' })
+        if (warningMessages.length > 0) {
+          addToast({
+            title: warningMessages[0] || `已删除 ${successCount} 个文件，但存在警告`,
+            color: 'warning',
+          })
+        } else {
+          addToast({ title: `成功删除 ${successCount} 个文件`, color: 'success' })
+        }
         return
       }
 
@@ -1721,6 +1802,7 @@ export function FilesPage() {
     let errorCount = 0
     const failedPaths: string[] = []
     const failedErrors: unknown[] = []
+    const warningMessages: string[] = []
     
     for (const path of paths) {
       const fileName = path.split('/').pop() || ''
@@ -1728,9 +1810,15 @@ export function FilesPage() {
       
       try {
         if (operation === 'cut') {
-          await moveFile(path, destPath)
+          const result = await moveFile(path, destPath)
+          if (result.warning) {
+            warningMessages.push(result.message ?? '')
+          }
         } else {
-          await copyFile(path, destPath)
+          const result = await copyFile(path, destPath)
+          if (result.warning) {
+            warningMessages.push(result.message ?? '')
+          }
         }
         successCount++
       } catch (error) {
@@ -1754,7 +1842,14 @@ export function FilesPage() {
     }
     
     if (errorCount === 0) {
-      addToast({ title: `成功${operation === 'cut' ? '移动' : '复制'} ${successCount} 个文件`, color: 'success' })
+          if (warningMessages.length > 0) {
+            addToast({
+              title: warningMessages[0] || `成功复制 ${successCount} 个文件，但存在警告`,
+              color: 'warning',
+            })
+          } else {
+            addToast({ title: `成功${operation === 'cut' ? '移动' : '复制'} ${successCount} 个文件`, color: 'success' })
+          }
       return
     }
 
@@ -2466,7 +2561,9 @@ export function FilesPage() {
                         isSelected={selectedFiles.has(file.path)}
                         isFavorited={favoritesData?.[file.path] ?? false}
                         favoriteActionsAvailable={favoriteActionsAvailable}
+                        favoriteUnavailableLabel={favoriteUnavailableLabel}
                         shareActionsAvailable={shareActionsAvailable}
+                        shareActionLabel={shareActionLabel}
                         isMultiSelection={hasMultiSelection}
                         canWrite={canWrite}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
@@ -2546,7 +2643,9 @@ export function FilesPage() {
                     isSelected={selectedFiles.has(file.path)}
                     isFavorited={favoritesData?.[file.path] ?? false}
                     favoriteActionsAvailable={favoriteActionsAvailable}
+                    favoriteUnavailableLabel={favoriteUnavailableLabel}
                     shareActionsAvailable={shareActionsAvailable}
+                    shareActionLabel={shareActionLabel}
                     isMultiSelection={hasMultiSelection}
                     canWrite={canWrite}
                     onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
@@ -2939,7 +3038,7 @@ export function FilesPage() {
                         contextMenu.hide()
                       }}
                     >
-                      {favoriteActionsAvailable ? (favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏') : '收藏状态不可用'}
+                      {favoriteActionsAvailable ? (favoritesData?.[contextMenuFile.path] ? '取消收藏' : '添加收藏') : favoriteUnavailableLabel}
                     </ContextMenuItem>
                   )}
                   {canWrite && (
@@ -2951,7 +3050,7 @@ export function FilesPage() {
                         contextMenu.hide()
                       }}
                     >
-                      {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
+                      {shareActionLabel}
                     </ContextMenuItem>
                   )}
                   <ContextMenuItem

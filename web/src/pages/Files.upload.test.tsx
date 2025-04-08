@@ -155,6 +155,11 @@ import { ApiError, listFiles, uploadFile, createDirectory, MAX_UPLOAD_FILE_SIZE_
 const mockListFiles = vi.mocked(listFiles)
 const mockUploadFile = vi.mocked(uploadFile)
 const mockCreateDirectory = vi.mocked(createDirectory)
+const successActionResult = { warning: false, message: undefined } as const
+
+function warningActionResult(message: string) {
+  return { warning: true, message } as const
+}
 
 describe('FilesPage upload queue', () => {
   beforeEach(() => {
@@ -167,7 +172,7 @@ describe('FilesPage upload queue', () => {
       path: '/',
     })
     mockUploadFile.mockResolvedValue(undefined)
-    mockCreateDirectory.mockResolvedValue(undefined)
+    mockCreateDirectory.mockResolvedValue(successActionResult)
   })
 
   afterEach(() => {
@@ -445,6 +450,32 @@ describe('FilesPage upload queue', () => {
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '文件夹上传部分完成',
       description: '成功上传 1 个文件，失败 1 个',
+      color: 'warning',
+    })
+  })
+
+  it('shows warning summary for folder uploads when directory creation succeeds with warnings', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockCreateDirectory.mockResolvedValueOnce(warningActionResult('directory created with persistence warning'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['ok'], 'first.txt', { type: 'text/plain' })
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: 'directory created with persistence warning',
+      description: '成功上传 1 个文件',
       color: 'warning',
     })
   })

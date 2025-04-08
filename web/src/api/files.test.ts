@@ -444,10 +444,30 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(deleteFile('/test.txt')).resolves.toBeUndefined()
+      await expect(deleteFile('/test.txt')).resolves.toEqual({ warning: false, message: undefined })
       expectFetchCall(1, '/api/v1/files/test.txt', {
         method: 'DELETE',
         headers: {},
+      })
+    })
+
+    it('returns warning details for successful delete responses with warnings', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "workspace mutation persistence incomplete"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+          },
+          message: 'file deleted with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(deleteFile('/test.txt')).resolves.toEqual({
+        warning: true,
+        message: 'file deleted with persistence warning',
       })
     })
 
@@ -483,6 +503,9 @@ describe('API: files', () => {
       const mockResponse = {
         success: true,
         data: {
+          total_files: 42,
+          total_files_available: true,
+          storage_stats_available: true,
           total_size: 1073741824,
           total_chunks: 100,
           unique_size: 536870912,
@@ -496,6 +519,9 @@ describe('API: files', () => {
       })
 
       const result = await getStorageStats()
+      expect(result.fileCount).toBe(42)
+      expect(result.fileCountAvailable).toBe(true)
+      expect(result.storageStatsAvailable).toBe(true)
       expect(result.totalSize).toBe(1073741824)
       expect(result.totalObjects).toBe(100)
       expect(result.uniqueSize).toBe(536870912)
@@ -521,6 +547,9 @@ describe('API: files', () => {
       })
 
       const result = await getStorageStats()
+      expect(result.fileCount).toBeUndefined()
+      expect(result.fileCountAvailable).toBe(false)
+      expect(result.storageStatsAvailable).toBe(false)
       expect(result.totalSize).toBeUndefined()
       expect(result.totalObjects).toBeUndefined()
       expect(result.uniqueSize).toBeUndefined()
@@ -664,10 +693,30 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(createDirectory('/new-folder')).resolves.toBeUndefined()
+      await expect(createDirectory('/new-folder')).resolves.toEqual({ warning: false, message: undefined })
       expectFetchCall(1, '/api/v1/directories/new-folder', {
         method: 'POST',
         headers: {},
+      })
+    })
+
+    it('returns warning details for successful create-directory responses with warnings', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "workspace mutation persistence incomplete"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/new-folder',
+          },
+          message: 'directory created with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(createDirectory('/new-folder')).resolves.toEqual({
+        warning: true,
+        message: 'directory created with persistence warning',
       })
     })
 
@@ -712,13 +761,35 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(moveFile('/old.txt', '/new.txt')).resolves.toBeUndefined()
+      await expect(moveFile('/old.txt', '/new.txt')).resolves.toEqual({ warning: false, message: undefined })
       expectFetchCall(1, '/api/v1/files-move', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ from: '/old.txt', to: '/new.txt' }),
+      })
+    })
+
+    it('returns warning details for successful move responses with warnings', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "workspace mutation persistence incomplete"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            from: '/old.txt',
+            to: '/new.txt',
+            warning: true,
+          },
+          message: 'resource moved with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(moveFile('/old.txt', '/new.txt')).resolves.toEqual({
+        warning: true,
+        message: 'resource moved with persistence warning',
       })
     })
 
@@ -763,13 +834,34 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(copyFile('/old.txt', '/copy.txt')).resolves.toBeUndefined()
+      await expect(copyFile('/old.txt', '/copy.txt')).resolves.toEqual({ warning: false, message: undefined })
       expectFetchCall(1, '/api/v1/files-copy', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ from: '/old.txt', to: '/copy.txt' }),
+      })
+    })
+
+    it('returns warning details for successful copy responses with warnings', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "workspace mutation persistence incomplete"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            from: '/old.txt',
+            to: '/copy.txt',
+          },
+          message: 'resource copied with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(copyFile('/old.txt', '/copy.txt')).resolves.toEqual({
+        warning: true,
+        message: 'resource copied with persistence warning',
       })
     })
 
@@ -814,10 +906,31 @@ describe('API: files', () => {
         }),
       })
 
-      await expect(restoreVersion('/test.txt', 'abc123')).resolves.toBeUndefined()
+      await expect(restoreVersion('/test.txt', 'abc123')).resolves.toEqual({ warning: false, message: undefined })
       expectFetchCall(1, '/api/v1/versions/abc123/restore?path=%2Ftest.txt', {
         method: 'POST',
         headers: {},
+      })
+    })
+
+    it('returns warning details for successful restore-version responses with warnings', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "workspace mutation persistence incomplete"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+            restored: 'abc123',
+          },
+          message: 'version restored with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(restoreVersion('/test.txt', 'abc123')).resolves.toEqual({
+        warning: true,
+        message: 'version restored with persistence warning',
       })
     })
 
@@ -1137,7 +1250,7 @@ describe('API: files', () => {
         })
 
         const result = await emptyTrash()
-        expect(result).toEqual({ deletedCount: 5, partial: false })
+        expect(result).toEqual({ deletedCount: 5, partial: false, warning: false, message: undefined })
       })
 
       it('returns partial result when backend reports partial empty', async () => {
@@ -1153,7 +1266,28 @@ describe('API: files', () => {
         })
 
         const result = await emptyTrash()
-        expect(result).toEqual({ deletedCount: 2, partial: true })
+        expect(result).toEqual({ deletedCount: 2, partial: true, warning: false, message: undefined })
+      })
+
+      it('returns warning details for successful empty trash responses with cleanup warnings', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "trash delete cleanup incomplete"' : null },
+          json: () => Promise.resolve({
+            success: true,
+            data: { deleted_count: 3, partial: false, warning: true },
+            message: 'trash emptied with cleanup warning',
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        const result = await emptyTrash()
+        expect(result).toEqual({
+          deletedCount: 3,
+          partial: false,
+          warning: true,
+          message: 'trash emptied with cleanup warning',
+        })
       })
 
       it('rejects malformed successful empty trash responses', async () => {
@@ -1512,6 +1646,37 @@ describe('API: files', () => {
       expect(result.has_result).toBe(true)
       expect(result.status).toBe('completed')
       expect(result.corrupted_objects).toBe(1)
+      expect(result.warning).toBe(false)
+    })
+
+    it('returns warning details for successful scrub responses with persistence warnings', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "scrub result persistence incomplete"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            total_objects: 100,
+            valid_objects: 100,
+            corrupted_objects: 0,
+            missing_objects: 0,
+            total_size: 2048,
+            duration_ms: 500,
+            errors: [],
+            warning: true,
+          },
+          message: 'scrub completed with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      const result = await runScrub()
+      expect(result).toMatchObject({
+        has_result: true,
+        status: 'completed',
+        warning: true,
+        message: 'scrub completed with persistence warning',
+      })
     })
 
     it('runs scrub for specific hashes', async () => {

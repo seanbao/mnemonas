@@ -67,6 +67,7 @@ describe('HealthPage', () => {
     totalObjects: 1234,
     totalSize: 5368709120,
     dedupRatio: 0.35,
+    storageStatsAvailable: true,
   }
 
   beforeEach(() => {
@@ -288,6 +289,22 @@ describe('HealthPage', () => {
         expect(screen.getByText('对象数量')).toBeTruthy()
       })
     })
+
+    it('treats explicit unavailable storage stats as unavailable even when numeric fields are present', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        totalObjects: 999,
+        totalSize: 1024,
+        dedupRatio: 0.42,
+        storageStatsAvailable: false,
+      })
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('统计不可用')).toBeTruthy()
+        expect(screen.queryByText('999')).toBeNull()
+        expect(screen.queryByText('42.0%')).toBeNull()
+      })
+    })
   })
 
   describe('trash info', () => {
@@ -352,16 +369,19 @@ describe('HealthPage', () => {
   })
 
   describe('error handling', () => {
-    it('shows an unavailable state when diagnostics or stats return service unavailable', async () => {
+    it('shows a partial-data warning when diagnostics or stats return service unavailable', async () => {
       mockGetDiagnostics.mockRejectedValue(new ApiError('diagnostics unavailable', 503, 'SERVICE_UNAVAILABLE'))
       mockGetStorageStats.mockResolvedValue(mockStats)
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('系统健康信息暂不可用')).toBeTruthy()
-        expect(screen.getByText('诊断或存储统计服务当前不可用，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('系统健康')).toBeTruthy()
+        expect(screen.getByText('部分健康数据加载失败')).toBeTruthy()
+        expect(screen.getByText('当前页面展示的是可用数据，部分指标可能不是最新状态。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
+
+      expect(screen.getByText('存储对象')).toBeTruthy()
     })
 
     it('shows retryable error state when health queries fail', async () => {

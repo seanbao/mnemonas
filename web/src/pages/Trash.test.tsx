@@ -318,7 +318,7 @@ describe('TrashPage', () => {
       render(<TrashPage />)
 
       await waitFor(() => {
-        expect(screen.getByText(/自动清理设置未知/)).toBeTruthy()
+        expect(screen.getAllByText(/自动清理设置未知/).length).toBeGreaterThan(1)
       })
     })
 
@@ -781,6 +781,41 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已部分清空，删除 1 项', color: 'warning' })
+      })
+    })
+
+    it('shows warning toast when empty trash succeeds with cleanup warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockResolvedValue({
+        deletedCount: 2,
+        partial: false,
+        warning: true,
+        message: 'trash emptied with cleanup warning',
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('清空回收站'))
+
+      await waitFor(() => {
+        const buttons = screen.getAllByText('清空回收站')
+        const confirmBtn = buttons.find(btn => btn.closest('[class*="ModalFooter"], footer'))
+        if (confirmBtn) {
+          return user.click(confirmBtn)
+        }
+        return user.click(buttons[buttons.length - 1])
+      })
+
+      await waitFor(() => {
+        expect(mockEmptyTrash).toHaveBeenCalled()
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: 'trash emptied with cleanup warning', color: 'warning' })
       })
     })
 

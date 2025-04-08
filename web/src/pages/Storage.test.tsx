@@ -41,6 +41,7 @@ describe('StoragePage', () => {
     totalObjects: 1234,
     totalSize: 5368709120, // 5 GB
     dedupRatio: 0.35,
+    storageStatsAvailable: true,
   }
 
   beforeEach(() => {
@@ -330,6 +331,22 @@ describe('StoragePage', () => {
         expect(screen.getByText('存储管理')).toBeTruthy()
         expect(screen.getAllByText('统计不可用').length).toBeGreaterThan(0)
         expect(screen.getAllByText('--').length).toBeGreaterThan(0)
+      })
+    })
+
+    it('treats explicit unavailable storage stats as unavailable even when numeric fields are present', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        totalObjects: 999,
+        totalSize: 1024,
+        dedupRatio: 0.42,
+        storageStatsAvailable: false,
+      })
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('统计不可用').length).toBeGreaterThan(0)
+        expect(screen.queryByText('999')).toBeNull()
+        expect(screen.queryByText('42.0%')).toBeNull()
       })
     })
   })
