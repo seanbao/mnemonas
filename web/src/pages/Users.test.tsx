@@ -369,6 +369,28 @@ describe('UsersPage', () => {
       expect(screen.getByRole('button', { name: /创建/ })).toBeInTheDocument()
       expect(screen.getByLabelText(/用户名/i)).toHaveValue('alice')
     })
+
+    it('shows a specific warning when the username already exists', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.createUser).mockRejectedValueOnce(new UsersError('user already exists', 409, 'USER_EXISTS'))
+
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+      await user.type(screen.getByLabelText(/用户名/i), 'admin')
+      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '用户名已存在',
+          description: '该用户名已被占用，请使用其他用户名。',
+          color: 'warning',
+        })
+      })
+
+      expect(screen.getByRole('button', { name: /创建/ })).toBeInTheDocument()
+    })
   })
 
   describe('delete user', () => {
@@ -747,6 +769,74 @@ describe('UsersPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '状态更新暂不可用',
           description: '用户配置当前不可用，请检查系统配置状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows a specific warning for SELF_DISABLE responses', async () => {
+      const user = userEvent.setup()
+      vi.mocked(authApi.getStoredUser).mockReturnValue({
+        id: 'another-admin',
+        username: 'operator',
+        role: 'admin',
+        homeDir: '/',
+        email: '',
+      })
+      vi.mocked(usersApi.toggleUserStatus).mockRejectedValueOnce(new UsersError('cannot disable self', 400, 'SELF_DISABLE'))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('admin')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'admin 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('禁用用户')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('禁用用户'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '不能禁用当前用户',
+          description: '当前登录用户不能禁用自身账号。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows a specific warning for LAST_ADMIN responses', async () => {
+      const user = userEvent.setup()
+      vi.mocked(authApi.getStoredUser).mockReturnValue({
+        id: 'another-admin',
+        username: 'operator',
+        role: 'admin',
+        homeDir: '/',
+        email: '',
+      })
+      vi.mocked(usersApi.toggleUserStatus).mockRejectedValueOnce(new UsersError('last admin', 400, 'LAST_ADMIN'))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('admin')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'admin 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('禁用用户')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('禁用用户'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '不能禁用最后一个管理员',
+          description: '系统至少需要保留一个启用中的管理员账号。',
           color: 'warning',
         })
       })

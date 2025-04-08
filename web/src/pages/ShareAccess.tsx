@@ -33,6 +33,31 @@ function hasAuthorizedShareContent(info: PublicShareInfo): boolean {
   return info.file_name !== undefined || info.file_size !== undefined || info.folder_items !== undefined
 }
 
+function getGoneSharePresentation(error: ShareError): { title: string; description: string } | null {
+  if (error.isDisabled) {
+    return {
+      title: '分享已停用',
+      description: '该分享已被停用，当前不可访问。',
+    }
+  }
+
+  if (error.isAccessLimitReached) {
+    return {
+      title: '分享访问次数已用尽',
+      description: '该分享已达到访问次数上限，当前不可访问。',
+    }
+  }
+
+  if (error.isExpired) {
+    return {
+      title: '分享已失效',
+      description: error.code === 'SHARE_EXPIRED' ? '该分享已过期，当前不可访问。' : error.message,
+    }
+  }
+
+  return null
+}
+
 function getShareAccessErrorPresentation(error: unknown): { title: string; description: string } {
   if (error instanceof ShareError) {
     if (error.isFeatureDisabled) {
@@ -42,11 +67,9 @@ function getShareAccessErrorPresentation(error: unknown): { title: string; descr
       }
     }
 
-    if (error.isExpired) {
-      return {
-        title: '分享已失效',
-        description: error.message,
-      }
+    const gonePresentation = getGoneSharePresentation(error)
+    if (gonePresentation) {
+      return gonePresentation
     }
 
     if (error.isUnavailable) {
@@ -97,10 +120,10 @@ function getShareActionErrorToast(
       }
     }
 
-    if (error.isExpired) {
+    const gonePresentation = getGoneSharePresentation(error)
+    if (gonePresentation) {
       return {
-        title: '分享已失效',
-        description: error.message,
+        ...gonePresentation,
         color: 'warning',
       }
     }

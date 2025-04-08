@@ -48,6 +48,11 @@ import { ApiError, listFiles, createDirectory } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
+const successActionResult = { warning: false, message: undefined } as const
+
+function warningActionResult(message: string) {
+  return { warning: true, message } as const
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -97,7 +102,7 @@ describe('DirectoryPicker', () => {
         { name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
       ],
     })
-    mockCreateDirectory.mockResolvedValue(undefined)
+    mockCreateDirectory.mockResolvedValue(successActionResult)
   })
 
   it('shows a danger toast when expanding a directory fails', async () => {
@@ -191,6 +196,28 @@ describe('DirectoryPicker', () => {
       expect(mockCreateDirectory).toHaveBeenCalledWith('/private')
       expect(screen.getByText('private')).toBeTruthy()
       expect(screen.getByText('/private')).toBeTruthy()
+    })
+  })
+
+  it('shows warning toast when creating a folder succeeds with a persistence warning', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockCreateDirectory.mockResolvedValueOnce(warningActionResult('directory created with persistence warning'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'warn-folder')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'directory created with persistence warning',
+        color: 'warning',
+      })
     })
   })
 
@@ -346,7 +373,7 @@ describe('DirectoryPicker', () => {
 
   it('keeps the picker open while a pending create request is in flight', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
-    const pendingCreate = createDeferred<void>()
+    const pendingCreate = createDeferred<typeof successActionResult>()
     const onClose = vi.fn()
     mockListFiles.mockImplementation(async (path) => {
       if (path === '/') {
@@ -365,7 +392,7 @@ describe('DirectoryPicker', () => {
       if (path === '/old') {
         return pendingCreate.promise
       }
-      return Promise.resolve(undefined)
+      return Promise.resolve(successActionResult)
     })
 
     renderPicker({ onClose })
@@ -388,7 +415,7 @@ describe('DirectoryPicker', () => {
     expect(screen.getByDisplayValue('old')).toBeTruthy()
 
     await act(async () => {
-      pendingCreate.resolve(undefined)
+      pendingCreate.resolve(successActionResult)
       await pendingCreate.promise
     })
 
@@ -400,7 +427,7 @@ describe('DirectoryPicker', () => {
 
   it('keeps the picker open when a pending create request later fails', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
-    const pendingCreate = createDeferred<void>()
+    const pendingCreate = createDeferred<typeof successActionResult>()
     const onClose = vi.fn()
     mockCreateDirectory.mockImplementationOnce(() => pendingCreate.promise)
 

@@ -271,11 +271,14 @@ export function DashboardPage() {
 
   const healthStatus = health?.status === 'healthy'
     ? 'healthy'
+    : health?.status === 'degraded'
+      ? 'degraded'
     : health?.status
       ? 'unhealthy'
       : 'unknown'
-  const hasStorageData = stats?.totalSize !== undefined && stats.totalSize > 0
-  const storageStatsKnown = stats?.totalSize !== undefined || stats?.totalObjects !== undefined || stats?.dedupRatio !== undefined
+  const hasStorageData = stats?.storageStatsAvailable === true && stats.totalSize !== undefined && stats.totalSize > 0
+  const storageStatsKnown = stats?.storageStatsAvailable === true
+  const fileCountKnown = stats?.fileCountAvailable === true
 
   const statsCards = [
     {
@@ -286,10 +289,10 @@ export function DashboardPage() {
       gradient: 'from-blue-500/20 to-violet-500/20',
     },
     {
-      title: '文件对象',
-      value: formatCount(stats?.totalObjects),
+      title: '文件数量',
+      value: fileCountKnown ? formatCount(stats?.fileCount) : '--',
       icon: FileBox,
-      trend: storageStatsKnown ? '总计存储对象' : '统计不可用',
+      trend: fileCountKnown ? '文件索引计数' : '统计不可用',
       gradient: 'from-emerald-500/20 to-cyan-500/20',
     },
     {
@@ -323,6 +326,8 @@ export function DashboardPage() {
             "flex items-center gap-2 px-3 py-1.5 rounded-full",
             healthStatus === 'healthy'
               ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              : healthStatus === 'degraded'
+                ? "bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400"
               : healthStatus === 'unhealthy'
                 ? "bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400"
                 : "bg-default-100 text-default-600 dark:bg-default-100/10 dark:text-default-400"
@@ -331,6 +336,11 @@ export function DashboardPage() {
               <>
                 <div className="live-indicator scale-75" />
                 <span>运行正常</span>
+              </>
+            ) : healthStatus === 'degraded' ? (
+              <>
+                <AlertCircle size={14} />
+                <span>已降级</span>
               </>
             ) : healthStatus === 'unhealthy' ? (
               <>

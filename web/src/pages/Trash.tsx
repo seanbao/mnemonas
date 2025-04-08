@@ -46,7 +46,11 @@ function daysUntilDelete(deletedAt: string, retentionDays: number): number | nul
   return Math.max(0, Math.ceil((autoDelete.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
 }
 
-function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number, retentionEnabled: boolean): string | null {
+function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | undefined, retentionEnabled: boolean | undefined): string | null {
+  if (retentionEnabled === undefined || retentionDays === undefined) {
+    return '自动清理设置未知'
+  }
+
   if (!retentionEnabled) {
     return null
   }
@@ -156,12 +160,17 @@ function TrashRow({
   onSelect: () => void
   onRestore: () => void
   onDelete: () => void
-  retentionDays: number
-  retentionEnabled: boolean
+  retentionDays: number | undefined
+  retentionEnabled: boolean | undefined
   canWrite: boolean
 }) {
   const autoDeleteBadgeLabel = getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled)
   const isExpiredForCleanup = autoDeleteBadgeLabel === '已过期，等待清理'
+  const autoDeleteBadgeColor = autoDeleteBadgeLabel === '自动清理设置未知'
+    ? 'default'
+    : isExpiredForCleanup
+      ? 'danger'
+      : 'warning'
   
   return (
     <div
@@ -194,7 +203,7 @@ function TrashRow({
           {formatRelativeTime(item.deletedAt)}
         </div>
         {autoDeleteBadgeLabel && (
-          <Chip size="sm" variant="flat" color={isExpiredForCleanup ? 'danger' : 'warning'} className="mt-1">
+          <Chip size="sm" variant="flat" color={autoDeleteBadgeColor} className="mt-1">
             {autoDeleteBadgeLabel}
           </Chip>
         )}
@@ -405,6 +414,8 @@ export function TrashPage() {
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       if (result.partial) {
         addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
+      } else if (result.warning) {
+        addToast({ title: result.message ?? `已清空回收站，删除 ${result.deletedCount} 项，但存在警告`, color: 'warning' })
       } else {
         addToast({ title: `已清空回收站，删除 ${result.deletedCount} 项`, color: 'success' })
       }
@@ -653,8 +664,8 @@ export function TrashPage() {
               key={item.id}
               item={item}
               isSelected={visibleSelectedItems.has(item.id)}
-              retentionDays={retentionDays ?? 0}
-              retentionEnabled={retentionEnabled ?? false}
+              retentionDays={retentionDays}
+              retentionEnabled={retentionEnabled}
               canWrite={canWrite}
               onSelect={() => {
                 if (!canWrite) return

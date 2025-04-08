@@ -59,7 +59,9 @@ vi.mock('@/api/share', () => ({
     }
     get isUnauthorized() { return this.status === 401 }
     get isFeatureDisabled() { return this.code === 'SHARE_FEATURE_DISABLED' }
-    get isExpired() { return this.status === 410 }
+    get isDisabled() { return this.code === 'SHARE_DISABLED' }
+    get isAccessLimitReached() { return this.code === 'SHARE_ACCESS_LIMIT_REACHED' }
+    get isExpired() { return this.code === 'SHARE_EXPIRED' || (this.status === 410 && !this.code) }
     get isUnavailable() { return this.status === 503 && !this.isFeatureDisabled }
   }
 }))
@@ -137,6 +139,28 @@ describe('ShareAccessPage', () => {
     await waitFor(() => {
       expect(screen.getByText('分享已失效')).toBeInTheDocument()
       expect(screen.getByText('分享已过期、已禁用或访问次数已达上限')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a dedicated disabled-state title when the share has been turned off', async () => {
+    mockGetPublicShare.mockRejectedValue(new ShareError('share disabled', 410, 'SHARE_DISABLED'))
+
+    renderWithRouter('disabled-gone-share')
+
+    await waitFor(() => {
+      expect(screen.getByText('分享已停用')).toBeInTheDocument()
+      expect(screen.getByText('该分享已被停用，当前不可访问。')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a dedicated access-limit state when a share reaches its visit cap', async () => {
+    mockGetPublicShare.mockRejectedValue(new ShareError('share access limit reached', 410, 'SHARE_ACCESS_LIMIT_REACHED'))
+
+    renderWithRouter('limited-share')
+
+    await waitFor(() => {
+      expect(screen.getByText('分享访问次数已用尽')).toBeInTheDocument()
+      expect(screen.getByText('该分享已达到访问次数上限，当前不可访问。')).toBeInTheDocument()
     })
   })
 
@@ -540,7 +564,7 @@ describe('ShareAccessPage', () => {
     })
   })
 
-  it('shows expired feedback when file download returns gone', async () => {
+  it('shows disabled feedback when file download returns a disabled share error', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({
       id: 'abc123',
@@ -562,8 +586,8 @@ describe('ShareAccessPage', () => {
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '分享已失效',
-        description: 'share disabled',
+        title: '分享已停用',
+        description: '该分享已被停用，当前不可访问。',
         color: 'warning',
       })
     })

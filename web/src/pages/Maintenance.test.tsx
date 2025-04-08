@@ -209,6 +209,22 @@ describe('MaintenancePage', () => {
         expect(screen.getAllByText('--').length).toBeGreaterThan(0)
       })
     })
+
+    it('keeps warning state visible when the stored scrub result has a warning', async () => {
+      mockGetScrubResult.mockResolvedValue({
+        ...mockCompletedResult,
+        warning: true,
+        message: 'scrub completed with persistence warning',
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('校验完成（有警告）')).toBeTruthy()
+        expect(screen.getByText('本次校验完成，但存在警告')).toBeTruthy()
+        expect(screen.getByText('scrub completed with persistence warning')).toBeTruthy()
+      })
+    })
   })
 
   describe('running state', () => {
@@ -305,6 +321,32 @@ describe('MaintenancePage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '数据校验已完成',
         color: 'success',
+      })
+    })
+
+    it('shows warning toast when scrub completes with a persistence warning', async () => {
+      const user = userEvent.setup()
+      mockRunScrub.mockResolvedValue({
+        ...mockCompletedResult,
+        warning: true,
+        message: 'scrub completed with persistence warning',
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('开始校验')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('开始校验'))
+
+      await waitFor(() => {
+        expect(mockRunScrub).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'scrub completed with persistence warning',
+        color: 'warning',
       })
     })
 

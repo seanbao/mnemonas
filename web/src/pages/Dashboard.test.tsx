@@ -31,6 +31,9 @@ vi.mock('@/api/files', () => ({
     go: 'go1.24.0',
   }),
   getStorageStats: vi.fn().mockResolvedValue({
+    fileCount: 42,
+    fileCountAvailable: true,
+    storageStatsAvailable: true,
     totalSize: 1073741824, // 1 GB
     totalObjects: 100,
     dedupRatio: 1.5,
@@ -104,6 +107,9 @@ describe('DashboardPage', () => {
       go: 'go1.24.0',
     })
     mockGetStorageStats.mockResolvedValue({
+      fileCount: 42,
+      fileCountAvailable: true,
+      storageStatsAvailable: true,
       totalSize: 1073741824, // 1 GB
       totalObjects: 100,
       dedupRatio: 1.5,
@@ -165,7 +171,7 @@ describe('DashboardPage', () => {
       })
     })
 
-    it('shows unhealthy status when system is degraded', async () => {
+    it('shows degraded status when system is degraded', async () => {
       mockGetHealth.mockResolvedValueOnce({
         status: 'degraded',
         uptime: '1h30m',
@@ -174,7 +180,7 @@ describe('DashboardPage', () => {
       render(<DashboardPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('异常')).toBeTruthy()
+        expect(screen.getByText('已降级')).toBeTruthy()
       })
     })
 
@@ -183,7 +189,7 @@ describe('DashboardPage', () => {
       
       await waitFor(() => {
         expect(screen.getByText('存储使用')).toBeTruthy()
-        expect(screen.getByText('文件对象')).toBeTruthy()
+        expect(screen.getByText('文件数量')).toBeTruthy()
         // Multiple elements may have '去重率' text
         expect(screen.getAllByText('去重率').length).toBeGreaterThan(0)
         expect(screen.getByText('运行时间')).toBeTruthy()
@@ -199,12 +205,11 @@ describe('DashboardPage', () => {
       })
     })
 
-    it('displays object count', async () => {
+    it('displays file count', async () => {
       render(<DashboardPage />)
       
       await waitFor(() => {
-        // Multiple elements may display '100'
-        expect(screen.getAllByText('100').length).toBeGreaterThan(0)
+        expect(screen.getByText('42')).toBeTruthy()
       })
     })
 
@@ -256,6 +261,9 @@ describe('DashboardPage', () => {
       const user = userEvent.setup()
       mockGetHealth.mockRejectedValueOnce(new FilesApiError('health unavailable', 503, 'SERVICE_UNAVAILABLE'))
       mockGetStorageStats.mockResolvedValueOnce({
+        fileCount: 42,
+        fileCountAvailable: true,
+        storageStatsAvailable: true,
         totalSize: 1073741824,
         totalObjects: 100,
         dedupRatio: 1.5,
