@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/disintegration/imaging"
 )
+
+var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")
 
 // Size represents thumbnail size preset
 type Size string
@@ -214,6 +217,10 @@ func (s *Service) loadFromCache(cachePath string) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if err := validateThumbnailCachePath(cachePath); err != nil {
+		return nil, err
+	}
+
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		return nil, err
@@ -226,19 +233,62 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateThumbnailCachePath(cachePath); err != nil {
+		return err
+	}
+
 	// Create directory if needed
 	dir := filepath.Dir(cachePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	// Write atomically using temp file
-	tmpPath := cachePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	tmpFile, err := os.CreateTemp(dir, ".thumbnail-*.tmp")
+	if err != nil {
 		return err
 	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	return os.Rename(tmpPath, cachePath)
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func validateThumbnailCachePath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errThumbnailCacheSymlink
+	}
+	return nil
 }
 
 // CleanCache removes cached thumbnails older than maxAge

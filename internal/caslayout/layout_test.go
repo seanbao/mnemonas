@@ -2,6 +2,7 @@
 package caslayout
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -241,6 +242,83 @@ func TestStore_AtomicWrite(t *testing.T) {
 
 	if found {
 		t.Error("Found .tmp file after Put() - atomic write may have failed")
+	}
+}
+
+func TestNewStore_RejectsSymlinkRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	realRoot := filepath.Join(tmpDir, "real-root")
+	if err := os.MkdirAll(realRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-root) error: %v", err)
+	}
+	rootLink := filepath.Join(tmpDir, "root-link")
+	if err := os.Symlink(realRoot, rootLink); err != nil {
+		t.Fatalf("Symlink(root-link) error: %v", err)
+	}
+
+	_, err := NewStore(rootLink, nil)
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestStore_PutRejectsSymlinkObjectPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "abcdef1234567890abcdef1234567890"
+	path := store.layout.FullPath(store.root, hash)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("MkdirAll(object dir) error: %v", err)
+	}
+	targetPath := filepath.Join(tmpDir, "real-object")
+	if err := os.WriteFile(targetPath, []byte("original"), 0644); err != nil {
+		t.Fatalf("WriteFile(real-object) error: %v", err)
+	}
+	if err := os.Symlink(targetPath, path); err != nil {
+		t.Fatalf("Symlink(object path) error: %v", err)
+	}
+
+	err = store.Put(hash, []byte("updated"))
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile(real-object) error: %v", err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("expected symlink target unchanged, got %q", string(data))
+	}
+}
+
+func TestStore_GetRejectsSymlinkObjectPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "1234567890abcdef1234567890abcdef"
+	path := store.layout.FullPath(store.root, hash)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("MkdirAll(object dir) error: %v", err)
+	}
+	targetPath := filepath.Join(tmpDir, "real-object")
+	if err := os.WriteFile(targetPath, []byte("payload"), 0644); err != nil {
+		t.Fatalf("WriteFile(real-object) error: %v", err)
+	}
+	if err := os.Symlink(targetPath, path); err != nil {
+		t.Fatalf("Symlink(object path) error: %v", err)
+	}
+
+	_, err = store.Get(hash)
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
 	}
 }
 

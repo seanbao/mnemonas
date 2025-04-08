@@ -1,6 +1,7 @@
 package maintenance
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,9 +67,12 @@ func TestHistoryStore_ScrubOperations(t *testing.T) {
 	}
 
 	// Start scrub
-	started := store.StartScrub()
+	started, err := store.StartScrub()
 	if started == nil {
 		t.Fatal("StartScrub returned nil")
+	}
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
 	}
 	if started.Status != "running" {
 		t.Errorf("expected status=running, got %s", started.Status)
@@ -178,7 +182,10 @@ func TestHistoryStore_FailedScrub(t *testing.T) {
 	}
 
 	// Start and fail scrub
-	started := store.StartScrub()
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
+	}
 	started.Status = "failed"
 	started.EndTime = time.Now()
 	started.ErrorMessage = "connection refused"
@@ -197,6 +204,52 @@ func TestHistoryStore_FailedScrub(t *testing.T) {
 	saved := store.GetLastScrubResult()
 	if saved.ErrorMessage != "connection refused" {
 		t.Errorf("expected ErrorMessage='connection refused', got '%s'", saved.ErrorMessage)
+	}
+}
+
+func TestNewHistoryStore_RejectsSymlinkHistoryFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "real-history.json")
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+
+	if err := os.WriteFile(targetPath, []byte("{}"), 0644); err != nil {
+		t.Fatalf("failed to write target history file: %v", err)
+	}
+	if err := os.Symlink(targetPath, historyPath); err != nil {
+		t.Fatalf("failed to create history symlink: %v", err)
+	}
+
+	_, err := NewHistoryStore(tmpDir)
+	if !errors.Is(err, errHistoryFileSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestHistoryStore_StartScrubRejectsSymlinkHistoryFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	targetPath := filepath.Join(tmpDir, "real-history.json")
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+	if err := os.WriteFile(targetPath, []byte("{}"), 0644); err != nil {
+		t.Fatalf("failed to write target history file: %v", err)
+	}
+	if err := os.Symlink(targetPath, historyPath); err != nil {
+		t.Fatalf("failed to create history symlink: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if !errors.Is(err, errHistoryFileSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+	if started != nil {
+		t.Fatal("expected nil result when start scrub persistence fails")
+	}
+	if store.GetLastScrubResult() != nil {
+		t.Fatal("expected in-memory scrub result rollback after failed start")
 	}
 }
 
