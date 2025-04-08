@@ -27,10 +27,16 @@ import (
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
+	"github.com/seanbao/mnemonas/internal/thumbnail"
 )
 
 // testDataplaneAddr is the address of the test dataplane server
-const testDataplaneAddr = "127.0.0.1:9090"
+func testDataplaneAddr() string {
+	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:9090"
+}
 
 type fakeAlertMonitor struct {
 	updateCount int
@@ -55,7 +61,7 @@ func (m *fakeRetentionMonitor) UpdateConfig(cfg storage.RetentionMonitorConfig) 
 // setupDataplaneClient creates a dataplane client for testing
 // Returns nil if dataplane is not available
 func setupDataplaneClient(t *testing.T) *dataplane.Client {
-	client := dataplane.NewClient(testDataplaneAddr)
+	client := dataplane.NewClient(testDataplaneAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -96,10 +102,17 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 
 	logger := zerolog.Nop()
 	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
 
 	server, err := NewServer(logger, &ServerConfig{
-		FileSystem: fs,
-		Config:     settings,
+		FileSystem:   fs,
+		Config:       settings,
+		ConfigPath:   configPath,
+		ActivityRoot: path.Join(tmpDir, "activity"),
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
@@ -205,10 +218,15 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 	logger := zerolog.Nop()
 	settings := config.Default()
 	settings.Storage.Root = tmpDir
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
 
 	server, err := NewServer(logger, &ServerConfig{
 		FileSystem:     fs,
 		Config:         settings,
+		ConfigPath:     configPath,
 		AuthEnabled:    true,
 		AuthUsersFile:  usersFile,
 		AuthJWTSecret:  "test-secret",
@@ -281,10 +299,15 @@ func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string
 	settings.Storage.Root = tmpDir
 	settings.Share.Enabled = shareEnabled
 	settings.Share.BaseURL = baseURL
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
 
 	server, err := NewServer(logger, &ServerConfig{
 		FileSystem:     fs,
 		Config:         settings,
+		ConfigPath:     configPath,
 		ShareEnabled:   shareEnabled,
 		ShareStoreFile: shareStorePath,
 		ShareBaseURL:   baseURL,
@@ -437,6 +460,48 @@ func TestServer_ListFiles_InternalReadDirErrorReturnsInternalServerError(t *test
 	}
 }
 
+func TestServer_ListFiles_ReturnsBadRequestWhenPathIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/single-file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/single-file.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ListFiles file path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "path is not a directory") {
+		t.Fatalf("expected path-not-directory message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ListVersions_ReturnsConflictWhenParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(versions-parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/versions/versions-parent/child.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("list versions parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
 func TestServer_UploadFile(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -512,6 +577,34 @@ func TestServer_Search_InvalidLimitReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_Search_TraversalErrorReturnsInternalServerError(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/blocked"); err != nil {
+		t.Fatalf("Mkdir(blocked) error: %v", err)
+	}
+	blockedDir := path.Join(tmpDir, "files", "blocked")
+	if err := os.Chmod(blockedDir, 0); err != nil {
+		t.Fatalf("Chmod(blocked) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(blockedDir, 0o755)
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=blocked", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Search traversal error status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
+		t.Fatalf("expected search traversal failure to stay generic, got %s", w.Body.String())
+	}
+}
+
 func TestServer_Activity_InvalidPaginationReturnsBadRequest(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -565,6 +658,27 @@ func TestServer_DeleteFile(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(delete-parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/api/v1/files/delete-parent/child.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("delete file parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
 func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -573,7 +687,7 @@ func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/quote%22name.txt?download=true", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/quote%22name.txt?download=true", nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -584,6 +698,27 @@ func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
 	contentDisposition := w.Header().Get("Content-Disposition")
 	if !strings.Contains(contentDisposition, `filename="quote\"name.txt"`) {
 		t.Fatalf("expected escaped Content-Disposition filename, got %q", contentDisposition)
+	}
+}
+
+func TestServer_DownloadFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/download-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(download-parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/download-parent/child.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("download file parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
 	}
 }
 
@@ -604,12 +739,29 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	}
 
 	var loginResp auth.LoginResponse
-	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
 		t.Fatalf("failed to parse login response: %v", err)
+	}
+	loginResp = loginPayload.Data
+
+	downloadSessionReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+	downloadSessionReq.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
+	downloadSessionRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(downloadSessionRec, downloadSessionReq)
+
+	if downloadSessionRec.Code != http.StatusOK {
+		t.Fatalf("download session status = %d, want %d", downloadSessionRec.Code, http.StatusOK)
+	}
+	cookies := downloadSessionRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected download session cookie")
 	}
 
 	downloadReq := httptest.NewRequest("GET", "/api/v1/download/auth/file.txt", nil)
-	downloadReq.AddCookie(&http.Cookie{Name: auth.DownloadSessionCookieName, Value: loginResp.AccessToken})
+	downloadReq.AddCookie(cookies[0])
 	downloadRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(downloadRec, downloadReq)
 
@@ -679,7 +831,11 @@ func TestServer_CreateShare_UsesBaseURL(t *testing.T) {
 		t.Fatalf("failed to parse response JSON: %v", err)
 	}
 
-	urlValue, ok := payload["url"].(string)
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected response envelope data")
+	}
+	urlValue, ok := data["url"].(string)
 	if !ok {
 		t.Fatalf("expected url in response")
 	}
@@ -720,7 +876,11 @@ func TestServer_UpdateSettings_UpdatesRunningShareBaseURL(t *testing.T) {
 		t.Fatalf("failed to parse response JSON: %v", err)
 	}
 
-	urlValue, ok := payload["url"].(string)
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected response envelope data")
+	}
+	urlValue, ok := data["url"].(string)
 	if !ok {
 		t.Fatalf("expected url in response")
 	}
@@ -906,7 +1066,7 @@ func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) 
 		t.Fatal("expected historical version hash")
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/versions/quote%22name.txt?download=true&version="+historicalHash, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/quote%22name.txt?download=true&version="+historicalHash, nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -917,6 +1077,184 @@ func TestServer_DownloadVersion_ContentDispositionEscapesFilename(t *testing.T) 
 	contentDisposition := w.Header().Get("Content-Disposition")
 	if !strings.Contains(contentDisposition, `filename="quote\"name.txt"`) {
 		t.Fatalf("expected escaped version Content-Disposition filename, got %q", contentDisposition)
+	}
+}
+
+func TestServer_DownloadVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
+		t.Fatalf("WriteFile(a v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/a.txt", bytes.NewReader([]byte("a-v2"))); err != nil {
+		t.Fatalf("WriteFile(a v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/b.txt", bytes.NewReader([]byte("b-current"))); err != nil {
+		t.Fatalf("WriteFile(b) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/a.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(a) error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/b.txt?version="+historicalHash, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("Download version other-path hash status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if strings.Contains(w.Body.String(), "a.txt") {
+		t.Fatalf("expected path mismatch to stay generic, got %s", w.Body.String())
+	}
+}
+
+func TestServer_RestoreVersion_ReturnsNotFoundWhenHashBelongsToDifferentPath(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
+		t.Fatalf("WriteFile(a v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/a.txt", bytes.NewReader([]byte("a-v2"))); err != nil {
+		t.Fatalf("WriteFile(a v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/b.txt", bytes.NewReader([]byte("b-current"))); err != nil {
+		t.Fatalf("WriteFile(b) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/a.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(a) error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+historicalHash+"/restore?path=/versions/b.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("restore version other-path hash status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if strings.Contains(w.Body.String(), "a.txt") {
+		t.Fatalf("expected path mismatch to stay generic, got %s", w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/versions/b.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(b) error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(b) error: %v", err)
+	}
+	if string(data) != "b-current" {
+		t.Fatalf("expected b.txt content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestServer_RestoreVersion_AllowsCurrentHash(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/current.txt", bytes.NewReader([]byte("current-content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/current.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) == 0 || versions[0].Comment != "(current)" {
+		t.Fatalf("expected current version entry, got %#v", versions)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+versions[0].Hash+"/restore?path=/versions/current.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("restore current version status = %d, want %d", w.Code, http.StatusOK)
+	}
+	reader, err := fs.OpenFile(ctx, "/versions/current.txt")
+	if err != nil {
+		t.Fatalf("OpenFile() error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if string(data) != "current-content" {
+		t.Fatalf("expected current.txt content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestServer_DownloadVersion_DirectoryPathReturnsBadRequest(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/versions-dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions-dir?version="+strings.Repeat("a", 64), nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Download version directory status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "cannot download directory") {
+		t.Fatalf("expected directory download message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_DownloadVersion_ReturnsConflictWhenParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/version-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(version-parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/version-parent/child.txt?version="+strings.Repeat("a", 64), nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("download version parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
 	}
 }
 
@@ -1002,9 +1340,11 @@ func TestServer_GetTrashItem_InternalErrorReturnsInternalServerError(t *testing.
 		t.Fatal("expected at least one trash item")
 	}
 
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/trash/"+items[0].ID, nil).WithContext(canceledCtx)
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/trash/"+items[0].ID, nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -1039,9 +1379,11 @@ func TestServer_DeleteFromTrash_InternalErrorReturnsInternalServerError(t *testi
 		t.Fatal("expected at least one trash item")
 	}
 
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/"+items[0].ID, nil).WithContext(canceledCtx)
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/"+items[0].ID, nil)
 	w := httptest.NewRecorder()
 
 	server.Router().ServeHTTP(w, req)
@@ -1308,6 +1650,49 @@ func TestServer_RestoreVersion_DirectoryPathReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_RestoreVersion_ReturnsConflictWhenParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-version-source.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version-source.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-version-parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/restore-version-source.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/versions/"+historicalHash+"/restore?path=/restore-version-parent-file/child.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("RestoreVersion parent file status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
 func TestShouldSkipGCObjectByGrace(t *testing.T) {
 	graceCutoff := time.Date(2026, 3, 17, 10, 0, 0, 0, time.UTC)
 
@@ -1396,6 +1781,93 @@ func TestServer_MoveFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_ReturnsConflictWhenDestinationParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/move-parent", bytes.NewReader([]byte("not a directory"))); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	body := `{"from":"/move-source.txt","to":"/move-parent/child.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("move file parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_MoveFile_ReturnsConflictWhenSourceAndDestinationMatch(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-same.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	body := `{"from":"/move-same.txt","to":"/move-same.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("move same-path status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "source and destination must differ") {
+		t.Fatalf("expected same-path conflict message, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/move-same.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected move, got %v", err)
+	}
+}
+
+func TestServer_MoveFile_ReturnsConflictWhenDirectoryMovesIntoDescendant(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/move-dir"); err != nil {
+		t.Fatalf("Mkdir(move-dir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/move-dir/child"); err != nil {
+		t.Fatalf("Mkdir(child) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/move-dir/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	body := `{"from":"/move-dir","to":"/move-dir/child/moved"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("move descendant status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "destination cannot be inside source directory") {
+		t.Fatalf("expected descendant conflict message, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/move-dir/file.txt"); err != nil {
+		t.Fatalf("expected source directory to remain after rejected move, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/move-dir/child/moved"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected descendant destination to remain absent, got %v", err)
+	}
+}
+
 func TestServer_CopyFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -1416,6 +1888,109 @@ func TestServer_CopyFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("copy file conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestServer_CopyFile_ReturnsConflictWhenDestinationParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/copy-parent", bytes.NewReader([]byte("not a directory"))); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	body := `{"from":"/copy-source.txt","to":"/copy-parent/child.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("copy file parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_CopyFile_ReturnsBadRequestWhenSourceIsDirectory(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/copy-dir"); err != nil {
+		t.Fatalf("Mkdir(copy-dir) error: %v", err)
+	}
+
+	body := `{"from":"/copy-dir","to":"/copy-dest.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("copy directory source status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "source path is a directory") {
+		t.Fatalf("expected directory-source validation message, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/copy-dest.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent after rejected directory copy, got %v", err)
+	}
+}
+
+func TestServer_CopyFile_ReturnsConflictWhenSourceParentIsFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(copy-parent) error: %v", err)
+	}
+
+	body := `{"from":"/copy-parent/child.txt","to":"/copy-dest.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("copy source parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_CreateDirectory_ReturnsConflictWhenPathIsExistingFile(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/existing-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(existing-file) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/directories/existing-file", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("create directory existing-file status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "resource already exists") {
+		t.Fatalf("expected existing-resource conflict message, got %s", w.Body.String())
+	}
+	info, err := fs.Stat(ctx, "/existing-file")
+	if err != nil {
+		t.Fatalf("Stat(existing-file) error: %v", err)
+	}
+	if info.IsDir {
+		t.Fatal("expected existing-file to remain a file")
 	}
 }
 
@@ -1552,6 +2127,40 @@ func TestServer_Trash_Restore(t *testing.T) {
 
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("RestoreFromTrash nonexistent status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("RestoreToCustomPathUnderFileReturnsConflict", func(t *testing.T) {
+		if err := fs.WriteFile(ctx, "/trash-restore-target-parent", bytes.NewReader([]byte("blocking file"))); err != nil {
+			t.Fatalf("WriteFile(parent file) error: %v", err)
+		}
+
+		// Create a fresh trash item so this subtest is isolated from prior restore attempts.
+		if err := fs.WriteFile(ctx, "/trash-restore-test/conflict.txt", bytes.NewReader([]byte("restore me again"))); err != nil {
+			t.Fatalf("WriteFile(conflict) error: %v", err)
+		}
+		if err := fs.Delete(ctx, "/trash-restore-test/conflict.txt"); err != nil {
+			t.Fatalf("Delete(conflict) error: %v", err)
+		}
+
+		refreshedItems, err := fs.ListTrash(ctx)
+		if err != nil {
+			t.Fatalf("ListTrash() error: %v", err)
+		}
+		if len(refreshedItems) == 0 {
+			t.Fatal("No items in trash")
+		}
+
+		req := httptest.NewRequest("POST", "/api/v1/trash/"+refreshedItems[len(refreshedItems)-1].ID+"/restore?path=/trash-restore-target-parent/child.txt", nil)
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		if w.Code != http.StatusConflict {
+			t.Fatalf("RestoreFromTrash custom parent file status = %d, want %d", w.Code, http.StatusConflict)
+		}
+		if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+			t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
 		}
 	})
 
@@ -1889,6 +2498,60 @@ func TestServer_Thumbnail_Unsupported(t *testing.T) {
 	// Without thumbnail service, should be ServiceUnavailable
 	if w.Code != http.StatusServiceUnavailable && w.Code != http.StatusBadRequest {
 		t.Errorf("Thumbnail for unsupported type status = %d", w.Code)
+	}
+}
+
+func TestServer_Thumbnail_DirectoryPathReturnsBadRequest(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.Mkdir(ctx, "/folder.jpg"); err != nil {
+		t.Fatalf("Mkdir(folder.jpg) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/folder.jpg", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("thumbnail directory status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "path is a directory") {
+		t.Fatalf("expected directory-path validation message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_Thumbnail_ReturnsConflictWhenParentIsFile(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/parent.jpg", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(parent.jpg) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/parent.jpg/child.png", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("thumbnail parent conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
+		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
 	}
 }
 
@@ -2701,10 +3364,29 @@ func TestServer_AcknowledgeSetup_InternalErrorUsesStructuredAPIError(t *testing.
 		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
 	}
 
+	adminUsername := "admin-tester"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+
+	adminLoginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, adminUsername, adminPassword)
+	adminLoginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(adminLoginBody))
+	adminLoginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(adminLoginRec, adminLoginReq)
+
+	if adminLoginRec.Code != http.StatusOK {
+		t.Fatalf("admin login status = %d, want %d", adminLoginRec.Code, http.StatusOK)
+	}
+
 	var loginResp auth.LoginResponse
-	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(adminLoginRec.Body.Bytes(), &loginPayload); err != nil {
 		t.Fatalf("failed to parse login response: %v", err)
 	}
+	loginResp = loginPayload.Data
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
 	req.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
@@ -2803,9 +3485,13 @@ func TestServer_RestoreVersion_RequiresAdmin(t *testing.T) {
 	}
 
 	var loginResp auth.LoginResponse
-	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
 		t.Fatalf("failed to parse login response: %v", err)
 	}
+	loginResp = loginPayload.Data
 
 	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/versions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/restore?path=/restore-version/file.txt", nil)
 	restoreReq.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
@@ -2996,5 +3682,30 @@ func TestServer_ListVersions_InternalStatErrorReturnsInternalServerError(t *test
 	}
 	if strings.Contains(strings.ToLower(w.Body.String()), "permission denied") {
 		t.Fatalf("expected list versions internal error to stay generic, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ListVersions_VersionStoreFailureReturnsInternalServerError(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/failing.txt", bytes.NewReader([]byte("current"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/versions/versions/failing.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("ListVersions version store failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "version store unavailable") {
+		t.Fatalf("expected list versions response to hide internal backend details, got %s", w.Body.String())
 	}
 }

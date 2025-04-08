@@ -544,10 +544,31 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath string) err
 }
 
 func (h *Handler) rollbackCopiedDirectory(dstPath string, copyErr error) error {
-	if rollbackErr := h.fs.PermanentDelete(context.Background(), dstPath); rollbackErr != nil && !errors.Is(rollbackErr, storage.ErrNotFound) {
+	if rollbackErr := h.removeCopiedTree(context.Background(), dstPath); rollbackErr != nil && !errors.Is(rollbackErr, storage.ErrNotFound) {
 		return errors.Join(copyErr, fmt.Errorf("rollback copied directory %s: %w", dstPath, rollbackErr))
 	}
 	return copyErr
+}
+
+func (h *Handler) removeCopiedTree(ctx context.Context, targetPath string) error {
+	info, err := h.fs.Stat(ctx, targetPath)
+	if err != nil {
+		return err
+	}
+
+	if info.IsDir {
+		children, err := h.fs.ReadDir(ctx, targetPath)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := h.removeCopiedTree(ctx, child.Path); err != nil {
+				return err
+			}
+		}
+	}
+
+	return h.fs.PermanentDelete(ctx, targetPath)
 }
 
 func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http.Request, srcPath string) {
@@ -594,9 +615,35 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
-	if err := h.fs.Rename(ctx, srcPath, dst); err != nil {
-		h.handleError(w, err)
-		return
+	if dstExists {
+		backupPath, err := h.allocateMoveBackupPath(ctx, dst)
+		if err != nil {
+			h.handleError(w, err)
+			return
+		}
+		if err := h.fs.Rename(ctx, dst, backupPath); err != nil {
+			h.handleError(w, err)
+			return
+		}
+
+		if err := h.fs.Rename(ctx, srcPath, dst); err != nil {
+			if restoreErr := h.fs.Rename(ctx, backupPath, dst); restoreErr != nil {
+				h.handleError(w, errors.Join(err, fmt.Errorf("failed to restore overwritten destination: %w", restoreErr)))
+				return
+			}
+			h.handleError(w, err)
+			return
+		}
+
+		if err := h.fs.PermanentDelete(ctx, backupPath); err != nil {
+			h.handleError(w, err)
+			return
+		}
+	} else {
+		if err := h.fs.Rename(ctx, srcPath, dst); err != nil {
+			h.handleError(w, err)
+			return
+		}
 	}
 
 	// Invalidate cache for both source and destination parents
@@ -608,6 +655,20 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) allocateMoveBackupPath(ctx context.Context, dst string) (string, error) {
+	dir := path.Dir(dst)
+	base := path.Base(dst)
+	for attempt := 0; attempt < 16; attempt++ {
+		candidate := path.Join(dir, fmt.Sprintf(".%s.webdav-move-backup-%d", base, time.Now().UnixNano()+int64(attempt)))
+		if _, err := h.fs.Stat(ctx, candidate); errors.Is(err, storage.ErrNotFound) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", storage.ErrAlreadyExists
 }
 
 func (h *Handler) checkOverwriteHeader(ctx context.Context, r *http.Request, dst string) error {

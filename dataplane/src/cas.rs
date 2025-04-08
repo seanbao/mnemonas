@@ -600,7 +600,10 @@ fn system_time_to_unix_timestamp(time: SystemTime) -> Option<i64> {
     duration_to_unix_timestamp(duration)
 }
 
-fn metadata_timestamp_to_unix(created: Option<SystemTime>, modified: Option<SystemTime>) -> Option<i64> {
+fn metadata_timestamp_to_unix(
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> Option<i64> {
     created
         .and_then(system_time_to_unix_timestamp)
         .or_else(|| modified.and_then(system_time_to_unix_timestamp))
@@ -610,7 +613,10 @@ fn duration_to_unix_timestamp(duration: Duration) -> Option<i64> {
     match i64::try_from(duration.as_secs()) {
         Ok(timestamp) => Some(timestamp),
         Err(_) => {
-            warn!(seconds = duration.as_secs(), "file creation time exceeds i64 unix timestamp range; omitting created_at") ;
+            warn!(
+                seconds = duration.as_secs(),
+                "file creation time exceeds i64 unix timestamp range; omitting created_at"
+            );
             None
         }
     }

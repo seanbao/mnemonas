@@ -1,22 +1,5 @@
 import { test, expect } from '@playwright/test'
 
-/**
- * 认证辅助函数
- * 当认证禁用时直接访问，启用时跳过需要登录的测试
- */
-async function gotoWithAuth(page: import('@playwright/test').Page, path: string) {
-  await page.goto(path)
-  
-  // 等待页面加载和可能的重定向
-  await page.waitForTimeout(1000)
-  
-  // 如果被重定向到登录页，说明认证启用了
-  if (page.url().includes('/login')) {
-    return false // 表示需要登录
-  }
-  return true // 表示可以直接访问
-}
-
 test.describe('主页（认证禁用时）', () => {
   test('应显示主页内容或登录页', async ({ page }) => {
     await page.goto('/')

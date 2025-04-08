@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Card, 
@@ -98,41 +98,7 @@ function SettingRow({
 export function SettingsPage() {
   const [selectedTab, setSelectedTab] = useState('general')
   const queryClient = useQueryClient()
-  
-  // WebDAV credentials state
-  const [showWebDAVPassword, setShowWebDAVPassword] = useState(false)
-  const [copiedField, setCopiedField] = useState<string | null>(null)
-  
-  // Fetch settings from API
-  const { data: settingsData, isLoading, error, refetch, isRefetching } = useQuery({
-    queryKey: ['settings'],
-    queryFn: getSettings,
-  })
-
-  // Fetch WebDAV credentials
-  const { data: webdavCredentials } = useQuery({
-    queryKey: ['webdav-credentials'],
-    queryFn: getWebDAVCredentials,
-    enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
-  })
-
-  const webdavUrl = useMemo(() => {
-    return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
-  }, [webdavCredentials?.url])
-
-  // Copy to clipboard helper
-  const handleCopy = async (field: string, value: string) => {
-    try {
-      await copyTextToClipboard(value)
-      setCopiedField(field)
-      setTimeout(() => setCopiedField(null), 2000)
-    } catch {
-      addToast({ title: '复制失败', color: 'danger' })
-    }
-  }
-
-  // Local editable state
-  const [settings, setSettings] = useState({
+  const defaultSettings = {
     serverHost: '0.0.0.0',
     serverPort: '8080',
     serverReadTimeout: '30s',
@@ -178,11 +144,44 @@ export function SettingsPage() {
     minChunkSize: '256KB',
     avgChunkSize: '1MB',
     maxChunkSize: '4MB',
+  }
+  
+  // WebDAV credentials state
+  const [showWebDAVPassword, setShowWebDAVPassword] = useState(false)
+  const [copiedField, setCopiedField] = useState<string | null>(null)
+  
+  // Fetch settings from API
+  const { data: settingsData, isLoading, error, refetch, isRefetching } = useQuery({
+    queryKey: ['settings'],
+    queryFn: getSettings,
   })
+
+  // Fetch WebDAV credentials
+  const { data: webdavCredentials } = useQuery({
+    queryKey: ['webdav-credentials'],
+    queryFn: getWebDAVCredentials,
+    enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
+  })
+
+  const webdavUrl = useMemo(() => {
+    return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
+  }, [webdavCredentials?.url])
+
+  const handleCopy = async (field: string, value: string) => {
+    try {
+      await copyTextToClipboard(value)
+      setCopiedField(field)
+      setTimeout(() => setCopiedField(null), 2000)
+    } catch {
+      addToast({ title: '复制失败', color: 'danger' })
+    }
+  }
+
+  const [draftSettings, setDraftSettings] = useState(defaultSettings)
   const [isDirty, setIsDirty] = useState(false)
 
-  const applyServerSettings = (data: NonNullable<typeof settingsData>['data']) => {
-    setSettings({
+  const mapServerSettings = useCallback((data: NonNullable<typeof settingsData>['data']) => {
+    return {
       serverHost: data.server.host,
       serverPort: String(data.server.port),
       serverReadTimeout: data.server.read_timeout,
@@ -222,26 +221,45 @@ export function SettingsPage() {
       alertsWebhookURL: data.alerts?.webhook_url ?? '',
       alertsWebhookMethod: data.alerts?.webhook_method ?? 'POST',
       alertsWebhookHeaders: data.alerts?.webhook_headers?.join('\n') ?? '',
+      dataplaneMaxRetries: String(data.dataplane.max_retries),
       dataplaneGrpcAddress: data.dataplane.grpc_address,
       dataplaneTimeout: data.dataplane.timeout,
-      dataplaneMaxRetries: String(data.dataplane.max_retries),
       minChunkSize: formatBytes(data.cdc.min_chunk_size),
       avgChunkSize: formatBytes(data.cdc.avg_chunk_size),
       maxChunkSize: formatBytes(data.cdc.max_chunk_size),
-    })
-  }
-
-  const updateDirtySettings = (updater: (prev: typeof settings) => typeof settings) => {
-    setIsDirty(true)
-    setSettings(updater)
-  }
-
-  // Update local state when API data loads
-  useEffect(() => {
-    if (settingsData?.data && !isDirty) {
-      applyServerSettings(settingsData.data)
     }
-  }, [isDirty, settingsData])
+  }, [])
+
+  const settings = useMemo(() => {
+    if (!isDirty && settingsData?.data) {
+      return mapServerSettings(settingsData.data)
+    }
+    return draftSettings
+  }, [draftSettings, isDirty, mapServerSettings, settingsData])
+
+  const updateDirtySettings = (updater: (prev: typeof draftSettings) => typeof draftSettings) => {
+    setIsDirty(true)
+    setDraftSettings((prev) => updater(isDirty ? prev : settings))
+  }
+
+  const handleReset = async () => {
+    const result = await refetch()
+    if (result.error) {
+      addToast({
+        title: '重置失败',
+        description: result.error instanceof Error ? result.error.message : '请稍后重试',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (result.data?.data) {
+      setDraftSettings(mapServerSettings(result.data.data))
+    }
+    setIsDirty(false)
+
+    addToast({ title: '已恢复为服务端当前配置', color: 'success' })
+  }
 
   // Save mutation
   const saveMutation = useMutation({
@@ -520,25 +538,6 @@ export function SettingsPage() {
       },
     }
     saveMutation.mutate(req)
-  }
-
-  const handleReset = async () => {
-    const result = await refetch()
-    if (result.error) {
-      addToast({
-        title: '重置失败',
-        description: result.error instanceof Error ? result.error.message : '请稍后重试',
-        color: 'danger',
-      })
-      return
-    }
-
-    if (result.data?.data) {
-      applyServerSettings(result.data.data)
-    }
-    setIsDirty(false)
-
-    addToast({ title: '已恢复为服务端当前配置', color: 'success' })
   }
 
   if (isLoading) {

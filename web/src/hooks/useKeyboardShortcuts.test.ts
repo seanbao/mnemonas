@@ -4,7 +4,7 @@ import { useKeyboardShortcuts, type KeyboardShortcutHandlers, type UseKeyboardSh
 
 describe('useKeyboardShortcuts', () => {
   const mockAddEventListener = vi.spyOn(document, 'addEventListener')
-  const mockRemoveEventListener = vi.spyOn(document, 'removeEventListener')
+  vi.spyOn(document, 'removeEventListener')
 
   const triggerKeyDown = (key: string, options: Partial<KeyboardEvent> = {}) => {
     const event = new KeyboardEvent('keydown', {

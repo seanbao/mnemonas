@@ -19,12 +19,17 @@ import (
 )
 
 // testDataplaneAddr is the address of the test dataplane server
-const testDataplaneAddr = "127.0.0.1:9090"
+func testDataplaneAddr() string {
+	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:9090"
+}
 
 // setupDataplaneClient creates a dataplane client for testing
 // Returns nil if dataplane is not available
 func setupDataplaneClient(t *testing.T) *dataplane.Client {
-	client := dataplane.NewClient(testDataplaneAddr)
+	client := dataplane.NewClient(testDataplaneAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -139,6 +144,40 @@ func TestFileSystem_WriteFile_Read(t *testing.T) {
 	}
 }
 
+func TestFileSystem_OpenFile_ReturnsErrIsDirForDirectoryPath(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	reader, err := fs.OpenFile(ctx, "/dir")
+	if err != ErrIsDir {
+		t.Fatalf("OpenFile() error = %v, want ErrIsDir", err)
+	}
+	if reader != nil {
+		t.Fatal("expected no reader for directory path")
+	}
+}
+
+func TestFileSystem_OpenFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/open-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(open-parent) error: %v", err)
+	}
+
+	reader, err := fs.OpenFile(ctx, "/open-parent/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("OpenFile() error = %v, want ErrNotDir", err)
+	}
+	if reader != nil {
+		t.Fatal("expected no reader for parent-not-directory path")
+	}
+}
+
 func TestFileSystem_WriteFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -150,6 +189,20 @@ func TestFileSystem_WriteFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	err := fs.WriteFile(ctx, "/parent-file/child.txt", bytes.NewReader([]byte("nested")))
 	if err != ErrNotDir {
 		t.Fatalf("WriteFile() error = %v, want ErrNotDir", err)
+	}
+}
+
+func TestFileSystem_Delete_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(delete-parent) error: %v", err)
+	}
+
+	err := fs.Delete(ctx, "/delete-parent/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("Delete() error = %v, want ErrNotDir", err)
 	}
 }
 
@@ -336,6 +389,23 @@ func TestFileSystem_ReadDir(t *testing.T) {
 
 	if len(entries) != 3 {
 		t.Errorf("ReadDir() returned %d entries, want 3", len(entries))
+	}
+}
+
+func TestFileSystem_ReadDir_ReturnsErrNotDirWhenPathIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/file.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	entries, err := fs.ReadDir(ctx, "/file.txt")
+	if err != ErrNotDir {
+		t.Fatalf("ReadDir() error = %v, want ErrNotDir", err)
+	}
+	if entries != nil {
+		t.Fatalf("expected no entries for file path, got %d", len(entries))
 	}
 }
 
@@ -834,6 +904,30 @@ func TestFileSystem_Rename_AlreadyExists(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Rename_ReturnsErrNotDirWhenDestinationParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/rename-parent", bytes.NewReader([]byte("not a directory"))); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	err := fs.Rename(ctx, "/rename-source.txt", "/rename-parent/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("Rename() error = %v, want ErrNotDir", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/rename-source.txt"); statErr != nil {
+		t.Fatalf("Expected source path to remain after parent conflict, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-parent/child.txt"); statErr != ErrNotDir {
+		t.Fatalf("Expected destination child to remain absent, got %v", statErr)
+	}
+}
+
 func TestFileSystem_Rename_PreservesVersions(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -985,6 +1079,43 @@ func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T)
 	}
 }
 
+func TestFileSystem_RestoreFromTrash_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/restore-parent/child"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-parent/child/file.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-parent/child/file.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if err := fs.PermanentDelete(ctx, "/restore-parent/child"); err != nil {
+		t.Fatalf("PermanentDelete(child) error: %v", err)
+	}
+	if err := fs.PermanentDelete(ctx, "/restore-parent"); err != nil {
+		t.Fatalf("PermanentDelete(parent) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-parent", bytes.NewReader([]byte("blocking file"))); err != nil {
+		t.Fatalf("WriteFile(parent file) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("No items in trash")
+	}
+
+	err = fs.RestoreFromTrash(ctx, items[0].ID)
+	if err != ErrNotDir {
+		t.Fatalf("RestoreFromTrash() error = %v, want ErrNotDir", err)
+	}
+}
+
 func TestFileSystem_RestoreFromTrashTo_PreservesVersions(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1058,12 +1189,40 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackWhenIndexUpdateFails(t *testing.
 		t.Fatalf("Expected trash content to remain after rollback, got %v", statErr)
 	}
 
-	versions, versionErr := fs.ListVersions(ctx, "/restore-to-index-fail.md")
+	versions, versionErr := fs.versions.GetVersions(ctx, "/restore-to-index-fail.md")
 	if versionErr != nil {
-		t.Fatalf("ListVersions() after rollback error: %v", versionErr)
+		t.Fatalf("GetVersions() after rollback error: %v", versionErr)
 	}
-	if len(versions) < 2 {
-		t.Fatalf("Expected original version metadata to remain after rollback, got %d versions", len(versions))
+	if len(versions) != 1 {
+		t.Fatalf("Expected original historical version metadata to remain after rollback, got %d versions", len(versions))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-to-parent-file.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-to-parent-file.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-target-parent", bytes.NewReader([]byte("blocking file"))); err != nil {
+		t.Fatalf("WriteFile(parent file) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("No items in trash")
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, "/restore-target-parent/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want ErrNotDir", err)
 	}
 }
 
@@ -1114,12 +1273,12 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackOnMetadataConflict(t *testing.T)
 		t.Fatalf("Expected original trash item path to remain unchanged, got %s", trashItems[0].OriginalPath)
 	}
 
-	versions, versionErr := fs.ListVersions(ctx, "/restore-conflict.md")
+	versions, versionErr := fs.versions.GetVersions(ctx, "/restore-conflict.md")
 	if versionErr != nil {
-		t.Fatalf("ListVersions() after rollback error: %v", versionErr)
+		t.Fatalf("GetVersions() after rollback error: %v", versionErr)
 	}
-	if len(versions) < 2 {
-		t.Fatalf("Expected original version metadata to remain after rollback, got %d versions", len(versions))
+	if len(versions) != 1 {
+		t.Fatalf("Expected original historical version metadata to remain after rollback, got %d versions", len(versions))
 	}
 }
 
@@ -1593,6 +1752,30 @@ func TestFileSystem_ListVersions(t *testing.T) {
 	}
 }
 
+func TestFileSystem_ListVersions_PropagatesVersionStoreFailure(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versioned.txt", bytes.NewReader([]byte("current"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	fs.getVersions = func(context.Context, string) ([]versionstore.Version, error) {
+		return nil, errors.New("version store unavailable")
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versioned.txt")
+	if err == nil {
+		t.Fatal("expected ListVersions() to return version store failure")
+	}
+	if versions != nil {
+		t.Fatalf("expected no version list on version store failure, got %d entries", len(versions))
+	}
+	if !strings.Contains(err.Error(), "version store unavailable") {
+		t.Fatalf("expected version store failure to propagate, got %v", err)
+	}
+}
+
 func TestFileSystem_RestoreVersion_RollsBackWhenIndexUpdateFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1641,6 +1824,198 @@ func TestFileSystem_RestoreVersion_RollsBackWhenIndexUpdateFails(t *testing.T) {
 	}
 	if string(data) != "v2" {
 		t.Fatalf("Expected current content to remain after rollback, got %q", string(data))
+	}
+}
+
+func TestFileSystem_GetVersion_RejectsHashFromDifferentPath(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
+		t.Fatalf("WriteFile(a v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a-v2"))); err != nil {
+		t.Fatalf("WriteFile(a v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/b.txt", bytes.NewReader([]byte("b-current"))); err != nil {
+		t.Fatalf("WriteFile(b) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/docs/a.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(a) error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash for a.txt")
+	}
+
+	reader, err := fs.GetVersion(ctx, "/docs/b.txt", historicalHash)
+	if err != ErrVersionNotFound {
+		t.Fatalf("GetVersion() error = %v, want ErrVersionNotFound", err)
+	}
+	if reader != nil {
+		t.Fatal("expected no reader when hash does not belong to requested path")
+	}
+}
+
+func TestFileSystem_RestoreVersion_RejectsHashFromDifferentPath(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a-v1"))); err != nil {
+		t.Fatalf("WriteFile(a v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("a-v2"))); err != nil {
+		t.Fatalf("WriteFile(a v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/b.txt", bytes.NewReader([]byte("b-current"))); err != nil {
+		t.Fatalf("WriteFile(b) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/docs/a.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(a) error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash for a.txt")
+	}
+
+	err = fs.RestoreVersion(ctx, "/docs/b.txt", historicalHash)
+	if err != ErrVersionNotFound {
+		t.Fatalf("RestoreVersion() error = %v, want ErrVersionNotFound", err)
+	}
+
+	reader, err := fs.OpenFile(ctx, "/docs/b.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(b) error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(b) error: %v", err)
+	}
+	if string(data) != "b-current" {
+		t.Fatalf("expected b.txt content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestFileSystem_RestoreVersion_AllowsCurrentHashWithoutStoredObject(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/docs/current.txt", bytes.NewReader([]byte("current-content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/docs/current.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) == 0 || versions[0].Comment != "(current)" {
+		t.Fatalf("expected current version entry, got %#v", versions)
+	}
+
+	if err := fs.RestoreVersion(ctx, "/docs/current.txt", versions[0].Hash); err != nil {
+		t.Fatalf("RestoreVersion(current) error: %v", err)
+	}
+
+	reader, err := fs.OpenFile(ctx, "/docs/current.txt")
+	if err != nil {
+		t.Fatalf("OpenFile() error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if string(data) != "current-content" {
+		t.Fatalf("expected current.txt content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestFileSystem_GetVersion_ReturnsErrIsDirForDirectoryPath(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+
+	reader, err := fs.GetVersion(ctx, "/dir", strings.Repeat("a", 64))
+	if err != ErrIsDir {
+		t.Fatalf("GetVersion() error = %v, want ErrIsDir", err)
+	}
+	if reader != nil {
+		t.Fatal("expected no reader for directory version request")
+	}
+}
+
+func TestFileSystem_GetVersion_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/version-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(version-parent) error: %v", err)
+	}
+
+	reader, err := fs.GetVersion(ctx, "/version-parent/child.txt", strings.Repeat("a", 64))
+	if err != ErrNotDir {
+		t.Fatalf("GetVersion() error = %v, want ErrNotDir", err)
+	}
+	if reader != nil {
+		t.Fatal("expected no reader for parent-not-directory version request")
+	}
+}
+
+func TestFileSystem_RestoreVersion_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-source.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-source.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-parent-file", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/restore-source.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("Expected at least one historical version")
+	}
+
+	err = fs.RestoreVersion(ctx, "/restore-parent-file/child.txt", historicalHash)
+	if err != ErrNotDir {
+		t.Fatalf("RestoreVersion() error = %v, want ErrNotDir", err)
 	}
 }
 
@@ -1912,6 +2287,30 @@ func TestFileSystem_Search(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Search_PropagatesTraversalError(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/blocked"); err != nil {
+		t.Fatalf("Mkdir(blocked) error: %v", err)
+	}
+	blockedPath := filepath.Join(fs.workspace.Root(), "blocked")
+	if err := os.Chmod(blockedPath, 0); err != nil {
+		t.Fatalf("Chmod(blocked) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(blockedPath, 0o755)
+	}()
+
+	results, err := fs.Search(ctx, "blocked", 10)
+	if err == nil {
+		t.Fatal("expected Search() to propagate traversal error")
+	}
+	if results != nil {
+		t.Fatalf("expected no results on traversal error, got %d", len(results))
+	}
+}
+
 func TestFileSystem_Search_EmptyQuery(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1934,6 +2333,32 @@ func TestFileSystem_CleanupStaging(t *testing.T) {
 	// Should not error even with no staging files
 	if files < 0 || bytes < 0 {
 		t.Error("CleanupStaging() returned negative values")
+	}
+}
+
+func TestFileSystem_CleanupStaging_PropagatesWorkspaceWalkError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based walk error is unreliable as root")
+	}
+
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	blockedDir := filepath.Join(fs.workspace.Root(), "blocked")
+	if err := os.Mkdir(blockedDir, 0755); err != nil {
+		t.Fatalf("Mkdir(blocked) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedDir, "stuck.tmp"), []byte("temp"), 0644); err != nil {
+		t.Fatalf("WriteFile(stuck.tmp) error: %v", err)
+	}
+	if err := os.Chmod(blockedDir, 0000); err != nil {
+		t.Fatalf("Chmod(blocked) error: %v", err)
+	}
+	defer os.Chmod(blockedDir, 0755)
+
+	_, _, err := fs.CleanupStaging(ctx)
+	if err == nil {
+		t.Fatal("expected CleanupStaging() to return walk error")
 	}
 }
 

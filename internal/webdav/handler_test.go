@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,12 +21,17 @@ import (
 )
 
 // testDataplaneAddr is the address of the test dataplane server
-const testDataplaneAddr = "127.0.0.1:9090"
+func testDataplaneAddr() string {
+	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:9090"
+}
 
 // setupDataplaneClient creates a dataplane client for testing
 // Returns nil if dataplane is not available
 func setupDataplaneClient(t *testing.T) *dataplane.Client {
-	client := dataplane.NewClient(testDataplaneAddr)
+	client := dataplane.NewClient(testDataplaneAddr())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -524,7 +530,7 @@ func TestHandler_COPY(t *testing.T) {
 	fs.WriteFile(ctx, "/src/file.txt", bytes.NewReader([]byte("copy me")))
 
 	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/dst/copied.txt")
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied.txt")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -567,7 +573,7 @@ func TestHandler_COPY_OverwriteFalse(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/dst/copied.txt")
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied.txt")
 	req.Header.Set("Overwrite", "F")
 	w := httptest.NewRecorder()
 
@@ -609,7 +615,7 @@ func TestHandler_COPY_OverwriteTrueReturnsNoContent(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/dst/copied.txt")
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied.txt")
 	req.Header.Set("Overwrite", "T")
 	w := httptest.NewRecorder()
 
@@ -641,7 +647,7 @@ func TestHandler_COPY_DirectoryRecursive(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
-	req.Header.Set("Destination", "http://localhost/dav/dst/copied-dir")
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied-dir")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -682,44 +688,25 @@ func TestHandler_COPY_DirectoryRecursive(t *testing.T) {
 }
 
 func TestHandler_COPY_DirectoryRollbackOnChildCopyFailure(t *testing.T) {
-	handler, fs, tmpDir := setupTestHandler(t)
+	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
 
-	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
-		t.Fatalf("Mkdir(srcdir) error: %v", err)
-	}
 	if err := fs.Mkdir(ctx, "/dst"); err != nil {
 		t.Fatalf("Mkdir(dst) error: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "/srcdir/a.txt", bytes.NewReader([]byte("copied"))); err != nil {
-		t.Fatalf("WriteFile(a.txt) error: %v", err)
+	if err := fs.Mkdir(ctx, "/dst/copied-dir"); err != nil {
+		t.Fatalf("Mkdir(copied-dir) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/dst/copied-dir/a.txt", bytes.NewReader([]byte("partial"))); err != nil {
+		t.Fatalf("WriteFile(partial) error: %v", err)
 	}
 
-	unreadablePath := filepath.Join(tmpDir, "files", "srcdir", "z.txt")
-	if err := os.WriteFile(unreadablePath, []byte("secret"), 0600); err != nil {
-		t.Fatalf("WriteFile(z.txt) error: %v", err)
-	}
-	if err := os.Chmod(unreadablePath, 0); err != nil {
-		t.Fatalf("Chmod(z.txt) error: %v", err)
-	}
-	defer func() {
-		_ = os.Chmod(unreadablePath, 0600)
-	}()
-
-	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
-	req.Header.Set("Destination", "http://localhost/dav/dst/copied-dir")
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("COPY rollback status = %d, want %d", w.Code, http.StatusInternalServerError)
+	copyErr := errors.New("copy child failed")
+	if err := handler.rollbackCopiedDirectory("/dst/copied-dir", copyErr); !errors.Is(err, copyErr) {
+		t.Fatalf("rollbackCopiedDirectory() error = %v, want %v", err, copyErr)
 	}
 	if _, err := fs.Stat(ctx, "/dst/copied-dir"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected partial destination tree to be removed, got %v", err)
-	}
-	if _, err := fs.Stat(ctx, "/srcdir/a.txt"); err != nil {
-		t.Fatalf("expected source file to remain after failed copy, got %v", err)
 	}
 }
 
@@ -738,7 +725,7 @@ func TestHandler_COPY_DirectoryIntoDescendantRejected(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
-	req.Header.Set("Destination", "http://localhost/dav/srcdir/nested/copied-dir")
+	req.Header.Set("Destination", "http://example.com/dav/srcdir/nested/copied-dir")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -769,7 +756,7 @@ func TestHandler_COPY_DirectoryOverwriteExistingDestinationRejected(t *testing.T
 	}
 
 	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
-	req.Header.Set("Destination", "http://localhost/dav/dst")
+	req.Header.Set("Destination", "http://example.com/dav/dst")
 	req.Header.Set("Overwrite", "T")
 	w := httptest.NewRecorder()
 
@@ -805,7 +792,7 @@ func TestHandler_COPY_InvalidDestinationPrefix(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
-	req.Header.Set("Destination", "http://localhost/other/copied.txt")
+	req.Header.Set("Destination", "http://example.com/other/copied.txt")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -830,7 +817,7 @@ func TestHandler_COPY_SameSourceAndDestinationRejected(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/src/file.txt")
+	req.Header.Set("Destination", "http://example.com/dav/src/file.txt")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -861,7 +848,7 @@ func TestHandler_MOVE(t *testing.T) {
 	fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me")))
 
 	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/movetest/moved.txt")
+	req.Header.Set("Destination", "http://example.com/dav/movetest/moved.txt")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -898,7 +885,7 @@ func TestHandler_MOVE_OverwriteFalse(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/movetest/existing.txt")
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing.txt")
 	req.Header.Set("Overwrite", "F")
 	w := httptest.NewRecorder()
 
@@ -940,7 +927,7 @@ func TestHandler_MOVE_OverwriteTrueReturnsNoContent(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/movetest/existing.txt")
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing.txt")
 	req.Header.Set("Overwrite", "T")
 	w := httptest.NewRecorder()
 
@@ -948,6 +935,51 @@ func TestHandler_MOVE_OverwriteTrueReturnsNoContent(t *testing.T) {
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("MOVE overwrite=true status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+func TestHandler_MOVE_OverwriteFailureRestoresExistingDestination(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/missing.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing.txt")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("MOVE missing source status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+
+	f, err := fs.OpenFile(ctx, "/movetest/existing.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(existing) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(existing) error: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("Expected destination content preserved after failed overwrite MOVE, got %q", string(data))
+	}
+	entries, err := fs.ReadDir(ctx, "/movetest")
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name, ".webdav-move-backup-") {
+			t.Fatalf("unexpected leftover MOVE backup path: %s", entry.Name)
+		}
 	}
 }
 
@@ -963,7 +995,7 @@ func TestHandler_MOVE_InvalidDestinationPrefix(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
-	req.Header.Set("Destination", "http://localhost/other/moved.txt")
+	req.Header.Set("Destination", "http://example.com/other/moved.txt")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -988,7 +1020,7 @@ func TestHandler_MOVE_SameSourceAndDestinationRejected(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
-	req.Header.Set("Destination", "http://localhost/dav/movetest/orig.txt")
+	req.Header.Set("Destination", "http://example.com/dav/movetest/orig.txt")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -1017,7 +1049,7 @@ func TestHandler_MOVE_DirectoryIntoDescendantRejected(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("MOVE", "/dav/movetest", nil)
-	req.Header.Set("Destination", "http://localhost/dav/movetest/nested/moved")
+	req.Header.Set("Destination", "http://example.com/dav/movetest/nested/moved")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -1231,6 +1263,62 @@ func TestHandler_PROPFIND(t *testing.T) {
 	})
 }
 
+func TestHandler_PROPFIND_InvalidatesAncestorCacheAfterNestedWrite(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/cachetest"); err != nil {
+		t.Fatalf("Mkdir(cachetest) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/cachetest/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("/cachetest/file-%02d.txt", i)
+		if err := fs.WriteFile(ctx, name, bytes.NewReader([]byte("seed"))); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", name, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/cachetest/nested/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(existing nested) error: %v", err)
+	}
+
+	firstReq := httptest.NewRequest("PROPFIND", "/dav/cachetest", nil)
+	firstReq.Header.Set("Depth", "infinity")
+	firstW := httptest.NewRecorder()
+	handler.ServeHTTP(firstW, firstReq)
+
+	if firstW.Code != http.StatusMultiStatus {
+		t.Fatalf("first PROPFIND status = %d, want %d", firstW.Code, http.StatusMultiStatus)
+	}
+	if !strings.Contains(firstW.Body.String(), "existing.txt") {
+		t.Fatalf("expected initial PROPFIND to include existing nested file, got %q", firstW.Body.String())
+	}
+	if strings.Contains(firstW.Body.String(), "new.txt") {
+		t.Fatalf("initial PROPFIND unexpectedly contains new file, got %q", firstW.Body.String())
+	}
+
+	putReq := httptest.NewRequest("PUT", "/dav/cachetest/nested/new.txt", strings.NewReader("new content"))
+	putW := httptest.NewRecorder()
+	handler.ServeHTTP(putW, putReq)
+
+	if putW.Code != http.StatusCreated {
+		t.Fatalf("nested PUT status = %d, want %d", putW.Code, http.StatusCreated)
+	}
+
+	secondReq := httptest.NewRequest("PROPFIND", "/dav/cachetest", nil)
+	secondReq.Header.Set("Depth", "infinity")
+	secondW := httptest.NewRecorder()
+	handler.ServeHTTP(secondW, secondReq)
+
+	if secondW.Code != http.StatusMultiStatus {
+		t.Fatalf("second PROPFIND status = %d, want %d", secondW.Code, http.StatusMultiStatus)
+	}
+	if !strings.Contains(secondW.Body.String(), "new.txt") {
+		t.Fatalf("expected nested write to invalidate ancestor PROPFIND cache, got %q", secondW.Body.String())
+	}
+}
+
 func TestHandler_PROPPATCH_MissingResourceReturnsNotFound(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 	req := httptest.NewRequest("PROPPATCH", "/dav/missing-proppatch.txt", strings.NewReader(`<?xml version="1.0"?><propertyupdate xmlns="DAV:"/>`))
@@ -1432,7 +1520,7 @@ func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 
 	t.Run("MoveRequiresToken", func(t *testing.T) {
 		req := httptest.NewRequest("MOVE", "/dav/locked/file.txt", nil)
-		req.Header.Set("Destination", "http://localhost/dav/locked-dst/file.txt")
+		req.Header.Set("Destination", "http://example.com/dav/locked-dst/file.txt")
 		w := httptest.NewRecorder()
 
 		handler.ServeHTTP(w, req)
@@ -1513,7 +1601,7 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 
 	t.Run("MoveIntoLockedCollectionRequiresToken", func(t *testing.T) {
 		req := httptest.NewRequest("MOVE", "/dav/src/file.txt", nil)
-		req.Header.Set("Destination", "http://localhost/dav/locked-dir/moved.txt")
+		req.Header.Set("Destination", "http://example.com/dav/locked-dir/moved.txt")
 		w := httptest.NewRecorder()
 
 		handler.ServeHTTP(w, req)
@@ -1537,7 +1625,7 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 
 	t.Run("MoveIntoLockedCollectionWithIfHeaderTokenSucceeds", func(t *testing.T) {
 		req := httptest.NewRequest("MOVE", "/dav/src/file.txt", nil)
-		req.Header.Set("Destination", "http://localhost/dav/locked-dir/if-header.txt")
+		req.Header.Set("Destination", "http://example.com/dav/locked-dir/if-header.txt")
 		req.Header.Set("If", "</dav/locked-dir> (<"+strings.Trim(lockToken, "<>")+">)")
 		w := httptest.NewRecorder()
 

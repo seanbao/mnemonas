@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner, addToast } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
-import { buildDownloadUrl, downloadFile } from '@/api/files'
+import { downloadFile } from '@/api/files'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
@@ -32,21 +32,16 @@ export function PreviewModal({
   files = [],
   onFileChange,
 }: PreviewModalProps) {
-  const [currentIndex, setCurrentIndex] = useState(0)
-
-  // Find current file index in files list
-  useEffect(() => {
-    if (file && files.length > 0) {
-      const index = files.findIndex(f => f.path === file.path)
-      if (index >= 0) {
-        setCurrentIndex(index)
-      }
+  const currentIndex = useMemo(() => {
+    if (!file || files.length === 0) {
+      return -1
     }
+    return files.findIndex(f => f.path === file.path)
   }, [file, files])
 
   // Get current file (either from navigation or prop)
   const currentFile = useMemo(() => {
-    if (files.length > 0 && currentIndex >= 0 && currentIndex < files.length) {
+    if (currentIndex >= 0 && currentIndex < files.length) {
       return files[currentIndex]
     }
     return file
@@ -63,17 +58,13 @@ export function PreviewModal({
 
   const handlePrev = useCallback(() => {
     if (canNavigatePrev) {
-      const newIndex = currentIndex - 1
-      setCurrentIndex(newIndex)
-      onFileChange?.(files[newIndex])
+      onFileChange?.(files[currentIndex - 1])
     }
   }, [canNavigatePrev, currentIndex, files, onFileChange])
 
   const handleNext = useCallback(() => {
     if (canNavigateNext) {
-      const newIndex = currentIndex + 1
-      setCurrentIndex(newIndex)
-      onFileChange?.(files[newIndex])
+      onFileChange?.(files[currentIndex + 1])
     }
   }, [canNavigateNext, currentIndex, files, onFileChange])
 
@@ -153,6 +144,7 @@ export function PreviewModal({
       case 'video':
         return (
           <VideoPreview 
+            key={currentFile.path}
             path={currentFile.path} 
             filename={currentFile.name}
           />
@@ -161,6 +153,7 @@ export function PreviewModal({
       case 'audio':
         return (
           <AudioPreview 
+            key={currentFile.path}
             path={currentFile.path} 
             filename={currentFile.name}
           />
@@ -287,11 +280,6 @@ function VideoPreview({ path }: { path: string; filename: string }) {
   const url = buildStreamUrl(path)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-
-  useEffect(() => {
-    setIsLoading(true)
-    setError(null)
-  }, [url])
   
   return (
     <div className="h-full flex flex-col bg-black rounded-xl overflow-hidden">
@@ -330,11 +318,6 @@ function AudioPreview({ path, filename }: { path: string; filename: string }) {
   const url = buildStreamUrl(path)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-
-  useEffect(() => {
-    setIsLoading(true)
-    setError(null)
-  }, [url])
   
   return (
     <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-xl">
