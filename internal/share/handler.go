@@ -548,7 +548,10 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 				Description: share.Description,
 			}
 
-			h.enrichPublicShareInfo(r.Context(), info, share)
+			if err := h.enrichPublicShareInfo(r.Context(), info, share); err != nil {
+				h.writePublicShareInfoError(w, share, err)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(info)
@@ -581,7 +584,10 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 		Description: share.Description,
 	}
 
-	h.enrichPublicShareInfo(r.Context(), info, share)
+	if err := h.enrichPublicShareInfo(r.Context(), info, share); err != nil {
+		h.writePublicShareInfoError(w, share, err)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
@@ -636,8 +642,6 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		h.passwordAttempts.reset(attemptKey)
 	}
 
-	h.setShareAccessCookie(w, r, share)
-
 	info := &PublicShareInfo{
 		ID:          share.ID,
 		Type:        share.Type,
@@ -645,7 +649,12 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		Permission:  share.Permission,
 		Description: share.Description,
 	}
-	h.enrichPublicShareInfo(r.Context(), info, share)
+	if err := h.enrichPublicShareInfo(r.Context(), info, share); err != nil {
+		h.writePublicShareInfoError(w, share, err)
+		return
+	}
+
+	h.setShareAccessCookie(w, r, share)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
@@ -663,7 +672,7 @@ func clientIdentifier(r *http.Request) string {
 func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	share, err := h.accessAuthorizedShare(r, id)
+	share, err := h.authorizeShare(r, id)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -698,10 +707,20 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
+	firstChunk, exhausted, err := prefetchDownloadChunk(reader)
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
+		return
+	}
+	if _, err := h.store.RecordAuthorizedAccess(id); err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+
 	filename := path.Base(share.Path)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	if err := streamDownload(w, reader); err != nil {
+	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -719,7 +738,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 	filePath = strings.TrimPrefix(filePath, "/")
 
-	share, err := h.accessAuthorizedShare(r, id)
+	share, err := h.authorizeShare(r, id)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -752,6 +771,10 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 			return
 		}
+		if errors.Is(err, storage.ErrNotDir) {
+			writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
+			return
+		}
 		if errors.Is(err, storage.ErrIsDir) {
 			writeShareError(w, http.StatusBadRequest, "path is a directory", "INVALID_PATH")
 			return
@@ -765,10 +788,20 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
+	firstChunk, exhausted, err := prefetchDownloadChunk(reader)
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
+		return
+	}
+	if _, err := h.store.RecordAuthorizedAccess(id); err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+
 	filename := path.Base(fullPath)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	if err := streamDownload(w, reader); err != nil {
+	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -782,8 +815,32 @@ func contentDispositionAttachment(filename string) string {
 	return value
 }
 
-func streamDownload(w http.ResponseWriter, reader io.Reader) error {
+func prefetchDownloadChunk(reader io.Reader) ([]byte, bool, error) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			return buf[:n], errors.Is(err, io.EOF), nil
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, true, nil
+			}
+			return nil, false, err
+		}
+	}
+}
+
+func streamDownload(w http.ResponseWriter, reader io.Reader, firstChunk []byte, exhausted bool) error {
 	trackingWriter := &downloadResponseWriter{ResponseWriter: w}
+	if len(firstChunk) > 0 {
+		if _, err := trackingWriter.Write(firstChunk); err != nil && !trackingWriter.started {
+			return err
+		}
+	}
+	if exhausted {
+		return nil
+	}
 	_, err := io.Copy(trackingWriter, reader)
 	if err != nil && !trackingWriter.started {
 		return err
@@ -816,7 +873,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		relPath = ""
 	}
 
-	share, err := h.accessAuthorizedShare(r, id)
+	share, err := h.authorizeShare(r, id)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -856,6 +913,11 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := h.store.RecordAuthorizedAccess(id); err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+
 	items := make([]*PublicShareItem, 0, len(entries))
 	for _, entry := range entries {
 		relItemPath, relErr := shareRelativePath(share.Path, entry.Path)
@@ -884,24 +946,51 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareInfo, share *Share) {
+func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareInfo, share *Share) error {
 	info.FileName = path.Base(share.Path)
 
 	statProvider, ok := h.fs.(FileStatProvider)
 	if !ok {
-		return
+		return nil
 	}
 
 	switch share.Type {
 	case ShareTypeFile:
-		if fileInfo, err := statProvider.Stat(ctx, share.Path); err == nil && !fileInfo.IsDir {
-			info.FileSize = fileInfo.Size
+		fileInfo, err := statProvider.Stat(ctx, share.Path)
+		if err != nil {
+			return err
 		}
+		if fileInfo.IsDir {
+			return storage.ErrIsDir
+		}
+		info.FileSize = fileInfo.Size
 	case ShareTypeFolder:
-		if entries, err := statProvider.ReadDir(ctx, share.Path); err == nil {
-			info.FolderItems = len(entries)
+		entries, err := statProvider.ReadDir(ctx, share.Path)
+		if err != nil {
+			return err
 		}
+		info.FolderItems = len(entries)
 	}
+
+	return nil
+}
+
+func (h *Handler) writePublicShareInfoError(w http.ResponseWriter, share *Share, err error) {
+	if errors.Is(err, storage.ErrNotFound) {
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+		return
+	}
+
+	if share.Type == ShareTypeFile && errors.Is(err, storage.ErrIsDir) {
+		writeShareError(w, http.StatusBadRequest, "shared resource is a directory", "INVALID_SHARE_TYPE")
+		return
+	}
+	if share.Type == ShareTypeFolder && errors.Is(err, storage.ErrNotDir) {
+		writeShareError(w, http.StatusBadRequest, "shared resource is not a folder", "INVALID_SHARE_TYPE")
+		return
+	}
+
+	writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
 }
 
 func (h *Handler) buildShareURL(id string) string {
@@ -911,7 +1000,7 @@ func (h *Handler) buildShareURL(id string) string {
 	return "/s/" + id
 }
 
-func (h *Handler) accessAuthorizedShare(r *http.Request, id string) (*Share, error) {
+func (h *Handler) authorizeShare(r *http.Request, id string) (*Share, error) {
 	share, err := h.store.Get(id)
 	if err != nil {
 		return nil, err
@@ -925,7 +1014,7 @@ func (h *Handler) accessAuthorizedShare(r *http.Request, id string) (*Share, err
 		return nil, ErrInvalidPassword
 	}
 
-	return h.store.RecordAuthorizedAccess(id)
+	return share, nil
 }
 
 func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {

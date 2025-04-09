@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -162,7 +162,7 @@ export function FavoritesPage() {
     queryFn: listFavorites,
   })
 
-  const favoriteItems = favorites ?? []
+  const favoriteItems = useMemo(() => favorites ?? [], [favorites])
 
   // Remove mutation
   const removeMutation = useMutation({

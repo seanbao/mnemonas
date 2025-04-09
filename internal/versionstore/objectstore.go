@@ -7,6 +7,8 @@ import (
 	"fmt"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ObjectStore handles version object storage via Rust dataplane
@@ -41,24 +43,32 @@ func (s *ObjectStore) Get(ctx context.Context, hash string) ([]byte, error) {
 
 	data, err := s.client.GetChunk(ctx, hash)
 	if err != nil {
-		return nil, ErrNotFound
+		return nil, mapObjectGetError(err)
 	}
 
 	return data, nil
 }
 
+func mapObjectGetError(err error) error {
+	if status.Code(err) == codes.NotFound {
+		return ErrNotFound
+	}
+
+	return fmt.Errorf("failed to get chunk: %w", err)
+}
+
 // Has checks if an object exists via dataplane
-func (s *ObjectStore) Has(ctx context.Context, hash string) bool {
+func (s *ObjectStore) Has(ctx context.Context, hash string) (bool, error) {
 	if !s.client.IsConnected() {
-		return false
+		return false, fmt.Errorf("dataplane not connected")
 	}
 
 	exists, err := s.client.HasChunk(ctx, hash)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("failed to check chunk existence: %w", err)
 	}
 
-	return exists
+	return exists, nil
 }
 
 // Delete removes an object via dataplane

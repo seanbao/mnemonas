@@ -3,6 +3,7 @@ package webdav
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,14 +84,24 @@ func (c *PropfindCache) Invalidate(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Invalidate all entries that might be affected by this path change
-	// This includes the path itself and its parent directories
 	for key := range c.entries {
-		// Simple prefix match - could be more precise
-		if len(key) >= len(path) && key[:len(path)] == path {
+		cachedPath, _, ok := strings.Cut(key, "|")
+		if !ok {
+			cachedPath = key
+		}
+
+		if affectsCachedPropfind(path, cachedPath) {
 			delete(c.entries, key)
 		}
 	}
+}
+
+func affectsCachedPropfind(changedPath, cachedPath string) bool {
+	if changedPath == cachedPath {
+		return true
+	}
+
+	return isDescendantPath(changedPath, cachedPath) || isDescendantPath(cachedPath, changedPath)
 }
 
 // InvalidateAll clears the entire cache

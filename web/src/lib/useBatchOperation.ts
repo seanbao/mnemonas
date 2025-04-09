@@ -60,7 +60,7 @@ export function useBatchOperation<T, R = void>(
   const execute = useCallback(
     async (items: T[]): Promise<BatchOperationResult> => {
       if (items.length === 0) {
-        return { succeeded: 0, failed: 0, total: 0 }
+        return { succeeded: 0, failed: 0, total: 0, succeededItems: [], failedItems: [] }
       }
 
       setIsLoading(true)

@@ -305,6 +305,9 @@ func (s *Server) setupRoutes() {
 	// Setup status (public, for showing credentials on first run)
 	s.router.Route("/api/v1/setup", func(r chi.Router) {
 		r.Get("/", s.handleGetSetupStatus)
+		if s.authEnabled {
+			r.With(s.authMw.RequireAuth, s.authMw.RequireRole(auth.RoleAdmin)).Post("/acknowledge", s.handleAcknowledgeSetup)
+		}
 	})
 
 	// Auth endpoints (public)
@@ -312,6 +315,10 @@ func (s *Server) setupRoutes() {
 		s.router.Route("/api/v1/auth", func(r chi.Router) {
 			r.Post("/login", s.handleLoginWithActivity)
 			r.Post("/refresh", s.authHandler.HandleRefresh)
+			r.With(s.authMw.RequireAuth).Post("/logout", s.handleLogoutWithActivity)
+			r.With(s.authMw.RequireAuth).Get("/me", s.authHandler.HandleMe)
+			r.With(s.authMw.RequireAuth).Post("/password", s.authHandler.HandleChangePassword)
+			r.With(s.authMw.RequireAuth).Post("/download-session", s.authHandler.HandleCreateDownloadSession)
 		})
 	}
 
@@ -335,16 +342,6 @@ func (s *Server) setupRoutes() {
 
 		// Auth endpoints (require auth)
 		if s.authEnabled {
-			r.Post("/auth/logout", s.handleLogoutWithActivity)
-			r.Get("/auth/me", s.authHandler.HandleMe)
-			r.Post("/auth/password", s.authHandler.HandleChangePassword)
-			r.Post("/auth/download-session", s.authHandler.HandleCreateDownloadSession)
-
-			r.Route("/setup", func(r chi.Router) {
-				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
-				r.Post("/acknowledge", s.handleAcknowledgeSetup)
-			})
-
 			// Admin user management
 			r.Route("/admin/users", func(r chi.Router) {
 				r.Use(s.authMw.RequireRole(auth.RoleAdmin))
@@ -494,6 +491,15 @@ func hasTraversalSegment(filePath string) bool {
 	return false
 }
 
+func pathContainsDescendant(basePath, targetPath string) bool {
+	basePath = path.Clean(basePath)
+	targetPath = path.Clean(targetPath)
+	if basePath == "/" {
+		return targetPath != "/"
+	}
+	return strings.HasPrefix(targetPath, basePath+"/")
+}
+
 // validateHash validates a BLAKE3 hash string (64 hex characters).
 func validateHash(hash string) error {
 	if len(hash) != 64 {
@@ -587,7 +593,7 @@ func isStorageNotFound(err error) bool {
 }
 
 func isStorageConflict(err error) bool {
-	return errors.Is(err, storage.ErrAlreadyExists)
+	return errors.Is(err, storage.ErrAlreadyExists) || errors.Is(err, storage.ErrNotDir)
 }
 
 func (s *Server) respondNotFound(w http.ResponseWriter, operation string, err error) {
@@ -627,6 +633,10 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "list files", err)
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			BadRequest(w, "path is not a directory")
 			return
 		}
 
@@ -715,18 +725,34 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
 	}
-
-	if err := s.fs.Mkdir(r.Context(), dirPath); err != nil {
-		// Check if already exists
-		if isStorageConflict(err) {
-			// Return success for idempotent behavior
+	if info, err := s.fs.Stat(r.Context(), dirPath); err == nil {
+		if info.IsDir {
 			NewAPIResponse(map[string]any{
 				"path": dirPath,
 			}).WithMessage("directory already exists").Write(w, http.StatusOK)
 			return
 		}
+		Conflict(w, "resource already exists")
+		return
+	} else if errors.Is(err, storage.ErrNotDir) {
+		Conflict(w, "parent path is not a directory")
+		return
+	} else if !isStorageNotFound(err) {
+		s.respondInternalError(w, "stat directory", err)
+		return
+	}
+
+	if err := s.fs.Mkdir(r.Context(), dirPath); err != nil {
 		if errors.Is(err, storage.ErrNotDir) {
 			Conflict(w, "parent path is not a directory")
+			return
+		}
+		// Check if already exists
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			// Return success for idempotent behavior
+			NewAPIResponse(map[string]any{
+				"path": dirPath,
+			}).WithMessage("directory already exists").Write(w, http.StatusOK)
 			return
 		}
 		s.respondInternalError(w, "create directory", err)
@@ -759,6 +785,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	if err := s.fs.Delete(r.Context(), filePath); err != nil {
 		if errors.Is(err, storage.ErrDirNotEmpty) {
 			Conflict(w, "directory not empty")
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
 			return
 		}
 		// Check if it's a "not found" error
@@ -804,6 +834,14 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 		reader, err := s.fs.GetVersion(r.Context(), filePath, versionHash)
 		if err != nil {
+			if errors.Is(err, storage.ErrIsDir) {
+				BadRequest(w, "cannot download directory")
+				return
+			}
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
 			if isStorageNotFound(err) {
 				s.respondNotFound(w, "download file version", err)
 				return
@@ -829,6 +867,10 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "stat file", err)
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
 			return
 		}
 		s.respondInternalError(w, "stat file", err)
@@ -885,14 +927,31 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidDestinationPath(w)
 		return
 	}
+	if fromPath == toPath {
+		Conflict(w, "source and destination must differ")
+		return
+	}
 
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
 	}
+	if info, err := s.fs.Stat(r.Context(), fromPath); err == nil {
+		if info.IsDir && pathContainsDescendant(fromPath, toPath) {
+			Conflict(w, "destination cannot be inside source directory")
+			return
+		}
+	} else if !isStorageNotFound(err) {
+		s.respondInternalError(w, "stat move source", err)
+		return
+	}
 
 	if err := s.fs.Rename(r.Context(), fromPath, toPath); err != nil {
 		if isStorageConflict(err) {
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
 			Conflict(w, "resource already exists")
 			return
 		}
@@ -943,11 +1002,30 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := s.fs.Stat(r.Context(), toPath); err == nil {
+		Conflict(w, "resource already exists")
+		return
+	} else if errors.Is(err, storage.ErrNotDir) {
+		Conflict(w, "parent path is not a directory")
+		return
+	} else if !isStorageNotFound(err) {
+		s.respondInternalError(w, "stat copy destination", err)
+		return
+	}
+
 	// Open source file
 	reader, err := s.fs.OpenFile(r.Context(), fromPath)
 	if err != nil {
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "copy file", err)
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if errors.Is(err, storage.ErrIsDir) {
+			BadRequest(w, "source path is a directory")
 			return
 		}
 		s.respondInternalError(w, "copy file", err)
@@ -958,6 +1036,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 	// Write to destination
 	if err := s.fs.WriteFile(r.Context(), toPath, reader); err != nil {
 		if isStorageConflict(err) {
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
 			Conflict(w, "resource already exists")
 			return
 		}
@@ -993,6 +1075,10 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, storage.ErrIsDir) {
 			BadRequest(w, "cannot list versions for directory")
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
 			return
 		}
 		if isStorageNotFound(err) {
@@ -1061,6 +1147,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
 		if errors.Is(err, storage.ErrIsDir) {
 			BadRequest(w, "cannot restore version for directory")
+			return
+		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
 			return
 		}
 		if isStorageNotFound(err) {
@@ -1238,17 +1328,6 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
-		ServiceUnavailable(w, "dataplane not connected")
-		return
-	}
-
-	// Check if scrub is already running
-	if s.maintenance != nil && s.maintenance.ScrubIsRunning() {
-		Conflict(w, "scrub is already running")
-		return
-	}
-
 	// M3 fix: Limit request body size
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultScrubRequestBodyLimit)
 
@@ -1261,6 +1340,17 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 			BadRequest(w, "invalid request body")
 			return
 		}
+	}
+
+	if s.dataplane == nil || !s.dataplane.IsConnected() {
+		ServiceUnavailable(w, "dataplane not connected")
+		return
+	}
+
+	// Check if scrub is already running
+	if s.maintenance != nil && s.maintenance.ScrubIsRunning() {
+		Conflict(w, "scrub is already running")
+		return
 	}
 
 	// Mark scrub as started
@@ -1329,11 +1419,6 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
-		ServiceUnavailable(w, "dataplane not connected")
-		return
-	}
-
 	// Parse pagination parameters
 	cursor := r.URL.Query().Get("cursor")
 	if len(cursor) > maxObjectsCursorLength {
@@ -1346,6 +1431,11 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		if l, err := parseUint32(limitStr); err == nil && l > 0 {
 			limit = l
 		}
+	}
+
+	if s.dataplane == nil || !s.dataplane.IsConnected() {
+		ServiceUnavailable(w, "dataplane not connected")
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), DefaultListObjectsTimeout*time.Second)
@@ -1839,7 +1929,11 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err != nil {
-		if isStorageConflict(err) {
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if errors.Is(err, storage.ErrAlreadyExists) {
 			Conflict(w, "resource already exists")
 			return
 		}
@@ -1958,6 +2052,14 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 			s.respondNotFound(w, "thumbnail open file", err)
 			return
 		}
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if errors.Is(err, storage.ErrIsDir) {
+			BadRequest(w, "path is a directory")
+			return
+		}
 		s.respondInternalError(w, "thumbnail open file", err)
 		return
 	}
@@ -1980,14 +2082,6 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 
 // handleListActivity returns recent activity log entries
 func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
-	if s.activity == nil {
-		NewAPIResponse(map[string]any{
-			"items": []any{},
-			"total": 0,
-		}).Write(w, http.StatusOK)
-		return
-	}
-
 	// Parse query parameters
 	limitStr := r.URL.Query().Get("limit")
 	offsetStr := r.URL.Query().Get("offset")
@@ -2012,6 +2106,16 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		offset = o
+	}
+
+	if s.activity == nil {
+		NewAPIResponse(map[string]any{
+			"items":  []any{},
+			"total":  0,
+			"limit":  limit,
+			"offset": offset,
+		}).Write(w, http.StatusOK)
+		return
 	}
 
 	entries, total := s.activity.List(limit, offset, activity.ActionType(actionFilter), userFilter)
@@ -2713,6 +2817,10 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleAcknowledgeSetup marks the setup as shown
 func (s *Server) handleAcknowledgeSetup(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		ServiceUnavailable(w, "configuration not available")
+		return
+	}
 	if err := config.MarkSetupShown(s.config.Storage.Root); err != nil {
 		s.respondInternalError(w, "acknowledge setup", err)
 		return

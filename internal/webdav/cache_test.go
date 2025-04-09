@@ -82,6 +82,30 @@ func TestPropfindCache_Invalidate(t *testing.T) {
 	}
 }
 
+func TestPropfindCache_InvalidateChildAlsoClearsAncestors(t *testing.T) {
+	cache := NewPropfindCache(time.Minute, 100)
+
+	cache.Set("/", "1", []propfindResponse{{Href: "/"}})
+	cache.Set("/parent", "infinity", []propfindResponse{{Href: "/parent"}})
+	cache.Set("/parent/child", "1", []propfindResponse{{Href: "/parent/child"}})
+	cache.Set("/sibling", "1", []propfindResponse{{Href: "/sibling"}})
+
+	cache.Invalidate("/parent/child")
+
+	if _, ok := cache.Get("/", "1"); ok {
+		t.Error("Ancestor root entry should be invalidated")
+	}
+	if _, ok := cache.Get("/parent", "infinity"); ok {
+		t.Error("Ancestor directory entry should be invalidated")
+	}
+	if _, ok := cache.Get("/parent/child", "1"); ok {
+		t.Error("Changed path entry should be invalidated")
+	}
+	if _, ok := cache.Get("/sibling", "1"); !ok {
+		t.Error("Unrelated sibling entry should not be invalidated")
+	}
+}
+
 func TestPropfindCache_InvalidateAll(t *testing.T) {
 	cache := NewPropfindCache(time.Minute, 100)
 

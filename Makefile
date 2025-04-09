@@ -64,7 +64,7 @@ dev:
 # 运行测试
 test:
 	@echo "🧪 Running Go tests..."
-	go test -v -race ./...
+	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race ./...
 	@echo "🦀 Running Rust tests..."
 	cd dataplane && cargo test
 	@echo "🌐 Running frontend tests..."
@@ -74,7 +74,7 @@ test:
 coverage:
 	@echo "📊 Generating coverage reports..."
 	@mkdir -p coverage
-	go test -coverprofile=coverage/go.out ./...
+	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out ./...
 	go tool cover -html=coverage/go.out -o coverage/go.html
 	cd web && npm run test:coverage
 	@echo "✅ Coverage reports: coverage/go.html, web/coverage/"
@@ -132,7 +132,7 @@ check: lint test
 # 快速检查 (commit 前)
 quick-check:
 	@echo "🚀 Quick check..."
-	go build ./...
-	go test -short ./...
+	CGO_ENABLED=1 go build ./...
+	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -short ./...
 	cd dataplane && cargo check
 	@echo "✅ Quick check passed"

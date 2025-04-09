@@ -345,8 +345,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.75'
       - name: Run unit tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out ./...
       - name: Upload coverage
         uses: codecov/codecov-action@v4
 

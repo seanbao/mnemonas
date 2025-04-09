@@ -175,6 +175,21 @@ func TestWorkspace_ReadDir(t *testing.T) {
 	}
 }
 
+func TestWorkspace_ReadDir_ReturnsErrNotDirWhenPathIsFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	w.WriteFile(ctx, "/file.txt", []byte("content"))
+
+	entries, err := w.ReadDir(ctx, "/file.txt")
+	if err != ErrNotDir {
+		t.Fatalf("ReadDir() error = %v, want ErrNotDir", err)
+	}
+	if entries != nil {
+		t.Fatalf("expected no entries for file path, got %d", len(entries))
+	}
+}
+
 func TestWorkspace_Delete(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -290,6 +305,33 @@ func TestWorkspace_Walk(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Walk_PropagatesTraversalError(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/walktest"); err != nil {
+		t.Fatalf("Mkdir(walktest) error: %v", err)
+	}
+	if err := w.Mkdir(ctx, "/walktest/blocked"); err != nil {
+		t.Fatalf("Mkdir(blocked) error: %v", err)
+	}
+
+	blockedPath := filepath.Join(w.root, "walktest", "blocked")
+	if err := os.Chmod(blockedPath, 0); err != nil {
+		t.Fatalf("Chmod(blocked) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(blockedPath, 0o755)
+	}()
+
+	err := w.Walk(ctx, "/walktest", func(path string, info *FileInfo) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected Walk() to propagate traversal error")
+	}
+}
+
 func TestWorkspace_OpenFile(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -362,6 +404,32 @@ func TestWorkspace_CleanupStaging(t *testing.T) {
 	}
 }
 
+func TestWorkspace_CleanupStaging_PropagatesWalkError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based walk error is unreliable as root")
+	}
+
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	blockedDir := filepath.Join(w.Root(), "blocked")
+	if err := os.Mkdir(blockedDir, 0755); err != nil {
+		t.Fatalf("Mkdir(blocked) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedDir, "stuck.tmp"), []byte("temp"), 0644); err != nil {
+		t.Fatalf("WriteFile(stuck.tmp) error: %v", err)
+	}
+	if err := os.Chmod(blockedDir, 0000); err != nil {
+		t.Fatalf("Chmod(blocked) error: %v", err)
+	}
+	defer os.Chmod(blockedDir, 0755)
+
+	_, _, err := w.CleanupStaging(ctx)
+	if err == nil {
+		t.Fatal("expected CleanupStaging() to return walk error")
+	}
+}
+
 func TestWorkspace_FullPath(t *testing.T) {
 	w := setupWorkspace(t)
 
@@ -401,6 +469,41 @@ func TestWorkspace_AtomicWrite(t *testing.T) {
 	tmpPath := filepath.Join(w.Root(), "large.bin.tmp")
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
 		t.Error("Temp file should not exist after successful write")
+	}
+}
+
+
+func TestWorkspace_OpenFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/open-parent", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(open-parent) error: %v", err)
+	}
+
+	reader, err := w.OpenFile(ctx, "/open-parent/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("OpenFile() error = %v, want ErrNotDir", err)
+	}
+	if reader != nil {
+		t.Fatal("expected no reader for parent-not-directory path")
+	}
+}
+
+func TestWorkspace_ReadFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/read-parent", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(read-parent) error: %v", err)
+	}
+
+	data, err := w.ReadFile(ctx, "/read-parent/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("ReadFile() error = %v, want ErrNotDir", err)
+	}
+	if data != nil {
+		t.Fatal("expected no data for parent-not-directory path")
 	}
 }
 
