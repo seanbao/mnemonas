@@ -9,6 +9,7 @@ const mockAddToast = vi.fn()
 const mockNavigate = vi.fn()
 const mockBatchExecute = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
+let mockUseRealBatchOperation = false
 let mockBatchResult = {
   succeeded: 1,
   failed: 0,
@@ -40,6 +41,31 @@ vi.mock('@/api/favorites', async () => {
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: (options: { onComplete?: (result: typeof mockBatchResult) => void }) => ({
     execute: vi.fn(async (items: string[]) => {
+      if (mockUseRealBatchOperation) {
+        const results = await Promise.allSettled(items.map((item) => options.operation(item)))
+        const warningMessages = results
+          .filter((result): result is PromiseFulfilledResult<unknown> => result.status === 'fulfilled')
+          .map((result) => result.value)
+          .filter((value): value is { warning?: boolean; message?: string } => !!value && typeof value === 'object')
+          .map((value) => value.warning ? value.message : undefined)
+          .filter((message): message is string => typeof message === 'string')
+        const result = {
+          succeeded: results.filter((result) => result.status === 'fulfilled').length,
+          failed: results.filter((result) => result.status === 'rejected').length,
+          total: items.length,
+          succeededItems: items.filter((_, index) => results[index]?.status === 'fulfilled'),
+          failedItems: items.filter((_, index) => results[index]?.status === 'rejected'),
+          failedErrors: results
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map((result) => result.reason),
+          warningCount: warningMessages.length,
+          warningMessages,
+        }
+        mockBatchExecute(items)
+        options.onComplete?.(result)
+        return result
+      }
+
       const result = {
         ...mockBatchResult,
         total: items.length,
@@ -90,6 +116,7 @@ describe('FavoritesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    mockUseRealBatchOperation = false
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockNavigate.mockClear()
     mockBatchExecute.mockClear()
@@ -374,6 +401,47 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('treats batch remove not-found results as already removed instead of keeping stale selections', async () => {
+    const user = userEvent.setup()
+    mockUseRealBatchOperation = true
+    vi.mocked(favoritesApi.removeFavorite).mockImplementation(async (path: string) => {
+      if (path === '/photos/') {
+        throw new FavoritesError('favorite not found', 404, 'FAVORITE_NOT_FOUND')
+      }
+    })
+    vi.mocked(favoritesApi.listFavorites).mockReset()
+    vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
+    vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockBatchExecute).toHaveBeenCalledWith(['/docs/report.pdf', '/photos/'])
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '打开文件夹 /photos/' })).not.toBeInTheDocument()
+      expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).not.toBeInTheDocument()
+      expect(screen.getByText('还没有收藏')).toBeInTheDocument()
+    })
+  })
+
   it('shows disabled toast when updating a note after favorites are disabled', async () => {
     const user = userEvent.setup()
     vi.mocked(favoritesApi.updateFavoriteNote).mockRejectedValueOnce(
@@ -401,6 +469,63 @@ describe('FavoritesPage', () => {
         color: 'warning',
       })
     })
+  })
+
+  it('removes a stale favorite and shows a warning when single remove hits not found', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockRejectedValueOnce(
+      new FavoritesError('favorite not found', 404, 'FAVORITE_NOT_FOUND')
+    )
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏已不存在',
+        description: '该收藏可能已被其他操作移除，列表已同步更新。',
+        color: 'warning',
+      })
+    })
+
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+  })
+
+  it('closes the note editor and removes a stale favorite when note update hits not found', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockRejectedValueOnce(
+      new FavoritesError('favorite not found', 404, 'FAVORITE_NOT_FOUND')
+    )
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏已不存在',
+        description: '该收藏可能已被其他操作移除，列表已同步更新。',
+        color: 'warning',
+      })
+    })
+
+    expect(screen.queryByRole('heading', { name: '编辑备注' })).not.toBeInTheDocument()
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
   })
 
   it('keeps the note editor open while a pending save is in flight', async () => {

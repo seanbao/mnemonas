@@ -22,6 +22,7 @@ vi.mock('@/api/files', async (importOriginal) => {
 
 // Mock useBatchOperation hook
 const mockBatchExecute = vi.fn()
+let mockUseRealBatchOperation = false
 let mockBatchResult = {
   succeeded: 1,
   failed: 0,
@@ -32,8 +33,40 @@ let mockBatchResult = {
 	warningMessages: [] as string[],
 }
 vi.mock('@/lib/useBatchOperation', () => ({
-  useBatchOperation: (options: { onComplete?: (result: typeof mockBatchResult) => void }) => ({
+  useBatchOperation: (options: {
+    operation: (item: string) => Promise<unknown>
+    onComplete?: (result: typeof mockBatchResult & {
+      failedErrors?: unknown[]
+      warningCount?: number
+      warningMessages?: string[]
+    }) => void
+  }) => ({
     execute: vi.fn(async (items: string[]) => {
+      if (mockUseRealBatchOperation) {
+        const results = await Promise.allSettled(items.map((item) => options.operation(item)))
+        const warningMessages = results
+          .filter((result): result is PromiseFulfilledResult<unknown> => result.status === 'fulfilled')
+          .map((result) => result.value)
+          .filter((value): value is { warning?: boolean; message?: string } => !!value && typeof value === 'object')
+          .map((value) => value.warning ? value.message : undefined)
+          .filter((message): message is string => typeof message === 'string')
+        const result = {
+          succeeded: results.filter((result) => result.status === 'fulfilled').length,
+          failed: results.filter((result) => result.status === 'rejected').length,
+          total: items.length,
+          succeededItems: items.filter((_, index) => results[index]?.status === 'fulfilled'),
+          failedItems: items.filter((_, index) => results[index]?.status === 'rejected'),
+          failedErrors: results
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map((result) => result.reason),
+			warningCount: warningMessages.length,
+			warningMessages,
+        }
+        mockBatchExecute(items)
+        options.onComplete?.(result)
+        return result
+      }
+
       const result = {
         ...mockBatchResult,
         total: items.length,
@@ -77,6 +110,7 @@ describe('TrashPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    mockUseRealBatchOperation = false
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockBatchExecute.mockClear()
     mockBatchResult = {
@@ -430,6 +464,55 @@ describe('TrashPage', () => {
       })
     })
 
+    it('removes a stale trash item and shows a warning when restore hits not found', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockRejectedValue(new ApiError('trash item not found', 404, 'Not Found', 'TRASH_NOT_FOUND'))
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 0,
+          },
+        ],
+        count: 2,
+        totalSize: 1024,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '回收站条目已不存在，已同步更新',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('deleted-file.txt')).toBeNull()
+        expect(screen.getByText('deleted-folder')).toBeTruthy()
+      })
+    })
+
   it('shows warning toast when restore succeeds with a warning', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     mockRestoreFromTrash.mockResolvedValue({
@@ -575,6 +658,62 @@ describe('TrashPage', () => {
           description: '文件系统当前不可用，请稍后重试',
           color: 'warning',
         })
+      })
+    })
+
+    it('removes a stale trash item and closes the modal when permanent delete hits not found', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockDeleteFromTrash.mockRejectedValue(new ApiError('trash item not found', 404, 'Not Found', 'TRASH_NOT_FOUND'))
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 0,
+          },
+        ],
+        count: 2,
+        totalSize: 1024,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(screen.getByText(/确定要永久删除/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '回收站条目已不存在，已同步更新',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('deleted-file.txt')).toBeNull()
+        expect(screen.queryByText(/确定要永久删除/)).toBeNull()
+        expect(screen.getByText('deleted-folder')).toBeTruthy()
       })
     })
 
@@ -1118,6 +1257,70 @@ describe('TrashPage', () => {
 
       const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
       await user.click(confirmButtons[confirmButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('deleted-file.txt')).toBeNull()
+        expect(screen.queryByText('deleted-folder')).toBeNull()
+        expect(screen.queryByText(/已选择.*项/)).toBeNull()
+        expect(screen.getByText('回收站是空的')).toBeTruthy()
+      })
+    })
+
+    it('treats batch restore not-found results as already synchronized instead of keeping stale selections', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUseRealBatchOperation = true
+      mockRestoreFromTrash.mockImplementation(async (id: string) => {
+        if (id === 'item2') {
+          throw new ApiError('trash item not found', 404, 'Not Found', 'TRASH_NOT_FOUND')
+        }
+
+        return { warning: false }
+      })
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 0,
+          },
+        ],
+        count: 2,
+        totalSize: 1024,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
 
       await waitFor(() => {
         expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])

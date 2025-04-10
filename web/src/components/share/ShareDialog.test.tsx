@@ -224,6 +224,27 @@ describe('ShareDialog', () => {
     })
   })
 
+  it('shows a stale-target warning when share creation target no longer exists', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockRejectedValue(new ShareError('file not found', 404, 'FILE_NOT_FOUND'))
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '分享目标已不存在',
+      description: '该文件或文件夹可能已被移动或删除，请刷新列表后重试。',
+      color: 'warning',
+    })
+  })
+
   it('blocks creating a protected share when password is empty', async () => {
     const user = userEvent.setup()
 

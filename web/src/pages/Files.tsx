@@ -66,6 +66,7 @@ import {
   MAX_UPLOAD_FILE_SIZE_BYTES,
   MAX_UPLOAD_FILE_SIZE_LABEL,
   type ActionResult,
+  type FileListResponse,
 } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
@@ -190,6 +191,13 @@ function getFilesActionSuccessToast(
   return {
     title: titles.success,
     color: 'success',
+  }
+}
+
+function getMissingFileActionResult(): ActionResult {
+  return {
+    warning: true,
+    message: '文件或文件夹已不存在，已同步更新',
   }
 }
 
@@ -1045,10 +1053,46 @@ export function FilesPage() {
     enabled: currentPathAllowed,
   })
 
+  const removeFilesFromCache = useCallback((paths: string[]) => {
+    if (paths.length === 0) {
+      return
+    }
+
+    const removedPaths = new Set(paths)
+    queryClient.setQueryData<FileListResponse>(['files', currentPath], (current) => {
+      if (!current) {
+        return current
+      }
+
+      const files = current.files.filter((file) => !removedPaths.has(file.path))
+      if (files.length === current.files.length) {
+        return current
+      }
+
+      return {
+        ...current,
+        files,
+      }
+    })
+  }, [currentPath, queryClient])
+
+  const deleteFileWithMissingSync = useCallback(async (path: string) => {
+    try {
+      return await deleteFile(path)
+    } catch (error) {
+      if (getErrorStatus(error) === 404) {
+        return getMissingFileActionResult()
+      }
+
+      throw error
+    }
+  }, [])
+
   // Mutations (omitted for brevity, same as before)
   const deleteMutation = useMutation({
-    mutationFn: deleteFile,
-    onSuccess: (result) => {
+    mutationFn: deleteFileWithMissingSync,
+    onSuccess: (result, path) => {
+      removeFilesFromCache([path])
       queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
       onDeleteClose()
       setDeleteTarget(null)
@@ -1208,6 +1252,15 @@ export function FilesPage() {
   const favoriteActionsAvailable = !favoritesError
   const favoritesBanner = favoritesError ? getFavoritesBannerContent(favoritesError) : null
   const favoriteUnavailableLabel = favoritesBanner?.title ?? '收藏状态不可用'
+  const syncFavoriteStatus = useCallback((path: string, isFavorited: boolean) => {
+    queryClient.setQueriesData<Record<string, boolean>>({ queryKey: ['favorites-check'] }, (current) => {
+      if (!current) {
+        return current
+      }
+
+      return { ...current, [path]: isFavorited }
+    })
+  }, [queryClient])
   const shareFeatureState = shareFeatureDisabled ? 'disabled' : getShareFeatureState(shareAvailabilityError)
   const shareActionsAvailable = shareFeatureState === null
   const shareActionLabel = getShareActionLabel(shareFeatureState)
@@ -1228,7 +1281,31 @@ export function FilesPage() {
         color: 'success' 
       })
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (getErrorCode(error) === 'FAVORITE_ALREADY_EXISTS' || getErrorStatus(error) === 409) {
+        syncFavoriteStatus(variables.path, true)
+        queryClient.invalidateQueries({ queryKey: ['favorites-check'] })
+        queryClient.invalidateQueries({ queryKey: ['favorites'] })
+        addToast({
+          title: '已在收藏夹中',
+          description: '该文件已被其他操作加入收藏，状态已同步。',
+          color: 'warning',
+        })
+        return
+      }
+
+      if (getErrorCode(error) === 'FAVORITE_NOT_FOUND' || getErrorStatus(error) === 404) {
+        syncFavoriteStatus(variables.path, false)
+        queryClient.invalidateQueries({ queryKey: ['favorites-check'] })
+        queryClient.invalidateQueries({ queryKey: ['favorites'] })
+        addToast({
+          title: '收藏已移除',
+          description: '该文件已不在收藏夹中，状态已同步。',
+          color: 'warning',
+        })
+        return
+      }
+
       addToast(getFavoriteActionErrorToast(error))
     },
   })
@@ -1682,6 +1759,7 @@ export function FilesPage() {
     const paths = Array.from(selectedFiles)
     let successCount = 0
     let errorCount = 0
+    const succeededPaths: string[] = []
     const failedPaths: string[] = []
     const failedErrors: unknown[] = []
     const warningMessages: string[] = []
@@ -1689,8 +1767,9 @@ export function FilesPage() {
     try {
       for (const path of paths) {
         try {
-          const result = await deleteFile(path)
+          const result = await deleteFileWithMissingSync(path)
           successCount++
+          succeededPaths.push(path)
           if (result.warning) {
             warningMessages.push(result.message ?? '')
           }
@@ -1701,6 +1780,7 @@ export function FilesPage() {
         }
       }
 
+      removeFilesFromCache(succeededPaths)
       queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
 
       if (errorCount === 0) {
@@ -1736,7 +1816,7 @@ export function FilesPage() {
     } finally {
       setIsBatchDeleting(false)
     }
-  }, [canWrite, selectedFiles, queryClient, currentPath, clearSelection, onBatchDeleteClose, setSelection])
+  }, [canWrite, selectedFiles, deleteFileWithMissingSync, removeFilesFromCache, queryClient, currentPath, clearSelection, onBatchDeleteClose, setSelection])
 
   // Batch download handler
   const handleBatchDownload = useCallback(async () => {
