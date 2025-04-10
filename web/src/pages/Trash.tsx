@@ -25,6 +25,7 @@ import {
   deleteFromTrash,
   emptyTrash,
   ApiError,
+  type ActionResult,
   type TrashItem,
   type TrashListResponse
 } from '@/api/files'
@@ -71,6 +72,13 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | unde
 }
 
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
+
+function getMissingTrashItemResult(): ActionResult {
+  return {
+    warning: true,
+    message: '回收站条目已不存在，已同步更新',
+  }
+}
 
 function getTrashLoadErrorPresentation(error: unknown): {
   title: string
@@ -360,9 +368,33 @@ export function TrashPage() {
   addToast({ title: '回收站已刷新', color: 'success' })
   }, [refetch])
 
+  const restoreTrashItem = useCallback(async (id: string) => {
+    try {
+      return await restoreFromTrash(id)
+    } catch (error) {
+      if (error instanceof ApiError && error.isNotFound) {
+        return getMissingTrashItemResult()
+      }
+
+      throw error
+    }
+  }, [])
+
+  const deleteTrashItem = useCallback(async (id: string) => {
+    try {
+      return await deleteFromTrash(id)
+    } catch (error) {
+      if (error instanceof ApiError && error.isNotFound) {
+        return getMissingTrashItemResult()
+      }
+
+      throw error
+    }
+  }, [])
+
   // Mutations
   const restoreMutation = useMutation({
-    mutationFn: (id: string) => restoreFromTrash(id),
+    mutationFn: (id: string) => restoreTrashItem(id),
     onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
@@ -383,7 +415,7 @@ export function TrashPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteFromTrash(id),
+    mutationFn: (id: string) => deleteTrashItem(id),
     onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
@@ -455,7 +487,7 @@ export function TrashPage() {
 
   // Batch restore using custom hook
   const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation({
-    operation: restoreFromTrash,
+    operation: restoreTrashItem,
     messages: {
       success: '{count} 项恢复成功',
       failure: '{count} 项恢复失败',
@@ -481,7 +513,7 @@ export function TrashPage() {
 
   // Batch delete using custom hook
   const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation({
-    operation: deleteFromTrash,
+    operation: deleteTrashItem,
     messages: {
       success: '{count} 项已永久删除',
       failure: '{count} 项永久删除失败',

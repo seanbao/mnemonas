@@ -53,6 +53,14 @@ function getShareDialogActionErrorToast(error: unknown): {
   color: 'warning' | 'danger'
 } {
   if (error instanceof ShareError) {
+    if (error.isNotFound) {
+      return {
+        title: '分享目标已不存在',
+        description: '该文件或文件夹可能已被移动或删除，请刷新列表后重试。',
+        color: 'warning',
+      }
+    }
+
     if (error.isFeatureDisabled) {
       return {
         title: '分享功能已关闭',

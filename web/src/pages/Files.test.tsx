@@ -136,6 +136,10 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function pendingFilesRefetch() {
+  return new Promise<Awaited<ReturnType<typeof listFiles>>>(() => {})
+}
+
 describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -762,6 +766,42 @@ describe('FilesPage', () => {
       })
     })
 
+    it('removes a stale file and closes the modal when single delete hits not found', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockDeleteFile.mockRejectedValue(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      mockListFiles.mockImplementation(() => pendingFilesRefetch())
+
+      await user.click(screen.getAllByRole('button', { name: '删除' })[1])
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '确认删除' })).toBeTruthy()
+      })
+
+      const deleteButtons = screen.getAllByRole('button', { name: '删除' })
+      await user.click(deleteButtons[deleteButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '文件或文件夹已不存在，已同步更新',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '确认删除' })).toBeFalsy()
+        expect(screen.queryByText('photo.jpg')).toBeFalsy()
+        expect(screen.getByText('video.mp4')).toBeTruthy()
+      })
+    })
+
     it('keeps failed items selected after partial batch delete failure', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
@@ -860,6 +900,49 @@ describe('FilesPage', () => {
         title: '批量删除暂不可用',
         description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
         color: 'warning',
+      })
+    })
+
+    it('treats batch delete not-found results as already synchronized and clears selection', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDeleteFile.mockRejectedValue(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      mockListFiles.mockImplementation(() => pendingFilesRefetch())
+
+      mockFilesStoreState.clearSelection.mockClear()
+      mockFilesStoreState.setSelection.mockClear()
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
+      })
+
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith([])
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '文件或文件夹已不存在，已同步更新',
+        color: 'warning',
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '批量删除' })).toBeFalsy()
+        expect(screen.queryByText('photo.jpg')).toBeFalsy()
+        expect(screen.queryByText('video.mp4')).toBeFalsy()
+        expect(screen.getByText('documents')).toBeTruthy()
       })
     })
 
@@ -1465,6 +1548,98 @@ describe('FilesPage', () => {
       expect(screen.getByText('收藏功能暂不可用')).toBeTruthy()
       expect(screen.getByText('收藏存储未成功初始化，请检查系统健康状态或稍后重试。')).toBeTruthy()
       expect(screen.queryByText('收藏状态不可用')).toBeNull()
+    })
+  })
+
+  it('treats add-favorite conflict as already favorited and syncs the status', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockCheckFavorites
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': false,
+        '/video.mp4': false,
+      })
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': true,
+        '/video.mp4': false,
+      })
+    mockToggleFavorite.mockRejectedValueOnce(Object.assign(new Error('favorite already exists'), {
+      status: 409,
+      code: 'FAVORITE_ALREADY_EXISTS',
+    }))
+
+    render(<FilesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('photo.jpg')).toBeTruthy()
+    })
+
+    await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+
+    await waitFor(() => {
+      expect(screen.getAllByText('添加收藏').length).toBeGreaterThan(0)
+    })
+
+    await user.click(screen.getAllByText('添加收藏')[0])
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已在收藏夹中',
+        description: '该文件已被其他操作加入收藏，状态已同步。',
+        color: 'warning',
+      })
+    })
+
+    await waitFor(() => {
+      expect(mockCheckFavorites).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it('treats remove-favorite not found as already removed and syncs the status', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockCheckFavorites
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': true,
+        '/video.mp4': false,
+      })
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': false,
+        '/video.mp4': false,
+      })
+    mockToggleFavorite.mockRejectedValueOnce(Object.assign(new Error('favorite not found'), {
+      status: 404,
+      code: 'FAVORITE_NOT_FOUND',
+    }))
+
+    render(<FilesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('photo.jpg')).toBeTruthy()
+    })
+
+    await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+
+    await waitFor(() => {
+      expect(screen.getAllByText('取消收藏').length).toBeGreaterThan(0)
+    })
+
+    await user.click(screen.getAllByText('取消收藏')[0])
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏已移除',
+        description: '该文件已不在收藏夹中，状态已同步。',
+        color: 'warning',
+      })
+    })
+
+    await waitFor(() => {
+      expect(mockCheckFavorites).toHaveBeenCalledTimes(2)
     })
   })
   })

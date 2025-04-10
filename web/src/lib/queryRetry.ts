@@ -7,13 +7,21 @@ function getErrorStatus(error: unknown): number | undefined {
   return typeof candidate.status === 'number' ? candidate.status : undefined
 }
 
+function isRetryableStatus(status: number): boolean {
+  if (status >= 500) {
+    return true
+  }
+
+  return status === 408 || status === 425 || status === 429
+}
+
 export function shouldRetryQuery(failureCount: number, error: unknown): boolean {
   const status = getErrorStatus(error)
 
-  // authFetch already performs token refresh + request replay once on 401.
-  // Retrying the whole query again only amplifies auth failures into request storms.
-  if (status === 401 || status === 403) {
-    return false
+  // Known HTTP statuses should only retry when the failure is plausibly transient.
+  // This keeps 401/403/404/409/410-style terminal states from being amplified into request storms.
+  if (status !== undefined) {
+    return failureCount < 3 && isRetryableStatus(status)
   }
 
   return failureCount < 3

@@ -424,6 +424,7 @@ GET /api/v1/diagnostics
     },
     "goroutines": 25,
     "filesystem": {
+      "trash_stats_available": true,
       "trash_items": 5,
       "trash_size": 52428800
     },
@@ -444,7 +445,8 @@ GET /api/v1/diagnostics
 ```
 
 **说明**:
-- 当回收站统计暂不可用时，`filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
+- `filesystem.trash_stats_available` 表示回收站统计是否可用。
+- 当回收站统计暂不可用时，`filesystem.trash_stats_available` 为 `false`，并且 `filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
 
 ### 指标信息
 
@@ -1092,9 +1094,10 @@ POST /api/v1/public/shares/{share_id}/access
 
 **说明**:
 - 当分享不需要密码，或已通过密码验证后，会返回 `file_name` / `file_size` / `folder_items`
-- 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`
+- 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`，错误码为 `SHARE_ACCESS_LIMIT_REACHED`
+- 当分享已过期时，返回 `410 Gone`，错误码为 `SHARE_EXPIRED`
 - 当创建该分享的用户被禁用或删除后，公开访问、下载和文件夹列表都会返回 `410 Gone`，错误码为 `SHARE_DISABLED`
-- `access_count` 在下载与文件夹列表请求时递增；`POST /s/{share_id}` 验证密码不会计数
+- `access_count` 在下载与文件夹列表请求时递增；`POST /api/v1/public/shares/{share_id}/access` 与兼容路径 `POST /s/{share_id}` 的密码验证不会计数
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
 - 口令失败限流默认按 share ID 与直连客户端地址组合统计；只有当请求直接来自 loopback 或私有网段代理时，才采信 `X-Forwarded-For` / `X-Real-IP`
