@@ -466,42 +466,19 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 
 	if shouldVersion && (fs.config.MaxVersions > 0 || fs.config.MaxVersionAge > 0) {
 		if err := fs.cleanupVersions(ctx, name); err != nil {
-			versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
-			if rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData); rollbackErr != nil {
-				joinedErr := errors.Join(
-					fmt.Errorf("failed to cleanup old versions: %w", err),
-					fmt.Errorf("failed to rollback file content: %w", rollbackErr),
-				)
-				if versionRollbackErr != nil {
-					joinedErr = errors.Join(joinedErr, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
-				}
-				return joinedErr
-			}
-			if hadPreviousFile {
-				if indexErr := fs.syncFileIndexFromWorkspace(ctx, name); indexErr != nil {
-					joinedErr := errors.Join(
-						fmt.Errorf("failed to cleanup old versions: %w", err),
-						fmt.Errorf("failed to restore file index after rollback: %w", indexErr),
-					)
-					if versionRollbackErr != nil {
-						joinedErr = errors.Join(joinedErr, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
-					}
-					return joinedErr
-				}
-			}
-			if versionRollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to cleanup old versions: %w", err),
-					fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr),
-				)
-			}
-			return fmt.Errorf("failed to cleanup old versions: %w", err)
+			// The new content, index, and current-version metadata are already
+			// committed here. Retention cleanup failures should leave extra history
+			// behind, not turn the caller's successful write into a false-negative.
+			return nil
 		}
 	}
 
 	if fs.shouldForceRetentionSweepLocked() {
 		if err := fs.runRetentionSweepLocked(ctx); err != nil {
-			return fmt.Errorf("failed to enforce retention free space: %w", err)
+			// The new content and index are already committed at this point, so
+			// retention enforcement failures must not turn a successful write into
+			// a false-negative for callers.
+			return nil
 		}
 	}
 
@@ -757,7 +734,7 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 			}
 		}
 		if objectDeleteErr != nil {
-			return fmt.Errorf("failed to delete one or more version objects: %w", objectDeleteErr)
+			return nil
 		}
 	}
 

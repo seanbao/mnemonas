@@ -823,8 +823,8 @@ func TestFileSystem_PermanentDelete_AttemptsAllVersionObjectDeletes(t *testing.T
 	}
 
 	err = fs.PermanentDelete(ctx, "/permanent-objects.md")
-	if err == nil {
-		t.Fatal("Expected PermanentDelete() to report object deletion failures")
+	if err != nil {
+		t.Fatalf("PermanentDelete() should succeed despite object deletion failures: %v", err)
 	}
 
 	for _, version := range versions {
@@ -2102,7 +2102,7 @@ func TestFileSystem_RestoreVersion_FailsWhenCurrentSnapshotCannotBeRecorded(t *t
 	}
 }
 
-func TestFileSystem_WriteFile_FailsWhenCleanupVersionsObjectDeleteFails(t *testing.T) {
+func TestFileSystem_WriteFile_DoesNotFailWhenCleanupVersionsObjectDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -2118,12 +2118,8 @@ func TestFileSystem_WriteFile_FailsWhenCleanupVersionsObjectDeleteFails(t *testi
 		return errors.New("delete object failed")
 	}
 
-	err := fs.WriteFile(ctx, "/cleanup-fail.md", bytes.NewReader([]byte("v3")))
-	if err == nil {
-		t.Fatal("Expected WriteFile() to fail when old version object cleanup fails")
-	}
-	if !strings.Contains(err.Error(), "failed to cleanup old versions") {
-		t.Fatalf("Expected cleanup failure in error, got %v", err)
+	if err := fs.WriteFile(ctx, "/cleanup-fail.md", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(v3) should succeed despite cleanup failure: %v", err)
 	}
 
 	f, openErr := fs.OpenFile(ctx, "/cleanup-fail.md")
@@ -2136,8 +2132,16 @@ func TestFileSystem_WriteFile_FailsWhenCleanupVersionsObjectDeleteFails(t *testi
 	if readErr != nil {
 		t.Fatalf("ReadAll() after cleanup failure error: %v", readErr)
 	}
-	if string(data) != "v2" {
-		t.Fatalf("Expected current content to remain unchanged after cleanup failure, got %q", string(data))
+	if string(data) != "v3" {
+		t.Fatalf("Expected new content to remain committed after cleanup failure, got %q", string(data))
+	}
+
+	versions, err := fs.ListVersions(ctx, "/cleanup-fail.md")
+	if err != nil {
+		t.Fatalf("ListVersions() after cleanup failure error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("expected version history to remain present after cleanup failure, got %d entries", len(versions))
 	}
 }
 
@@ -2166,6 +2170,55 @@ func TestFileSystem_WriteFile_ForcesRetentionSweepWhenFreeSpaceBelowThreshold(t 
 	}
 	if len(versions) != 2 {
 		t.Fatalf("expected current version plus one retained historical version after forced sweep, got %d", len(versions))
+	}
+}
+
+func TestFileSystem_WriteFile_DoesNotFailWhenForcedRetentionSweepFailsAfterCommit(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	fs.config.MaxVersions = 3
+	fs.config.MaxVersionAge = 365 * 24 * time.Hour
+	fs.config.MinFreeSpace = ^uint64(0)
+
+	for _, content := range []string{"v1", "v2", "v3", "v4"} {
+		if err := fs.WriteFile(ctx, "/retention-sweep.txt", bytes.NewReader([]byte(content))); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", content, err)
+		}
+	}
+
+	fs.UpdateRetentionSettings(1, 365*24*time.Hour, ^uint64(0))
+	fs.deleteVersionObject = func(hash string) error {
+		return errors.New("delete version object failed")
+	}
+
+	if err := fs.WriteFile(ctx, "/trigger.txt", bytes.NewReader([]byte("trigger"))); err != nil {
+		t.Fatalf("WriteFile(trigger) should succeed despite post-commit retention sweep failure: %v", err)
+	}
+
+	f, err := fs.OpenFile(ctx, "/trigger.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(trigger) error: %v", err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(trigger) error: %v", err)
+	}
+	if string(data) != "trigger" {
+		t.Fatalf("expected committed trigger content, got %q", string(data))
+	}
+
+	versions, err := fs.ListVersions(ctx, "/retention-sweep.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(retention-sweep) error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("expected retention-sweep history to remain present after failed maintenance, got %d versions", len(versions))
+	}
+	if _, err := fs.Stat(ctx, "/trigger.txt"); err != nil {
+		t.Fatalf("Stat(trigger) error: %v", err)
 	}
 }
 

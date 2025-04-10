@@ -1,6 +1,7 @@
 package share
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -211,6 +212,24 @@ func TestShareStore_Persistence(t *testing.T) {
 
 	if loaded.Description != "Test share" {
 		t.Errorf("expected description 'Test share', got '%s'", loaded.Description)
+	}
+}
+
+func TestShareStore_RejectsSymlinkPathOnLoad(t *testing.T) {
+	tempDir := t.TempDir()
+	targetPath := filepath.Join(tempDir, "real-shares.json")
+	symlinkPath := filepath.Join(tempDir, "shares.json")
+
+	if err := os.WriteFile(targetPath, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to write target store: %v", err)
+	}
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	_, err := NewShareStore(symlinkPath)
+	if !errors.Is(err, errShareStoreSymlink) {
+		t.Fatalf("expected symlink error, got %v", err)
 	}
 }
 
@@ -564,6 +583,41 @@ func TestShareStore_CreateRollbackOnSaveFailure(t *testing.T) {
 	}
 }
 
+func TestShareStore_CreateRejectsSymlinkPath(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	targetPath := filepath.Join(tempDir, "real-shares.json")
+	if err := os.WriteFile(targetPath, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to write target store: %v", err)
+	}
+	symlinkPath := filepath.Join(tempDir, "shares-link.json")
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+	store.filePath = symlinkPath
+
+	created, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if !errors.Is(err, errShareStoreSymlink) {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+	if created != nil {
+		t.Fatal("expected failed create to return nil share")
+	}
+	if len(store.shares) != 0 {
+		t.Fatalf("expected shares map to remain empty, got %d entries", len(store.shares))
+	}
+}
+
 func TestShareStore_AccessRollbackOnSaveFailure(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -600,6 +654,103 @@ func TestShareStore_AccessRollbackOnSaveFailure(t *testing.T) {
 	}
 	if loaded.AccessCount != 0 {
 		t.Fatalf("expected access_count to roll back, got %d", loaded.AccessCount)
+	}
+}
+
+func TestShareStore_RollbackAuthorizedAccess_RestoresPreviousState(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	first, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	accessed, err := store.RecordAuthorizedAccess(first.ID)
+	if err != nil {
+		t.Fatalf("failed to record initial access: %v", err)
+	}
+	if accessed.LastAccess == nil {
+		t.Fatal("expected initial access to set LastAccess")
+	}
+	previousLastAccess := *accessed.LastAccess
+
+	_, reservation, err := store.reserveAuthorizedAccess(first.ID)
+	if err != nil {
+		t.Fatalf("failed to reserve authorized access: %v", err)
+	}
+	if reservation == nil {
+		t.Fatal("expected access reservation")
+	}
+
+	if err := store.rollbackAuthorizedAccess(reservation); err != nil {
+		t.Fatalf("failed to rollback authorized access: %v", err)
+	}
+
+	loaded, err := store.Get(first.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if loaded.AccessCount != 1 {
+		t.Fatalf("expected access_count to restore to 1, got %d", loaded.AccessCount)
+	}
+	if loaded.LastAccess == nil || !loaded.LastAccess.Equal(previousLastAccess) {
+		t.Fatalf("expected last_access to restore to %v, got %v", previousLastAccess, loaded.LastAccess)
+	}
+}
+
+func TestShareStore_RollbackAuthorizedAccess_PreservesNewerLastAccess(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	_, firstReservation, err := store.reserveAuthorizedAccess(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reserve first access: %v", err)
+	}
+	if firstReservation == nil {
+		t.Fatal("expected first access reservation")
+	}
+	secondAccess, err := store.RecordAuthorizedAccess(share.ID)
+	if err != nil {
+		t.Fatalf("failed to record second access: %v", err)
+	}
+
+	if err := store.rollbackAuthorizedAccess(firstReservation); err != nil {
+		t.Fatalf("failed to rollback first reservation: %v", err)
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if loaded.AccessCount != 1 {
+		t.Fatalf("expected one surviving access after rollback, got %d", loaded.AccessCount)
+	}
+	if loaded.LastAccess == nil || secondAccess.LastAccess == nil || !loaded.LastAccess.Equal(*secondAccess.LastAccess) {
+		t.Fatalf("expected newer last_access to be preserved, got %v want %v", loaded.LastAccess, secondAccess.LastAccess)
 	}
 }
 

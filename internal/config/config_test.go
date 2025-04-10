@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -274,6 +275,50 @@ func TestLoad_InvalidTOML(t *testing.T) {
 	_, err := Load(configPath)
 	if err == nil {
 		t.Error("Load() should error for invalid TOML")
+	}
+}
+
+func TestConfig_Save_RejectsSymlinkPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "target.toml")
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	if err := os.WriteFile(targetPath, []byte("keep = 'original'\n"), 0644); err != nil {
+		t.Fatalf("failed to seed target config: %v", err)
+	}
+	if err := os.Symlink(targetPath, configPath); err != nil {
+		t.Fatalf("failed to create config symlink: %v", err)
+	}
+
+	err := Default().Save(configPath)
+	if !errors.Is(err, errConfigFileSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read target config: %v", err)
+	}
+	if string(data) != "keep = 'original'\n" {
+		t.Fatalf("expected target config to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestLoad_RejectsSymlinkPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "target.toml")
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	if err := os.WriteFile(targetPath, []byte("[server]\nport = 8081\n"), 0644); err != nil {
+		t.Fatalf("failed to seed target config: %v", err)
+	}
+	if err := os.Symlink(targetPath, configPath); err != nil {
+		t.Fatalf("failed to create config symlink: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if !errors.Is(err, errConfigFileSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
 	}
 }
 

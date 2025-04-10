@@ -12,6 +12,8 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+var errConfigFileSymlink = errors.New("config file path must not be a symlink")
+
 // Config is the main configuration structure for MnemoNAS
 type Config struct {
 	Server    ServerConfig    `toml:"server"`
@@ -303,6 +305,9 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 // Load loads configuration from file
 func Load(path string) (*Config, error) {
 	cfg := Default()
+	if err := validateConfigFilePath(path); err != nil {
+		return nil, err
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -338,10 +343,64 @@ func (c *Config) Save(path string) error {
 		return fmt.Errorf("failed to serialize config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
+	if err := writeConfigFile(path, data); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+func validateConfigFilePath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat config file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errConfigFileSymlink
+	}
+	return nil
+}
+
+func writeConfigFile(path string, data []byte) error {
+	if err := validateConfigFilePath(path); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp config file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to set temp config permissions: %w", err)
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync config file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp config file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to replace config file: %w", err)
+	}
+	cleanup = false
 	return nil
 }
 
