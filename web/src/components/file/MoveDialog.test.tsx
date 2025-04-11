@@ -127,6 +127,38 @@ describe('MoveDialog', () => {
     })
   })
 
+  it('drops stale missing files from retry state during partial move failure', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockMoveFile
+      .mockRejectedValueOnce(new ApiError('file not found', 404, 'Not Found', 'FILE_NOT_FOUND'))
+      .mockRejectedValueOnce(new Error('move failed'))
+
+    renderDialog({ onClose })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    await waitFor(() => {
+      expect(mockMoveFile).toHaveBeenCalledTimes(2)
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.queryByText('a.txt')).toBeNull()
+    expect(screen.getAllByText('b.txt').length).toBeGreaterThan(0)
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '批量移动部分完成',
+      description: '成功 1 个，失败 1 个',
+      color: 'warning',
+    })
+  })
+
   it('shows warning toast when full move succeeds with warnings', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
@@ -175,6 +207,31 @@ describe('MoveDialog', () => {
       expect(onClose).toHaveBeenCalledTimes(1)
       expect(mockAddToast).toHaveBeenCalledWith({
         title: 'resource copied with persistence warning',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('closes with a warning when all copy sources are already missing', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockCopyFile.mockRejectedValue(new ApiError('file not found', 404, 'Not Found', 'FILE_NOT_FOUND'))
+
+    renderDialog({ onClose, mode: 'copy' })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    await user.click(screen.getByRole('button', { name: '复制' }))
+
+    await waitFor(() => {
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '文件或文件夹已不存在，已同步更新',
         color: 'warning',
       })
     })

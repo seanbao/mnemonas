@@ -36,9 +36,17 @@ export interface ListUsersResponse {
   total: number
 }
 
+interface UsersActionResult {
+  success: boolean
+  warning?: boolean
+  message?: string
+}
+
 export interface UserResponse {
   success: boolean
   user: User
+  warning?: boolean
+  message?: string
 }
 
 interface UsersApiError {
@@ -76,6 +84,18 @@ function isValidUser(value: unknown): value is User {
     typeof user.quota_bytes === 'number' &&
     typeof user.used_bytes === 'number'
   )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+}
+
+function hasUsersWarning(response: Response, data: unknown): boolean {
+  const warningHeader = typeof response.headers?.get === 'function'
+    ? response.headers.get('Warning')
+    : null
+
+  return warningHeader != null || (isRecord(data) && data.warning === true)
 }
 
 export class UsersError extends Error {
@@ -172,13 +192,15 @@ export async function createUser(data: CreateUserRequest): Promise<UserResponse>
   return {
     success: body.success,
     user: body.data.user,
+    warning: hasUsersWarning(response, body.data),
+    message: body.message,
   }
 }
 
 /**
  * Delete a user (admin only)
  */
-export async function deleteUser(userId: string): Promise<{ success: boolean }> {
+export async function deleteUser(userId: string): Promise<UsersActionResult> {
   const response = await authFetch(`${API_BASE}/${userId}`, {
     method: 'DELETE',
   })
@@ -191,7 +213,11 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
   if (!('data' in body)) {
     throw new Error('Invalid delete user response')
   }
-  return { success: body.success }
+  return {
+    success: body.success,
+    warning: hasUsersWarning(response, body.data),
+    message: body.message,
+  }
 }
 
 /**
@@ -200,7 +226,7 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
 export async function resetUserPassword(
   userId: string,
   data: ResetPasswordRequest
-): Promise<{ success: boolean }> {
+): Promise<UsersActionResult> {
   const response = await authFetch(`${API_BASE}/${userId}/reset-password`, {
     method: 'POST',
     headers: {
@@ -217,7 +243,11 @@ export async function resetUserPassword(
   if (!('data' in body)) {
     throw new Error('Invalid reset password response')
   }
-  return { success: body.success }
+  return {
+    success: body.success,
+    warning: hasUsersWarning(response, body.data),
+    message: body.message,
+  }
 }
 
 /**
@@ -226,7 +256,7 @@ export async function resetUserPassword(
 export async function toggleUserStatus(
   userId: string,
   disabled: boolean
-): Promise<{ success: boolean }> {
+): Promise<UsersActionResult> {
   const response = await authFetch(`${API_BASE}/${userId}/status`, {
     method: 'PUT',
     headers: {
@@ -243,5 +273,9 @@ export async function toggleUserStatus(
   if (!body.data || typeof body.data.disabled !== 'boolean') {
 	throw new Error('Invalid update user status response')
 	}
-  return { success: body.success }
+  return {
+    success: body.success,
+    warning: hasUsersWarning(response, body.data),
+    message: body.message,
+  }
 }
