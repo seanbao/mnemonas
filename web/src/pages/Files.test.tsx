@@ -740,7 +740,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('photo.jpg')).toBeTruthy()
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
       })
 
       const menuButton = screen.getByLabelText('photo.jpg 操作菜单')
@@ -774,7 +774,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('photo.jpg')).toBeTruthy()
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
       })
 
       mockListFiles.mockImplementation(() => pendingFilesRefetch())
@@ -1130,6 +1130,33 @@ describe('FilesPage', () => {
       })
     })
 
+    it('removes stale cut items from clipboard when paste source no longer exists', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockMoveFile.mockRejectedValue(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockMoveFile).toHaveBeenCalledWith('/source/photo.jpg', '/photo.jpg')
+      })
+
+      expect(mockClipboardState.clear).toHaveBeenCalled()
+      expect(mockClipboardState.cut).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '文件或文件夹已不存在，已同步更新',
+        color: 'warning',
+      })
+    })
+
     it('shows warning toast when batch delete succeeds with cleanup warnings', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
@@ -1238,7 +1265,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('photo.jpg')).toBeTruthy()
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
       })
 
       await act(async () => {
@@ -1340,6 +1367,48 @@ describe('FilesPage', () => {
           title: 'resource moved with persistence warning',
           color: 'warning',
         })
+      })
+    })
+
+    it('closes the rename modal and removes a stale file when rename hits not found', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockFilesStoreState.viewMode = 'grid'
+      mockMoveFile.mockRejectedValueOnce(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
+      })
+
+      mockListFiles.mockImplementation(() => pendingFilesRefetch())
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, 'photo-gone.jpg')
+      await user.click(screen.getByRole('button', { name: '确定' }))
+
+      await waitFor(() => {
+        expect(mockMoveFile).toHaveBeenCalledWith('/photo.jpg', '/photo-gone.jpg')
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '文件或文件夹已不存在，已同步更新',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByPlaceholderText('请输入新名称')).toBeFalsy()
+        expect(screen.queryByRole('button', { name: '确定' })).toBeFalsy()
+        expect(screen.queryAllByText('photo.jpg')).toHaveLength(0)
+        expect(screen.getByText('video.mp4')).toBeTruthy()
       })
     })
   })

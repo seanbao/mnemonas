@@ -587,5 +587,34 @@ describe('MaintenancePage', () => {
         color: 'warning',
       })
     })
+
+    it('shows a running-state warning and refreshes status when scrub is already running', async () => {
+      mockGetScrubResult
+        .mockResolvedValueOnce(mockNoResult)
+        .mockResolvedValueOnce(mockRunningResult)
+      mockRunScrub.mockRejectedValue(new ApiError('scrub is already running', 409))
+      const user = userEvent.setup()
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('开始校验')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('开始校验'))
+
+      await waitFor(() => {
+        expect(mockRunScrub).toHaveBeenCalled()
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '数据校验已在运行',
+          description: '已有校验任务正在执行，已同步最新状态。',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.getAllByText('校验中...').length).toBeGreaterThan(0)
+      })
+    })
   })
 })

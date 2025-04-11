@@ -391,6 +391,42 @@ describe('UsersPage', () => {
 
       expect(screen.getByRole('button', { name: /创建/ })).toBeInTheDocument()
     })
+
+    it('shows a localized warning when create succeeds with a persistence warning', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.createUser).mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'user created with persistence warning',
+        user: {
+          id: 'new-user',
+          username: 'newuser',
+          email: 'new@example.com',
+          role: 'user',
+          disabled: false,
+          home_dir: '/home/newuser',
+          created_at: '2024-01-20T00:00:00Z',
+          updated_at: '2024-01-20T00:00:00Z',
+          quota_bytes: 0,
+          used_bytes: 0,
+        },
+      })
+
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+      await user.type(screen.getByLabelText(/用户名/i), 'newuser')
+      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '用户已创建，但持久化存在告警',
+          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
+          color: 'warning',
+        })
+      })
+    })
   })
 
   describe('delete user', () => {
@@ -538,6 +574,64 @@ describe('UsersPage', () => {
         expect(screen.queryByText('确认删除')).not.toBeInTheDocument()
       })
     })
+
+    it('closes the delete modal and removes a stale user when delete hits not found', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.deleteUser).mockRejectedValueOnce(new UsersError('user not found', 404, 'USER_NOT_FOUND'))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: '删除' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已不存在，已同步更新', color: 'warning' })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '确认删除' })).not.toBeInTheDocument()
+        expect(screen.queryByText('testuser')).not.toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+    })
+
+    it('shows a localized warning when delete succeeds with a persistence warning', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.deleteUser).mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'user deleted with persistence warning',
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await user.click(screen.getByRole('button', { name: '删除' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '用户已删除，但持久化存在告警',
+          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
+          color: 'warning',
+        })
+      })
+    })
   })
 
   describe('reset password', () => {
@@ -607,6 +701,66 @@ describe('UsersPage', () => {
 
       expect(screen.getByRole('button', { name: /确认重置/ })).toBeInTheDocument()
       expect(screen.getByLabelText('新密码')).toHaveValue('password123')
+    })
+
+    it('closes the reset modal and removes a stale user when reset hits not found', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.resetUserPassword).mockRejectedValueOnce(new UsersError('user not found', 404, 'USER_NOT_FOUND'))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
+      })
+
+      await user.type(screen.getByLabelText('新密码'), 'password123')
+      await user.click(screen.getByRole('button', { name: '确认重置' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已不存在，已同步更新', color: 'warning' })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: '确认重置' })).not.toBeInTheDocument()
+        expect(screen.queryByText('testuser')).not.toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+    })
+
+    it('shows a localized warning when reset succeeds with a persistence warning', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.resetUserPassword).mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'password reset with persistence warning',
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+      await user.type(screen.getByLabelText('新密码'), 'password123')
+      await user.click(screen.getByRole('button', { name: '确认重置' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '密码已重置，但持久化存在告警',
+          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
+          color: 'warning',
+        })
+      })
     })
   })
 
@@ -837,6 +991,64 @@ describe('UsersPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '不能禁用最后一个管理员',
           description: '系统至少需要保留一个启用中的管理员账号。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('removes a stale user when status update hits not found', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.toggleUserStatus).mockRejectedValueOnce(new UsersError('user not found', 404, 'USER_NOT_FOUND'))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('禁用用户')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('禁用用户'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已不存在，已同步更新', color: 'warning' })
+      })
+
+      expect(screen.queryByText('testuser')).not.toBeInTheDocument()
+      expect(screen.getByText('guest')).toBeInTheDocument()
+    })
+
+    it('shows a localized warning when status update succeeds with a persistence warning', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.toggleUserStatus).mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'user status updated with persistence warning',
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('禁用用户')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('禁用用户'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '用户已禁用，但持久化存在告警',
+          description: '操作已提交，但用户配置持久化存在告警，请检查系统状态。',
           color: 'warning',
         })
       })

@@ -417,6 +417,34 @@ describe('VersionsPage', () => {
       })
     })
 
+    it('closes the restore modal and shows a stale-version warning when restore hits not found', async () => {
+      mockRestoreVersion.mockRejectedValue(new ApiError('resource not found', 404))
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+      await user.click(await screen.findByText('确认恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '所选版本已不存在，已同步更新',
+          description: '该版本或目标文件已被移除，请刷新版本历史后重试。',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('确认恢复版本')).toBeFalsy()
+      })
+    })
+
     it('keeps the restore modal open while a pending restore is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const firstRestore = createDeferred<typeof successActionResult>()
@@ -532,6 +560,33 @@ describe('VersionsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '下载版本暂不可用',
           description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows a stale-version warning when version download hits not found', async () => {
+      mockDownloadFile.mockRejectedValue(new ApiError('resource not found', 404))
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('下载此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('下载此版本')[0])
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledWith('/test.txt', { version: 'hash3' })
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '所选版本已不存在',
+          description: '该版本或目标文件已被移除，请刷新版本历史后重试。',
           color: 'warning',
         })
       })
