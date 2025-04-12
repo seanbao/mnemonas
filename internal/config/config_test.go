@@ -223,6 +223,94 @@ prefix = "dav/"
 	}
 }
 
+func TestLoad_ParsesDurationStrings(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[server]
+read_timeout = "45s"
+write_timeout = "90s"
+idle_timeout = "3m"
+
+[storage.retention]
+max_age = "720h"
+gc_interval = "12h"
+
+[dataplane]
+timeout = "45s"
+
+[auth]
+access_token_ttl = "20m"
+refresh_token_ttl = "240h"
+
+[alerts]
+check_interval = "2h"
+cooldown_period = "6h"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Server.ReadTimeout != 45*time.Second {
+		t.Fatalf("expected read timeout 45s, got %s", cfg.Server.ReadTimeout)
+	}
+	if cfg.Server.WriteTimeout != 90*time.Second {
+		t.Fatalf("expected write timeout 90s, got %s", cfg.Server.WriteTimeout)
+	}
+	if cfg.Server.IdleTimeout != 3*time.Minute {
+		t.Fatalf("expected idle timeout 3m, got %s", cfg.Server.IdleTimeout)
+	}
+	if cfg.Storage.Retention.MaxAge != 720*time.Hour {
+		t.Fatalf("expected max age 720h, got %s", cfg.Storage.Retention.MaxAge)
+	}
+	if cfg.Storage.Retention.GCInterval != 12*time.Hour {
+		t.Fatalf("expected GC interval 12h, got %s", cfg.Storage.Retention.GCInterval)
+	}
+	if cfg.DataPlane.Timeout != 45*time.Second {
+		t.Fatalf("expected dataplane timeout 45s, got %s", cfg.DataPlane.Timeout)
+	}
+	if cfg.Auth.AccessTokenTTL != 20*time.Minute {
+		t.Fatalf("expected access token ttl 20m, got %s", cfg.Auth.AccessTokenTTL)
+	}
+	if cfg.Auth.RefreshTokenTTL != 240*time.Hour {
+		t.Fatalf("expected refresh token ttl 240h, got %s", cfg.Auth.RefreshTokenTTL)
+	}
+	if cfg.Alerts.CheckInterval != 2*time.Hour {
+		t.Fatalf("expected alerts check interval 2h, got %s", cfg.Alerts.CheckInterval)
+	}
+	if cfg.Alerts.CooldownPeriod != 6*time.Hour {
+		t.Fatalf("expected alerts cooldown 6h, got %s", cfg.Alerts.CooldownPeriod)
+	}
+}
+
+func TestLoad_ExampleConfig(t *testing.T) {
+	configPath := filepath.Join("..", "..", "mnemonas.example.toml")
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Server.ReadTimeout != 30*time.Second {
+		t.Fatalf("expected read timeout 30s, got %s", cfg.Server.ReadTimeout)
+	}
+	if cfg.Storage.Retention.MaxAge != 2160*time.Hour {
+		t.Fatalf("expected max age 2160h, got %s", cfg.Storage.Retention.MaxAge)
+	}
+	if cfg.Auth.AccessTokenTTL != 15*time.Minute {
+		t.Fatalf("expected access token ttl 15m, got %s", cfg.Auth.AccessTokenTTL)
+	}
+	if cfg.Alerts.CheckInterval != time.Hour {
+		t.Fatalf("expected alerts check interval 1h, got %s", cfg.Alerts.CheckInterval)
+	}
+}
+
 func TestConfig_SaveLoad(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config", "config.toml")

@@ -207,6 +207,78 @@ func TestHistoryStore_FailedScrub(t *testing.T) {
 	}
 }
 
+func TestHistoryStore_StartScrub_ReturnedResultDoesNotMutateStoreBeforeSave(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
+	}
+
+	started.Status = "completed"
+	started.ErrorMessage = "should not leak"
+
+	if !store.ScrubIsRunning() {
+		t.Fatal("expected scrub to remain running until SaveScrubResult")
+	}
+
+	saved := store.GetLastScrubResult()
+	if saved == nil {
+		t.Fatal("expected current scrub result")
+	}
+	if saved.Status != "running" {
+		t.Fatalf("stored status = %q, want running", saved.Status)
+	}
+	if saved.ErrorMessage != "" {
+		t.Fatalf("stored error message = %q, want empty", saved.ErrorMessage)
+	}
+}
+
+func TestHistoryStore_GetLastScrubResult_ReturnsClone(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	if err := store.SaveScrubResult(&ScrubResult{
+		ID:           "clone-test",
+		StartTime:    time.Now().Add(-time.Minute),
+		EndTime:      time.Now(),
+		Status:       "completed",
+		ErrorMessage: "original",
+		Errors:       []ScrubError{{Hash: "abc", ErrorType: "corrupted", Message: "mismatch"}},
+	}); err != nil {
+		t.Fatalf("SaveScrubResult failed: %v", err)
+	}
+
+	loaded := store.GetLastScrubResult()
+	if loaded == nil {
+		t.Fatal("expected loaded scrub result")
+	}
+	loaded.Status = "failed"
+	loaded.ErrorMessage = "mutated"
+	loaded.Errors[0].Message = "changed"
+
+	again := store.GetLastScrubResult()
+	if again == nil {
+		t.Fatal("expected scrub result on second load")
+	}
+	if again.Status != "completed" {
+		t.Fatalf("stored status = %q, want completed", again.Status)
+	}
+	if again.ErrorMessage != "original" {
+		t.Fatalf("stored error message = %q, want original", again.ErrorMessage)
+	}
+	if again.Errors[0].Message != "mismatch" {
+		t.Fatalf("stored error message detail = %q, want mismatch", again.Errors[0].Message)
+	}
+}
+
 func TestNewHistoryStore_RecoverInterruptedRunningScrub(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewHistoryStore(tmpDir)

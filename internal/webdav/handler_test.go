@@ -2160,6 +2160,17 @@ func TestHandler_GetDestination_RejectsCrossHostDestination(t *testing.T) {
 	}
 }
 
+func TestHandler_GetDestination_RejectsPercentEncodedTraversal(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "localhost"
+	req.Header.Set("Destination", "http://localhost/dav/%2e%2e/secret.txt")
+
+	if dst := handler.getDestination(req); dst != "" {
+		t.Fatalf("getDestination() = %q, want empty string for encoded traversal destination", dst)
+	}
+}
+
 func TestHandler_HeadRequest(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()

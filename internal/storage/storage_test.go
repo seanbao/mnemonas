@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +19,24 @@ import (
 	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
 )
+
+type blockingOnceReader struct {
+	started chan struct{}
+	release chan struct{}
+	data    []byte
+	sent    bool
+}
+
+func (r *blockingOnceReader) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	close(r.started)
+	<-r.release
+	r.sent = true
+	n := copy(p, r.data)
+	return n, io.EOF
+}
 
 // testDataplaneAddr is the address of the test dataplane server
 func testDataplaneAddr() string {
@@ -252,6 +271,74 @@ func TestFileSystem_WriteFile_DoesNotFollowTempSymlink(t *testing.T) {
 	}
 	if string(data) != "workspace" {
 		t.Fatalf("expected workspace content to be written, got %q", string(data))
+	}
+}
+
+func TestFileSystem_WriteFile_VersionsOriginalContentWhenWorkspaceChangesDuringUpload(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	originalContent := []byte("original content")
+	if err := fs.WriteFile(ctx, "/version-race.txt", bytes.NewReader(originalContent)); err != nil {
+		t.Fatalf("initial WriteFile() error: %v", err)
+	}
+
+	reader := &blockingOnceReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte("new content"),
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fs.WriteFile(ctx, "/version-race.txt", reader)
+	}()
+
+	<-reader.started
+	if err := os.WriteFile(fs.workspace.FullPath("/version-race.txt"), []byte("mutated externally"), 0644); err != nil {
+		t.Fatalf("WriteFile(external mutation) error: %v", err)
+	}
+	close(reader.release)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("race WriteFile() error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/version-race.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) < 2 {
+		t.Fatalf("expected current version plus one historical version, got %d entries", len(versions))
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	wantHistoricalHash := computeHash(originalContent)
+	if historicalHash != wantHistoricalHash {
+		t.Fatalf("expected historical version hash %q, got %q", wantHistoricalHash, historicalHash)
+	}
+
+	readerAfter, err := fs.OpenFile(ctx, "/version-race.txt")
+	if err != nil {
+		t.Fatalf("OpenFile() error: %v", err)
+	}
+	defer readerAfter.Close()
+
+	currentData, err := io.ReadAll(readerAfter)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if string(currentData) != "new content" {
+		t.Fatalf("expected current content %q, got %q", "new content", string(currentData))
 	}
 }
 
@@ -653,6 +740,50 @@ func TestFileSystem_Delete_EvictsOldestTrashWhenMaxSizeExceeded(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("trash root entries = %d, want 1", len(entries))
+	}
+}
+
+func TestFileSystem_Delete_EvictsExistingTrashBeforeKeepingOversizedNewestItem(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	fs.config.MaxTrashSize = 10
+
+	if err := fs.WriteFile(ctx, "/old.txt", bytes.NewReader([]byte("123456"))); err != nil {
+		t.Fatalf("WriteFile(old) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/old.txt"); err != nil {
+		t.Fatalf("Delete(old) error: %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	if err := fs.WriteFile(ctx, "/oversized.txt", bytes.NewReader([]byte("12345678901"))); err != nil {
+		t.Fatalf("WriteFile(oversized) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/oversized.txt"); err != nil {
+		t.Fatalf("Delete(oversized) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("ListTrash() returned %d items, want 1", len(items))
+	}
+	if items[0].OriginalPath != "/oversized.txt" {
+		t.Fatalf("expected oversized newest item to remain in trash, got %s", items[0].OriginalPath)
+	}
+
+	count, totalSize, err := fs.GetTrashStats(ctx)
+	if err != nil {
+		t.Fatalf("GetTrashStats() error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Trash count = %d, want 1", count)
+	}
+	if totalSize != 11 {
+		t.Fatalf("Trash size = %d, want 11", totalSize)
 	}
 }
 
@@ -2187,7 +2318,7 @@ func TestFileSystem_RestoreVersion_AllowsCurrentHashWithoutStoredObject(t *testi
 	}
 }
 
-func TestMapWorkspaceOpenFileError(t *testing.T) {
+func TestMapWorkspaceReadablePathError(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -2201,15 +2332,15 @@ func TestMapWorkspaceOpenFileError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := mapWorkspaceOpenFileError(tt.err)
+			got := mapWorkspaceReadablePathError(tt.err)
 			if tt.want == nil {
 				if got != tt.err {
-					t.Fatalf("mapWorkspaceOpenFileError() = %v, want original error %v", got, tt.err)
+					t.Fatalf("mapWorkspaceReadablePathError() = %v, want original error %v", got, tt.err)
 				}
 				return
 			}
 			if !errors.Is(got, tt.want) {
-				t.Fatalf("mapWorkspaceOpenFileError() = %v, want %v", got, tt.want)
+				t.Fatalf("mapWorkspaceReadablePathError() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -2728,6 +2859,34 @@ func TestFileSystem_WriteFile_DoesNotFailWhenForcedRetentionSweepFailsAfterCommi
 	}
 }
 
+func TestFileSystem_CleanupVersions_ZeroRetentionKeepsAllHistory(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	fs.config.MaxVersions = 60
+	fs.config.MaxVersionAge = 365 * 24 * time.Hour
+
+	for i := 0; i < 55; i++ {
+		content := fmt.Sprintf("v%02d", i)
+		if err := fs.WriteFile(ctx, "/retention-unlimited.txt", bytes.NewReader([]byte(content))); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", content, err)
+		}
+	}
+
+	fs.UpdateRetentionSettings(0, 0, 0)
+	if err := fs.cleanupVersions(ctx, "/retention-unlimited.txt"); err != nil {
+		t.Fatalf("cleanupVersions() error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/retention-unlimited.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	if len(versions) != 55 {
+		t.Fatalf("expected current version plus 54 historical versions, got %d entries", len(versions))
+	}
+}
+
 func TestMovePath_NonEmptyDirectory(t *testing.T) {
 	tempDir := t.TempDir()
 	src := filepath.Join(tempDir, "src")
@@ -3006,6 +3165,20 @@ func TestFileSystem_SetVersioning(t *testing.T) {
 	}
 }
 
+func TestFileSystem_GetVersioningStatus_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/override-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(override-parent) error: %v", err)
+	}
+
+	_, _, err := fs.GetVersioningStatus(ctx, "/override-parent/child.txt")
+	if err != ErrNotDir {
+		t.Fatalf("GetVersioningStatus() error = %v, want ErrNotDir", err)
+	}
+}
+
 func TestFileSystem_GetAllReferencedHashes(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3044,9 +3217,9 @@ func TestFileSystem_AcquireGCLock_BlocksMutationsUntilReleased(t *testing.T) {
 
 	locked := make(chan struct{})
 	go func() {
-		fs.mu.Lock()
+		releaseMutation := fs.beginMutation()
 		close(locked)
-		fs.mu.Unlock()
+		releaseMutation()
 	}()
 
 	select {
@@ -3061,6 +3234,33 @@ func TestFileSystem_AcquireGCLock_BlocksMutationsUntilReleased(t *testing.T) {
 	case <-locked:
 	case <-time.After(time.Second):
 		t.Fatal("expected blocked mutation to proceed after GC lock release")
+	}
+}
+
+func TestFileSystem_AcquireGCLock_DoesNotBlockReaders(t *testing.T) {
+	fs := &FileSystem{
+		listReferencedHashes: func(ctx context.Context) ([]string, error) {
+			return []string{"hash1"}, nil
+		},
+	}
+
+	_, release, err := fs.AcquireGCLock(context.Background())
+	if err != nil {
+		t.Fatalf("AcquireGCLock() error: %v", err)
+	}
+	defer release()
+
+	readLocked := make(chan struct{})
+	go func() {
+		fs.mu.RLock()
+		close(readLocked)
+		fs.mu.RUnlock()
+	}()
+
+	select {
+	case <-readLocked:
+	case <-time.After(time.Second):
+		t.Fatal("expected readers to proceed while GC gate is held")
 	}
 }
 
@@ -3081,9 +3281,9 @@ func TestFileSystem_AcquireGCLock_ReleasesLockOnSnapshotError(t *testing.T) {
 
 	locked := make(chan struct{})
 	go func() {
-		fs.mu.Lock()
+		releaseMutation := fs.beginMutation()
 		close(locked)
-		fs.mu.Unlock()
+		releaseMutation()
 	}()
 
 	select {

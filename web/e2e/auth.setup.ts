@@ -1,4 +1,5 @@
 import { test as setup } from '@playwright/test'
+import { resolveE2ECredentials } from './helpers/credentials'
 
 const STORAGE_STATE_PATH = './e2e/.auth/user.json'
 
@@ -16,8 +17,8 @@ const STORAGE_STATE_PATH = './e2e/.auth/user.json'
  * 3. 如果登录失败（后端未运行或账号错误），保存空状态让测试继续运行
  */
 setup('authenticate', async ({ page }) => {
-  const username = process.env.E2E_USERNAME || 'admin'
-  const password = process.env.E2E_PASSWORD || 'changeme'
+  const credentials = resolveE2ECredentials()
+  const { username, password, passwordSource } = credentials
 
   // 先尝试直接访问受保护页面
   await page.goto('/files')
@@ -31,7 +32,13 @@ setup('authenticate', async ({ page }) => {
     return
   }
 
-  console.log('Authentication required, attempting login...')
+  if (!password) {
+    console.log('No E2E password configured or discoverable, saving empty auth state')
+    await page.context().storageState({ path: STORAGE_STATE_PATH })
+    return
+  }
+
+  console.log(`Authentication required, attempting login with ${passwordSource} password...`)
 
   // 检查登录表单是否存在
   const loginButton = page.getByRole('button', { name: /登录|sign in|login/i })
@@ -61,11 +68,11 @@ setup('authenticate', async ({ page }) => {
     console.log(`Authenticated as ${username}`)
   } catch {
     // 登录失败（可能是后端未运行或账号错误）
-    const errorToast = page.locator('[class*="toast"], [class*="alert"]')
+    const errorToast = page.locator('[class*="toast"], [class*="alert"], [role="alert"]')
     const hasError = await errorToast.isVisible({ timeout: 1000 }).catch(() => false)
     
     if (hasError) {
-      console.log('Login failed (invalid credentials or backend error), tests will run in unauthenticated mode')
+      console.log('Login failed (invalid credentials, rate limit, or backend error), tests will run in unauthenticated mode')
     } else {
       console.log('Login timeout (backend may not be running), tests will run in unauthenticated mode')
     }

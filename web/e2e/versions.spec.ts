@@ -33,7 +33,7 @@ test.describe('版本历史页面', () => {
   })
 
   test('空状态应显示引导信息', async ({ page }) => {
-    const emptyGuide = page.getByText(/查看文件版本|输入文件路径|历史版本/i)
+    const emptyGuide = page.getByRole('heading', { name: '查看文件版本历史' })
     await expect(emptyGuide).toBeVisible({ timeout: 5000 })
   })
 })
@@ -68,17 +68,14 @@ test.describe('版本历史查询', () => {
     await expect(queryBtn).toBeVisible({ timeout: 2000 })
     await queryBtn.click()
 
-    await page.waitForTimeout(2000)
+    const noHistory = page.getByText(/暂无版本历史/i)
+    const errorTitle = page.getByText(/获取版本历史失败/i)
 
-    // 应显示无结果或错误提示
-    const noHistory = page.getByText(/暂无版本|不存在|失败|没有/i)
-    const hasNoHistory = await noHistory.isVisible({ timeout: 3000 }).catch(() => false)
-
-    // 或者显示错误消息
-    const errorMsg = page.locator('[class*="error"], [class*="danger"]')
-    const hasError = await errorMsg.isVisible({ timeout: 1000 }).catch(() => false)
-
-    expect(hasNoHistory || hasError).toBe(true)
+    await expect.poll(async () => {
+      const hasNoHistory = await noHistory.isVisible().catch(() => false)
+      const hasError = await errorTitle.isVisible().catch(() => false)
+      return hasNoHistory || hasError
+    }, { timeout: 10000 }).toBe(true)
   })
 })
 
@@ -108,10 +105,9 @@ test.describe('版本历史页面响应式', () => {
 
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
-    await page.goto('/versions')
-    await page.waitForLoadState('networkidle')
+    await ensureAuthenticatedAt(page, '/versions')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    const title = page.getByText('版本历史').first()
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 })

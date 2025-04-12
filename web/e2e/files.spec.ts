@@ -25,9 +25,11 @@ test.describe('文件浏览页面', () => {
   })
 
   test('应显示工具栏按钮', async ({ page }) => {
-    // 检查上传按钮（保存记忆）
-    const uploadBtn = page.getByRole('button', { name: /保存记忆|上传/i })
-    await expect(uploadBtn).toBeVisible({ timeout: 5000 })
+    const uploadFileBtn = page.getByRole('button', { name: '上传文件', exact: true })
+    await expect(uploadFileBtn).toBeVisible({ timeout: 5000 })
+
+    const uploadFolderBtn = page.getByRole('button', { name: '上传文件夹', exact: true })
+    await expect(uploadFolderBtn).toBeVisible({ timeout: 5000 })
 
     // 检查新建文件夹按钮
     const newFolderBtn = page.getByRole('button', { name: /新建空间|新建文件夹/i })

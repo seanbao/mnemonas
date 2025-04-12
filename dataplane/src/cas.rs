@@ -86,6 +86,12 @@ pub struct CasStats {
     pub miss_count: AtomicU64,
 }
 
+/// Paginated object listing entry: (hash, size, created_at_unix)
+pub type ObjectListEntry = (String, u64, Option<i64>);
+
+/// Paginated object listing page: (entries, next_cursor)
+pub type ObjectListPage = (Vec<ObjectListEntry>, Option<String>);
+
 /// Scrub result for a single object
 #[derive(Debug, Clone)]
 pub struct ScrubResult {
@@ -398,7 +404,7 @@ impl CasStore {
         &self,
         cursor: Option<&str>,
         limit: usize,
-    ) -> (Vec<(String, u64, Option<i64>)>, Option<String>) {
+    ) -> ObjectListPage {
         let mut objects: Vec<(String, u64)> = self
             .index
             .iter()
@@ -420,7 +426,7 @@ impl CasStore {
         let end = (start + limit).min(objects.len());
 
         // Get creation times from file metadata
-        let result: Vec<(String, u64, Option<i64>)> = objects[start..end]
+        let result: Vec<ObjectListEntry> = objects[start..end]
             .iter()
             .map(|(hash, size)| {
                 let created_at = self.get_created_at(hash);
