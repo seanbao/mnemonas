@@ -319,6 +319,11 @@ export function UsersPage() {
     toggleStatusMutation.mutate({ userId: user.id, disabled: !user.disabled })
   }, [currentUserId, toggleStatusMutation])
 
+  const users = data?.users ?? []
+  const totalUsers = data?.total ?? users.length
+  const adminCount = users.filter((user) => user.role === 'admin').length
+  const activeUserCount = users.filter((user) => !user.disabled).length
+
   return (
     <div className="h-full flex flex-col p-6">
       {/* Header */}
@@ -353,19 +358,19 @@ export function UsersPage() {
       <div className="grid grid-cols-3 gap-4 mb-6">
         <StatCard
           title="总用户数"
-          value={data?.total || 0}
+          value={totalUsers}
           icon={UsersIcon}
           tone="primary"
         />
         <StatCard
           title="管理员"
-          value={data?.users?.filter(u => u.role === 'admin').length || 0}
+          value={adminCount}
           icon={Shield}
           tone="danger"
         />
         <StatCard
           title="活跃用户"
-          value={data?.users?.filter(u => !u.disabled).length || 0}
+          value={activeUserCount}
           icon={UserIcon}
           tone="success"
         />
@@ -397,13 +402,13 @@ export function UsersPage() {
                 }
               />
             </div>
-          ) : !data?.users?.length ? (
+          ) : !users.length ? (
             <div className="flex items-center justify-center h-40">
               <EmptyState icon={UsersIcon} title="暂无用户" />
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-1">
-              {data.users.map((user) => (
+              {users.map((user) => (
                 <UserCard
                   key={user.id}
                   user={user}

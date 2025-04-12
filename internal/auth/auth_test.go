@@ -918,6 +918,26 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("login rejects unknown fields", func(t *testing.T) {
+		body := `{"username":"handleruser","password":"password123","unexpected":true}`
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_REQUEST" {
+			t.Fatalf("expected INVALID_REQUEST error, got %+v", envelope.Error)
+		}
+	})
+
 	t.Run("login failure", func(t *testing.T) {
 		body := `{"username":"handleruser","password":"wrongpassword"}`
 		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
@@ -1279,6 +1299,31 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("admin create user rejects unknown fields", func(t *testing.T) {
+		body := `{"username":"unknownfielduser","password":"newpass123","email":"new@test.com","role":"user","unexpected":true}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		ctx := context.WithValue(req.Context(), ContextKeyUser, admin)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create user envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_REQUEST" {
+			t.Fatalf("expected INVALID_REQUEST error, got %+v", envelope.Error)
+		}
+		if _, err := store.GetByUsername("unknownfielduser"); err == nil {
+			t.Fatal("expected user creation to be rejected before persistence")
+		}
+	})
+
 	t.Run("admin create user rejects whitespace-only username", func(t *testing.T) {
 		body := `{"username":"   ","password":"newpass123","email":"new@test.com","role":"user"}`
 		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
@@ -1432,6 +1477,21 @@ func TestAuthHandler(t *testing.T) {
 			t.Fatal("expected missing disabled field to leave user disabled")
 		}
 	})
+}
+
+func TestWriteSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	writeSuccess(rec, http.StatusOK, map[string]interface{}{
+		"bad": make(chan int),
+	}, "ok")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+	if rec.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", rec.Body.String())
+	}
 }
 
 func TestLoginAttemptTracker_PrunesStaleEntriesOnNewFailure(t *testing.T) {

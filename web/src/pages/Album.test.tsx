@@ -362,6 +362,35 @@ describe('AlbumPage', () => {
       })
     })
 
+    it('shows unknown size instead of 0 B when preview metadata is incomplete', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListFiles.mockResolvedValue({
+        files: [
+          {
+            ...mockImageFiles[0],
+            size: undefined,
+          },
+        ],
+        path: '/',
+      })
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      await user.click(thumbnail)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '显示图片信息' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '显示图片信息' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('大小')).toBeTruthy()
+        expect(screen.getByText('--')).toBeTruthy()
+      })
+    })
+
     it('does not crash when currentIndex exceeds images length', async () => {
       // Start with images then clear them - simulates race condition
       mockListFiles.mockResolvedValue({

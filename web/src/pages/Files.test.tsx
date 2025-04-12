@@ -812,5 +812,19 @@ describe('FilesPage', () => {
         expect(screen.queryByText('收藏状态加载失败')).toBeNull()
       })
     })
+
+  it('shows a feature-disabled warning when favorites are turned off', async () => {
+    mockCheckFavorites.mockRejectedValueOnce(Object.assign(new Error('favorites feature disabled'), {
+      status: 503,
+      code: 'FAVORITES_FEATURE_DISABLED',
+    }))
+
+    render(<FilesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('收藏功能已关闭')).toBeTruthy()
+      expect(screen.getByText('当前服务已关闭收藏功能。启用后重新加载即可恢复收藏状态与相关操作。')).toBeTruthy()
+    })
+  })
   })
 })

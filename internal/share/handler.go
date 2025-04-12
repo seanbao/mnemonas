@@ -217,10 +217,28 @@ func normalizeShareRelativePath(rawPath string) (string, error) {
 	return cleaned, nil
 }
 
+func decodeJSONBodyStrict(r *http.Request, dst any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing data")
+		}
+		return err
+	}
+
+	return nil
+}
+
 // CreateShare creates a new share link
 func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	var req CreateShareRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -378,7 +396,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var req UpdateShareRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -419,6 +437,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var updatedShare *Share
 	err = h.store.Update(id, func(s *Share) error {
 		if req.Enabled != nil {
 			s.Enabled = *req.Enabled
@@ -453,6 +472,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		if req.Description != nil {
 			s.Description = *req.Description
 		}
+		updatedShare = copyShare(s)
 		return nil
 	})
 
@@ -465,9 +485,12 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	share, _ = h.store.Get(id)
-	info := share.ToInfo()
-	info.URL = h.buildShareURL(share.ID)
+	if updatedShare == nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
+		return
+	}
+	info := updatedShare.ToInfo()
+	info.URL = h.buildShareURL(updatedShare.ID)
 
 	writeShareSuccess(w, http.StatusOK, info, "")
 }
@@ -575,8 +598,9 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(info)
+			if !writePublicShareInfo(w, info) {
+				return
+			}
 			return
 		}
 
@@ -588,8 +612,9 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 			Description: share.Description,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(info)
+		if !writePublicShareInfo(w, info) {
+			return
+		}
 		return
 	}
 
@@ -611,8 +636,9 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	if !writePublicShareInfo(w, info) {
+		return
+	}
 }
 
 // AccessShareRequest is the request for password-protected share access
@@ -625,7 +651,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	id := chi.URLParam(r, "id")
 
 	var req AccessShareRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBodyStrict(r, &req); err != nil {
 		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 		return
 	}
@@ -675,11 +701,14 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 		h.writePublicShareInfoError(w, share, err)
 		return
 	}
+	payload, err := marshalShareJSON(info)
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
+		return
+	}
 
 	h.setShareAccessCookie(w, r, share)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	writeShareJSONPayload(w, http.StatusOK, payload)
 }
 
 func sharePasswordAttemptKey(id string, r *http.Request) string {
@@ -1152,10 +1181,40 @@ func requestIsHTTPS(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+func marshalShareJSON(data any) ([]byte, error) {
+	return json.Marshal(data)
+}
+
+func writeShareJSONPayload(w http.ResponseWriter, status int, payload []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(responseEnvelope{
+	_, _ = w.Write(payload)
+}
+
+func writeShareJSON(w http.ResponseWriter, status int, data any) bool {
+	payload, err := marshalShareJSON(data)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return false
+	}
+
+	writeShareJSONPayload(w, status, payload)
+	return true
+}
+
+func writePublicShareInfo(w http.ResponseWriter, info *PublicShareInfo) bool {
+	payload, err := marshalShareJSON(info)
+	if err != nil {
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "GET_SHARE_FAILED")
+		return false
+	}
+
+	writeShareJSONPayload(w, http.StatusOK, payload)
+	return true
+}
+
+func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	writeShareJSON(w, status, responseEnvelope{
 		Success: true,
 		Data:    data,
 		Message: message,
@@ -1163,9 +1222,7 @@ func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, mess
 }
 
 func writeShareError(w http.ResponseWriter, status int, message, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(responseEnvelope{
+	writeShareJSON(w, status, responseEnvelope{
 		Success: false,
 		Error: &errorDetail{
 			Code:    code,

@@ -84,6 +84,29 @@ describe('ActivityPage', () => {
       })
     })
 
+    it('derives activity count from the returned items when the summary field is missing', async () => {
+      mockListActivity.mockResolvedValue({
+        items: [
+          {
+            id: '1',
+            timestamp: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
+            action: 'upload',
+            path: '/documents/report.pdf',
+            user: 'admin',
+          },
+        ],
+        total: undefined as unknown as number,
+        limit: 20,
+        offset: 0,
+      })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/共 1 条记录/)).toBeTruthy()
+      })
+    })
+
     it('displays activity entries', async () => {
       render(<ActivityPage />)
       

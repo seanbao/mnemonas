@@ -20,6 +20,9 @@ describe('HealthPage', () => {
       filesystemInitialized: true,
       dataplaneConnected: true,
       thumbnailServiceReady: true,
+      maintenanceHistoryReady: true,
+      activityLogReady: true,
+        favoritesStoreReady: true,
     },
     version: {
       name: 'MnemoNAS',
@@ -141,6 +144,30 @@ describe('HealthPage', () => {
         expect(screen.getByText('缩略图服务')).toBeTruthy()
       })
     })
+
+    it('displays maintenance history status', async () => {
+      render(<HealthPage />)
+
+	  await waitFor(() => {
+	    expect(screen.getByText('维护历史')).toBeTruthy()
+	  })
+    })
+
+    it('displays activity log status', async () => {
+      render(<HealthPage />)
+
+	  await waitFor(() => {
+	    expect(screen.getByText('活动日志')).toBeTruthy()
+	  })
+    })
+
+      it('displays favorites store status when diagnostics provide it', async () => {
+        render(<HealthPage />)
+
+        await waitFor(() => {
+          expect(screen.getByText('收藏存储')).toBeTruthy()
+        })
+      })
 
     it('displays version info', async () => {
       render(<HealthPage />)

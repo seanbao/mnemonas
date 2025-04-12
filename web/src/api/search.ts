@@ -43,6 +43,14 @@ interface SearchResultWire {
   hash?: string
 }
 
+function isSearchResponse(value: unknown): value is SearchResponse & { results: SearchResultWire[] } {
+  return !!value &&
+    typeof value === 'object' &&
+    typeof (value as SearchResponse).query === 'string' &&
+    typeof (value as SearchResponse).count === 'number' &&
+    Array.isArray((value as SearchResponse).results)
+}
+
 /**
  * Search for files matching the query
  * @param query - Search query (case-insensitive substring match)
@@ -77,8 +85,25 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
     throw new Error(message)
   }
 
-  const result = await response.json() as SearchApiResponse<SearchResponse> & SearchResponse
-  const data = result.data ?? result
+  let result: unknown
+  try {
+    result = await response.json()
+  } catch {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  const looksWrapped = !!result &&
+    typeof result === 'object' &&
+    ('success' in result || 'data' in result || 'error' in result || 'message' in result)
+
+  const data = looksWrapped
+    ? ((result as SearchApiResponse<SearchResponse>).success === true ? (result as SearchApiResponse<SearchResponse>).data : undefined)
+    : result
+
+  if (!isSearchResponse(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
   return {
     query: data.query,
     count: data.count,

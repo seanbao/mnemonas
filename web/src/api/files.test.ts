@@ -5,8 +5,10 @@ import {
   deleteFile,
   getStorageStats,
   getHealth,
+  getAppVersion,
   createDirectory,
   moveFile,
+  copyFile,
   restoreVersion,
   listTrash,
   restoreFromTrash,
@@ -21,6 +23,7 @@ import {
   getScrubResult,
   runScrub,
   uploadFile,
+  downloadDiagnosticsExport,
 } from './files'
 
 // Type declaration for global (Node.js environment in Vitest)
@@ -202,6 +205,15 @@ describe('API: files', () => {
       expect(localStorage.getItem('mnemonas_token')).toBeNull()
       expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     })
+
+    it('surfaces a clear error when the backend rejects oversized uploads', async () => {
+      MockXMLHttpRequest.queuedResults.push({ type: 'load', status: 413, statusText: 'Request Entity Too Large' })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toMatchObject({
+        message: '文件超过 10 GB 上传限制',
+        status: 413,
+      })
+    })
   })
 
   describe('ApiError', () => {
@@ -302,6 +314,15 @@ describe('API: files', () => {
 
       await expect(listFiles('/nonexistent')).rejects.toThrow('目录不存在')
     })
+
+    it('rejects wrapped file list responses when success is false', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ success: false, data: { files: [], path: '/' } }),
+      })
+
+      await expect(listFiles('/')).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getVersions', () => {
@@ -346,9 +367,10 @@ describe('API: files', () => {
         ok: false,
         status: 403,
         statusText: 'Forbidden',
+        json: () => Promise.resolve({ error: { message: '只允许删除主目录内的文件' } }),
       })
 
-      await expect(deleteFile('/protected.txt')).rejects.toThrow(ApiError)
+      await expect(deleteFile('/protected.txt')).rejects.toThrow('只允许删除主目录内的文件')
     })
   })
 
@@ -384,10 +406,49 @@ describe('API: files', () => {
 
       await expect(getStorageStats()).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it('preserves unknown storage stats fields instead of coercing zero values', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {},
+        }),
+      })
+
+      const result = await getStorageStats()
+      expect(result.totalSize).toBeUndefined()
+      expect(result.totalObjects).toBeUndefined()
+      expect(result.uniqueSize).toBeUndefined()
+      expect(result.dedupRatio).toBeUndefined()
+    })
   })
 
   describe('getHealth', () => {
-    it('fetches health status', async () => {
+    it('accepts the current backend health response shape', async () => {
+      const mockResponse = {
+        status: 'healthy',
+        timestamp: '2024-01-15T10:00:00Z',
+        uptime: '1h30m',
+        dataplane: {
+          healthy: true,
+          version: '0.3.0',
+          uptime: 3600,
+        },
+      }
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      })
+
+      const result = await getHealth()
+      expect(result.status).toBe('healthy')
+      expect(result.dataplane?.healthy).toBe(true)
+      expect(result.timestamp).toBe('2024-01-15T10:00:00Z')
+    })
+
+    it('keeps optional legacy fields when present', async () => {
       const mockResponse = {
         status: 'healthy',
         version: '0.1.0',
@@ -404,8 +465,51 @@ describe('API: files', () => {
       })
 
       const result = await getHealth()
-      expect(result.status).toBe('healthy')
-      expect(result.storage.writable).toBe(true)
+      expect(result.version).toBe('0.1.0')
+      expect(result.storage?.writable).toBe(true)
+    })
+
+    it('rejects malformed successful health responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'healthy' }),
+      })
+
+      await expect(getHealth()).rejects.toThrow('服务器返回了无效的数据')
+    })
+  })
+
+  describe('getAppVersion', () => {
+    it('unwraps valid version responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            name: 'MnemoNAS',
+            version: '0.1.0',
+            go: 'go1.24.0',
+          },
+        }),
+      })
+
+      const result = await getAppVersion()
+      expect(result.version).toBe('0.1.0')
+      expect(result.go).toBe('go1.24.0')
+    })
+
+    it('rejects malformed successful version responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            version: '0.1.0',
+          },
+        }),
+      })
+
+      await expect(getAppVersion()).rejects.toThrow('服务器返回了无效的数据')
     })
   })
 
@@ -420,6 +524,17 @@ describe('API: files', () => {
         method: 'POST',
         headers: {},
       })
+    })
+
+    it('surfaces structured backend errors', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: () => Promise.resolve({ error: { message: '目录已存在' } }),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toThrow('目录已存在')
     })
   })
 
@@ -438,6 +553,30 @@ describe('API: files', () => {
         body: JSON.stringify({ from: '/old.txt', to: '/new.txt' }),
       })
     })
+
+    it('surfaces structured backend errors', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: () => Promise.resolve({ error: { message: '目标目录不存在' } }),
+      })
+
+      await expect(moveFile('/old.txt', '/missing/new.txt')).rejects.toThrow('目标目录不存在')
+    })
+  })
+
+  describe('copyFile', () => {
+    it('surfaces structured backend errors', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: () => Promise.resolve({ error: { message: '目标路径已存在' } }),
+      })
+
+      await expect(copyFile('/old.txt', '/existing.txt')).rejects.toThrow('目标路径已存在')
+    })
   })
 
   describe('restoreVersion', () => {
@@ -451,6 +590,17 @@ describe('API: files', () => {
         method: 'POST',
         headers: {},
       })
+    })
+
+    it('surfaces structured backend errors', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        json: () => Promise.resolve({ error: { message: '仅管理员可恢复历史版本' } }),
+      })
+
+      await expect(restoreVersion('/test.txt', 'abc123')).rejects.toThrow('仅管理员可恢复历史版本')
     })
   })
 
@@ -486,6 +636,43 @@ describe('API: files', () => {
         expect(result.items[0].originalPath).toBe('/deleted.txt')
         expect(result.count).toBe(1)
       })
+
+      it('derives trash count and total size from returned items when summary fields are missing', async () => {
+        const mockResponse = {
+          success: true,
+          data: {
+            items: [
+              {
+                id: 'item1',
+                originalPath: '/deleted.txt',
+                deletedAt: '2024-01-01T00:00:00Z',
+                name: 'deleted.txt',
+                isDir: false,
+                size: 100,
+              },
+              {
+                id: 'item2',
+                originalPath: '/deleted-2.txt',
+                deletedAt: '2024-01-02T00:00:00Z',
+                name: 'deleted-2.txt',
+                isDir: false,
+                size: 24,
+              },
+            ],
+          },
+          timestamp: '2024-01-01',
+        }
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockResponse),
+        })
+
+        const result = await listTrash()
+        expect(result.items).toHaveLength(2)
+        expect(result.count).toBe(2)
+        expect(result.totalSize).toBe(124)
+      })
     })
 
     describe('restoreFromTrash', () => {
@@ -512,6 +699,17 @@ describe('API: files', () => {
           headers: {},
         })
       })
+
+      it('surfaces structured backend errors', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+          json: () => Promise.resolve({ error: { message: '仅可恢复主目录内的文件' } }),
+        })
+
+        await expect(restoreFromTrash('item1')).rejects.toThrow('仅可恢复主目录内的文件')
+      })
     })
 
     describe('deleteFromTrash', () => {
@@ -525,6 +723,17 @@ describe('API: files', () => {
           method: 'DELETE',
           headers: {},
         })
+      })
+
+      it('surfaces structured backend errors', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          json: () => Promise.resolve({ error: { message: '回收站条目状态已变更，请刷新后重试' } }),
+        })
+
+        await expect(deleteFromTrash('item1')).rejects.toThrow('回收站条目状态已变更，请刷新后重试')
       })
     })
 
@@ -607,7 +816,7 @@ describe('API: files', () => {
 
       it('uses fallback filename when header is missing', async () => {
         const blob = new Blob(['file-content'])
-        let createdLink: HTMLAnchorElement | null = null
+        let createdLink: HTMLAnchorElement | undefined
         const originalCreateElement = document.createElement.bind(document)
         const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
           const element = originalCreateElement(tagName)
@@ -630,8 +839,61 @@ describe('API: files', () => {
 
         await downloadFile('/docs/report.txt', { filename: 'custom.txt' })
 
-	        expect(createdLink?.download).toBe('custom.txt')
+        expect(createdLink?.download).toBe('custom.txt')
         createElementSpy.mockRestore()
+      })
+
+      it('surfaces structured backend errors', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          json: () => Promise.resolve({ error: { message: '父路径不是目录' } }),
+        })
+
+        await expect(downloadFile('/docs/report.txt')).rejects.toThrow('父路径不是目录')
+      })
+    })
+
+    describe('downloadDiagnosticsExport', () => {
+      it('uses content-disposition filename when provided', async () => {
+        const blob = new Blob(['{}'], { type: 'application/json' })
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:diagnostics')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'Content-Disposition': 'attachment; filename="diagnostics.json"' }),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadDiagnosticsExport()
+
+        expect(createdLink?.download).toBe('diagnostics.json')
+        createElementSpy.mockRestore()
+      })
+
+      it('surfaces structured backend errors', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+          json: () => Promise.resolve({ error: { message: 'admin access required' } }),
+        })
+
+        await expect(downloadDiagnosticsExport()).rejects.toThrow('admin access required')
       })
     })
 
@@ -665,6 +927,9 @@ describe('API: files', () => {
             filesystem_initialized: true,
             dataplane_connected: true,
             thumbnail_service_ready: false,
+            maintenance_history_ready: true,
+            activity_log_ready: true,
+            favorites_store_ready: true,
           },
           memory: {
             alloc_mb: 50,
@@ -686,8 +951,11 @@ describe('API: files', () => {
 
       const result = await getDiagnostics()
       expect(result.uptimeSecs).toBe(5400)
-      expect(result.system.filesystemInitialized).toBe(true)
-      expect(result.memory.allocMb).toBe(50)
+      expect(result.system?.filesystemInitialized).toBe(true)
+      expect(result.system?.maintenanceHistoryReady).toBe(true)
+      expect(result.system?.activityLogReady).toBe(true)
+        expect(result.system?.favoritesStoreReady).toBe(true)
+      expect(result.memory?.allocMb).toBe(50)
       expect(result.goroutines).toBe(25)
       expect(result.filesystem?.trashItems).toBe(5)
       expect(result.storage?.dedupRatio).toBe(1.25)
@@ -743,6 +1011,9 @@ describe('API: files', () => {
       const result = await getDiagnostics()
       expect(result.uptimeSecs).toBe(0)
       expect(result.system?.filesystemInitialized).toBeUndefined()
+      expect(result.system?.maintenanceHistoryReady).toBeUndefined()
+      expect(result.system?.activityLogReady).toBeUndefined()
+        expect(result.system?.favoritesStoreReady).toBeUndefined()
       expect(result.memory?.allocMb).toBeUndefined()
       expect(result.filesystem?.trashItems).toBeUndefined()
       expect(result.storage?.dedupRatio).toBeUndefined()
@@ -753,6 +1024,22 @@ describe('API: files', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ timestamp: '2024-01-15T10:00:00Z' }),
+      })
+
+      await expect(getDiagnostics()).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it('rejects malformed successful diagnostics payloads', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            timestamp: '2024-01-15T10:00:00Z',
+            uptime: '1h30m',
+            version: { name: 'MnemoNAS', version: '0.1.0' },
+          },
+        }),
       })
 
       await expect(getDiagnostics()).rejects.toThrow('服务器返回了无效的数据')
@@ -784,6 +1071,21 @@ describe('API: files', () => {
       expect(result.status).toBe('completed')
       expect(result.corrupted_objects).toBe(2)
     })
+
+    it('rejects wrapped scrub responses when success is false', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: false,
+          data: {
+            has_result: true,
+            status: 'completed',
+          },
+        }),
+      })
+
+      await expect(getScrubResult()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('runScrub', () => {
@@ -791,9 +1093,13 @@ describe('API: files', () => {
       const mockResponse = {
         success: true,
         data: {
-          id: 'scrub-456',
-          status: 'running',
-          message: 'Scrub started',
+          total_objects: 100,
+          valid_objects: 99,
+          corrupted_objects: 1,
+          missing_objects: 0,
+          total_size: 2048,
+          duration_ms: 500,
+          errors: [],
         },
         timestamp: '2024-01-01',
       }
@@ -805,15 +1111,21 @@ describe('API: files', () => {
 
       const result = await runScrub()
       expect(result.has_result).toBe(true)
-      expect(result.status).toBe('running')
+      expect(result.status).toBe('completed')
+      expect(result.corrupted_objects).toBe(1)
     })
 
     it('runs scrub for specific hashes', async () => {
       const mockResponse = {
         success: true,
         data: {
-          id: 'scrub-789',
-          status: 'running',
+          total_objects: 2,
+          valid_objects: 2,
+          corrupted_objects: 0,
+          missing_objects: 0,
+          total_size: 128,
+          duration_ms: 10,
+          errors: [],
         },
         timestamp: '2024-01-01',
       }
@@ -831,6 +1143,20 @@ describe('API: files', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hashes }),
       })
+    })
+
+    it('rejects malformed successful scrub-run responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            errors: 'invalid',
+          },
+        }),
+      })
+
+      await expect(runScrub()).rejects.toThrow('服务器返回了无效的数据')
     })
   })
 

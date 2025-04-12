@@ -92,6 +92,10 @@ export class ShareError extends Error {
   get isRateLimited(): boolean {
     return this.status === 429
   }
+
+  get isFeatureDisabled(): boolean {
+    return this.code === 'SHARE_FEATURE_DISABLED'
+  }
 }
 
 interface ShareApiError {
@@ -104,6 +108,37 @@ interface ShareApiResponse<T> {
   data?: T
   message?: string
   error?: ShareApiError | string
+}
+
+function isShareType(value: unknown): value is ShareType {
+  return value === 'file' || value === 'folder'
+}
+
+function isPermission(value: unknown): value is Permission {
+  return value === 'read'
+}
+
+function isValidShare(value: unknown): value is Share {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const share = value as Partial<Share>
+  return (
+    typeof share.id === 'string' &&
+    typeof share.path === 'string' &&
+    isShareType(share.type) &&
+    typeof share.created_by === 'string' &&
+    typeof share.created_at === 'string' &&
+    typeof share.has_password === 'boolean' &&
+    isPermission(share.permission) &&
+    typeof share.enabled === 'boolean' &&
+    typeof share.access_count === 'number' &&
+    typeof share.url === 'string' &&
+    (share.expires_at === undefined || typeof share.expires_at === 'string') &&
+    (share.max_access === undefined || typeof share.max_access === 'number') &&
+    (share.description === undefined || typeof share.description === 'string')
+  )
 }
 
 function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
@@ -156,6 +191,56 @@ function getShareErrorCode(body: ShareApiResponse<never> | { error?: string; mes
   return undefined
 }
 
+async function readShareApiError(response: Response, fallback: string): Promise<ShareError> {
+  let message = fallback
+  let code: string | undefined
+
+  try {
+    const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
+    message = getShareErrorMessage(body, message)
+    code = getShareErrorCode(body)
+  } catch {
+    // Keep the fallback when the response body is unavailable.
+  }
+
+  return new ShareError(message, response.status, code)
+}
+
+async function parseWrappedShareSuccess<T>(response: Response, invalidMessage: string): Promise<T> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new ShareError(invalidMessage, response.status)
+  }
+
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    (body as ShareApiResponse<unknown>).success !== true ||
+    !('data' in body)
+  ) {
+    throw new ShareError(invalidMessage, response.status)
+  }
+
+  return body as T
+}
+
+async function parsePublicShareSuccess<T>(response: Response, invalidMessage: string): Promise<T> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new ShareError(invalidMessage, response.status)
+  }
+
+  if (!body || typeof body !== 'object') {
+    throw new ShareError(invalidMessage, response.status)
+  }
+
+  return body as T
+}
+
 // === Authenticated Share APIs ===
 
 /**
@@ -167,16 +252,11 @@ export async function listShares(all = false): Promise<Share[]> {
   const response = await authFetch(url)
   
   if (!response.ok) {
-    let message = '获取分享列表失败'
-    try {
-      const body: ShareApiResponse<never> = await response.json()
-      message = getShareErrorMessage(body, message)
-    } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw await readShareApiError(response, '获取分享列表失败')
   }
 
-  const body: ShareApiResponse<Share[]> = await response.json()
-  if (!body.data) {
+  const body = await parseWrappedShareSuccess<ShareApiResponse<unknown>>(response, '获取分享列表响应无效')
+  if (!Array.isArray(body.data) || !body.data.every(isValidShare)) {
     throw new ShareError('获取分享列表响应无效', response.status)
   }
   return body.data
@@ -193,16 +273,11 @@ export async function createShare(req: CreateShareRequest): Promise<Share> {
   })
   
   if (!response.ok) {
-    let message = '创建分享失败'
-    try {
-      const body: ShareApiResponse<never> = await response.json()
-      message = getShareErrorMessage(body, message)
-    } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw await readShareApiError(response, '创建分享失败')
   }
 
-  const body: ShareApiResponse<Share> = await response.json()
-  if (!body.data) {
+  const body = await parseWrappedShareSuccess<ShareApiResponse<unknown>>(response, '创建分享响应无效')
+  if (!isValidShare(body.data)) {
     throw new ShareError('创建分享响应无效', response.status)
   }
   return body.data
@@ -215,16 +290,11 @@ export async function getShare(id: string): Promise<Share> {
   const response = await authFetch(`${API_BASE}/shares/${id}`)
   
   if (!response.ok) {
-    let message = '获取分享详情失败'
-    try {
-      const body: ShareApiResponse<never> = await response.json()
-      message = getShareErrorMessage(body, message)
-    } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw await readShareApiError(response, '获取分享详情失败')
   }
 
-  const body: ShareApiResponse<Share> = await response.json()
-  if (!body.data) {
+  const body = await parseWrappedShareSuccess<ShareApiResponse<unknown>>(response, '获取分享详情响应无效')
+  if (!isValidShare(body.data)) {
     throw new ShareError('获取分享详情响应无效', response.status)
   }
   return body.data
@@ -241,16 +311,11 @@ export async function updateShare(id: string, req: UpdateShareRequest): Promise<
   })
   
   if (!response.ok) {
-    let message = '更新分享失败'
-    try {
-      const body: ShareApiResponse<never> = await response.json()
-      message = getShareErrorMessage(body, message)
-    } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw await readShareApiError(response, '更新分享失败')
   }
 
-  const body: ShareApiResponse<Share> = await response.json()
-  if (!body.data) {
+  const body = await parseWrappedShareSuccess<ShareApiResponse<unknown>>(response, '更新分享响应无效')
+  if (!isValidShare(body.data)) {
     throw new ShareError('更新分享响应无效', response.status)
   }
   return body.data
@@ -265,12 +330,7 @@ export async function deleteShare(id: string): Promise<void> {
   })
   
   if (!response.ok) {
-    let message = '删除分享失败'
-    try {
-      const body: ShareApiResponse<never> = await response.json()
-      message = getShareErrorMessage(body, message)
-    } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw await readShareApiError(response, '删除分享失败')
   }
 }
 
@@ -294,7 +354,7 @@ export async function getPublicShare(id: string): Promise<PublicShareInfo> {
     throw new ShareError(message, response.status)
   }
   
-  return response.json()
+  return parsePublicShareSuccess<PublicShareInfo>(response, '分享信息无效')
 }
 
 /**
@@ -330,7 +390,11 @@ export async function getPublicShareItems(
     throw new ShareError(message, response.status, code)
   }
 
-  return response.json()
+  const body = await parsePublicShareSuccess<PublicShareItemsResponse>(response, '分享文件夹响应无效')
+  if (!Array.isArray(body.items)) {
+    throw new ShareError('分享文件夹响应无效', response.status)
+  }
+  return body
 }
 
 /**
@@ -362,7 +426,7 @@ export async function accessShareWithPassword(id: string, password: string): Pro
     throw new ShareError(message, response.status, code)
   }
   
-  return response.json()
+  return parsePublicShareSuccess<PublicShareInfo>(response, '分享信息无效')
 }
 
 /**

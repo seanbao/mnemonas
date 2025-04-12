@@ -89,6 +89,8 @@ vi.mock('@/api/files', () => ({
   uploadFile: vi.fn(),
   moveFile: vi.fn(),
   copyFile: vi.fn(),
+  MAX_UPLOAD_FILE_SIZE_BYTES: 10 * 1024 * 1024 * 1024,
+  MAX_UPLOAD_FILE_SIZE_LABEL: '10 GB',
   ApiError: class ApiError extends Error {
     status: number
     statusText: string
@@ -131,7 +133,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { listFiles, uploadFile, createDirectory } from '@/api/files'
+import { listFiles, uploadFile, createDirectory, MAX_UPLOAD_FILE_SIZE_BYTES } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockUploadFile = vi.mocked(uploadFile)
@@ -154,6 +156,16 @@ describe('FilesPage upload queue', () => {
     vi.useRealTimers()
   })
 
+  const flushUi = async () => {
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    act(() => {
+      vi.advanceTimersByTime(0)
+    })
+  }
+
   it('clears successful uploads after timeout', async () => {
     render(<FilesPage />)
 
@@ -167,9 +179,7 @@ describe('FilesPage upload queue', () => {
 
     fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
 
-    await act(async () => {
-      await Promise.resolve()
-    })
+    await flushUi()
 
     expect(screen.getByText('上传完成')).toBeTruthy()
 
@@ -194,9 +204,7 @@ describe('FilesPage upload queue', () => {
     const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
 
     fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
-    await act(async () => {
-      await Promise.resolve()
-    })
+    await flushUi()
 
     expect(screen.getByText('上传完成')).toBeTruthy()
 
@@ -205,9 +213,7 @@ describe('FilesPage upload queue', () => {
     })
 
     fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
-    await act(async () => {
-      await Promise.resolve()
-    })
+    await flushUi()
 
     expect(screen.getByText('上传完成')).toBeTruthy()
 
@@ -240,13 +246,71 @@ describe('FilesPage upload queue', () => {
 
     fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
 
-    await act(async () => {
-      await Promise.resolve()
-    })
+    await flushUi()
 
     expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
     expect(mockUploadFile).not.toHaveBeenCalled()
     expect(screen.getByText('权限不足')).toBeTruthy()
+  })
+
+  it('rejects oversized files before starting the upload request', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const oversizedFile = new File(['data'], 'huge.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(oversizedFile, 'size', {
+      configurable: true,
+      value: MAX_UPLOAD_FILE_SIZE_BYTES + 1,
+    })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [oversizedFile] } })
+
+    await flushUi()
+
+    expect(mockUploadFile).not.toHaveBeenCalled()
+    expect(screen.getByText('huge.bin 超过 10 GB 上传限制')).toBeTruthy()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '上传失败',
+      description: 'huge.bin 超过 10 GB 上传限制',
+      color: 'danger',
+    })
+  })
+
+  it('skips oversized files and continues uploading the rest', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const oversizedFile = new File(['data'], 'huge.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(oversizedFile, 'size', {
+      configurable: true,
+      value: MAX_UPLOAD_FILE_SIZE_BYTES + 1,
+    })
+    const smallFile = new File(['ok'], 'small.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [oversizedFile, smallFile] } })
+
+    await flushUi()
+
+    expect(mockUploadFile).toHaveBeenCalledTimes(1)
+    expect(mockUploadFile).toHaveBeenCalledWith('/', smallFile, expect.any(Function))
+    expect(screen.getByText('huge.bin 超过 10 GB 上传限制')).toBeTruthy()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '部分文件未上传',
+      description: 'huge.bin 超过 10 GB 上传限制',
+      color: 'warning',
+    })
   })
 
   it('shows partial summary for folder uploads with failures', async () => {
@@ -270,10 +334,7 @@ describe('FilesPage upload queue', () => {
 
     fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
 
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
+    await flushUi()
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '文件夹上传部分完成',

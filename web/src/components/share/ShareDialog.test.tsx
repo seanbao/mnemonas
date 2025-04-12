@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ShareDialog } from './ShareDialog'
 
 // Mock HeroUI components
@@ -24,10 +25,16 @@ vi.mock('@heroui/react', () => ({
 }))
 
 // Mock share API
-vi.mock('@/api/share', () => ({
-  createShare: vi.fn(),
-  copyShareUrl: vi.fn(),
-}))
+vi.mock('@/api/share', async () => {
+  const actual = await vi.importActual<typeof import('@/api/share')>('@/api/share')
+  return {
+    ...actual,
+    createShare: vi.fn(),
+    copyShareUrl: vi.fn(),
+  }
+})
+
+import { createShare, ShareError } from '@/api/share'
 
 describe('ShareDialog', () => {
   beforeEach(() => {
@@ -121,5 +128,23 @@ describe('ShareDialog', () => {
     )
 
     expect(screen.getByText('创建分享链接')).toBeInTheDocument()
+  })
+
+  it('shows a disabled state when share creation reports the feature is off', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockRejectedValue(new ShareError('share feature disabled', 503, 'SHARE_FEATURE_DISABLED'))
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(await screen.findByText('分享功能已关闭')).toBeInTheDocument()
+    expect(screen.getByText('当前服务已关闭分享功能。重新启用后，才能为文件或文件夹创建分享链接。')).toBeInTheDocument()
   })
 })

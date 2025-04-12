@@ -60,6 +60,14 @@ describe('ShareManager', () => {
     expect(screen.queryByText('暂无分享')).not.toBeInTheDocument()
   })
 
+  it('shows a disabled state without loading shares when the feature is off', async () => {
+    render(<ShareManager featureEnabled={false} />)
+
+    expect(screen.getByText('分享功能已关闭')).toBeInTheDocument()
+    expect(screen.getByText('当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。')).toBeInTheDocument()
+    expect(shareApi.listShares).not.toHaveBeenCalled()
+  })
+
   it('retries loading from the error state', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.listShares)

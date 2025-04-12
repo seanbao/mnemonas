@@ -3,6 +3,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -952,7 +953,7 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 		return nil, err
 	}
 
-	return io.NopCloser(strings.NewReader(string(data))), nil
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 func (fs *FileSystem) hashWorkspaceFile(ctx context.Context, name string) (string, error) {
