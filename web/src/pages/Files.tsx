@@ -194,6 +194,57 @@ function getFilesActionSuccessToast(
   }
 }
 
+function isDirectoryAlreadyExistsResult(result: ActionResult): boolean {
+  return result.warning !== true && result.message === 'directory already exists'
+}
+
+function getCreateFolderSuccessToast(result: ActionResult): {
+  title: string
+  description?: string
+  color: 'success' | 'warning'
+} {
+  if (isDirectoryAlreadyExistsResult(result)) {
+    return {
+      title: '文件夹已存在，已同步更新',
+      color: 'warning',
+    }
+  }
+
+  return getFilesActionSuccessToast(result, {
+    success: '文件夹创建成功',
+    warning: '文件夹创建完成，但存在警告',
+  })
+}
+
+function getCreateFolderErrorToast(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof Error) {
+    if (error.message === 'resource already exists') {
+      return {
+        title: '同名项目已存在',
+        description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+        color: 'warning',
+      }
+    }
+
+    if (error.message === 'parent path is not a directory') {
+      return {
+        title: '目标位置不可用',
+        description: '当前目录状态已变更，请刷新列表后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return getFilesActionErrorToast(error, {
+    unavailable: '创建暂不可用',
+    failure: '创建失败',
+  })
+}
+
 type MissingFileActionResult = ActionResult & { staleMissing: true }
 
 function getMissingFileActionResult(): MissingFileActionResult {
@@ -321,8 +372,37 @@ function getFolderUploadSummaryToast(
   }
 
   return {
-    title: '文件夹上传部分完成',
+    title: warningMessages[0] || '文件夹上传部分完成',
     description: `成功上传 ${successCount} 个文件，失败 ${errorCount} 个`,
+    color: 'warning',
+  }
+}
+
+function getUploadWarningSummaryToast(successCount: number, warningMessages: string[]): {
+  title: string
+  description: string
+  color: 'warning'
+} {
+  return {
+    title: warningMessages[0] || '上传完成，但存在警告',
+    description: `成功上传 ${successCount} 个文件`,
+    color: 'warning',
+  }
+}
+
+function getPartialBatchActionToast(
+  title: string,
+  successCount: number,
+  errorCount: number,
+  warningMessages: string[]
+): {
+  title: string
+  description: string
+  color: 'warning'
+} {
+  return {
+    title: warningMessages[0] || title,
+    description: `成功 ${successCount} 个，失败 ${errorCount} 个`,
     color: 'warning',
   }
 }
@@ -1151,16 +1231,10 @@ export function FilesPage() {
         onNewFolderClose()
         setNewFolderName('')
       }
-      addToast(getFilesActionSuccessToast(result, {
-        success: '文件夹创建成功',
-        warning: '文件夹创建完成，但存在警告',
-      }))
+      addToast(getCreateFolderSuccessToast(result))
     },
     onError: (error) => {
-      addToast(getFilesActionErrorToast(error, {
-        unavailable: '创建暂不可用',
-        failure: '创建失败',
-      }))
+      addToast(getCreateFolderErrorToast(error))
     },
   })
   
@@ -1683,7 +1757,7 @@ export function FilesPage() {
           targetPath = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
         }
         
-        await uploadFile(targetPath, file, (progress) => {
+        const result = await uploadFile(targetPath, file, (progress) => {
           if (!isCurrentUploadSession()) {
             return
           }
@@ -1691,6 +1765,9 @@ export function FilesPage() {
             j === index ? { ...item, progress } : item
           ))
         })
+        if (result.warning) {
+          uploadWarningMessages.push(result.message ?? '')
+        }
         successCount++
         if (isCurrentUploadSession()) {
           setUploadQueue(prev => prev.map((item, j) => 
@@ -1719,6 +1796,8 @@ export function FilesPage() {
     // Show summary toast for folder upload
     if (isFolderUpload) {
       addToast(getFolderUploadSummaryToast(successCount, errorCount, uploadErrors, uploadWarningMessages))
+    } else if (errorCount === 0 && uploadWarningMessages.length > 0) {
+      addToast(getUploadWarningSummaryToast(successCount, uploadWarningMessages))
     }
     
     // Auto-clear successful uploads after 3 seconds
@@ -1846,7 +1925,7 @@ export function FilesPage() {
         return
       }
 
-      addToast({ title: '批量删除部分完成', description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
+      addToast(getPartialBatchActionToast('批量删除部分完成', successCount, errorCount, warningMessages))
     } finally {
       setIsBatchDeleting(false)
     }
@@ -1995,7 +2074,7 @@ export function FilesPage() {
       return
     }
 
-    addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
+    addToast(getPartialBatchActionToast(`${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, successCount, errorCount, warningMessages))
   }, [canWrite, clipboard, currentPath, moveFileWithMissingSync, copyFileWithMissingSync, queryClient])
 
   const handleKeyboardDelete = useCallback(() => {

@@ -221,6 +221,58 @@ describe('DirectoryPicker', () => {
     })
   })
 
+  it('shows a synchronized warning when the created folder already exists', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockCreateDirectory.mockResolvedValueOnce({ warning: false, message: 'directory already exists' })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'docs')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '文件夹已存在，已同步更新',
+        color: 'warning',
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue('docs')).toBeFalsy()
+      expect(screen.getByText('/docs')).toBeTruthy()
+    })
+  })
+
+  it('shows a localized warning when creating a folder hits a name conflict', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockCreateDirectory.mockRejectedValueOnce(new ApiError('resource already exists', 409, 'Conflict'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'docs')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '同名项目已存在',
+        description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+        color: 'warning',
+      })
+    })
+
+    expect(screen.getByDisplayValue('docs')).toBeTruthy()
+  })
+
   it('shows an unavailable toast when expanding a directory hits filesystem unavailability', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     mockListFiles

@@ -352,6 +352,24 @@ describe('Share API', () => {
       })
     })
 
+    it('returns warning details for successful delete share responses with warnings', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "audit log persistence incomplete"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: null,
+          message: 'share deleted with audit warning',
+        }),
+      })
+
+      await expect(deleteShare('share-1')).resolves.toEqual({
+        warning: true,
+        message: 'share deleted with audit warning',
+      })
+    })
+
     it('rejects malformed successful delete share responses', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,

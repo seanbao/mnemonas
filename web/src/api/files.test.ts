@@ -38,6 +38,7 @@ type MockXHRResult = {
   status?: number
   statusText?: string
   responseText?: string
+  responseHeaders?: Record<string, string>
 }
 
 class MockXMLHttpRequest {
@@ -56,6 +57,7 @@ class MockXMLHttpRequest {
   status = 0
   statusText = ''
   responseText = ''
+  responseHeaders = new Map<string, string>()
   method = ''
   url = ''
   body: Document | XMLHttpRequestBodyInit | null = null
@@ -81,6 +83,10 @@ class MockXMLHttpRequest {
     this.listeners.set(type, existing)
   }
 
+  getResponseHeader(name: string): string | null {
+    return this.responseHeaders.get(name.toLowerCase()) ?? null
+  }
+
   send(body: Document | XMLHttpRequestBodyInit | null = null): void {
     this.body = body
     const next = MockXMLHttpRequest.queuedResults.shift()
@@ -91,6 +97,9 @@ class MockXMLHttpRequest {
     this.status = next.status ?? 0
     this.statusText = next.statusText ?? ''
     this.responseText = next.responseText ?? ''
+    this.responseHeaders = new Map(
+      Object.entries(next.responseHeaders ?? {}).map(([key, value]) => [key.toLowerCase(), value])
+    )
     const listeners = this.listeners.get(next.type) ?? []
     for (const listener of listeners) {
       listener()
@@ -183,7 +192,7 @@ describe('API: files', () => {
         })
         .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
 
-      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toBeUndefined()
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toEqual({ warning: false, message: undefined })
 
       expect(mockFetch).toHaveBeenNthCalledWith(1, '/api/v1/auth/refresh', expect.objectContaining({ method: 'POST' }))
       expect(mockFetch).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({ method: 'POST' }))
@@ -236,6 +245,30 @@ describe('API: files', () => {
         expect((error as ApiError).code).toBe('SERVICE_UNAVAILABLE')
         expect((error as ApiError).isUnavailable).toBe(true)
       }
+    })
+
+    it('returns warning details for successful uploads with warning headers', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 201,
+        statusText: 'Created',
+        responseText: JSON.stringify({
+          success: true,
+          data: {
+            path: '/docs/report.txt',
+          },
+          message: 'file uploaded with persistence warning',
+          timestamp: '2024-01-01',
+        }),
+        responseHeaders: {
+          Warning: '199 MnemoNAS "workspace mutation persistence incomplete"',
+        },
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).resolves.toEqual({
+        warning: true,
+        message: 'file uploaded with persistence warning',
+      })
     })
   })
 
