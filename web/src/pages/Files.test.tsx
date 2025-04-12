@@ -552,6 +552,58 @@ describe('FilesPage', () => {
         })
       })
     })
+
+    it('shows a synchronized warning when the folder already exists', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCreateDirectory.mockResolvedValueOnce({ warning: false, message: 'directory already exists' })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新建空间')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('新建空间'))
+      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'existing-folder')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '文件夹已存在，已同步更新',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('新建文件夹')).toBeFalsy()
+      })
+    })
+
+    it('keeps the create folder modal open with a localized warning when a name conflict occurs', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCreateDirectory.mockRejectedValueOnce(new ApiError('resource already exists', 409))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新建空间')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('新建空间'))
+      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'conflict-folder')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '同名项目已存在',
+          description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+          color: 'warning',
+        })
+      })
+
+      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByDisplayValue('conflict-folder')).toBeTruthy()
+    })
   })
 
   describe('file selection', () => {
@@ -1179,6 +1231,31 @@ describe('FilesPage', () => {
       })
     })
 
+    it('preserves warning detail when batch delete partially succeeds with warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDeleteFile
+        .mockResolvedValueOnce(warningActionResult('file deleted with persistence warning'))
+        .mockRejectedValueOnce(new Error('delete failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量删除'))
+      await user.click(await screen.findByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'file deleted with persistence warning',
+          description: '成功 1 个，失败 1 个',
+          color: 'warning',
+        })
+      })
+    })
+
     it('shows danger toast when copy paste fully fails', async () => {
       mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
       mockClipboardState.operation = 'copy'
@@ -1246,6 +1323,32 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: 'resource moved with persistence warning',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('preserves warning detail when cut paste partially succeeds with warnings', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockMoveFile
+        .mockResolvedValueOnce(warningActionResult('resource moved with persistence warning'))
+        .mockRejectedValueOnce(new Error('move failed'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'resource moved with persistence warning',
+          description: '成功 1 个，失败 1 个',
           color: 'warning',
         })
       })
