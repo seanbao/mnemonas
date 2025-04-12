@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Button, Spinner } from '@heroui/react'
 import { AlertCircle } from 'lucide-react'
 import { buildPreviewUrl } from '@/lib/preview-utils'
-import { getAuthHeaders } from '@/api/auth'
+import { authFetch } from '@/api/auth'
 import { cn } from '@/lib/utils'
 
 export interface PdfPreviewProps {
@@ -31,7 +31,7 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
       setBlobUrl(null)
       
       try {
-        const response = await fetch(pdfUrl, { headers: getAuthHeaders() })
+        const response = await authFetch(pdfUrl)
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const blob = await response.blob()
         if (!cancelled) {

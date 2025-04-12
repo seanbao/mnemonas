@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner, addToast } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
 import { downloadFile } from '@/api/files'
+import { refreshAuthSession } from '@/api/auth'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
 import { TextPreview } from './TextPreview'
 import { ImagePreview } from './ImagePreview'
@@ -23,6 +24,54 @@ export interface PreviewModalProps {
 
 function buildStreamUrl(path: string): string {
   return buildPreviewUrl(path)
+}
+
+function withSessionRetryParam(url: string): string {
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}session_retry=1`
+}
+
+function useRetryableMediaUrl(baseUrl: string, errorMessage: string) {
+  const [mediaUrl, setMediaUrl] = useState(baseUrl)
+  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [hasRetried, setHasRetried] = useState(false)
+
+  useEffect(() => {
+    setMediaUrl(baseUrl)
+    setError(null)
+    setIsLoading(true)
+    setHasRetried(false)
+  }, [baseUrl])
+
+  const handleLoaded = useCallback(() => {
+    setIsLoading(false)
+    setError(null)
+  }, [])
+
+  const handleError = useCallback(async () => {
+    if (!hasRetried) {
+      const refreshed = await refreshAuthSession()
+      if (refreshed) {
+        setHasRetried(true)
+        setError(null)
+        setIsLoading(true)
+        setMediaUrl(withSessionRetryParam(baseUrl))
+        return
+      }
+    }
+
+    setIsLoading(false)
+    setError(errorMessage)
+  }, [baseUrl, errorMessage, hasRetried])
+
+  return {
+    mediaUrl,
+    error,
+    isLoading,
+    handleLoaded,
+    handleError,
+  }
 }
 
 export function PreviewModal({ 
@@ -278,8 +327,13 @@ export function PreviewModal({
 // Simple video preview using native video element
 function VideoPreview({ path }: { path: string; filename: string }) {
   const url = buildStreamUrl(path)
-  const [error, setError] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  const {
+    mediaUrl,
+    error,
+    isLoading,
+    handleLoaded,
+    handleError,
+  } = useRetryableMediaUrl(url, '无法加载视频')
   
   return (
     <div className="h-full flex flex-col bg-black rounded-xl overflow-hidden">
@@ -293,15 +347,14 @@ function VideoPreview({ path }: { path: string; filename: string }) {
         )}
         {!error && (
           <video
-            src={url}
+            src={mediaUrl}
             controls
             preload="metadata"
             autoPlay
             className="max-w-full max-h-full"
-            onLoadedData={() => setIsLoading(false)}
+            onLoadedData={handleLoaded}
             onError={() => {
-              setIsLoading(false)
-              setError('无法加载视频')
+              void handleError()
             }}
           >
             <track kind="captions" srcLang="zh" label="中文" />
@@ -316,8 +369,13 @@ function VideoPreview({ path }: { path: string; filename: string }) {
 // Simple audio preview
 function AudioPreview({ path, filename }: { path: string; filename: string }) {
   const url = buildStreamUrl(path)
-  const [error, setError] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  const {
+    mediaUrl,
+    error,
+    isLoading,
+    handleLoaded,
+    handleError,
+  } = useRetryableMediaUrl(url, '无法加载音频')
   
   return (
     <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-xl">
@@ -336,15 +394,14 @@ function AudioPreview({ path, filename }: { path: string; filename: string }) {
       )}
       {!error && (
         <audio
-          src={url}
+          src={mediaUrl}
           controls
           preload="metadata"
           autoPlay
           className="w-[400px] max-w-full"
-          onLoadedData={() => setIsLoading(false)}
+          onLoadedData={handleLoaded}
           onError={() => {
-            setIsLoading(false)
-            setError('无法加载音频')
+            void handleError()
           }}
         >
           浏览器不支持音频播放
