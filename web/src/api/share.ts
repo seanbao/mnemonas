@@ -72,6 +72,8 @@ export interface ShareActionResult {
   message?: string
 }
 
+export type ShareCreateResult = Share & ShareActionResult
+
 export class ShareError extends Error {
   status: number
   code?: string
@@ -324,7 +326,7 @@ export async function listShares(all = false): Promise<Share[]> {
 /**
  * Create a new share
  */
-export async function createShare(req: CreateShareRequest): Promise<Share> {
+export async function createShare(req: CreateShareRequest): Promise<ShareCreateResult> {
   const response = await authFetch(`${API_BASE}/shares`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -339,7 +341,10 @@ export async function createShare(req: CreateShareRequest): Promise<Share> {
   if (!isValidShare(body.data)) {
     throw new ShareError('创建分享响应无效', response.status)
   }
-  return body.data
+  return {
+    ...body.data,
+    ...getShareActionResult(response, body),
+  }
 }
 
 /**

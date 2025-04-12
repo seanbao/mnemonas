@@ -24,8 +24,10 @@ export function Header({ onMenuClick }: HeaderProps) {
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   const handleLogout = async () => {
-    await logout()
-    addToast({ title: '已退出登录', color: 'success' })
+    const result = await logout()
+    addToast(result.warning
+      ? { title: result.message ?? '已退出登录，但活动日志写入失败', color: 'warning' }
+      : { title: '已退出登录', color: 'success' })
     navigate('/login', { replace: true })
   }
 
@@ -51,7 +53,7 @@ export function Header({ onMenuClick }: HeaderProps) {
   const handleRefresh = async () => {
     setIsRefreshing(true)
     try {
-      await queryClient.invalidateQueries()
+      await queryClient.refetchQueries({ type: 'active' }, { throwOnError: true })
       addToast({ title: '数据已刷新', color: 'success' })
     } catch (error) {
       addToast({

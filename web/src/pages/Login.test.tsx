@@ -231,7 +231,7 @@ describe('LoginPage', () => {
     })
 
     it('navigates to home on successful login', async () => {
-      mockLogin.mockResolvedValue(true)
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
       const user = userEvent.setup()
       renderLogin()
       
@@ -241,6 +241,19 @@ describe('LoginPage', () => {
       
       expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '登录成功', color: 'success' }))
+    })
+
+    it('shows a warning toast when login succeeds with backend warning metadata', async () => {
+      mockLogin.mockResolvedValue({ warning: true, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '登录成功，但活动日志写入失败', color: 'warning' }))
     })
   })
 
