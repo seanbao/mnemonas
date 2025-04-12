@@ -207,6 +207,96 @@ func TestHistoryStore_FailedScrub(t *testing.T) {
 	}
 }
 
+func TestNewHistoryStore_RecoverInterruptedRunningScrub(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
+	}
+	if started == nil {
+		t.Fatal("expected non-nil started scrub result")
+	}
+
+	reloaded, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore(reload) failed: %v", err)
+	}
+
+	if reloaded.ScrubIsRunning() {
+		t.Fatal("expected interrupted persisted scrub not to remain running after reload")
+	}
+
+	result := reloaded.GetLastScrubResult()
+	if result == nil {
+		t.Fatal("expected recovered scrub result")
+	}
+	if result.Status != "failed" {
+		t.Fatalf("expected recovered scrub status failed, got %q", result.Status)
+	}
+	if result.ErrorMessage != interruptedScrubErrorMessage {
+		t.Fatalf("expected recovered scrub error message %q, got %q", interruptedScrubErrorMessage, result.ErrorMessage)
+	}
+	if result.EndTime.IsZero() {
+		t.Fatal("expected recovered scrub to have an end time")
+	}
+	if !result.StartTime.IsZero() && result.EndTime.Before(result.StartTime) {
+		t.Fatalf("expected recovered scrub end time %v to be >= start time %v", result.EndTime, result.StartTime)
+	}
+}
+
+func TestHistoryStore_SaveScrubResultFailureKeepsTerminalStateInMemory(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
+	}
+
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+	backupPath := filepath.Join(tmpDir, "last_scrub.backup.json")
+	if err := os.Rename(historyPath, backupPath); err != nil {
+		t.Fatalf("failed to rename history file: %v", err)
+	}
+	if err := os.Symlink(backupPath, historyPath); err != nil {
+		t.Fatalf("failed to replace history file with symlink: %v", err)
+	}
+
+	started.Status = "completed"
+	started.EndTime = time.Now()
+	started.TotalObjects = 5
+
+	err = store.SaveScrubResult(started)
+	if !errors.Is(err, errHistoryFileSymlink) {
+		t.Fatalf("expected symlink rejection on final save, got %v", err)
+	}
+	if store.ScrubIsRunning() {
+		t.Fatal("expected failed final persistence not to leave scrub running in memory")
+	}
+
+	result := store.GetLastScrubResult()
+	if result == nil {
+		t.Fatal("expected in-memory scrub result after failed final persistence")
+	}
+	if result.Status != "completed" {
+		t.Fatalf("expected in-memory scrub status completed, got %q", result.Status)
+	}
+	if result.TotalObjects != 5 {
+		t.Fatalf("expected in-memory scrub total_objects 5, got %d", result.TotalObjects)
+	}
+	if result.EndTime.IsZero() {
+		t.Fatal("expected in-memory scrub result to retain end time")
+	}
+}
+
 func TestNewHistoryStore_RejectsSymlinkHistoryFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	targetPath := filepath.Join(tmpDir, "real-history.json")

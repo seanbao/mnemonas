@@ -53,7 +53,10 @@ type Store struct {
 	entries []Entry
 	mu      sync.RWMutex
 	maxSize int // Maximum number of entries to keep in memory
+	version uint64
 }
+
+var activityLogWriter = writeActivityLogFile
 
 func copyDetails(details map[string]string) map[string]string {
 	if details == nil {
@@ -150,12 +153,41 @@ func isRecoverableActivityLogError(err error) bool {
 }
 
 // save writes entries to disk
-func (s *Store) save() error {
-	data, err := json.MarshalIndent(s.entries, "", "  ")
+func saveEntries(path string, entries []Entry) error {
+	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeActivityLogFile(s.logFilePath(), data)
+	return activityLogWriter(path, data)
+}
+
+func cloneEntries(entries []Entry) []Entry {
+	return append([]Entry(nil), entries...)
+}
+
+func (s *Store) updateEntries(mutator func([]Entry) []Entry) error {
+	for {
+		s.mu.RLock()
+		baseVersion := s.version
+		currentEntries := cloneEntries(s.entries)
+		logPath := s.logFilePath()
+		s.mu.RUnlock()
+
+		nextEntries := mutator(currentEntries)
+		if err := saveEntries(logPath, nextEntries); err != nil {
+			return err
+		}
+
+		s.mu.Lock()
+		if s.version != baseVersion {
+			s.mu.Unlock()
+			continue
+		}
+		s.entries = nextEntries
+		s.version++
+		s.mu.Unlock()
+		return nil
+	}
 }
 
 func validateActivityLogPath(path string) error {
@@ -256,10 +288,6 @@ func generateID() string {
 
 // Log records a new activity entry
 func (s *Store) Log(action ActionType, path, user, ip string, details map[string]string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	previous := append([]Entry(nil), s.entries...)
-
 	entry := Entry{
 		ID:        generateID(),
 		Timestamp: time.Now(),
@@ -270,19 +298,15 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 		Details:   copyDetails(details),
 	}
 
-	// Prepend entry (newest first)
-	s.entries = append([]Entry{entry}, s.entries...)
-
-	// Trim to max size
-	if len(s.entries) > s.maxSize {
-		s.entries = s.entries[:s.maxSize]
-	}
-
-	if err := s.save(); err != nil {
-		s.entries = previous
-		return err
-	}
-	return nil
+	return s.updateEntries(func(entries []Entry) []Entry {
+		nextEntries := make([]Entry, 0, len(entries)+1)
+		nextEntries = append(nextEntries, entry)
+		nextEntries = append(nextEntries, entries...)
+		if len(nextEntries) > s.maxSize {
+			nextEntries = nextEntries[:s.maxSize]
+		}
+		return nextEntries
+	})
 }
 
 // List returns recent activity entries
@@ -326,16 +350,9 @@ func (s *Store) Count() int {
 
 // Clear removes all entries
 func (s *Store) Clear() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	previous := append([]Entry(nil), s.entries...)
-	s.entries = make([]Entry, 0)
-	if err := s.save(); err != nil {
-		s.entries = previous
-		return err
-	}
-	return nil
+	return s.updateEntries(func([]Entry) []Entry {
+		return make([]Entry, 0)
+	})
 }
 
 // GetByID returns a specific entry by ID

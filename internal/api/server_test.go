@@ -742,6 +742,65 @@ func TestServer_DownloadFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	}
 }
 
+func TestServer_RespondReadableOpenFileError_MapsStorageErrors(t *testing.T) {
+	server := &Server{logger: zerolog.Nop()}
+
+	tests := []struct {
+		name       string
+		err        error
+		statusCode int
+		body       string
+	}{
+		{
+			name:       "not found",
+			err:        fmt.Errorf("wrapped: %w", storage.ErrNotFound),
+			statusCode: http.StatusNotFound,
+			body:       "resource not found",
+		},
+		{
+			name:       "parent not directory",
+			err:        fmt.Errorf("wrapped: %w", storage.ErrNotDir),
+			statusCode: http.StatusConflict,
+			body:       "parent path is not a directory",
+		},
+		{
+			name:       "unexpected internal error",
+			err:        errors.New("boom"),
+			statusCode: http.StatusInternalServerError,
+			body:       "internal server error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+
+			server.respondReadableOpenFileError(w, "open file", tt.err, "cannot download directory")
+
+			if w.Code != tt.statusCode {
+				t.Fatalf("status = %d, want %d", w.Code, tt.statusCode)
+			}
+			if !strings.Contains(w.Body.String(), tt.body) {
+				t.Fatalf("expected body to contain %q, got %s", tt.body, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestServer_RespondReadableOpenFileError_UsesContextSpecificDirectoryMessage(t *testing.T) {
+	server := &Server{logger: zerolog.Nop()}
+	w := httptest.NewRecorder()
+
+	server.respondReadableOpenFileError(w, "thumbnail open file", storage.ErrIsDir, "path is a directory")
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "path is a directory") {
+		t.Fatalf("expected directory-path validation message, got %s", w.Body.String())
+	}
+}
+
 func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 	ctx := context.Background()
