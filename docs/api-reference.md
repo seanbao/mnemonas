@@ -89,21 +89,28 @@ Authorization: Bearer <access_token>
 | 200 | 成功 |
 | 201 | 创建成功 |
 | 400 | 请求参数错误 |
+| 401 | 未认证或认证已失效 |
+| 403 | 已认证但无权限 |
+| 409 | 资源状态冲突 / 当前操作不可执行 |
 | 404 | 资源不存在 |
 | 429 | 请求过于频繁 / 密码尝试次数过多 |
 | 410 | 资源不可用（过期/禁用/访问上限） |
 | 413 | 文件过大 |
+| 503 | 服务暂不可用（如文件系统、分享服务、活动日志、版本存储未就绪） |
 | 500 | 服务器内部错误 |
 
 ### Warning 响应头
 
 部分写接口在变更已经对外可见、但后续持久化或清理步骤失败时，仍返回成功状态码，并附带 HTTP `Warning` 响应头。当前使用的 warning 文案包括：
 
+- `199 MnemoNAS "activity log persistence failed"`
 - `199 MnemoNAS "workspace mutation persistence incomplete"`
+- `199 MnemoNAS "scrub result persistence incomplete"`
+- `199 MnemoNAS "trash restore metadata reconciliation failed"`
 - `199 MnemoNAS "delete cleanup incomplete"`
 - `199 MnemoNAS "trash delete cleanup incomplete"`
 
-这类响应的 JSON body 可能包含 `warning: true`，`message` 会说明成功已提交但存在后置 warning，例如 `resource copied with persistence warning`、`version restored with persistence warning`。
+调用方应优先检查 HTTP `Warning` 响应头，而不是只依赖 JSON body。部分 `/api/v1` 写接口会额外返回 `warning: true` 和 `message`，例如 `resource copied with persistence warning`、`version restored with persistence warning`；但审计补写失败等场景可能只有 `Warning` header，body 仍保持原成功结构。
 
 ---
 
@@ -194,6 +201,37 @@ POST /api/v1/auth/logout
 ```
 
 **需要认证**: 是
+
+**行为说明**:
+- 当前 access token 会被吊销
+- `/api/v1` 作用域下的短期 `HttpOnly` download-session cookie 会一并清理
+
+### 创建下载会话 Cookie
+
+为浏览器下载、预览、缩略图等无法稳定附带 `Authorization` header 的请求创建短期 `HttpOnly` cookie。
+
+```
+POST /api/v1/auth/download-session
+```
+
+**需要认证**: 是
+
+**请求头**:
+```http
+Authorization: Bearer <access_token>
+```
+
+**请求体**: 无
+
+**成功行为**:
+- 返回 `200 OK`
+- 设置名为 `download-session` 的 `HttpOnly` cookie，路径为 `/api/v1`
+- cookie 过期时间与当前 access token 剩余有效期对齐
+- 当请求被后端识别为 HTTPS（直连 TLS 或可信代理转发 `X-Forwarded-Proto: https`）时，cookie 带 `Secure`
+
+**失败行为**:
+- 缺少 `Authorization: Bearer ...` 头时返回 `401`，错误码 `MISSING_AUTH`
+- 认证上下文缺失或 access token 已失效时返回 `401`，错误码 `NOT_AUTHENTICATED`
 
 ### 修改密码
 
@@ -355,6 +393,35 @@ GET /api/v1/setup/
 **说明**:
 - 该接口不再返回任何初始密码或用户名
 - 首次启动生成的初始密码仅写入启动日志和 `secrets.json`
+- 该接口返回 setup 专用平铺 JSON，不使用通用 `data` wrapper
+
+### 确认已查看初始化信息
+
+将首次启动提示标记为已查看，后续 `GET /api/v1/setup/` 会返回 `is_first_run=false`。
+
+```
+POST /api/v1/setup/acknowledge
+```
+
+**需要认证**:
+- 当认证启用时，需要管理员权限
+- 当认证未启用时，可匿名调用
+
+**请求体**: 无
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "message": "setup acknowledged"
+}
+```
+
+**失败行为**:
+- 认证启用但未登录时返回 `401`
+- 认证启用但非管理员时返回 `403`
+- 运行时 secrets 不可用时返回 `503`，message 为 `setup acknowledge unavailable`
+- 该接口同样返回 setup 专用 JSON，而不是通用 `data` wrapper
 
 ### 存储统计
 

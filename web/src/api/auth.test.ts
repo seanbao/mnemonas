@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { AUTH_CLEARED_EVENT, authFetch, changePassword, deleteUser, getCurrentUser, getStoredUser, listUsers, login, resetUserPassword } from './auth'
+import { AUTH_CLEARED_EVENT, authFetch, changePassword, deleteUser, getCurrentUser, getStoredUser, listUsers, login, logout, resetUserPassword } from './auth'
 
 const fetchMock = vi.fn()
 
@@ -27,7 +27,11 @@ describe('auth API', () => {
       })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
 
-    await login('admin', 'password')
+    await expect(login('admin', 'password')).resolves.toMatchObject({
+      user: { homeDir: '/' },
+      warning: false,
+      message: undefined,
+    })
 
     expect(getStoredUser()).toMatchObject({ homeDir: '/' })
 
@@ -35,6 +39,32 @@ describe('auth API', () => {
       method: 'POST',
       headers: { Authorization: 'Bearer access-1' },
     }))
+  })
+
+  it('returns warning metadata for successful login responses with warning headers', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "activity log persistence failed"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            access_token: 'access-1',
+            refresh_token: 'refresh-1',
+            expires_at: '2026-03-13T00:00:00Z',
+            token_type: 'Bearer',
+            user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
+
+    await expect(login('admin', 'password')).resolves.toMatchObject({
+      user: { username: 'admin' },
+      warning: true,
+      message: undefined,
+    })
   })
 
   it('rejects malformed successful login responses instead of storing fake session state', async () => {
@@ -188,6 +218,21 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
+  it('returns warning metadata for successful logout responses with warning headers', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "activity log persistence failed"' : null },
+      json: () => Promise.resolve({ success: true, data: null }),
+    })
+
+    await expect(logout()).resolves.toMatchObject({
+      warning: true,
+      message: undefined,
+    })
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
   })
 
   it('preserves local auth state when current user lookup is temporarily unavailable', async () => {

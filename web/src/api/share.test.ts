@@ -251,6 +251,27 @@ describe('Share API', () => {
       const result = await createShare({ path: '/docs/b.txt' })
 
       expect(result.id).toBe('share-2')
+      expect(result.warning).toBe(false)
+      expect(result.message).toBeUndefined()
+    })
+
+    it('returns warning details for successful create share responses with warnings', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: { get: (name: string) => name === 'Warning' ? '199 MnemoNAS "activity log persistence failed"' : null },
+        json: () => Promise.resolve({
+          success: true,
+          data: { id: 'share-2', path: '/docs/b.txt', type: 'file', created_by: 'u1', created_at: '2026-03-13T00:00:00Z', has_password: false, permission: 'read', enabled: true, access_count: 0, url: '/s/share-2' },
+          message: 'share created with audit warning',
+        }),
+      })
+
+      await expect(createShare({ path: '/docs/b.txt' })).resolves.toMatchObject({
+        id: 'share-2',
+        warning: true,
+        message: 'share created with audit warning',
+      })
     })
 
     it('reads structured share errors', async () => {
