@@ -98,6 +98,19 @@ describe('ShareDialog', () => {
     expect(screen.getByText('有效期')).toBeInTheDocument()
   })
 
+  it('renders the access limit section without crashing', () => {
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    expect(screen.getByText('访问次数限制')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('不限制')).toBeInTheDocument()
+  })
+
   it('shows create button', () => {
     render(
       <ShareDialog

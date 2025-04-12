@@ -19,6 +19,7 @@ import {
   Lock,
   Clock,
   Eye,
+  Users,
   CheckCircle,
 } from 'lucide-react'
 import { createShare, copyShareUrl, type Share, type CreateShareRequest } from '@/api/share'

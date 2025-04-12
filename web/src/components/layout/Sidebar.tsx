@@ -1,6 +1,7 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useIsAdmin } from '@/stores/auth'
+import { Button } from '@heroui/react'
 import { 
   Folder, 
   Image, 
@@ -16,6 +17,8 @@ import {
   FileText,
   X,
   Star,
+  AlertCircle,
+  RefreshCw,
 } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
 import { getStorageStats } from '@/api/files'
@@ -57,7 +60,7 @@ const navSections: NavSection[] = [
   {
     title: '系统',
     items: [
-      { icon: Activity, label: '健康', path: '/system-health' },
+      { icon: Activity, label: '健康', path: '/system-health', adminOnly: true },
       { icon: FileText, label: '活动', path: '/activity' },
       { icon: Settings, label: '设置', path: '/settings', adminOnly: true },
     ]
@@ -74,7 +77,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const isAdmin = useIsAdmin()
   
   // Fetch storage stats for the sidebar indicator
-  const { data: storageStats } = useQuery({
+  const { data: storageStats, error: storageStatsError, refetch: refetchStorageStats, isRefetching: isRefetchingStorageStats } = useQuery({
     queryKey: ['storage-stats-sidebar'],
     queryFn: getStorageStats,
     staleTime: 1000 * 60 * 5, // Cache for 5 minutes
@@ -194,32 +197,54 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
               <HardDrive size={16} className="text-accent-primary" />
               <span className="text-sm font-medium">存储空间</span>
             </div>
-            <div className="space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-default-500">已使用</span>
-                <span className="data-value text-accent-light font-medium">
-                  {storageStats ? formatBytes(usedBytes) : '--'}
-                </span>
+            {storageStatsError ? (
+              <div className="space-y-3 text-xs">
+                <div className="flex items-start gap-2 text-warning">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                  <div>
+                    <div className="font-medium text-foreground">统计加载失败</div>
+                    <div className="text-default-500">{(storageStatsError as Error).message || '请稍后重试'}</div>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="bordered"
+                  className="w-full rounded-lg"
+                  onPress={() => refetchStorageStats()}
+                  isLoading={isRefetchingStorageStats}
+                  startContent={!isRefetchingStorageStats ? <RefreshCw size={14} /> : undefined}
+                >
+                  重新加载
+                </Button>
               </div>
-              <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
-                <div 
-                  className={cn(
-                    "h-full bg-accent-primary rounded-full transition-all duration-500",
-                    hasUsage ? "flow-line opacity-60" : "opacity-20"
-                  )}
-                  style={{ width: hasUsage ? '100%' : '0%' }}
-                />
-              </div>
-              <div className="text-[11px] text-default-400">容量未知</div>
-                {storageStats && storageStats.dedupRatio > 0 && (
-                <div className="flex items-center gap-2">
-                  <div className="live-indicator scale-75" />
-                    <span className="text-default-400">
-                      去重率 {(storageStats.dedupRatio * 100).toFixed(1)}%
+            ) : (
+              <div className="space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-default-500">已使用</span>
+                  <span className="data-value text-accent-light font-medium">
+                    {storageStats ? formatBytes(usedBytes) : '--'}
                   </span>
                 </div>
-              )}
-            </div>
+                <div className="h-1.5 bg-content1 rounded-full overflow-hidden">
+                  <div 
+                    className={cn(
+                      "h-full bg-accent-primary rounded-full transition-all duration-500",
+                      hasUsage ? "flow-line opacity-60" : "opacity-20"
+                    )}
+                    style={{ width: hasUsage ? '100%' : '0%' }}
+                  />
+                </div>
+                <div className="text-[11px] text-default-400">容量未知</div>
+                  {storageStats && storageStats.dedupRatio > 0 && (
+                  <div className="flex items-center gap-2">
+                    <div className="live-indicator scale-75" />
+                      <span className="text-default-400">
+                        去重率 {(storageStats.dedupRatio * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <p className="text-default-500 text-center text-[10px] mt-3">
             MnemoNAS v0.1.0

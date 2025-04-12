@@ -1,4 +1,4 @@
-import { Navigate, useLocation } from 'react-router-dom'
+import { Link, Navigate, useLocation } from 'react-router-dom'
 import { useAuthStore, useIsAdmin, useIsAuthenticated } from '@/stores/auth'
 
 interface ProtectedRouteProps {
@@ -40,7 +40,25 @@ export function ProtectedRoute({ children, adminOnly = false }: ProtectedRoutePr
   }
 
   if (adminOnly && !isAdmin) {
-    return <Navigate to="/" replace />
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-6">
+        <div className="max-w-md w-full text-center bg-content1 border border-divider rounded-2xl shadow-sm p-8 space-y-4">
+          <div className="w-12 h-12 rounded-full bg-warning/10 text-warning flex items-center justify-center mx-auto text-xl font-semibold">
+            403
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-semibold text-foreground">访问被拒绝</h1>
+            <p className="text-default-500">当前账户没有访问此页面的权限。</p>
+          </div>
+          <Link
+            to="/"
+            className="inline-flex items-center justify-center rounded-xl bg-primary px-4 py-2 text-primary-foreground font-medium"
+          >
+            返回首页
+          </Link>
+        </div>
+      </div>
+    )
   }
 
   return <>{children}</>

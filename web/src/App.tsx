@@ -61,7 +61,14 @@ function App() {
             <Route path="trash" element={<TrashPage />} />
             <Route path="favorites" element={<FavoritesPage />} />
             <Route path="storage" element={<StoragePage />} />
-            <Route path="system-health" element={<HealthPage />} />
+            <Route
+              path="system-health"
+              element={
+                <ProtectedRoute adminOnly>
+                  <HealthPage />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="maintenance"
               element={

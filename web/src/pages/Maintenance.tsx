@@ -43,32 +43,43 @@ function ResultSummary({ result }: { result: ScrubResult }) {
   if (!result.has_result || !result.status || result.status === 'running') {
     return null
   }
+
+  const formatCount = (value: number | undefined): string | number => value === undefined ? '--' : value
+  const toneForCount = (
+    value: number | undefined,
+    alertTone: 'warning' | 'danger'
+  ): 'default' | 'warning' | 'danger' => {
+    if (value === undefined) {
+      return 'default'
+    }
+    return value > 0 ? alertTone : 'default'
+  }
   
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
       <StatCard
         title="总对象数"
-        value={result.total_objects || 0}
+        value={formatCount(result.total_objects)}
         icon={Database}
         tone="primary"
       />
       <StatCard
         title="有效对象"
-        value={result.valid_objects || 0}
+        value={formatCount(result.valid_objects)}
         icon={CheckCircle}
         tone="success"
       />
       <StatCard
         title="损坏对象"
-        value={result.corrupted_objects || 0}
+        value={formatCount(result.corrupted_objects)}
         icon={AlertCircle}
-        tone={(result.corrupted_objects || 0) > 0 ? 'danger' : 'default'}
+        tone={toneForCount(result.corrupted_objects, 'danger')}
       />
       <StatCard
         title="缺失对象"
-        value={result.missing_objects || 0}
+        value={formatCount(result.missing_objects)}
         icon={XCircle}
-        tone={(result.missing_objects || 0) > 0 ? 'warning' : 'default'}
+        tone={toneForCount(result.missing_objects, 'warning')}
       />
     </div>
   )

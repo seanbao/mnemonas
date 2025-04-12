@@ -4,6 +4,7 @@ import React from 'react'
 import { Header } from './Header'
 
 const invalidateQueries = vi.fn().mockResolvedValue(undefined)
+const useIsAdminMock = vi.fn(() => true)
 
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ invalidateQueries }),
@@ -12,6 +13,7 @@ vi.mock('@tanstack/react-query', () => ({
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({ logout: vi.fn().mockResolvedValue(undefined) }),
   useUser: () => ({ username: 'admin', email: 'admin@local' }),
+  useIsAdmin: () => useIsAdminMock(),
 }))
 
 vi.mock('react-router-dom', () => ({
@@ -37,6 +39,7 @@ vi.mock('@heroui/react', () => ({
 describe('Header', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useIsAdminMock.mockReturnValue(true)
   })
 
   it('triggers refresh invalidation', async () => {
@@ -49,5 +52,13 @@ describe('Header', () => {
     })
 
     expect(invalidateQueries).toHaveBeenCalled()
+  })
+
+  it('hides settings menu item for non-admin users', () => {
+    useIsAdminMock.mockReturnValue(false)
+    render(<Header />)
+
+    expect(screen.queryByText('设置')).toBeNull()
+    expect(screen.getByText('帮助文档')).toBeTruthy()
   })
 })
