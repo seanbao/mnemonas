@@ -29,6 +29,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
+	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 // testDataplaneAddr is the address of the test dataplane server
@@ -57,6 +58,16 @@ type fakeRetentionMonitor struct {
 func (m *fakeRetentionMonitor) UpdateConfig(cfg storage.RetentionMonitorConfig) {
 	m.updateCount++
 	m.lastConfig = cfg
+}
+
+type fakeWebDAVUpdater struct {
+	updateCount int
+	lastConfig  WebDAVRuntimeConfig
+}
+
+func (u *fakeWebDAVUpdater) UpdateConfig(cfg WebDAVRuntimeConfig) {
+	u.updateCount++
+	u.lastConfig = cfg
 }
 
 // setupDataplaneClient creates a dataplane client for testing
@@ -137,6 +148,34 @@ func setVersionStoreObjectClient(t *testing.T, fs *storage.FileSystem, client *d
 	objectsValue := reflect.NewAt(objectsField.Type(), unsafe.Pointer(objectsField.UnsafeAddr())).Elem()
 	clientField := objectsValue.Elem().FieldByName("client")
 	reflect.NewAt(clientField.Type(), unsafe.Pointer(clientField.UnsafeAddr())).Elem().Set(reflect.ValueOf(client))
+}
+
+func getVersionStoreObjectClient(t *testing.T, fs *storage.FileSystem) *dataplane.Client {
+	t.Helper()
+	fsValue := reflect.ValueOf(fs).Elem()
+	versionsField := fsValue.FieldByName("versions")
+	versionsValue := reflect.NewAt(versionsField.Type(), unsafe.Pointer(versionsField.UnsafeAddr())).Elem()
+	objectsField := versionsValue.Elem().FieldByName("objects")
+	objectsValue := reflect.NewAt(objectsField.Type(), unsafe.Pointer(objectsField.UnsafeAddr())).Elem()
+	clientField := objectsValue.Elem().FieldByName("client")
+	clientValue := reflect.NewAt(clientField.Type(), unsafe.Pointer(clientField.UnsafeAddr())).Elem()
+	if clientValue.IsNil() {
+		return nil
+	}
+	client, _ := clientValue.Interface().(*dataplane.Client)
+	return client
+}
+
+func getVersioningPolicy(t *testing.T, fs *storage.FileSystem) *versionstore.VersioningPolicy {
+	t.Helper()
+	fsValue := reflect.ValueOf(fs).Elem()
+	policyField := fsValue.FieldByName("policy")
+	policyValue := reflect.NewAt(policyField.Type(), unsafe.Pointer(policyField.UnsafeAddr())).Elem()
+	if policyValue.IsNil() {
+		return nil
+	}
+	policy, _ := policyValue.Interface().(*versionstore.VersioningPolicy)
+	return policy
 }
 
 func TestNewServer_InitializesFavoritesWhenDisabledIfStoreConfigured(t *testing.T) {
@@ -396,6 +435,41 @@ func TestServer_Health_DataplaneFailureDoesNotExposeInternalError(t *testing.T) 
 	}
 	if !strings.Contains(body, "unavailable") {
 		t.Fatalf("expected health response to include generic dataplane status, got %q", body)
+	}
+}
+
+func TestServer_Health_ReconnectsDataplaneOnDemand(t *testing.T) {
+	probe := setupDataplaneClient(t)
+	if probe == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	server, err := NewServer(zerolog.Nop(), nil)
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	disconnected := dataplane.NewClient(testDataplaneAddr())
+	defer disconnected.Close()
+	server.dataplane = disconnected
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Health status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !server.dataplane.IsConnected() {
+		t.Fatal("expected health check to reconnect dataplane client")
+	}
+	body := w.Body.String()
+	if strings.Contains(body, `"status":"degraded"`) {
+		t.Fatalf("expected healthy dataplane after reconnect, got %q", body)
+	}
+	if !strings.Contains(body, `"dataplane":{"healthy":true`) {
+		t.Fatalf("expected health response to include dataplane health after reconnect, got %q", body)
 	}
 }
 
@@ -1889,6 +1963,8 @@ func TestValidatePath(t *testing.T) {
 		{"/nested/foo..txt", "/nested/foo..txt", false},
 		{"../etc/passwd", "", true},
 		{"/foo/../bar", "", true},
+		{"..\\etc\\passwd", "", true},
+		{"/safe\\..\\secret.txt", "", true},
 	}
 
 	for _, tt := range tests {
@@ -2111,6 +2187,28 @@ func TestServer_MoveFile_InvalidSourcePathIsSanitized(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_BackslashTraversalSourceIsSanitized(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	body := `{"from":"..\\etc\\passwd","to":"/safe.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("move file backslash traversal source status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "invalid source path") {
+		t.Fatalf("expected invalid source path message, got %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "..") || strings.Contains(strings.ToLower(bodyStr), "traversal") {
+		t.Fatalf("expected sanitized invalid source path error, got %s", bodyStr)
+	}
+}
+
 func TestServer_MoveFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2157,6 +2255,32 @@ func TestServer_MoveFile_ReturnsConflictWhenDestinationParentIsFile(t *testing.T
 	}
 	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
 		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_MoveFile_ReturnsNotFoundWhenDestinationParentMissing(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/move-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	body := `{"from":"/move-source.txt","to":"/missing-parent/child.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("move file missing parent status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if _, err := fs.Stat(ctx, "/move-source.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected move, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/missing-parent/child.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
 	}
 }
 
@@ -2319,6 +2443,32 @@ func TestServer_CopyFile_ReturnsConflictWhenDestinationParentIsFile(t *testing.T
 	}
 	if !strings.Contains(w.Body.String(), "parent path is not a directory") {
 		t.Fatalf("expected parent-not-directory conflict message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_CopyFile_ReturnsNotFoundWhenDestinationParentMissing(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	body := `{"from":"/copy-source.txt","to":"/missing-parent/child.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("copy file missing parent status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if _, err := fs.Stat(ctx, "/copy-source.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected copy, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/missing-parent/child.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent, got %v", err)
 	}
 }
 
@@ -3296,25 +3446,29 @@ func TestServer_WebDAVCredentials_URLNormalized(t *testing.T) {
 	}
 }
 
-func TestServer_WebDAVCredentials_StayOnRunningConfigAfterSettingsUpdate(t *testing.T) {
+func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	server.config.Storage.Root = tmpDir
+	webdavUpdater := &fakeWebDAVUpdater{}
+	server.updateWebDAV = webdavUpdater.UpdateConfig
 	server.config.WebDAV.Enabled = true
 	server.config.WebDAV.Prefix = "/dav"
+	server.config.WebDAV.ReadOnly = false
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Username = "runtime-user"
 	server.config.WebDAV.Password = "runtime-pass"
 	server.activeWebDAV = WebDAVRuntimeConfig{
 		Enabled:             true,
 		Prefix:              "/dav",
+		ReadOnly:            false,
 		AuthType:            "basic",
 		Username:            "runtime-user",
 		Password:            "runtime-pass",
 		PasswordIsGenerated: true,
 	}
 
-	body := `{"webdav":{"enabled":true,"prefix":"/new-dav","auth_type":"basic","username":"saved-user","password":"saved-pass"}}`
+	body := `{"webdav":{"enabled":true,"prefix":"/new-dav","read_only":true,"auth_type":"basic","username":"saved-user","password":"saved-pass"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -3343,17 +3497,38 @@ func TestServer_WebDAVCredentials_StayOnRunningConfigAfterSettingsUpdate(t *test
 	if err := json.Unmarshal(credsRec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to parse response JSON: %v", err)
 	}
-	if payload.Data.URL != "/dav/" {
-		t.Fatalf("expected running webdav url /dav/, got %q", payload.Data.URL)
+	if payload.Data.URL != "/new-dav/" {
+		t.Fatalf("expected running webdav url /new-dav/, got %q", payload.Data.URL)
 	}
-	if payload.Data.Username != "runtime-user" {
-		t.Fatalf("expected running webdav username runtime-user, got %q", payload.Data.Username)
+	if payload.Data.Username != "saved-user" {
+		t.Fatalf("expected running webdav username saved-user, got %q", payload.Data.Username)
 	}
-	if payload.Data.Password != "runtime-pass" {
-		t.Fatalf("expected running webdav password runtime-pass, got %q", payload.Data.Password)
+	if payload.Data.Password != "" {
+		t.Fatalf("expected custom WebDAV password to remain hidden, got %q", payload.Data.Password)
 	}
 	if server.config.WebDAV.Prefix != "/new-dav" {
 		t.Fatalf("expected saved config prefix /new-dav, got %q", server.config.WebDAV.Prefix)
+	}
+	if server.activeWebDAV.Prefix != "/new-dav" {
+		t.Fatalf("expected active WebDAV prefix /new-dav, got %q", server.activeWebDAV.Prefix)
+	}
+	if !server.activeWebDAV.ReadOnly {
+		t.Fatalf("expected active WebDAV read-only mode to update")
+	}
+	if server.activeWebDAV.Password != "saved-pass" {
+		t.Fatalf("expected active WebDAV password to update, got %q", server.activeWebDAV.Password)
+	}
+	if server.activeWebDAV.PasswordIsGenerated {
+		t.Fatalf("expected active WebDAV password to be marked custom")
+	}
+	if webdavUpdater.updateCount != 1 {
+		t.Fatalf("expected WebDAV updater to be called once, got %d", webdavUpdater.updateCount)
+	}
+	if webdavUpdater.lastConfig.Prefix != "/new-dav" {
+		t.Fatalf("expected WebDAV updater prefix /new-dav, got %q", webdavUpdater.lastConfig.Prefix)
+	}
+	if !webdavUpdater.lastConfig.ReadOnly {
+		t.Fatalf("expected WebDAV updater to receive read-only=true")
 	}
 }
 
@@ -3654,6 +3829,57 @@ func TestServer_UpdateSettings_UpdatesTrashConfig(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_UpdatesRunningDataplaneClient(t *testing.T) {
+	probe := setupDataplaneClient(t)
+	if probe == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	oldClient := dataplane.NewClient("127.0.0.1:1")
+	server.dataplane = oldClient
+	setVersionStoreObjectClient(t, fs, oldClient)
+
+	body := fmt.Sprintf(`{"dataplane":{"grpc_address":%q}}`, testDataplaneAddr())
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings dataplane status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if server.dataplane == nil {
+		t.Fatal("expected running dataplane client to be initialized")
+	}
+	if server.dataplane == oldClient {
+		t.Fatal("expected running dataplane client to be replaced")
+	}
+	if got := server.dataplane.Addr(); got != testDataplaneAddr() {
+		t.Fatalf("running dataplane addr = %q, want %q", got, testDataplaneAddr())
+	}
+	if !server.dataplane.IsConnected() {
+		t.Fatal("expected replacement dataplane client to connect")
+	}
+
+	objectClient := getVersionStoreObjectClient(t, fs)
+	if objectClient == nil {
+		t.Fatal("expected version store object client to remain configured")
+	}
+	if objectClient == oldClient {
+		t.Fatal("expected version store object client to be replaced")
+	}
+	if got := objectClient.Addr(); got != testDataplaneAddr() {
+		t.Fatalf("version store dataplane addr = %q, want %q", got, testDataplaneAddr())
+	}
+	if !objectClient.IsConnected() {
+		t.Fatal("expected version store dataplane client to connect")
+	}
+}
+
 func TestServer_UpdateSettings_InvalidTrashSettingsRejected(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -3849,6 +4075,36 @@ func TestServer_UpdateSettings_UpdatesVersioningConfig(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_UpdatesRunningVersioningPolicy(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"versioning":{"auto_versioned_extensions":[".md"," .txt ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings versioning runtime status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	policy := getVersioningPolicy(t, fs)
+	if policy == nil {
+		t.Fatal("expected running versioning policy to remain configured")
+	}
+	if !reflect.DeepEqual(policy.AutoVersionedExtensions, []string{".md", ".txt"}) {
+		t.Fatalf("unexpected running versioning extensions: %#v", policy.AutoVersionedExtensions)
+	}
+	if !reflect.DeepEqual(policy.AutoVersionedFilenames, []string{"README", "Dockerfile"}) {
+		t.Fatalf("unexpected running versioning filenames: %#v", policy.AutoVersionedFilenames)
+	}
+	if policy.MaxVersionedSize != 209715200 {
+		t.Fatalf("expected running max versioned size 209715200, got %d", policy.MaxVersionedSize)
+	}
+}
+
 func TestServer_UpdateSettings_InvalidVersioningMaxSizeRejected(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -3912,6 +4168,20 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 }
 
+func TestServer_SetupStatus_WithoutConfigReturnsServiceUnavailable(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/setup/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup status without config = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
 func TestServer_AcknowledgeSetup_RequiresAuthentication(t *testing.T) {
 	server, _, _, _, _ := setupAuthServer(t)
 
@@ -3922,6 +4192,225 @@ func TestServer_AcknowledgeSetup_RequiresAuthentication(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("acknowledge setup status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestServer_ClearActivity_RequiresAdminRoleWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	login := func(t *testing.T, user, pass string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, user, pass)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("login status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var payload struct {
+			Data auth.LoginResponse `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to parse login response: %v", err)
+		}
+		return payload.Data.AccessToken
+	}
+
+	userToken := login(t, username, password)
+	userReq := httptest.NewRequest(http.MethodDelete, "/api/v1/activity/", nil)
+	userReq.Header.Set("Authorization", "Bearer "+userToken)
+	userRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(userRec, userReq)
+
+	if userRec.Code != http.StatusForbidden {
+		t.Fatalf("clear activity as non-admin status = %d, want %d", userRec.Code, http.StatusForbidden)
+	}
+
+	adminUsername := "activity-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	adminToken := login(t, adminUsername, adminPassword)
+	adminReq := httptest.NewRequest(http.MethodDelete, "/api/v1/activity/", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+adminToken)
+	adminRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(adminRec, adminReq)
+
+	if adminRec.Code != http.StatusOK {
+		t.Fatalf("clear activity as admin status = %d, want %d", adminRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(adminRec.Body.String(), "Activity log cleared") {
+		t.Fatalf("expected success message when admin clears activity, got %s", adminRec.Body.String())
+	}
+}
+
+func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	login := func(t *testing.T, user, pass string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, user, pass)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("login status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var payload struct {
+			Data auth.LoginResponse `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to parse login response: %v", err)
+		}
+		return payload.Data.AccessToken
+	}
+
+	adminUsername := "activity-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/users/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log own activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionDelete, "/users/admin.txt", adminUsername, "127.0.0.2", nil); err != nil {
+		t.Fatalf("log admin activity error: %v", err)
+	}
+
+	userToken := login(t, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/?user="+adminUsername, nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list activity as non-admin status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Items []activity.Entry `json:"items"`
+			Total int              `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse list activity response: %v", err)
+	}
+	if payload.Data.Total != 1 {
+		t.Fatalf("non-admin activity total = %d, want 1", payload.Data.Total)
+	}
+	if len(payload.Data.Items) != 1 {
+		t.Fatalf("non-admin activity items = %d, want 1", len(payload.Data.Items))
+	}
+	if payload.Data.Items[0].User != username {
+		t.Fatalf("non-admin saw user %q, want %q", payload.Data.Items[0].User, username)
+	}
+	if payload.Data.Items[0].Path != "/users/own.txt" {
+		t.Fatalf("non-admin saw path %q, want own path", payload.Data.Items[0].Path)
+	}
+}
+
+func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	if _, err := server.userStore.Create("stats-admin", "adminpass123", "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if err := server.activity.Log(activity.ActionUpload, "/users/own.txt", username, "127.0.0.1", nil); err != nil {
+		t.Fatalf("log own activity error: %v", err)
+	}
+	if err := server.activity.Log(activity.ActionDelete, "/users/admin.txt", "stats-admin", "127.0.0.2", nil); err != nil {
+		t.Fatalf("log admin activity error: %v", err)
+	}
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
+	statsReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	statsRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(statsRec, statsReq)
+
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("activity stats as non-admin status = %d, want %d", statsRec.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Total    int            `json:"total"`
+			Today    int            `json:"today"`
+			ByUser   map[string]int `json:"by_user"`
+			ByAction map[string]int `json:"by_action"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(statsRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse activity stats response: %v", err)
+	}
+	if payload.Data.Total != 1 {
+		t.Fatalf("non-admin activity stats total = %d, want 1", payload.Data.Total)
+	}
+	if payload.Data.Today != 1 {
+		t.Fatalf("non-admin activity stats today = %d, want 1", payload.Data.Today)
+	}
+	if payload.Data.ByUser[username] != 1 {
+		t.Fatalf("expected own user count = 1, got %d", payload.Data.ByUser[username])
+	}
+	if payload.Data.ByUser["stats-admin"] != 0 {
+		t.Fatalf("expected admin user count to be hidden, got %d", payload.Data.ByUser["stats-admin"])
+	}
+	if payload.Data.ByAction[string(activity.ActionUpload)] != 1 {
+		t.Fatalf("expected own upload count = 1, got %d", payload.Data.ByAction[string(activity.ActionUpload)])
+	}
+	if payload.Data.ByAction[string(activity.ActionDelete)] != 0 {
+		t.Fatalf("expected admin delete count to be hidden, got %d", payload.Data.ByAction[string(activity.ActionDelete)])
+	}
+}
+
+func TestServer_AcknowledgeSetup_WithoutAuthMarksSetupShown(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+
+	secrets := &config.Secrets{SetupShown: false}
+	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
+		t.Fatalf("failed to save secrets: %v", err)
+	}
+	server.config.Storage.Root = tmpDir
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup/acknowledge", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("acknowledge setup without auth status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	updatedSecrets, err := config.LoadSecrets(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to reload secrets: %v", err)
+	}
+	if updatedSecrets == nil || !updatedSecrets.SetupShown {
+		t.Fatalf("expected setup to be marked shown after acknowledge without auth")
 	}
 }
 
@@ -4093,6 +4582,38 @@ func TestServer_RestoreVersion_RequiresAdmin(t *testing.T) {
 
 	if restoreRec.Code != http.StatusForbidden {
 		t.Fatalf("restore status = %d, want %d", restoreRec.Code, http.StatusForbidden)
+	}
+}
+
+func TestServer_RestoreVersion_RejectsNonAdminBeforeValidation(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/versions/not-a-valid-hash/restore?path=/restore-version/file.txt", nil)
+	restoreReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+
+	if restoreRec.Code != http.StatusForbidden {
+		t.Fatalf("restore invalid hash as non-admin status = %d, want %d", restoreRec.Code, http.StatusForbidden)
+	}
+	if strings.Contains(strings.ToLower(restoreRec.Body.String()), "invalid hash") {
+		t.Fatalf("expected auth guard to run before validation, got %s", restoreRec.Body.String())
 	}
 }
 

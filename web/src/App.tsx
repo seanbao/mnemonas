@@ -62,11 +62,32 @@ function App() {
             <Route path="favorites" element={<FavoritesPage />} />
             <Route path="storage" element={<StoragePage />} />
             <Route path="system-health" element={<HealthPage />} />
-            <Route path="maintenance" element={<MaintenancePage />} />
-            <Route path="users" element={<UsersPage />} />
+            <Route
+              path="maintenance"
+              element={
+                <ProtectedRoute adminOnly>
+                  <MaintenancePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="users"
+              element={
+                <ProtectedRoute adminOnly>
+                  <UsersPage />
+                </ProtectedRoute>
+              }
+            />
             <Route path="search" element={<SearchPage />} />
             <Route path="activity" element={<ActivityPage />} />
-            <Route path="settings" element={<SettingsPage />} />
+            <Route
+              path="settings"
+              element={
+                <ProtectedRoute adminOnly>
+                  <SettingsPage />
+                </ProtectedRoute>
+              }
+            />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Routes>

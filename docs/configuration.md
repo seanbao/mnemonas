@@ -101,6 +101,36 @@ time_format = "RFC3339"
 
 ---
 
+### [webdav] — WebDAV 配置
+
+| 选项 | 类型 | 默认值 | 说明 |
+| ---- | ---- | ------ | ---- |
+| `enabled` | bool | `true` | 是否启用 WebDAV 服务 |
+| `prefix` | string | `"/dav"` | WebDAV 挂载前缀 |
+| `read_only` | bool | `false` | 是否禁止写入类 WebDAV 方法 |
+| `auth_type` | string | `"basic"` | 认证方式，支持 `basic` 和 `none` |
+| `username` | string | `""` | `basic` 认证用户名，留空时运行态默认使用 `admin` |
+| `password` | string | `""` | `basic` 认证密码，留空时运行态使用 `secrets.json` 中的自动生成密码 |
+
+**运行态行为：**
+
+- 通过设置 API 更新 `webdav` 配置后，运行中的 WebDAV handler 会立即切换到新前缀、读写模式和认证配置
+- `password = ""` 且 `auth_type = "basic"` 时，运行态继续使用已有自动生成密码，不要求重启
+
+**示例：**
+
+```toml
+[webdav]
+enabled = true
+prefix = "/dav"
+read_only = false
+auth_type = "basic"
+username = "admin"
+password = ""
+```
+
+---
+
 ## 配置段详解
 
 ### [server] — HTTP 服务器配置
@@ -250,8 +280,8 @@ max_versioned_size = 104857600
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
 | `grpc_address` | string | `"127.0.0.1:9090"` | Rust 数据面 gRPC 地址 |
-| `timeout` | duration | `"30s"` | gRPC 调用超时时间 |
-| `max_retries` | int | `3` | gRPC 调用失败时的最大重试次数 |
+| `timeout` | duration | `"30s"` | 数据面连接与重连的总超时预算 |
+| `max_retries` | int | `3` | 数据面连接建立/重连时的最大重试次数 |
 
 **示例：**
 

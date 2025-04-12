@@ -5,6 +5,7 @@ package versionstore
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"google.golang.org/grpc/codes"
@@ -13,6 +14,7 @@ import (
 
 // ObjectStore handles version object storage via Rust dataplane
 type ObjectStore struct {
+	mu     sync.RWMutex
 	client *dataplane.Client
 }
 
@@ -21,13 +23,27 @@ func NewObjectStore(client *dataplane.Client) *ObjectStore {
 	return &ObjectStore{client: client}
 }
 
+// SetClient swaps the dataplane client used for object operations.
+func (s *ObjectStore) SetClient(client *dataplane.Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.client = client
+}
+
+func (s *ObjectStore) getClient() *dataplane.Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.client
+}
+
 // Put stores data via dataplane and returns its hash
 func (s *ObjectStore) Put(ctx context.Context, data []byte) (string, error) {
-	if !s.client.IsConnected() {
+	client := s.getClient()
+	if client == nil || !client.IsConnected() {
 		return "", fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
-	info, err := s.client.PutChunk(ctx, data)
+	info, err := client.PutChunk(ctx, data)
 	if err != nil {
 		if status.Code(err) == codes.Unavailable {
 			return "", fmt.Errorf("%w: %v", ErrUnavailable, err)
@@ -40,11 +56,12 @@ func (s *ObjectStore) Put(ctx context.Context, data []byte) (string, error) {
 
 // Get retrieves data via dataplane by hash
 func (s *ObjectStore) Get(ctx context.Context, hash string) ([]byte, error) {
-	if !s.client.IsConnected() {
+	client := s.getClient()
+	if client == nil || !client.IsConnected() {
 		return nil, fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
-	data, err := s.client.GetChunk(ctx, hash)
+	data, err := client.GetChunk(ctx, hash)
 	if err != nil {
 		return nil, mapObjectGetError(err)
 	}
@@ -76,11 +93,12 @@ func mapObjectDeleteError(err error) error {
 
 // Has checks if an object exists via dataplane
 func (s *ObjectStore) Has(ctx context.Context, hash string) (bool, error) {
-	if !s.client.IsConnected() {
+	client := s.getClient()
+	if client == nil || !client.IsConnected() {
 		return false, fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
-	exists, err := s.client.HasChunk(ctx, hash)
+	exists, err := client.HasChunk(ctx, hash)
 	if err != nil {
 		if status.Code(err) == codes.Unavailable {
 			return false, fmt.Errorf("%w: %v", ErrUnavailable, err)
@@ -93,11 +111,12 @@ func (s *ObjectStore) Has(ctx context.Context, hash string) (bool, error) {
 
 // Delete removes an object via dataplane
 func (s *ObjectStore) Delete(ctx context.Context, hash string) error {
-	if !s.client.IsConnected() {
+	client := s.getClient()
+	if client == nil || !client.IsConnected() {
 		return fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
-	_, err := s.client.DeleteChunk(ctx, hash)
+	_, err := client.DeleteChunk(ctx, hash)
 	if err != nil {
 		return mapObjectDeleteError(err)
 	}

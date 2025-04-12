@@ -5,10 +5,12 @@ import { ProtectedRoute } from './ProtectedRoute'
 
 const useAuthStoreMock = vi.fn()
 const useIsAuthenticatedMock = vi.fn()
+const useIsAdminMock = vi.fn()
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => useAuthStoreMock(),
   useIsAuthenticated: () => useIsAuthenticatedMock(),
+  useIsAdmin: () => useIsAdminMock(),
 }))
 
 function LoginRedirectProbe() {
@@ -20,6 +22,7 @@ describe('ProtectedRoute', () => {
   it('preserves query and hash in the post-login redirect target', () => {
     useAuthStoreMock.mockReturnValue({ isLoading: false, authEnabled: true })
     useIsAuthenticatedMock.mockReturnValue(false)
+    useIsAdminMock.mockReturnValue(false)
 
     render(
       <MemoryRouter initialEntries={["/files/report?view=grid#preview"]}>
@@ -38,5 +41,30 @@ describe('ProtectedRoute', () => {
     )
 
     expect(screen.getByText('/files/report?view=grid#preview')).toBeInTheDocument()
+  })
+
+  it('redirects non-admin users away from admin-only routes', () => {
+    useAuthStoreMock.mockReturnValue({ isLoading: false, authEnabled: true })
+    useIsAuthenticatedMock.mockReturnValue(true)
+    useIsAdminMock.mockReturnValue(false)
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <Routes>
+          <Route path="/" element={<div>home</div>} />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute adminOnly>
+                <div>settings</div>
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('home')).toBeInTheDocument()
+    expect(screen.queryByText('settings')).not.toBeInTheDocument()
   })
 })
