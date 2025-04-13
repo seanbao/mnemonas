@@ -314,14 +314,22 @@ func TestHandler_PUT_ReturnsConflictWhenParentChainContainsFile(t *testing.T) {
 }
 
 func TestHandler_PUT_ParentStatUnexpectedErrorReturnsInternalServerError(t *testing.T) {
-	handler, _, tmpDir := setupTestHandler(t)
-
-	loopPath := filepath.Join(tmpDir, "files", "loop")
-	if err := os.Symlink("loop", loopPath); err != nil {
-		t.Fatalf("Symlink() error: %v", err)
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based stat failures are unreliable as root")
 	}
 
-	req := httptest.NewRequest("PUT", "/dav/loop/sub/file.txt", strings.NewReader("content"))
+	handler, _, tmpDir := setupTestHandler(t)
+
+	blockedPath := filepath.Join(tmpDir, "files", "blocked")
+	if err := os.MkdirAll(blockedPath, 0755); err != nil {
+		t.Fatalf("MkdirAll(blocked) error: %v", err)
+	}
+	if err := os.Chmod(blockedPath, 0); err != nil {
+		t.Fatalf("Chmod(blocked) error: %v", err)
+	}
+	defer os.Chmod(blockedPath, 0755)
+
+	req := httptest.NewRequest("PUT", "/dav/blocked/sub/file.txt", strings.NewReader("content"))
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -335,14 +343,22 @@ func TestHandler_PUT_ParentStatUnexpectedErrorReturnsInternalServerError(t *test
 }
 
 func TestHandler_PUT_TargetStatUnexpectedErrorWithIfMatchReturnsInternalServerError(t *testing.T) {
-	handler, _, tmpDir := setupTestHandler(t)
-
-	loopPath := filepath.Join(tmpDir, "files", "loop-target")
-	if err := os.Symlink("loop-target", loopPath); err != nil {
-		t.Fatalf("Symlink() error: %v", err)
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based stat failures are unreliable as root")
 	}
 
-	req := httptest.NewRequest("PUT", "/dav/loop-target", strings.NewReader("content"))
+	handler, _, tmpDir := setupTestHandler(t)
+
+	blockedPath := filepath.Join(tmpDir, "files", "loop-target")
+	if err := os.MkdirAll(blockedPath, 0755); err != nil {
+		t.Fatalf("MkdirAll(loop-target) error: %v", err)
+	}
+	if err := os.Chmod(blockedPath, 0); err != nil {
+		t.Fatalf("Chmod(loop-target) error: %v", err)
+	}
+	defer os.Chmod(blockedPath, 0755)
+
+	req := httptest.NewRequest("PUT", "/dav/loop-target/file.txt", strings.NewReader("content"))
 	req.Header.Set("If-Match", "*")
 	w := httptest.NewRecorder()
 

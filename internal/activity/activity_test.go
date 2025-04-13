@@ -1,6 +1,7 @@
 package activity
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,24 @@ func TestNewStore_RecoversFromCorruptLogFile(t *testing.T) {
 	}
 }
 
+func TestNewStore_RejectsSymlinkLogFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "real-activity.json")
+	logPath := filepath.Join(tmpDir, "activity.json")
+
+	if err := os.WriteFile(targetPath, []byte("[]"), 0640); err != nil {
+		t.Fatalf("WriteFile(real-activity.json) error: %v", err)
+	}
+	if err := os.Symlink(targetPath, logPath); err != nil {
+		t.Fatalf("Symlink(activity.json) error: %v", err)
+	}
+
+	_, err := NewStore(tmpDir)
+	if !errors.Is(err, errActivityLogSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
 func TestLogAndList(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
@@ -112,7 +131,11 @@ func TestLogRollsBackWhenSaveFails(t *testing.T) {
 	}
 
 	originalRoot := store.root
-	store.root = filepath.Join(tmpDir, "missing", "nested")
+	blockedPath := filepath.Join(tmpDir, "blocked-root")
+	if err := os.WriteFile(blockedPath, []byte("blocked"), 0644); err != nil {
+		t.Fatalf("WriteFile(blocked-root) error: %v", err)
+	}
+	store.root = filepath.Join(blockedPath, "nested")
 
 	err := store.Log(ActionDelete, "/should-not-persist.txt", "user", "127.0.0.1", nil)
 	if err == nil {
@@ -139,6 +162,48 @@ func TestLogRollsBackWhenSaveFails(t *testing.T) {
 	if reloadedEntries[0].Path != "/original.txt" {
 		t.Fatalf("Expected persisted original entry after failed log, got %s", reloadedEntries[0].Path)
 	}
+}
+
+func TestLogRollsBackWhenLogPathIsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionUpload, "/original.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Initial Log() error: %v", err)
+	}
+
+	symlinkRoot := filepath.Join(tmpDir, "symlink-root")
+	if err := os.MkdirAll(symlinkRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll(symlink-root) error: %v", err)
+	}
+	targetPath := filepath.Join(tmpDir, "real-activity.json")
+	if err := os.WriteFile(targetPath, []byte("[]"), 0640); err != nil {
+		t.Fatalf("WriteFile(real-activity.json) error: %v", err)
+	}
+	if err := os.Symlink(targetPath, filepath.Join(symlinkRoot, "activity.json")); err != nil {
+		t.Fatalf("Symlink(activity.json) error: %v", err)
+	}
+
+	originalRoot := store.root
+	store.root = symlinkRoot
+
+	err = store.Log(ActionDelete, "/should-not-persist.txt", "user", "127.0.0.1", nil)
+	if !errors.Is(err, errActivityLogSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected original entries after rollback, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].Path != "/original.txt" {
+		t.Fatalf("expected original entry after rollback, got %s", entries[0].Path)
+	}
+
+	store.root = originalRoot
 }
 
 func TestListWithFilters(t *testing.T) {
@@ -232,7 +297,11 @@ func TestClearRollsBackWhenSaveFails(t *testing.T) {
 	}
 
 	originalRoot := store.root
-	store.root = filepath.Join(tmpDir, "missing", "nested")
+	blockedPath := filepath.Join(tmpDir, "blocked-root")
+	if err := os.WriteFile(blockedPath, []byte("blocked"), 0644); err != nil {
+		t.Fatalf("WriteFile(blocked-root) error: %v", err)
+	}
+	store.root = filepath.Join(blockedPath, "nested")
 
 	err := store.Clear()
 	if err == nil {

@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+var errActivityLogSymlink = errors.New("activity log path must not be a symlink")
+
 // ActionType represents the type of activity
 type ActionType string
 
@@ -98,6 +100,9 @@ func (s *Store) logFilePath() string {
 
 // load reads entries from disk
 func (s *Store) load() error {
+	if err := validateActivityLogPath(s.logFilePath()); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(s.logFilePath())
 	if os.IsNotExist(err) {
 		return nil
@@ -149,32 +154,65 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	tmpPath := s.logFilePath() + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
+	return writeActivityLogFile(s.logFilePath(), data)
+}
+
+func validateActivityLogPath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errActivityLogSymlink
+	}
+	return nil
+}
+
+func writeActivityLogFile(path string, data []byte) error {
+	if err := validateActivityLogPath(path); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return err
+	}
+
+	f, err := os.CreateTemp(dir, ".activity-*.tmp")
 	if err != nil {
 		return err
 	}
+	tmpPath := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
+	if err := f.Chmod(0640); err != nil {
+		_ = f.Close()
+		return err
+	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpPath)
 		return err
 	}
 
-	if err := os.Rename(tmpPath, s.logFilePath()); err != nil {
-		os.Remove(tmpPath)
+	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-
+	cleanup = false
 	return nil
 }
 

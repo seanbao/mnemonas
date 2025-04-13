@@ -15,7 +15,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+)
+
+var (
+	errCertFileSymlink = errors.New("TLS certificate file path must not be a symlink")
+	errKeyFileSymlink  = errors.New("TLS private key file path must not be a symlink")
 )
 
 // Config holds TLS configuration
@@ -75,6 +81,12 @@ func (m *Manager) loadOrGenerateCert() (tls.Certificate, error) {
 
 	// Try to load existing certificate
 	if certFile != "" && keyFile != "" {
+		if err := validateTLSFilePath(certFile, errCertFileSymlink, "certificate file"); err != nil {
+			return tls.Certificate{}, err
+		}
+		if err := validateTLSFilePath(keyFile, errKeyFileSymlink, "private key file"); err != nil {
+			return tls.Certificate{}, err
+		}
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err == nil {
 			return cert, nil
@@ -158,22 +170,104 @@ func (m *Manager) generateSelfSignedCert(certFile, keyFile string) (tls.Certific
 
 // saveCertFiles saves certificate and key to files
 func (m *Manager) saveCertFiles(certFile, keyFile string, certPEM, keyPEM []byte) error {
-	// Create directory if needed
-	certDir := filepath.Dir(certFile)
-	if err := os.MkdirAll(certDir, 0700); err != nil {
-		return fmt.Errorf("failed to create certificate directory: %w", err)
+	if err := writeTLSFile(certFile, certPEM, 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file"); err != nil {
+		return err
+	}
+	if err := writeTLSFile(keyFile, keyPEM, 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file"); err != nil {
+		return err
 	}
 
-	// Write certificate file (readable by all)
-	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
-		return fmt.Errorf("failed to write certificate file: %w", err)
+	return nil
+}
+
+func validateTLSFilePath(path string, symlinkErr error, label string) error {
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		absPath, err := filepath.Abs(cleaned)
+		if err != nil {
+			return fmt.Errorf("failed to resolve %s path: %w", label, err)
+		}
+		cleaned = absPath
 	}
 
-	// Write key file (restricted permissions)
-	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
-		return fmt.Errorf("failed to write key file: %w", err)
+	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(cleaned, root)
+	if trimmed == "" {
+		info, err := os.Lstat(cleaned)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat %s: %w", label, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkErr
+		}
+		return nil
 	}
 
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat %s: %w", label, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkErr
+		}
+	}
+	return nil
+}
+
+func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
+	if err := validateTLSFilePath(path, symlinkErr, label); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create %s directory: %w", label, err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to create temp %s: %w", label, err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(mode); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to set temp %s permissions: %w", label, err)
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write %s: %w", label, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync %s: %w", label, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp %s: %w", label, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to replace %s: %w", label, err)
+	}
+	cleanup = false
 	return nil
 }
 
@@ -190,6 +284,9 @@ func (m *Manager) GetCertificateInfo() (*CertInfo, error) {
 
 	if certFile == "" {
 		return nil, errors.New("no certificate file configured")
+	}
+	if err := validateTLSFilePath(certFile, errCertFileSymlink, "certificate file"); err != nil {
+		return nil, err
 	}
 
 	certPEM, err := os.ReadFile(certFile)
