@@ -236,10 +236,10 @@ describe('Favorites API', () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: () => Promise.resolve({ success: true, data: null }),
+        json: () => Promise.resolve({ success: true, data: null, message: 'favorite removed successfully' }),
       })
 
-      await removeFavorite('/file.txt')
+      await expect(removeFavorite('/file.txt')).resolves.toEqual({ message: 'favorite removed successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         method: 'DELETE',
@@ -250,10 +250,10 @@ describe('Favorites API', () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: () => Promise.resolve({ success: true, data: null }),
+        json: () => Promise.resolve({ success: true, data: null, message: 'favorite removed successfully' }),
       })
 
-      await removeFavorite('/documents/my file.txt')
+      await expect(removeFavorite('/documents/my file.txt')).resolves.toEqual({ message: 'favorite removed successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith(
         '/api/v1/favorites/documents/my%20file.txt',
@@ -465,10 +465,10 @@ describe('Favorites API', () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: () => Promise.resolve({ success: true, data: null }),
+        json: () => Promise.resolve({ success: true, data: null, message: 'favorite note updated successfully' }),
       })
 
-      await updateFavoriteNote('/file.txt', '新备注')
+      await expect(updateFavoriteNote('/file.txt', '新备注')).resolves.toEqual({ message: 'favorite note updated successfully' })
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites/file.txt', {
         method: 'PATCH',
