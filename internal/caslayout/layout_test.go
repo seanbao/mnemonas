@@ -291,6 +291,43 @@ func TestNewStore_RejectsSymlinkRoot(t *testing.T) {
 	}
 }
 
+func TestNewStore_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) error: %v", err)
+	}
+
+	_, err := NewStore(filepath.Join(linkedParent, "cas"), nil)
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+}
+
+func TestNewStore_DoesNotCreateRootThroughSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) error: %v", err)
+	}
+
+	root := filepath.Join(linkedParent, "cas")
+	if _, err := NewStore(root, nil); !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(realParent, "cas")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("CAS root created through symlink parent, stat error = %v", err)
+	}
+}
+
 func TestNewStore_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	root := filepath.Join(tmpDir, "nested", "cas")
@@ -344,6 +381,66 @@ func TestStore_PutRejectsSymlinkObjectPath(t *testing.T) {
 	}
 }
 
+func TestStore_PutDoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	root := filepath.Join(baseDir, "cas")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outsideDir) error: %v", err)
+	}
+
+	store, err := NewStore(root, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "abcdef1234567890abcdef1234567890"
+	objectPath := store.layout.FullPath(store.root, hash)
+	shardDir := filepath.Dir(objectPath)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(shardDir) error: %v", err)
+	}
+	outsideObjectPath := filepath.Join(outsideDir, filepath.Base(objectPath))
+	if err := os.WriteFile(outsideObjectPath, []byte("outside-original"), 0644); err != nil {
+		t.Fatalf("WriteFile(outsideObject) error: %v", err)
+	}
+	backupDir := filepath.Join(root, "backup-shard")
+
+	originalHook := afterValidateCASPath
+	var hookErr error
+	afterValidateCASPath = func() {
+		if hookErr != nil {
+			return
+		}
+		if err := os.Rename(shardDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, shardDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateCASPath = originalHook
+	}()
+
+	err = store.Put(hash, []byte("updated"))
+	if hookErr != nil {
+		t.Fatalf("afterValidateCASPath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+
+	data, err := os.ReadFile(outsideObjectPath)
+	if err != nil {
+		t.Fatalf("ReadFile(outsideObject) error: %v", err)
+	}
+	if string(data) != "outside-original" {
+		t.Fatalf("expected outside object unchanged, got %q", string(data))
+	}
+}
+
 func TestStore_PutReturnsDirectoryTreeSyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir, nil)
@@ -351,12 +448,12 @@ func TestStore_PutReturnsDirectoryTreeSyncError(t *testing.T) {
 		t.Fatalf("NewStore() error: %v", err)
 	}
 
-	originalSyncDir := syncDir
-	syncDir = func(dir string) error {
+	originalSyncRootDir := syncRootDir
+	syncRootDir = func(root *os.Root, dir string) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncDir = originalSyncDir
+		syncRootDir = originalSyncRootDir
 	}()
 
 	hash := "abcdef1234567890abcdef1234567890"
@@ -386,12 +483,12 @@ func TestStore_PutReturnsDirectorySyncError(t *testing.T) {
 		t.Fatalf("MkdirAll(object dir) error: %v", err)
 	}
 
-	originalSyncDir := syncDir
-	syncDir = func(dir string) error {
+	originalSyncRootDir := syncRootDir
+	syncRootDir = func(root *os.Root, dir string) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncDir = originalSyncDir
+		syncRootDir = originalSyncRootDir
 	}()
 
 	err = store.Put(hash, []byte("payload"))
@@ -428,12 +525,12 @@ func TestStore_DeleteReturnsDirectorySyncError(t *testing.T) {
 		t.Fatalf("Put() error: %v", err)
 	}
 
-	originalSyncDir := syncDir
-	syncDir = func(dir string) error {
+	originalSyncRootDir := syncRootDir
+	syncRootDir = func(root *os.Root, dir string) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncDir = originalSyncDir
+		syncRootDir = originalSyncRootDir
 	}()
 
 	err = store.Delete(hash)
@@ -469,6 +566,61 @@ func TestStore_GetRejectsSymlinkObjectPath(t *testing.T) {
 	}
 
 	_, err = store.Get(hash)
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestStore_GetDoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	root := filepath.Join(baseDir, "cas")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outsideDir) error: %v", err)
+	}
+
+	store, err := NewStore(root, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "1234567890abcdef1234567890abcdef"
+	objectPath := store.layout.FullPath(store.root, hash)
+	shardDir := filepath.Dir(objectPath)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(shardDir) error: %v", err)
+	}
+	if err := os.WriteFile(objectPath, []byte("root-payload"), 0644); err != nil {
+		t.Fatalf("WriteFile(objectPath) error: %v", err)
+	}
+	outsideObjectPath := filepath.Join(outsideDir, filepath.Base(objectPath))
+	if err := os.WriteFile(outsideObjectPath, []byte("outside-payload"), 0644); err != nil {
+		t.Fatalf("WriteFile(outsideObject) error: %v", err)
+	}
+	backupDir := filepath.Join(root, "backup-shard")
+
+	originalHook := afterValidateCASPath
+	var hookErr error
+	afterValidateCASPath = func() {
+		if hookErr != nil {
+			return
+		}
+		if err := os.Rename(shardDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, shardDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateCASPath = originalHook
+	}()
+
+	_, err = store.Get(hash)
+	if hookErr != nil {
+		t.Fatalf("afterValidateCASPath hook error: %v", hookErr)
+	}
 	if !errors.Is(err, errCASPathSymlink) {
 		t.Fatalf("expected symlink rejection, got %v", err)
 	}
@@ -515,6 +667,64 @@ func TestStore_Walk(t *testing.T) {
 	}
 }
 
+func TestStore_Walk_DoesNotFollowRootSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalHash := "hash4444444444444444444444444444"
+	if err := store.Put(originalHash, []byte("original-data")); err != nil {
+		t.Fatalf("Put(originalHash) error: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsideHash := "hash5555555555555555555555555555"
+	outsidePath := store.layout.FullPath(outsideRoot, outsideHash)
+	if err := os.MkdirAll(filepath.Dir(outsidePath), 0755); err != nil {
+		t.Fatalf("MkdirAll(outside shard dir) error: %v", err)
+	}
+	if err := os.WriteFile(outsidePath, []byte("outside-data"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside object) error: %v", err)
+	}
+
+	backupRoot := tmpDir + "-backup"
+	originalHook := afterValidateCASPath
+	afterValidateCASPath = func() {
+		if err := os.Rename(tmpDir, backupRoot); err != nil {
+			t.Fatalf("Rename(CAS root) error: %v", err)
+		}
+		if err := os.Symlink(outsideRoot, tmpDir); err != nil {
+			t.Fatalf("Symlink(CAS root) error: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		afterValidateCASPath = originalHook
+		if info, err := os.Lstat(tmpDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(tmpDir); removeErr != nil {
+				t.Errorf("Remove(CAS root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupRoot); err == nil {
+			if renameErr := os.Rename(backupRoot, tmpDir); renameErr != nil {
+				t.Errorf("Rename(backup root) error: %v", renameErr)
+			}
+		}
+	})
+
+	var walked []string
+	if err := store.Walk(func(hash string) error {
+		walked = append(walked, hash)
+		return nil
+	}); err != nil {
+		t.Fatalf("Walk() error: %v", err)
+	}
+	if len(walked) != 1 || walked[0] != originalHash {
+		t.Fatalf("Walk() returned %v, want [%s]", walked, originalHash)
+	}
+}
+
 func TestStore_Stats(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -549,6 +759,63 @@ func TestStore_Stats(t *testing.T) {
 	expectedSize := int64(len(data1) + len(data2))
 	if stats.TotalSize != expectedSize {
 		t.Errorf("Stats.TotalSize = %d, want %d", stats.TotalSize, expectedSize)
+	}
+}
+
+func TestStore_Stats_DoesNotFollowRootSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalData := []byte("original-data")
+	if err := store.Put("hash6666666666666666666666666666", originalData); err != nil {
+		t.Fatalf("Put(original hash) error: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsidePath := store.layout.FullPath(outsideRoot, "hash7777777777777777777777777777")
+	if err := os.MkdirAll(filepath.Dir(outsidePath), 0755); err != nil {
+		t.Fatalf("MkdirAll(outside shard dir) error: %v", err)
+	}
+	if err := os.WriteFile(outsidePath, []byte("outside-data"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside object) error: %v", err)
+	}
+
+	backupRoot := tmpDir + "-backup"
+	originalHook := afterValidateCASPath
+	afterValidateCASPath = func() {
+		if err := os.Rename(tmpDir, backupRoot); err != nil {
+			t.Fatalf("Rename(CAS root) error: %v", err)
+		}
+		if err := os.Symlink(outsideRoot, tmpDir); err != nil {
+			t.Fatalf("Symlink(CAS root) error: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		afterValidateCASPath = originalHook
+		if info, err := os.Lstat(tmpDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(tmpDir); removeErr != nil {
+				t.Errorf("Remove(CAS root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupRoot); err == nil {
+			if renameErr := os.Rename(backupRoot, tmpDir); renameErr != nil {
+				t.Errorf("Rename(backup root) error: %v", renameErr)
+			}
+		}
+	})
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.TotalObjects != 1 {
+		t.Fatalf("Stats.TotalObjects = %d, want 1", stats.TotalObjects)
+	}
+	if stats.TotalSize != int64(len(originalData)) {
+		t.Fatalf("Stats.TotalSize = %d, want %d", stats.TotalSize, len(originalData))
 	}
 }
 
@@ -634,6 +901,123 @@ func TestStore_CleanupStaging(t *testing.T) {
 	}
 	if _, err := os.Stat(tmpPath2); !os.IsNotExist(err) {
 		t.Error("tmp file 2 still exists after cleanup")
+	}
+}
+
+func TestStore_CleanupStaging_DoesNotFollowRootSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalTmpPath := store.layout.FullPath(tmpDir, "ab12staging3") + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(originalTmpPath), 0755); err != nil {
+		t.Fatalf("MkdirAll(original tmp dir) error: %v", err)
+	}
+	if err := os.WriteFile(originalTmpPath, []byte("inside-staging"), 0644); err != nil {
+		t.Fatalf("WriteFile(original tmp) error: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsideTmpPath := store.layout.FullPath(outsideRoot, "cd34staging4") + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(outsideTmpPath), 0755); err != nil {
+		t.Fatalf("MkdirAll(outside tmp dir) error: %v", err)
+	}
+	if err := os.WriteFile(outsideTmpPath, []byte("outside-staging"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside tmp) error: %v", err)
+	}
+
+	backupRoot := tmpDir + "-backup"
+	originalHook := afterValidateCASPath
+	afterValidateCASPath = func() {
+		if err := os.Rename(tmpDir, backupRoot); err != nil {
+			t.Fatalf("Rename(CAS root) error: %v", err)
+		}
+		if err := os.Symlink(outsideRoot, tmpDir); err != nil {
+			t.Fatalf("Symlink(CAS root) error: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		afterValidateCASPath = originalHook
+		if info, err := os.Lstat(tmpDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(tmpDir); removeErr != nil {
+				t.Errorf("Remove(CAS root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupRoot); err == nil {
+			if renameErr := os.Rename(backupRoot, tmpDir); renameErr != nil {
+				t.Errorf("Rename(backup root) error: %v", renameErr)
+			}
+		}
+	})
+
+	count, size, err := store.CleanupStaging()
+	if err != nil {
+		t.Fatalf("CleanupStaging() error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("CleanupStaging() count = %d, want 1", count)
+	}
+	if size != int64(len("inside-staging")) {
+		t.Fatalf("CleanupStaging() size = %d, want %d", size, len("inside-staging"))
+	}
+	originalRelPath, err := filepath.Rel(tmpDir, originalTmpPath)
+	if err != nil {
+		t.Fatalf("filepath.Rel(originalTmpPath) error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(backupRoot, originalRelPath)); !os.IsNotExist(err) {
+		t.Fatalf("expected anchored tmp file removed, got %v", err)
+	}
+	data, err := os.ReadFile(outsideTmpPath)
+	if err != nil {
+		t.Fatalf("ReadFile(outside tmp) error: %v", err)
+	}
+	if string(data) != "outside-staging" {
+		t.Fatalf("expected outside tmp file unchanged, got %q", string(data))
+	}
+}
+
+func TestStore_CleanupStaging_DoesNotCountBytesWhenRemoveFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	tmpPath := store.layout.FullPath(tmpDir, "ef56staging5") + ".tmp"
+	shardDir := filepath.Dir(tmpPath)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(shard dir) error: %v", err)
+	}
+	if err := os.WriteFile(tmpPath, []byte("not-removed"), 0644); err != nil {
+		t.Fatalf("WriteFile(tmp) error: %v", err)
+	}
+	if err := os.Chmod(shardDir, 0555); err != nil {
+		t.Fatalf("Chmod(shard dir) error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(shardDir, 0755)
+	})
+
+	count, size, err := store.CleanupStaging()
+	if err == nil {
+		if _, statErr := os.Stat(tmpPath); os.IsNotExist(statErr) {
+			t.Skip("filesystem permits tmp removal from read-only directory")
+		}
+		t.Fatal("CleanupStaging() expected error when tmp removal fails")
+	}
+	if count != 0 {
+		t.Fatalf("CleanupStaging() count = %d, want 0", count)
+	}
+	if size != 0 {
+		t.Fatalf("CleanupStaging() size = %d, want 0", size)
+	}
+	if _, statErr := os.Stat(tmpPath); statErr != nil {
+		t.Fatalf("expected tmp file to remain after failed cleanup, got %v", statErr)
+	}
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("CleanupStaging() error = %v, want %v", err, errCASPathSymlink)
 	}
 }
 

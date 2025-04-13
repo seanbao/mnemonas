@@ -314,7 +314,7 @@ curl http://localhost:8080/health
 MnemoNAS 提供 `/api/v1/metrics` JSON 指标端点。
 
 - Prometheus 原生抓取器不能直接解析该 JSON 响应；接入时需使用 `json_exporter`、自定义 exporter，或先由中间层转换为 Prometheus exposition format。
-- 当 `auth.enabled = true` 时，转换层或抓取代理还需要附带有效认证信息。
+- 当 `auth.enabled = true` 时，转换层或抓取代理还需要附带有效管理员认证信息。
 
 ---
 

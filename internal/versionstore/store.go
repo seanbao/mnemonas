@@ -25,9 +25,11 @@ var (
 	ErrLockExpired      = errors.New("lock has expired")
 	ErrUnavailable      = errors.New("version object store unavailable")
 	errInvalidStorePath = errors.New("invalid path")
+	errVersionStoreSymlink = errors.New("version store path must not traverse a symlink")
 )
 
 var syncVersionStoreDir = syncVersionStoreDirectory
+var afterValidateVersionStorePath = func() {}
 
 // LockType defines the type of lock
 type LockType int
@@ -72,6 +74,7 @@ type Version struct {
 type Store struct {
 	db          *sql.DB
 	objects     *ObjectStore
+	dbDirHandle *os.File
 	fileLocksMu sync.Mutex
 
 	getChunkRefSizeFn func(ctx context.Context, hash string) (int64, error)
@@ -91,27 +94,43 @@ func New(cfg Config) (*Store, error) {
 		return nil, errors.New("dataplane client is required")
 	}
 
+	normalizedPath, err := normalizeVersionStoreFilePath(cfg.DBPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateVersionStoreFilePath(normalizedPath); err != nil {
+		return nil, err
+	}
+
 	// Ensure database directory exists
-	dbDir := filepath.Dir(cfg.DBPath)
+	dbDir := filepath.Dir(normalizedPath)
 	if err := ensureVersionStoreDir(dbDir, 0700); err != nil {
 		return nil, err
 	}
 
-	// Open database
-	db, err := sql.Open("sqlite3", cfg.DBPath+"?_journal=WAL&_timeout=5000")
+	anchoredDBPath, dirHandle, err := prepareAnchoredVersionStorePath(normalizedPath)
 	if err != nil {
+		return nil, err
+	}
+
+	// Open database
+	db, err := sql.Open("sqlite3", anchoredDBPath+"?_journal=WAL&_timeout=5000")
+	if err != nil {
+		_ = dirHandle.Close()
 		return nil, err
 	}
 
 	// Create tables
 	if err := createTables(db); err != nil {
-		db.Close()
+		_ = db.Close()
+		_ = dirHandle.Close()
 		return nil, err
 	}
 
 	store := &Store{
-		db:      db,
-		objects: NewObjectStore(cfg.Dataplane),
+		db:          db,
+		objects:     NewObjectStore(cfg.Dataplane),
+		dbDirHandle: dirHandle,
 	}
 	store.getChunkRefSizeFn = func(ctx context.Context, hash string) (int64, error) {
 		var size int64
@@ -128,6 +147,73 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+func normalizeVersionStoreFilePath(dbPath string) (string, error) {
+	cleaned := filepath.Clean(dbPath)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve version store path: %w", err)
+	}
+	return absPath, nil
+}
+
+func validateVersionStoreFilePath(path string) error {
+	root := filepath.VolumeName(path) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(path, root)
+	if trimmed == "" {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat version store path: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errVersionStoreSymlink
+		}
+		return nil
+	}
+
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat version store path: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errVersionStoreSymlink
+		}
+	}
+
+	return nil
+}
+
+func prepareAnchoredVersionStorePath(dbPath string) (string, *os.File, error) {
+	dbDir := filepath.Dir(dbPath)
+	root, err := os.OpenRoot(dbDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to open version store directory root: %w", err)
+	}
+	defer root.Close()
+
+	dirHandle, err := root.Open(".")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to anchor version store directory: %w", err)
+	}
+
+	afterValidateVersionStorePath()
+	return fmt.Sprintf("/proc/self/fd/%d/%s", dirHandle.Fd(), filepath.Base(dbPath)), dirHandle, nil
 }
 
 func collectMissingVersionStoreDirs(dir string) ([]string, error) {
@@ -372,7 +458,17 @@ func ensureFileLocksTableSchema(db *sql.DB) error {
 
 // Close closes the store
 func (s *Store) Close() error {
-	return s.db.Close()
+	if s == nil {
+		return nil
+	}
+	err := s.db.Close()
+	if s.dbDirHandle != nil {
+		if closeErr := s.dbDirHandle.Close(); err == nil {
+			err = closeErr
+		}
+		s.dbDirHandle = nil
+	}
+	return err
 }
 
 // ============================================================================

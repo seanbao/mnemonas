@@ -147,12 +147,16 @@ export const useAuthStore = create<AuthState>((set) => ({
   
   logout: async () => {
     bumpAuthStateEpoch()
-    set({ isLoading: true })
-    
+    set({ isLoading: true, error: null })
+
     try {
-      return await apiLogout()
-    } finally {
+      const result = await apiLogout()
       set({ user: null, isAuthenticated: false, isLoading: false, error: null })
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '退出登录失败'
+      set({ isLoading: false, error: message })
+      throw err
     }
   },
   

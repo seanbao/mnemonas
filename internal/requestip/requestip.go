@@ -4,7 +4,25 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 )
+
+var trustedProxyHops atomic.Int32
+
+func init() {
+	trustedProxyHops.Store(1)
+}
+
+func SetTrustedProxyHops(hops int) {
+	if hops < 0 {
+		hops = 0
+	}
+	trustedProxyHops.Store(int32(hops))
+}
+
+func TrustedProxyHops() int {
+	return int(trustedProxyHops.Load())
+}
 
 // ClientIP returns the client IP for a request.
 // Forwarded headers are only trusted when the direct peer is loopback or private.
@@ -29,21 +47,38 @@ func ClientIP(r *http.Request) string {
 
 func ForwardedClientIP(r *http.Request) string {
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			if parsed := ParseIP(strings.TrimSpace(parts[i])); parsed != nil {
+		if selected := selectForwardedForClientIP(forwarded, TrustedProxyHops()); selected != "" {
+			return selected
+		}
+	}
+
+	if TrustedProxyHops() == 1 {
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+			if parsed := ParseIP(realIP); parsed != nil {
 				return parsed.String()
 			}
 		}
 	}
 
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		if parsed := ParseIP(realIP); parsed != nil {
-			return parsed.String()
-		}
+	return ""
+}
+
+func selectForwardedForClientIP(forwarded string, trustedProxyHops int) string {
+	if trustedProxyHops <= 0 {
+		return ""
 	}
 
-	return ""
+	parts := strings.Split(forwarded, ",")
+	validIPs := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if parsed := ParseIP(strings.TrimSpace(part)); parsed != nil {
+			validIPs = append(validIPs, parsed.String())
+		}
+	}
+	if len(validIPs) < trustedProxyHops {
+		return ""
+	}
+	return validIPs[len(validIPs)-trustedProxyHops]
 }
 
 func RemoteIP(remoteAddr string) string {

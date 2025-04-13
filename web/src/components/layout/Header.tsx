@@ -24,11 +24,19 @@ export function Header({ onMenuClick }: HeaderProps) {
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   const handleLogout = async () => {
-    const result = await logout()
-    addToast(result.warning
-      ? { title: result.message ?? '已退出登录，但活动日志写入失败', color: 'warning' }
-      : { title: '已退出登录', color: 'success' })
-    navigate('/login', { replace: true })
+    try {
+      const result = await logout()
+      addToast(result.warning
+        ? { title: result.message ?? '已退出登录，但活动日志写入失败', color: 'warning' }
+        : { title: '已退出登录', color: 'success' })
+      navigate('/login', { replace: true })
+    } catch (error) {
+      addToast({
+        title: '退出登录失败',
+        description: error instanceof Error ? error.message : '退出登录失败，请稍后重试。',
+        color: 'danger',
+      })
+    }
   }
 
   const handleSettings = () => {

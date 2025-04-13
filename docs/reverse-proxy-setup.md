@@ -159,6 +159,8 @@ server {
 }
 ```
 
+  若请求会经过多层反向代理，MnemoNAS 侧需要把 `[server].trusted_proxy_hops` 设置为实际代理层数。默认值 `1` 只适用于 app 前面只有一层受信代理的部署；多跳链路仍保留 `X-Forwarded-For $proxy_add_x_forwarded_for` 时，应显式调高该值，避免把上一级代理地址误判为客户端地址。
+
 ### 3. 启用站点并申请证书
 
 ```bash
@@ -233,6 +235,7 @@ services:
 ### 1. 基础认证（可选双重保护）
 
 Caddy：
+
 ```caddyfile
 nas.example.com {
     basicauth /dav/* {
@@ -245,6 +248,7 @@ nas.example.com {
 ### 2. 限制访问 IP（可选）
 
 Caddy：
+
 ```caddyfile
 nas.example.com {
     @blocked not remote_ip 192.168.0.0/16 10.0.0.0/8
@@ -257,6 +261,7 @@ nas.example.com {
 ### 3. Fail2ban 防暴力破解
 
 创建 `/etc/fail2ban/filter.d/mnemonas.conf`：
+
 ```ini
 [Definition]
 failregex = ^.*"POST /api/v1/auth/login.*" 401.*client=<HOST>.*$
@@ -264,6 +269,7 @@ ignoreregex =
 ```
 
 创建 `/etc/fail2ban/jail.d/mnemonas.conf`：
+
 ```ini
 [mnemonas]
 enabled = true
@@ -281,7 +287,7 @@ bantime = 3600
 配置完成后，各客户端连接方式：
 
 | 客户端 | 地址 |
-|--------|------|
+| ------ | ---- |
 | Web 浏览器 | `https://nas.example.com` |
 | macOS Finder | `https://nas.example.com/dav` |
 | Windows 资源管理器 | `https://nas.example.com/dav` |

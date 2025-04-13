@@ -177,6 +177,42 @@ func TestNewService_CreateDir(t *testing.T) {
 	}
 }
 
+func TestNewService_RejectsSymlinkCacheParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realCacheDir := filepath.Join(tmpDir, "real-cache")
+	if err := os.MkdirAll(realCacheDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-cache) failed: %v", err)
+	}
+	linkedCacheDir := filepath.Join(tmpDir, "linked-cache")
+	if err := os.Symlink(realCacheDir, linkedCacheDir); err != nil {
+		t.Fatalf("Symlink(linked-cache) failed: %v", err)
+	}
+
+	if _, err := NewService(linkedCacheDir); !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("expected NewService() to reject symlink cache dir, got %v", err)
+	}
+}
+
+func TestNewService_DoesNotCreateCacheDirThroughSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) failed: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) failed: %v", err)
+	}
+	cacheDir := filepath.Join(linkedParent, "cache")
+
+	if _, err := NewService(cacheDir); !errors.Is(err, errThumbnailCacheSymlink) {
+		t.Fatalf("expected NewService() to reject symlink cache parent, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(realParent, "cache")); !os.IsNotExist(err) {
+		t.Fatalf("expected no cache dir to be created through symlink parent, got %v", err)
+	}
+}
+
 func TestNewService_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	nestedDir := filepath.Join(tmpDir, "nested", "cache")
@@ -207,12 +243,12 @@ func TestService_SaveToCache_ReturnsDirectorySyncError(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
 		t.Fatalf("MkdirAll(cache dir) error: %v", err)
 	}
-	originalSyncThumbnailCacheDir := syncThumbnailCacheDir
-	syncThumbnailCacheDir = func(dir string) error {
+	originalSyncThumbnailCacheRootDir := syncThumbnailCacheRootDir
+	syncThumbnailCacheRootDir = func(root *os.Root, dir string) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncThumbnailCacheDir = originalSyncThumbnailCacheDir
+		syncThumbnailCacheRootDir = originalSyncThumbnailCacheRootDir
 	}()
 
 	err = svc.saveToCache(cachePath, []byte("thumbnail"))
@@ -247,12 +283,12 @@ func TestService_SaveToCache_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 
 	cachePath := filepath.Join(tmpDir, "ab", "cd", "thumb.jpg")
-	originalSyncThumbnailCacheDir := syncThumbnailCacheDir
-	syncThumbnailCacheDir = func(dir string) error {
+	originalSyncThumbnailCacheRootDir := syncThumbnailCacheRootDir
+	syncThumbnailCacheRootDir = func(root *os.Root, dir string) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncThumbnailCacheDir = originalSyncThumbnailCacheDir
+		syncThumbnailCacheRootDir = originalSyncThumbnailCacheRootDir
 	}()
 
 	err = svc.saveToCache(cachePath, []byte("thumbnail"))
@@ -472,8 +508,8 @@ func TestGetThumbnail_ReusesGeneratedBytesUntilAsyncCacheSaveCompletes(t *testin
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	originalSyncThumbnailCacheDir := syncThumbnailCacheDir
-	syncThumbnailCacheDir = func(dir string) error {
+	originalSyncThumbnailCacheRootDir := syncThumbnailCacheRootDir
+	syncThumbnailCacheRootDir = func(root *os.Root, dir string) error {
 		select {
 		case started <- struct{}{}:
 		default:
@@ -482,7 +518,7 @@ func TestGetThumbnail_ReusesGeneratedBytesUntilAsyncCacheSaveCompletes(t *testin
 		return nil
 	}
 	t.Cleanup(func() {
-		syncThumbnailCacheDir = originalSyncThumbnailCacheDir
+		syncThumbnailCacheRootDir = originalSyncThumbnailCacheRootDir
 	})
 
 	ctx := context.Background()
@@ -539,8 +575,8 @@ func TestGetThumbnail_ReusesGeneratedBytesBrieflyAfterCacheSaveFailure(t *testin
 	svc.failedCacheReuseTTL = 50 * time.Millisecond
 
 	failedSave := make(chan struct{}, 1)
-	originalSyncThumbnailCacheDir := syncThumbnailCacheDir
-	syncThumbnailCacheDir = func(dir string) error {
+	originalSyncThumbnailCacheRootDir := syncThumbnailCacheRootDir
+	syncThumbnailCacheRootDir = func(root *os.Root, dir string) error {
 		select {
 		case failedSave <- struct{}{}:
 		default:
@@ -548,7 +584,7 @@ func TestGetThumbnail_ReusesGeneratedBytesBrieflyAfterCacheSaveFailure(t *testin
 		return errors.New("directory fsync failed")
 	}
 	t.Cleanup(func() {
-		syncThumbnailCacheDir = originalSyncThumbnailCacheDir
+		syncThumbnailCacheRootDir = originalSyncThumbnailCacheRootDir
 	})
 
 	ctx := context.Background()
@@ -708,46 +744,120 @@ func TestGetThumbnail_RejectsCachePathSymlinkIntroducedAfterValidation(t *testin
 	}
 }
 
-func TestGetThumbnail_RejectsSymlinkCacheParentDirectory(t *testing.T) {
+func TestGetThumbnail_LoadFromCache_DoesNotFollowSymlinkParentInsertedAfterValidation(t *testing.T) {
 	tmpDir := t.TempDir()
-	realCacheDir := filepath.Join(tmpDir, "real-cache")
-	if err := os.MkdirAll(realCacheDir, 0755); err != nil {
-		t.Fatalf("MkdirAll(real-cache) failed: %v", err)
-	}
-	linkedCacheDir := filepath.Join(tmpDir, "linked-cache")
-	if err := os.Symlink(realCacheDir, linkedCacheDir); err != nil {
-		t.Fatalf("Symlink(linked-cache) failed: %v", err)
-	}
-
-	svc, err := NewService(linkedCacheDir)
+	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	cachePath := filepath.Join(linkedCacheDir, "ab", "thumb.jpg")
-	if err := os.MkdirAll(filepath.Join(realCacheDir, "ab"), 0755); err != nil {
-		t.Fatalf("MkdirAll(real-cache/ab) failed: %v", err)
+	cacheKey := svc.cacheKey("/test/parent-race.png", SizeSmall)
+	cachePath := svc.cachePath(cacheKey)
+	cacheDir := filepath.Dir(cachePath)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(cache dir) failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(realCacheDir, "ab", "thumb.jpg"), []byte("old-thumb"), 0644); err != nil {
-		t.Fatalf("WriteFile(real thumb) failed: %v", err)
+	if err := os.WriteFile(cachePath, []byte("cached-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(cachePath) failed: %v", err)
 	}
+	outsideDir := filepath.Join(tmpDir, "outside-cache")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside-cache) failed: %v", err)
+	}
+	outsidePath := filepath.Join(outsideDir, filepath.Base(cachePath))
+	if err := os.WriteFile(outsidePath, []byte("secret-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside cache) failed: %v", err)
+	}
+	backupDir := cacheDir + "-backup"
+
+	originalAfterValidateThumbnailCachePath := afterValidateThumbnailCachePath
+	afterValidateThumbnailCachePath = func() {
+		if err := os.Rename(cacheDir, backupDir); err != nil {
+			t.Fatalf("Rename(cacheDir) failed: %v", err)
+		}
+		if err := os.Symlink(outsideDir, cacheDir); err != nil {
+			t.Fatalf("Symlink(cacheDir) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateThumbnailCachePath = originalAfterValidateThumbnailCachePath
+	}()
 
 	_, err = svc.loadFromCache(cachePath)
 	if !errors.Is(err, errThumbnailCacheSymlink) {
-		t.Fatalf("expected parent-directory symlink rejection on load, got %v", err)
+		t.Fatalf("expected parent-directory symlink rejection after validation race, got %v", err)
 	}
+
+	data, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFile(outside cache) failed: %v", err)
+	}
+	if string(data) != "secret-thumb" {
+		t.Fatalf("expected outside cache file unchanged, got %q", string(data))
+	}
+
+	backupPath := filepath.Join(backupDir, filepath.Base(cachePath))
+	data, err = os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("ReadFile(backup cache) failed: %v", err)
+	}
+	if string(data) != "cached-thumb" {
+		t.Fatalf("expected original cache file preserved, got %q", string(data))
+	}
+}
+
+func TestService_SaveToCache_DoesNotFollowSymlinkParentInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cacheKey := svc.cacheKey("/test/save-parent-race.png", SizeSmall)
+	cachePath := svc.cachePath(cacheKey)
+	cacheDir := filepath.Dir(cachePath)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(cache dir) failed: %v", err)
+	}
+	outsideDir := filepath.Join(tmpDir, "outside-cache")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside-cache) failed: %v", err)
+	}
+	outsidePath := filepath.Join(outsideDir, filepath.Base(cachePath))
+	if err := os.WriteFile(outsidePath, []byte("secret-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside cache) failed: %v", err)
+	}
+	backupDir := cacheDir + "-backup"
+
+	originalAfterValidateThumbnailCachePath := afterValidateThumbnailCachePath
+	afterValidateThumbnailCachePath = func() {
+		if err := os.Rename(cacheDir, backupDir); err != nil {
+			t.Fatalf("Rename(cacheDir) failed: %v", err)
+		}
+		if err := os.Symlink(outsideDir, cacheDir); err != nil {
+			t.Fatalf("Symlink(cacheDir) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateThumbnailCachePath = originalAfterValidateThumbnailCachePath
+	}()
 
 	err = svc.saveToCache(cachePath, []byte("new-thumb"))
 	if !errors.Is(err, errThumbnailCacheSymlink) {
-		t.Fatalf("expected parent-directory symlink rejection on save, got %v", err)
+		t.Fatalf("expected parent-directory symlink rejection on save after validation race, got %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(realCacheDir, "ab", "thumb.jpg"))
+	data, err := os.ReadFile(outsidePath)
 	if err != nil {
-		t.Fatalf("ReadFile(real thumb) failed: %v", err)
+		t.Fatalf("ReadFile(outside cache) failed: %v", err)
 	}
-	if string(data) != "old-thumb" {
-		t.Fatalf("expected real cache file unchanged, got %q", string(data))
+	if string(data) != "secret-thumb" {
+		t.Fatalf("expected outside cache file unchanged, got %q", string(data))
+	}
+
+	backupPath := filepath.Join(backupDir, filepath.Base(cachePath))
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no thumbnail cache file to be created in original directory, got %v", err)
 	}
 }
 
@@ -941,7 +1051,7 @@ func TestCacheStats_DoesNotBlockSaveToCache(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	originalWalkThumbnailCache := walkThumbnailCache
-	walkThumbnailCache = func(root string, walkFn filepath.WalkFunc) error {
+	walkThumbnailCache = func(root string, cacheRoot *os.Root, walkFn thumbnailWalkFunc) error {
 		close(started)
 		<-release
 		return nil
@@ -1032,6 +1142,149 @@ func TestCleanCache(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected count=0 after clean, got %d", count)
+	}
+}
+
+func TestCleanCache_DoesNotFollowCacheRootSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	originalPath := filepath.Join(tmpDir, "ab", "thumb.jpg")
+	if err := os.MkdirAll(filepath.Dir(originalPath), 0755); err != nil {
+		t.Fatalf("MkdirAll(original cache dir) failed: %v", err)
+	}
+	if err := os.WriteFile(originalPath, []byte("cached-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(original thumb) failed: %v", err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(originalPath, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes(original thumb) failed: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsidePath := filepath.Join(outsideRoot, "ab", "thumb.jpg")
+	if err := os.MkdirAll(filepath.Dir(outsidePath), 0755); err != nil {
+		t.Fatalf("MkdirAll(outside cache dir) failed: %v", err)
+	}
+	if err := os.WriteFile(outsidePath, []byte("outside-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside thumb) failed: %v", err)
+	}
+	if err := os.Chtimes(outsidePath, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes(outside thumb) failed: %v", err)
+	}
+
+	backupRoot := tmpDir + "-backup"
+	originalAfterValidateThumbnailCachePath := afterValidateThumbnailCachePath
+	afterValidateThumbnailCachePath = func() {
+		if err := os.Rename(tmpDir, backupRoot); err != nil {
+			t.Fatalf("Rename(cache root) failed: %v", err)
+		}
+		if err := os.Symlink(outsideRoot, tmpDir); err != nil {
+			t.Fatalf("Symlink(cache root) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateThumbnailCachePath = originalAfterValidateThumbnailCachePath
+		if info, err := os.Lstat(tmpDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(tmpDir); removeErr != nil {
+				t.Errorf("Remove(cache root symlink) failed: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupRoot); err == nil {
+			if renameErr := os.Rename(backupRoot, tmpDir); renameErr != nil {
+				t.Errorf("Rename(backup root) failed: %v", renameErr)
+			}
+		}
+	}()
+
+	cleaned, err := svc.CleanCache(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("CleanCache failed: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected 1 cleaned file, got %d", cleaned)
+	}
+
+	if _, err := os.Stat(filepath.Join(backupRoot, "ab", "thumb.jpg")); !os.IsNotExist(err) {
+		t.Fatalf("expected anchored cache file to be removed, got %v", err)
+	}
+	data, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFile(outside thumb) failed: %v", err)
+	}
+	if string(data) != "outside-thumb" {
+		t.Fatalf("expected outside cache file unchanged, got %q", string(data))
+	}
+}
+
+func TestCacheStats_DoesNotFollowCacheRootSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	originalPath := filepath.Join(tmpDir, "ab", "thumb.jpg")
+	if err := os.MkdirAll(filepath.Dir(originalPath), 0755); err != nil {
+		t.Fatalf("MkdirAll(original cache dir) failed: %v", err)
+	}
+	if err := os.WriteFile(originalPath, []byte("cached-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(original thumb) failed: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsidePath := filepath.Join(outsideRoot, "ab", "thumb.jpg")
+	if err := os.MkdirAll(filepath.Dir(outsidePath), 0755); err != nil {
+		t.Fatalf("MkdirAll(outside cache dir) failed: %v", err)
+	}
+	if err := os.WriteFile(outsidePath, []byte("outside-thumb"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside thumb) failed: %v", err)
+	}
+
+	backupRoot := tmpDir + "-backup"
+	originalAfterValidateThumbnailCachePath := afterValidateThumbnailCachePath
+	afterValidateThumbnailCachePath = func() {
+		if err := os.Rename(tmpDir, backupRoot); err != nil {
+			t.Fatalf("Rename(cache root) failed: %v", err)
+		}
+		if err := os.Symlink(outsideRoot, tmpDir); err != nil {
+			t.Fatalf("Symlink(cache root) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateThumbnailCachePath = originalAfterValidateThumbnailCachePath
+		if info, err := os.Lstat(tmpDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(tmpDir); removeErr != nil {
+				t.Errorf("Remove(cache root symlink) failed: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupRoot); err == nil {
+			if renameErr := os.Rename(backupRoot, tmpDir); renameErr != nil {
+				t.Errorf("Rename(backup root) failed: %v", renameErr)
+			}
+		}
+	}()
+
+	count, size, err := svc.CacheStats(context.Background())
+	if err != nil {
+		t.Fatalf("CacheStats failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 cached file, got %d", count)
+	}
+	if size != int64(len("cached-thumb")) {
+		t.Fatalf("expected cache size %d, got %d", len("cached-thumb"), size)
+	}
+
+	data, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFile(outside thumb) failed: %v", err)
+	}
+	if string(data) != "outside-thumb" {
+		t.Fatalf("expected outside cache file unchanged, got %q", string(data))
 	}
 }
 

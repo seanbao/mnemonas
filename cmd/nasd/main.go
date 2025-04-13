@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -35,6 +36,8 @@ var (
 	commit    = "none"
 	buildTime = "unknown"
 )
+
+var errLogOutputSymlink = errors.New("log output path must not be a symlink")
 
 var startupDataplaneContext = dataplane.WithTimeout
 var startupDataplaneConnect = func(client *dataplane.Client, ctx context.Context) error {
@@ -465,6 +468,55 @@ func applyLoggerConfig(cfg config.LogConfig) (io.Closer, error) {
 	return closer, nil
 }
 
+func normalizeLogOutputPath(output string) (string, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(output))
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve log output path: %w", err)
+	}
+	return absPath, nil
+}
+
+func validateLogOutputPath(path string) error {
+	root := filepath.VolumeName(path) + string(filepath.Separator)
+	current := root
+	trimmed := strings.TrimPrefix(path, root)
+	if trimmed == "" {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errLogOutputSymlink
+		}
+		return nil
+	}
+
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errLogOutputSymlink
+		}
+	}
+	return nil
+}
+
 func resolveLogOutput(output string) (io.Writer, io.Closer, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(output)) {
 	case "", "stdout":
@@ -474,8 +526,17 @@ func resolveLogOutput(output string) (io.Writer, io.Closer, bool, error) {
 		noColor := !isatty.IsTerminal(os.Stderr.Fd()) && !isatty.IsCygwinTerminal(os.Stderr.Fd())
 		return os.Stderr, nil, noColor, nil
 	default:
-		cleanPath := strings.TrimSpace(output)
+		cleanPath, err := normalizeLogOutputPath(output)
+		if err != nil {
+			return nil, nil, true, err
+		}
+		if err := validateLogOutputPath(cleanPath); err != nil {
+			return nil, nil, true, err
+		}
 		if err := os.MkdirAll(filepath.Dir(cleanPath), 0o755); err != nil {
+			return nil, nil, true, err
+		}
+		if err := validateLogOutputPath(cleanPath); err != nil {
 			return nil, nil, true, err
 		}
 		file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)

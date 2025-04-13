@@ -4,17 +4,27 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
 var errConfigFileSymlink = errors.New("config file path must not be a symlink")
+var errManagedDirectorySymlink = errors.New("managed directory path must not be a symlink")
 
 var syncManagedDir = syncManagedDirectory
+var syncManagedRootDir = syncManagedRootDirectory
+var afterValidateManagedFilePath = func() {}
+
+var managedDirRootsMu sync.RWMutex
+var managedDirRoots = map[string]*os.Root{}
+
+const managedRootEscapeError = "path escapes from parent"
 
 var durationFieldPaths = [][]string{
 	{"server", "read_timeout"},
@@ -44,11 +54,12 @@ type Config struct {
 
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
-	Host         string        `toml:"host"`
-	Port         int           `toml:"port"`
-	ReadTimeout  time.Duration `toml:"read_timeout"`
-	WriteTimeout time.Duration `toml:"write_timeout"`
-	IdleTimeout  time.Duration `toml:"idle_timeout"`
+	Host             string        `toml:"host"`
+	Port             int           `toml:"port"`
+	ReadTimeout      time.Duration `toml:"read_timeout"`
+	WriteTimeout     time.Duration `toml:"write_timeout"`
+	IdleTimeout      time.Duration `toml:"idle_timeout"`
+	TrustedProxyHops int           `toml:"trusted_proxy_hops"`
 	// TLS configuration
 	TLS TLSConfig `toml:"tls"`
 }
@@ -197,11 +208,12 @@ func Default() *Config {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Host:         "0.0.0.0",
-			Port:         8080,
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			IdleTimeout:  120 * time.Second,
+			Host:             "0.0.0.0",
+			Port:             8080,
+			ReadTimeout:      30 * time.Second,
+			WriteTimeout:     60 * time.Second,
+			IdleTimeout:      120 * time.Second,
+			TrustedProxyHops: 1,
 			TLS: TLSConfig{
 				Enabled:      false,
 				AutoGenerate: true, // Auto-generate self-signed cert for easy setup
@@ -362,11 +374,12 @@ func normalizeStringSlice(values []string) []string {
 // Load loads configuration from file
 func Load(path string) (*Config, error) {
 	cfg := Default()
-	if err := validateConfigFilePath(path); err != nil {
+	normalizedPath, err := ensureManagedDirRoot(path, errConfigFileSymlink, "config file", false)
+	if err != nil {
 		return nil, err
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := readRegisteredManagedFile(normalizedPath, errConfigFileSymlink, "config file")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return cfg, nil // file not found, use default config
@@ -454,13 +467,9 @@ func normalizeDurationFieldValue(raw map[string]any, fieldPath []string) error {
 
 // Save saves configuration to file
 func (c *Config) Save(path string) error {
-	if err := validateManagedFilePath(path, errConfigFileSymlink, "config file"); err != nil {
+	normalizedPath, err := ensureManagedDirRoot(path, errConfigFileSymlink, "config file", true)
+	if err != nil {
 		return err
-	}
-
-	dir := filepath.Dir(path)
-	if err := ensureManagedDir(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	data, err := toml.Marshal(c)
@@ -468,7 +477,7 @@ func (c *Config) Save(path string) error {
 		return fmt.Errorf("failed to serialize config: %w", err)
 	}
 
-	if err := writeConfigFile(path, data); err != nil {
+	if err := writeConfigFile(normalizedPath, data); err != nil {
 		return err
 	}
 
@@ -479,14 +488,22 @@ func validateConfigFilePath(path string) error {
 	return validateManagedFilePath(path, errConfigFileSymlink, "config file")
 }
 
-func validateManagedFilePath(path string, symlinkErr error, label string) error {
+func normalizeManagedFilePath(path, label string) (string, error) {
 	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		absPath, err := filepath.Abs(cleaned)
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s path: %w", label, err)
-		}
-		cleaned = absPath
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve %s path: %w", label, err)
+	}
+	return absPath, nil
+}
+
+func validateManagedFilePath(path string, symlinkErr error, label string) error {
+	cleaned, err := normalizeManagedFilePath(path, label)
+	if err != nil {
+		return err
 	}
 
 	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
@@ -527,6 +544,114 @@ func validateManagedFilePath(path string, symlinkErr error, label string) error 
 	return nil
 }
 
+func ensureManagedDirRoot(path string, symlinkErr error, label string, create bool) (string, error) {
+	normalizedPath, err := normalizeManagedFilePath(path, label)
+	if err != nil {
+		return "", err
+	}
+	if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
+		return "", err
+	}
+
+	dir := filepath.Dir(normalizedPath)
+	managedDirRootsMu.RLock()
+	root := managedDirRoots[dir]
+	managedDirRootsMu.RUnlock()
+	if root != nil {
+		return normalizedPath, nil
+	}
+
+	if create {
+		if err := ensureManagedDir(dir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create %s directory: %w", label, err)
+		}
+	} else if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return normalizedPath, nil
+		}
+		return "", fmt.Errorf("failed to stat %s directory: %w", label, err)
+	}
+
+	root, err = os.OpenRoot(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to open %s directory root: %w", label, err)
+	}
+
+	managedDirRootsMu.Lock()
+	if existing := managedDirRoots[dir]; existing != nil {
+		managedDirRootsMu.Unlock()
+		_ = root.Close()
+		return normalizedPath, nil
+	}
+	managedDirRoots[dir] = root
+	managedDirRootsMu.Unlock()
+
+	return normalizedPath, nil
+}
+
+func registeredManagedDirRoot(path, label string) (*os.Root, string, bool, error) {
+	normalizedPath, err := normalizeManagedFilePath(path, label)
+	if err != nil {
+		return nil, "", false, err
+	}
+	dir := filepath.Dir(normalizedPath)
+	managedDirRootsMu.RLock()
+	root := managedDirRoots[dir]
+	managedDirRootsMu.RUnlock()
+	return root, normalizedPath, root != nil, nil
+}
+
+func readRegisteredManagedFile(path string, symlinkErr error, label string) ([]byte, error) {
+	root, normalizedPath, ok, err := registeredManagedDirRoot(path, label)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(normalizedPath)
+	}
+	return readManagedFileWithRoot(root, normalizedPath, symlinkErr, label)
+}
+
+func writeRegisteredManagedFileAtomically(path string, data []byte, symlinkErr error, pattern, label string, perm os.FileMode) error {
+	root, normalizedPath, ok, err := registeredManagedDirRoot(path, label)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return writeManagedFileAtomically(normalizedPath, data, symlinkErr, pattern, label, perm)
+	}
+	return writeManagedFileAtomicallyWithRoot(root, normalizedPath, data, symlinkErr, pattern, label, perm)
+}
+
+func chmodRegisteredManagedFile(path string, mode os.FileMode, symlinkErr error, label string) error {
+	root, normalizedPath, ok, err := registeredManagedDirRoot(path, label)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
+			return err
+		}
+		afterValidateManagedFilePath()
+		return os.Chmod(normalizedPath, mode)
+	}
+	return chmodManagedFileWithRoot(root, normalizedPath, mode, symlinkErr)
+}
+
+func syncRegisteredManagedDir(path, label string) error {
+	root, normalizedPath, ok, err := registeredManagedDirRoot(path, label)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return syncManagedRootDir(root)
+	}
+	return syncManagedDir(filepath.Dir(normalizedPath))
+}
+
 func syncManagedDirectory(dir string) error {
 	parentDir, err := os.Open(dir)
 	if err != nil {
@@ -540,6 +665,23 @@ func syncManagedDirectory(dir string) error {
 	}
 	if err := parentDir.Close(); err != nil {
 		return fmt.Errorf("close directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+func syncManagedRootDirectory(root *os.Root) error {
+	parentDir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = parentDir.Close()
+	}()
+	if err := parentDir.Sync(); err != nil {
+		return err
+	}
+	if err := parentDir.Close(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -585,15 +727,115 @@ func ensureManagedDir(dir string, perm os.FileMode) error {
 	return syncCreatedManagedDirs(createdDirs)
 }
 
-func writeConfigFile(path string, data []byte) error {
-	if err := validateConfigFilePath(path); err != nil {
+func readManagedFileWithRoot(root *os.Root, path string, symlinkErr error, label string) ([]byte, error) {
+	if err := validateManagedFilePath(path, symlinkErr, label); err != nil {
+		return nil, err
+	}
+	afterValidateManagedFilePath()
+
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return nil, mapManagedRootPathError(err, symlinkErr)
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func writeManagedFileAtomicallyWithRoot(root *os.Root, path string, data []byte, symlinkErr error, pattern, label string, perm os.FileMode) error {
+	if err := validateManagedFilePath(path, symlinkErr, label); err != nil {
 		return err
 	}
+	afterValidateManagedFilePath()
+
+	tmpFile, tmpName, err := createManagedTempFile(root, pattern, symlinkErr)
+	if err != nil {
+		return fmt.Errorf("failed to create temp %s file: %w", label, err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = root.Remove(tmpName)
+		}
+	}()
+
+	if err := tmpFile.Chmod(perm); err != nil {
+		_ = tmpFile.Close()
+		return cleanupManagedTempPath(root, tmpName, fmt.Errorf("failed to set temp %s permissions: %w", label, err))
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return cleanupManagedTempPath(root, tmpName, fmt.Errorf("failed to write %s file: %w", label, err))
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return cleanupManagedTempPath(root, tmpName, fmt.Errorf("failed to sync %s file: %w", label, err))
+	}
+	if err := tmpFile.Close(); err != nil {
+		return cleanupManagedTempPath(root, tmpName, fmt.Errorf("failed to close temp %s file: %w", label, err))
+	}
+	if err := root.Rename(tmpName, filepath.Base(path)); err != nil {
+		return cleanupManagedTempPath(root, tmpName, fmt.Errorf("failed to replace %s: %w", label, mapManagedRootPathError(err, symlinkErr)))
+	}
+	cleanup = false
+	if err := syncRegisteredManagedDir(path, label); err != nil {
+		return fmt.Errorf("failed to sync %s directory: %w", label, err)
+	}
+	return nil
+}
+
+func chmodManagedFileWithRoot(root *os.Root, path string, mode os.FileMode, symlinkErr error) error {
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDWR, 0)
+	if err != nil {
+		return mapManagedRootPathError(err, symlinkErr)
+	}
+	defer file.Close()
+
+	if err := file.Chmod(mode); err != nil {
+		return err
+	}
+	return nil
+}
+
+func createManagedTempFile(root *os.Root, pattern string, symlinkErr error) (*os.File, string, error) {
+	tmpName, err := newManagedTempName(pattern)
+	if err != nil {
+		return nil, "", err
+	}
+	tmpFile, err := root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, "", mapManagedRootPathError(err, symlinkErr)
+	}
+	return tmpFile, tmpName, nil
+}
+
+func newManagedTempName(pattern string) (string, error) {
+	random, err := generateSecureKey(8)
+	if err != nil {
+		return "", err
+	}
+	name := strings.Replace(pattern, "*", random, 1)
+	if !strings.Contains(name, random) {
+		name = pattern + random
+	}
+	return name, nil
+}
+
+func cleanupManagedTempPath(root *os.Root, path string, err error) error {
+	_ = root.Remove(path)
+	return err
+}
+
+func writeManagedFileAtomically(path string, data []byte, symlinkErr error, pattern, label string, perm os.FileMode) error {
+	if err := validateManagedFilePath(path, symlinkErr, label); err != nil {
+		return err
+	}
+	afterValidateManagedFilePath()
 
 	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, ".config-*.tmp")
+	tmpFile, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return fmt.Errorf("failed to create temp config file: %w", err)
+		return fmt.Errorf("failed to create temp %s file: %w", label, err)
 	}
 	tmpPath := tmpFile.Name()
 	cleanup := true
@@ -603,29 +845,44 @@ func writeConfigFile(path string, data []byte) error {
 		}
 	}()
 
-	if err := tmpFile.Chmod(0644); err != nil {
+	if err := tmpFile.Chmod(perm); err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("failed to set temp config permissions: %w", err)
+		return fmt.Errorf("failed to set temp %s permissions: %w", label, err)
 	}
 	if _, err := tmpFile.Write(data); err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write config file: %w", err)
+		return fmt.Errorf("failed to write %s file: %w", label, err)
 	}
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("failed to sync config file: %w", err)
+		return fmt.Errorf("failed to sync %s file: %w", label, err)
 	}
 	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp config file: %w", err)
+		return fmt.Errorf("failed to close temp %s file: %w", label, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to replace config file: %w", err)
+		return fmt.Errorf("failed to replace %s: %w", label, err)
 	}
 	cleanup = false
 	if err := syncManagedDir(dir); err != nil {
-		return fmt.Errorf("failed to sync config directory: %w", err)
+		return fmt.Errorf("failed to sync %s directory: %w", label, err)
 	}
 	return nil
+}
+
+func mapManagedRootPathError(err error, symlinkErr error) error {
+	if errors.Is(err, os.ErrPermission) || isManagedRootEscapeError(err) {
+		return symlinkErr
+	}
+	return err
+}
+
+func isManagedRootEscapeError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), managedRootEscapeError)
+}
+
+func writeConfigFile(path string, data []byte) error {
+	return writeRegisteredManagedFileAtomically(path, data, errConfigFileSymlink, ".config-*.tmp", "config", 0644)
 }
 
 // Validate validates configuration
@@ -643,6 +900,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.IdleTimeout <= 0 {
 		errs = append(errs, errors.New("server.idle_timeout must be positive"))
+	}
+	if c.Server.TrustedProxyHops < 0 {
+		errs = append(errs, errors.New("server.trusted_proxy_hops cannot be negative"))
 	}
 
 	if c.Storage.Root == "" {
@@ -777,12 +1037,18 @@ func (c *Config) EnsureDirs() error {
 		filepath.Join(root, ".mnemonas", "tmp"),         // Temp files
 	}
 
+	for _, dir := range dirs {
+		if err := validateManagedFilePath(dir, errManagedDirectorySymlink, "managed directory"); err != nil {
+			return fmt.Errorf("failed to validate directory %s: %w", dir, err)
+		}
+	}
+
 	for i, dir := range dirs {
 		var perm os.FileMode = 0700
 		if i == 0 { // files/ directory should be accessible
 			perm = 0755
 		}
-		if err := os.MkdirAll(dir, perm); err != nil {
+		if err := ensureManagedDir(dir, perm); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}

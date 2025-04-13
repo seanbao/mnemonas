@@ -5,7 +5,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 ## 📍 连接信息
 
 | 项目 | 值 |
-|------|-----|
+| --- | --- |
 | **协议** | WebDAV (HTTP) |
 | **地址** | `http://<服务器IP>:8080/dav` |
 | **用户名** | 按配置；默认启用 Basic Auth，留空时使用 `admin` |
@@ -58,7 +58,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 
 **注意**：Windows 原生 WebDAV 客户端对 HTTP（非 HTTPS）支持有限。如遇问题：
 
-```
+```powershell
 # 以管理员身份运行 PowerShell
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
 Restart-Service WebClient
@@ -121,7 +121,7 @@ http://localhost:8080/dav  /mnt/nas  davfs  _netdev,user,noauto  0  0
 
 **凭据配置**（`~/.davfs2/secrets`）：
 
-```
+```text
 http://localhost:8080/dav  username  password
 ```
 
@@ -207,12 +207,14 @@ Restart-Service WebClient
 ### 大文件上传失败
 
 1. 检查 davfs2 缓存设置：编辑 `/etc/davfs2/davfs2.conf`
-   ```
+
+   ```text
    cache_size  1024
    buf_size    256
    ```
 
 2. rclone 用户尝试：
+
    ```bash
    rclone copy localfile mnemonas:/ --size-only
    ```

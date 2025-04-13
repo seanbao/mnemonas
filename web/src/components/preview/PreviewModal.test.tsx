@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { refreshAuthSession } from '@/api/auth'
+import { ensureDownloadSession, refreshAuthSession } from '@/api/auth'
 import { downloadFile } from '@/api/files'
 import { PreviewModal, type PreviewFile } from './PreviewModal'
 
 vi.mock('@/api/auth', () => ({
+  ensureDownloadSession: vi.fn(),
   refreshAuthSession: vi.fn(),
 }))
 
@@ -39,11 +40,14 @@ vi.mock('@/lib/preview-utils', async () => {
 })
 
 describe('PreviewModal', () => {
+  const mockEnsureDownloadSession = vi.mocked(ensureDownloadSession)
   const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
   const mockDownloadFile = vi.mocked(downloadFile)
 
   beforeEach(() => {
+    vi.clearAllMocks()
     vi.restoreAllMocks()
+    mockEnsureDownloadSession.mockResolvedValue({ ok: true })
     mockRefreshAuthSession.mockResolvedValue(false)
     mockDownloadFile.mockResolvedValue(undefined)
   })
@@ -129,7 +133,7 @@ describe('PreviewModal', () => {
     })
   })
 
-  it('opens external link without auth query', () => {
+  it('opens external link without auth query', async () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
     const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
 
@@ -145,14 +149,42 @@ describe('PreviewModal', () => {
     const externalButton = screen.getByTitle('在新标签页打开')
     externalButton.click()
 
-    expect(openSpy).toHaveBeenCalledWith(
-      '/api/v1/download/video.mp4',
-      '_blank',
-      'noopener,noreferrer'
-    )
+    await waitFor(() => {
+      expect(mockEnsureDownloadSession).toHaveBeenCalledTimes(1)
+      expect(openSpy).toHaveBeenCalledWith(
+        '/api/v1/download/video.mp4',
+        '_blank',
+        'noopener,noreferrer'
+      )
+    })
   })
 
-  it('shows toast when browser blocks external preview', () => {
+  it('shows warning when download session cannot be prepared for external preview', async () => {
+    mockEnsureDownloadSession.mockResolvedValueOnce({ ok: false, message: 'download session unavailable' })
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    screen.getByTitle('在新标签页打开').click()
+
+    await waitFor(() => {
+      expect(openSpy).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'download session unavailable',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows toast when browser blocks external preview', async () => {
     vi.spyOn(window, 'open').mockReturnValue(null)
     const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
 
@@ -167,9 +199,12 @@ describe('PreviewModal', () => {
 
     screen.getByTitle('在新标签页打开').click()
 
-    expect(mockAddToast).toHaveBeenCalledWith({
-      title: '浏览器拦截了新标签页，请允许弹窗后重试',
-      color: 'warning',
+    await waitFor(() => {
+      expect(mockEnsureDownloadSession).toHaveBeenCalledTimes(1)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '浏览器拦截了新标签页，请允许弹窗后重试',
+        color: 'warning',
+      })
     })
   })
 

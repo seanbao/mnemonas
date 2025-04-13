@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +93,50 @@ func setupFileSystem(t *testing.T) *FileSystem {
 	return fs
 }
 
+func setupManagedPathHelperFileSystem(t *testing.T) *FileSystem {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	ws, err := workspace.New(filepath.Join(tmpDir, "files"))
+	if err != nil {
+		t.Fatalf("workspace.New() error: %v", err)
+	}
+
+	trashRoot := filepath.Join(tmpDir, "trash")
+	if err := ensureStorageDir(trashRoot, 0700); err != nil {
+		t.Fatalf("ensureStorageDir(trash) error: %v", err)
+	}
+	absTrashRoot, err := normalizeStorageHostPath(trashRoot)
+	if err != nil {
+		t.Fatalf("normalizeStorageHostPath(trash) error: %v", err)
+	}
+
+	filesRootHandle, err := os.OpenRoot(ws.Root())
+	if err != nil {
+		_ = ws.Close()
+		t.Fatalf("os.OpenRoot(files) error: %v", err)
+	}
+	trashRootHandle, err := os.OpenRoot(absTrashRoot)
+	if err != nil {
+		_ = filesRootHandle.Close()
+		_ = ws.Close()
+		t.Fatalf("os.OpenRoot(trash) error: %v", err)
+	}
+
+	fs := &FileSystem{
+		workspace:       ws,
+		filesRootHandle: filesRootHandle,
+		trashRootHandle: trashRootHandle,
+		trashRoot:       absTrashRoot,
+	}
+	t.Cleanup(func() {
+		if err := fs.Close(); err != nil {
+			t.Errorf("fs.Close() error: %v", err)
+		}
+	})
+	return fs
+}
+
 func mustGenerateStorageID(t *testing.T) string {
 	t.Helper()
 
@@ -131,6 +176,40 @@ func TestNew(t *testing.T) {
 	dbPath := filepath.Join(cfg.InternalRoot, "index.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Errorf("Database not created: %v", err)
+	}
+}
+
+func TestNew_RejectsFilesRootSymlinkParent(t *testing.T) {
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	realFilesParent := filepath.Join(tmpDir, "real-files-parent")
+	if err := os.MkdirAll(realFilesParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-files-parent) error: %v", err)
+	}
+	linkedFilesParent := filepath.Join(tmpDir, "linked-files-parent")
+	if err := os.Symlink(realFilesParent, linkedFilesParent); err != nil {
+		t.Fatalf("Symlink(linked-files-parent) error: %v", err)
+	}
+
+	filesRoot := filepath.Join(linkedFilesParent, "files")
+	_, err := New(&Config{
+		FilesRoot:    filesRoot,
+		InternalRoot: filepath.Join(tmpDir, ".mnemonas"),
+		TrashRoot:    filepath.Join(tmpDir, ".mnemonas", "trash"),
+		Dataplane:    client,
+	})
+	if err == nil {
+		t.Fatal("expected New() to reject files root under symlink parent")
+	}
+	if !strings.Contains(err.Error(), "failed to create workspace") || !strings.Contains(err.Error(), "workspace root must not be a symlink") {
+		t.Fatalf("expected workspace symlink rejection, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(realFilesParent, "files")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("files root created through symlink parent, stat error = %v", statErr)
 	}
 }
 
@@ -236,6 +315,56 @@ func TestFileSystem_OpenFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	}
 }
 
+func TestFileSystem_OpenFileSnapshot_PreservesSnapshotAcrossPathReplacement(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	originalContent := []byte("first version")
+	replacementContent := []byte("second version with different bytes")
+
+	if err := fs.WriteFile(ctx, "/snapshot.txt", bytes.NewReader(originalContent)); err != nil {
+		t.Fatalf("WriteFile(snapshot original) error: %v", err)
+	}
+
+	file, info, err := fs.OpenFileSnapshot(ctx, "/snapshot.txt")
+	if err != nil {
+		t.Fatalf("OpenFileSnapshot() error: %v", err)
+	}
+	defer file.Close()
+
+	if info.ContentHash == "" {
+		t.Fatal("expected snapshot info to include content hash")
+	}
+	if info.Size != int64(len(originalContent)) {
+		t.Fatalf("snapshot size = %d, want %d", info.Size, len(originalContent))
+	}
+
+	if err := fs.WriteFile(ctx, "/snapshot.txt", bytes.NewReader(replacementContent)); err != nil {
+		t.Fatalf("WriteFile(snapshot replacement) error: %v", err)
+	}
+
+	body, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("ReadAll(snapshot file) error: %v", err)
+	}
+	if string(body) != string(originalContent) {
+		t.Fatalf("snapshot body = %q, want %q", string(body), string(originalContent))
+	}
+	if gotHash := computeHash(body); gotHash != info.ContentHash {
+		t.Fatalf("snapshot hash = %q, want %q", gotHash, info.ContentHash)
+	}
+
+	currentInfo, err := fs.Stat(ctx, "/snapshot.txt")
+	if err != nil {
+		t.Fatalf("Stat(snapshot current) error: %v", err)
+	}
+	if currentInfo.ContentHash == info.ContentHash {
+		t.Fatalf("expected current path hash to differ after replacement, got %q", currentInfo.ContentHash)
+	}
+	if currentInfo.Size != int64(len(replacementContent)) {
+		t.Fatalf("current size = %d, want %d", currentInfo.Size, len(replacementContent))
+	}
+}
+
 func TestFileSystem_WriteFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -312,6 +441,36 @@ func TestFileSystem_WriteFile_DoesNotFollowTempSymlink(t *testing.T) {
 	}
 }
 
+func TestFileSystem_WriteFile_DoesNotFollowSymlinkInsertedBeforeManagedWrite(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	safeDir := filepath.Join(fs.workspace.Root(), "safe")
+	if err := os.Mkdir(safeDir, 0755); err != nil {
+		t.Fatalf("Mkdir(safe) error: %v", err)
+	}
+	outsideDir := t.TempDir()
+
+	originalBeforeStorageWorkspaceWrite := beforeStorageWorkspaceWrite
+	beforeStorageWorkspaceWrite = func() error {
+		if err := os.Remove(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, safeDir)
+	}
+	t.Cleanup(func() {
+		beforeStorageWorkspaceWrite = originalBeforeStorageWorkspaceWrite
+	})
+
+	err := fs.WriteFile(ctx, "/safe/child.txt", bytes.NewReader([]byte("blocked")))
+	if err != ErrNotFound {
+		t.Fatalf("WriteFile() error = %v, want ErrNotFound", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "child.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected external target file to remain absent, got %v", statErr)
+	}
+}
+
 func TestFileSystem_WriteFile_VersionsOriginalContentWhenWorkspaceChangesDuringUpload(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -330,7 +489,6 @@ func TestFileSystem_WriteFile_VersionsOriginalContentWhenWorkspaceChangesDuringU
 	go func() {
 		errCh <- fs.WriteFile(ctx, "/version-race.txt", reader)
 	}()
-
 	<-reader.started
 	if err := os.WriteFile(fs.workspace.FullPath("/version-race.txt"), []byte("mutated externally"), 0644); err != nil {
 		t.Fatalf("WriteFile(external mutation) error: %v", err)
@@ -377,6 +535,34 @@ func TestFileSystem_WriteFile_VersionsOriginalContentWhenWorkspaceChangesDuringU
 	}
 	if string(currentData) != "new content" {
 		t.Fatalf("expected current content %q, got %q", "new content", string(currentData))
+	}
+}
+
+func TestFileSystem_RootMutationsAreRejected(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/source.txt", bytes.NewReader([]byte("copy content"))); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	if err := fs.Delete(ctx, "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete(/) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.PermanentDelete(ctx, "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("PermanentDelete(/) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Rename(ctx, "/", "/renamed-root"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Rename(/, /renamed-root) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Copy(ctx, "/", "/copied-root"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Copy(/, /copied-root) error = %v, want ErrNotFound", err)
+	}
+	if err := fs.Copy(ctx, "/source.txt", "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Copy(/source.txt, /) error = %v, want ErrNotFound", err)
+	}
+	if _, err := fs.Stat(ctx, "/source.txt"); err != nil {
+		t.Fatalf("expected source file to remain after rejected root mutations, got %v", err)
 	}
 }
 
@@ -2429,6 +2615,77 @@ func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	}
 }
 
+func TestFileSystem_RestoreFromTrash_DoesNotRemoveOutsideTrashItemDirAfterTrashRootSwap(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-root-swap.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-root-swap.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+
+	outsideRoot := t.TempDir()
+	outsideItemDir := filepath.Join(outsideRoot, items[0].ID)
+	if err := os.MkdirAll(outsideItemDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(outside trash item dir) error: %v", err)
+	}
+
+	backupTrashRoot := fs.trashRoot + "-backup"
+	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	afterValidateStoragePaths = func() error {
+		if err := os.Rename(fs.trashRoot, backupTrashRoot); err != nil {
+			return err
+		}
+		return os.Symlink(outsideRoot, fs.trashRoot)
+	}
+	t.Cleanup(func() {
+		afterValidateStoragePaths = originalAfterValidateStoragePaths
+		if info, err := os.Lstat(fs.trashRoot); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(fs.trashRoot); removeErr != nil {
+				t.Errorf("Remove(trash root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupTrashRoot); err == nil {
+			if renameErr := os.Rename(backupTrashRoot, fs.trashRoot); renameErr != nil {
+				t.Errorf("Rename(backup trash root) error: %v", renameErr)
+			}
+		}
+	})
+
+	err = fs.RestoreFromTrash(ctx, items[0].ID)
+	if err != nil {
+		t.Fatalf("RestoreFromTrash() error: %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/restore-root-swap.txt"); statErr != nil {
+		t.Fatalf("expected restored file to exist, got %v", statErr)
+	}
+	if _, statErr := os.Stat(outsideItemDir); statErr != nil {
+		t.Fatalf("expected outside trash item dir to remain untouched, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(backupTrashRoot, items[0].ID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected anchored trash item dir to be removed after restore, got %v", statErr)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after restore error: %v", listErr)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected trash metadata to be removed after restore, got %d items", len(remaining))
+	}
+}
+
 func TestFileSystem_RestoreFromTrash_RollsBackWhenIndexUpdateFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3455,6 +3712,65 @@ func TestFileSystem_EmptyTrash_ContinuesAfterVisibleDeleteWarning(t *testing.T) 
 	}
 }
 
+func TestFileSystem_EmptyTrash_PreservesPartialWarningWhenHardFailureFollows(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/empty-trash-mixed-plain.txt", bytes.NewReader([]byte("plain"))); err != nil {
+		t.Fatalf("WriteFile(plain) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/empty-trash-mixed-versioned.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(versioned v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/empty-trash-mixed-versioned.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(versioned v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/empty-trash-mixed-plain.txt"); err != nil {
+		t.Fatalf("Delete(plain) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/empty-trash-mixed-versioned.md"); err != nil {
+		t.Fatalf("Delete(versioned) error: %v", err)
+	}
+
+	removeCalls := 0
+	fs.removeTrashPath = func(path string) error {
+		removeCalls++
+		if removeCalls == 2 {
+			return errors.New("trash delete failed")
+		}
+		return os.RemoveAll(path)
+	}
+	fs.deleteVersionObject = func(ctx context.Context, hash string) error {
+		return errors.New("delete object failed")
+	}
+
+	deleted, err := fs.EmptyTrash(ctx)
+	if err == nil {
+		t.Fatal("expected EmptyTrash() to report mixed partial warning")
+	}
+	var warningErr *TrashDeleteWarningError
+	if !errors.As(err, &warningErr) {
+		t.Fatalf("expected trash delete warning error, got %v", err)
+	}
+	if !warningErr.Partial() {
+		t.Fatalf("expected trash delete warning error to mark partial failure, got %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected deleted count 1 when hard failure follows warning, got %d", deleted)
+	}
+
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after mixed warning error: %v", listErr)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item to remain after mixed warning error, got %d", len(items))
+	}
+	if items[0].OriginalPath != "/empty-trash-mixed-plain.txt" {
+		t.Fatalf("expected plain trash item to remain after hard failure, got %+v", items[0])
+	}
+}
+
 func TestFileSystem_DeleteFromTrash_KeepsContentWhenMetadataDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3550,6 +3866,83 @@ func TestFileSystem_DeleteFromTrash_ReturnsDirectorySyncErrorAfterContentDelete(
 	}
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("Expected trash content to remain deleted after sync failure, got %v", statErr)
+	}
+}
+
+func TestFileSystem_DeleteFromTrash_DoesNotRemoveOutsideDeletingDirAfterTrashRootSwap(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-root-swap.txt", bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-root-swap.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+
+	outsideRoot := t.TempDir()
+	outsideDeletingDir := filepath.Join(outsideRoot, ".deleting")
+	if err := os.MkdirAll(outsideDeletingDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(outside .deleting) error: %v", err)
+	}
+
+	backupTrashRoot := fs.trashRoot + "-backup"
+	originalRemoveTrashMetadata := fs.removeTrashMetadata
+	fs.removeTrashMetadata = func(ctx context.Context, id string) error {
+		if err := os.Rename(fs.trashRoot, backupTrashRoot); err != nil {
+			return err
+		}
+		if err := os.Symlink(outsideRoot, fs.trashRoot); err != nil {
+			return err
+		}
+		return errors.New("metadata delete failed")
+	}
+	t.Cleanup(func() {
+		fs.removeTrashMetadata = originalRemoveTrashMetadata
+		if info, err := os.Lstat(fs.trashRoot); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(fs.trashRoot); removeErr != nil {
+				t.Errorf("Remove(trash root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupTrashRoot); err == nil {
+			if renameErr := os.Rename(backupTrashRoot, fs.trashRoot); renameErr != nil {
+				t.Errorf("Rename(backup trash root) error: %v", renameErr)
+			}
+		}
+	})
+
+	err = fs.DeleteFromTrash(ctx, items[0].ID)
+	if err == nil {
+		t.Fatal("Expected DeleteFromTrash() to fail when trash metadata deletion fails after trash root swap")
+	}
+	if !strings.Contains(err.Error(), "metadata delete failed") {
+		t.Fatalf("expected metadata delete failure, got %v", err)
+	}
+
+	if _, statErr := os.Stat(outsideDeletingDir); statErr != nil {
+		t.Fatalf("expected outside .deleting directory to remain untouched, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(backupTrashRoot, ".deleting")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected anchored .deleting directory to be cleaned up, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(backupTrashRoot, items[0].ID)); statErr != nil {
+		t.Fatalf("expected trash item content to be rolled back inside anchored trash root, got %v", statErr)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed metadata delete error: %v", listErr)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected trash metadata to remain after rollback, got %#v", remaining)
 	}
 }
 
@@ -4993,9 +5386,9 @@ func TestFileSystem_RunRetentionSweep_ReturnsContextCanceledBeforeListingPaths(t
 }
 
 func TestMovePath_NonEmptyDirectory(t *testing.T) {
-	tempDir := t.TempDir()
-	src := filepath.Join(tempDir, "src")
-	dst := filepath.Join(tempDir, "dst")
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src")
+	dst := filepath.Join(fs.workspace.Root(), "dst")
 
 	if err := os.MkdirAll(filepath.Join(src, "nested"), 0755); err != nil {
 		t.Fatalf("MkdirAll(src) error: %v", err)
@@ -5004,7 +5397,7 @@ func TestMovePath_NonEmptyDirectory(t *testing.T) {
 		t.Fatalf("WriteFile(src) error: %v", err)
 	}
 
-	if err := movePath(src, dst); err != nil {
+	if err := fs.movePath(src, dst); err != nil {
 		t.Fatalf("movePath() error: %v", err)
 	}
 
@@ -5022,9 +5415,9 @@ func TestMovePath_NonEmptyDirectory(t *testing.T) {
 }
 
 func TestMovePath_PreservesDirectoryAndFileModes(t *testing.T) {
-	tempDir := t.TempDir()
-	src := filepath.Join(tempDir, "src")
-	dst := filepath.Join(tempDir, "dst")
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src")
+	dst := filepath.Join(fs.workspace.Root(), "dst")
 
 	if err := os.MkdirAll(filepath.Join(src, "nested"), 0700); err != nil {
 		t.Fatalf("MkdirAll(src) error: %v", err)
@@ -5037,7 +5430,7 @@ func TestMovePath_PreservesDirectoryAndFileModes(t *testing.T) {
 		t.Fatalf("WriteFile(src) error: %v", err)
 	}
 
-	if err := movePath(src, dst); err != nil {
+	if err := fs.movePath(src, dst); err != nil {
 		t.Fatalf("movePath() error: %v", err)
 	}
 
@@ -5059,9 +5452,9 @@ func TestMovePath_PreservesDirectoryAndFileModes(t *testing.T) {
 }
 
 func TestMovePath_RollsBackRenameWhenDirectorySyncFails(t *testing.T) {
-	tempDir := t.TempDir()
-	srcDir := filepath.Join(tempDir, "src-dir")
-	dstDir := filepath.Join(tempDir, "dst-dir")
+	fs := setupManagedPathHelperFileSystem(t)
+	srcDir := filepath.Join(fs.workspace.Root(), "src-dir")
+	dstDir := filepath.Join(fs.workspace.Root(), "dst-dir")
 	if err := os.MkdirAll(srcDir, 0755); err != nil {
 		t.Fatalf("MkdirAll(srcDir) error: %v", err)
 	}
@@ -5075,9 +5468,9 @@ func TestMovePath_RollsBackRenameWhenDirectorySyncFails(t *testing.T) {
 		t.Fatalf("WriteFile(src) error: %v", err)
 	}
 
-	originalSyncStoragePathDir := syncStoragePathDir
+	originalSyncManagedStorageDir := syncManagedStorageDir
 	syncFailed := false
-	syncStoragePathDir = func(dir string) error {
+	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
 		if !syncFailed {
 			syncFailed = true
 			return errors.New("sync dir failed")
@@ -5085,10 +5478,10 @@ func TestMovePath_RollsBackRenameWhenDirectorySyncFails(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() {
-		syncStoragePathDir = originalSyncStoragePathDir
+		syncManagedStorageDir = originalSyncManagedStorageDir
 	})
 
-	err := movePath(src, dst)
+	err := fs.movePath(src, dst)
 	if err == nil {
 		t.Fatal("expected movePath() to fail when directory sync fails")
 	}
@@ -5109,9 +5502,9 @@ func TestMovePath_RollsBackRenameWhenDirectorySyncFails(t *testing.T) {
 }
 
 func TestMovePath_PreservesCopiedDirectoryWhenSourceCleanupFails(t *testing.T) {
-	tempDir := t.TempDir()
-	src := filepath.Join(tempDir, "src")
-	dst := filepath.Join(tempDir, "dst")
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src")
+	dst := filepath.Join(fs.trashRoot, "dst")
 
 	if err := os.MkdirAll(filepath.Join(src, "nested"), 0755); err != nil {
 		t.Fatalf("MkdirAll(src) error: %v", err)
@@ -5122,13 +5515,13 @@ func TestMovePath_PreservesCopiedDirectoryWhenSourceCleanupFails(t *testing.T) {
 
 	originalMovePathRename := movePathRename
 	originalMovePathRemoveAll := movePathRemoveAll
-	movePathRename = func(oldPath, newPath string) error {
+	movePathRename = func(root *os.Root, oldRel, newRel, oldPath, newPath string) error {
 		if oldPath == src && newPath == dst {
 			return errors.New("rename failed")
 		}
-		return originalMovePathRename(oldPath, newPath)
+		return originalMovePathRename(root, oldRel, newRel, oldPath, newPath)
 	}
-	movePathRemoveAll = func(target string) error {
+	movePathRemoveAll = func(root *os.Root, rel, target string) error {
 		if target == src {
 			nestedFile := filepath.Join(src, "nested", "file.txt")
 			if err := os.Remove(nestedFile); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -5136,14 +5529,14 @@ func TestMovePath_PreservesCopiedDirectoryWhenSourceCleanupFails(t *testing.T) {
 			}
 			return errors.New("source cleanup failed")
 		}
-		return originalMovePathRemoveAll(target)
+		return originalMovePathRemoveAll(root, rel, target)
 	}
 	t.Cleanup(func() {
 		movePathRename = originalMovePathRename
 		movePathRemoveAll = originalMovePathRemoveAll
 	})
 
-	err := movePath(src, dst)
+	err := fs.movePath(src, dst)
 	if err == nil {
 		t.Fatal("expected movePath() to fail when copied source cleanup fails")
 	}
@@ -5168,23 +5561,23 @@ func TestMovePath_PreservesCopiedDirectoryWhenSourceCleanupFails(t *testing.T) {
 }
 
 func TestCopyFile_RejectsSymlinkDestination(t *testing.T) {
-	tempDir := t.TempDir()
-	src := filepath.Join(tempDir, "src.txt")
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src.txt")
 	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
 		t.Fatalf("WriteFile(src) error: %v", err)
 	}
 
-	outsidePath := filepath.Join(tempDir, "outside.txt")
+	outsidePath := filepath.Join(filepath.Dir(fs.workspace.Root()), "outside.txt")
 	if err := os.WriteFile(outsidePath, []byte("outside"), 0600); err != nil {
 		t.Fatalf("WriteFile(outside) error: %v", err)
 	}
 
-	dst := filepath.Join(tempDir, "dst.txt")
+	dst := filepath.Join(fs.workspace.Root(), "dst.txt")
 	if err := os.Symlink(outsidePath, dst); err != nil {
 		t.Fatalf("Symlink(dst) error: %v", err)
 	}
 
-	err := copyFile(src, dst)
+	err := fs.copyFile(src, dst)
 	if !errors.Is(err, errStoragePathSymlink) {
 		t.Fatalf("copyFile() error = %v, want errStoragePathSymlink", err)
 	}
@@ -5199,9 +5592,9 @@ func TestCopyFile_RejectsSymlinkDestination(t *testing.T) {
 }
 
 func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
-	tempDir := t.TempDir()
-	srcDir := filepath.Join(tempDir, "src-dir")
-	dstDir := filepath.Join(tempDir, "dst-dir")
+	fs := setupManagedPathHelperFileSystem(t)
+	srcDir := filepath.Join(fs.workspace.Root(), "src-dir")
+	dstDir := filepath.Join(fs.workspace.Root(), "dst-dir")
 	if err := os.MkdirAll(srcDir, 0755); err != nil {
 		t.Fatalf("MkdirAll(srcDir) error: %v", err)
 	}
@@ -5215,9 +5608,9 @@ func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 		t.Fatalf("WriteFile(src) error: %v", err)
 	}
 
-	originalSyncStoragePathDir := syncStoragePathDir
+	originalSyncManagedStorageDir := syncManagedStorageDir
 	syncFailed := false
-	syncStoragePathDir = func(dir string) error {
+	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
 		if !syncFailed {
 			syncFailed = true
 			return errors.New("sync dir failed")
@@ -5225,10 +5618,10 @@ func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() {
-		syncStoragePathDir = originalSyncStoragePathDir
+		syncManagedStorageDir = originalSyncManagedStorageDir
 	})
 
-	err := copyFile(src, dst)
+	err := fs.copyFile(src, dst)
 	if err == nil {
 		t.Fatal("expected copyFile() to fail when directory sync fails")
 	}
@@ -5249,9 +5642,9 @@ func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 }
 
 func TestCopyDir_ReturnsErrorWhenDirectorySyncFails(t *testing.T) {
-	tempDir := t.TempDir()
-	src := filepath.Join(tempDir, "src")
-	dst := filepath.Join(tempDir, "dst")
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src")
+	dst := filepath.Join(fs.workspace.Root(), "dst")
 	if err := os.MkdirAll(filepath.Join(src, "nested"), 0755); err != nil {
 		t.Fatalf("MkdirAll(src) error: %v", err)
 	}
@@ -5259,15 +5652,15 @@ func TestCopyDir_ReturnsErrorWhenDirectorySyncFails(t *testing.T) {
 		t.Fatalf("WriteFile(src/nested/file.txt) error: %v", err)
 	}
 
-	originalSyncStoragePathDir := syncStoragePathDir
-	syncStoragePathDir = func(dir string) error {
+	originalSyncManagedStorageDir := syncManagedStorageDir
+	syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
 		return errors.New("sync dir failed")
 	}
 	t.Cleanup(func() {
-		syncStoragePathDir = originalSyncStoragePathDir
+		syncManagedStorageDir = originalSyncManagedStorageDir
 	})
 
-	err := copyDir(src, dst)
+	err := fs.copyDir(src, dst)
 	if err == nil {
 		t.Fatal("expected copyDir() to fail when directory sync fails")
 	}
@@ -5283,23 +5676,23 @@ func TestCopyDir_ReturnsErrorWhenDirectorySyncFails(t *testing.T) {
 }
 
 func TestMovePath_RejectsSymlinkDestinationParent(t *testing.T) {
-	tempDir := t.TempDir()
-	src := filepath.Join(tempDir, "src.txt")
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src.txt")
 	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
 		t.Fatalf("WriteFile(src) error: %v", err)
 	}
 
-	outsideDir := filepath.Join(tempDir, "outside")
+	outsideDir := filepath.Join(filepath.Dir(fs.workspace.Root()), "outside")
 	if err := os.MkdirAll(outsideDir, 0755); err != nil {
 		t.Fatalf("MkdirAll(outside) error: %v", err)
 	}
 
-	escapeDir := filepath.Join(tempDir, "escape")
+	escapeDir := filepath.Join(fs.workspace.Root(), "escape")
 	if err := os.Symlink(outsideDir, escapeDir); err != nil {
 		t.Fatalf("Symlink(escape) error: %v", err)
 	}
 
-	err := movePath(src, filepath.Join(escapeDir, "dst.txt"))
+	err := fs.movePath(src, filepath.Join(escapeDir, "dst.txt"))
 	if !errors.Is(err, errStoragePathSymlink) {
 		t.Fatalf("movePath() error = %v, want errStoragePathSymlink", err)
 	}
@@ -5309,6 +5702,94 @@ func TestMovePath_RejectsSymlinkDestinationParent(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(outsideDir, "dst.txt")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected no file outside managed path, got %v", statErr)
+	}
+}
+
+func TestCopyFile_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src.txt")
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	safeDir := filepath.Join(fs.workspace.Root(), "safe")
+	if err := os.MkdirAll(safeDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(safe) error: %v", err)
+	}
+	outsideDir := filepath.Join(filepath.Dir(fs.workspace.Root()), "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+
+	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	afterValidateStoragePaths = func() error {
+		if err := os.RemoveAll(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, safeDir)
+	}
+	t.Cleanup(func() {
+		afterValidateStoragePaths = originalAfterValidateStoragePaths
+	})
+
+	err := fs.copyFile(src, filepath.Join(safeDir, "dst.txt"))
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("copyFile() error = %v, want errStoragePathSymlink", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "dst.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no file outside managed path, got %v", statErr)
+	}
+	data, readErr := os.ReadFile(src)
+	if readErr != nil {
+		t.Fatalf("ReadFile(src) error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected source content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestMovePath_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	fs := setupManagedPathHelperFileSystem(t)
+	src := filepath.Join(fs.workspace.Root(), "src.txt")
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	safeDir := filepath.Join(fs.workspace.Root(), "safe")
+	if err := os.MkdirAll(safeDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(safe) error: %v", err)
+	}
+	outsideDir := filepath.Join(filepath.Dir(fs.workspace.Root()), "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+
+	originalAfterValidateStoragePaths := afterValidateStoragePaths
+	afterValidateStoragePaths = func() error {
+		if err := os.RemoveAll(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, safeDir)
+	}
+	t.Cleanup(func() {
+		afterValidateStoragePaths = originalAfterValidateStoragePaths
+	})
+
+	err := fs.movePath(src, filepath.Join(safeDir, "dst.txt"))
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("movePath() error = %v, want errStoragePathSymlink", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "dst.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no file outside managed path, got %v", statErr)
+	}
+	data, readErr := os.ReadFile(src)
+	if readErr != nil {
+		t.Fatalf("ReadFile(src) error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected source content to remain unchanged, got %q", string(data))
 	}
 }
 
@@ -5567,6 +6048,109 @@ func TestFileSystem_GetVersioningStatus_ReturnsErrNotDirWhenParentIsFile(t *test
 	_, _, err := fs.GetVersioningStatus(ctx, "/override-parent/child.txt")
 	if err != ErrNotDir {
 		t.Fatalf("GetVersioningStatus() error = %v, want ErrNotDir", err)
+	}
+}
+func TestFileSystem_CurrentVersioningPolicy_ReturnsDetachedSnapshot(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	snapshot := fs.currentVersioningPolicy()
+	if snapshot == nil {
+		t.Fatal("expected currentVersioningPolicy() snapshot")
+	}
+	if !snapshot.ShouldVersion(ctx, "/notes.md", 16) {
+		t.Fatal("expected default snapshot to version .md files")
+	}
+	if snapshot.ShouldVersion(ctx, "/events.log", 16) {
+		t.Fatal("expected default snapshot to skip .log files")
+	}
+
+	fs.UpdateVersioningSettings([]string{".log"}, []string{"ENVFILE"}, 32)
+
+	if !snapshot.ShouldVersion(ctx, "/notes.md", 16) {
+		t.Fatal("expected detached snapshot to retain original .md policy")
+	}
+	if snapshot.ShouldVersion(ctx, "/events.log", 16) {
+		t.Fatal("expected detached snapshot to remain isolated from updated .log policy")
+	}
+
+	updated := fs.currentVersioningPolicy()
+	if updated == nil {
+		t.Fatal("expected updated currentVersioningPolicy() snapshot")
+	}
+	if updated.ShouldVersion(ctx, "/notes.md", 16) {
+		t.Fatal("expected updated policy to stop versioning .md files")
+	}
+	if !updated.ShouldVersion(ctx, "/events.log", 16) {
+		t.Fatal("expected updated policy to version .log files")
+	}
+	if updated.ShouldVersion(ctx, "/too-large.log", 64) {
+		t.Fatal("expected updated policy to enforce max versioned size")
+	}
+}
+
+func TestFileSystem_VersioningReadPathsRemainStableDuringHotUpdates(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/hot-update.md", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(hot-update.md) error: %v", err)
+	}
+
+	stop := make(chan struct{})
+	errCh := make(chan error, 1)
+	reportErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+
+	var wg sync.WaitGroup
+	reader := func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+
+			if _, err := fs.Stat(ctx, "/hot-update.md"); err != nil {
+				reportErr(fmt.Errorf("Stat() error: %w", err))
+				return
+			}
+			if _, _, err := fs.GetVersioningStatus(ctx, "/hot-update.md"); err != nil {
+				reportErr(fmt.Errorf("GetVersioningStatus() error: %w", err))
+				return
+			}
+			if _, err := fs.ReadDir(ctx, "/"); err != nil {
+				reportErr(fmt.Errorf("ReadDir() error: %w", err))
+				return
+			}
+		}
+	}
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go reader()
+	}
+
+	for i := 0; i < 200; i++ {
+		if i%2 == 0 {
+			fs.UpdateVersioningSettings([]string{".md"}, nil, 1024)
+		} else {
+			fs.UpdateVersioningSettings([]string{".log"}, []string{"ENVFILE"}, 32)
+		}
+	}
+
+	close(stop)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
 	}
 }
 

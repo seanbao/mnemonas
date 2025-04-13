@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
+import { ensureDownloadSession } from '@/api/auth'
 
 const mockAddToast = vi.fn()
 
@@ -35,6 +36,10 @@ vi.mock('@/stores/auth', () => ({
   useUser: () => mockUseUser(),
 }))
 
+vi.mock('@/api/auth', () => ({
+  ensureDownloadSession: vi.fn(),
+}))
+
 import { VersionsPage } from './Versions'
 
 import { ApiError, downloadFile, getVersions, restoreVersion } from '@/api/files'
@@ -42,6 +47,7 @@ import { ApiError, downloadFile, getVersions, restoreVersion } from '@/api/files
 const mockGetVersions = vi.mocked(getVersions)
 const mockDownloadFile = vi.mocked(downloadFile)
 const mockRestoreVersion = vi.mocked(restoreVersion)
+const mockEnsureDownloadSession = vi.mocked(ensureDownloadSession)
 const successActionResult = { warning: false, message: undefined } as const
 
 function warningActionResult(message: string) {
@@ -65,6 +71,7 @@ describe('VersionsPage', () => {
     window.history.pushState({}, '', '/')
     mockUseIsAdmin.mockReturnValue(true)
     mockUseUser.mockReturnValue({ id: 'admin', username: 'admin', role: 'admin', email: '', homeDir: '/' })
+    mockEnsureDownloadSession.mockResolvedValue({ ok: true })
     mockDownloadFile.mockResolvedValue(undefined)
     mockGetVersions.mockResolvedValue([
       { version: 3, hash: 'hash3', size: 3000, timestamp: '2024-01-03T00:00:00Z' },
@@ -606,9 +613,12 @@ describe('VersionsPage', () => {
 
       await user.click(screen.getAllByTitle('预览')[0])
 
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '浏览器拦截了新标签页，请允许弹窗后重试',
-        color: 'warning',
+      await waitFor(() => {
+        expect(mockEnsureDownloadSession).toHaveBeenCalledTimes(1)
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '浏览器拦截了新标签页，请允许弹窗后重试',
+          color: 'warning',
+        })
       })
     })
 
@@ -626,7 +636,34 @@ describe('VersionsPage', () => {
 
       await user.click(screen.getAllByTitle('预览')[0])
 
-      expect(openSpy).toHaveBeenCalledWith('/api/v1/download/test.txt?version=hash3', '_blank', 'noopener,noreferrer')
+      await waitFor(() => {
+        expect(mockEnsureDownloadSession).toHaveBeenCalledTimes(1)
+        expect(openSpy).toHaveBeenCalledWith('/api/v1/download/test.txt?version=hash3', '_blank', 'noopener,noreferrer')
+      })
+    })
+
+    it('shows a warning and skips opening when version preview session setup fails', async () => {
+      mockEnsureDownloadSession.mockResolvedValueOnce({ ok: false, message: 'download session unavailable' })
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('预览').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('预览')[0])
+
+      await waitFor(() => {
+        expect(openSpy).not.toHaveBeenCalled()
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'download session unavailable',
+          color: 'warning',
+        })
+      })
     })
   })
 
