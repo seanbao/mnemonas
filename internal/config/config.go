@@ -467,17 +467,12 @@ func normalizeDurationFieldValue(raw map[string]any, fieldPath []string) error {
 
 // Save saves configuration to file
 func (c *Config) Save(path string) error {
-	normalizedPath, err := ensureManagedDirRoot(path, errConfigFileSymlink, "config file", true)
-	if err != nil {
-		return err
-	}
-
 	data, err := toml.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("failed to serialize config: %w", err)
 	}
 
-	if err := writeConfigFile(normalizedPath, data); err != nil {
+	if err := writeConfigFile(path, data); err != nil {
 		return err
 	}
 
@@ -545,12 +540,17 @@ func validateManagedFilePath(path string, symlinkErr error, label string) error 
 }
 
 func ensureManagedDirRoot(path string, symlinkErr error, label string, create bool) (string, error) {
+	normalizedPath, _, err := ensureManagedDirRootWithState(path, symlinkErr, label, create)
+	return normalizedPath, err
+}
+
+func ensureManagedDirRootWithState(path string, symlinkErr error, label string, create bool) (string, *os.Root, error) {
 	normalizedPath, err := normalizeManagedFilePath(path, label)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	dir := filepath.Dir(normalizedPath)
@@ -558,35 +558,47 @@ func ensureManagedDirRoot(path string, symlinkErr error, label string, create bo
 	root := managedDirRoots[dir]
 	managedDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 
 	if create {
 		if err := ensureManagedDir(dir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create %s directory: %w", label, err)
+			return "", nil, fmt.Errorf("failed to create %s directory: %w", label, err)
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil
+			return normalizedPath, nil, nil
 		}
-		return "", fmt.Errorf("failed to stat %s directory: %w", label, err)
+		return "", nil, fmt.Errorf("failed to stat %s directory: %w", label, err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", fmt.Errorf("failed to open %s directory root: %w", label, err)
+		return "", nil, fmt.Errorf("failed to open %s directory root: %w", label, err)
 	}
 
 	managedDirRootsMu.Lock()
 	if existing := managedDirRoots[dir]; existing != nil {
 		managedDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 	managedDirRoots[dir] = root
 	managedDirRootsMu.Unlock()
 
-	return normalizedPath, nil
+	return normalizedPath, root, nil
+}
+
+func releaseRegisteredManagedDirRoot(dir string, root *os.Root) {
+	if root == nil {
+		return
+	}
+	managedDirRootsMu.Lock()
+	if managedDirRoots[dir] == root {
+		delete(managedDirRoots, dir)
+	}
+	managedDirRootsMu.Unlock()
+	_ = root.Close()
 }
 
 func registeredManagedDirRoot(path, label string) (*os.Root, string, bool, error) {
@@ -620,10 +632,27 @@ func writeRegisteredManagedFileAtomically(path string, data []byte, symlinkErr e
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return writeManagedFileAtomically(normalizedPath, data, symlinkErr, pattern, label, perm)
+	if ok {
+		return writeManagedFileAtomicallyWithRoot(root, normalizedPath, data, symlinkErr, pattern, label, perm)
 	}
-	return writeManagedFileAtomicallyWithRoot(root, normalizedPath, data, symlinkErr, pattern, label, perm)
+	if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
+		return err
+	}
+	createdDirs, err := collectMissingManagedDirs(filepath.Dir(normalizedPath))
+	if err != nil {
+		return err
+	}
+	registeredRoot := (*os.Root)(nil)
+	normalizedPath, registeredRoot, err = ensureManagedDirRootWithState(normalizedPath, symlinkErr, label, true)
+	if err != nil {
+		releaseRegisteredManagedDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedManagedDirs(createdDirs, label, err)
+	}
+	if err := writeManagedFileAtomicallyWithRoot(registeredRoot, normalizedPath, data, symlinkErr, pattern, label, perm); err != nil {
+		releaseRegisteredManagedDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedManagedDirs(createdDirs, label, err)
+	}
+	return nil
 }
 
 func chmodRegisteredManagedFile(path string, mode os.FileMode, symlinkErr error, label string) error {
@@ -824,6 +853,17 @@ func newManagedTempName(pattern string) (string, error) {
 func cleanupManagedTempPath(root *os.Root, path string, err error) error {
 	_ = root.Remove(path)
 	return err
+}
+
+func cleanupCreatedManagedDirs(createdDirs []string, label string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		if removeErr := os.Remove(dir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created %s directory %s: %w", label, dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
 }
 
 func writeManagedFileAtomically(path string, data []byte, symlinkErr error, pattern, label string, perm os.FileMode) error {

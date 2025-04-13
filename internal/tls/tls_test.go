@@ -227,6 +227,59 @@ func TestWriteTLSFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestWriteTLSFile_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "nested", "tls", "server.crt")
+	fileDir := filepath.Dir(filePath)
+
+	originalHook := afterValidateTLSFilePath
+	var hookErr error
+	hookApplied := false
+	afterValidateTLSFilePath = func() {
+		if hookApplied || hookErr != nil {
+			return
+		}
+		hookApplied = true
+		hookErr = os.Chmod(fileDir, 0500)
+	}
+	defer func() {
+		afterValidateTLSFilePath = originalHook
+		_ = os.Chmod(fileDir, 0700)
+	}()
+
+	err := writeTLSFile(filePath, []byte("certificate"), 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file")
+	if hookErr != nil {
+		t.Fatalf("afterValidateTLSFilePath hook error: %v", hookErr)
+	}
+	if err == nil {
+		t.Fatal("expected writeTLSFile() to fail when temp file creation fails")
+	}
+	if !strings.Contains(err.Error(), "failed to create temp certificate file") {
+		t.Fatalf("expected temp create error, got %v", err)
+	}
+	if _, statErr := os.Stat(filePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no TLS file to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(fileDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created TLS directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "nested")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created parent directory to be removed, got %v", statErr)
+	}
+
+	afterValidateTLSFilePath = originalHook
+	if err := writeTLSFile(filePath, []byte("certificate"), 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file"); err != nil {
+		t.Fatalf("expected retry after failed write cleanup to succeed, got %v", err)
+	}
+	data, readErr := os.ReadFile(filePath)
+	if readErr != nil {
+		t.Fatalf("expected TLS file after retry, got %v", readErr)
+	}
+	if string(data) != "certificate" {
+		t.Fatalf("expected TLS file content after retry, got %q", string(data))
+	}
+}
+
 func TestEnsureTLSDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
 	tmpDir := t.TempDir()
 	nestedDir := filepath.Join(tmpDir, "nested", "tls")

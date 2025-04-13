@@ -89,6 +89,7 @@ var movePathRemoveAll = func(root *os.Root, rel, abs string) error {
 }
 var beforeStorageWorkspaceWrite = func() error { return nil }
 var afterValidateStoragePaths = func() error { return nil }
+var createStorageCopyTempFile = createStorageTempFile
 var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
 	return ws.Walk(ctx, root, fn)
 }
@@ -577,13 +578,17 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	if err != nil {
 		return err
 	}
+	createdWorkspaceDirs, err := fs.collectMissingWorkspaceParentDirs(name)
+	if err != nil {
+		return err
+	}
 
 	var rollbackVersionHash string
 	var rollbackVersionRecorded bool
 	var rollbackVersionObjectCreated bool
 	rollbackMutation := func(cause error) error {
 		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
-		fileRollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData)
+		fileRollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData, createdWorkspaceDirs)
 		if fileRollbackErr != nil && versionRollbackErr != nil {
 			return errors.Join(
 				cause,
@@ -1434,7 +1439,7 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	}
 
 	if err := fs.updateFileIndex(ctx, name, int64(len(data)), time.Now(), computeHash(data)); err != nil {
-		rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData)
+		rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData, nil)
 		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
 		if rollbackErr != nil && versionRollbackErr != nil {
 			return errors.Join(
@@ -2619,6 +2624,17 @@ func syncCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []string) 
 	return nil
 }
 
+func cleanupCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []string) {
+	for _, dir := range createdDirs {
+		if dir == "." {
+			continue
+		}
+		if err := root.handle.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+	}
+}
+
 func ensureStorageManagedDir(root *storagePathRoot, absDir string, perm os.FileMode) error {
 	relDir, ok := storageRelativePath(root.absRoot, absDir)
 	if !ok {
@@ -2754,14 +2770,19 @@ func (fs *FileSystem) copyFileBetweenRoots(srcRoot *storagePathRoot, srcRel, src
 		return mapStorageRootPathError(err)
 	}
 	defer srcFile.Close()
+	dstParentRel := filepath.Dir(dstRel)
+	createdDirs, err := collectMissingStorageManagedDirs(dstRoot, dstParentRel)
+	if err != nil {
+		return err
+	}
 
 	if err := ensureStorageManagedDir(dstRoot, filepath.Dir(dstAbs), 0755); err != nil {
 		return err
 	}
 
-	dstParentRel := filepath.Dir(dstRel)
-	dstFile, tmpRel, err := createStorageTempFile(dstRoot.handle, dstParentRel, ".storage-copy-")
+	dstFile, tmpRel, err := createStorageCopyTempFile(dstRoot.handle, dstParentRel, ".storage-copy-")
 	if err != nil {
+		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
 		return err
 	}
 	defer func() {
@@ -2769,23 +2790,28 @@ func (fs *FileSystem) copyFileBetweenRoots(srcRoot *storagePathRoot, srcRel, src
 	}()
 	if err := dstFile.Chmod(srcInfo.Mode().Perm()); err != nil {
 		dstFile.Close()
+		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
 		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 
 	_, err = io.Copy(dstFile, srcFile)
 	if err != nil {
 		dstFile.Close()
+		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
 		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 	if err := dstFile.Sync(); err != nil {
 		dstFile.Close()
+		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
 		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 	if err := dstFile.Close(); err != nil {
+		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
 		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 
 	if err := dstRoot.handle.Rename(tmpRel, dstRel); err != nil {
+		cleanupCreatedStorageManagedDirs(dstRoot, createdDirs)
 		return cleanupStorageTempPath(dstRoot.handle, tmpRel, mapStorageRootPathError(err))
 	}
 	if err := syncManagedStorageDir(dstRoot.handle, dstParentRel, filepath.Dir(dstAbs)); err != nil {
@@ -2847,11 +2873,68 @@ func (fs *FileSystem) writeWorkspaceFile(ctx context.Context, name string, data 
 	return mappedErr
 }
 
-func (fs *FileSystem) restoreFileAfterIndexFailure(ctx context.Context, name string, hadPreviousFile bool, previousData []byte) error {
+func (fs *FileSystem) collectMissingWorkspaceParentDirs(name string) ([]string, error) {
+	parentAbsPath := filepath.Dir(fs.workspace.FullPath(name))
+	if fs.filesRootHandle != nil {
+		writeRoot := &storagePathRoot{absRoot: fs.workspace.Root(), handle: fs.filesRootHandle}
+		relDir, ok := storageRelativePath(writeRoot.absRoot, parentAbsPath)
+		if !ok {
+			return nil, ErrNotFound
+		}
+		missingDirs, err := collectMissingStorageManagedDirs(writeRoot, relDir)
+		if err != nil {
+			if errors.Is(err, syscall.ENOTDIR) {
+				return nil, ErrNotDir
+			}
+			return nil, err
+		}
+		return missingDirs, nil
+	}
+
+	missingDirs, err := collectMissingStorageDirs(parentAbsPath)
+	if err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return nil, ErrNotDir
+		}
+		return nil, err
+	}
+	relMissingDirs := make([]string, 0, len(missingDirs))
+	for _, dir := range missingDirs {
+		relDir, ok := storageRelativePath(fs.workspace.Root(), dir)
+		if !ok {
+			return nil, ErrNotFound
+		}
+		relMissingDirs = append(relMissingDirs, relDir)
+	}
+	return relMissingDirs, nil
+}
+
+func (fs *FileSystem) rollbackCreatedWorkspaceDirs(ctx context.Context, createdDirs []string) error {
+	var rollbackErr error
+	for _, dir := range createdDirs {
+		if dir == "." {
+			continue
+		}
+		name := "/" + filepath.ToSlash(dir)
+		if err := fs.workspace.Delete(ctx, name); err != nil {
+			if errors.Is(err, workspace.ErrNotFound) {
+				continue
+			}
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("remove created directory %s: %w", name, err))
+			break
+		}
+	}
+	return rollbackErr
+}
+
+func (fs *FileSystem) restoreFileAfterIndexFailure(ctx context.Context, name string, hadPreviousFile bool, previousData []byte, createdDirs []string) error {
 	if hadPreviousFile {
 		return fs.workspace.WriteFile(ctx, name, previousData)
 	}
-	return fs.workspace.Delete(ctx, name)
+	if err := fs.workspace.Delete(ctx, name); err != nil {
+		return err
+	}
+	return fs.rollbackCreatedWorkspaceDirs(ctx, createdDirs)
 }
 
 func (fs *FileSystem) rollbackWriteVersion(ctx context.Context, name, hash string, versionRecorded, objectCreated bool) error {

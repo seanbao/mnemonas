@@ -493,6 +493,52 @@ func TestSaveSecrets_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	}
 }
 
+func TestSaveSecrets_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretsDir := filepath.Join(tmpDir, "nested", "secrets")
+	secretsPath := filepath.Join(secretsDir, SecretsFile)
+
+	originalHook := afterValidateManagedFilePath
+	var hookErr error
+	hookApplied := false
+	afterValidateManagedFilePath = func() {
+		if hookApplied || hookErr != nil {
+			return
+		}
+		hookApplied = true
+		hookErr = os.Chmod(secretsDir, 0500)
+	}
+	defer func() {
+		afterValidateManagedFilePath = originalHook
+		_ = os.Chmod(secretsDir, 0755)
+	}()
+
+	err := SaveSecrets(secretsDir, &Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if hookErr != nil {
+		t.Fatalf("afterValidateManagedFilePath hook error: %v", hookErr)
+	}
+	if err == nil {
+		t.Fatal("expected SaveSecrets() to fail when temp file creation fails")
+	}
+	if !strings.Contains(err.Error(), "failed to create temp secrets file") {
+		t.Fatalf("expected temp create error, got %v", err)
+	}
+	if _, statErr := os.Stat(secretsPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no secrets file to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(secretsDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created secrets directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "nested")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created parent directory to be removed, got %v", statErr)
+	}
+
+	afterValidateManagedFilePath = originalHook
+	if err := SaveSecrets(secretsDir, &Secrets{JWTSecret: "jwt", WebDAVPassword: "password"}); err != nil {
+		t.Fatalf("expected retry after failed save cleanup to succeed, got %v", err)
+	}
+}
+
 func TestLoadSecrets_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	secretsDir := filepath.Join(baseDir, "secrets")

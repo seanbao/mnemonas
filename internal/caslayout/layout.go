@@ -132,6 +132,10 @@ func (s *Store) Put(hash string, data []byte) error {
 	if err := validateCASPath(s.root, path); err != nil {
 		return err
 	}
+	createdDirs, err := collectMissingCASDirsWithRoot(s.rootHandle, relDir)
+	if err != nil {
+		return err
+	}
 
 	if err := ensureCASDirWithRoot(s.rootHandle, relDir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
@@ -145,6 +149,7 @@ func (s *Store) Put(hash string, data []byte) error {
 	// Step 1: Write to temp file
 	f, tmpPath, err := createCASTempFile(s.rootHandle, relDir)
 	if err != nil {
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
 		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
 			return errCASPathSymlink
 		}
@@ -157,20 +162,24 @@ func (s *Store) Put(hash string, data []byte) error {
 
 	if writeErr != nil {
 		cleanupCASTempPath(s.rootHandle, tmpPath)
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
 		return fmt.Errorf("failed to write temp file: %w", writeErr)
 	}
 	if syncErr != nil {
 		cleanupCASTempPath(s.rootHandle, tmpPath)
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
 		return fmt.Errorf("failed to sync temp file: %w", syncErr)
 	}
 	if closeErr != nil {
 		cleanupCASTempPath(s.rootHandle, tmpPath)
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
 		return fmt.Errorf("failed to close temp file: %w", closeErr)
 	}
 
 	// Step 2: Atomic rename
 	if err := s.rootHandle.Rename(tmpPath, relPath); err != nil {
 		cleanupCASTempPath(s.rootHandle, tmpPath)
+		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
 		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
 			return errCASPathSymlink
 		}
@@ -411,6 +420,17 @@ func newCASTempName() (string, error) {
 
 func cleanupCASTempPath(root *os.Root, path string) {
 	_ = root.Remove(path)
+}
+
+func cleanupCreatedCASDirsWithRoot(root *os.Root, createdDirs []string) {
+	for _, dir := range createdDirs {
+		if dir == "." {
+			continue
+		}
+		if err := root.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+	}
 }
 
 func isCASRootEscapeError(err error) bool {

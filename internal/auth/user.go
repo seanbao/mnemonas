@@ -382,12 +382,17 @@ func normalizeAuthFilePath(path string) (string, error) {
 }
 
 func ensureAuthDirRoot(path string, symlinkErr error, label string) (string, error) {
+	normalizedPath, _, err := ensureAuthDirRootWithState(path, symlinkErr, label)
+	return normalizedPath, err
+}
+
+func ensureAuthDirRootWithState(path string, symlinkErr error, label string) (string, *os.Root, error) {
 	normalizedPath, err := normalizeAuthFilePath(path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	dir := filepath.Dir(normalizedPath)
@@ -395,28 +400,40 @@ func ensureAuthDirRoot(path string, symlinkErr error, label string) (string, err
 	root := authDirRoots[dir]
 	authDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 
 	if err := ensureAuthDir(dir, 0755, label); err != nil {
-		return "", fmt.Errorf("failed to create directory: %w", err)
+		return "", nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", fmt.Errorf("failed to open %s directory root: %w", label, err)
+		return "", nil, fmt.Errorf("failed to open %s directory root: %w", label, err)
 	}
 
 	authDirRootsMu.Lock()
 	if existing := authDirRoots[dir]; existing != nil {
 		authDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 	authDirRoots[dir] = root
 	authDirRootsMu.Unlock()
 
-	return normalizedPath, nil
+	return normalizedPath, root, nil
+}
+
+func releaseRegisteredAuthDirRoot(dir string, root *os.Root) {
+	if root == nil {
+		return
+	}
+	authDirRootsMu.Lock()
+	if authDirRoots[dir] == root {
+		delete(authDirRoots, dir)
+	}
+	authDirRootsMu.Unlock()
+	_ = root.Close()
 }
 
 func registeredAuthDirRoot(path string) (*os.Root, string, bool, error) {
@@ -450,10 +467,27 @@ func writeRegisteredAuthFileAtomically(path string, data []byte, symlinkErr erro
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return writeAuthFileAtomically(normalizedPath, data, symlinkErr, pattern, label)
+	if ok {
+		return writeAuthFileAtomicallyWithRoot(root, normalizedPath, data, symlinkErr, pattern, label)
 	}
-	return writeAuthFileAtomicallyWithRoot(root, normalizedPath, data, symlinkErr, pattern, label)
+	if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
+		return err
+	}
+	createdDirs, err := collectMissingAuthDirs(filepath.Dir(normalizedPath))
+	if err != nil {
+		return err
+	}
+	registeredRoot := (*os.Root)(nil)
+	normalizedPath, registeredRoot, err = ensureAuthDirRootWithState(normalizedPath, symlinkErr, label)
+	if err != nil {
+		releaseRegisteredAuthDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedAuthDirs(createdDirs, label, err)
+	}
+	if err := writeAuthFileAtomicallyWithRoot(registeredRoot, normalizedPath, data, symlinkErr, pattern, label); err != nil {
+		releaseRegisteredAuthDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedAuthDirs(createdDirs, label, err)
+	}
+	return nil
 }
 
 func renameRegisteredAuthFile(oldPath, newPath string, symlinkErr error) error {
@@ -607,6 +641,17 @@ func cleanupAuthTempPath(root *os.Root, tmpPath string, operationErr error) erro
 		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
 	}
 	return operationErr
+}
+
+func cleanupCreatedAuthDirs(createdDirs []string, label string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		if removeErr := os.Remove(dir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created %s directory %s: %w", label, dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
 }
 
 func syncManagedAuthDir(root *os.Root) error {

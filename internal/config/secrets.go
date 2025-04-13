@@ -58,17 +58,12 @@ func LoadSecrets(dataDir string) (*Secrets, error) {
 // SaveSecrets saves secrets to file
 func SaveSecrets(dataDir string, secrets *Secrets) error {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
-	normalizedPath, err := ensureManagedDirRoot(secretsPath, errSecretsFileSymlink, "secrets file", true)
-	if err != nil {
-		return err
-	}
-
 	data, err := json.MarshalIndent(secrets, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 
-	if err := writeSecretsFile(normalizedPath, data); err != nil {
+	if err := writeSecretsFile(secretsPath, data); err != nil {
 		return err
 	}
 	return nil
@@ -126,11 +121,6 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	secrets := &Secrets{
 		JWTSecret:      jwtSecret,
 		WebDAVPassword: webdavPassword,
-	}
-
-	normalizedPath, err = ensureManagedDirRoot(normalizedPath, errSecretsFileSymlink, "secrets file", true)
-	if err != nil {
-		return nil, false, err
 	}
 
 	// Save secrets with restricted permissions

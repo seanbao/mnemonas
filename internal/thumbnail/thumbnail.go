@@ -32,6 +32,7 @@ import (
 var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")
 var syncThumbnailCacheDir = syncThumbnailDir
 var syncThumbnailCacheRootDir = syncThumbnailRootDir
+var createThumbnailCacheTempFile = createThumbnailTempFile
 var walkThumbnailCache = func(cacheDir string, cacheRoot *os.Root, walkFn thumbnailWalkFunc) error {
 	if cacheRoot != nil {
 		return walkThumbnailCacheWithRoot(cacheRoot, ".", walkFn)
@@ -430,12 +431,17 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 			return err
 		}
 		relDir := filepath.Dir(relPath)
+		createdDirs, err := collectMissingThumbnailDirsWithRoot(s.cacheRoot, relDir)
+		if err != nil {
+			return err
+		}
 		if err := ensureThumbnailDirWithRoot(s.cacheRoot, relDir, 0755); err != nil {
 			return err
 		}
 
-		tmpFile, tmpPath, err := createThumbnailTempFile(s.cacheRoot, relDir)
+		tmpFile, tmpPath, err := createThumbnailCacheTempFile(s.cacheRoot, relDir)
 		if err != nil {
+			cleanupCreatedThumbnailDirsWithRoot(s.cacheRoot, createdDirs)
 			return err
 		}
 		cleanup := true
@@ -447,20 +453,25 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 
 		if err := tmpFile.Chmod(0644); err != nil {
 			_ = tmpFile.Close()
+			cleanupCreatedThumbnailDirsWithRoot(s.cacheRoot, createdDirs)
 			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
 		}
 		if _, err := tmpFile.Write(data); err != nil {
 			_ = tmpFile.Close()
+			cleanupCreatedThumbnailDirsWithRoot(s.cacheRoot, createdDirs)
 			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
 		}
 		if err := tmpFile.Sync(); err != nil {
 			_ = tmpFile.Close()
+			cleanupCreatedThumbnailDirsWithRoot(s.cacheRoot, createdDirs)
 			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
 		}
 		if err := tmpFile.Close(); err != nil {
+			cleanupCreatedThumbnailDirsWithRoot(s.cacheRoot, createdDirs)
 			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
 		}
 		if err := s.cacheRoot.Rename(tmpPath, relPath); err != nil {
+			cleanupCreatedThumbnailDirsWithRoot(s.cacheRoot, createdDirs)
 			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, mapThumbnailRootPathError(err))
 		}
 		cleanup = false
@@ -673,6 +684,17 @@ func cleanupThumbnailTempPath(root *os.Root, path string, err error) error {
 		return errors.Join(err, fmt.Errorf("cleanup temp thumbnail %s: %w", path, removeErr))
 	}
 	return err
+}
+
+func cleanupCreatedThumbnailDirsWithRoot(root *os.Root, createdDirs []string) {
+	for _, dir := range createdDirs {
+		if dir == "." {
+			continue
+		}
+		if err := root.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+	}
 }
 
 func thumbnailChildRelativePath(parent, child string) string {
