@@ -84,6 +84,59 @@ func TestWriteFavoritesStoreFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestWriteFavoritesStoreFile_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "nested", "state", "favorites.json")
+	storeDir := filepath.Dir(storePath)
+
+	originalHook := afterValidateFavoritesStorePath
+	var hookErr error
+	hookApplied := false
+	afterValidateFavoritesStorePath = func() {
+		if hookApplied || hookErr != nil {
+			return
+		}
+		hookApplied = true
+		hookErr = os.Chmod(storeDir, 0500)
+	}
+	defer func() {
+		afterValidateFavoritesStorePath = originalHook
+		_ = os.Chmod(storeDir, 0755)
+	}()
+
+	err := writeFavoritesStoreFile(storePath, []byte("[]"))
+	if hookErr != nil {
+		t.Fatalf("afterValidateFavoritesStorePath hook error: %v", hookErr)
+	}
+	if err == nil {
+		t.Fatal("expected writeFavoritesStoreFile() to fail when temp file creation fails")
+	}
+	if !strings.Contains(err.Error(), "failed to create temp favorites file") {
+		t.Fatalf("expected temp create error, got %v", err)
+	}
+	if _, statErr := os.Stat(storePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no favorites file to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(storeDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created favorites directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "nested")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created parent directory to be removed, got %v", statErr)
+	}
+
+	afterValidateFavoritesStorePath = originalHook
+	if err := writeFavoritesStoreFile(storePath, []byte("[]")); err != nil {
+		t.Fatalf("expected retry after failed write cleanup to succeed, got %v", err)
+	}
+	data, readErr := os.ReadFile(storePath)
+	if readErr != nil {
+		t.Fatalf("expected favorites file after retry, got %v", readErr)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("expected favorites content after retry, got %q", string(data))
+	}
+}
+
 func TestNewStore_RecoversFromCorruptFavoritesFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")

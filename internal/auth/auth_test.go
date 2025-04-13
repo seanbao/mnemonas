@@ -80,6 +80,52 @@ func TestWriteAuthFileAtomically_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestWriteRegisteredAuthFileAtomically_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "nested", "state", "users.json")
+	usersDir := filepath.Dir(usersPath)
+
+	originalHook := afterValidateAuthFilePath
+	var hookErr error
+	hookApplied := false
+	afterValidateAuthFilePath = func() {
+		if hookApplied || hookErr != nil {
+			return
+		}
+		hookApplied = true
+		hookErr = os.Chmod(usersDir, 0500)
+	}
+	defer func() {
+		afterValidateAuthFilePath = originalHook
+		_ = os.Chmod(usersDir, 0755)
+	}()
+
+	err := writeRegisteredAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users")
+	if hookErr != nil {
+		t.Fatalf("afterValidateAuthFilePath hook error: %v", hookErr)
+	}
+	if err == nil {
+		t.Fatal("expected writeRegisteredAuthFileAtomically() to fail when temp file creation fails")
+	}
+	if !strings.Contains(err.Error(), "failed to create temp users file") {
+		t.Fatalf("expected temp create error, got %v", err)
+	}
+	if _, statErr := os.Stat(usersPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no users file to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(usersDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created users directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "nested")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created parent directory to be removed, got %v", statErr)
+	}
+
+	afterValidateAuthFilePath = originalHook
+	if err := writeRegisteredAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users"); err != nil {
+		t.Fatalf("expected retry after failed write cleanup to succeed, got %v", err)
+	}
+}
+
 func TestUserStore_Create_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	managedDir := filepath.Join(baseDir, "managed")
@@ -173,9 +219,9 @@ func TestTokenManager_RevokeToken_DoesNotFollowSymlinkInsertedAfterValidation(t 
 		afterValidateAuthFilePath = originalHook
 	})
 
-		if err := tm.RevokeToken("revoked-after-validate"); err != nil {
-			t.Fatalf("RevokeToken() error: %v", err)
-		}
+	if err := tm.RevokeToken("revoked-after-validate"); err != nil {
+		t.Fatalf("RevokeToken() error: %v", err)
+	}
 
 	outsideData, err := os.ReadFile(outsideRevocationFile)
 	if err != nil {

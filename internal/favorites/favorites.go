@@ -304,9 +304,14 @@ func normalizeFavoritesStorePath(path string) (string, error) {
 }
 
 func ensureFavoritesStoreDirRoot(path string, create bool) (string, error) {
+	normalizedPath, _, err := ensureFavoritesStoreDirRootWithState(path, create)
+	return normalizedPath, err
+}
+
+func ensureFavoritesStoreDirRootWithState(path string, create bool) (string, *os.Root, error) {
 	normalizedPath, err := normalizeFavoritesStorePath(path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	dir := filepath.Dir(normalizedPath)
 
@@ -314,39 +319,51 @@ func ensureFavoritesStoreDirRoot(path string, create bool) (string, error) {
 	root := favoritesStoreDirRoots[dir]
 	favoritesStoreDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 
 	if err := validateFavoritesStorePath(normalizedPath); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	if create {
 		if err := ensureFavoritesDir(dir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create directory: %w", err)
+			return "", nil, fmt.Errorf("failed to create directory: %w", err)
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil
+			return normalizedPath, nil, nil
 		}
-		return "", fmt.Errorf("failed to stat favorites store directory: %w", err)
+		return "", nil, fmt.Errorf("failed to stat favorites store directory: %w", err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", fmt.Errorf("failed to open favorites store directory root: %w", err)
+		return "", nil, fmt.Errorf("failed to open favorites store directory root: %w", err)
 	}
 
 	favoritesStoreDirRootsMu.Lock()
 	if existing := favoritesStoreDirRoots[dir]; existing != nil {
 		favoritesStoreDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 	favoritesStoreDirRoots[dir] = root
 	favoritesStoreDirRootsMu.Unlock()
 
-	return normalizedPath, nil
+	return normalizedPath, root, nil
+}
+
+func releaseRegisteredFavoritesStoreDirRoot(dir string, root *os.Root) {
+	if root == nil {
+		return
+	}
+	favoritesStoreDirRootsMu.Lock()
+	if favoritesStoreDirRoots[dir] == root {
+		delete(favoritesStoreDirRoots, dir)
+	}
+	favoritesStoreDirRootsMu.Unlock()
+	_ = root.Close()
 }
 
 func registeredFavoritesStoreDirRoot(path string) (*os.Root, string, bool, error) {
@@ -510,6 +527,17 @@ func cleanupFavoritesTempPath(root *os.Root, tmpPath string, operationErr error)
 	return operationErr
 }
 
+func cleanupCreatedFavoritesDirs(createdDirs []string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		if removeErr := os.Remove(dir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created favorites directory %s: %w", dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
+}
+
 func syncFavoritesRootDir(root *os.Root) error {
 	dirHandle, err := root.Open(".")
 	if err != nil {
@@ -580,11 +608,31 @@ func writeFavoritesStoreFileAtomically(path string, data []byte) error {
 }
 
 func writeFavoritesStoreFile(path string, data []byte) error {
-	normalizedPath, err := ensureFavoritesStoreDirRoot(path, true)
+	_, normalizedPath, ok, err := registeredFavoritesStoreDirRoot(path)
 	if err != nil {
 		return err
 	}
-	return writeRegisteredFavoritesStoreFileAtomically(normalizedPath, data)
+	if ok {
+		return writeRegisteredFavoritesStoreFileAtomically(normalizedPath, data)
+	}
+	if err := validateFavoritesStorePath(normalizedPath); err != nil {
+		return err
+	}
+	createdDirs, err := collectMissingFavoritesDirs(filepath.Dir(normalizedPath))
+	if err != nil {
+		return err
+	}
+	registeredRoot := (*os.Root)(nil)
+	normalizedPath, registeredRoot, err = ensureFavoritesStoreDirRootWithState(normalizedPath, true)
+	if err != nil {
+		releaseRegisteredFavoritesStoreDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedFavoritesDirs(createdDirs, err)
+	}
+	if err := writeRegisteredFavoritesStoreFileAtomically(normalizedPath, data); err != nil {
+		releaseRegisteredFavoritesStoreDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedFavoritesDirs(createdDirs, err)
+	}
+	return nil
 }
 
 func collectMissingFavoritesDirs(dir string) ([]string, error) {

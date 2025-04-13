@@ -28,6 +28,12 @@ type blockingOnceReader struct {
 	sent    bool
 }
 
+type partialErrorReader struct {
+	data []byte
+	err  error
+	sent bool
+}
+
 func (r *blockingOnceReader) Read(p []byte) (int, error) {
 	if r.sent {
 		return 0, io.EOF
@@ -37,6 +43,15 @@ func (r *blockingOnceReader) Read(p []byte) (int, error) {
 	r.sent = true
 	n := copy(p, r.data)
 	return n, io.EOF
+}
+
+func (r *partialErrorReader) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	r.sent = true
+	n := copy(p, r.data)
+	return n, r.err
 }
 
 // testDataplaneAddr is the address of the test dataplane server
@@ -598,6 +613,50 @@ func TestFileSystem_WriteFile_RollsBackNewFileWhenIndexUpdateFails(t *testing.T)
 	}
 }
 
+func TestFileSystem_WriteFile_RollsBackCreatedDirectoriesWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.versions.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	err := fs.WriteFile(ctx, "/deep/path/rollback-index-tree.bin", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() to fail when file index update cannot persist")
+	}
+
+	if _, statErr := fs.Stat(ctx, "/deep/path/rollback-index-tree.bin"); statErr != ErrNotFound {
+		t.Fatalf("Expected new file to be removed after rollback, got %v", statErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/deep/path")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Expected created nested directory to be removed after rollback, got %v", statErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/deep")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Expected created parent directory to be removed after rollback, got %v", statErr)
+	}
+}
+
+func TestFileSystem_WriteFile_CleansCreatedDirectoriesWhenReaderFailsBeforeRename(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	readerErr := errors.New("reader failed")
+
+	err := fs.WriteFile(ctx, "/deep/path/reader-fail.bin", &partialErrorReader{data: []byte("partial"), err: readerErr})
+	if !errors.Is(err, readerErr) {
+		t.Fatalf("expected reader failure, got %v", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/deep/path/reader-fail.bin"); statErr != ErrNotFound {
+		t.Fatalf("Expected failed write file to remain absent, got %v", statErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/deep/path")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Expected created nested directory to be removed after failed write, got %v", statErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/deep")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Expected created parent directory to be removed after failed write, got %v", statErr)
+	}
+}
+
 func TestFileSystem_WriteFile_RollsBackOverwriteWhenIndexUpdateFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -848,6 +907,40 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenDirectorySyncFails(t *
 	}
 	if string(data) != "old content" {
 		t.Fatalf("Expected original content after rollback, got %q", string(data))
+	}
+}
+
+func TestFileSystem_WriteFile_RollsBackNewFileWhenCreatedDirectoryTreeSyncFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	blockedDir := fs.workspace.FullPath("/deep")
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncStoragePathDir = func(dir string) error {
+		if dir == blockedDir {
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err := fs.WriteFile(ctx, "/deep/path/rollback-sync-tree.bin", bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() to fail when created directory tree sync fails")
+	}
+	if !strings.Contains(err.Error(), "sync created directory tree") {
+		t.Fatalf("expected created directory tree sync failure in error, got %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/deep/path/rollback-sync-tree.bin"); statErr != ErrNotFound {
+		t.Fatalf("Expected new file to be removed after rollback, got %v", statErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/deep/path")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Expected created nested directory to be removed after rollback, got %v", statErr)
+	}
+	if _, statErr := os.Stat(fs.workspace.FullPath("/deep")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Expected created parent directory to be removed after rollback, got %v", statErr)
 	}
 }
 
@@ -5638,6 +5731,56 @@ func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected destination to be removed after rollback, got %v", statErr)
+	}
+}
+
+func TestCopyFile_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	fs := setupManagedPathHelperFileSystem(t)
+	srcDir := filepath.Join(fs.workspace.Root(), "src-dir")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(srcDir) error: %v", err)
+	}
+
+	src := filepath.Join(srcDir, "src.txt")
+	dst := filepath.Join(fs.workspace.Root(), "deep", "copy", "dst.txt")
+	dstDir := filepath.Dir(dst)
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	originalCreateStorageCopyTempFile := createStorageCopyTempFile
+	tempCreateErr := errors.New("temp create failed")
+	createStorageCopyTempFile = func(root *os.Root, parentName, prefix string) (*os.File, string, error) {
+		return nil, "", tempCreateErr
+	}
+	t.Cleanup(func() {
+		createStorageCopyTempFile = originalCreateStorageCopyTempFile
+	})
+
+	err := fs.copyFile(src, dst)
+	if !errors.Is(err, tempCreateErr) {
+		t.Fatalf("expected temp create failure, got %v", err)
+	}
+	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no destination file to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(dstDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected created destination directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.workspace.Root(), "deep")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected created parent destination directory to be removed, got %v", statErr)
+	}
+
+	createStorageCopyTempFile = originalCreateStorageCopyTempFile
+	if err := fs.copyFile(src, dst); err != nil {
+		t.Fatalf("expected retry after failed copy cleanup to succeed, got %v", err)
+	}
+	data, readErr := os.ReadFile(dst)
+	if readErr != nil {
+		t.Fatalf("ReadFile(dst) error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected destination content after retry, got %q", string(data))
 	}
 }
 
