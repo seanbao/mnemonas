@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -41,6 +42,10 @@ const maxListObjectsLimit = 1000
 const maxGCGracePeriodHours = int64((1<<63 - 1) / int64(time.Hour))
 
 const scrubFailurePublicMessage = "scrub failed; check server logs for details"
+
+var startScrub = func(store *maintenance.HistoryStore) (*maintenance.ScrubResult, error) {
+	return store.StartScrub()
+}
 
 var saveScrubResult = func(store *maintenance.HistoryStore, result *maintenance.ScrubResult) error {
 	return store.SaveScrubResult(result)
@@ -140,6 +145,9 @@ func (s *Server) storeConfig(cfg *config.Config) {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
 	s.config = cloneConfigSnapshot(cfg)
+	if cfg != nil {
+		requestip.SetTrustedProxyHops(cfg.Server.TrustedProxyHops)
+	}
 }
 
 func (s *Server) currentActiveWebDAV() WebDAVRuntimeConfig {
@@ -152,6 +160,19 @@ func (s *Server) storeActiveWebDAV(cfg WebDAVRuntimeConfig) {
 	s.webdavMu.Lock()
 	defer s.webdavMu.Unlock()
 	s.activeWebDAV = cfg
+}
+
+func webDAVUsesGeneratedPassword(cfg config.Config) bool {
+	return cfg.WebDAV.Enabled && strings.EqualFold(cfg.WebDAV.AuthType, "basic") && strings.TrimSpace(cfg.WebDAV.Password) == ""
+}
+
+func (s *Server) webDAVConfiguredButUnavailable() bool {
+	cfg := s.currentConfig()
+	if cfg == nil || !webDAVUsesGeneratedPassword(*cfg) {
+		return false
+	}
+	runtimeCfg := s.currentActiveWebDAV()
+	return !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") || strings.TrimSpace(runtimeCfg.Password) == ""
 }
 
 func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) error {
@@ -558,7 +579,8 @@ func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConf
 
 	password, err := loadGeneratedWebDAVPassword(cfg.Storage.Root)
 	if err != nil {
-		s.logger.Warn().Err(err).Msg("failed to load secrets for WebDAV runtime config")
+		runtimeCfg.Enabled = false
+		s.logger.Warn().Err(err).Msg("disabling WebDAV runtime config because generated password is unavailable")
 		return runtimeCfg
 	}
 
@@ -647,7 +669,6 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 
 	// Middleware
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(metrics.MetricsMiddleware) // Collect request metrics
 	r.Use(zerologMiddleware(logger))
 	r.Use(middleware.Recoverer)
@@ -661,6 +682,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		logger:    logger,
 		startTime: time.Now(),
 	}
+	requestip.SetTrustedProxyHops(config.Default().Server.TrustedProxyHops)
 	if cfg != nil {
 		s.updateWebDAV = cfg.UpdateWebDAV
 	}
@@ -764,6 +786,10 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			refreshTTL = 7 * 24 * time.Hour
 		}
 		s.tokenManager = auth.NewTokenManager(cfg.AuthJWTSecret, accessTTL, refreshTTL)
+		tokenRevocationStoreFile := filepath.Join(filepath.Dir(cfg.AuthUsersFile), "token-revocations.json")
+		if err := s.tokenManager.EnablePersistence(tokenRevocationStoreFile); err != nil {
+			return nil, fmt.Errorf("failed to initialize token revocation store: %w", err)
+		}
 
 		// Initialize auth handler and middleware
 		s.authHandler = auth.NewHandler(s.userStore, s.tokenManager)
@@ -1027,11 +1053,12 @@ func (s *Server) setupRoutes() {
 		if s.authEnabled {
 			r.With(s.authMw.RequireRole(auth.RoleAdmin)).Get("/diagnostics", s.handleDiagnostics)
 			r.With(s.authMw.RequireRole(auth.RoleAdmin)).Get("/diagnostics-export", s.handleDiagnosticsExport)
+			r.With(s.authMw.RequireRole(auth.RoleAdmin)).Get("/metrics", s.handleMetrics)
 		} else {
 			r.Get("/diagnostics", s.handleDiagnostics)
 			r.Get("/diagnostics-export", s.handleDiagnosticsExport)
+			r.Get("/metrics", s.handleMetrics)
 		}
-		r.Get("/metrics", s.handleMetrics)
 
 		// Search
 		r.Get("/search", s.handleSearch)
@@ -1296,6 +1323,10 @@ func badRequestInvalidDestinationPath(w http.ResponseWriter) {
 	BadRequest(w, "invalid destination path")
 }
 
+func isMutationRootPath(targetPath string) bool {
+	return path.Clean(targetPath) == "/"
+}
+
 func forbiddenPathOutsideHome(w http.ResponseWriter) {
 	Forbidden(w, "path is outside the assigned home directory")
 }
@@ -1443,7 +1474,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if (s.thumbnailConfigured && s.thumbnail == nil) ||
 		(s.maintenanceConfigured && s.maintenance == nil) ||
 		(s.activityConfigured && s.activity == nil) ||
-		s.favoritesConfiguredButUnavailable() {
+		s.favoritesConfiguredButUnavailable() ||
+		s.webDAVConfiguredButUnavailable() {
 		health["status"] = "degraded"
 	}
 
@@ -1505,6 +1537,10 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path to prevent traversal attacks
 	filePath, err := validatePath(filePath)
 	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if isMutationRootPath(filePath) {
 		badRequestInvalidPath(w)
 		return
 	}
@@ -1869,8 +1905,8 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Open file
-	file, err := s.fs.OpenFile(r.Context(), filePath)
+	// Open a snapshot so headers and bytes come from the same file handle.
+	file, snapshotInfo, err := s.fs.OpenFileSnapshot(r.Context(), filePath)
 	if err != nil {
 		s.respondReadableOpenFileError(w, "open file", err, "cannot download directory")
 		return
@@ -1878,8 +1914,8 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Set cache headers
-	if info.ContentHash != "" {
-		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, info.ContentHash))
+	if snapshotInfo.ContentHash != "" {
+		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, snapshotInfo.ContentHash))
 	}
 	w.Header().Set("Cache-Control", "private, no-cache")
 	if forceDownload {
@@ -1888,7 +1924,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Use http.ServeContent for proper Range support and content type detection
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
-	http.ServeContent(trackingWriter, r, path.Base(filePath), info.ModTime, file)
+	http.ServeContent(trackingWriter, r, path.Base(filePath), snapshotInfo.ModTime, file)
 	if trackingWriter.writeErr == nil && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
 		s.LogActivity(r, activity.ActionDownload, filePath, nil)
 	}
@@ -1912,6 +1948,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidSourcePath(w)
 		return
 	}
+	if isMutationRootPath(fromPath) {
+		badRequestInvalidSourcePath(w)
+		return
+	}
 	if err := s.authorizeUserPath(r.Context(), fromPath); err != nil {
 		forbiddenPathOutsideHome(w)
 		return
@@ -1919,6 +1959,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 
 	toPath, err := validatePath(req.To)
 	if err != nil {
+		badRequestInvalidDestinationPath(w)
+		return
+	}
+	if isMutationRootPath(toPath) {
 		badRequestInvalidDestinationPath(w)
 		return
 	}
@@ -1997,6 +2041,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidSourcePath(w)
 		return
 	}
+	if isMutationRootPath(fromPath) {
+		badRequestInvalidSourcePath(w)
+		return
+	}
 	if err := s.authorizeUserPath(r.Context(), fromPath); err != nil {
 		forbiddenPathOutsideHome(w)
 		return
@@ -2004,6 +2052,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 
 	toPath, err := validatePath(req.To)
 	if err != nil {
+		badRequestInvalidDestinationPath(w)
+		return
+	}
+	if isMutationRootPath(toPath) {
 		badRequestInvalidDestinationPath(w)
 		return
 	}
@@ -2451,6 +2503,9 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"maintenance_history_ready": s.maintenance != nil,
 		"activity_log_ready":        s.activity != nil,
 	}
+	if cfg := s.currentConfig(); cfg != nil && cfg.WebDAV.Enabled {
+		systemStatus["webdav_runtime_ready"] = !s.webDAVConfiguredButUnavailable()
+	}
 	if s.favoritesConfigured {
 		systemStatus["favorites_store_ready"] = !s.favoritesConfiguredButUnavailable()
 	}
@@ -2545,14 +2600,17 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 	var scrubRecord *maintenance.ScrubResult
 	if s.maintenance != nil {
 		var err error
-		scrubRecord, err = s.maintenance.StartScrub()
+		scrubRecord, err = startScrub(s.maintenance)
 		if err != nil {
 			if errors.Is(err, maintenance.ErrScrubAlreadyRunning) {
 				Conflict(w, "scrub is already running")
 				return
 			}
-			s.respondInternalError(w, "persist scrub start", err)
-			return
+			if scrubRecord == nil {
+				s.respondInternalError(w, "persist scrub start", err)
+				return
+			}
+			s.logger.Warn().Err(err).Msg("scrub start persistence warning")
 		}
 	}
 
@@ -3363,17 +3421,23 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if deletedCount > 0 {
-					if cleanupWarning {
-						markTrashDeleteCleanupWarningHeaders(w)
-					}
-					s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
+					details := map[string]string{
 						"count":   strconv.Itoa(deletedCount),
 						"partial": "true",
-					})
-					NewAPIResponse(map[string]any{
+					}
+					response := map[string]any{
 						"deleted_count": deletedCount,
 						"partial":       true,
-					}).WithMessage("trash emptied partially").Write(w, http.StatusOK)
+					}
+					message := "trash emptied partially"
+					if cleanupWarning {
+						markTrashDeleteCleanupWarningHeaders(w)
+						details["cleanup_warning"] = "true"
+						response["warning"] = true
+						message = "trash emptied partially with cleanup warning"
+					}
+					s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
+					NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
 					return
 				}
 				s.respondInternalError(w, "empty trash", err)
@@ -3404,15 +3468,24 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		var warningErr *storage.TrashDeleteWarningError
 		if errors.As(err, &warningErr) {
 			markTrashDeleteCleanupWarningHeaders(w)
-			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
+			details := map[string]string{
 				"count":           strconv.Itoa(count),
 				"cleanup_warning": "true",
-			})
-			NewAPIResponse(map[string]any{
+			}
+			response := map[string]any{
 				"deleted_count": count,
-				"partial":       false,
 				"warning":       true,
-			}).WithMessage("trash emptied with cleanup warning").Write(w, http.StatusOK)
+			}
+			message := "trash emptied with cleanup warning"
+			if warningErr.Partial() {
+				details["partial"] = "true"
+				response["partial"] = true
+				message = "trash emptied partially with cleanup warning"
+			} else {
+				response["partial"] = false
+			}
+			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
+			NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
 			return
 		}
 		if count > 0 {
@@ -3929,11 +4002,12 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 	settings := map[string]interface{}{
 		"server": map[string]interface{}{
-			"host":          cfg.Server.Host,
-			"port":          cfg.Server.Port,
-			"read_timeout":  cfg.Server.ReadTimeout.String(),
-			"write_timeout": cfg.Server.WriteTimeout.String(),
-			"idle_timeout":  cfg.Server.IdleTimeout.String(),
+			"host":               cfg.Server.Host,
+			"port":               cfg.Server.Port,
+			"read_timeout":       cfg.Server.ReadTimeout.String(),
+			"write_timeout":      cfg.Server.WriteTimeout.String(),
+			"idle_timeout":       cfg.Server.IdleTimeout.String(),
+			"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
 			"tls": map[string]interface{}{
 				"enabled":       cfg.Server.TLS.Enabled,
 				"cert_file":     cfg.Server.TLS.CertFile,
@@ -4016,12 +4090,13 @@ type UpdateSettingsRequest struct {
 }
 
 type ServerSettingsUpdate struct {
-	Host         *string                  `json:"host,omitempty"`
-	Port         *int                     `json:"port,omitempty"`
-	ReadTimeout  *string                  `json:"read_timeout,omitempty"`
-	WriteTimeout *string                  `json:"write_timeout,omitempty"`
-	IdleTimeout  *string                  `json:"idle_timeout,omitempty"`
-	TLS          *ServerTLSSettingsUpdate `json:"tls,omitempty"`
+	Host             *string                  `json:"host,omitempty"`
+	Port             *int                     `json:"port,omitempty"`
+	ReadTimeout      *string                  `json:"read_timeout,omitempty"`
+	WriteTimeout     *string                  `json:"write_timeout,omitempty"`
+	IdleTimeout      *string                  `json:"idle_timeout,omitempty"`
+	TrustedProxyHops *int                     `json:"trusted_proxy_hops,omitempty"`
+	TLS              *ServerTLSSettingsUpdate `json:"tls,omitempty"`
 }
 
 type ServerTLSSettingsUpdate struct {
@@ -4171,6 +4246,13 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updatedConfig.Server.IdleTimeout = d
+		}
+		if req.Server.TrustedProxyHops != nil {
+			if *req.Server.TrustedProxyHops < 0 {
+				BadRequest(w, "invalid server.trusted_proxy_hops")
+				return
+			}
+			updatedConfig.Server.TrustedProxyHops = *req.Server.TrustedProxyHops
 		}
 		if req.Server.TLS != nil {
 			if req.Server.TLS.Enabled != nil {
@@ -4567,7 +4649,7 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 	}
 
 	runtimeCfg := s.currentActiveWebDAV()
-	if runtimeCfg.Enabled && strings.EqualFold(runtimeCfg.AuthType, "basic") && strings.TrimSpace(cfg.WebDAV.Password) == "" {
+	if webDAVUsesGeneratedPassword(*cfg) {
 		preparedRuntimeCfg, err := prepareWebDAVRuntimeConfig(*cfg)
 		if err != nil {
 			s.logger.Error().Err(err).Msg("failed to load generated WebDAV password for credentials response")
@@ -4803,10 +4885,13 @@ func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
 	if owner.Role == auth.RoleAdmin {
 		return shareInfo, nil
 	}
+	if strings.TrimSpace(owner.HomeDir) == "" {
+		return nil, share.ErrShareNotFound
+	}
 
 	homeDir, err := validatePath(owner.HomeDir)
 	if err != nil {
-		return nil, err
+		return nil, share.ErrShareNotFound
 	}
 	if !pathWithinBase(homeDir, shareInfo.Path) {
 		return nil, share.ErrShareNotFound
@@ -4905,15 +4990,16 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := "anonymous"
-	if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
-		userID = claims.UserID
-	}
-
 	var sharesList []*share.Share
-	if auth.IsAdmin(r.Context()) && r.URL.Query().Get("all") == "true" {
+	if !s.authEnabled {
+		sharesList = s.shareStore.ListAll()
+	} else if auth.IsAdmin(r.Context()) && r.URL.Query().Get("all") == "true" {
 		sharesList = s.shareStore.ListAll()
 	} else {
+		userID := ""
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil && claims.UserID != "" {
+			userID = claims.UserID
+		}
 		sharesList = s.shareStore.ListByUser(userID)
 	}
 
@@ -5030,7 +5116,12 @@ func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.favoritesHandler.AddFavorite(w, r)
+	rec := newBufferedResponseRecorder()
+	s.favoritesHandler.AddFavorite(rec, r)
+	if rec.statusCode == http.StatusCreated {
+		s.LogActivityWithWarning(rec, r, activity.ActionFavorite, favoritePath, nil)
+	}
+	rec.FlushTo(w)
 }
 
 func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
@@ -5103,7 +5194,12 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.favoritesHandler.RemoveFavorite(w, r)
+	rec := newBufferedResponseRecorder()
+	s.favoritesHandler.RemoveFavorite(rec, r)
+	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices {
+		s.LogActivityWithWarning(rec, r, activity.ActionUnfavorite, favoritePath, nil)
+	}
+	rec.FlushTo(w)
 }
 
 func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request) {
@@ -5126,7 +5222,12 @@ func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	s.favoritesHandler.UpdateNote(w, r)
+	rec := newBufferedResponseRecorder()
+	s.favoritesHandler.UpdateNote(rec, r)
+	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices {
+		s.LogActivityWithWarning(rec, r, activity.ActionFavoriteNote, favoritePath, nil)
+	}
+	rec.FlushTo(w)
 }
 
 // handleCreateShareWithActivity wraps share creation to log activity

@@ -2,6 +2,8 @@
 package maintenance
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -20,7 +23,43 @@ var ErrScrubAlreadyRunning = errors.New("scrub already running")
 const interruptedScrubErrorMessage = "scrub interrupted before completion"
 
 var syncHistoryFileDir = syncHistoryDir
+var syncHistoryFileRootDir = syncHistoryRootDir
 var writeHistoryStoreFile = writeHistoryFile
+var afterValidateHistoryFilePath = func() {}
+
+var historyFileDirRootsMu sync.RWMutex
+var historyFileDirRoots = map[string]*os.Root{}
+
+const historyRootEscapeError = "path escapes from parent"
+const maxHistoryTempAttempts = 32
+
+type historyPersistenceWarningError struct {
+	err error
+}
+
+func (e *historyPersistenceWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *historyPersistenceWarningError) Unwrap() error {
+	return e.err
+}
+
+func wrapHistoryPersistenceWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warning *historyPersistenceWarningError
+	if errors.As(err, &warning) {
+		return err
+	}
+	return &historyPersistenceWarningError{err: err}
+}
+
+func isHistoryPersistenceWarning(err error) bool {
+	var warning *historyPersistenceWarningError
+	return errors.As(err, &warning)
+}
 
 // gcRunning tracks whether GC is currently running (atomic for thread-safety)
 var gcRunning atomic.Bool
@@ -68,11 +107,12 @@ func cloneScrubResult(result *ScrubResult) *ScrubResult {
 
 // NewHistoryStore creates a new history store
 func NewHistoryStore(dataDir string) (*HistoryStore, error) {
-	if err := ensureHistoryDir(dataDir, 0755); err != nil {
+	normalizedHistoryPath, err := ensureHistoryDirRoot(filepath.Join(dataDir, "last_scrub.json"), true)
+	if err != nil {
 		return nil, err
 	}
 	store := &HistoryStore{
-		dataDir: dataDir,
+		dataDir: filepath.Dir(normalizedHistoryPath),
 	}
 	// Load last scrub result if exists
 	if err := store.loadLastScrubResult(); err != nil && !os.IsNotExist(err) {
@@ -95,6 +135,9 @@ func (s *HistoryStore) SaveScrubResult(result *ScrubResult) error {
 	stored := cloneScrubResult(result)
 	s.scrubResult = stored
 	if err := s.persistScrubResult(stored); err != nil {
+		if isHistoryPersistenceWarning(err) {
+			return err
+		}
 		if shouldPreserveTerminalScrubState(previous, stored) {
 			if fallbackErr := s.persistScrubTerminalFallback(stored); fallbackErr != nil {
 				return errors.Join(err, fmt.Errorf("persist scrub terminal fallback: %w", fallbackErr))
@@ -150,6 +193,9 @@ func (s *HistoryStore) StartScrub() (*ScrubResult, error) {
 	}
 	s.scrubResult = cloneScrubResult(result)
 	if err := s.persistScrubResult(result); err != nil {
+		if isHistoryPersistenceWarning(err) {
+			return cloneScrubResult(result), err
+		}
 		s.scrubResult = previous
 		return nil, err
 	}
@@ -169,11 +215,17 @@ func (s *HistoryStore) loadLastScrubResult() error {
 		}
 	} else if fallback != nil {
 		result = fallback
-		_ = s.persistScrubResult(result)
+		if err := s.persistScrubResult(result); err != nil && !isHistoryPersistenceWarning(err) {
+			return fmt.Errorf("persist restored scrub fallback: %w", err)
+		}
 	}
 
 	if recoverInterruptedScrubResult(result, time.Now()) {
 		if err := s.persistScrubResult(result); err != nil {
+			if isHistoryPersistenceWarning(err) {
+				s.scrubResult = cloneScrubResult(result)
+				return nil
+			}
 			return fmt.Errorf("persist recovered scrub result: %w", err)
 		}
 	}
@@ -187,19 +239,18 @@ func (s *HistoryStore) recoverCorruptLastScrubResult(loadErr error) error {
 	}
 
 	path := s.lastScrubPath()
-	dir := filepath.Dir(path)
 	corruptPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
-	if err := os.Rename(path, corruptPath); err != nil {
+	if err := renameRegisteredHistoryFile(path, corruptPath); err != nil {
 		return fmt.Errorf("backup corrupt scrub history: %w", err)
 	}
-	if err := syncHistoryFileDir(dir); err != nil {
-		if rollbackErr := os.Rename(corruptPath, path); rollbackErr != nil {
+	if err := syncRegisteredHistoryDir(path); err != nil {
+		if rollbackErr := renameRegisteredHistoryFile(corruptPath, path); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt scrub history directory: %w", err),
 				fmt.Errorf("rollback corrupt scrub history backup: %w", rollbackErr),
 			)
 		}
-		if rollbackSyncErr := syncHistoryFileDir(dir); rollbackSyncErr != nil {
+		if rollbackSyncErr := syncRegisteredHistoryDir(path); rollbackSyncErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt scrub history directory: %w", err),
 				fmt.Errorf("sync corrupt scrub history rollback: %w", rollbackSyncErr),
@@ -273,10 +324,7 @@ func (s *HistoryStore) persistScrubResultToPath(path string, result *ScrubResult
 }
 
 func loadScrubResultFile(path string) (*ScrubResult, error) {
-	if err := validateHistoryFilePath(path); err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
+	data, err := readRegisteredHistoryFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -312,14 +360,22 @@ func sameScrubExecution(current, fallback *ScrubResult) bool {
 	return current.StartTime.Equal(fallback.StartTime)
 }
 
-func validateHistoryFilePath(path string) error {
+func normalizeHistoryFilePath(path string) (string, error) {
 	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		absPath, err := filepath.Abs(cleaned)
-		if err != nil {
-			return fmt.Errorf("failed to resolve maintenance history file path: %w", err)
-		}
-		cleaned = absPath
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve maintenance history file path: %w", err)
+	}
+	return absPath, nil
+}
+
+func validateHistoryFilePath(path string) error {
+	cleaned, err := normalizeHistoryFilePath(path)
+	if err != nil {
+		return err
 	}
 
 	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
@@ -358,10 +414,252 @@ func validateHistoryFilePath(path string) error {
 	return nil
 }
 
+func ensureHistoryDirRoot(path string, create bool) (string, error) {
+	normalizedPath, err := normalizeHistoryFilePath(path)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(normalizedPath)
+
+	historyFileDirRootsMu.RLock()
+	root := historyFileDirRoots[dir]
+	historyFileDirRootsMu.RUnlock()
+	if root != nil {
+		return normalizedPath, nil
+	}
+
+	if err := validateHistoryFilePath(normalizedPath); err != nil {
+		return "", err
+	}
+
+	if create {
+		if err := ensureHistoryDir(dir, 0755); err != nil {
+			return "", err
+		}
+	} else if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return normalizedPath, nil
+		}
+		return "", err
+	}
+
+	root, err = os.OpenRoot(dir)
+	if err != nil {
+		return "", mapHistoryRootPathError(err)
+	}
+
+	historyFileDirRootsMu.Lock()
+	if existing := historyFileDirRoots[dir]; existing != nil {
+		historyFileDirRootsMu.Unlock()
+		_ = root.Close()
+		return normalizedPath, nil
+	}
+	historyFileDirRoots[dir] = root
+	historyFileDirRootsMu.Unlock()
+
+	return normalizedPath, nil
+}
+
+func registeredHistoryDirRoot(path string) (*os.Root, string, bool, error) {
+	normalizedPath, err := normalizeHistoryFilePath(path)
+	if err != nil {
+		return nil, "", false, err
+	}
+	dir := filepath.Dir(normalizedPath)
+	historyFileDirRootsMu.RLock()
+	root := historyFileDirRoots[dir]
+	historyFileDirRootsMu.RUnlock()
+	return root, normalizedPath, root != nil, nil
+}
+
+func readRegisteredHistoryFile(path string) ([]byte, error) {
+	root, normalizedPath, ok, err := registeredHistoryDirRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if err := validateHistoryFilePath(normalizedPath); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(normalizedPath)
+	}
+	return readHistoryFileWithRoot(root, normalizedPath)
+}
+
+func writeRegisteredHistoryFileAtomically(path string, data []byte) error {
+	root, normalizedPath, ok, err := registeredHistoryDirRoot(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return writeHistoryFileAtomically(normalizedPath, data)
+	}
+	return writeHistoryFileAtomicallyWithRoot(root, normalizedPath, data)
+}
+
+func renameRegisteredHistoryFile(oldPath, newPath string) error {
+	root, normalizedOldPath, ok, err := registeredHistoryDirRoot(oldPath)
+	if err != nil {
+		return err
+	}
+	normalizedNewPath, err := normalizeHistoryFilePath(newPath)
+	if err != nil {
+		return err
+	}
+	if ok && filepath.Dir(normalizedOldPath) == filepath.Dir(normalizedNewPath) {
+		afterValidateHistoryFilePath()
+		if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+			return mapHistoryRootPathError(err)
+		}
+		return nil
+	}
+	if err := validateHistoryFilePath(normalizedOldPath); err != nil {
+		return err
+	}
+	if err := validateHistoryFilePath(normalizedNewPath); err != nil {
+		return err
+	}
+	afterValidateHistoryFilePath()
+	return os.Rename(normalizedOldPath, normalizedNewPath)
+}
+
+func syncRegisteredHistoryDir(path string) error {
+	root, normalizedPath, ok, err := registeredHistoryDirRoot(path)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return syncHistoryFileRootDir(root)
+	}
+	return syncHistoryFileDir(filepath.Dir(normalizedPath))
+}
+
+func readHistoryFileWithRoot(root *os.Root, path string) ([]byte, error) {
+	afterValidateHistoryFilePath()
+
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, mapHistoryRootPathError(err)
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func writeHistoryFileAtomicallyWithRoot(root *os.Root, path string, data []byte) error {
+	afterValidateHistoryFilePath()
+
+	tmpFile, tmpName, err := createHistoryTempFile(root, ".last-scrub-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp maintenance history file: %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = root.Remove(tmpName)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to set maintenance history file permissions: %w", cleanupHistoryTempPath(root, tmpName, err))
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write maintenance history file: %w", cleanupHistoryTempPath(root, tmpName, err))
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to sync maintenance history file: %w", cleanupHistoryTempPath(root, tmpName, err))
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp maintenance history file: %w", cleanupHistoryTempPath(root, tmpName, err))
+	}
+	if err := root.Rename(tmpName, filepath.Base(path)); err != nil {
+		return fmt.Errorf("failed to replace maintenance history file: %w", cleanupHistoryTempPath(root, tmpName, mapHistoryRootPathError(err)))
+	}
+	cleanup = false
+	if err := syncRegisteredHistoryDir(path); err != nil {
+		return wrapHistoryPersistenceWarning(fmt.Errorf("failed to sync maintenance history directory: %w", err))
+	}
+	return nil
+}
+
+func newHistoryTempName(pattern string) (string, error) {
+	randomPart := make([]byte, 8)
+	if _, err := rand.Read(randomPart); err != nil {
+		return "", err
+	}
+	name := hex.EncodeToString(randomPart)
+	if strings.Contains(pattern, "*") {
+		return strings.Replace(pattern, "*", name, 1), nil
+	}
+	return pattern + name, nil
+}
+
+func createHistoryTempFile(root *os.Root, pattern string) (*os.File, string, error) {
+	for range maxHistoryTempAttempts {
+		tmpName, err := newHistoryTempName(pattern)
+		if err != nil {
+			return nil, "", err
+		}
+		tmpFile, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			return tmpFile, tmpName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapHistoryRootPathError(err)
+	}
+
+	return nil, "", errors.New("failed to allocate unique maintenance history temp file")
+}
+
+func cleanupHistoryTempPath(root *os.Root, tmpPath string, operationErr error) error {
+	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return errors.Join(operationErr, fmt.Errorf("cleanup temp maintenance history file %s: %w", tmpPath, removeErr))
+	}
+	return operationErr
+}
+
+func syncHistoryRootDir(root *os.Root) error {
+	dirHandle, err := root.Open(".")
+	if err != nil {
+		return mapHistoryRootPathError(err)
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
+}
+
+func isHistoryRootEscapeError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), historyRootEscapeError)
+}
+
+func mapHistoryRootPathError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isHistoryRootEscapeError(err) {
+		return errHistoryFileSymlink
+	}
+	return err
+}
+
 func writeHistoryFile(path string, data []byte) error {
+	normalizedPath, err := ensureHistoryDirRoot(path, true)
+	if err != nil {
+		return err
+	}
+	return writeRegisteredHistoryFileAtomically(normalizedPath, data)
+}
+
+func writeHistoryFileAtomically(path string, data []byte) error {
 	if err := validateHistoryFilePath(path); err != nil {
 		return err
 	}
+	afterValidateHistoryFilePath()
 
 	dir := filepath.Dir(path)
 	if err := ensureHistoryDir(dir, 0755); err != nil {
@@ -400,7 +698,7 @@ func writeHistoryFile(path string, data []byte) error {
 	}
 	cleanup = false
 	if err := syncHistoryFileDir(dir); err != nil {
-		return fmt.Errorf("failed to sync maintenance history directory: %w", err)
+		return wrapHistoryPersistenceWarning(fmt.Errorf("failed to sync maintenance history directory: %w", err))
 	}
 	return nil
 }

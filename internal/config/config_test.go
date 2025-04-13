@@ -21,6 +21,10 @@ func TestDefault(t *testing.T) {
 		t.Errorf("Default host = %s, want 0.0.0.0", cfg.Server.Host)
 	}
 
+	if cfg.Server.TrustedProxyHops != 1 {
+		t.Errorf("Default trusted proxy hops = %d, want 1", cfg.Server.TrustedProxyHops)
+	}
+
 	if cfg.Storage.Root == "" {
 		t.Error("Default storage.root should not be empty")
 	}
@@ -96,6 +100,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Invalid idle timeout",
 			modify:  func(c *Config) { c.Server.IdleTimeout = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid trusted proxy hops",
+			modify:  func(c *Config) { c.Server.TrustedProxyHops = -1 },
 			wantErr: true,
 		},
 		{
@@ -354,6 +363,27 @@ cooldown_period = "6h"
 	}
 }
 
+func TestLoad_ParsesTrustedProxyHops(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	content := []byte(`
+[server]
+trusted_proxy_hops = 2
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Server.TrustedProxyHops != 2 {
+		t.Fatalf("trusted proxy hops = %d, want 2", cfg.Server.TrustedProxyHops)
+	}
+}
+
 func TestLoad_ExpandsHomeDirectoryInStorageRootAndDerivedPaths(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -502,12 +532,12 @@ func TestConfig_Save_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
 
-	originalSyncManagedDir := syncManagedDir
-	syncManagedDir = func(dir string) error {
+	originalSyncManagedRootDir := syncManagedRootDir
+	syncManagedRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncManagedDir = originalSyncManagedDir
+		syncManagedRootDir = originalSyncManagedRootDir
 	}()
 
 	cfg := Default()
@@ -672,6 +702,114 @@ func TestLoad_RejectsSymlinkParentDirectory(t *testing.T) {
 	}
 }
 
+func TestConfig_Save_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	configDir := filepath.Join(baseDir, "config")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	outsidePath := filepath.Join(outsideDir, "config.toml")
+	if err := os.WriteFile(outsidePath, []byte("keep = 'outside'\n"), 0644); err != nil {
+		t.Fatalf("failed to seed outside config: %v", err)
+	}
+
+	originalHook := afterValidateManagedFilePath
+	var hookErr error
+	afterValidateManagedFilePath = func() {
+		if hookErr != nil {
+			return
+		}
+		backupDir := filepath.Join(baseDir, "config-backup")
+		if err := os.Rename(configDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, configDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateManagedFilePath = originalHook
+	}()
+
+	cfg := Default()
+	cfg.Server.Port = 9090
+	err := cfg.Save(configPath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateManagedFilePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected save to stay bound to the original directory, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(outsidePath)
+	if readErr != nil {
+		t.Fatalf("failed to read outside config: %v", readErr)
+	}
+	if string(data) != "keep = 'outside'\n" {
+		t.Fatalf("expected outside config to remain unchanged, got %q", string(data))
+	}
+
+	loaded, loadErr := Load(filepath.Join(baseDir, "config-backup", "config.toml"))
+	if loadErr != nil {
+		t.Fatalf("failed to load config written through original directory root: %v", loadErr)
+	}
+	if loaded.Server.Port != 9090 {
+		t.Fatalf("expected saved config to remain bound to original directory, got port %d", loaded.Server.Port)
+	}
+}
+
+func TestLoad_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	configDir := filepath.Join(baseDir, "config")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[server]\nport = 9090\n"), 0644); err != nil {
+		t.Fatalf("failed to seed config: %v", err)
+	}
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "config.toml"), []byte("[server]\nport = 8081\n"), 0644); err != nil {
+		t.Fatalf("failed to seed outside config: %v", err)
+	}
+
+	originalHook := afterValidateManagedFilePath
+	var hookErr error
+	afterValidateManagedFilePath = func() {
+		if hookErr != nil {
+			return
+		}
+		backupDir := filepath.Join(baseDir, "config-backup")
+		if err := os.Rename(configDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, configDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateManagedFilePath = originalHook
+	}()
+
+	loaded, err := Load(configPath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateManagedFilePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected load to stay bound to the original directory, got %v", err)
+	}
+	if loaded.Server.Port != 9090 {
+		t.Fatalf("expected config load to ignore the swapped symlink target, got port %d", loaded.Server.Port)
+	}
+}
+
 func TestConfig_EnsureDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -691,6 +829,8 @@ func TestConfig_EnsureDirs(t *testing.T) {
 		filepath.Join(tmpDir, ".mnemonas", "trash"),
 		filepath.Join(tmpDir, ".mnemonas", "thumbnails"),
 		filepath.Join(tmpDir, ".mnemonas", "maintenance"),
+		filepath.Join(tmpDir, ".mnemonas", "activity"),
+		filepath.Join(tmpDir, ".mnemonas", "tmp"),
 	}
 
 	for _, dir := range dirs {
@@ -700,6 +840,49 @@ func TestConfig_EnsureDirs(t *testing.T) {
 		} else if !info.IsDir() {
 			t.Errorf("%s is not a directory", dir)
 		}
+	}
+}
+
+func TestConfig_EnsureDirs_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("failed to create real parent: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("failed to create linked parent: %v", err)
+	}
+
+	cfg := Default()
+	cfg.Storage.Root = filepath.Join(linkedParent, "storage-root")
+
+	err := cfg.EnsureDirs()
+	if !errors.Is(err, errManagedDirectorySymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+}
+
+func TestConfig_EnsureDirs_DoesNotCreateDirectoriesThroughSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("failed to create real parent: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("failed to create linked parent: %v", err)
+	}
+
+	cfg := Default()
+	cfg.Storage.Root = filepath.Join(linkedParent, "storage-root")
+
+	err := cfg.EnsureDirs()
+	if !errors.Is(err, errManagedDirectorySymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(realParent, "storage-root")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("storage root created through symlink parent, stat error = %v", statErr)
 	}
 }
 

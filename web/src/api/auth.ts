@@ -40,35 +40,6 @@ export interface RefreshResponse {
   user: ApiUser
 }
 
-export interface ChangePasswordRequest {
-  old_password: string
-  new_password: string
-}
-
-export interface CreateUserRequest {
-  username: string
-  password: string
-  email?: string
-  role?: string
-}
-
-export interface UserListResponse {
-  users: Array<{
-    id: string
-    username: string
-    email?: string
-    role: string
-    disabled: boolean
-    home_dir: string
-    created_at: string
-    updated_at: string
-    quota_bytes: number
-    used_bytes: number
-    last_login_at?: string
-  }>
-  total: number
-}
-
 interface AuthApiError {
   code?: string
   message: string
@@ -127,6 +98,7 @@ const REFRESH_TOKEN_KEY = 'mnemonas_refresh_token'
 const USER_KEY = 'mnemonas_user'
 export const AUTH_CLEARED_EVENT = 'mnemonas:auth-cleared'
 let refreshPromise: Promise<boolean> | null = null
+let isDownloadSessionReady = true
 
 function getSessionEndedMessage(responseMessage?: string): string {
   return responseMessage || '账户已被禁用，请联系管理员'
@@ -142,27 +114,6 @@ function hasStoredAuthState(): boolean {
 
 function isUserRole(role: unknown): role is User['role'] {
   return role === 'admin' || role === 'user' || role === 'guest'
-}
-
-function isValidAdminListUser(value: unknown): value is UserListResponse['users'][number] {
-  if (!value || typeof value !== 'object') {
-    return false
-  }
-
-  const user = value as Partial<UserListResponse['users'][number]>
-  return (
-    typeof user.id === 'string' &&
-    typeof user.username === 'string' &&
-    isUserRole(user.role) &&
-    typeof user.disabled === 'boolean' &&
-    typeof user.home_dir === 'string' &&
-    typeof user.created_at === 'string' &&
-    typeof user.updated_at === 'string' &&
-    typeof user.quota_bytes === 'number' &&
-    typeof user.used_bytes === 'number' &&
-    (user.email === undefined || typeof user.email === 'string') &&
-    (user.last_login_at === undefined || typeof user.last_login_at === 'string')
-  )
 }
 
 function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined): AuthSessionData {
@@ -291,26 +242,60 @@ export function clearTokens(detail?: AuthClearedDetail): void {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
   localStorage.removeItem(USER_KEY)
+  isDownloadSessionReady = true
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent<AuthClearedDetail>(AUTH_CLEARED_EVENT, { detail }))
   }
 }
 
-async function syncDownloadSession(): Promise<void> {
+function getDownloadSessionSyncMessage(responseMessage?: string): string {
+  return responseMessage || '原始预览和下载会话同步失败，请稍后重试'
+}
+
+async function syncDownloadSession(): Promise<{ ok: boolean; message?: string }> {
   const token = getStoredToken()
-  if (!token) return
+  if (!token) {
+    isDownloadSessionReady = false
+    return { ok: false }
+  }
 
   try {
-    await fetch(`${API_BASE}/auth/download-session`, {
+    const response = await fetch(`${API_BASE}/auth/download-session`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
       },
     })
+
+    if (!response.ok) {
+      let message = getDownloadSessionSyncMessage()
+      try {
+        const body: AuthApiResponse<never> = await response.json()
+        if (body.error?.message) {
+          message = getDownloadSessionSyncMessage(body.error.message)
+        }
+      } catch {
+        // Keep the default warning when the sync failure body is invalid.
+      }
+      isDownloadSessionReady = false
+      return { ok: false, message }
+    }
+
+    isDownloadSessionReady = true
+    return { ok: true }
   } catch {
-    // Ignore download session sync failures; header-based fetch remains available.
+    isDownloadSessionReady = false
+    return { ok: false, message: getDownloadSessionSyncMessage() }
   }
+}
+
+export async function ensureDownloadSession(): Promise<DownloadSessionResult> {
+  if (!getStoredToken()) {
+    return { ok: true }
+  }
+
+  return syncDownloadSession()
 }
 
 // Auth header helper
@@ -370,7 +355,8 @@ export async function authFetch(url: string, options: RequestInit = {}, retryCou
 }
 
 export async function refreshAuthSession(): Promise<boolean> {
-  return tryRefreshToken()
+  const refreshed = await tryRefreshToken()
+  return refreshed && isDownloadSessionReady
 }
 
 // Try to refresh the token
@@ -440,38 +426,55 @@ export async function login(username: string, password: string): Promise<LoginAc
   }
 
   storeTokens(data.accessToken, data.refreshToken, data.user)
-  await syncDownloadSession()
+  const downloadSession = await syncDownloadSession()
+  const action = getAuthActionResult(response, body)
+
   return {
     user: data.user,
-    ...getAuthActionResult(response, body),
+    warning: action.warning || !downloadSession.ok,
+    message: action.message ?? downloadSession.message,
   }
 }
 
 // Logout
 export async function logout(): Promise<AuthActionResult> {
   const token = getStoredToken()
-  let result: AuthActionResult = { warning: false, message: undefined }
-
-  if (token) {
-    try {
-      const response = await fetch(`${API_BASE}/auth/logout`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-      })
-
-      if (response.ok) {
-        let body: AuthApiResponse<null> | undefined
-        try {
-          body = await response.json()
-        } catch {
-          body = undefined
-        }
-        result = getAuthActionResult(response, body)
-      }
-    } catch {
-      // Ignore logout errors
-    }
+  if (!token) {
+    clearTokens()
+    return { warning: false, message: undefined }
   }
+
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}/auth/logout`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    })
+  } catch {
+    throw new AuthError('退出登录失败', 0)
+  }
+
+  if (!response.ok) {
+    let message = '退出登录失败'
+    let code: string | undefined
+    try {
+      const body: AuthApiResponse<never> = await response.json()
+      if (body.error?.message) message = body.error.message
+      if (body.error?.code) code = body.error.code
+    } catch {
+      // Keep the generic logout error when the response body is invalid.
+    }
+    throw new AuthError(message, response.status, code)
+  }
+
+  let body: AuthApiResponse<null> | undefined
+  try {
+    body = await response.json()
+  } catch {
+    body = undefined
+  }
+
+  const result = getAuthActionResult(response, body)
   clearTokens()
   return result
 }
@@ -533,134 +536,3 @@ export async function getCurrentUser(): Promise<User | null> {
   return user
 }
 
-// Change password
-export async function changePassword(oldPassword: string, newPassword: string): Promise<void> {
-  const response = await authFetch(`${API_BASE}/auth/password`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      old_password: oldPassword,
-      new_password: newPassword,
-    }),
-  })
-  
-  if (!response.ok) {
-    let message = '修改密码失败'
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
-    } catch { /* ignore */ }
-    throw new AuthError(message, response.status)
-  }
-
-  try {
-    const body: AuthApiResponse<null> = await response.json()
-    readAuthSuccessData(body)
-  } catch {
-    throw new AuthError('修改密码响应无效', response.status)
-  }
-}
-
-// === Admin APIs ===
-
-// List users (admin only)
-export async function listUsers(): Promise<UserListResponse['users']> {
-  const response = await authFetch(`${API_BASE}/admin/users`)
-  
-  if (!response.ok) {
-    let message = '获取用户列表失败'
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
-    } catch { /* ignore */ }
-    throw new AuthError(message, response.status)
-  }
-  
-  const body: AuthApiResponse<UserListResponse> = await response.json()
-  let data: UserListResponse
-  try {
-    data = readAuthSuccessData(body)
-  } catch {
-    throw new AuthError('获取用户列表响应无效', response.status)
-  }
-
-  if (!Array.isArray(data.users) || data.users.some((user) => !isValidAdminListUser(user))) {
-    throw new AuthError('获取用户列表响应无效', response.status)
-  }
-
-  return data.users
-}
-
-// Create user (admin only)
-export async function createUser(req: CreateUserRequest): Promise<User> {
-  const response = await authFetch(`${API_BASE}/admin/users`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
-  })
-  
-  if (!response.ok) {
-    let message = '创建用户失败'
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
-    } catch { /* ignore */ }
-    throw new AuthError(message, response.status)
-  }
-  
-  try {
-    const body: AuthApiResponse<{ user: ApiUser }> = await response.json()
-    const data = readAuthSuccessData(body)
-    return normalizeUser(data.user)
-  } catch {
-    throw new AuthError('创建用户响应无效', response.status)
-  }
-}
-
-// Delete user (admin only)
-export async function deleteUser(userId: string): Promise<void> {
-  const response = await authFetch(`${API_BASE}/admin/users/${userId}`, {
-    method: 'DELETE',
-  })
-  
-  if (!response.ok) {
-    let message = '删除用户失败'
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
-    } catch { /* ignore */ }
-    throw new AuthError(message, response.status)
-  }
-
-  try {
-    const body: AuthApiResponse<null> = await response.json()
-    readAuthSuccessData(body)
-  } catch {
-    throw new AuthError('删除用户响应无效', response.status)
-  }
-}
-
-// Reset user password (admin only)
-export async function resetUserPassword(userId: string, newPassword: string): Promise<void> {
-  const response = await authFetch(`${API_BASE}/admin/users/${userId}/reset-password`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ new_password: newPassword }),
-  })
-  
-  if (!response.ok) {
-    let message = '重置密码失败'
-    try {
-      const body: AuthApiResponse<never> = await response.json()
-      if (body.error?.message) message = body.error.message
-    } catch { /* ignore */ }
-    throw new AuthError(message, response.status)
-  }
-
-  try {
-    const body: AuthApiResponse<null> = await response.json()
-    readAuthSuccessData(body)
-  } catch {
-    throw new AuthError('重置密码响应无效', response.status)
-  }
-}

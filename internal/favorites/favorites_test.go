@@ -12,16 +12,28 @@ import (
 	"time"
 )
 
+func writeFavoritesFixture(t *testing.T, path string, favorites []Favorite) {
+	t.Helper()
+
+	data, err := json.Marshal(favorites)
+	if err != nil {
+		t.Fatalf("failed to marshal favorites fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("failed to write favorites fixture: %v", err)
+	}
+}
+
 func TestWriteFavoritesStoreFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
 
-	originalSyncFavoritesStoreDir := syncFavoritesStoreDir
-	syncFavoritesStoreDir = func(dir string) error {
+	originalSyncFavoritesStoreRootDir := syncFavoritesStoreRootDir
+	syncFavoritesStoreRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncFavoritesStoreDir = originalSyncFavoritesStoreDir
+		syncFavoritesStoreRootDir = originalSyncFavoritesStoreRootDir
 	}()
 
 	err := writeFavoritesStoreFile(storePath, []byte("[]"))
@@ -191,7 +203,8 @@ func TestNewStore_ReturnsErrorWhenCorruptFavoritesBackupSyncFails(t *testing.T) 
 
 	originalSyncFavoritesStoreDir := syncFavoritesStoreDir
 	syncFailed := false
-	syncFavoritesStoreDir = func(dir string) error {
+	originalSyncFavoritesStoreRootDir := syncFavoritesStoreRootDir
+	syncFavoritesStoreRootDir = func(root *os.Root) error {
 		if !syncFailed {
 			syncFailed = true
 			return errors.New("directory fsync failed")
@@ -200,6 +213,7 @@ func TestNewStore_ReturnsErrorWhenCorruptFavoritesBackupSyncFails(t *testing.T) 
 	}
 	defer func() {
 		syncFavoritesStoreDir = originalSyncFavoritesStoreDir
+		syncFavoritesStoreRootDir = originalSyncFavoritesStoreRootDir
 	}()
 
 	if _, err := NewStore(storePath); err == nil {
@@ -501,6 +515,200 @@ func TestStore_RejectsSymlinkParentDirectoryOnLoad(t *testing.T) {
 	}
 }
 
+func TestNewStore_Load_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	favoritesDir := filepath.Join(baseDir, "favorites")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(favoritesDir, 0755); err != nil {
+		t.Fatalf("failed to create favorites dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	writeFavoritesFixture(t, filepath.Join(favoritesDir, "favorites.json"), []Favorite{{
+		Path:      "/docs/original.txt",
+		UserID:    "user1",
+		CreatedAt: time.Now(),
+		Note:      "original",
+	}})
+	writeFavoritesFixture(t, filepath.Join(outsideDir, "favorites.json"), []Favorite{{
+		Path:      "/docs/outside.txt",
+		UserID:    "user1",
+		CreatedAt: time.Now(),
+		Note:      "outside",
+	}})
+
+	originalHook := afterValidateFavoritesStorePath
+	var hookErr error
+	swapped := false
+	afterValidateFavoritesStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "favorites-backup")
+		if err := os.Rename(favoritesDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, favoritesDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateFavoritesStorePath = originalHook
+	}()
+
+	store, err := NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if hookErr != nil {
+		t.Fatalf("afterValidateFavoritesStorePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected load to stay bound to the original directory, got %v", err)
+	}
+	if !store.IsFavorite("user1", "/docs/original.txt") || store.Count("user1") != 1 {
+		favorites := store.List("user1")
+		t.Fatalf("expected original favorites store to be loaded, got %+v", favorites)
+	}
+}
+
+func TestStore_Add_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	favoritesDir := filepath.Join(baseDir, "favorites")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(favoritesDir, 0755); err != nil {
+		t.Fatalf("failed to create favorites dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	writeFavoritesFixture(t, filepath.Join(outsideDir, "favorites.json"), []Favorite{})
+
+	store, err := NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("failed to create favorites store: %v", err)
+	}
+
+	originalHook := afterValidateFavoritesStorePath
+	var hookErr error
+	swapped := false
+	afterValidateFavoritesStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "favorites-backup")
+		if err := os.Rename(favoritesDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, favoritesDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateFavoritesStorePath = originalHook
+	}()
+
+	fav, err := store.Add("user1", "/docs/file.txt", "note")
+	if hookErr != nil {
+		t.Fatalf("afterValidateFavoritesStorePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected add to stay bound to the original directory, got %v", err)
+	}
+	if fav == nil {
+		t.Fatal("expected successful add to return a favorite")
+	}
+
+	outsideStore, err := NewStore(filepath.Join(outsideDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("failed to reload outside favorites store: %v", err)
+	}
+	if outsideStore.Count("user1") != 0 {
+		t.Fatalf("expected outside favorites store to remain unchanged, got %+v", outsideStore.List("user1"))
+	}
+
+	backupStore, err := NewStore(filepath.Join(baseDir, "favorites-backup", "favorites.json"))
+	if err != nil {
+		t.Fatalf("failed to reload original favorites directory inode: %v", err)
+	}
+	if !backupStore.IsFavorite("user1", "/docs/file.txt") {
+		t.Fatalf("expected added favorite to persist in original directory inode, got %+v", backupStore.List("user1"))
+	}
+}
+
+func TestNewStore_RecoverCorruptFavorites_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	favoritesDir := filepath.Join(baseDir, "favorites")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(favoritesDir, 0755); err != nil {
+		t.Fatalf("failed to create favorites dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(favoritesDir, "favorites.json"), []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("failed to seed corrupt favorites file: %v", err)
+	}
+	writeFavoritesFixture(t, filepath.Join(outsideDir, "favorites.json"), []Favorite{})
+
+	originalHook := afterValidateFavoritesStorePath
+	var hookErr error
+	swapped := false
+	afterValidateFavoritesStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "favorites-backup")
+		if err := os.Rename(favoritesDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, favoritesDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateFavoritesStorePath = originalHook
+	}()
+
+	store, err := NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if hookErr != nil {
+		t.Fatalf("afterValidateFavoritesStorePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected corrupt recovery to stay bound to the original directory, got %v", err)
+	}
+	if store.Count("user1") != 0 {
+		t.Fatalf("expected recovered favorites store to be empty, got %+v", store.List("user1"))
+	}
+
+	entries, err := os.ReadDir(filepath.Join(baseDir, "favorites-backup"))
+	if err != nil {
+		t.Fatalf("failed to read backup favorites directory: %v", err)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "favorites.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt favorites backup to remain in original directory inode")
+	}
+
+	outsideStore, err := NewStore(filepath.Join(outsideDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("failed to reload outside favorites store: %v", err)
+	}
+	if outsideStore.Count("user1") != 0 {
+		t.Fatalf("expected outside favorites store to remain unchanged, got %+v", outsideStore.List("user1"))
+	}
+}
+
 func TestStore_ReturnedFavoritesAreDetachedCopies(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
@@ -560,7 +768,7 @@ func TestStore_RollsBackFailedMutations(t *testing.T) {
 	}
 }
 
-func TestStore_AddRejectsSymlinkPath(t *testing.T) {
+func TestStore_Add_DoesNotFollowSymlinkPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
 
@@ -580,14 +788,32 @@ func TestStore_AddRejectsSymlinkPath(t *testing.T) {
 	store.filePath = symlinkPath
 
 	fav, err := store.Add("user1", "/docs/file.txt", "note")
-	if !errors.Is(err, errFavoritesStoreSymlink) {
-		t.Fatalf("expected symlink error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected add to stay within the original directory root, got %v", err)
 	}
-	if fav != nil {
-		t.Fatal("expected failed add to return nil favorite")
+	if fav == nil {
+		t.Fatal("expected successful add to return a favorite")
 	}
-	if store.Count("user1") != 0 {
-		t.Fatalf("expected failed add to roll back store state, got %d favorites", store.Count("user1"))
+	targetBytes, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read symlink target: %v", err)
+	}
+	if string(targetBytes) != "[]" {
+		t.Fatalf("expected symlink target to remain unchanged, got %q", string(targetBytes))
+	}
+	info, err := os.Lstat(symlinkPath)
+	if err != nil {
+		t.Fatalf("failed to stat replaced symlink path: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("expected symlink path to be replaced with a regular file inside the original root")
+	}
+	reloaded, err := NewStore(symlinkPath)
+	if err != nil {
+		t.Fatalf("failed to reload replaced favorites store path: %v", err)
+	}
+	if !reloaded.IsFavorite("user1", "/docs/file.txt") {
+		t.Fatalf("expected added favorite to persist at replaced symlink path, got %+v", reloaded.List("user1"))
 	}
 }
 

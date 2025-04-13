@@ -682,6 +682,7 @@ func TestNewUserStore_ReturnsErrorWhenCorruptUsersBackupSyncFails(t *testing.T) 
 	}
 
 	originalSyncAuthFileDir := syncAuthFileDir
+	originalSyncAuthRootDir := syncAuthRootDir
 	syncFailed := false
 	syncAuthFileDir = func(dir string) error {
 		if !syncFailed {
@@ -690,8 +691,16 @@ func TestNewUserStore_ReturnsErrorWhenCorruptUsersBackupSyncFails(t *testing.T) 
 		}
 		return nil
 	}
+	syncAuthRootDir = func(root *os.Root) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("directory fsync failed")
+		}
+		return nil
+	}
 	defer func() {
 		syncAuthFileDir = originalSyncAuthFileDir
+		syncAuthRootDir = originalSyncAuthRootDir
 	}()
 
 	if _, _, err := NewUserStore(usersFile); err == nil {

@@ -19,7 +19,7 @@ const mockGetWebDAVCredentials = vi.mocked(getWebDAVCredentials)
 const { defaultSettingsResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
     data: {
-      server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
+      server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, read_timeout_seconds: 60, write_timeout_seconds: 300 },
       storage: { root: '/root/.mnemonas' },
     trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
@@ -676,6 +676,50 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('renders trusted proxy hops input', async () => {
+    render(<SettingsPage />)
+    await waitFor(() => {
+    expect(screen.getByLabelText('受信代理层数')).toHaveValue(1)
+    })
+    })
+
+    it('allows editing trusted proxy hops and saves it', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    const input = await screen.findByLabelText('受信代理层数')
+    await user.clear(input)
+    await user.type(input, '2')
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+    expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      server: expect.objectContaining({
+      trusted_proxy_hops: 2,
+      }),
+    }))
+    })
+    })
+
+    it('rejects negative trusted proxy hops before saving', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    const input = await screen.findByLabelText('受信代理层数')
+    await user.clear(input)
+    await user.type(input, '-1')
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '受信代理层数格式无效',
+      description: '受信代理层数必须是 0 或正整数',
+      color: 'danger',
+    })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
     it('renders server host input', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
@@ -720,7 +764,7 @@ describe('SettingsPage', () => {
       mockGetSettings
         .mockResolvedValueOnce({
           data: {
-            server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/root/.mnemonas' },
             trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
@@ -735,7 +779,7 @@ describe('SettingsPage', () => {
         })
         .mockResolvedValue({
           data: {
-            server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', read_timeout_seconds: 60, write_timeout_seconds: 300 },
+            server: { host: '10.0.0.1', port: 9090, read_timeout: '45s', write_timeout: '90s', idle_timeout: '5m', trusted_proxy_hops: 3, read_timeout_seconds: 60, write_timeout_seconds: 300 },
             storage: { root: '/srv/mnemonas' },
             trash: { enabled: false, retention_days: 14, max_size: 2147483648 },
             retention: { max_versions: 200, max_age: '720h', min_free_space: 2147483648, gc_interval: '12h' },

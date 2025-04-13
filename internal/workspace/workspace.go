@@ -2,6 +2,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,13 +12,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 )
 
-var readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
-	return entry.Info()
+var readDirEntryInfo = func(root *os.Root, name string, entry os.DirEntry) (os.FileInfo, error) {
+	return root.Lstat(name)
 }
 
 var copyWorkspaceData = copyWithContext
@@ -135,14 +137,105 @@ func syncCreatedWorkspaceDirs(createdDirs []string) error {
 	return nil
 }
 
+func normalizeWorkspaceRootPath(root string) (string, error) {
+	cleaned := filepath.Clean(root)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+
+	absRoot, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", err
+	}
+	return absRoot, nil
+}
+
+func validateWorkspaceRootComponent(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrNotDir
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errWorkspaceRootSymlink
+	}
+	if !info.IsDir() {
+		return ErrNotDir
+	}
+	return nil
+}
+
+func validateWorkspaceRootPath(root string) error {
+	current := filepath.VolumeName(root) + string(filepath.Separator)
+	trimmed := strings.TrimPrefix(root, current)
+	if trimmed == "" {
+		return validateWorkspaceRootComponent(root)
+	}
+
+	if err := validateWorkspaceRootComponent(current); err != nil {
+		return err
+	}
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		if err := validateWorkspaceRootComponent(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureWorkspaceRoot(root string) (string, *os.Root, error) {
+	normalizedRoot, err := normalizeWorkspaceRootPath(root)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := validateWorkspaceRootPath(normalizedRoot); err != nil {
+		return "", nil, err
+	}
+
+	createdDirs, err := collectMissingWorkspaceDirs(normalizedRoot)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.MkdirAll(normalizedRoot, 0755); err != nil {
+		return "", nil, err
+	}
+	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
+		return "", nil, fmt.Errorf("failed to sync directory: %w", err)
+	}
+	if err := validateWorkspaceRootPath(normalizedRoot); err != nil {
+		return "", nil, err
+	}
+
+	rootHandle, err := os.OpenRoot(normalizedRoot)
+	if err != nil {
+		return "", nil, err
+	}
+	return normalizedRoot, rootHandle, nil
+}
+
 // Common errors
 var (
 	ErrNotFound             = errors.New("not found")
 	ErrAlreadyExists        = errors.New("already exists")
 	ErrNotDir               = errors.New("not a directory")
 	ErrIsDir                = errors.New("is a directory")
+	ErrFileTooLarge         = errors.New("file too large")
 	errWorkspaceRootSymlink = errors.New("workspace root must not be a symlink")
 )
+
+type WriteFileOptions struct {
+	MaxBytes   int64
+	SyncParent func(string) error
+}
 
 // VisibleMutationWarningError reports that a workspace mutation is already
 // externally visible, but the final directory fsync did not complete.
@@ -191,35 +284,7 @@ type Workspace struct {
 
 // New creates a new Workspace with the given root directory
 func New(root string) (*Workspace, error) {
-	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return nil, errWorkspaceRootSymlink
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-
-	// Ensure root exists
-	createdDirs, err := collectMissingWorkspaceDirs(root)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(root, 0755); err != nil {
-		return nil, err
-	}
-	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
-		return nil, fmt.Errorf("failed to sync directory: %w", err)
-	}
-
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return nil, err
-	}
-	if info, err := os.Lstat(absRoot); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return nil, errWorkspaceRootSymlink
-	} else if err != nil {
-		return nil, err
-	}
-
-	rootHandle, err := os.OpenRoot(absRoot)
+	absRoot, rootHandle, err := ensureWorkspaceRoot(root)
 	if err != nil {
 		return nil, err
 	}
@@ -281,6 +346,13 @@ func workspaceRootRelativeName(name string) string {
 
 func workspaceParentRelativeName(name string) string {
 	return workspaceRootRelativeName(path.Dir(CleanPath(name)))
+}
+
+func childWorkspaceRootName(parent, child string) string {
+	if parent == "." {
+		return child
+	}
+	return path.Join(parent, child)
 }
 
 func isWorkspaceRootEscapeError(err error) bool {
@@ -390,6 +462,16 @@ func validateWorkspaceName(name string) error {
 	return nil
 }
 
+func validateWorkspaceMutationName(name string) error {
+	if err := validateWorkspaceName(name); err != nil {
+		return err
+	}
+	if CleanPath(name) == "/" {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Stat returns file information
 func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
 	if err := validateWorkspaceName(name); err != nil {
@@ -457,9 +539,10 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		info, err := readDirEntryInfo(e)
+		childRootName := childWorkspaceRootName(workspaceRootRelativeName(name), e.Name())
+		info, err := readDirEntryInfo(w.rootHandle, childRootName, e)
 		if err != nil {
-			return nil, err
+			return nil, mapWorkspaceRootPathError(err)
 		}
 
 		childPath := path.Join(CleanPath(name), e.Name())
@@ -538,18 +621,23 @@ func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error) {
 
 // WriteFile writes data to a file, creating parent directories as needed
 func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) error {
+	_, err := w.WriteFileFromReaderWithOptions(ctx, name, bytes.NewReader(data), WriteFileOptions{})
+	return err
+}
+
+func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name string, r io.Reader, options WriteFileOptions) (int64, error) {
 	if err := validateWorkspaceName(name); err != nil {
-		return err
+		return 0, err
 	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
-		return err
+		return 0, err
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := afterValidateWorkspacePaths(); err != nil {
-		return err
+		return 0, err
 	}
 
 	rootName := workspaceRootRelativeName(name)
@@ -557,105 +645,62 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 
 	// Ensure parent directory exists
 	if err := w.rootHandle.MkdirAll(parentName, 0755); err != nil {
-		return w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
+		return 0, w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
 	}
 
 	// Atomic write: write to temp file then rename
 	tmpFile, tmpPath, err := createWorkspaceTempFile(w.rootHandle, parentName)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := tmpFile.Chmod(0644); err != nil {
 		_ = tmpFile.Close()
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
+		return 0, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
 
-	_, writeErr := tmpFile.Write(data)
+	copyReader := r
+	if options.MaxBytes > 0 {
+		copyReader = &io.LimitedReader{R: r, N: options.MaxBytes + 1}
+	}
+
+	written, writeErr := copyWorkspaceData(ctx, tmpFile, copyReader)
 	syncErr := tmpFile.Sync()
 	closeErr := tmpFile.Close()
 
 	if writeErr != nil {
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, writeErr)
+		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, writeErr)
 	}
 	if syncErr != nil {
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr)
+		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr)
 	}
 	if closeErr != nil {
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
+		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
+	}
+	if options.MaxBytes > 0 && written > options.MaxBytes {
+		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, ErrFileTooLarge)
 	}
 
 	if err := w.rootHandle.Rename(tmpPath, rootName); err != nil {
 		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
-			return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
+			return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
 		}
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
+		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
-	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
-		return fmt.Errorf("sync parent directory: %w", err)
+	syncParent := options.SyncParent
+	if syncParent == nil {
+		syncParent = syncWorkspaceDir
+	}
+	if err := syncParent(filepath.Dir(fullPath)); err != nil {
+		return written, WrapVisibleMutationWarning(fmt.Errorf("sync parent directory: %w", err))
 	}
 
-	return nil
+	return written, nil
 }
 
 // WriteFileFromReader writes data from a reader to a file
 func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.Reader) error {
-	if err := validateWorkspaceName(name); err != nil {
-		return err
-	}
-	fullPath := w.FullPath(name)
-	if err := w.validatePath(fullPath); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := afterValidateWorkspacePaths(); err != nil {
-		return err
-	}
-
-	rootName := workspaceRootRelativeName(name)
-	parentName := workspaceParentRelativeName(name)
-
-	// Ensure parent directory exists
-	if err := w.rootHandle.MkdirAll(parentName, 0755); err != nil {
-		return w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
-	}
-
-	// Atomic write: write to temp file then rename
-	tmpFile, tmpPath, err := createWorkspaceTempFile(w.rootHandle, parentName)
-	if err != nil {
-		return err
-	}
-	if err := tmpFile.Chmod(0644); err != nil {
-		_ = tmpFile.Close()
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
-	}
-
-	_, copyErr := copyWorkspaceData(ctx, tmpFile, r)
-	syncErr := tmpFile.Sync()
-	closeErr := tmpFile.Close()
-
-	if copyErr != nil {
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, copyErr)
-	}
-	if syncErr != nil {
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr)
-	}
-	if closeErr != nil {
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
-	}
-
-	if err := w.rootHandle.Rename(tmpPath, rootName); err != nil {
-		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
-			return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
-		}
-		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
-	}
-	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
-		return fmt.Errorf("sync parent directory: %w", err)
-	}
-
-	return nil
+	_, err := w.WriteFileFromReaderWithOptions(ctx, name, r, WriteFileOptions{})
+	return err
 }
 
 // Mkdir creates a directory
@@ -705,7 +750,7 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 
 // Delete removes a file or empty directory
 func (w *Workspace) Delete(ctx context.Context, name string) error {
-	if err := validateWorkspaceName(name); err != nil {
+	if err := validateWorkspaceMutationName(name); err != nil {
 		return err
 	}
 	fullPath := w.FullPath(name)
@@ -744,7 +789,7 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 
 // DeleteAll removes a file or directory recursively
 func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
-	if err := validateWorkspaceName(name); err != nil {
+	if err := validateWorkspaceMutationName(name); err != nil {
 		return err
 	}
 	fullPath := w.FullPath(name)
@@ -773,10 +818,10 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 
 // Rename moves or renames a file or directory
 func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
-	if err := validateWorkspaceName(oldName); err != nil {
+	if err := validateWorkspaceMutationName(oldName); err != nil {
 		return err
 	}
-	if err := validateWorkspaceName(newName); err != nil {
+	if err := validateWorkspaceMutationName(newName); err != nil {
 		return err
 	}
 	oldPath := w.FullPath(oldName)
@@ -838,10 +883,10 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 
 // Copy copies a file
 func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
-	if err := validateWorkspaceName(srcName); err != nil {
+	if err := validateWorkspaceMutationName(srcName); err != nil {
 		return err
 	}
-	if err := validateWorkspaceName(dstName); err != nil {
+	if err := validateWorkspaceMutationName(dstName); err != nil {
 		return err
 	}
 	srcPath := w.FullPath(srcName)
@@ -944,6 +989,62 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 // WalkFunc is the type of function called by Walk
 type WalkFunc func(path string, info *FileInfo) error
 
+type workspaceWalkInternalFunc func(rootName, cleanPath string, info os.FileInfo) error
+
+func (w *Workspace) walkWithRootHandle(ctx context.Context, rootName, cleanPath string, fn workspaceWalkInternalFunc) error {
+	entryInfo, err := w.rootHandle.Lstat(rootName)
+	if err != nil {
+		return mapWorkspaceRootPathError(err)
+	}
+
+	return w.walkWorkspaceEntry(ctx, rootName, cleanPath, entryInfo, fn)
+}
+
+func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath string, info os.FileInfo, fn workspaceWalkInternalFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := fn(rootName, cleanPath, info); err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	dirHandle, err := w.rootHandle.Open(rootName)
+	if err != nil {
+		return mapWorkspaceRootPathError(err)
+	}
+	defer dirHandle.Close()
+
+	entries, err := dirHandle.ReadDir(-1)
+	if err != nil {
+		return mapWorkspaceRootPathError(err)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		childRootName := childWorkspaceRootName(rootName, entry.Name())
+		entryInfo, err := readDirEntryInfo(w.rootHandle, childRootName, entry)
+		if err != nil {
+			return mapWorkspaceRootPathError(err)
+		}
+
+		childCleanPath := path.Join(cleanPath, entry.Name())
+		if err := w.walkWorkspaceEntry(ctx, childRootName, childCleanPath, entryInfo, fn); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // Walk walks the file tree rooted at root, calling fn for each file or directory
 func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 	if err := validateWorkspaceName(root); err != nil {
@@ -957,26 +1058,11 @@ func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return err
+	}
 
-	return filepath.Walk(rootPath, func(absPath string, info os.FileInfo, err error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err != nil {
-			return err
-		}
-
-		// Compute relative path
-		relPath, err := filepath.Rel(w.root, absPath)
-		if err != nil {
-			return err
-		}
-
-		cleanPath := "/" + filepath.ToSlash(relPath)
-		if cleanPath == "/." {
-			cleanPath = rootClean
-		}
-
+	return w.walkWithRootHandle(ctx, workspaceRootRelativeName(root), rootClean, func(_ string, cleanPath string, info os.FileInfo) error {
 		return fn(cleanPath, &FileInfo{
 			Path:    cleanPath,
 			Name:    info.Name(),
@@ -992,29 +1078,35 @@ func (w *Workspace) CleanupStaging(ctx context.Context) (files int, bytes int64,
 	if err := ctx.Err(); err != nil {
 		return 0, 0, err
 	}
-	err = filepath.WalkDir(w.root, func(path string, entry os.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			return walkErr
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return 0, 0, err
+	}
 
-		if entry.IsDir() || !isWorkspaceStagingFile(entry.Name()) {
+	type stagingFile struct {
+		rootName string
+		size     int64
+	}
+	stagingFiles := make([]stagingFile, 0)
+	err = w.walkWithRootHandle(ctx, ".", "/", func(rootName, _ string, info os.FileInfo) error {
+		if info.IsDir() || !isWorkspaceStagingFile(info.Name()) {
 			return nil
 		}
-
-		info, err := readDirEntryInfo(entry)
-		if err != nil {
-			return err
-		}
-		if rmErr := os.Remove(path); rmErr == nil {
-			files++
-			bytes += info.Size()
-		}
-
+		stagingFiles = append(stagingFiles, stagingFile{rootName: rootName, size: info.Size()})
 		return nil
 	})
+	if err != nil {
+		return 0, 0, err
+	}
+
+	for _, stagingFile := range stagingFiles {
+		if err := ctx.Err(); err != nil {
+			return files, bytes, err
+		}
+		if rmErr := w.rootHandle.Remove(stagingFile.rootName); rmErr == nil {
+			files++
+			bytes += stagingFile.size
+		}
+	}
 
 	return files, bytes, err
 }

@@ -33,6 +33,7 @@ import {
   AlertCircle,
   Sparkles
 } from 'lucide-react'
+import { ensureDownloadSession } from '@/api/auth'
 import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type ActionResult, type VersionInfo } from '@/api/files'
 import { useIsAdmin, useUser } from '@/stores/auth'
 import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
@@ -428,8 +429,15 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
     })
   }
 
-  const handlePreview = (version: VersionInfo) => {
+  const handlePreview = async (version: VersionInfo) => {
     if (!selectedPath) return
+
+    const session = await ensureDownloadSession()
+    if (!session.ok) {
+      addToast({ title: session.message ?? '原始预览和下载会话同步失败，请稍后重试', color: 'warning' })
+      return
+    }
+
     const url = buildDownloadUrl(selectedPath, { version: version.hash })
     if (!openUrlInNewTab(url)) {
       addToast({ title: '浏览器拦截了新标签页，请允许弹窗后重试', color: 'warning' })

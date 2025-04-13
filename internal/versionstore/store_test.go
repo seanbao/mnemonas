@@ -124,6 +124,77 @@ func TestNew_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsSymlinkDBDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-db")
+	if err := os.MkdirAll(realDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(realDir) error: %v", err)
+	}
+	linkDir := filepath.Join(tmpDir, "db-link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("Symlink(linkDir) error: %v", err)
+	}
+
+	_, err := New(Config{
+		DBPath:    filepath.Join(linkDir, "test.db"),
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if !errors.Is(err, errVersionStoreSymlink) {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestNew_DoesNotFollowDBDirectorySymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbDir := filepath.Join(tmpDir, "db")
+	if err := os.MkdirAll(dbDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(dbDir) error: %v", err)
+	}
+	dbPath := filepath.Join(dbDir, "test.db")
+
+	outsideDir := t.TempDir()
+	backupDir := dbDir + "-backup"
+	originalHook := afterValidateVersionStorePath
+	afterValidateVersionStorePath = func() {
+		if err := os.Rename(dbDir, backupDir); err != nil {
+			t.Fatalf("Rename(dbDir) error: %v", err)
+		}
+		if err := os.Symlink(outsideDir, dbDir); err != nil {
+			t.Fatalf("Symlink(dbDir) error: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		afterValidateVersionStorePath = originalHook
+		if info, err := os.Lstat(dbDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(dbDir); removeErr != nil {
+				t.Errorf("Remove(dbDir symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupDir); err == nil {
+			if renameErr := os.Rename(backupDir, dbDir); renameErr != nil {
+				t.Errorf("Rename(backupDir) error: %v", renameErr)
+			}
+		}
+	})
+
+	store, err := New(Config{
+		DBPath:    dbPath,
+		Dataplane: dataplane.NewClient("unused"),
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer store.Close()
+
+	anchoredDBPath := filepath.Join(backupDir, "test.db")
+	if _, err := os.Stat(anchoredDBPath); err != nil {
+		t.Fatalf("expected anchored database file, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "test.db")); !os.IsNotExist(err) {
+		t.Fatalf("expected no outside database file, got %v", err)
+	}
+}
+
 func TestEnsureVersionStoreDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
 	tmpDir := t.TempDir()
 	targetDir := filepath.Join(tmpDir, "nested", "db", "store")

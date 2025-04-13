@@ -85,6 +85,9 @@ export type ActionType =
   | 'restore'
   | 'share'
   | 'unshare'
+  | 'favorite'
+  | 'unfavorite'
+  | 'favorite_note_update'
   | 'login'
   | 'logout'
   | 'trash_restore'
@@ -102,6 +105,9 @@ function isActionType(value: unknown): value is ActionType {
     || value === 'restore'
     || value === 'share'
     || value === 'unshare'
+    || value === 'favorite'
+    || value === 'unfavorite'
+    || value === 'favorite_note_update'
     || value === 'login'
     || value === 'logout'
     || value === 'trash_restore'
@@ -153,6 +159,10 @@ export interface ActivityStats {
   today: number
   by_action: Record<ActionType, number>
   by_user: Record<string, number>
+}
+
+export interface ActivityActionResult {
+  message?: string
 }
 
 // List activity entries
@@ -218,16 +228,23 @@ export async function getActivityStats(): Promise<ActivityStats> {
 }
 
 // Clear activity log (admin only)
-export async function clearActivity(): Promise<void> {
+export async function clearActivity(): Promise<ActivityActionResult> {
   const response = await authFetch(`${API_BASE}/activity/`, {
     method: 'DELETE',
   })
   if (!response.ok) {
     await handleResponse(response, '清除活动日志失败')
-    return
   }
 
-  await handleResponse<ApiResponseWrapper<Record<string, never>>>(response, '清除活动日志失败')
+  const result = await handleResponse<ApiResponseWrapper<{ message?: string }>>(response, '清除活动日志失败')
+
+  if (result.data.message !== undefined && typeof result.data.message !== 'string') {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  return {
+    message: result.data.message,
+  }
 }
 
 // Get action label in Chinese
@@ -243,6 +260,9 @@ export function getActionLabel(action: ActionType): string {
     restore: '恢复版本',
     share: '创建分享',
     unshare: '取消分享',
+    favorite: '添加收藏',
+    unfavorite: '取消收藏',
+    favorite_note_update: '更新收藏备注',
     login: '登录',
     logout: '登出',
     trash_restore: '从回收站恢复',
@@ -265,6 +285,9 @@ export function getActionColor(action: ActionType): 'default' | 'primary' | 'suc
     restore: 'success',
     share: 'primary',
     unshare: 'warning',
+    favorite: 'primary',
+    unfavorite: 'warning',
+    favorite_note_update: 'primary',
     login: 'success',
     logout: 'default',
     trash_restore: 'success',

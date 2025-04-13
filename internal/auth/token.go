@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,13 +23,26 @@ func init() {
 
 var tokenRandomRead = rand.Read
 var afterRevokeTokenCleanup = func() {}
+var persistTokenRevocations = func(tm *TokenManager) error { return tm.persistRevocationsLocked() }
+var errTokenRevocationFileSymlink = errors.New("token revocation file path must not be a symlink")
+
+type tokenRevocationState struct {
+	RevokedTokens map[string]time.Time `json:"revoked_tokens"`
+	UserRevokedAt map[string]time.Time `json:"user_revoked_at"`
+}
+
+type revokedTokenCleanupSnapshot struct {
+	revokedTokens map[string]time.Time
+	userRevokedAt map[string]time.Time
+}
 
 // TokenManager handles JWT token generation and validation
 type TokenManager struct {
-	secretKey     []byte
-	accessExpiry  time.Duration
-	refreshExpiry time.Duration
-	issuer        string
+	secretKey           []byte
+	accessExpiry        time.Duration
+	refreshExpiry       time.Duration
+	issuer              string
+	revocationStorePath string
 
 	// Revoked tokens (for logout)
 	mu            sync.RWMutex
@@ -71,6 +86,116 @@ func NewTokenManager(secretKey string, accessExpiry, refreshExpiry time.Duration
 		issuer:        "mnemonas",
 		revokedTokens: make(map[string]time.Time),
 		userRevokedAt: make(map[string]time.Time),
+	}
+}
+
+// EnablePersistence configures a file-backed revocation store so token
+// revocations survive process restarts.
+func (tm *TokenManager) EnablePersistence(filePath string) error {
+	if filePath == "" {
+		return nil
+	}
+
+	normalizedPath, err := ensureAuthDirRoot(filePath, errTokenRevocationFileSymlink, "token revocations")
+	if err != nil {
+		return err
+	}
+
+	state, err := loadTokenRevocationState(normalizedPath)
+	if err != nil {
+		return err
+	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	tm.revocationStorePath = normalizedPath
+	for tokenID, expiry := range state.RevokedTokens {
+		if currentExpiry, ok := tm.revokedTokens[tokenID]; !ok || expiry.After(currentExpiry) {
+			tm.revokedTokens[tokenID] = expiry
+		}
+	}
+	for userID, revokedAt := range state.UserRevokedAt {
+		if currentRevokedAt, ok := tm.userRevokedAt[userID]; !ok || revokedAt.After(currentRevokedAt) {
+			tm.userRevokedAt[userID] = revokedAt
+		}
+	}
+	tm.cleanupRevokedTokensLocked(time.Now())
+
+	return nil
+}
+
+func loadTokenRevocationState(filePath string) (*tokenRevocationState, error) {
+	state := &tokenRevocationState{
+		RevokedTokens: make(map[string]time.Time),
+		UserRevokedAt: make(map[string]time.Time),
+	}
+
+	data, err := readRegisteredAuthFile(filePath, errTokenRevocationFileSymlink)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return state, nil
+		}
+		return nil, fmt.Errorf("failed to read token revocation file: %w", err)
+	}
+	if len(data) == 0 {
+		return state, nil
+	}
+	if err := json.Unmarshal(data, state); err != nil {
+		return nil, fmt.Errorf("failed to parse token revocation file: %w", err)
+	}
+	if state.RevokedTokens == nil {
+		state.RevokedTokens = make(map[string]time.Time)
+	}
+	if state.UserRevokedAt == nil {
+		state.UserRevokedAt = make(map[string]time.Time)
+	}
+
+	return state, nil
+}
+
+func (tm *TokenManager) persistRevocationsLocked() error {
+	if tm.revocationStorePath == "" {
+		return nil
+	}
+
+	state := tokenRevocationState{
+		RevokedTokens: make(map[string]time.Time, len(tm.revokedTokens)),
+		UserRevokedAt: make(map[string]time.Time, len(tm.userRevokedAt)),
+	}
+	for tokenID, expiry := range tm.revokedTokens {
+		state.RevokedTokens[tokenID] = expiry
+	}
+	for userID, revokedAt := range tm.userRevokedAt {
+		state.UserRevokedAt[userID] = revokedAt
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to marshal token revocations: %w", err)
+	}
+
+	return writeRegisteredAuthFileAtomically(tm.revocationStorePath, data, errTokenRevocationFileSymlink, ".token-revocations-*.tmp", "token revocations")
+}
+
+func (tm *TokenManager) restoreRevokedTokenCleanupLocked(snapshot *revokedTokenCleanupSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	for tokenID, expiry := range snapshot.revokedTokens {
+		tm.revokedTokens[tokenID] = expiry
+	}
+	for userID, revokedAt := range snapshot.userRevokedAt {
+		tm.userRevokedAt[userID] = revokedAt
+	}
+}
+
+func (tm *TokenManager) persistCleanupRevocationsLocked(snapshot *revokedTokenCleanupSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	if err := persistTokenRevocations(tm); err != nil && !isAuthPersistenceWarning(err) {
+		tm.restoreRevokedTokenCleanupLocked(snapshot)
 	}
 }
 
@@ -225,26 +350,52 @@ func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error)
 }
 
 // RevokeToken revokes a token by ID
-func (tm *TokenManager) RevokeToken(tokenID string) {
+func (tm *TokenManager) RevokeToken(tokenID string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
 	now := time.Now()
-	tm.cleanupRevokedTokensLocked(now)
+	previousExpiry, hadPrevious := tm.revokedTokens[tokenID]
+	cleanupSnapshot := tm.cleanupRevokedTokensLocked(now)
 	afterRevokeTokenCleanup()
 
 	// Store with expiry time for cleanup
 	tm.revokedTokens[tokenID] = now.Add(tm.refreshExpiry)
+	if err := persistTokenRevocations(tm); err != nil {
+		if !isAuthPersistenceWarning(err) {
+			if hadPrevious {
+				tm.revokedTokens[tokenID] = previousExpiry
+			} else {
+				delete(tm.revokedTokens, tokenID)
+			}
+			tm.restoreRevokedTokenCleanupLocked(cleanupSnapshot)
+		}
+		return err
+	}
+	return nil
 }
 
 // RevokeByUser revokes all tokens for a user (used when password changed)
-func (tm *TokenManager) RevokeByUser(userID string) {
+func (tm *TokenManager) RevokeByUser(userID string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
 	now := time.Now()
-	tm.cleanupRevokedTokensLocked(now)
+	previousRevokedAt, hadPrevious := tm.userRevokedAt[userID]
+	cleanupSnapshot := tm.cleanupRevokedTokensLocked(now)
 	tm.userRevokedAt[userID] = jwtTimestamp(now)
+	if err := persistTokenRevocations(tm); err != nil {
+		if !isAuthPersistenceWarning(err) {
+			if hadPrevious {
+				tm.userRevokedAt[userID] = previousRevokedAt
+			} else {
+				delete(tm.userRevokedAt, userID)
+			}
+			tm.restoreRevokedTokenCleanupLocked(cleanupSnapshot)
+		}
+		return err
+	}
+	return nil
 }
 
 // isRevoked checks if a token is revoked
@@ -257,10 +408,15 @@ func (tm *TokenManager) isRevoked(tokenID string) bool {
 		return false
 	}
 
-	if time.Now().After(expiry) {
+	now := time.Now()
+	if now.After(expiry) {
 		tm.mu.Lock()
-		if currentExpiry, ok := tm.revokedTokens[tokenID]; ok && time.Now().After(currentExpiry) {
+		if currentExpiry, ok := tm.revokedTokens[tokenID]; ok && now.After(currentExpiry) {
+			cleanupSnapshot := &revokedTokenCleanupSnapshot{
+				revokedTokens: map[string]time.Time{tokenID: currentExpiry},
+			}
 			delete(tm.revokedTokens, tokenID)
+			tm.persistCleanupRevocationsLocked(cleanupSnapshot)
 		}
 		tm.mu.Unlock()
 		return false
@@ -273,21 +429,33 @@ func (tm *TokenManager) isRevoked(tokenID string) bool {
 func (tm *TokenManager) CleanupRevokedTokens() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	tm.cleanupRevokedTokensLocked(time.Now())
+	tm.persistCleanupRevocationsLocked(tm.cleanupRevokedTokensLocked(time.Now()))
 }
 
-func (tm *TokenManager) cleanupRevokedTokensLocked(now time.Time) {
+func (tm *TokenManager) cleanupRevokedTokensLocked(now time.Time) *revokedTokenCleanupSnapshot {
+	snapshot := &revokedTokenCleanupSnapshot{
+		revokedTokens: make(map[string]time.Time),
+		userRevokedAt: make(map[string]time.Time),
+	}
 	for id, expiry := range tm.revokedTokens {
 		if now.After(expiry) {
+			snapshot.revokedTokens[id] = expiry
 			delete(tm.revokedTokens, id)
 		}
 	}
 
 	for userID, revokedAt := range tm.userRevokedAt {
 		if now.Sub(revokedAt) > tm.refreshExpiry {
+			snapshot.userRevokedAt[userID] = revokedAt
 			delete(tm.userRevokedAt, userID)
 		}
 	}
+
+	if len(snapshot.revokedTokens) == 0 && len(snapshot.userRevokedAt) == 0 {
+		return nil
+	}
+
+	return snapshot
 }
 
 func (tm *TokenManager) isUserRevoked(userID string, issuedAt *jwt.NumericDate) bool {
