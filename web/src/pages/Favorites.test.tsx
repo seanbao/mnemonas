@@ -327,7 +327,7 @@ describe('FavoritesPage', () => {
 
   it('optimistically removes a selected favorite before refetch completes', async () => {
     const user = userEvent.setup()
-    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue(undefined)
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue({ message: 'favorite removed successfully' })
     vi.mocked(favoritesApi.listFavorites).mockReset()
     vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
     vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
@@ -530,7 +530,7 @@ describe('FavoritesPage', () => {
 
   it('keeps the note editor open while a pending save is in flight', async () => {
     const user = userEvent.setup()
-    const pendingNoteSave = createDeferred<void>()
+    const pendingNoteSave = createDeferred<{ message?: string }>()
     vi.mocked(favoritesApi.updateFavoriteNote).mockImplementationOnce(() => pendingNoteSave.promise)
 
     render(<FavoritesPage />)
@@ -555,7 +555,7 @@ describe('FavoritesPage', () => {
     expect(screen.getByLabelText('备注')).toHaveValue('旧备注')
 
     await act(async () => {
-      pendingNoteSave.resolve(undefined)
+      pendingNoteSave.resolve({ message: 'favorite note updated successfully' })
     })
 
     await waitFor(() => {
@@ -565,7 +565,7 @@ describe('FavoritesPage', () => {
 
   it('keeps the note editor open when a pending save later fails', async () => {
     const user = userEvent.setup()
-    const pendingNoteSave = createDeferred<void>()
+    const pendingNoteSave = createDeferred<{ message?: string }>()
     vi.mocked(favoritesApi.updateFavoriteNote).mockImplementationOnce(() => pendingNoteSave.promise)
 
     render(<FavoritesPage />)
@@ -602,5 +602,45 @@ describe('FavoritesPage', () => {
 
     expect(screen.getByRole('heading', { name: '编辑备注' })).toBeInTheDocument()
     expect(screen.getByLabelText('备注')).toHaveValue('保留备注')
+  })
+
+  it('shows the localized remove success toast after a successful single remove', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({ message: 'favorite removed successfully' })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已取消收藏', color: 'success' })
+    })
+  })
+
+  it('shows the localized note update success toast after a successful save', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ message: 'favorite note updated successfully' })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '备注已更新', color: 'success' })
+    })
   })
 })

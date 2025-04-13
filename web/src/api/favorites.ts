@@ -20,6 +20,10 @@ export interface CheckPathsResponse {
   favorites: Record<string, boolean>
 }
 
+export interface FavoritesActionResult {
+  message?: string
+}
+
 export class FavoritesError extends Error {
   status: number
   code?: string
@@ -104,12 +108,24 @@ function getFavoritesErrorCode(body: FavoritesApiResponse<never>): string | unde
   return undefined
 }
 
-async function readFavoritesSuccessData<T>(response: Response, invalidMessage: string): Promise<T> {
+async function readFavoritesSuccess<T>(response: Response, invalidMessage: string): Promise<FavoritesApiResponse<T>> {
   const body: FavoritesApiResponse<T> = await response.json()
   if (body.success !== true || body.data === undefined) {
     throw new FavoritesError(invalidMessage, response.status)
   }
-  return body.data
+  return body
+}
+
+async function readFavoritesSuccessData<T>(response: Response, invalidMessage: string): Promise<T> {
+  const body = await readFavoritesSuccess<T>(response, invalidMessage)
+  return body.data as T
+}
+
+async function readFavoritesActionSuccess(response: Response, invalidMessage: string): Promise<FavoritesActionResult> {
+  const body = await readFavoritesSuccess<null>(response, invalidMessage)
+  return {
+    message: body.message,
+  }
 }
 
 /**
@@ -155,7 +171,7 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
 /**
  * Remove path from favorites
  */
-export async function removeFavorite(path: string): Promise<void> {
+export async function removeFavorite(path: string): Promise<FavoritesActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/favorites${encodedPath}`, {
@@ -166,7 +182,7 @@ export async function removeFavorite(path: string): Promise<void> {
     throw await createFavoritesError(response, '移除收藏失败')
   }
 
-  await readFavoritesSuccessData<null>(response, '移除收藏响应无效')
+  return readFavoritesActionSuccess(response, '移除收藏响应无效')
 }
 
 /**
@@ -238,7 +254,7 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
 /**
  * Update note for a favorite
  */
-export async function updateFavoriteNote(path: string, note: string): Promise<void> {
+export async function updateFavoriteNote(path: string, note: string): Promise<FavoritesActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/favorites${encodedPath}`, {
@@ -251,7 +267,7 @@ export async function updateFavoriteNote(path: string, note: string): Promise<vo
     throw await createFavoritesError(response, '更新备注失败')
   }
 
-  await readFavoritesSuccessData<null>(response, '更新备注响应无效')
+  return readFavoritesActionSuccess(response, '更新备注响应无效')
 }
 
 /**

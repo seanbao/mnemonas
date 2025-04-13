@@ -86,6 +86,22 @@ function getFavoritesActionErrorPresentation(error: unknown): {
   }
 }
 
+function getFavoritesActionSuccessTitle(action: 'remove' | 'update-note', message?: string): string {
+  if (action === 'remove') {
+    if (message === 'favorite removed successfully') {
+      return '已取消收藏'
+    }
+
+    return '已取消收藏'
+  }
+
+  if (message === 'favorite note updated successfully') {
+    return '备注已更新'
+  }
+
+  return '备注已更新'
+}
+
 function getFavoritesRefreshErrorPresentation(error: unknown): {
   title: string
   description: string
@@ -362,11 +378,11 @@ export function FavoritesPage() {
   // Remove mutation
   const removeMutation = useMutation({
     mutationFn: (path: string) => removeFavorite(path),
-    onSuccess: (_, path) => {
+    onSuccess: (result, path) => {
       removeFavoritesFromCache([path])
       removeSelectedPaths([path])
       queryClient.invalidateQueries({ queryKey: ['favorites'] })
-      addToast({ title: '已取消收藏', color: 'success' })
+      addToast({ title: getFavoritesActionSuccessTitle('remove', result.message), color: 'success' })
     },
     onError: (error, path) => {
       if (error instanceof FavoritesError && error.isNotFound) {
@@ -384,9 +400,9 @@ export function FavoritesPage() {
   const updateNoteMutation = useMutation({
     mutationFn: ({ path, note }: { path: string; note: string; editSession: number }) => 
       updateFavoriteNote(path, note),
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['favorites'] })
-      addToast({ title: '备注已更新', color: 'success' })
+      addToast({ title: getFavoritesActionSuccessTitle('update-note', result.message), color: 'success' })
       if (
         editSessionRef.current === variables.editSession
         && editingItemRef.current?.path === variables.path
