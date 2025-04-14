@@ -274,6 +274,27 @@ func TestNewUserStore_RejectsSymlinkUsersFile(t *testing.T) {
 	}
 }
 
+func TestNewUserStore_RejectsSymlinkUsersParentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real-users")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real users dir: %v", err)
+	}
+	usersFile := filepath.Join(realDir, "users.json")
+	if err := os.WriteFile(usersFile, []byte("[]"), 0600); err != nil {
+		t.Fatalf("failed to seed users file: %v", err)
+	}
+	linkedDir := filepath.Join(dir, "linked-users")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create users dir symlink: %v", err)
+	}
+
+	_, _, err := NewUserStore(filepath.Join(linkedDir, "users.json"))
+	if !errors.Is(err, errUserStoreSymlink) {
+		t.Fatalf("expected parent-directory symlink error, got %v", err)
+	}
+}
+
 func TestNewUserStore_RejectsSymlinkPasswordFileAndRollsBackAdmin(t *testing.T) {
 	dir := t.TempDir()
 	usersFile := filepath.Join(dir, "users.json")

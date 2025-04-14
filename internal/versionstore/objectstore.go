@@ -24,11 +24,14 @@ func NewObjectStore(client *dataplane.Client) *ObjectStore {
 // Put stores data via dataplane and returns its hash
 func (s *ObjectStore) Put(ctx context.Context, data []byte) (string, error) {
 	if !s.client.IsConnected() {
-		return "", fmt.Errorf("dataplane not connected")
+		return "", fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
 	info, err := s.client.PutChunk(ctx, data)
 	if err != nil {
+		if status.Code(err) == codes.Unavailable {
+			return "", fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
 		return "", fmt.Errorf("failed to put chunk: %w", err)
 	}
 
@@ -38,7 +41,7 @@ func (s *ObjectStore) Put(ctx context.Context, data []byte) (string, error) {
 // Get retrieves data via dataplane by hash
 func (s *ObjectStore) Get(ctx context.Context, hash string) ([]byte, error) {
 	if !s.client.IsConnected() {
-		return nil, fmt.Errorf("dataplane not connected")
+		return nil, fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
 	data, err := s.client.GetChunk(ctx, hash)
@@ -53,6 +56,9 @@ func mapObjectGetError(err error) error {
 	if status.Code(err) == codes.NotFound {
 		return ErrNotFound
 	}
+	if status.Code(err) == codes.Unavailable {
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
 
 	return fmt.Errorf("failed to get chunk: %w", err)
 }
@@ -60,11 +66,14 @@ func mapObjectGetError(err error) error {
 // Has checks if an object exists via dataplane
 func (s *ObjectStore) Has(ctx context.Context, hash string) (bool, error) {
 	if !s.client.IsConnected() {
-		return false, fmt.Errorf("dataplane not connected")
+		return false, fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
 	exists, err := s.client.HasChunk(ctx, hash)
 	if err != nil {
+		if status.Code(err) == codes.Unavailable {
+			return false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
 		return false, fmt.Errorf("failed to check chunk existence: %w", err)
 	}
 
@@ -74,11 +83,14 @@ func (s *ObjectStore) Has(ctx context.Context, hash string) (bool, error) {
 // Delete removes an object via dataplane
 func (s *ObjectStore) Delete(ctx context.Context, hash string) error {
 	if !s.client.IsConnected() {
-		return fmt.Errorf("dataplane not connected")
+		return fmt.Errorf("%w: dataplane not connected", ErrUnavailable)
 	}
 
 	_, err := s.client.DeleteChunk(ctx, hash)
 	if err != nil {
+		if status.Code(err) == codes.Unavailable {
+			return fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
 		return fmt.Errorf("failed to delete chunk: %w", err)
 	}
 

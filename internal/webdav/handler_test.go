@@ -12,13 +12,27 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/storage"
 )
+
+func setDeleteVersionObjectHook(t *testing.T, fs *storage.FileSystem, fn func(string) error) {
+	t.Helper()
+	field := reflect.ValueOf(fs).Elem().FieldByName("deleteVersionObject")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fn))
+}
+
+func setStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName string, fn T) {
+	t.Helper()
+	field := reflect.ValueOf(fs).Elem().FieldByName(fieldName)
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fn))
+}
 
 // testDataplaneAddr is the address of the test dataplane server
 func testDataplaneAddr() string {
@@ -810,6 +824,52 @@ func TestHandler_COPY_DirectoryRollbackOnChildCopyFailure(t *testing.T) {
 	}
 }
 
+func TestHandler_COPY_DirectoryRequestRollsBackPartialTreeOnWriteFailure(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/srcdir/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/nested/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	updateFileIndexField := reflect.ValueOf(fs).Elem().FieldByName("updateFileIndex")
+	originalUpdateFileIndex := reflect.NewAt(updateFileIndexField.Type(), unsafe.Pointer(updateFileIndexField.UnsafeAddr())).Elem().Interface().(func(context.Context, string, int64, time.Time, string) error)
+	setStorageHook(t, fs, "updateFileIndex", func(ctx context.Context, name string, size int64, modTime time.Time, hash string) error {
+		if name == "/dst/copied-dir/nested/child.txt" {
+			return errors.New("index update failed")
+		}
+		return originalUpdateFileIndex(ctx, name, size, modTime, hash)
+	})
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied-dir")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("COPY directory failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/dst/copied-dir"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected failed COPY request to rollback destination tree, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/srcdir"); err != nil {
+		t.Fatalf("expected source directory preserved after failed COPY, got %v", err)
+	}
+}
+
 func TestHandler_COPY_DirectoryIntoDescendantRejected(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1124,6 +1184,63 @@ func TestHandler_MOVE_OverwriteFailureRestoresExistingDestination(t *testing.T) 
 	}
 	if string(data) != "existing" {
 		t.Fatalf("Expected destination content preserved after failed overwrite MOVE, got %q", string(data))
+	}
+	entries, err := fs.ReadDir(ctx, "/movetest")
+	if err != nil {
+		t.Fatalf("ReadDir() error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name, ".webdav-move-backup-") {
+			t.Fatalf("unexpected leftover MOVE backup path: %s", entry.Name)
+		}
+	}
+}
+
+func TestHandler_MOVE_OverwriteCleanupFailureStillReturnsNoContent(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/orig.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(existing v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(existing v2) error: %v", err)
+	}
+
+	setDeleteVersionObjectHook(t, fs, func(hash string) error {
+		return errors.New("delete version object failed")
+	})
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing.txt")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("MOVE overwrite cleanup failure status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/orig.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected source path removed after committed MOVE, got %v", err)
+	}
+	f, err := fs.OpenFile(ctx, "/movetest/existing.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(existing) error: %v", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll(existing) error: %v", err)
+	}
+	if string(data) != "move me" {
+		t.Fatalf("expected destination content updated after committed MOVE, got %q", string(data))
 	}
 	entries, err := fs.ReadDir(ctx, "/movetest")
 	if err != nil {

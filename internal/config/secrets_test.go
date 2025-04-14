@@ -299,6 +299,80 @@ func TestLoadOrCreateSecrets_RejectsSymlinkPath(t *testing.T) {
 	}
 }
 
+func TestSaveSecrets_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-secrets")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real secrets dir: %v", err)
+	}
+	targetPath := filepath.Join(realDir, SecretsFile)
+	if err := os.WriteFile(targetPath, []byte(`{"keep":"original"}`), 0600); err != nil {
+		t.Fatalf("failed to seed target file: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked-secrets")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create secrets dir symlink: %v", err)
+	}
+
+	err := SaveSecrets(linkedDir, &Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if !errors.Is(err, errSecretsFileSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read target file: %v", err)
+	}
+	if string(data) != `{"keep":"original"}` {
+		t.Fatalf("expected target file to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestLoadSecrets_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-secrets")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real secrets dir: %v", err)
+	}
+	targetPath := filepath.Join(realDir, SecretsFile)
+	data, err := json.Marshal(&Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if err != nil {
+		t.Fatalf("failed to marshal secrets: %v", err)
+	}
+	if err := os.WriteFile(targetPath, data, 0600); err != nil {
+		t.Fatalf("failed to seed target file: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked-secrets")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create secrets dir symlink: %v", err)
+	}
+
+	_, err = LoadSecrets(linkedDir)
+	if !errors.Is(err, errSecretsFileSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+}
+
+func TestLoadOrCreateSecrets_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDir := filepath.Join(tmpDir, "real-secrets")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real secrets dir: %v", err)
+	}
+	linkedDir := filepath.Join(tmpDir, "linked-secrets")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("failed to create secrets dir symlink: %v", err)
+	}
+
+	_, _, err := LoadOrCreateSecrets(linkedDir)
+	if !errors.Is(err, errSecretsFileSymlink) {
+		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(realDir, SecretsFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no secrets file created in symlink target dir, got %v", statErr)
+	}
+}
+
 func TestGenerateSecureKey(t *testing.T) {
 	// Generate multiple keys and verify uniqueness
 	keys := make(map[string]bool)

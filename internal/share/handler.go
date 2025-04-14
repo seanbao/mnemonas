@@ -731,6 +731,9 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		_ = h.store.rollbackAuthorizedAccess(accessReservation)
+		if streamResponseStarted(err) {
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -814,6 +817,9 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		_ = h.store.rollbackAuthorizedAccess(accessReservation)
+		if streamResponseStarted(err) {
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -846,18 +852,36 @@ func prefetchDownloadChunk(reader io.Reader) ([]byte, bool, error) {
 func streamDownload(w http.ResponseWriter, reader io.Reader, firstChunk []byte, exhausted bool) error {
 	trackingWriter := &responseStartTrackingWriter{ResponseWriter: w}
 	if len(firstChunk) > 0 {
-		if _, err := trackingWriter.Write(firstChunk); err != nil && !trackingWriter.started {
-			return err
+		if _, err := trackingWriter.Write(firstChunk); err != nil {
+			return &streamResponseError{err: err, responseStarted: trackingWriter.started}
 		}
 	}
 	if exhausted {
 		return nil
 	}
 	_, err := io.Copy(trackingWriter, reader)
-	if err != nil && !trackingWriter.started {
-		return err
+	if err != nil {
+		return &streamResponseError{err: err, responseStarted: trackingWriter.started}
 	}
 	return nil
+}
+
+type streamResponseError struct {
+	err             error
+	responseStarted bool
+}
+
+func (e *streamResponseError) Error() string {
+	return e.err.Error()
+}
+
+func (e *streamResponseError) Unwrap() error {
+	return e.err
+}
+
+func streamResponseStarted(err error) bool {
+	var streamErr *streamResponseError
+	return errors.As(err, &streamErr) && streamErr.responseStarted
 }
 
 type responseStartTrackingWriter struct {
@@ -961,8 +985,8 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	trackingWriter := &responseStartTrackingWriter{ResponseWriter: w}
 	if err := json.NewEncoder(trackingWriter).Encode(resp); err != nil {
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if !trackingWriter.started {
-			_ = h.store.rollbackAuthorizedAccess(accessReservation)
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 		}
 		return

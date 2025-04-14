@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
+	"github.com/seanbao/mnemonas/internal/versionstore"
 )
 
 const maxObjectsCursorLength = 256
@@ -834,6 +836,10 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 		reader, err := s.fs.GetVersion(r.Context(), filePath, versionHash)
 		if err != nil {
+			if errors.Is(err, versionstore.ErrUnavailable) {
+				ServiceUnavailable(w, "version storage unavailable")
+				return
+			}
 			if errors.Is(err, storage.ErrIsDir) {
 				BadRequest(w, "cannot download directory")
 				return
@@ -856,6 +862,9 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		if err := streamAPIResponse(w, reader); err != nil {
+			if apiStreamResponseStarted(err) {
+				return
+			}
 			s.respondInternalError(w, "download file version", err)
 			return
 		}
@@ -1152,6 +1161,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
+		if errors.Is(err, versionstore.ErrUnavailable) {
+			ServiceUnavailable(w, "version storage unavailable")
+			return
+		}
 		if errors.Is(err, storage.ErrIsDir) {
 			BadRequest(w, "cannot restore version for directory")
 			return
@@ -1729,10 +1742,28 @@ func formatAttachmentHeader(filename string) string {
 func streamAPIResponse(w http.ResponseWriter, reader io.Reader) error {
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 	_, err := io.Copy(trackingWriter, reader)
-	if err != nil && !trackingWriter.started {
-		return err
+	if err != nil {
+		return &apiStreamResponseError{err: err, responseStarted: trackingWriter.started}
 	}
 	return nil
+}
+
+type apiStreamResponseError struct {
+	err             error
+	responseStarted bool
+}
+
+func (e *apiStreamResponseError) Error() string {
+	return e.err.Error()
+}
+
+func (e *apiStreamResponseError) Unwrap() error {
+	return e.err
+}
+
+func apiStreamResponseStarted(err error) bool {
+	var streamErr *apiStreamResponseError
+	return errors.As(err, &streamErr) && streamErr.responseStarted
 }
 
 type apiDownloadResponseWriter struct {
@@ -1925,6 +1956,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	// Check if custom restore path is provided
 	newPath := r.URL.Query().Get("path")
+	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
 
 	var err error
 	if newPath != "" {
@@ -1934,6 +1966,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 			badRequestInvalidPath(w)
 			return
 		}
+		activityPath = newPath
 		err = s.fs.RestoreFromTrashTo(r.Context(), id, newPath)
 	} else {
 		// Restore to original path
@@ -1958,7 +1991,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionTrashRestore, id, nil)
+	s.LogActivity(r, activity.ActionTrashRestore, activityPath, nil)
 
 	NewAPIResponse(map[string]any{
 		"id":       id,
@@ -1977,6 +2010,7 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "id is required")
 		return
 	}
+	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
 		if isStorageNotFound(err) {
@@ -1989,12 +2023,30 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivity(r, activity.ActionTrashDelete, id, nil)
+	s.LogActivity(r, activity.ActionTrashDelete, activityPath, nil)
 
 	NewAPIResponse(map[string]any{
 		"id":      id,
 		"deleted": true,
 	}).WithMessage("item permanently deleted").Write(w, http.StatusOK)
+}
+
+func (s *Server) lookupTrashOriginalPath(ctx context.Context, id string) string {
+	if s.fs == nil || id == "" {
+		return ""
+	}
+
+	items, err := s.fs.ListTrash(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return item.OriginalPath
+		}
+	}
+
+	return ""
 }
 
 func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
@@ -2005,6 +2057,17 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 
 	count, err := s.fs.EmptyTrash(r.Context())
 	if err != nil {
+		if count > 0 {
+			s.LogActivity(r, activity.ActionTrashEmpty, "", map[string]string{
+				"count":   strconv.Itoa(count),
+				"partial": "true",
+			})
+			NewAPIResponse(map[string]any{
+				"deleted_count": count,
+				"partial":       true,
+			}).WithMessage("trash emptied partially").Write(w, http.StatusOK)
+			return
+		}
 		s.respondInternalError(w, "empty trash", err)
 		return
 	}
@@ -2014,6 +2077,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 
 	NewAPIResponse(map[string]any{
 		"deleted_count": count,
+		"partial":       false,
 	}).WithMessage("trash emptied successfully").Write(w, http.StatusOK)
 }
 
@@ -2197,6 +2261,15 @@ func (s *Server) LogActivity(r *http.Request, action activity.ActionType, path s
 
 // handleLoginWithActivity wraps auth login to log activity
 func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request) {
+	user := "unknown"
+	if s.activity != nil {
+		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
+			user = claims.Username
+		} else if loginUser, err := readLoginUsername(r); err == nil && loginUser != "" {
+			user = loginUser
+		}
+	}
+
 	// Create a response recorder to capture the response
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 
@@ -2205,16 +2278,29 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 
 	// If login was successful (status 200), log the activity
 	if rec.statusCode == http.StatusOK && s.activity != nil {
-		// Try to extract username from request (best effort)
-		user := "unknown"
-		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
-			user = claims.Username
-		}
-
 		ip := requestip.ClientIP(r)
 
 		s.activity.Log(activity.ActionLogin, "", user, ip, nil)
 	}
+}
+
+func readLoginUsername(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var req auth.LoginRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(req.Username), nil
 }
 
 // handleLogoutWithActivity wraps auth logout to log activity
@@ -2501,20 +2587,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Storage.Retention.GCInterval = d
 		}
-		if s.retentionMonitor != nil {
-			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
-				MaxVersions:   updatedConfig.Storage.Retention.MaxVersions,
-				MaxVersionAge: updatedConfig.Storage.Retention.MaxAge,
-				MinFreeSpace:  updatedConfig.Storage.Retention.MinFreeSpace,
-				SweepInterval: updatedConfig.Storage.Retention.GCInterval,
-			})
-		} else if s.fs != nil {
-			s.fs.UpdateRetentionSettings(
-				updatedConfig.Storage.Retention.MaxVersions,
-				updatedConfig.Storage.Retention.MaxAge,
-				updatedConfig.Storage.Retention.MinFreeSpace,
-			)
-		}
 	}
 
 	if req.Versioning != nil {
@@ -2567,13 +2639,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Storage.Trash.MaxSize = *req.Trash.MaxSize
 		}
-		if s.fs != nil {
-			s.fs.UpdateTrashSettings(
-				updatedConfig.Storage.Trash.Enabled,
-				updatedConfig.Storage.Trash.RetentionDays,
-				updatedConfig.Storage.Trash.MaxSize,
-			)
-		}
 	}
 
 	if req.DataPlane != nil {
@@ -2603,9 +2668,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Share.BaseURL != nil {
 			updatedConfig.Share.BaseURL = *req.Share.BaseURL
-			if s.shareHandler != nil {
-				s.shareHandler.SetBaseURL(updatedConfig.Share.BaseURL)
-			}
 		}
 	}
 
@@ -2661,19 +2723,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Alerts.WebhookHeaders = cleaned
 		}
-		if s.alertMonitor != nil {
-			s.alertMonitor.UpdateConfig(alerts.Config{
-				Enabled:        updatedConfig.Alerts.Enabled,
-				CheckInterval:  updatedConfig.Alerts.CheckInterval,
-				ThresholdPct:   updatedConfig.Alerts.ThresholdPct,
-				CriticalPct:    updatedConfig.Alerts.CriticalPct,
-				MinFreeBytes:   updatedConfig.Alerts.MinFreeBytes,
-				CooldownPeriod: updatedConfig.Alerts.CooldownPeriod,
-				WebhookURL:     updatedConfig.Alerts.WebhookURL,
-				WebhookMethod:  updatedConfig.Alerts.WebhookMethod,
-				WebhookHeaders: updatedConfig.Alerts.WebhookHeaders,
-			})
-		}
 	}
 
 	if req.CDC != nil {
@@ -2724,10 +2773,56 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	*s.config = updatedConfig
+	s.applyRuntimeSettings(req, updatedConfig)
 
 	s.logger.Info().Msg("settings updated and saved")
 
 	NewAPIResponse(nil).WithMessage("settings updated, some changes may require restart").Write(w, http.StatusOK)
+}
+
+func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Config) {
+	if req.Retention != nil {
+		if s.retentionMonitor != nil {
+			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
+				MaxVersions:   cfg.Storage.Retention.MaxVersions,
+				MaxVersionAge: cfg.Storage.Retention.MaxAge,
+				MinFreeSpace:  cfg.Storage.Retention.MinFreeSpace,
+				SweepInterval: cfg.Storage.Retention.GCInterval,
+			})
+		} else if s.fs != nil {
+			s.fs.UpdateRetentionSettings(
+				cfg.Storage.Retention.MaxVersions,
+				cfg.Storage.Retention.MaxAge,
+				cfg.Storage.Retention.MinFreeSpace,
+			)
+		}
+	}
+
+	if req.Trash != nil && s.fs != nil {
+		s.fs.UpdateTrashSettings(
+			cfg.Storage.Trash.Enabled,
+			cfg.Storage.Trash.RetentionDays,
+			cfg.Storage.Trash.MaxSize,
+		)
+	}
+
+	if req.Share != nil && req.Share.BaseURL != nil && s.shareHandler != nil {
+		s.shareHandler.SetBaseURL(cfg.Share.BaseURL)
+	}
+
+	if req.Alerts != nil && s.alertMonitor != nil {
+		s.alertMonitor.UpdateConfig(alerts.Config{
+			Enabled:        cfg.Alerts.Enabled,
+			CheckInterval:  cfg.Alerts.CheckInterval,
+			ThresholdPct:   cfg.Alerts.ThresholdPct,
+			CriticalPct:    cfg.Alerts.CriticalPct,
+			MinFreeBytes:   cfg.Alerts.MinFreeBytes,
+			CooldownPeriod: cfg.Alerts.CooldownPeriod,
+			WebhookURL:     cfg.Alerts.WebhookURL,
+			WebhookMethod:  cfg.Alerts.WebhookMethod,
+			WebhookHeaders: cfg.Alerts.WebhookHeaders,
+		})
+	}
 }
 
 // WebDAVCredentialsResponse represents WebDAV credentials for authenticated users
@@ -2983,6 +3078,13 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	sharePath := ""
+	if s.activity != nil {
+		if parsedPath, err := readCreateSharePath(r); err == nil {
+			sharePath = parsedPath
+		}
+	}
+
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 	s.shareHandler.CreateShare(rec, r)
 
@@ -2995,17 +3097,24 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 
 		ip := requestip.ClientIP(r)
 
-		s.activity.Log(activity.ActionShare, "", user, ip, nil)
+		s.activity.Log(activity.ActionShare, sharePath, user, ip, nil)
 	}
 }
 
 // handleDeleteShareWithActivity wraps share deletion to log activity
 func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Request) {
+	sharePath := ""
+	if s.shareStore != nil {
+		if shareInfo, err := s.shareStore.Get(chi.URLParam(r, "id")); err == nil {
+			sharePath = shareInfo.Path
+		}
+	}
+
 	rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 	s.shareHandler.DeleteShare(rec, r)
 
-	// If share was deleted (status 204), log the activity
-	if rec.statusCode == http.StatusNoContent && s.activity != nil {
+	// Log successful share deletions regardless of whether the handler responds 200 or 204.
+	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices && s.activity != nil {
 		user := "unknown"
 		if claims := auth.GetClaimsFromContext(r.Context()); claims != nil {
 			user = claims.Username
@@ -3013,6 +3122,30 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 
 		ip := requestip.ClientIP(r)
 
-		s.activity.Log(activity.ActionUnshare, "", user, ip, nil)
+		s.activity.Log(activity.ActionUnshare, sharePath, user, ip, nil)
 	}
+}
+
+func readCreateSharePath(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var req share.CreateShareRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", err
+	}
+
+	cleanPath := strings.TrimSpace(req.Path)
+	if cleanPath == "" {
+		return "", nil
+	}
+
+	return path.Clean("/" + cleanPath), nil
 }
