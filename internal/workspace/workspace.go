@@ -446,9 +446,10 @@ func (w *Workspace) Close() error {
 	if w == nil || w.rootHandle == nil {
 		return nil
 	}
-	err := w.rootHandle.Close()
-	w.rootHandle = nil
-	return err
+	if err := w.rootHandle.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // Root returns the workspace root directory

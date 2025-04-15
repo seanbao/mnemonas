@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -316,6 +317,162 @@ func TestCheck_ConcurrentConfigUpdates(t *testing.T) {
 	}
 }
 
+func TestCheck_DoesNotAdvanceCooldownWhenWebhookFails(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   150,
+		CriticalPct:    200,
+		MinFreeBytes:   ^uint64(0),
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}, t.TempDir(), zerolog.Nop())
+
+	monitor.check(context.Background())
+	monitor.check(context.Background())
+
+	if got := requestCount.Load(); got != 2 {
+		t.Fatalf("expected webhook failures to bypass cooldown suppression, got %d requests", got)
+	}
+}
+
+func TestCheck_ResolvedAlertResetsCooldown(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	warningCfg := Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   150,
+		CriticalPct:    200,
+		MinFreeBytes:   ^uint64(0),
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}
+	noneCfg := Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   150,
+		CriticalPct:    200,
+		MinFreeBytes:   0,
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}
+
+	monitor := NewMonitor(warningCfg, t.TempDir(), zerolog.Nop())
+	monitor.check(context.Background())
+	monitor.UpdateConfig(noneCfg)
+	monitor.check(context.Background())
+	monitor.UpdateConfig(warningCfg)
+	monitor.check(context.Background())
+
+	if got := requestCount.Load(); got != 2 {
+		t.Fatalf("expected alert after resolution to bypass cooldown, got %d requests", got)
+	}
+	if stats := monitor.LastStats(); stats == nil || stats.Level != AlertLevelWarning {
+		t.Fatalf("expected last stats level warning after re-alert, got %+v", stats)
+	}
+}
+
+func TestCheck_CriticalRealertAfterSuppressedWarningTransition(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	criticalCfg := Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   0,
+		CriticalPct:    0,
+		MinFreeBytes:   0,
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}
+	warningCfg := Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   0,
+		CriticalPct:    200,
+		MinFreeBytes:   0,
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}
+
+	monitor := NewMonitor(criticalCfg, t.TempDir(), zerolog.Nop())
+	monitor.check(context.Background())
+	monitor.UpdateConfig(warningCfg)
+	monitor.check(context.Background())
+	monitor.UpdateConfig(criticalCfg)
+	monitor.check(context.Background())
+
+	if got := requestCount.Load(); got != 2 {
+		t.Fatalf("expected critical re-alert after suppressed warning transition, got %d requests", got)
+	}
+}
+
+func TestCheck_CriticalRetryAfterFailedCriticalSendBypassesWarningCooldown(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := requestCount.Add(1)
+		if count == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	warningCfg := Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   150,
+		CriticalPct:    200,
+		MinFreeBytes:   ^uint64(0),
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}
+	criticalCfg := Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   0,
+		CriticalPct:    0,
+		MinFreeBytes:   0,
+		CooldownPeriod: time.Hour,
+		WebhookURL:     server.URL,
+		WebhookMethod:  http.MethodPost,
+	}
+
+	monitor := NewMonitor(warningCfg, t.TempDir(), zerolog.Nop())
+	monitor.check(context.Background())
+	monitor.UpdateConfig(criticalCfg)
+	monitor.check(context.Background())
+	monitor.check(context.Background())
+
+	if got := requestCount.Load(); got != 3 {
+		t.Fatalf("expected failed critical alert to retry immediately despite prior warning cooldown, got %d requests", got)
+	}
+}
+
 func TestSendWebhook_TrimsConfiguredHeaders(t *testing.T) {
 	reqCh := make(chan *http.Request, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -347,5 +504,91 @@ func TestSendWebhook_TrimsConfiguredHeaders(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for webhook request")
+	}
+}
+
+func TestSendWebhook_GETEncodesPayloadInQueryWithoutBody(t *testing.T) {
+	type webhookRequest struct {
+		method string
+		query  map[string]string
+		body   string
+	}
+
+	reqCh := make(chan webhookRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll(request body) error: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		query := make(map[string]string)
+		for key, values := range r.URL.Query() {
+			if len(values) > 0 {
+				query[key] = values[0]
+			}
+		}
+		reqCh <- webhookRequest{
+			method: r.Method,
+			query:  query,
+			body:   string(body),
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	payload := AlertPayload{
+		Type:      "storage_alert",
+		Level:     AlertLevelCritical,
+		Message:   "disk almost full",
+		Timestamp: time.Unix(1710000000, 123).UTC(),
+		Hostname:  "mnemonas-host",
+		Stats: StorageStats{
+			Path:       "/srv/mnemonas",
+			TotalBytes: 100,
+			FreeBytes:  10,
+			UsedBytes:  90,
+			UsedPct:    90,
+			CheckedAt:  time.Unix(1710000001, 456).UTC(),
+		},
+	}
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendWebhook(context.Background(), payload, Config{
+		WebhookURL:    server.URL + "?existing=1",
+		WebhookMethod: http.MethodGet,
+	})
+	if err != nil {
+		t.Fatalf("sendWebhook() error: %v", err)
+	}
+
+	select {
+	case req := <-reqCh:
+		if req.method != http.MethodGet {
+			t.Fatalf("method = %q, want %q", req.method, http.MethodGet)
+		}
+		if req.body != "" {
+			t.Fatalf("expected GET webhook body to be empty, got %q", req.body)
+		}
+		if req.query["existing"] != "1" {
+			t.Fatalf("existing query = %q, want %q", req.query["existing"], "1")
+		}
+		if req.query["type"] != payload.Type {
+			t.Fatalf("type query = %q, want %q", req.query["type"], payload.Type)
+		}
+		if req.query["level"] != string(payload.Level) {
+			t.Fatalf("level query = %q, want %q", req.query["level"], payload.Level)
+		}
+		if req.query["message"] != payload.Message {
+			t.Fatalf("message query = %q, want %q", req.query["message"], payload.Message)
+		}
+		if req.query["path"] != payload.Stats.Path {
+			t.Fatalf("path query = %q, want %q", req.query["path"], payload.Stats.Path)
+		}
+		if req.query["used_pct"] != "90" {
+			t.Fatalf("used_pct query = %q, want %q", req.query["used_pct"], "90")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for GET webhook request")
 	}
 }

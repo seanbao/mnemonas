@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -95,11 +98,12 @@ type Monitor struct {
 	dataDir string
 	baseCtx context.Context
 
-	lifecycleMu sync.Mutex
-	mu          sync.Mutex
-	lastAlert   time.Time
-	lastLevel   AlertLevel
-	lastStats   *StorageStats
+	lifecycleMu    sync.Mutex
+	mu             sync.Mutex
+	lastAlert      time.Time
+	lastLevel      AlertLevel
+	lastAlertLevel AlertLevel
+	lastStats      *StorageStats
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -110,9 +114,11 @@ var onAlertMonitorLoopStart = func(context.Context) {}
 // NewMonitor creates a new storage monitor
 func NewMonitor(cfg Config, dataDir string, logger zerolog.Logger) *Monitor {
 	return &Monitor{
-		cfg:     cloneConfig(cfg),
-		logger:  logger,
-		dataDir: dataDir,
+		cfg:            cloneConfig(cfg),
+		logger:         logger,
+		dataDir:        dataDir,
+		lastLevel:      AlertLevelNone,
+		lastAlertLevel: AlertLevelNone,
 	}
 }
 
@@ -253,7 +259,9 @@ func (m *Monitor) check(ctx context.Context) {
 
 	if level == AlertLevelNone {
 		m.mu.Lock()
+		m.lastAlert = time.Time{}
 		m.lastLevel = level
+		m.lastAlertLevel = AlertLevelNone
 		m.mu.Unlock()
 		return
 	}
@@ -261,15 +269,28 @@ func (m *Monitor) check(ctx context.Context) {
 	// Check cooldown
 	m.mu.Lock()
 	shouldAlert := m.shouldSendAlert(level, cfg)
-	if shouldAlert {
-		m.lastAlert = time.Now()
-		m.lastLevel = level
-	}
 	m.mu.Unlock()
 
 	if shouldAlert {
-		m.sendAlert(ctx, stats, cfg)
+		if err := m.sendAlert(ctx, stats, cfg); err != nil {
+			m.mu.Lock()
+			m.lastLevel = level
+			m.mu.Unlock()
+			m.logger.Error().Err(err).Msg("Failed to send alert")
+			return
+		}
+
+		m.mu.Lock()
+		m.lastAlert = time.Now()
+		m.lastLevel = level
+		m.lastAlertLevel = level
+		m.mu.Unlock()
+		return
 	}
+
+	m.mu.Lock()
+	m.lastLevel = level
+	m.mu.Unlock()
 }
 
 func (m *Monitor) getStats() (*StorageStats, error) {
@@ -314,8 +335,12 @@ func (m *Monitor) determineLevel(stats *StorageStats, cfg Config) AlertLevel {
 }
 
 func (m *Monitor) shouldSendAlert(level AlertLevel, cfg Config) bool {
+	if m.lastLevel == AlertLevelNone {
+		return true
+	}
+
 	// Always alert on critical level change
-	if level == AlertLevelCritical && m.lastLevel != AlertLevelCritical {
+	if level == AlertLevelCritical && (m.lastLevel != AlertLevelCritical || m.lastAlertLevel != AlertLevelCritical) {
 		return true
 	}
 
@@ -327,7 +352,7 @@ func (m *Monitor) shouldSendAlert(level AlertLevel, cfg Config) bool {
 	return true
 }
 
-func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config) {
+func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config) error {
 	hostname, _ := os.Hostname()
 
 	var message string
@@ -357,28 +382,56 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 		}
 
 		if err := m.sendWebhook(ctx, payload, cfg); err != nil {
-			m.logger.Error().Err(err).Msg("Failed to send webhook")
+			return err
 		}
 	}
+
+	return nil
 }
 
 func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Config) error {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
-	}
-
-	method := cfg.WebhookMethod
+	method := strings.ToUpper(strings.TrimSpace(cfg.WebhookMethod))
 	if method == "" {
-		method = "POST"
+		method = http.MethodPost
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, cfg.WebhookURL, bytes.NewReader(data))
+	requestURL := cfg.WebhookURL
+	var body io.Reader
+	if method == http.MethodGet {
+		parsedURL, err := url.Parse(cfg.WebhookURL)
+		if err != nil {
+			return fmt.Errorf("parse webhook url: %w", err)
+		}
+		query := parsedURL.Query()
+		query.Set("type", payload.Type)
+		query.Set("level", string(payload.Level))
+		query.Set("message", payload.Message)
+		query.Set("hostname", payload.Hostname)
+		query.Set("timestamp", payload.Timestamp.UTC().Format(time.RFC3339Nano))
+		query.Set("path", payload.Stats.Path)
+		query.Set("total_bytes", strconv.FormatUint(payload.Stats.TotalBytes, 10))
+		query.Set("free_bytes", strconv.FormatUint(payload.Stats.FreeBytes, 10))
+		query.Set("used_bytes", strconv.FormatUint(payload.Stats.UsedBytes, 10))
+		query.Set("used_pct", strconv.FormatFloat(payload.Stats.UsedPct, 'f', -1, 64))
+		query.Set("checked_at", payload.Stats.CheckedAt.UTC().Format(time.RFC3339Nano))
+		parsedURL.RawQuery = query.Encode()
+		requestURL = parsedURL.String()
+	} else {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal payload: %w", err)
+		}
+		body = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
 
 	// Add custom headers

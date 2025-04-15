@@ -18,12 +18,12 @@
 | `PROPFIND` | ✅ 完整 | 支持 Depth: 0, 1, infinity |
 | `GET` | ✅ 完整 | 支持 Range 请求、ETag、条件请求 |
 | `HEAD` | ✅ 完整 | 返回文件元信息 |
-| `PUT` | ✅ 完整 | 支持 If-Match 条件写入；仅接受完整覆盖写入，`Content-Range` partial PUT 返回 `400 Bad Request` |
+| `PUT` | ✅ 完整 | 支持 `If-Match`、`If-Unmodified-Since` 条件写入；仅接受完整覆盖写入，`Content-Range` partial PUT 返回 `400 Bad Request` |
 | `DELETE` | ✅ 完整 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
 | `MKCOL` | ✅ 完整 | 创建目录 |
 | `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理）；覆盖目标已提交后若 backup cleanup 失败，返回 `204 + Warning` |
 | `COPY` | ✅ 完整 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在目标目录已创建、仅持久化失败时返回成功并附带 `Warning` |
-| `PROPPATCH` | ⚠️ 简化 | 接受请求但不实际修改属性 |
+| `PROPPATCH` | ⚠️ 简化 | 解析请求并显式拒绝属性修改；返回 `207 Multi-Status`，属性状态为 `403 Forbidden`，不持久化 dead properties |
 | `LOCK` | ⚠️ 简化 | 返回虚拟锁 token，支持 `Depth: 0` / `Depth: infinity`，默认 1 小时过期 |
 | `UNLOCK` | ⚠️ 简化 | 需要匹配 `Lock-Token`，过期锁会自动清理 |
 

@@ -242,6 +242,36 @@ func TestPropfindCache_Eviction(t *testing.T) {
 	}
 }
 
+func TestPropfindCache_EvictOldest_IsDeterministicWhenCachedAtTies(t *testing.T) {
+	cachedAt := time.Unix(1700000000, 0)
+	expectedEvictedKey := "/a|1"
+
+	for i := 0; i < 64; i++ {
+		cache := NewPropfindCache(time.Minute, 10)
+		cache.entries = map[string]*cacheEntry{
+			"/a|1": {cachedAt: cachedAt},
+			"/b|1": {cachedAt: cachedAt},
+			"/c|1": {cachedAt: cachedAt},
+			"/d|1": {cachedAt: cachedAt},
+			"/e|1": {cachedAt: cachedAt},
+			"/f|1": {cachedAt: cachedAt},
+			"/g|1": {cachedAt: cachedAt},
+			"/h|1": {cachedAt: cachedAt},
+			"/i|1": {cachedAt: cachedAt},
+			"/j|1": {cachedAt: cachedAt},
+		}
+
+		cache.evictOldest()
+
+		if _, exists := cache.entries[expectedEvictedKey]; exists {
+			t.Fatalf("evictOldest() iteration %d kept %q during cachedAt tie", i, expectedEvictedKey)
+		}
+		if len(cache.entries) != 9 {
+			t.Fatalf("evictOldest() iteration %d left %d entries, want 9", i, len(cache.entries))
+		}
+	}
+}
+
 func TestPropfindCache_Stats(t *testing.T) {
 	cache := NewPropfindCache(50*time.Millisecond, 100)
 

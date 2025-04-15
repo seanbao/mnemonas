@@ -169,39 +169,40 @@ type Config struct {
 
 // FileSystem provides unified storage operations
 type FileSystem struct {
-	workspace              *workspace.Workspace
-	filesRootHandle        *os.Root
-	trashRootHandle        *os.Root
-	versions               *versionstore.Store
-	policy                 *versionstore.VersioningPolicy
-	trashRoot              string
-	config                 *Config
-	onPathRenamed          func(ctx context.Context, oldPath, newPath string) error
-	onPathDeleted          func(ctx context.Context, path string) (*PathDeleteHookResult, error)
-	listReferencedHashes   func(ctx context.Context) ([]string, error)
-	listVersionPaths       func(ctx context.Context) ([]string, error)
-	getVersions            func(ctx context.Context, path string) ([]versionstore.Version, error)
-	deleteFileIndex        func(ctx context.Context, path string) error
-	deleteFileIndexPrefix  func(ctx context.Context, path string) error
-	updateFileIndex        func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
-	hasVersionObject       func(ctx context.Context, hash string) (bool, error)
-	getVersionObject       func(ctx context.Context, hash string) ([]byte, error)
-	putVersionObject       func(ctx context.Context, data []byte) (string, error)
-	addFileVersion         func(ctx context.Context, path, hash string, size int64, comment string) error
-	deleteFileVersion      func(ctx context.Context, path, hash string) error
-	deleteVersionObject    func(ctx context.Context, hash string) error
-	addTrashMetadata       func(ctx context.Context, item *versionstore.TrashItem) error
-	updateTrashRestoreData func(ctx context.Context, id string, restoreData []byte) error
-	removeTrashMetadata    func(ctx context.Context, id string) error
-	writeWorkspacePath     func(ctx context.Context, name string, data []byte) error
-	mkdirWorkspacePath     func(ctx context.Context, name string) error
-	deleteWorkspacePath    func(ctx context.Context, name string) error
-	renameWorkspacePath    func(ctx context.Context, oldName, newName string) error
-	renameMetadataPath     func(ctx context.Context, oldName, newName string) error
-	removeTrashPath        func(path string) error
-	hookMu                 sync.RWMutex
-	gcMu                   sync.RWMutex
-	mu                     sync.RWMutex
+	workspace                 *workspace.Workspace
+	filesRootHandle           *os.Root
+	trashRootHandle           *os.Root
+	versions                  *versionstore.Store
+	policy                    *versionstore.VersioningPolicy
+	trashRoot                 string
+	config                    *Config
+	onPathRenamed             func(ctx context.Context, oldPath, newPath string) error
+	onPathDeleted             func(ctx context.Context, path string) (*PathDeleteHookResult, error)
+	listReferencedHashes      func(ctx context.Context) ([]string, error)
+	listVersionPaths          func(ctx context.Context) ([]string, error)
+	getVersions               func(ctx context.Context, path string) ([]versionstore.Version, error)
+	deleteFileIndex           func(ctx context.Context, path string) error
+	deleteFileIndexPrefix     func(ctx context.Context, path string) error
+	updateFileIndex           func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
+	hasVersionObject          func(ctx context.Context, hash string) (bool, error)
+	getVersionObject          func(ctx context.Context, hash string) ([]byte, error)
+	putVersionObject          func(ctx context.Context, data []byte) (string, error)
+	addFileVersion            func(ctx context.Context, path, hash string, size int64, comment string) error
+	deleteFileVersion         func(ctx context.Context, path, hash string) error
+	deleteVersionObject       func(ctx context.Context, hash string) error
+	addTrashMetadata          func(ctx context.Context, item *versionstore.TrashItem) error
+	updateTrashRestoreData    func(ctx context.Context, id string, restoreData []byte) error
+	removeTrashMetadata       func(ctx context.Context, id string) error
+	writeWorkspacePath        func(ctx context.Context, name string, data []byte) error
+	mkdirWorkspacePath        func(ctx context.Context, name string) error
+	deleteWorkspacePath       func(ctx context.Context, name string) error
+	renameWorkspacePath       func(ctx context.Context, oldName, newName string) error
+	renameMetadataPath        func(ctx context.Context, oldName, newName string) error
+	renameHistoryMetadataPath func(ctx context.Context, oldName, newName string) error
+	removeTrashPath           func(path string) error
+	hookMu                    sync.RWMutex
+	gcMu                      sync.RWMutex
+	mu                        sync.RWMutex
 }
 
 // UpdateTrashSettings applies trash settings to the running filesystem.
@@ -353,34 +354,35 @@ func New(cfg *Config) (*FileSystem, error) {
 	}
 
 	return &FileSystem{
-		workspace:              ws,
-		filesRootHandle:        filesRootHandle,
-		trashRootHandle:        trashRootHandle,
-		versions:               vs,
-		policy:                 policy,
-		trashRoot:              trashRoot,
-		config:                 cfg,
-		listReferencedHashes:   vs.GetAllVersionHashes,
-		listVersionPaths:       vs.ListVersionPaths,
-		getVersions:            vs.GetVersions,
-		deleteFileIndex:        vs.DeleteFileIndex,
-		deleteFileIndexPrefix:  vs.DeleteFileIndexPrefix,
-		updateFileIndex:        vs.UpdateFileIndex,
-		hasVersionObject:       vs.HasObject,
-		getVersionObject:       vs.GetObject,
-		putVersionObject:       vs.PutObject,
-		addFileVersion:         vs.AddVersion,
-		deleteFileVersion:      vs.DeleteVersion,
-		deleteVersionObject:    vs.DeleteObject,
-		addTrashMetadata:       vs.AddToTrash,
-		updateTrashRestoreData: vs.UpdateTrashRestoreData,
-		removeTrashMetadata:    vs.RemoveFromTrash,
-		writeWorkspacePath:     nil,
-		mkdirWorkspacePath:     ws.Mkdir,
-		deleteWorkspacePath:    ws.Delete,
-		renameWorkspacePath:    ws.Rename,
-		renameMetadataPath:     vs.RenamePath,
-		removeTrashPath:        os.RemoveAll,
+		workspace:                 ws,
+		filesRootHandle:           filesRootHandle,
+		trashRootHandle:           trashRootHandle,
+		versions:                  vs,
+		policy:                    policy,
+		trashRoot:                 trashRoot,
+		config:                    cfg,
+		listReferencedHashes:      vs.GetAllVersionHashes,
+		listVersionPaths:          vs.ListVersionPaths,
+		getVersions:               vs.GetVersions,
+		deleteFileIndex:           vs.DeleteFileIndex,
+		deleteFileIndexPrefix:     vs.DeleteFileIndexPrefix,
+		updateFileIndex:           vs.UpdateFileIndex,
+		hasVersionObject:          vs.HasObject,
+		getVersionObject:          vs.GetObject,
+		putVersionObject:          vs.PutObject,
+		addFileVersion:            vs.AddVersion,
+		deleteFileVersion:         vs.DeleteVersion,
+		deleteVersionObject:       vs.DeleteObject,
+		addTrashMetadata:          vs.AddToTrash,
+		updateTrashRestoreData:    vs.UpdateTrashRestoreData,
+		removeTrashMetadata:       vs.RemoveFromTrash,
+		writeWorkspacePath:        nil,
+		mkdirWorkspacePath:        ws.Mkdir,
+		deleteWorkspacePath:       ws.Delete,
+		renameWorkspacePath:       ws.Rename,
+		renameMetadataPath:        vs.RenamePath,
+		renameHistoryMetadataPath: vs.RenamePathHistory,
+		removeTrashPath:           os.RemoveAll,
 	}, nil
 }
 
@@ -1193,10 +1195,8 @@ func (fs *FileSystem) ListVersions(ctx context.Context, name string) ([]VersionR
 	}
 
 	// Current version
-	var currentHash string
-	if contentHash, err := fs.hashWorkspaceFile(ctx, name); err == nil {
-		currentHash = contentHash
-	} else if errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotDir) || errors.Is(err, ErrIsDir) {
+	currentHash, err := fs.hashWorkspaceFile(ctx, name)
+	if err != nil {
 		return nil, err
 	}
 
@@ -1286,14 +1286,16 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 	}
 
 	// Check if it's the current version
-	if currentHash, err := fs.hashWorkspaceFile(ctx, name); err == nil {
-		if currentHash == hash {
-			f, err := fs.workspace.OpenFile(ctx, name)
-			if err != nil {
-				return nil, mapWorkspaceReadablePathError(err)
-			}
-			return f, nil
+	currentHash, err := fs.hashWorkspaceFile(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if currentHash == hash {
+		f, err := fs.workspace.OpenFile(ctx, name)
+		if err != nil {
+			return nil, mapWorkspaceReadablePathError(err)
 		}
+		return f, nil
 	}
 
 	if _, err := fs.versions.GetVersion(ctx, name, hash); err != nil {
@@ -1474,6 +1476,19 @@ func (fs *FileSystem) SetVersioning(ctx context.Context, name string, enabled bo
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
 		return err
+	}
+	info, err := fs.workspace.Stat(ctx, name)
+	if err != nil {
+		if errors.Is(err, workspace.ErrNotFound) {
+			return ErrNotFound
+		}
+		if errors.Is(err, workspace.ErrNotDir) {
+			return ErrNotDir
+		}
+		return err
+	}
+	if info.IsDir {
+		return ErrIsDir
 	}
 	return fs.versions.SetVersioningOverride(ctx, name, enabled)
 }
@@ -1702,8 +1717,8 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 		return fmt.Errorf("failed to update file index: %w", err)
 	}
 
-	if item.HadVersions {
-		if err := fs.renameMetadataPath(ctx, item.OriginalPath, newPath); err != nil {
+	if item.HadVersions && newPath != item.OriginalPath {
+		if err := fs.renameHistoryMetadataPath(ctx, item.OriginalPath, newPath); err != nil {
 			var rollbackErrs []error
 			if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
 				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
@@ -1939,7 +1954,7 @@ func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.Tr
 	}
 
 	if err := fs.removeTrashMetadata(ctx, item.ID); err != nil {
-		if rollbackErr := fs.movePath(stagedTrashPath, trashItemPath); rollbackErr != nil {
+		if rollbackErr := fs.rollbackStagedTrashItem(stagedTrashPath, trashItemPath); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to remove trash metadata for %s: %w", item.ID, err),
 				fmt.Errorf("failed to rollback trash content for %s: %w", item.ID, rollbackErr),
@@ -1954,7 +1969,7 @@ func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.Tr
 		if removedContent {
 			return &trashDeleteDurabilityError{err: fmt.Errorf("failed to sync deleted trash content for %s: %w", item.ID, err)}
 		}
-		rollbackErr := fs.movePath(stagedTrashPath, trashItemPath)
+		rollbackErr := fs.rollbackStagedTrashItem(stagedTrashPath, trashItemPath)
 		metadataErr := fs.addTrashMetadata(ctx, item)
 		fs.cleanupTrashStagingDir(stagedTrashPath)
 		if rollbackErr != nil && metadataErr != nil {
@@ -1981,6 +1996,41 @@ func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.Tr
 
 	fs.cleanupTrashStagingDir(stagedTrashPath)
 
+	return nil
+}
+
+func (fs *FileSystem) rollbackStagedTrashItem(stagedTrashPath, trashItemPath string) error {
+	trashRoot := &storagePathRoot{absRoot: fs.trashRoot, handle: fs.trashRootHandle}
+	stagedRel, ok := storageRelativePath(fs.trashRoot, filepath.Clean(stagedTrashPath))
+	if !ok {
+		return fmt.Errorf("managed path %q is outside trash root", stagedTrashPath)
+	}
+	trashItemRel, ok := storageRelativePath(fs.trashRoot, filepath.Clean(trashItemPath))
+	if !ok {
+		return fmt.Errorf("managed path %q is outside trash root", trashItemPath)
+	}
+
+	if err := ensureStorageManagedDir(trashRoot, filepath.Dir(storageAbsolutePath(trashRoot, trashItemRel)), 0755); err != nil {
+		return err
+	}
+	if err := movePathRename(trashRoot.handle, stagedRel, trashItemRel, storageAbsolutePath(trashRoot, stagedRel), storageAbsolutePath(trashRoot, trashItemRel)); err != nil {
+		return mapStorageRootPathError(err)
+	}
+	if syncErr := syncStorageManagedRenameDirs(trashRoot, stagedRel, trashRoot, trashItemRel); syncErr != nil {
+		if rollbackErr := movePathRename(trashRoot.handle, trashItemRel, stagedRel, storageAbsolutePath(trashRoot, trashItemRel), storageAbsolutePath(trashRoot, stagedRel)); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync renamed path: %w", syncErr),
+				fmt.Errorf("failed to rollback renamed path: %w", mapStorageRootPathError(rollbackErr)),
+			)
+		}
+		if rollbackSyncErr := syncStorageManagedRenameDirs(trashRoot, trashItemRel, trashRoot, stagedRel); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync renamed path: %w", syncErr),
+				fmt.Errorf("failed to sync rollback path: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("failed to sync renamed path: %w", syncErr)
+	}
 	return nil
 }
 
@@ -2089,7 +2139,11 @@ func (fs *FileSystem) Search(ctx context.Context, query string, limit int) ([]*S
 
 // SearchWithinBase returns search results under a specific workspace root.
 func (fs *FileSystem) SearchWithinBase(ctx context.Context, root, query string, limit int) ([]*SearchResult, error) {
-	return fs.search(ctx, workspace.CleanPath(root), query, limit)
+	normalizedRoot, err := normalizeStorageWorkspacePath(root)
+	if err != nil {
+		return nil, err
+	}
+	return fs.search(ctx, normalizedRoot, query, limit)
 }
 
 func (fs *FileSystem) search(ctx context.Context, root, query string, limit int) ([]*SearchResult, error) {
@@ -2124,7 +2178,6 @@ func (fs *FileSystem) search(ctx context.Context, root, query string, limit int)
 				ModTime: info.ModTime,
 			})
 		}
-
 		return nil
 	})
 
@@ -2958,7 +3011,7 @@ func (fs *FileSystem) rollbackWriteVersion(ctx context.Context, name, hash strin
 	}
 	if objectCreated && metadataRolledBack {
 		if err := fs.deleteVersionObject(ctx, hash); err != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete version object %s: %w", hash, err))
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("failed to cleanup version object during rollback %s: %w", hash, err))
 		}
 	}
 
@@ -3048,6 +3101,9 @@ func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
 	root, relPath, _, err := fs.resolveStoragePathRoot(stagedTrashPath)
 	if err != nil {
 		return
+	}
+	if relPath != "." {
+		_ = root.handle.RemoveAll(relPath)
 	}
 	stagingDir := filepath.Dir(relPath)
 	if stagingDir == "." {

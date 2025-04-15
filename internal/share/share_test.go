@@ -222,6 +222,85 @@ func TestNewShareStore_ReturnsErrorWhenCorruptSharesBackupSyncFails(t *testing.T
 	}
 }
 
+func TestShareStore_SaveShareState_PersistsCanonicalOrder(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "shares.json")
+	createdAt := time.Unix(1700000000, 0)
+	shares := map[string]*Share{
+		"share-c": {
+			ID:        "share-c",
+			Path:      "/docs/c.txt",
+			CreatedBy: "user-b",
+			CreatedAt: createdAt,
+		},
+		"share-b": {
+			ID:        "share-b",
+			Path:      "/docs/b.txt",
+			CreatedBy: "user-a",
+			CreatedAt: createdAt,
+		},
+		"share-a": {
+			ID:        "share-a",
+			Path:      "/docs/a.txt",
+			CreatedBy: "user-a",
+			CreatedAt: createdAt,
+		},
+	}
+
+	expected := []struct {
+		id   string
+		path string
+		user string
+	}{
+		{id: "share-a", path: "/docs/a.txt", user: "user-a"},
+		{id: "share-b", path: "/docs/b.txt", user: "user-a"},
+		{id: "share-c", path: "/docs/c.txt", user: "user-b"},
+	}
+
+	for i := 0; i < 64; i++ {
+		if err := saveShareState(storePath, shares); err != nil {
+			t.Fatalf("saveShareState() error: %v", err)
+		}
+
+		data, err := os.ReadFile(storePath)
+		if err != nil {
+			t.Fatalf("ReadFile(shares.json) error: %v", err)
+		}
+
+		var persisted []Share
+		if err := json.Unmarshal(data, &persisted); err != nil {
+			t.Fatalf("Unmarshal(persisted shares) error: %v", err)
+		}
+		if len(persisted) != len(expected) {
+			t.Fatalf("persisted share count = %d, want %d", len(persisted), len(expected))
+		}
+		for index, want := range expected {
+			if persisted[index].ID != want.id || persisted[index].Path != want.path || persisted[index].CreatedBy != want.user {
+				t.Fatalf("persisted order at iteration %d = [%s:%s:%s %s:%s:%s %s:%s:%s], want [%s:%s:%s %s:%s:%s %s:%s:%s]",
+					i,
+					persisted[0].ID,
+					persisted[0].CreatedBy,
+					persisted[0].Path,
+					persisted[1].ID,
+					persisted[1].CreatedBy,
+					persisted[1].Path,
+					persisted[2].ID,
+					persisted[2].CreatedBy,
+					persisted[2].Path,
+					expected[0].id,
+					expected[0].user,
+					expected[0].path,
+					expected[1].id,
+					expected[1].user,
+					expected[1].path,
+					expected[2].id,
+					expected[2].user,
+					expected[2].path,
+				)
+			}
+		}
+	}
+}
+
 func TestShareStore_Create(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1682,6 +1761,48 @@ func TestShareStore_DisableSharesUnderPathWithRestore_RestoresDisabledShares(t *
 	}
 	if !reloadedFolder.Enabled {
 		t.Fatal("expected restored enabled state to persist for folder share")
+	}
+}
+
+func TestShareStore_DisableSharesUnderPathWithRestore_ReturnsCanonicalOrder(t *testing.T) {
+	expectedPaths := []string{"/docs/a.txt", "/docs/b.txt", "/docs/c.txt"}
+
+	for i := 0; i < 32; i++ {
+		store, err := NewShareStore(filepath.Join(t.TempDir(), "shares.json"))
+		if err != nil {
+			t.Fatalf("NewShareStore() error: %v", err)
+		}
+
+		if _, err := store.Create(CreateShareOptions{Path: "/docs/c.txt", Type: ShareTypeFile, CreatedBy: "user-b"}); err != nil {
+			t.Fatalf("Create(/docs/c.txt) error: %v", err)
+		}
+		if _, err := store.Create(CreateShareOptions{Path: "/docs/b.txt", Type: ShareTypeFile, CreatedBy: "user-a"}); err != nil {
+			t.Fatalf("Create(/docs/b.txt) error: %v", err)
+		}
+		if _, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user-a"}); err != nil {
+			t.Fatalf("Create(/docs/a.txt) error: %v", err)
+		}
+
+		disabled, err := store.DisableSharesUnderPathWithRestore("/docs")
+		if err != nil {
+			t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+		}
+		if len(disabled) != len(expectedPaths) {
+			t.Fatalf("disabled share count = %d, want %d", len(disabled), len(expectedPaths))
+		}
+		for index, expectedPath := range expectedPaths {
+			if disabled[index].Path != expectedPath {
+				t.Fatalf("disabled order at iteration %d = [%s %s %s], want [%s %s %s]",
+					i,
+					disabled[0].Path,
+					disabled[1].Path,
+					disabled[2].Path,
+					expectedPaths[0],
+					expectedPaths[1],
+					expectedPaths[2],
+				)
+			}
+		}
 	}
 }
 

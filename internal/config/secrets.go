@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Secrets holds auto-generated secrets that persist across restarts
@@ -99,10 +101,17 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 			return nil, false, err
 		}
 		var secrets Secrets
-		if err := json.Unmarshal(data, &secrets); err != nil {
-			return nil, false, fmt.Errorf("failed to parse secrets file: %w", err)
+		if parseErr := json.Unmarshal(data, &secrets); parseErr != nil {
+			if recoverErr := recoverCorruptSecretsFile(normalizedPath, parseErr); recoverErr != nil {
+				return nil, false, errors.Join(
+					fmt.Errorf("failed to parse secrets file: %w", parseErr),
+					fmt.Errorf("recover corrupt secrets file: %w", recoverErr),
+				)
+			}
+			err = os.ErrNotExist
+		} else {
+			return &secrets, false, nil
 		}
-		return &secrets, false, nil
 	}
 
 	if !os.IsNotExist(err) {
@@ -134,6 +143,76 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	}
 
 	return secrets, true, nil
+}
+
+func recoverCorruptSecretsFile(secretsPath string, loadErr error) error {
+	if !isRecoverableSecretsLoadError(loadErr) {
+		return loadErr
+	}
+
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", secretsPath, time.Now().UnixNano())
+	if err := renameRegisteredSecretsFile(secretsPath, corruptPath); err != nil {
+		return fmt.Errorf("backup corrupt secrets file: %w", err)
+	}
+	if err := syncRegisteredManagedDir(secretsPath, "secrets file"); err != nil {
+		if rollbackErr := renameRegisteredSecretsFile(corruptPath, secretsPath); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt secrets directory: %w", err),
+				fmt.Errorf("rollback corrupt secrets backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncRegisteredManagedDir(secretsPath, "secrets file"); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt secrets directory: %w", err),
+				fmt.Errorf("sync corrupt secrets rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt secrets directory: %w", err)
+	}
+
+	return nil
+}
+
+func isRecoverableSecretsLoadError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
+}
+
+func renameRegisteredSecretsFile(oldPath, newPath string) error {
+	root, normalizedOldPath, ok, err := registeredManagedDirRoot(oldPath, "secrets file")
+	if err != nil {
+		return err
+	}
+	normalizedNewPath, err := normalizeManagedFilePath(newPath, "secrets file")
+	if err != nil {
+		return err
+	}
+	if filepath.Dir(normalizedOldPath) != filepath.Dir(normalizedNewPath) {
+		return fmt.Errorf("secrets rename requires same parent directory")
+	}
+	if err := validateManagedFilePath(normalizedOldPath, errSecretsFileSymlink, "secrets file"); err != nil {
+		return err
+	}
+	if err := validateManagedFilePath(normalizedNewPath, errSecretsFileSymlink, "secrets file"); err != nil {
+		return err
+	}
+	if ok {
+		afterValidateManagedFilePath()
+		if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+			return mapManagedRootPathError(err, errSecretsFileSymlink)
+		}
+		return nil
+	}
+	return os.Rename(normalizedOldPath, normalizedNewPath)
 }
 
 func validateSecretsFilePath(secretsPath string) error {

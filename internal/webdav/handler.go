@@ -29,6 +29,7 @@ import (
 var (
 	errInvalidDepthHeader                 = errors.New("invalid Depth header")
 	errPropfindDepthLimitExceeded         = errors.New("Depth header exceeds server recursion limit")
+	errInvalidProppatchBody               = errors.New("invalid PROPPATCH request body")
 	errInvalidOverwriteHeader             = errors.New("invalid Overwrite header")
 	errLockTokenMatchesRequestURI         = errors.New("lock token does not match request URI")
 	errLockRefreshRequiresToken           = errors.New("LOCK refresh requires a matching lock token")
@@ -135,6 +136,30 @@ func (h *Handler) Close() {
 		})
 		<-h.lockCleanupDone
 	default:
+	}
+}
+
+// OnPathRenamed invalidates cached listings and rebases locks after an external rename.
+func (h *Handler) OnPathRenamed(oldPath, newPath string) {
+	affectedPaths := []string{path.Dir(oldPath), oldPath, path.Dir(newPath), newPath}
+	h.moveLocksUnderPath(oldPath, newPath)
+	h.invalidatePropCache(affectedPaths...)
+}
+
+// OnPathDeleted invalidates cached listings and clears locks after an external delete.
+func (h *Handler) OnPathDeleted(filePath string) *storage.PathDeleteHookResult {
+	affectedPaths := []string{path.Dir(filePath), filePath}
+	removedLocks := h.clearLocksUnderPathWithSnapshot(filePath)
+	h.invalidatePropCache(affectedPaths...)
+	if len(removedLocks) == 0 {
+		return nil
+	}
+
+	return &storage.PathDeleteHookResult{
+		Rollback: func() error {
+			h.restoreLocks(removedLocks)
+			return nil
+		},
 	}
 }
 
@@ -439,6 +464,13 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 		// If-Match: only update if ETag matches (prevent overwrite conflicts)
 		if im := r.Header.Get("If-Match"); im != "" {
 			if !h.matchETag(im, etag) {
+				http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+				return
+			}
+		}
+
+		if ius := r.Header.Get("If-Unmodified-Since"); ius != "" {
+			if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(existingInfo.ModTime, unmodifiedSince) {
 				http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 				return
 			}
@@ -1265,11 +1297,82 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 		return
 	}
 
-	// Simple implementation: ignore property modification requests
+	requestedProperties, err := parseProppatchProperties(r.Body)
+	if err != nil {
+		writeKnownWebDAVError(w, errInvalidProppatchBody, http.StatusBadRequest)
+		return
+	}
+	if len(requestedProperties) == 0 {
+		h.writeProppatchNoOpResponse(w, filePath, info.IsDir)
+		return
+	}
+
+	h.writeProppatchUnsupportedResponse(w, filePath, info.IsDir, requestedProperties)
+}
+
+func parseProppatchProperties(body io.Reader) ([]webdavPropertyElement, error) {
+	decoder := xml.NewDecoder(body)
+	var requestedProperties []webdavPropertyElement
+	seenRoot := false
+	inProp := false
+	propDepth := 0
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		switch token := token.(type) {
+		case xml.StartElement:
+			if !seenRoot {
+				if token.Name.Local != "propertyupdate" {
+					return nil, errInvalidProppatchBody
+				}
+				seenRoot = true
+				continue
+			}
+
+			if token.Name.Local == "prop" {
+				inProp = true
+				propDepth = 0
+				continue
+			}
+
+			if inProp {
+				if propDepth == 0 {
+					requestedProperties = append(requestedProperties, webdavPropertyElement{XMLName: token.Name})
+				}
+				propDepth++
+			}
+		case xml.EndElement:
+			if !inProp {
+				continue
+			}
+			if token.Name.Local == "prop" && propDepth == 0 {
+				inProp = false
+				continue
+			}
+			if propDepth > 0 {
+				propDepth--
+			}
+		}
+	}
+
+	if !seenRoot {
+		return nil, errInvalidProppatchBody
+	}
+
+	return requestedProperties, nil
+}
+
+func (h *Handler) writeProppatchNoOpResponse(w http.ResponseWriter, filePath string, isDir bool) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusMultiStatus)
 	fmt.Fprint(w, xml.Header)
-	escapedHref := h.webdavHref(filePath, info.IsDir)
 	fmt.Fprintf(w, `<D:multistatus xmlns:D="DAV:">
   <D:response>
     <D:href>%s</D:href>
@@ -1277,7 +1380,62 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>
-</D:multistatus>`, escapedHref)
+</D:multistatus>`, h.webdavHref(filePath, isDir))
+}
+
+func (h *Handler) writeProppatchUnsupportedResponse(w http.ResponseWriter, filePath string, isDir bool, requestedProperties []webdavPropertyElement) {
+	namespacePrefixes, orderedNamespaces := buildProppatchNamespacePrefixes(requestedProperties)
+	var response strings.Builder
+	response.WriteString(`<D:multistatus xmlns:D="DAV:"`)
+	for _, namespace := range orderedNamespaces {
+		response.WriteString(` xmlns:`)
+		response.WriteString(namespacePrefixes[namespace])
+		response.WriteString(`="`)
+		_ = xml.EscapeText(&response, []byte(namespace))
+		response.WriteString(`"`)
+	}
+	response.WriteString(`>`)
+	response.WriteString(`<D:response><D:href>`)
+	_ = xml.EscapeText(&response, []byte(h.webdavHref(filePath, isDir)))
+	response.WriteString(`</D:href><D:propstat><D:prop>`)
+	for _, property := range requestedProperties {
+		writeProppatchPropertyElement(&response, namespacePrefixes, property)
+	}
+	response.WriteString(`</D:prop><D:status>HTTP/1.1 403 Forbidden</D:status><D:error><D:cannot-modify-protected-property/></D:error><D:responsedescription>`)
+	_ = xml.EscapeText(&response, []byte("property updates are not supported"))
+	response.WriteString(`</D:responsedescription></D:propstat></D:response></D:multistatus>`)
+
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusMultiStatus)
+	fmt.Fprint(w, xml.Header)
+	fmt.Fprint(w, response.String())
+}
+
+func buildProppatchNamespacePrefixes(requestedProperties []webdavPropertyElement) (map[string]string, []string) {
+	namespacePrefixes := map[string]string{"DAV:": "D"}
+	orderedNamespaces := make([]string, 0)
+	for _, property := range requestedProperties {
+		namespace := property.XMLName.Space
+		if namespace == "" || namespace == "DAV:" {
+			continue
+		}
+		if _, exists := namespacePrefixes[namespace]; exists {
+			continue
+		}
+		namespacePrefixes[namespace] = fmt.Sprintf("P%d", len(orderedNamespaces)+1)
+		orderedNamespaces = append(orderedNamespaces, namespace)
+	}
+	return namespacePrefixes, orderedNamespaces
+}
+
+func writeProppatchPropertyElement(response *strings.Builder, namespacePrefixes map[string]string, property webdavPropertyElement) {
+	response.WriteByte('<')
+	if prefix, ok := namespacePrefixes[property.XMLName.Space]; ok && prefix != "" {
+		response.WriteString(prefix)
+		response.WriteByte(':')
+	}
+	response.WriteString(property.XMLName.Local)
+	response.WriteString("/>")
 }
 
 func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
@@ -1404,31 +1562,33 @@ func normalizeLockToken(token string) string {
 }
 
 type providedLockToken struct {
-	token string
-	path  string
+	token  string
+	path   string
+	tagged bool
 }
 
 func extractLockTokens(r *http.Request, requestPath, prefix string) []providedLockToken {
 	seen := make(map[string]struct{})
 	tokens := make([]providedLockToken, 0, 2)
 
-	appendToken := func(token, tokenPath string) {
+	appendToken := func(token, tokenPath string, tagged bool) {
 		token = normalizeLockToken(token)
 		if token == "" || tokenPath == "" {
 			return
 		}
-		key := tokenPath + "\x00" + token
+		key := tokenPath + "\x00" + strconv.FormatBool(tagged) + "\x00" + token
 		if _, exists := seen[key]; exists {
 			return
 		}
 		seen[key] = struct{}{}
-		tokens = append(tokens, providedLockToken{token: token, path: tokenPath})
+		tokens = append(tokens, providedLockToken{token: token, path: tokenPath, tagged: tagged})
 	}
 
-	appendToken(r.Header.Get("Lock-Token"), requestPath)
+	appendToken(r.Header.Get("Lock-Token"), requestPath, false)
 
 	ifHeader := r.Header.Get("If")
 	currentPath := requestPath
+	currentTagged := false
 	for {
 		ifHeader = strings.TrimSpace(ifHeader)
 		if ifHeader == "" {
@@ -1447,13 +1607,14 @@ func extractLockTokens(r *http.Request, requestPath, prefix string) []providedLo
 			} else {
 				currentPath = ""
 			}
+			currentTagged = true
 			ifHeader = ifHeader[uriEnd+1:]
 		case '(':
 			stateEnd := strings.IndexByte(ifHeader, ')')
 			if stateEnd == -1 {
 				return tokens
 			}
-			extractStateListLockTokens(ifHeader[1:stateEnd], currentPath, appendToken)
+			extractStateListLockTokens(ifHeader[1:stateEnd], currentPath, currentTagged, appendToken)
 			ifHeader = ifHeader[stateEnd+1:]
 		default:
 			ifHeader = ifHeader[1:]
@@ -1463,7 +1624,7 @@ func extractLockTokens(r *http.Request, requestPath, prefix string) []providedLo
 	return tokens
 }
 
-func extractStateListLockTokens(stateList, tokenPath string, appendToken func(token, tokenPath string)) {
+func extractStateListLockTokens(stateList, tokenPath string, tagged bool, appendToken func(token, tokenPath string, tagged bool)) {
 	for {
 		stateList = strings.TrimSpace(stateList)
 		if stateList == "" {
@@ -1489,7 +1650,7 @@ func extractStateListLockTokens(stateList, tokenPath string, appendToken func(to
 				return
 			}
 			if !negated {
-				appendToken(stateList[1:tokenEnd], tokenPath)
+				appendToken(stateList[1:tokenEnd], tokenPath, tagged)
 			}
 			stateList = stateList[tokenEnd+1:]
 		case '[':
@@ -1537,11 +1698,27 @@ func hasMatchingLockToken(providedTokens []providedLockToken, expected, lockPath
 		if token.token != expected {
 			continue
 		}
+		if token.tagged {
+			if taggedLockScopeContainsPath(lockPath, lockInfo, token.path) {
+				return true
+			}
+			continue
+		}
 		if lockScopeContainsPath(lockPath, lockInfo, token.path) {
 			return true
 		}
 	}
 	return false
+}
+
+func taggedLockScopeContainsPath(lockPath string, lockInfo webdavLock, candidatePath string) bool {
+	if candidatePath == lockPath {
+		return true
+	}
+	if lockInfo.depth == webdavLockDepthInfinity {
+		return isDescendantPath(lockPath, candidatePath)
+	}
+	return path.Dir(candidatePath) == lockPath
 }
 
 func lockScopeContainsPath(lockPath string, lockInfo webdavLock, candidatePath string) bool {
@@ -1776,14 +1953,45 @@ func rebaseLockedPath(rootPath, newRootPath, lockPath string) string {
 }
 
 func (h *Handler) clearLocksUnderPath(rootPath string) {
+	_ = h.clearLocksUnderPathWithSnapshot(rootPath)
+}
+
+func (h *Handler) clearLocksUnderPathWithSnapshot(rootPath string) map[string]webdavLock {
 	h.locksMu.Lock()
 	defer h.locksMu.Unlock()
 	h.removeExpiredLocksLocked(time.Now())
 
+	removed := make(map[string]webdavLock)
 	for lockPath := range h.locks {
 		if pathMatchesOrDescendant(rootPath, lockPath) {
+			removed[lockPath] = h.locks[lockPath]
 			delete(h.locks, lockPath)
 		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	return removed
+}
+
+func (h *Handler) restoreLocks(restored map[string]webdavLock) {
+	if len(restored) == 0 {
+		return
+	}
+
+	h.locksMu.Lock()
+	defer h.locksMu.Unlock()
+	h.removeExpiredLocksLocked(time.Now())
+
+	now := time.Now()
+	for lockPath, lockInfo := range restored {
+		if !lockInfo.expiresAt.After(now) {
+			continue
+		}
+		if _, exists := h.locks[lockPath]; exists {
+			continue
+		}
+		h.locks[lockPath] = lockInfo
 	}
 }
 
@@ -2023,4 +2231,9 @@ type prop struct {
 
 type resourceType struct {
 	Collection *struct{} `xml:"collection,omitempty"`
+}
+
+type webdavPropertyElement struct {
+	XMLName xml.Name
+	Inner   string `xml:",innerxml,omitempty"`
 }
