@@ -111,6 +111,8 @@ type Server struct {
 	activeWebDAV        WebDAVRuntimeConfig
 	webdavMu            sync.RWMutex
 	updateWebDAV        func(WebDAVRuntimeConfig)
+	afterPathRenamed    func(oldPath, newPath string)
+	afterPathDeleted    func(path string) *storage.PathDeleteHookResult
 	beforeThumbnailRead func(string) error
 }
 
@@ -196,6 +198,9 @@ func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) e
 			}
 			return fmt.Errorf("sync favorite paths after rename: %w", err)
 		}
+	}
+	if s.afterPathRenamed != nil {
+		s.afterPathRenamed(oldPath, newPath)
 	}
 
 	return nil
@@ -312,7 +317,7 @@ func (s *Server) rollbackDeletedPathShareRestoreState(snapshot deletedPathShareR
 
 	var rollbackErr error
 	if len(snapshot.shares) > 0 {
-		if err := s.shareStore.RestoreShares(snapshot.shares); err != nil {
+		if err := s.shareStore.RestoreDisabledSharesPreservingCurrent(snapshot.shares); err != nil {
 			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore share snapshot after trash metadata failure: %w", err))
 		}
 	}
@@ -401,10 +406,6 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		}
 	}
 
-	if len(disabledShares) == 0 && len(removedFavorites) == 0 {
-		return nil, nil
-	}
-
 	rollback := func() error {
 		var rollbackErr error
 		if len(removedFavorites) > 0 {
@@ -420,24 +421,83 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		return rollbackErr
 	}
 
-	restoreData, err := json.Marshal(deletedPathRestoreState{
-		Shares:    disabledShares,
-		Favorites: removedFavorites,
-	})
-	if err != nil {
-		if rollbackErr := rollback(); rollbackErr != nil {
-			return nil, errors.Join(
-				fmt.Errorf("encode delete restore metadata: %w", err),
-				fmt.Errorf("rollback delete hooks after metadata encode failure: %w", rollbackErr),
-			)
+	var hookResult *storage.PathDeleteHookResult
+	if len(disabledShares) > 0 || len(removedFavorites) > 0 {
+		restoreData, err := json.Marshal(deletedPathRestoreState{
+			Shares:    disabledShares,
+			Favorites: removedFavorites,
+		})
+		if err != nil {
+			if rollbackErr := rollback(); rollbackErr != nil {
+				return nil, errors.Join(
+					fmt.Errorf("encode delete restore metadata: %w", err),
+					fmt.Errorf("rollback delete hooks after metadata encode failure: %w", rollbackErr),
+				)
+			}
+			return nil, fmt.Errorf("encode delete restore metadata: %w", err)
 		}
-		return nil, fmt.Errorf("encode delete restore metadata: %w", err)
+
+		hookResult = &storage.PathDeleteHookResult{
+			Rollback:    rollback,
+			RestoreData: restoreData,
+		}
 	}
 
-	return &storage.PathDeleteHookResult{
-		Rollback:    rollback,
-		RestoreData: restoreData,
-	}, nil
+	var afterHookResult *storage.PathDeleteHookResult
+	if s.afterPathDeleted != nil {
+		afterHookResult = s.afterPathDeleted(targetPath)
+	}
+
+	combinedHookResult, err := combineDeleteHookResults(hookResult, afterHookResult)
+	if err != nil {
+		rollbackErr := errors.Join(runDeleteHookRollback(afterHookResult), runDeleteHookRollback(hookResult))
+		if rollbackErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("rollback delete hooks after listener merge failure: %w", rollbackErr))
+		}
+		return nil, err
+	}
+
+	return combinedHookResult, nil
+}
+
+func runDeleteHookRollback(result *storage.PathDeleteHookResult) error {
+	if result == nil || result.Rollback == nil {
+		return nil
+	}
+	return result.Rollback()
+}
+
+func combineDeleteHookResults(primary, secondary *storage.PathDeleteHookResult) (*storage.PathDeleteHookResult, error) {
+	if primary == nil {
+		return secondary, nil
+	}
+	if secondary == nil {
+		return primary, nil
+	}
+	if len(primary.RestoreData) > 0 && len(secondary.RestoreData) > 0 {
+		return nil, errors.New("multiple delete hooks returned restore metadata")
+	}
+
+	combined := &storage.PathDeleteHookResult{}
+	if len(primary.RestoreData) > 0 {
+		combined.RestoreData = primary.RestoreData
+	} else {
+		combined.RestoreData = secondary.RestoreData
+	}
+	if primary.Rollback != nil || secondary.Rollback != nil {
+		combined.Rollback = func() error {
+			var rollbackErr error
+			if secondary.Rollback != nil {
+				rollbackErr = errors.Join(rollbackErr, secondary.Rollback())
+			}
+			if primary.Rollback != nil {
+				rollbackErr = errors.Join(rollbackErr, primary.Rollback())
+			}
+			return rollbackErr
+		}
+	}
+
+	return combined, nil
 }
 
 type AlertMonitor interface {
@@ -637,6 +697,9 @@ type ServerConfig struct {
 	DataplaneAddr string
 	// New storage configuration
 	FileSystem *storage.FileSystem
+	// Additional path change listeners run after the built-in share/favorites sync.
+	AfterPathRenamed func(oldPath, newPath string)
+	AfterPathDeleted func(path string) *storage.PathDeleteHookResult
 	// Storage service roots
 	ThumbnailRoot   string
 	MaintenanceRoot string
@@ -684,6 +747,8 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	}
 	requestip.SetTrustedProxyHops(config.Default().Server.TrustedProxyHops)
 	if cfg != nil {
+		s.afterPathRenamed = cfg.AfterPathRenamed
+		s.afterPathDeleted = cfg.AfterPathDeleted
 		s.updateWebDAV = cfg.UpdateWebDAV
 	}
 
@@ -1540,10 +1605,6 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
-	if isMutationRootPath(filePath) {
-		badRequestInvalidPath(w)
-		return
-	}
 	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
 		forbiddenPathOutsideHome(w)
 		return
@@ -1719,6 +1780,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	filePath, err := validatePath(filePath)
 	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if isMutationRootPath(filePath) {
 		badRequestInvalidPath(w)
 		return
 	}

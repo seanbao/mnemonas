@@ -783,6 +783,48 @@ func TestHandler_PUT_IfNoneMatchMatchingETagFails(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_IfUnmodifiedSinceFailsForStaleWrite(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/files/existing.txt", strings.NewReader("initial")); err != nil {
+		t.Fatalf("WriteFile(existing.txt) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, "/files/existing.txt")
+	if err != nil {
+		t.Fatalf("Stat(existing.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/existing.txt", strings.NewReader("updated"))
+	req.Header.Set("If-Unmodified-Since", info.ModTime.Add(-time.Minute).UTC().Format(http.TimeFormat))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("PUT If-Unmodified-Since stale write status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+	}
+	if !strings.Contains(w.Body.String(), errPreconditionFailed.Error()) {
+		t.Fatalf("expected precondition failed message, got %q", w.Body.String())
+	}
+
+	reader, err := fs.OpenFile(ctx, "/files/existing.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(existing.txt) error: %v", err)
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(existing.txt) error: %v", err)
+	}
+	if string(body) != "initial" {
+		t.Fatalf("expected existing file content to remain unchanged, got %q", string(body))
+	}
+}
+
 func TestHandler_ConditionalGET(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1098,6 +1140,21 @@ func TestHandler_DELETE_ConditionalHeaders(t *testing.T) {
 		}
 		if _, err := fs.Stat(ctx, "/deltest/file.txt"); err != nil {
 			t.Fatalf("expected file to remain after failed If-None-Match DELETE, got %v", err)
+		}
+	})
+
+	t.Run("IfUnmodifiedSincePreventsDelete", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+		req.Header.Set("If-Unmodified-Since", info.ModTime.Add(-time.Minute).UTC().Format(http.TimeFormat))
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("DELETE If-Unmodified-Since stale status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/deltest/file.txt"); err != nil {
+			t.Fatalf("expected file to remain after failed If-Unmodified-Since DELETE, got %v", err)
 		}
 	})
 }
@@ -2062,6 +2119,66 @@ func TestHandler_MOVE_OverwriteFalse(t *testing.T) {
 	if string(data) != "existing" {
 		t.Fatalf("Expected destination content unchanged, got %q", string(data))
 	}
+}
+
+func TestHandler_MOVE_ConditionalHeaders(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/movetest-conditions"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest-conditions/orig.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(orig) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, "/movetest-conditions/orig.txt")
+	if err != nil {
+		t.Fatalf("Stat(orig) error: %v", err)
+	}
+	staleETag := `"` + info.ContentHash + `"`
+	staleIfUnmodifiedSince := info.ModTime.Add(-time.Minute).UTC().Format(http.TimeFormat)
+
+	if err := fs.WriteFile(ctx, "/movetest-conditions/orig.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(updated orig) error: %v", err)
+	}
+
+	t.Run("IfMatchMismatchPreventsMove", func(t *testing.T) {
+		req := httptest.NewRequest("MOVE", "/dav/movetest-conditions/orig.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/movetest-conditions/if-match.txt")
+		req.Header.Set("If-Match", staleETag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("MOVE If-Match mismatch status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/movetest-conditions/orig.txt"); err != nil {
+			t.Fatalf("expected source file to remain after failed conditional MOVE, got %v", err)
+		}
+		if _, err := fs.Stat(ctx, "/movetest-conditions/if-match.txt"); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected destination to remain absent after failed conditional MOVE, got %v", err)
+		}
+	})
+
+	t.Run("IfUnmodifiedSincePreventsMove", func(t *testing.T) {
+		req := httptest.NewRequest("MOVE", "/dav/movetest-conditions/orig.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/movetest-conditions/if-unmodified-since.txt")
+		req.Header.Set("If-Unmodified-Since", staleIfUnmodifiedSince)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("MOVE If-Unmodified-Since stale status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/movetest-conditions/orig.txt"); err != nil {
+			t.Fatalf("expected source file to remain after failed If-Unmodified-Since MOVE, got %v", err)
+		}
+		if _, err := fs.Stat(ctx, "/movetest-conditions/if-unmodified-since.txt"); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected destination to remain absent after failed If-Unmodified-Since MOVE, got %v", err)
+		}
+	})
 }
 
 func TestHandler_MOVE_OverwriteFalseValidatesDestinationUnderLock(t *testing.T) {
@@ -3032,6 +3149,65 @@ func TestHandler_PROPPATCH_DirectoryHrefPreservesTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestHandler_PROPPATCH_RequestedPropertiesReturnForbiddenPropstat(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/prop-patch-props.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/prop-patch-props.txt) error: %v", err)
+	}
+
+	body := `<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:mnemonas:test">
+  <D:set>
+    <D:prop>
+      <Z:customprop>value</Z:customprop>
+    </D:prop>
+  </D:set>
+  <D:remove>
+    <D:prop>
+      <Z:otherprop />
+    </D:prop>
+  </D:remove>
+</D:propertyupdate>`
+	req := httptest.NewRequest("PROPPATCH", "/dav/prop-patch-props.txt", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
+	}
+	responseBody := w.Body.String()
+	if !strings.Contains(responseBody, "HTTP/1.1 403 Forbidden") {
+		t.Fatalf("expected PROPPATCH to report unsupported property updates, got %q", responseBody)
+	}
+	if strings.Contains(responseBody, "HTTP/1.1 200 OK") {
+		t.Fatalf("expected PROPPATCH property update to avoid false success, got %q", responseBody)
+	}
+	if !strings.Contains(responseBody, "cannot-modify-protected-property") {
+		t.Fatalf("expected PROPPATCH response to explain unsupported property updates, got %q", responseBody)
+	}
+}
+
+func TestHandler_PROPPATCH_InvalidXMLReturnsBadRequest(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/prop-patch-invalid.xml", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/prop-patch-invalid.xml) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PROPPATCH", "/dav/prop-patch-invalid.xml", strings.NewReader(`<D:propertyupdate xmlns:D="DAV:"><D:set>`))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 func TestHandler_LOCK_UNLOCK(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -3494,6 +3670,49 @@ func TestHandler_LOCK_RefreshWithMismatchedTaggedIfURIFails(t *testing.T) {
 	}
 	if !strings.Contains(refreshW.Body.String(), errLockTokenMatchesRequestURI.Error()) {
 		t.Fatalf("expected lock-token-matches-request-uri failure, got %q", refreshW.Body.String())
+	}
+}
+
+func TestHandler_LOCK_RefreshWithAncestorTaggedIfURIFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/lock-refresh-ancestor-tagged"); err != nil {
+		t.Fatalf("Mkdir(lock-refresh-ancestor-tagged) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/lock-refresh-ancestor-tagged/child.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(child.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-ancestor-tagged", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("initial collection LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	handler.locksMu.Lock()
+	before := handler.locks["/lock-refresh-ancestor-tagged"].expiresAt
+	handler.locksMu.Unlock()
+
+	refreshReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-ancestor-tagged/child.txt", nil)
+	refreshReq.Header.Set("If", "</dav> ("+lockToken+")")
+	refreshW := httptest.NewRecorder()
+	handler.ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusPreconditionFailed {
+		t.Fatalf("refresh LOCK with ancestor tagged URI status = %d, want %d", refreshW.Code, http.StatusPreconditionFailed)
+	}
+	if !strings.Contains(refreshW.Body.String(), errLockTokenMatchesRequestURI.Error()) {
+		t.Fatalf("expected lock-token-matches-request-uri failure, got %q", refreshW.Body.String())
+	}
+
+	handler.locksMu.Lock()
+	after := handler.locks["/lock-refresh-ancestor-tagged"].expiresAt
+	handler.locksMu.Unlock()
+	if !after.Equal(before) {
+		t.Fatalf("expected failed ancestor-tagged refresh not to move expiry: before=%v after=%v", before, after)
 	}
 }
 
@@ -4417,6 +4636,90 @@ func TestHandler_WriteExpectedWebDAVError_UsesSentinelMessageForWrappedError(t *
 	}
 	if !strings.Contains(w.Body.String(), errDestinationInsideSourceDirectory.Error()) {
 		t.Fatalf("expected sentinel message in response, got %q", w.Body.String())
+	}
+}
+
+func TestHandler_OnPathRenamed_RebasesLocksAndInvalidatesPropCache(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	handler.propCache.Set("/docs", "1", []propfindResponse{{Href: "/docs"}})
+	handler.propCache.Set("/archive", "1", []propfindResponse{{Href: "/archive"}})
+	handler.locksMu.Lock()
+	handler.locks["/docs/file.txt"] = webdavLock{
+		token:     "token-1",
+		depth:     webdavLockDepthZero,
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	handler.locksMu.Unlock()
+
+	handler.OnPathRenamed("/docs", "/archive/docs")
+
+	handler.locksMu.Lock()
+	_, oldExists := handler.locks["/docs/file.txt"]
+	newLock, newExists := handler.locks["/archive/docs/file.txt"]
+	handler.locksMu.Unlock()
+	if oldExists {
+		t.Fatal("expected old lock path to be removed after external rename")
+	}
+	if !newExists {
+		t.Fatal("expected lock to be rebased onto renamed path")
+	}
+	if newLock.token != "token-1" {
+		t.Fatalf("rebased lock token = %q, want token-1", newLock.token)
+	}
+	if _, ok := handler.propCache.Get("/docs", "1"); ok {
+		t.Fatal("expected old path cache entry to be invalidated after external rename")
+	}
+	if _, ok := handler.propCache.Get("/archive", "1"); ok {
+		t.Fatal("expected destination ancestor cache entry to be invalidated after external rename")
+	}
+}
+
+func TestHandler_OnPathDeleted_ClearsLocksAndRestoresOnRollback(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	handler.propCache.Set("/docs", "1", []propfindResponse{{Href: "/docs"}})
+	handler.locksMu.Lock()
+	handler.locks["/docs/file.txt"] = webdavLock{
+		token:     "token-1",
+		depth:     webdavLockDepthZero,
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	handler.locks["/other/file.txt"] = webdavLock{
+		token:     "token-2",
+		depth:     webdavLockDepthZero,
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	handler.locksMu.Unlock()
+
+	hookResult := handler.OnPathDeleted("/docs")
+	if hookResult == nil || hookResult.Rollback == nil {
+		t.Fatal("expected external delete hook to provide rollback for removed locks")
+	}
+
+	handler.locksMu.Lock()
+	_, deletedLockExists := handler.locks["/docs/file.txt"]
+	_, siblingLockExists := handler.locks["/other/file.txt"]
+	handler.locksMu.Unlock()
+	if deletedLockExists {
+		t.Fatal("expected deleted path lock to be cleared")
+	}
+	if !siblingLockExists {
+		t.Fatal("expected unrelated lock to remain after external delete")
+	}
+	if _, ok := handler.propCache.Get("/docs", "1"); ok {
+		t.Fatal("expected deleted path cache entry to be invalidated")
+	}
+
+	if err := hookResult.Rollback(); err != nil {
+		t.Fatalf("rollback() error: %v", err)
+	}
+
+	handler.locksMu.Lock()
+	_, restoredLockExists := handler.locks["/docs/file.txt"]
+	handler.locksMu.Unlock()
+	if !restoredLockExists {
+		t.Fatal("expected rollback to restore cleared WebDAV locks")
 	}
 }
 

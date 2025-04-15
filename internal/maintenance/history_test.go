@@ -308,6 +308,62 @@ func TestNewHistoryStore_RecoversFromCorruptLastScrubFile(t *testing.T) {
 	}
 }
 
+func TestNewHistoryStore_RecoversCorruptLastScrubFileUsingTerminalFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+	fallbackPath := filepath.Join(tmpDir, "last_scrub.terminal.json")
+
+	if err := os.WriteFile(historyPath, []byte("{"), 0644); err != nil {
+		t.Fatalf("WriteFile(corrupt last_scrub.json) error: %v", err)
+	}
+
+	fallback := &ScrubResult{
+		ID:           "terminal-fallback",
+		Status:       "completed",
+		TotalObjects: 5,
+		StartTime:    time.Unix(1, 0),
+		EndTime:      time.Unix(2, 0),
+	}
+	fallbackData, err := json.Marshal(fallback)
+	if err != nil {
+		t.Fatalf("Marshal(fallback) error: %v", err)
+	}
+	if err := os.WriteFile(fallbackPath, fallbackData, 0644); err != nil {
+		t.Fatalf("WriteFile(last_scrub.terminal.json) error: %v", err)
+	}
+
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+
+	loaded := store.GetLastScrubResult()
+	if loaded == nil {
+		t.Fatal("expected terminal fallback scrub result to be loaded after corrupt canonical recovery")
+	}
+	if loaded.Status != "completed" {
+		t.Fatalf("expected recovered scrub status completed, got %q", loaded.Status)
+	}
+	if loaded.TotalObjects != 5 {
+		t.Fatalf("expected recovered scrub total_objects 5, got %d", loaded.TotalObjects)
+	}
+
+	persistedData, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(persistedData, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "completed" {
+		t.Fatalf("expected canonical scrub status completed after fallback recovery, got %q", persisted.Status)
+	}
+	if persisted.ID != fallback.ID {
+		t.Fatalf("expected canonical scrub id %q after fallback recovery, got %q", fallback.ID, persisted.ID)
+	}
+}
+
 func TestNewHistoryStore_ReturnsErrorWhenCorruptBackupDirectorySyncFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	historyPath := filepath.Join(tmpDir, "last_scrub.json")
@@ -694,6 +750,51 @@ func TestNewHistoryStore_RestoresTerminalFallbackAfterFailedFinalPersistence(t *
 	}
 	if persisted.Status != "completed" {
 		t.Fatalf("expected canonical scrub status completed after reload repair, got %q", persisted.Status)
+	}
+}
+
+func TestNewHistoryStore_IgnoresCorruptTerminalFallbackWhenCanonicalIsValid(t *testing.T) {
+	tmpDir := t.TempDir()
+	canonical := &ScrubResult{
+		ID:        "running-scrub",
+		Status:    "running",
+		StartTime: time.Unix(10, 0),
+	}
+	canonicalData, err := json.Marshal(canonical)
+	if err != nil {
+		t.Fatalf("Marshal(canonical) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "last_scrub.json"), canonicalData, 0644); err != nil {
+		t.Fatalf("WriteFile(last_scrub.json) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "last_scrub.terminal.json"), []byte("{"), 0644); err != nil {
+		t.Fatalf("WriteFile(last_scrub.terminal.json) error: %v", err)
+	}
+
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+
+	loaded := store.GetLastScrubResult()
+	if loaded == nil {
+		t.Fatal("expected valid canonical scrub result to survive corrupt terminal fallback")
+	}
+	if loaded.Status != "failed" {
+		t.Fatalf("expected interrupted canonical scrub to recover as failed, got %q", loaded.Status)
+	}
+	if loaded.ErrorMessage != interruptedScrubErrorMessage {
+		t.Fatalf("expected interrupted scrub error message %q, got %q", interruptedScrubErrorMessage, loaded.ErrorMessage)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(tmpDir) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "last_scrub.json.corrupt.") {
+			t.Fatalf("expected canonical scrub file not to be backed up as corrupt, found %s", entry.Name())
+		}
 	}
 }
 

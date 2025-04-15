@@ -439,7 +439,7 @@ base_url = "https://nas.example.com"
 | `min_free_bytes` | uint64 | `10737418240` | 最小可用空间（字节） |
 | `cooldown_period` | duration | `4h` | 告警冷却时间 |
 | `webhook_url` | string | `""` | Webhook URL |
-| `webhook_method` | string | `POST` | Webhook 方法 |
+| `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query |
 | `webhook_headers` | string[] | `[]` | 自定义 Header（"Key:Value"） |
 
 **示例：**

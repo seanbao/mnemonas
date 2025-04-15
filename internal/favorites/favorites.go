@@ -64,6 +64,18 @@ func copyFavorite(fav *Favorite) *Favorite {
 	return &clone
 }
 
+func sortFavoritesCanonical(favorites []*Favorite) {
+	sort.Slice(favorites, func(i, j int) bool {
+		if favorites[i].UserID != favorites[j].UserID {
+			return favorites[i].UserID < favorites[j].UserID
+		}
+		if favorites[i].Path != favorites[j].Path {
+			return favorites[i].Path < favorites[j].Path
+		}
+		return favorites[i].CreatedAt.Before(favorites[j].CreatedAt)
+	})
+}
+
 func normalizeStoredFavoritePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
 	if normalized == "" {
@@ -201,6 +213,7 @@ func saveFavoritesState(filePath string, dataByUser map[string]map[string]*Favor
 			favorites = append(favorites, copyFavorite(fav))
 		}
 	}
+	sortFavoritesCanonical(favorites)
 
 	data, err := json.MarshalIndent(favorites, "", "  ")
 	if err != nil {
@@ -772,6 +785,9 @@ func (s *Store) List(userID string) []*Favorite {
 
 	// Sort by creation time, newest first
 	sort.Slice(favorites, func(i, j int) bool {
+		if favorites[i].CreatedAt.Equal(favorites[j].CreatedAt) {
+			return favorites[i].Path < favorites[j].Path
+		}
 		return favorites[i].CreatedAt.After(favorites[j].CreatedAt)
 	})
 
@@ -886,8 +902,15 @@ func relocateFavoritePath(currentPath, oldRoot, newRoot string) (string, bool) {
 
 // UpdatePathReferences rewrites favorite paths when a filesystem path is renamed.
 func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
-	oldPath = path.Clean(oldPath)
-	newPath = path.Clean(newPath)
+	var err error
+	oldPath, err = normalizeStoredFavoritePath(oldPath)
+	if err != nil {
+		return err
+	}
+	newPath, err = normalizeStoredFavoritePath(newPath)
+	if err != nil {
+		return err
+	}
 	if oldPath == newPath {
 		return nil
 	}
@@ -949,7 +972,11 @@ func (s *Store) RemoveFavoritesUnderPath(targetPath string) error {
 // RemoveFavoritesUnderPathWithRestore removes favorites under a deleted path and
 // returns the removed favorites for rollback if a later step fails.
 func (s *Store) RemoveFavoritesUnderPathWithRestore(targetPath string) ([]*Favorite, error) {
-	targetPath = path.Clean(targetPath)
+	var err error
+	targetPath, err = normalizeStoredFavoritePath(targetPath)
+	if err != nil {
+		return nil, err
+	}
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -977,6 +1004,7 @@ func (s *Store) RemoveFavoritesUnderPathWithRestore(targetPath string) ([]*Favor
 		if !changed {
 			return nil, nil
 		}
+		sortFavoritesCanonical(removed)
 		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
 			return nil, err
 		}
