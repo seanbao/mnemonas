@@ -20,7 +20,7 @@
 ### 必需依赖
 
 | 工具 | 最低版本 | 推荐版本 | 用途 |
-|------|---------|---------|------|
+| ---- | -------- | -------- | ---- |
 | **Go** | 1.21 | 1.25 | Go 控制面开发 |
 | **Rust** | 1.75 | 1.92 | Rust 数据面开发 |
 | **Node.js** | 20.19 | 22.x | 前端开发 |
@@ -30,7 +30,7 @@
 ### 可选依赖
 
 | 工具 | 用途 |
-|------|------|
+| ---- | ---- |
 | Docker & Docker Compose | 容器化部署 |
 | golangci-lint | Go 代码静态检查 |
 | cargo-watch | Rust 热重载 |
@@ -108,6 +108,7 @@ sudo sysctl -p
 建议在 WSL2 Ubuntu 环境下开发，按照上述 Ubuntu 步骤操作。
 
 原生 Windows 开发：
+
 ```powershell
 # 使用 winget 或 scoop
 winget install GoLang.Go
@@ -141,7 +142,7 @@ nvm use
 
 ## 项目结构
 
-```
+```text
 mnemonas/
 ├── cmd/nasd/                    # Go 主程序入口
 │   └── main.go                  # 程序入口，启动控制面服务
@@ -310,6 +311,7 @@ nvm use
 ```
 
 脚本特性：
+
 - **自动构建**：启动前自动构建 Go 和 Rust 组件
 - **端口检测**：避免重复启动，自动跳过已占用的端口
 - **健康检查**：等待服务就绪后再继续
@@ -319,7 +321,7 @@ nvm use
 
 启动后的服务状态表：
 
-```
+```text
 ┌─────────────┬────────┬──────────────────────────────────┐
 │ 组件        │ 状态   │ 地址                             │
 ├─────────────┼────────┼──────────────────────────────────┤
@@ -333,7 +335,8 @@ nvm use
 
 如果需要更细粒度的控制，可以分别启动各组件：
 
-**终端 1 - Rust 数据面**
+#### 终端 1 - Rust 数据面
+
 ```bash
 cd dataplane
 cargo run -- --data-dir ~/.mnemonas/.mnemonas/objects --grpc 127.0.0.1:9090 --listen 127.0.0.1:9091
@@ -342,7 +345,8 @@ cargo run -- --data-dir ~/.mnemonas/.mnemonas/objects --grpc 127.0.0.1:9090 --li
 ./bin/dataplane --data-dir ~/.mnemonas/.mnemonas/objects --grpc 127.0.0.1:9090 --listen 127.0.0.1:9091
 ```
 
-**终端 2 - Go 控制面**
+#### 终端 2 - Go 控制面
+
 ```bash
 ./bin/nasd
 
@@ -350,7 +354,8 @@ cargo run -- --data-dir ~/.mnemonas/.mnemonas/objects --grpc 127.0.0.1:9090 --li
 go run ./cmd/nasd
 ```
 
-**终端 3 - 前端开发服务器**
+#### 终端 3 - 前端开发服务器
+
 ```bash
 source ~/.nvm/nvm.sh
 nvm use
@@ -364,7 +369,8 @@ npm run dev
 
 ### 热重载开发
 
-**Go 热重载** (使用 air)
+#### Go 热重载 (使用 air)
+
 ```bash
 # 安装 air
 go install github.com/air-verse/air@latest
@@ -373,14 +379,16 @@ go install github.com/air-verse/air@latest
 air
 ```
 
-**Rust 热重载** (使用 cargo-watch)
+#### Rust 热重载 (使用 cargo-watch)
+
 ```bash
 cargo install cargo-watch
 cd dataplane
 cargo watch -x run
 ```
 
-**前端热重载**
+#### 前端热重载
+
 ```bash
 # Vite 默认支持 HMR
 cd web && npm run dev
@@ -389,7 +397,7 @@ cd web && npm run dev
 ### 端口说明
 
 | 服务 | 端口 | 说明 |
-|------|------|------|
+| ---- | ---- | ---- |
 | Go 控制面 (nasd) | 8080 | REST API + WebDAV |
 | Rust 数据面 HTTP | 9091 | 健康检查 + 统计信息 |
 | Rust 数据面 gRPC | 9090 | CAS 存储服务 |
@@ -529,6 +537,7 @@ curl http://localhost:9091/stats            # dataplane 统计
 ```
 
 测试覆盖：
+
 - 基础功能：健康检查、版本 API、WebDAV OPTIONS
 - 文件操作：PUT/GET/DELETE/MKCOL/COPY/MOVE
 - ETag 条件请求：If-None-Match/If-Match
@@ -553,6 +562,7 @@ curl http://localhost:9091/stats            # dataplane 统计
 ```
 
 测试内容：
+
 - 不同目录大小的 PROPFIND 响应时间（10/100/500/1000 文件）
 - 缓存效果测试（冷启动 vs 缓存后）
 - API 指标统计
@@ -571,6 +581,9 @@ go install github.com/go-delve/delve/cmd/dlv@latest
 dlv debug ./cmd/nasd
 
 # VS Code launch.json
+```
+
+```json
 {
   "version": "0.2.0",
   "configurations": [
@@ -594,6 +607,9 @@ cargo build
 rust-lldb target/debug/dataplane
 
 # VS Code 配置 (需要 CodeLLDB 扩展)
+```
+
+```json
 {
   "version": "0.2.0",
   "configurations": [
@@ -645,6 +661,7 @@ sudo tcpdump -i lo port 8080 -w debug.pcap
 ### Q: `protoc-gen-go: program not found`
 
 确保 Go bin 目录在 PATH 中：
+
 ```bash
 export PATH=$PATH:$(go env GOPATH)/bin
 ```
@@ -652,6 +669,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 ### Q: 前端开发服务器报 `ENOSPC: System limit for file watchers reached`
 
 增加文件监视器限制：
+
 ```bash
 echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
@@ -660,6 +678,7 @@ sudo sysctl -p
 ### Q: Rust 编译慢
 
 使用增量编译和 sccache：
+
 ```bash
 cargo install sccache
 export RUSTC_WRAPPER=sccache
@@ -668,11 +687,14 @@ export RUSTC_WRAPPER=sccache
 ### Q: Go 模块下载慢
 
 配置 GOPROXY：
+
 ```bash
 export GOPROXY=https://goproxy.cn,direct
 ```
 
 ### Q: WebDAV 客户端连接失败
+
+排查步骤：
 
 1. 确认服务在运行：`curl http://localhost:8080/health`
 2. 检查 WebDAV 前缀配置（默认 `/dav`）
@@ -688,6 +710,7 @@ rm -rf ~/.mnemonas
 ### Q: 如何调整 dataplane 端口？
 
 dataplane 同时监听两个端口：
+
 - HTTP 端口（默认 9091）：健康检查和统计信息
 - gRPC 端口（默认 9090）：CAS 存储服务
 
@@ -704,6 +727,7 @@ dataplane 同时监听两个端口：
 ### Go
 
 遵循官方 Go 代码规范，使用 `gofmt` 格式化：
+
 ```bash
 go fmt ./...
 ```
@@ -711,6 +735,7 @@ go fmt ./...
 ### Rust
 
 使用 `rustfmt` 格式化：
+
 ```bash
 cd dataplane && cargo fmt
 ```
@@ -718,6 +743,7 @@ cd dataplane && cargo fmt
 ### TypeScript/React
 
 使用 ESLint + Prettier：
+
 ```bash
 cd web && npm run lint
 ```
@@ -728,7 +754,7 @@ cd web && npm run lint
 
 使用 Conventional Commits 格式：
 
-```
+```text
 <type>(<scope>): <description>
 
 [optional body]
@@ -737,6 +763,7 @@ cd web && npm run lint
 ```
 
 类型：
+
 - `feat`: 新功能
 - `fix`: 修复 bug
 - `docs`: 文档更新
@@ -746,7 +773,8 @@ cd web && npm run lint
 - `chore`: 构建/工具链
 
 示例：
-```
+
+```text
 feat(webdav): add ETag support for conditional requests
 fix(dataplane): fix memory leak in CDC chunking
 docs(readme): update installation instructions

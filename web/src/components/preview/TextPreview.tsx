@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Spinner } from '@heroui/react'
 import { FileCode, AlertCircle } from 'lucide-react'
 import { buildPreviewUrl, getLanguageFromExtension } from '@/lib/preview-utils'
-import { getAuthHeaders } from '@/api/auth'
+import { authFetch } from '@/api/auth'
 import { cn } from '@/lib/utils'
 
 // Simple syntax highlighting for common patterns
@@ -75,7 +75,7 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
       
       try {
         const url = buildPreviewUrl(path, { includeAuth: false })
-        const response = await fetch(url, { headers: getAuthHeaders() })
+        const response = await authFetch(url)
         
         if (!response.ok) {
           throw new Error(`加载失败: ${response.statusText}`)

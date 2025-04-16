@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { refreshAuthSession } from '@/api/auth'
 import { PreviewModal, type PreviewFile } from './PreviewModal'
+
+vi.mock('@/api/auth', () => ({
+  refreshAuthSession: vi.fn(),
+}))
 
 const mockAddToast = vi.fn()
 
@@ -33,8 +38,11 @@ vi.mock('@/lib/preview-utils', async () => {
 })
 
 describe('PreviewModal', () => {
+  const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
+
   beforeEach(() => {
     vi.restoreAllMocks()
+    mockRefreshAuthSession.mockResolvedValue(false)
   })
 
   it('renders video preview without auth query', () => {
@@ -69,6 +77,53 @@ describe('PreviewModal', () => {
     const audio = document.querySelector('audio') as HTMLAudioElement | null
     expect(audio).toBeTruthy()
     expect(audio?.getAttribute('src')).toBe('/api/v1/download/audio.mp3')
+  })
+
+  it('retries video preview once after refreshing the auth session', async () => {
+    mockRefreshAuthSession.mockResolvedValueOnce(true)
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    const video = document.querySelector('video') as HTMLVideoElement | null
+    expect(video).toBeTruthy()
+
+    fireEvent.error(video!)
+
+    await waitFor(() => {
+      expect(mockRefreshAuthSession).toHaveBeenCalledTimes(1)
+      expect(video?.getAttribute('src')).toBe('/api/v1/download/video.mp4?session_retry=1')
+    })
+  })
+
+  it('shows an error when audio preview still cannot recover after session refresh', async () => {
+    mockRefreshAuthSession.mockResolvedValueOnce(false)
+    const file: PreviewFile = { path: '/audio.mp3', name: 'audio.mp3' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    const audio = document.querySelector('audio') as HTMLAudioElement | null
+    expect(audio).toBeTruthy()
+
+    fireEvent.error(audio!)
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载音频')).toBeInTheDocument()
+    })
   })
 
   it('opens external link without auth query', () => {
