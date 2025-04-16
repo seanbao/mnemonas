@@ -1485,6 +1485,7 @@ GET /api/v1/settings
     },
     "webdav": {
       "enabled": true,
+      "runtime_enabled": true,
       "prefix": "/dav",
       "read_only": false,
       "auth_type": "basic",
@@ -1495,7 +1496,8 @@ GET /api/v1/settings
       "base_url": ""
     },
     "favorites": {
-      "enabled": true
+      "enabled": true,
+      "runtime_available": true
     },
     "trash": {
       "enabled": true,
@@ -1526,6 +1528,9 @@ GET /api/v1/settings
   }
 }
 ```
+
+- `webdav.runtime_enabled` 表示当前进程中的 WebDAV 服务是否处于运行状态；当 `webdav.enabled = true` 但自动生成凭据不可用时，该值为 `false`
+- `favorites.runtime_available` 表示当前进程中的收藏接口是否可用；当 `favorites.enabled = true` 但收藏存储初始化失败或运行态依赖缺失时，该值为 `false`
 
 ### 更新设置
 
@@ -1608,11 +1613,12 @@ PUT /api/v1/settings
 ```json
 {
   "success": true,
-  "message": "settings updated, some changes may require restart"
+  "message": "settings updated"
 }
 ```
 
 **失败行为**:
+- 成功响应的 `message` 在仅包含热更新字段时为 `settings updated`；当请求涉及 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 时为 `settings updated, some changes may require restart`
 - `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
 - `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
 - `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`；保存后需重启服务才能影响运行中的 HTTP 监听器

@@ -6253,9 +6253,11 @@ func TestFileSystem_Search_EmptyQuery(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
-	_, err := fs.Search(ctx, "", 10)
-	if err == nil {
-		t.Error("Search with empty query should return error")
+	for _, query := range []string{"", "   \t\n  "} {
+		_, err := fs.Search(ctx, query, 10)
+		if err == nil {
+			t.Fatalf("Search with query %q should return error", query)
+		}
 	}
 }
 

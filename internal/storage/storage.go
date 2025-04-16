@@ -2147,6 +2147,7 @@ func (fs *FileSystem) SearchWithinBase(ctx context.Context, root, query string, 
 }
 
 func (fs *FileSystem) search(ctx context.Context, root, query string, limit int) ([]*SearchResult, error) {
+	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, errors.New("search query cannot be empty")
 	}
