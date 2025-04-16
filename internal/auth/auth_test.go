@@ -2832,6 +2832,16 @@ func TestAuthHandler(t *testing.T) {
 		if !envelope.Success {
 			t.Fatal("expected create user success")
 		}
+		var data map[string]map[string]interface{}
+		if err := json.Unmarshal(envelope.Data, &data); err != nil {
+			t.Fatalf("unmarshal create user data error: %v", err)
+		}
+		userData := data["user"]
+		for _, field := range []string{"id", "username", "email", "role", "disabled", "home_dir", "created_at", "updated_at", "quota_bytes", "used_bytes"} {
+			if _, ok := userData[field]; !ok {
+				t.Fatalf("expected create user response to include %q, got %+v", field, userData)
+			}
+		}
 	})
 
 	t.Run("admin create user rejects unknown fields", func(t *testing.T) {
@@ -3078,8 +3088,14 @@ func TestAuthHandler(t *testing.T) {
 		createRec := httptest.NewRecorder()
 		warningHandler.HandleCreateUser(createRec, createReq)
 		createData := assertWarningSuccess(t, createRec, http.StatusCreated, "user created with persistence warning")
-		if _, ok := createData["user"].(map[string]interface{}); !ok {
+		userData, ok := createData["user"].(map[string]interface{})
+		if !ok {
 			t.Fatalf("expected user payload for create warning, got %+v", createData)
+		}
+		for _, field := range []string{"id", "username", "email", "role", "disabled", "home_dir", "created_at", "updated_at", "quota_bytes", "used_bytes"} {
+			if _, ok := userData[field]; !ok {
+				t.Fatalf("expected create warning user payload to include %q, got %+v", field, userData)
+			}
 		}
 		if _, err := warningStore.GetByUsername("warningcreate"); err != nil {
 			t.Fatalf("expected warned create to commit user, got %v", err)

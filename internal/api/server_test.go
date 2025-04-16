@@ -1500,6 +1500,27 @@ func TestServer_Search_InvalidLimitReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestServer_Search_WhitespaceOnlyQueryReturnsBadRequest(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/docs/my report.txt", strings.NewReader("content")); err != nil {
+		t.Fatalf("WriteFile(my report.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/search?q=%20", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Search whitespace-only query status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "query parameter 'q' is required") {
+		t.Fatalf("expected missing query error, got %s", w.Body.String())
+	}
+}
+
 func TestServer_Search_TraversalErrorReturnsInternalServerError(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
@@ -3110,6 +3131,58 @@ func TestServer_ListFavorites_ReturnsServiceUnavailableWhenStoreInitFails(t *tes
 	}
 	if !strings.Contains(w.Body.String(), "FAVORITES_UNAVAILABLE") {
 		t.Fatalf("expected FAVORITES_UNAVAILABLE response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_ListFavorites_FailsClosedWhenRuntimeComponentsAreMissing(t *testing.T) {
+	server := setupFavoritesServerWithOptions(t, true)
+	server.favoritesStore = nil
+	server.favoritesHandler = nil
+	server.favoritesConfigured = false
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("list favorites without runtime components status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(w.Body.String(), "FAVORITES_UNAVAILABLE") {
+		t.Fatalf("expected FAVORITES_UNAVAILABLE response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_GetSettings_ReportsFavoritesRuntimeUnavailableWhenStoreInitFails(t *testing.T) {
+	server := setupFavoritesUnavailableServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Favorites struct {
+				Enabled          bool `json:"enabled"`
+				RuntimeAvailable bool `json:"runtime_available"`
+			} `json:"favorites"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if !resp.Data.Favorites.Enabled {
+		t.Fatal("expected favorites to remain enabled in persisted settings")
+	}
+	if resp.Data.Favorites.RuntimeAvailable {
+		t.Fatal("expected favorites runtime_available to report false when store initialization fails")
 	}
 }
 
@@ -8952,6 +9025,51 @@ func TestServer_WebDAVCredentials_GeneratedPasswordUnavailableReturnsServiceUnav
 	}
 }
 
+func TestServer_GetSettings_ReportsWebDAVRuntimeDisabledWhenGeneratedPasswordUnavailable(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.config.Storage.Root = filepath.Join(tmpDir, "missing-secrets")
+	server.config.WebDAV.Enabled = true
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Username = "webdav-user"
+	server.config.WebDAV.Password = ""
+	server.activeWebDAV = WebDAVRuntimeConfig{
+		Enabled:  false,
+		Prefix:   "/dav",
+		AuthType: "basic",
+		Username: "webdav-user",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			WebDAV struct {
+				Enabled        bool `json:"enabled"`
+				RuntimeEnabled bool `json:"runtime_enabled"`
+			} `json:"webdav"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if !resp.Data.WebDAV.Enabled {
+		t.Fatal("expected persisted WebDAV enabled flag to remain true")
+	}
+	if resp.Data.WebDAV.RuntimeEnabled {
+		t.Fatal("expected runtime_enabled to report false when generated credentials are unavailable")
+	}
+}
+
 func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -9098,6 +9216,15 @@ func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("update settings status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode update settings trusted proxy response: %v", err)
+	}
+	if resp.Message != "settings updated" {
+		t.Fatalf("expected hot-applied settings message, got %q", resp.Message)
 	}
 	if server.config.Server.TrustedProxyHops != 2 {
 		t.Fatalf("trusted proxy hops = %d, want %d", server.config.Server.TrustedProxyHops, 2)
@@ -9922,6 +10049,15 @@ func TestServer_UpdateSettings_UpdatesServerTimeouts(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("update settings server timeouts status = %d, want %d", w.Code, http.StatusOK)
 	}
+	var resp struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode update settings server timeouts response: %v", err)
+	}
+	if resp.Message != "settings updated, some changes may require restart" {
+		t.Fatalf("expected restart warning message, got %q", resp.Message)
+	}
 	if server.config.Server.ReadTimeout != 45*time.Second {
 		t.Fatalf("expected read timeout 45s, got %s", server.config.Server.ReadTimeout)
 	}
@@ -10104,7 +10240,7 @@ func TestServer_UpdateSettings_UpdatesVersioningConfig(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
-	body := `{"versioning":{"auto_versioned_extensions":[".md"," .txt ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -10129,7 +10265,7 @@ func TestServer_UpdateSettings_UpdatesRunningVersioningPolicy(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 
-	body := `{"versioning":{"auto_versioned_extensions":[".md"," .txt ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
+	body := `{"versioning":{"auto_versioned_extensions":[".MD"," .TXT ",""],"auto_versioned_filenames":["README"," Dockerfile ",""],"max_versioned_size":209715200}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
