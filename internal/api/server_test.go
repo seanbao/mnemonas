@@ -895,7 +895,7 @@ func TestServer_ObservabilityEndpoints_BypassThrottle(t *testing.T) {
 	}
 
 	client := &http.Client{Timeout: 500 * time.Millisecond}
-	for _, endpoint := range []string{"/health", "/api/v1/version"} {
+	for _, endpoint := range []string{"/health", "/api/v1/version", "/api/v1/metrics"} {
 		resp, err := client.Get(httpServer.URL + endpoint)
 		if err != nil {
 			t.Fatalf("GET %s should bypass throttle: %v", endpoint, err)
@@ -2448,6 +2448,81 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	if !strings.Contains(downloadRec.Body.String(), "secure") {
 		t.Error("downloaded content mismatch")
 	}
+}
+
+func TestServer_DownloadSession_UsesRouteAuthContract(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	decodeErrorCode := func(t *testing.T, body []byte) string {
+		t.Helper()
+
+		var envelope struct {
+			Error *struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if envelope.Error == nil {
+			t.Fatalf("expected structured error response, got %s", string(body))
+		}
+		return envelope.Error.Code
+	}
+
+	t.Run("missing authorization header", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+		rec := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+		}
+		if got := decodeErrorCode(t, rec.Body.Bytes()); got != "MISSING_AUTH_HEADER" {
+			t.Fatalf("error code = %q, want %q", got, "MISSING_AUTH_HEADER")
+		}
+	})
+
+	t.Run("revoked access token", func(t *testing.T) {
+		loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+		loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+		loginRec := httptest.NewRecorder()
+		server.Router().ServeHTTP(loginRec, loginReq)
+
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
+		}
+
+		var loginPayload struct {
+			Data auth.LoginResponse `json:"data"`
+		}
+		if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+			t.Fatalf("failed to decode login response: %v", err)
+		}
+
+		logoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+		logoutReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+		logoutRec := httptest.NewRecorder()
+		server.Router().ServeHTTP(logoutRec, logoutReq)
+
+		if logoutRec.Code != http.StatusOK {
+			t.Fatalf("logout status = %d, want %d; body=%s", logoutRec.Code, http.StatusOK, logoutRec.Body.String())
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+		req.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+		rec := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+		}
+		if got := decodeErrorCode(t, rec.Body.Bytes()); got != "TOKEN_REVOKED" {
+			t.Fatalf("error code = %q, want %q", got, "TOKEN_REVOKED")
+		}
+	})
 }
 
 func TestServer_Login_LogsActivityWithUsername(t *testing.T) {
@@ -4628,6 +4703,60 @@ func TestValidatePath(t *testing.T) {
 	}
 }
 
+func TestReadFavoriteBodyPath_PreservesWhitespaceInPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/report.pdf "}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	cleanPath, err := readFavoriteBodyPath(req)
+	if err != nil {
+		t.Fatalf("readFavoriteBodyPath() error: %v", err)
+	}
+	if cleanPath != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving path, got %q", cleanPath)
+	}
+}
+
+func TestReadFavoriteBatchPaths_PreservesWhitespaceInPaths(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/docs/report.pdf ","/docs/report.pdf"]}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	cleanPaths, err := readFavoriteBatchPaths(req)
+	if err != nil {
+		t.Fatalf("readFavoriteBatchPaths() error: %v", err)
+	}
+	if len(cleanPaths) != 2 {
+		t.Fatalf("expected two preserved paths, got %+v", cleanPaths)
+	}
+	if cleanPaths[0] != "/docs/report.pdf " || cleanPaths[1] != "/docs/report.pdf" {
+		t.Fatalf("expected preserved batch paths, got %+v", cleanPaths)
+	}
+}
+
+func TestReadFavoriteQueryPath_PreservesWhitespaceInPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/favorites/check?path=%2Fdocs%2Freport.pdf%20", nil)
+
+	cleanPath, err := readFavoriteQueryPath(req)
+	if err != nil {
+		t.Fatalf("readFavoriteQueryPath() error: %v", err)
+	}
+	if cleanPath != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving query path, got %q", cleanPath)
+	}
+}
+
+func TestReadFavoriteRoutePath_PreservesWhitespaceInPath(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/report.pdf", nil)
+	req.URL.Path = "/api/v1/favorites/docs/report.pdf "
+
+	cleanPath, err := readFavoriteRoutePath(req)
+	if err != nil {
+		t.Fatalf("readFavoriteRoutePath() error: %v", err)
+	}
+	if cleanPath != "/docs/report.pdf " {
+		t.Fatalf("expected whitespace-preserving route path, got %q", cleanPath)
+	}
+}
+
 func TestValidateHash(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -5709,6 +5838,22 @@ func TestServer_CreateDirectory_ReturnsConflictWhenPathIsExistingFile(t *testing
 	}
 	if info.IsDir {
 		t.Fatal("expected existing-file to remain a file")
+	}
+}
+
+func TestServer_CreateDirectory_RejectsRootPath(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/directories/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create directory root path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
 	}
 }
 
@@ -7921,6 +8066,36 @@ func TestServer_CreateShare_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_CreateShare_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/other/secret.txt","type":"file","unexpected":true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("share create with unknown fields status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "INVALID_REQUEST") {
+		t.Fatalf("expected invalid request response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_CreateShare_RejectsOversizedRequestBody(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
 	token := loginAndGetAccessToken(t, server, username, password)
@@ -8550,6 +8725,25 @@ func TestServer_CheckFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_AddFavorite_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/other/secret.txt","note":"x","extra":true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("add favorite with unknown fields status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "INVALID_REQUEST") {
+		t.Fatalf("expected invalid request response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_CheckFavorites_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 
@@ -8586,6 +8780,25 @@ func TestServer_CheckFavorites_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 	if !strings.Contains(allowedRec.Body.String(), `"/tester/own.txt":true`) {
 		t.Fatalf("expected own home favorite batch result, got %s", allowedRec.Body.String())
+	}
+}
+
+func TestServer_CheckFavorites_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/other/secret.txt"],"extra":true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("check favorites with unknown fields status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "INVALID_REQUEST") {
+		t.Fatalf("expected invalid request response, got %s", w.Body.String())
 	}
 }
 

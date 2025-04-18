@@ -53,7 +53,7 @@ func getUserID(r *http.Request) string {
 }
 
 func normalizeFavoritePath(rawPath string) (string, error) {
-	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
 	if hasFavoriteTraversalSegment(normalized) {
 		return "", errors.New("invalid path")
 	}
@@ -130,6 +130,10 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 		h.writeJSONBodyError(w, err)
 		return
 	}
+	if strings.TrimSpace(req.Path) == "" {
+		h.error(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
+		return
+	}
 
 	// Validate path
 	cleanPath, err := normalizeFavoritePath(req.Path)
@@ -162,7 +166,8 @@ func (h *Handler) RemoveFavorite(w http.ResponseWriter, r *http.Request) {
 
 	// Extract path from URL
 	favPath := strings.TrimPrefix(r.URL.Path, "/api/v1/favorites")
-	if favPath == "" || favPath == "/" {
+	trimmedPath := strings.TrimSpace(favPath)
+	if trimmedPath == "" || trimmedPath == "/" {
 		h.error(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
 		return
 	}
@@ -191,7 +196,7 @@ func (h *Handler) CheckFavorite(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
 	checkPath := r.URL.Query().Get("path")
 
-	if checkPath == "" {
+	if strings.TrimSpace(checkPath) == "" {
 		h.error(w, http.StatusBadRequest, "path query parameter is required", "MISSING_PATH")
 		return
 	}
@@ -230,6 +235,10 @@ func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
 	// Clean paths
 	cleanPaths := make([]string, len(req.Paths))
 	for i, p := range req.Paths {
+		if strings.TrimSpace(p) == "" {
+			h.error(w, http.StatusBadRequest, "paths must not contain empty values", "MISSING_PATH")
+			return
+		}
 		cleanPath, err := normalizeFavoritePath(p)
 		if err != nil {
 			h.error(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
@@ -255,7 +264,8 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 
 	// Extract path from URL
 	favPath := strings.TrimPrefix(r.URL.Path, "/api/v1/favorites")
-	if favPath == "" || favPath == "/" {
+	trimmedPath := strings.TrimSpace(favPath)
+	if trimmedPath == "" || trimmedPath == "/" {
 		h.error(w, http.StatusBadRequest, "path is required", "MISSING_PATH")
 		return
 	}

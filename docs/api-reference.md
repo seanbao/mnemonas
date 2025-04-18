@@ -230,8 +230,10 @@ Authorization: Bearer <access_token>
 - 当请求被后端识别为 HTTPS（直连 TLS 或可信代理转发 `X-Forwarded-Proto: https`）时，cookie 带 `Secure`
 
 **失败行为**:
-- 缺少 `Authorization: Bearer ...` 头时返回 `401`，错误码 `MISSING_AUTH`
-- 认证上下文缺失或 access token 已失效时返回 `401`，错误码 `NOT_AUTHENTICATED`
+- 该路由复用通用认证 middleware；缺少认证头时返回 `401`，错误码 `MISSING_AUTH_HEADER`
+- `Authorization` 头格式非法时返回 `401`，错误码 `INVALID_AUTH_HEADER`
+- access token 已过期、已吊销或无效时分别返回 `401`，错误码 `TOKEN_EXPIRED`、`TOKEN_REVOKED`、`INVALID_TOKEN`
+- token 对应用户不存在或已被禁用时分别返回 `401/403`，错误码 `USER_NOT_FOUND`、`USER_DISABLED`
 
 ### 修改密码
 
@@ -457,6 +459,8 @@ GET /api/v1/stats
 ### 诊断信息
 
 获取详细的系统诊断信息。
+
+**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
 
 ```
 GET /api/v1/diagnostics
@@ -1853,6 +1857,8 @@ POST /api/v1/maintenance/gc
 ### 导出诊断信息
 
 下载完整的诊断信息包（JSON 格式）。
+
+**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
 
 ```
 GET /api/v1/diagnostics-export

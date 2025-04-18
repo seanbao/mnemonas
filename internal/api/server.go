@@ -738,7 +738,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	r.Use(middleware.Timeout(DefaultRequestTimeout * time.Second))
 	// Keep observability endpoints reachable even when the request concurrency
 	// budget is saturated by slow data operations.
-	r.Use(throttleExceptPaths(DefaultMaxConcurrentRequests, "/health", "/api/v1/version"))
+	r.Use(throttleExceptPaths(DefaultMaxConcurrentRequests, "/health", "/api/v1/version", "/api/v1/metrics"))
 
 	s := &Server{
 		router:    r,
@@ -1708,6 +1708,10 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	// REM-5 fix: Validate path
 	dirPath, err := validatePath(dirPath)
 	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if isMutationRootPath(dirPath) {
 		badRequestInvalidPath(w)
 		return
 	}
@@ -5401,22 +5405,16 @@ func readCreateSharePath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
-	if err != nil {
-		return "", err
-	}
-
 	var req share.CreateShareRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		return "", err
 	}
 
-	cleanPath := strings.TrimSpace(req.Path)
-	if cleanPath == "" {
+	if strings.TrimSpace(req.Path) == "" {
 		return "", nil
 	}
 
-	return validatePath(cleanPath)
+	return validatePath(req.Path)
 }
 
 func readFavoriteBodyPath(r *http.Request) (string, error) {
@@ -5424,24 +5422,18 @@ func readFavoriteBodyPath(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
-	if err != nil {
-		return "", err
-	}
-
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		return "", err
 	}
 
-	cleanPath := strings.TrimSpace(req.Path)
-	if cleanPath == "" {
+	if strings.TrimSpace(req.Path) == "" {
 		return "", nil
 	}
 
-	return validatePath(cleanPath)
+	return validatePath(req.Path)
 }
 
 func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
@@ -5449,25 +5441,19 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 		return nil, nil
 	}
 
-	body, err := readBufferedRequestBody(r, DefaultJSONRequestBodyLimit)
-	if err != nil {
-		return nil, err
-	}
-
 	var req struct {
 		Paths []string `json:"paths"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		return nil, err
 	}
 
 	cleanPaths := make([]string, 0, len(req.Paths))
 	for _, favoritePath := range req.Paths {
-		trimmedPath := strings.TrimSpace(favoritePath)
-		if trimmedPath == "" {
+		if strings.TrimSpace(favoritePath) == "" {
 			continue
 		}
-		cleanPath, err := validatePath(trimmedPath)
+		cleanPath, err := validatePath(favoritePath)
 		if err != nil {
 			return nil, err
 		}
@@ -5478,17 +5464,18 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 }
 
 func readFavoriteQueryPath(r *http.Request) (string, error) {
-	cleanPath := strings.TrimSpace(r.URL.Query().Get("path"))
-	if cleanPath == "" {
+	queryPath := r.URL.Query().Get("path")
+	if strings.TrimSpace(queryPath) == "" {
 		return "", nil
 	}
-	return validatePath(cleanPath)
+	return validatePath(queryPath)
 }
 
 func readFavoriteRoutePath(r *http.Request) (string, error) {
-	cleanPath := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/favorites"))
-	if cleanPath == "" || cleanPath == "/" {
+	routePath := strings.TrimPrefix(r.URL.Path, "/api/v1/favorites")
+	trimmedPath := strings.TrimSpace(routePath)
+	if trimmedPath == "" || trimmedPath == "/" {
 		return "", nil
 	}
-	return validatePath(cleanPath)
+	return validatePath(routePath)
 }

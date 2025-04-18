@@ -101,6 +101,24 @@ describe('Search API', () => {
     }
   })
 
+  it('preserves top-level backend error codes on failure', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      json: () => Promise.resolve({ code: 'SERVICE_UNAVAILABLE', message: 'search unavailable', timestamp: '2026-04-23T00:00:00Z' }),
+    })
+
+    try {
+      await searchFiles('report')
+      throw new Error('Expected searchFiles to throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(SearchError)
+      expect((error as SearchError).code).toBe('SERVICE_UNAVAILABLE')
+      expect((error as SearchError).isUnavailable).toBe(true)
+    }
+  })
+
   it('falls back to a generic error when the error body is invalid', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
