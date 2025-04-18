@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -861,5 +862,93 @@ func TestShareStore_DeleteRollbackOnSaveFailure(t *testing.T) {
 	}
 	if loaded.Path != share.Path {
 		t.Fatalf("expected share to remain after rollback")
+	}
+}
+
+func TestShareStore_GetDoesNotBlockWhileAuthorizedAccessPersists(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	originalWriter := shareStoreWriter
+	writerStarted := make(chan struct{})
+	writerRelease := make(chan struct{})
+	var startOnce sync.Once
+	var releaseOnce sync.Once
+	shareStoreWriter = func(path string, data []byte) error {
+		startOnce.Do(func() {
+			close(writerStarted)
+		})
+		<-writerRelease
+		return originalWriter(path, data)
+	}
+	t.Cleanup(func() {
+		shareStoreWriter = originalWriter
+		releaseOnce.Do(func() {
+			close(writerRelease)
+		})
+	})
+
+	accessDone := make(chan error, 1)
+	go func() {
+		_, accessErr := store.RecordAuthorizedAccess(share.ID)
+		accessDone <- accessErr
+	}()
+
+	select {
+	case <-writerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for share store write to start")
+	}
+
+	getDone := make(chan struct{})
+	go func() {
+		loaded, getErr := store.Get(share.ID)
+		if getErr != nil {
+			t.Errorf("Get() error during pending persist: %v", getErr)
+		} else if loaded.AccessCount != 0 {
+			t.Errorf("expected reads during pending persist to observe committed access_count 0, got %d", loaded.AccessCount)
+		}
+		close(getDone)
+	}()
+
+	select {
+	case <-getDone:
+	case <-time.After(time.Second):
+		t.Fatal("Get() blocked on an in-flight authorized access save")
+	}
+
+	releaseOnce.Do(func() {
+		close(writerRelease)
+	})
+
+	select {
+	case accessErr := <-accessDone:
+		if accessErr != nil {
+			t.Fatalf("RecordAuthorizedAccess() error: %v", accessErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RecordAuthorizedAccess() did not finish after releasing writer")
+	}
+
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share after access: %v", err)
+	}
+	if loaded.AccessCount != 1 {
+		t.Fatalf("expected committed access_count 1 after save, got %d", loaded.AccessCount)
 	}
 }

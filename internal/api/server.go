@@ -608,6 +608,22 @@ func (s *Server) respondInternalError(w http.ResponseWriter, operation string, e
 	InternalError(w, "internal server error")
 }
 
+func (s *Server) respondReadableOpenFileError(w http.ResponseWriter, operation string, err error, directoryMessage string) {
+	if isStorageNotFound(err) {
+		s.respondNotFound(w, operation, err)
+		return
+	}
+	if errors.Is(err, storage.ErrNotDir) {
+		Conflict(w, "parent path is not a directory")
+		return
+	}
+	if errors.Is(err, storage.ErrIsDir) {
+		BadRequest(w, directoryMessage)
+		return
+	}
+	s.respondInternalError(w, operation, err)
+}
+
 func respondPayloadTooLarge(w http.ResponseWriter, message string) {
 	NewAPIError(ErrCodeBadRequest, message).Write(w, http.StatusRequestEntityTooLarge)
 }
@@ -894,7 +910,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	// Open file
 	file, err := s.fs.OpenFile(r.Context(), filePath)
 	if err != nil {
-		s.respondInternalError(w, "open file", err)
+		s.respondReadableOpenFileError(w, "open file", err, "cannot download directory")
 		return
 	}
 	defer file.Close()
@@ -2124,19 +2140,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Open original file
 	reader, err := s.fs.OpenFile(r.Context(), filePath)
 	if err != nil {
-		if isStorageNotFound(err) {
-			s.respondNotFound(w, "thumbnail open file", err)
-			return
-		}
-		if errors.Is(err, storage.ErrNotDir) {
-			Conflict(w, "parent path is not a directory")
-			return
-		}
-		if errors.Is(err, storage.ErrIsDir) {
-			BadRequest(w, "path is a directory")
-			return
-		}
-		s.respondInternalError(w, "thumbnail open file", err)
+		s.respondReadableOpenFileError(w, "thumbnail open file", err, "path is a directory")
 		return
 	}
 	defer reader.Close()

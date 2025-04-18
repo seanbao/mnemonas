@@ -33,6 +33,15 @@ type Store struct {
 	// map[userID]map[path]*Favorite
 	data     map[string]map[string]*Favorite
 	filePath string
+	version  uint64
+}
+
+var favoritesStoreWriter = writeFavoritesStoreFile
+
+type favoritesSnapshot struct {
+	data     map[string]map[string]*Favorite
+	filePath string
+	version  uint64
 }
 
 func copyFavorite(fav *Favorite) *Favorite {
@@ -83,10 +92,14 @@ func (s *Store) load() error {
 }
 
 func (s *Store) save() error {
+	return saveFavoritesState(s.filePath, s.data)
+}
+
+func saveFavoritesState(filePath string, dataByUser map[string]map[string]*Favorite) error {
 	var favorites []*Favorite
-	for _, userFavs := range s.data {
+	for _, userFavs := range dataByUser {
 		for _, fav := range userFavs {
-			favorites = append(favorites, fav)
+			favorites = append(favorites, copyFavorite(fav))
 		}
 	}
 
@@ -95,11 +108,46 @@ func (s *Store) save() error {
 		return fmt.Errorf("failed to serialize favorites: %w", err)
 	}
 
-	if err := writeFavoritesStoreFile(s.filePath, data); err != nil {
+	if err := favoritesStoreWriter(filePath, data); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func cloneFavoritesData(data map[string]map[string]*Favorite) map[string]map[string]*Favorite {
+	cloned := make(map[string]map[string]*Favorite, len(data))
+	for userID, userFavs := range data {
+		cloned[userID] = make(map[string]*Favorite, len(userFavs))
+		for path, fav := range userFavs {
+			cloned[userID][path] = copyFavorite(fav)
+		}
+	}
+	return cloned
+}
+
+func (s *Store) snapshotState() favoritesSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return favoritesSnapshot{
+		data:     cloneFavoritesData(s.data),
+		filePath: s.filePath,
+		version:  s.version,
+	}
+}
+
+func (s *Store) commitSnapshot(snapshot favoritesSnapshot) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.version != snapshot.version {
+		return false
+	}
+
+	s.data = snapshot.data
+	s.version++
+	return true
 }
 
 func validateFavoritesStorePath(path string) error {
@@ -195,17 +243,6 @@ func writeFavoritesStoreFile(path string, data []byte) error {
 
 // Add adds a path to favorites
 func (s *Store) Add(userID, path, note string) (*Favorite, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.data[userID] == nil {
-		s.data[userID] = make(map[string]*Favorite)
-	}
-
-	if _, exists := s.data[userID][path]; exists {
-		return nil, ErrAlreadyFavorited
-	}
-
 	fav := &Favorite{
 		Path:      path,
 		UserID:    userID,
@@ -213,37 +250,49 @@ func (s *Store) Add(userID, path, note string) (*Favorite, error) {
 		Note:      note,
 	}
 
-	s.data[userID][path] = fav
+	for {
+		snapshot := s.snapshotState()
+		if snapshot.data[userID] == nil {
+			snapshot.data[userID] = make(map[string]*Favorite)
+		}
+		if _, exists := snapshot.data[userID][path]; exists {
+			return nil, ErrAlreadyFavorited
+		}
 
-	if err := s.save(); err != nil {
-		delete(s.data[userID], path)
-		return nil, err
+		snapshot.data[userID][path] = copyFavorite(fav)
+
+		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+			return nil, err
+		}
+		if s.commitSnapshot(snapshot) {
+			return copyFavorite(fav), nil
+		}
 	}
-
-	return copyFavorite(fav), nil
 }
 
 // Remove removes a path from favorites
 func (s *Store) Remove(userID, path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		if snapshot.data[userID] == nil {
+			return ErrFavoriteNotFound
+		}
+		if _, exists := snapshot.data[userID][path]; !exists {
+			return ErrFavoriteNotFound
+		}
 
-	if s.data[userID] == nil {
-		return ErrFavoriteNotFound
+		delete(snapshot.data[userID], path)
+		if len(snapshot.data[userID]) == 0 {
+			delete(snapshot.data, userID)
+		}
+
+		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
 	}
-
-	if _, exists := s.data[userID][path]; !exists {
-		return ErrFavoriteNotFound
-	}
-
-	removed := s.data[userID][path]
-	delete(s.data[userID], path)
-	if err := s.save(); err != nil {
-		s.data[userID][path] = removed
-		return err
-	}
-
-	return nil
 }
 
 // List returns all favorites for a user, sorted by creation time (newest first)
@@ -303,26 +352,25 @@ func (s *Store) CheckPaths(userID string, paths []string) map[string]bool {
 
 // UpdateNote updates the note for a favorite
 func (s *Store) UpdateNote(userID, path, note string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		if snapshot.data[userID] == nil {
+			return ErrFavoriteNotFound
+		}
 
-	if s.data[userID] == nil {
-		return ErrFavoriteNotFound
+		fav, exists := snapshot.data[userID][path]
+		if !exists {
+			return ErrFavoriteNotFound
+		}
+
+		fav.Note = note
+		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
 	}
-
-	fav, exists := s.data[userID][path]
-	if !exists {
-		return ErrFavoriteNotFound
-	}
-
-	prev := copyFavorite(fav)
-	fav.Note = note
-	if err := s.save(); err != nil {
-		*fav = *prev
-		return err
-	}
-
-	return nil
 }
 
 // Count returns the number of favorites for a user

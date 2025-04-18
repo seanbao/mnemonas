@@ -16,6 +16,7 @@ import (
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/versionstore"
+	"github.com/seanbao/mnemonas/internal/workspace"
 )
 
 // testDataplaneAddr is the address of the test dataplane server
@@ -2183,6 +2184,65 @@ func TestFileSystem_RestoreVersion_AllowsCurrentHashWithoutStoredObject(t *testi
 	}
 	if string(data) != "current-content" {
 		t.Fatalf("expected current.txt content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestMapWorkspaceOpenFileError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "not found", err: workspace.ErrNotFound, want: ErrNotFound},
+		{name: "wrapped not dir", err: errors.Join(errors.New("wrapped"), workspace.ErrNotDir), want: ErrNotDir},
+		{name: "wrapped is dir", err: errors.Join(errors.New("wrapped"), workspace.ErrIsDir), want: ErrIsDir},
+		{name: "passthrough", err: errors.New("boom")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mapWorkspaceOpenFileError(tt.err)
+			if tt.want == nil {
+				if got != tt.err {
+					t.Fatalf("mapWorkspaceOpenFileError() = %v, want original error %v", got, tt.err)
+				}
+				return
+			}
+			if !errors.Is(got, tt.want) {
+				t.Fatalf("mapWorkspaceOpenFileError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileSystem_HashWorkspaceFile_MapsReadablePathErrors(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/hash-dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/hash-parent", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(hash-parent) error: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want error
+	}{
+		{name: "missing path", path: "/missing.txt", want: ErrNotFound},
+		{name: "directory path", path: "/hash-dir", want: ErrIsDir},
+		{name: "parent not directory", path: "/hash-parent/child.txt", want: ErrNotDir},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := fs.hashWorkspaceFile(ctx, tt.path)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("hashWorkspaceFile() error = %v, want %v", err, tt.want)
+			}
+		})
 	}
 }
 
