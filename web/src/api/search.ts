@@ -106,12 +106,15 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
     let message = 'Search failed'
     let code: string | undefined
     try {
-      const body = await response.json() as SearchApiResponse<never>
+      const body = await response.json() as SearchApiResponse<never> & { code?: string }
+      const topLevelCode = typeof body.code === 'string' ? body.code : undefined
       message = typeof body.error === 'string'
         ? body.error
         : body.error?.message || body.message || 'Search failed'
       if (typeof body.error !== 'string' && typeof body.error?.code === 'string') {
         code = body.error.code
+      } else if (topLevelCode) {
+        code = topLevelCode
       }
     } catch {
       // Fall back to a generic error when the backend did not return valid JSON.

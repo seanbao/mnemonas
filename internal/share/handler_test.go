@@ -373,6 +373,39 @@ func TestCreateShare_RejectsOversizedRequestBody(t *testing.T) {
 	}
 }
 
+func TestCreateShare_FailsClosedWhenFilesystemUnavailable(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, nil)
+	body := []byte(`{"path":"/docs/report.pdf","type":"file"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "FILESYSTEM_UNAVAILABLE" {
+		t.Fatalf("expected FILESYSTEM_UNAVAILABLE code, got %v", errorPayload["code"])
+	}
+	if len(store.ListAll()) != 0 {
+		t.Fatal("expected share creation to fail before persistence when filesystem is unavailable")
+	}
+}
+
 func TestCreateShare_NegativeMaxAccessReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -473,6 +506,53 @@ func TestCreateShare_WhitespaceOnlyPathReturnsBadRequest(t *testing.T) {
 	}
 	if errorPayload["code"] != "MISSING_PATH" {
 		t.Fatalf("expected MISSING_PATH code, got %v", errorPayload["code"])
+	}
+}
+
+func TestCreateShare_PreservesWhitespaceInPath(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	targetPath := "/docs/report.pdf "
+	handler := NewHandler(store, &fakeShareFS{
+		statInfo: &storage.FileInfo{Path: targetPath, Name: "report.pdf ", IsDir: false},
+		beforeStat: func(filePath string) error {
+			if filePath != targetPath {
+				return storage.ErrNotFound
+			}
+			return nil
+		},
+	})
+	body := []byte(`{"path":"/docs/report.pdf ","type":"file"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	payload := decodeEnvelopeData(t, recorder)
+	pathValue, ok := payload["path"].(string)
+	if !ok {
+		t.Fatalf("expected path in response, got %v", payload)
+	}
+	if pathValue != targetPath {
+		t.Fatalf("expected whitespace-preserving share path, got %q", pathValue)
+	}
+
+	shares := store.GetByPath(targetPath)
+	if len(shares) != 1 {
+		t.Fatalf("expected stored share indexed by whitespace-preserving path, got %+v", shares)
+	}
+	if shares[0].Path != targetPath {
+		t.Fatalf("expected persisted share path %q, got %q", targetPath, shares[0].Path)
 	}
 }
 

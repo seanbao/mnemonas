@@ -413,6 +413,49 @@ func TestShareStore_CreateRejectsInvalidInvariants(t *testing.T) {
 	}
 }
 
+func TestNewShareStore_LoadPreservesWhitespaceInPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+	createdAt := time.Date(2026, time.April, 23, 10, 0, 0, 0, time.UTC)
+	targetPath := "/docs/report.pdf "
+
+	writeShareFixture(t, storePath, []*Share{{
+		ID:         "share-with-space",
+		Path:       targetPath,
+		Type:       ShareTypeFile,
+		CreatedBy:  "user1",
+		CreatedAt:  createdAt,
+		Permission: PermissionRead,
+		Enabled:    true,
+	}})
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to load share store: %v", err)
+	}
+
+	loaded, err := store.Get("share-with-space")
+	if err != nil {
+		t.Fatalf("failed to get loaded share: %v", err)
+	}
+	if loaded.Path != targetPath {
+		t.Fatalf("expected loaded share path %q, got %q", targetPath, loaded.Path)
+	}
+
+	byPath := store.GetByPath(targetPath)
+	if len(byPath) != 1 || byPath[0].ID != "share-with-space" {
+		t.Fatalf("expected whitespace-preserving path index, got %+v", byPath)
+	}
+
+	reloadedData, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("failed to read shares file after load: %v", err)
+	}
+	if !strings.Contains(string(reloadedData), `"path":"/docs/report.pdf "`) {
+		t.Fatalf("expected shares file to preserve trailing whitespace path, got %s", string(reloadedData))
+	}
+}
+
 func TestShareStore_CreateWithExpiration(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

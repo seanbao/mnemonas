@@ -233,6 +233,39 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	}
 }
 
+func TestNewStore_LoadPreservesWhitespaceInPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	targetPath := "/docs/report.pdf "
+
+	writeFavoritesFixture(t, storePath, []Favorite{{
+		Path:      targetPath,
+		UserID:    "user1",
+		CreatedAt: time.Date(2026, time.April, 23, 11, 0, 0, 0, time.UTC),
+		Note:      "whitespace",
+	}})
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if !store.IsFavorite("user1", targetPath) {
+		t.Fatal("expected whitespace-preserving favorite path to remain favorited after load")
+	}
+	if store.IsFavorite("user1", "/docs/report.pdf") {
+		t.Fatal("expected trimmed sibling path to remain unfavorited after load")
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(favorites.json) error: %v", err)
+	}
+	if !strings.Contains(string(data), `"path":"/docs/report.pdf "`) {
+		t.Fatalf("expected persisted favorites file to preserve trailing whitespace path, got %s", string(data))
+	}
+}
+
 func TestNewStore_RejectsNullFavoriteEntry(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")

@@ -77,8 +77,8 @@ func sortFavoritesCanonical(favorites []*Favorite) {
 }
 
 func normalizeStoredFavoritePath(rawPath string) (string, error) {
-	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
-	if normalized == "" {
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.TrimSpace(normalized) == "" {
 		return "", errInvalidFavoritePath
 	}
 	for _, segment := range strings.Split(normalized, "/") {

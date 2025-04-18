@@ -302,8 +302,8 @@ func clonePathIndex(pathIdx map[string][]string) map[string][]string {
 }
 
 func normalizeStoredSharePath(rawPath string) (string, error) {
-	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
-	if normalized == "" {
+	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.TrimSpace(normalized) == "" {
 		return "", errInvalidSharePath
 	}
 	for _, segment := range strings.Split(normalized, "/") {

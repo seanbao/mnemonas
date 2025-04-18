@@ -247,6 +247,30 @@ describe('API: files', () => {
       }
     })
 
+    it('preserves top-level unavailable upload error codes from XHR responses', async () => {
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 503,
+        statusText: 'Service Unavailable',
+        responseText: JSON.stringify({
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'filesystem not initialized',
+          timestamp: '2026-04-23T00:00:00Z',
+        }),
+      })
+
+      try {
+        await uploadFile('/docs', new File(['content'], 'report.txt'))
+        throw new Error('Expected uploadFile to throw')
+      } catch (error) {
+        expect(error).toBeInstanceOf(ApiError)
+        expect((error as ApiError).message).toBe('filesystem not initialized')
+        expect((error as ApiError).status).toBe(503)
+        expect((error as ApiError).code).toBe('SERVICE_UNAVAILABLE')
+        expect((error as ApiError).isUnavailable).toBe(true)
+      }
+    })
+
     it('returns warning details for successful uploads with warning headers', async () => {
       MockXMLHttpRequest.queuedResults.push({
         type: 'load',
@@ -596,6 +620,26 @@ describe('API: files', () => {
         statusText: 'Service Unavailable',
         json: () => Promise.resolve({
           error: { code: 'SERVICE_UNAVAILABLE', message: 'storage stats unavailable' },
+        }),
+      })
+
+      await expect(getStorageStats()).rejects.toMatchObject({
+        message: 'storage stats unavailable',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        isUnavailable: true,
+      })
+    })
+
+    it('preserves top-level service-unavailable storage stats error codes', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'storage stats unavailable',
+          timestamp: '2026-04-23T00:00:00Z',
         }),
       })
 
