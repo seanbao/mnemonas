@@ -170,9 +170,9 @@ build_project() {
     
     cd "$PROJECT_ROOT"
     
-    # 构建 Go 控制面 (需要 CGO 支持 SQLite)
+    # 构建 Go 控制面
     log_info "构建 nasd..."
-    CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd
+    CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd
     
     # 构建 Rust 数据面
     log_info "构建 dataplane..."

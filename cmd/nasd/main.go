@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -88,6 +89,108 @@ func handlersEqual(a, b http.Handler) bool {
 		return false
 	}
 	return a == b
+}
+
+type frontendHandler struct {
+	root       string
+	fileServer http.Handler
+}
+
+func newFrontendHandler(root string) http.Handler {
+	return &frontendHandler{
+		root:       root,
+		fileServer: http.FileServer(http.Dir(root)),
+	}
+}
+
+func (h *frontendHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.NotFound(w, r)
+		return
+	}
+
+	cleanPath := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
+	if cleanPath != "/" {
+		localPath, err := filepath.Localize(strings.TrimPrefix(cleanPath, "/"))
+		if err == nil {
+			target := filepath.Join(h.root, localPath)
+			if info, statErr := os.Stat(target); statErr == nil && !info.IsDir() {
+				h.fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+	}
+
+	if cleanPath != "/" && !requestAcceptsHTML(r) {
+		http.NotFound(w, r)
+		return
+	}
+
+	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
+}
+
+func discoverFrontendAssets() string {
+	candidates := []string{}
+	if envDir := strings.TrimSpace(os.Getenv("MNEMONAS_WEB_DIR")); envDir != "" {
+		candidates = append(candidates, envDir)
+	}
+	candidates = append(candidates,
+		filepath.Join("web", "dist"),
+		"web",
+	)
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "web"),
+			filepath.Join(exeDir, "web", "dist"),
+			filepath.Join(exeDir, "..", "web", "dist"),
+		)
+	}
+
+	for _, candidate := range candidates {
+		if hasFrontendIndex(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func hasFrontendIndex(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "index.html"))
+	return err == nil && !info.IsDir()
+}
+
+func shouldServeFrontend(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+
+	cleanPath := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
+	switch {
+	case cleanPath == "/health":
+		return false
+	case cleanPath == "/api" || strings.HasPrefix(cleanPath, "/api/"):
+		return false
+	case cleanPath == "/s":
+		return false
+	case strings.HasPrefix(cleanPath, "/s/"):
+		return isShareFrontendRoute(cleanPath, r)
+	default:
+		return true
+	}
+}
+
+func isShareFrontendRoute(cleanPath string, r *http.Request) bool {
+	if !requestAcceptsHTML(r) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(cleanPath, "/"), "/")
+	return len(parts) == 2 && parts[0] == "s" && parts[1] != ""
+}
+
+func requestAcceptsHTML(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	return accept == "" || strings.Contains(accept, "text/html")
 }
 
 func (s *switchableWebDAVHandler) ServeIfMatches(w http.ResponseWriter, r *http.Request) bool {
@@ -385,10 +488,23 @@ func main() {
 	}
 	router.Mount("/", apiServer.Router())
 
+	frontendDir := discoverFrontendAssets()
+	var frontend http.Handler
+	if frontendDir != "" {
+		frontend = newFrontendHandler(frontendDir)
+		log.Info().Str("dir", frontendDir).Msg("frontend assets enabled")
+	} else {
+		log.Info().Msg("frontend assets not found; serving API and WebDAV only")
+	}
+
 	// Create final handler - WebDAV needs to be handled before chi router
 	// because chi doesn't support WebDAV methods (PROPFIND, MKCOL, etc.)
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if runtimeWebDAV.ServeIfMatches(w, r) {
+			return
+		}
+		if frontend != nil && shouldServeFrontend(r) {
+			frontend.ServeHTTP(w, r)
 			return
 		}
 		router.ServeHTTP(w, r)

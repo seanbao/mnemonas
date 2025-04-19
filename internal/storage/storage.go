@@ -771,10 +771,6 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 
 	// Move file to trash
 	trashContentPath := path.Join(fs.trashRoot, id, "content")
-	if err := ensureStorageDir(path.Dir(trashContentPath), 0700); err != nil {
-		return fmt.Errorf("failed to create trash directory: %w", err)
-	}
-
 	fullPath := fs.workspace.FullPath(name)
 	if err := fs.movePath(fullPath, trashContentPath); err != nil {
 		return fmt.Errorf("failed to move to trash: %w", err)
@@ -1614,15 +1610,10 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 	trashContentPath := path.Join(fs.trashRoot, id, "content")
 	destPath := fs.workspace.FullPath(item.OriginalPath)
 
-	// Ensure parent directory exists
-	if err := ensureStorageDir(path.Dir(destPath), 0755); err != nil {
+	if err := fs.movePath(trashContentPath, destPath); err != nil {
 		if isPathNotDirError(err) {
 			return ErrNotDir
 		}
-		return fmt.Errorf("failed to create parent directory: %w", err)
-	}
-
-	if err := fs.movePath(trashContentPath, destPath); err != nil {
 		return fmt.Errorf("failed to restore from trash: %w", err)
 	}
 
@@ -1696,14 +1687,10 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	trashContentPath := path.Join(fs.trashRoot, id, "content")
 	destPath := fs.workspace.FullPath(newPath)
 
-	if err := ensureStorageDir(path.Dir(destPath), 0755); err != nil {
+	if err := fs.movePath(trashContentPath, destPath); err != nil {
 		if isPathNotDirError(err) {
 			return ErrNotDir
 		}
-		return fmt.Errorf("failed to create parent directory: %w", err)
-	}
-
-	if err := fs.movePath(trashContentPath, destPath); err != nil {
 		return fmt.Errorf("failed to restore from trash: %w", err)
 	}
 
@@ -1939,18 +1926,35 @@ func (fs *FileSystem) permanentlyDeleteTrashItem(ctx context.Context, item *vers
 }
 
 func (fs *FileSystem) cleanupDeletedTrashVersions(ctx context.Context, item *versionstore.TrashItem) error {
-	versions, err := fs.versions.GetVersions(ctx, item.OriginalPath)
-	if err != nil {
-		return fmt.Errorf("failed to read version metadata for trash item: %w", err)
+	versionPaths := []string{item.OriginalPath}
+	if item.IsDir {
+		paths, err := fs.listVersionPaths(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list version metadata paths for trash item: %w", err)
+		}
+		versionPaths = versionPaths[:0]
+		for _, versionPath := range paths {
+			if pathMatchesOrDescendant(item.OriginalPath, versionPath) {
+				versionPaths = append(versionPaths, versionPath)
+			}
+		}
 	}
 
-	versionHashes := make([]string, 0, len(versions))
-	for _, version := range versions {
-		versionHashes = append(versionHashes, version.Hash)
+	versionHashes := make([]string, 0)
+	for _, versionPath := range versionPaths {
+		versions, err := fs.versions.GetVersions(ctx, versionPath)
+		if err != nil {
+			return fmt.Errorf("failed to read version metadata for trash item: %w", err)
+		}
+		for _, version := range versions {
+			versionHashes = append(versionHashes, version.Hash)
+		}
 	}
 
-	if err := fs.versions.DeleteVersions(ctx, item.OriginalPath); err != nil {
-		return fmt.Errorf("failed to delete version metadata for trash item: %w", err)
+	for _, versionPath := range versionPaths {
+		if err := fs.versions.DeleteVersions(ctx, versionPath); err != nil {
+			return fmt.Errorf("failed to delete version metadata for trash item: %w", err)
+		}
 	}
 	if err := fs.deleteUnreferencedVersionObjects(ctx, versionHashes); err != nil {
 		return fmt.Errorf("failed to delete version objects for trash item: %w", err)

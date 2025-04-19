@@ -55,6 +55,22 @@ describe('TextPreview', () => {
     })
   })
 
+  it('renders preview content as inert text instead of injecting HTML', async () => {
+    const mockContent = '<img src=x onerror=alert(1)>\nconst value = "500"'
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers(),
+      text: () => Promise.resolve(mockContent),
+    } as Response)
+
+    const { container } = render(<TextPreview path="/unsafe.ts" filename="unsafe.ts" />)
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('<img src=x onerror=alert(1)>')
+    })
+    expect(container.querySelector('img')).toBeNull()
+  })
+
   it('shows error when fetch fails', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -76,6 +92,20 @@ describe('TextPreview', () => {
     } as Response)
 
     render(<TextPreview path="/large.txt" filename="large.txt" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('文件过大，无法预览')).toBeInTheDocument()
+    })
+  })
+
+  it('rejects large files even when content-length is missing', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers(),
+      text: () => Promise.resolve('x'.repeat(1024 * 1024 + 1)),
+    } as Response)
+
+    render(<TextPreview path="/large-without-length.txt" filename="large-without-length.txt" />)
 
     await waitFor(() => {
       expect(screen.getByText('文件过大，无法预览')).toBeInTheDocument()

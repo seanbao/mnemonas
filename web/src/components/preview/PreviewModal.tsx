@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner, addToast } from '@heroui/react'
-import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
+import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle, Music, FileQuestion } from 'lucide-react'
 import { downloadFile } from '@/api/files'
 import { ensureDownloadSession, refreshAuthSession } from '@/api/auth'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
@@ -384,7 +384,7 @@ function AudioPreview({ path, filename }: { path: string; filename: string }) {
     <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-xl">
       <div className="text-center mb-8">
         <div className="w-32 h-32 mx-auto mb-4 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center">
-          <span className="text-4xl">🎵</span>
+          <Music size={56} className="text-white" aria-hidden />
         </div>
         <p className="text-lg font-medium">{filename}</p>
       </div>
@@ -428,7 +428,7 @@ function UnsupportedPreview({
     <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-xl">
       <div className="text-center max-w-md">
         <div className="w-20 h-20 mx-auto mb-6 rounded-xl bg-default-100 flex items-center justify-center">
-          <span className="text-3xl">📄</span>
+          <FileQuestion size={40} className="text-default-500" aria-hidden />
         </div>
         <h3 className="text-xl font-semibold mb-2">{filename}</h3>
         <p className="text-default-500 mb-6">

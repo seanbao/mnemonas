@@ -213,7 +213,7 @@ func Default() *Config {
 			ReadTimeout:      30 * time.Second,
 			WriteTimeout:     60 * time.Second,
 			IdleTimeout:      120 * time.Second,
-			TrustedProxyHops: 1,
+			TrustedProxyHops: 0,
 			TLS: TLSConfig{
 				Enabled:      false,
 				AutoGenerate: true, // Auto-generate self-signed cert for easy setup

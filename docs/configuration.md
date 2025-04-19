@@ -145,7 +145,7 @@ password = ""
 | `read_timeout` | duration | `"30s"` | 读取请求的超时时间 |
 | `write_timeout` | duration | `"60s"` | 写入响应的超时时间 |
 | `idle_timeout` | duration | `"120s"` | Keep-Alive 连接的空闲超时 |
-| `trusted_proxy_hops` | int | `1` | 信任的反向代理层数；按 `X-Forwarded-For` 从右向左数第 N 个地址作为客户端 IP，`0` 表示忽略转发头 |
+| `trusted_proxy_hops` | int | `0` | 信任的反向代理层数；默认忽略转发头，部署在受信反向代理后方时按 `X-Forwarded-For` 从右向左数第 N 个地址作为客户端 IP |
 
 **示例：**
 
@@ -158,7 +158,7 @@ write_timeout = "120s"
 trusted_proxy_hops = 2 # app 前面有两层反向代理时显式设置
 ```
 
-`trusted_proxy_hops = 1` 适用于 app 前面只有一层受信代理的默认部署；如果链路中存在多层反向代理，必须把该值设置为代理总层数，才能从 `X-Forwarded-For` 中选到真实客户端地址。若不希望信任任何转发头，可设置为 `0`。
+默认 `trusted_proxy_hops = 0`，直接暴露服务时不会采信客户端可伪造的 `X-Forwarded-*` 头。若 MnemoNAS 位于受信反向代理后方，一层代理设置为 `1`；多层代理必须设置为代理总层数，才能从 `X-Forwarded-For` 中选到真实客户端地址。
 
 ---
 

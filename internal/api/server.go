@@ -89,12 +89,11 @@ type Server struct {
 	activityConfigured    bool
 	startTime             time.Time
 	// Auth components
-	userStore          *auth.UserStore
-	tokenManager       *auth.TokenManager
-	authHandler        *auth.Handler
-	authMw             *auth.Middleware
-	authEnabled        bool
-	initialWebPassword string // Set when admin user is first created
+	userStore    *auth.UserStore
+	tokenManager *auth.TokenManager
+	authHandler  *auth.Handler
+	authMw       *auth.Middleware
+	authEnabled  bool
 	// Share components
 	shareStore       *share.ShareStore
 	shareHandler     *share.Handler
@@ -227,9 +226,9 @@ type deletedPathShareRestoreSnapshot struct {
 }
 
 func relocateDeletedPathRestorePath(sourcePath, restoredPath, currentPath string) (string, bool) {
-	sourcePath = path.Clean(sourcePath)
-	restoredPath = path.Clean(restoredPath)
-	currentPath = path.Clean(currentPath)
+	sourcePath = normalizeDeletedPathRestoreStatePath(sourcePath)
+	restoredPath = normalizeDeletedPathRestoreStatePath(restoredPath)
+	currentPath = normalizeDeletedPathRestoreStatePath(currentPath)
 
 	if currentPath == sourcePath {
 		return restoredPath, true
@@ -248,6 +247,11 @@ func relocateDeletedPathRestorePath(sourcePath, restoredPath, currentPath string
 	}
 
 	return path.Join(restoredPath, strings.TrimPrefix(currentPath, prefix)), true
+}
+
+func normalizeDeletedPathRestoreStatePath(targetPath string) string {
+	normalized := strings.ReplaceAll(targetPath, "\\", "/")
+	return path.Clean("/" + strings.TrimPrefix(normalized, "/"))
 }
 
 func relocateDeletedPathRestoreState(state deletedPathRestoreState, sourcePath, restoredPath string) deletedPathRestoreState {
@@ -314,7 +318,9 @@ func (s *Server) snapshotDeletedPathShareRestoreState(shares []*share.Share) (de
 			}
 			return deletedPathShareRestoreSnapshot{}, err
 		}
-		snapshot.shares = append(snapshot.shares, current)
+		snapshotShare := *current
+		snapshotShare.Enabled = false
+		snapshot.shares = append(snapshot.shares, &snapshotShare)
 	}
 
 	return snapshot, nil
@@ -373,7 +379,7 @@ func (s *Server) restoreDeletedPathState(sourcePath, restoredPath string, restor
 		}
 	}
 	if len(state.Shares) > 0 && s.shareStore != nil {
-		if err := s.shareStore.RestoreShares(state.Shares); err != nil {
+		if err := s.shareStore.RestoreSharesPreservingCurrent(state.Shares); err != nil {
 			if share.IsPersistenceWarning(err) {
 				restoreWarning = errors.Join(restoreWarning, fmt.Errorf("restore shares from trash metadata: %w", err))
 			} else {
@@ -597,6 +603,16 @@ func decodeJSONBody(r *http.Request, dst any) error {
 	return decodeJSONBodyWithLimit(r, dst, DefaultJSONRequestBodyLimit)
 }
 
+func resetJSONRequestBody(r *http.Request, body any) error {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(encoded))
+	r.ContentLength = int64(len(encoded))
+	return nil
+}
+
 func readBufferedRequestBody(r *http.Request, limit int64) ([]byte, error) {
 	if r.Body == nil {
 		return nil, nil
@@ -621,7 +637,7 @@ func writeLimitedJSONBodyError(w http.ResponseWriter, err error, limit int64) {
 		return
 	}
 
-	BadRequest(w, "invalid request body")
+	NewAPIError("INVALID_REQUEST", "invalid request body").Write(w, http.StatusBadRequest)
 }
 
 func requestHasBody(r *http.Request) (bool, error) {
@@ -861,23 +877,11 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		s.authEnabled = true
 
 		// Initialize user store
-		userStore, initialPassword, err := auth.NewUserStore(cfg.AuthUsersFile)
+		userStore, _, err := auth.NewUserStore(cfg.AuthUsersFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize user store: %w", err)
 		}
 		s.userStore = userStore
-		s.initialWebPassword = initialPassword
-
-		// Save initial web password to secrets.json for retrieval in Setup API
-		if initialPassword != "" && cfg.Config != nil {
-			secrets, err := config.LoadSecrets(cfg.Config.Storage.Root)
-			if err == nil && secrets != nil {
-				secrets.WebPassword = initialPassword
-				if err := config.SaveSecrets(cfg.Config.Storage.Root, secrets); err != nil {
-					logger.Warn().Err(err).Msg("failed to save web password to secrets")
-				}
-			}
-		}
 
 		// Initialize token manager
 		accessTTL := cfg.AuthAccessTTL
@@ -1355,13 +1359,39 @@ func (s *Server) filterActivityEntriesByHomeDir(ctx context.Context, entries []a
 		return entries, nil
 	}
 
+	user := auth.GetUserFromContext(ctx)
 	filtered := make([]activity.Entry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Path == "" || pathWithinBase(homeDir, entry.Path) {
-			filtered = append(filtered, entry)
+		if user != nil && !user.CreatedAt.IsZero() && entry.Timestamp.Before(user.CreatedAt) {
+			continue
 		}
+		if entry.Path != "" && !pathWithinBase(homeDir, entry.Path) {
+			continue
+		}
+		filtered = append(filtered, sanitizeActivityEntryForHomeDir(entry, homeDir))
 	}
 	return filtered, nil
+}
+
+func sanitizeActivityEntryForHomeDir(entry activity.Entry, homeDir string) activity.Entry {
+	if len(entry.Details) == 0 {
+		return entry
+	}
+
+	sanitized := entry
+	sanitized.Details = make(map[string]string, len(entry.Details))
+	for key, value := range entry.Details {
+		sanitized.Details[key] = value
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" || (!strings.HasPrefix(trimmed, "/") && !strings.Contains(trimmed, "\\")) {
+			continue
+		}
+		detailPath, err := validatePath(trimmed)
+		if err != nil || !pathWithinBase(homeDir, detailPath) {
+			sanitized.Details[key] = ""
+		}
+	}
+	return sanitized
 }
 
 func paginateActivityEntries(entries []activity.Entry, limit, offset int) []activity.Entry {
@@ -2100,20 +2130,24 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.Rename(r.Context(), fromPath, toPath); err != nil {
-		if isStorageConflict(err) {
-			if errors.Is(err, storage.ErrNotDir) {
-				Conflict(w, "parent path is not a directory")
+		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+			markWorkspaceMutationWarningHeaders(w)
+		} else {
+			if isStorageConflict(err) {
+				if errors.Is(err, storage.ErrNotDir) {
+					Conflict(w, "parent path is not a directory")
+					return
+				}
+				Conflict(w, "resource already exists")
 				return
 			}
-			Conflict(w, "resource already exists")
+			if isStorageNotFound(err) {
+				s.respondNotFound(w, "move file", err)
+				return
+			}
+			s.respondInternalError(w, "move file", err)
 			return
 		}
-		if isStorageNotFound(err) {
-			s.respondNotFound(w, "move file", err)
-			return
-		}
-		s.respondInternalError(w, "move file", err)
-		return
 	}
 
 	action := activity.ActionMove
@@ -5506,11 +5540,23 @@ func readCreateSharePath(r *http.Request) (string, error) {
 		return "", err
 	}
 
-	if strings.TrimSpace(req.Path) == "" {
+	trimmedPath := strings.TrimSpace(req.Path)
+	if trimmedPath == "" {
 		return "", nil
 	}
 
-	return validatePath(req.Path)
+	cleanPath, err := validatePath(trimmedPath)
+	if err != nil {
+		return "", err
+	}
+	if cleanPath != req.Path {
+		req.Path = cleanPath
+		if err := resetJSONRequestBody(r, &req); err != nil {
+			return "", err
+		}
+	}
+
+	return cleanPath, nil
 }
 
 func readFavoriteBodyPath(r *http.Request) (string, error) {
@@ -5526,11 +5572,20 @@ func readFavoriteBodyPath(r *http.Request) (string, error) {
 		return "", err
 	}
 
-	if strings.TrimSpace(req.Path) == "" {
+	trimmedPath := strings.TrimSpace(req.Path)
+	if trimmedPath == "" {
 		return "", nil
 	}
 
-	return validatePath(req.Path)
+	cleanPath, err := validatePath(req.Path)
+	if err != nil {
+		return "", err
+	}
+	if cleanPath == "/" {
+		return "", nil
+	}
+
+	return cleanPath, nil
 }
 
 func readFavoriteBatchPaths(r *http.Request) ([]string, error) {

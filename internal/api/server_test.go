@@ -175,7 +175,7 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	logger := zerolog.Nop()
@@ -218,7 +218,7 @@ func TestServer_PathChangeHooks_CallAdditionalListeners(t *testing.T) {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	var renamedPairs [][2]string
@@ -280,7 +280,7 @@ func TestServer_PathChangeHooks_RollBackAdditionalDeleteListenerOnMetadataFailur
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	rollbackCalls := 0
@@ -499,7 +499,7 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	usersFile := path.Join(tmpDir, "users.json")
@@ -558,7 +558,7 @@ func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bo
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	ctx := context.Background()
@@ -743,7 +743,7 @@ func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	ctx := context.Background()
@@ -816,7 +816,7 @@ func setupFavoritesPathSyncServer(t *testing.T) *Server {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	ctx := context.Background()
@@ -4355,7 +4355,7 @@ func TestServer_Diagnostics(t *testing.T) {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	settings := config.Default()
@@ -7906,7 +7906,7 @@ func TestServer_ClearActivity_DoesNotExposeInternalDetails(t *testing.T) {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	server, err := NewServer(zerolog.Nop(), &ServerConfig{
@@ -11468,13 +11468,9 @@ func TestServer_UpdateSettings_InvalidVersioningMaxSizeRejected(t *testing.T) {
 func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 
-	secrets := &config.Secrets{
-		WebPassword:    "web-pass",
-		WebDAVPassword: "auto-pass",
-		SetupShown:     false,
-	}
-	if err := config.SaveSecrets(tmpDir, secrets); err != nil {
-		t.Fatalf("failed to save secrets: %v", err)
+	secretsPath := filepath.Join(tmpDir, config.SecretsFile)
+	if err := os.WriteFile(secretsPath, []byte(`{"web_password":"web-pass","webdav_password":"auto-pass","setup_shown":false}`), 0o600); err != nil {
+		t.Fatalf("failed to save legacy secrets: %v", err)
 	}
 
 	server.config.Storage.Root = tmpDir
@@ -11505,6 +11501,36 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 	if _, ok := payload["webdav_username"]; ok {
 		t.Fatalf("expected webdav_username to be omitted from setup status")
+	}
+}
+
+func TestNewServer_DoesNotPersistInitialWebPasswordToSecrets(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := config.SaveSecrets(tmpDir, &config.Secrets{JWTSecret: "jwt", WebDAVPassword: "webdav-pass"}); err != nil {
+		t.Fatalf("failed to save initial secrets: %v", err)
+	}
+
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	settings.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	settings.Auth.JWTSecret = "jwt"
+
+	_, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:        settings,
+		AuthEnabled:   true,
+		AuthUsersFile: settings.Auth.UsersFile,
+		AuthJWTSecret: settings.Auth.JWTSecret,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	secretsData, err := os.ReadFile(filepath.Join(tmpDir, config.SecretsFile))
+	if err != nil {
+		t.Fatalf("failed to read secrets: %v", err)
+	}
+	if strings.Contains(string(secretsData), "web_password") {
+		t.Fatalf("expected initial web password to be absent from secrets.json, got %s", string(secretsData))
 	}
 }
 

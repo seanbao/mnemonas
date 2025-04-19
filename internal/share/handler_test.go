@@ -4328,6 +4328,10 @@ func TestClientIdentifier_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *t
 }
 
 func TestClientIdentifier_UsesLastForwardedAddressFromTrustedProxy(t *testing.T) {
+	originalHops := requestip.TrustedProxyHops()
+	requestip.SetTrustedProxyHops(1)
+	defer requestip.SetTrustedProxyHops(originalHops)
+
 	req := httptest.NewRequest(http.MethodGet, "/s/share-1", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
 	req.Header.Set("X-Forwarded-For", "198.51.100.99, 198.51.100.20")

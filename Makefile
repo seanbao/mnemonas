@@ -4,6 +4,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
+GO_PACKAGES ?= $(shell go list ./... | grep -v '/web/node_modules/')
 
 # 默认目标
 all: build
@@ -47,7 +48,7 @@ proto:
 # 构建
 build: proto
 	@echo "🏗️  Building Go control plane..."
-	CGO_ENABLED=1 go build -ldflags="$(LDFLAGS)" -o bin/nasd ./cmd/nasd
+	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/nasd ./cmd/nasd
 	@echo "🦀 Building Rust data plane..."
 	cd dataplane && cargo build --release
 	cp dataplane/target/release/dataplane bin/dataplane
@@ -56,7 +57,7 @@ build: proto
 # 开发模式构建
 dev:
 	@echo "🔨 Development build..."
-	CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd
+	CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd
 	cd dataplane && cargo build
 	cp dataplane/target/debug/dataplane bin/dataplane-debug
 	@echo "✅ Dev build complete"
@@ -64,7 +65,7 @@ dev:
 # 运行测试
 test:
 	@echo "🧪 Running Go tests..."
-	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race ./...
+	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $(GO_PACKAGES)
 	@echo "🦀 Running Rust tests..."
 	cd dataplane && cargo test
 	@echo "🌐 Running frontend tests..."
@@ -74,7 +75,7 @@ test:
 coverage:
 	@echo "📊 Generating coverage reports..."
 	@mkdir -p coverage
-	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out ./...
+	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out $(GO_PACKAGES)
 	go tool cover -html=coverage/go.out -o coverage/go.html
 	cd web && npm run test:coverage
 	@echo "✅ Coverage reports: coverage/go.html, web/coverage/"
@@ -106,14 +107,14 @@ clean:
 # 格式化代码
 fmt:
 	@echo "✨ Formatting code..."
-	go fmt ./...
+	go fmt $(GO_PACKAGES)
 	cd dataplane && cargo fmt
 	cd web && npm run lint -- --fix 2>/dev/null || true
 
 # 代码检查
 lint:
 	@echo "🔍 Linting Go..."
-	golangci-lint run || echo "⚠️  golangci-lint not installed, skipping"
+	golangci-lint run $(GO_PACKAGES) || echo "⚠️  golangci-lint not installed, skipping"
 	@echo "🔍 Linting Rust..."
 	cd dataplane && cargo clippy -- -D warnings
 	@echo "🔍 Linting frontend..."
@@ -132,7 +133,7 @@ check: lint test
 # 快速检查 (commit 前)
 quick-check:
 	@echo "🚀 Quick check..."
-	CGO_ENABLED=1 go build ./...
-	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -short ./...
+	CGO_ENABLED=0 go build $(GO_PACKAGES)
+	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -short $(GO_PACKAGES)
 	cd dataplane && cargo check
 	@echo "✅ Quick check passed"

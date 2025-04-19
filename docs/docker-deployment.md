@@ -26,16 +26,15 @@ git clone https://github.com/seanbao/mnemonas.git
 cd mnemonas
 ```
 
-### 2. 创建配置文件
+### 2. 准备数据目录
 
 ```bash
 mkdir -p ~/.mnemonas
-cp mnemonas.example.toml ~/.mnemonas/config.toml
 ```
 
-编辑 `~/.mnemonas/config.toml`，至少修改：
+首次启动会在 `~/.mnemonas/config.toml` 自动生成持久化配置。启动后可按需编辑该文件，至少建议修改：
 
-- `password` - WebDAV 认证密码
+- `[webdav].password` - WebDAV 认证密码
 
 如修改 `[storage].root`，需额外挂载该容器内路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
 
@@ -75,8 +74,6 @@ services:
     volumes:
       # 数据存储到用户目录
       - ~/.mnemonas:/root/.mnemonas
-      # 配置文件
-      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped
@@ -127,7 +124,6 @@ services:
       - "8080:8080"
     volumes:
       - ~/.mnemonas:/root/.mnemonas
-      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     restart: unless-stopped
 ```
 
@@ -153,7 +149,7 @@ level = "debug"          # 开发时可用 debug
 
 ### 场景三：多用户共享 NAS
 
-支持家庭成员各有独立账号（未来功能，当前使用单一账号）。
+支持家庭成员各有独立账号。管理员可在 Web UI 中创建用户并设置 `home_dir`，非管理员只能访问自己的主目录范围。
 
 **docker-compose.yml**:
 
@@ -166,7 +162,6 @@ services:
       - "8080:8080"
     volumes:
       - ~/.mnemonas:/root/.mnemonas
-      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     environment:
       - TZ=Asia/Shanghai
     restart: always
@@ -197,7 +192,6 @@ services:
       - "8080"
     volumes:
       - ~/.mnemonas:/root/.mnemonas
-      - ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro
     restart: unless-stopped
     networks:
       - internal
@@ -369,7 +363,7 @@ docker compose logs mnemonas
 
 # 检查配置文件语法与基础字段校验（无副作用，不会启动 dataplane）
 docker run --rm --entrypoint /app/nasd \
-  -v ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro \
+  -v ~/.mnemonas:/root/.mnemonas \
   ghcr.io/seanbao/mnemonas:latest --check-config --config /root/.mnemonas/config.toml
 ```
 
@@ -379,8 +373,8 @@ docker run --rm --entrypoint /app/nasd \
 # 检查挂载目录权限
 ls -la ~/.mnemonas
 
-# 修复权限（容器内使用 uid 1000）
-sudo chown -R 1000:1000 ~/.mnemonas
+# 默认镜像以 root 运行；若你改成非 root 用户运行容器，请把目录所有者调整为对应 UID/GID。
+sudo chown -R <uid>:<gid> ~/.mnemonas
 ```
 
 ### 端口冲突

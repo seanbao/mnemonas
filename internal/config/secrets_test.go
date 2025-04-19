@@ -78,6 +78,34 @@ func TestLoadOrCreateSecrets(t *testing.T) {
 		}
 	})
 
+	t.Run("removes legacy web password from existing secrets file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		secretsPath := filepath.Join(tmpDir, SecretsFile)
+
+		if err := os.WriteFile(secretsPath, []byte(`{"jwt_secret":"jwt","webdav_password":"webdav","web_password":"web-admin","setup_shown":false}`), 0o600); err != nil {
+			t.Fatalf("failed to write legacy secrets: %v", err)
+		}
+
+		secrets, isNew, err := LoadOrCreateSecrets(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadOrCreateSecrets failed: %v", err)
+		}
+		if isNew {
+			t.Fatal("expected existing secrets to load without recreation")
+		}
+		if secrets.JWTSecret != "jwt" || secrets.WebDAVPassword != "webdav" {
+			t.Fatalf("expected non-legacy secrets to be preserved, got %+v", secrets)
+		}
+
+		data, err := os.ReadFile(secretsPath)
+		if err != nil {
+			t.Fatalf("failed to read scrubbed secrets: %v", err)
+		}
+		if strings.Contains(string(data), "web_password") || strings.Contains(string(data), "web-admin") {
+			t.Fatalf("expected legacy web password to be removed, got %s", string(data))
+		}
+	})
+
 	t.Run("load existing secrets", func(t *testing.T) {
 		tmpDir := t.TempDir()
 

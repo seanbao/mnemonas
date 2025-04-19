@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,8 @@ var (
 	errInvalidStorePath    = errors.New("invalid path")
 	errVersionStoreSymlink = errors.New("version store path must not traverse a symlink")
 )
+
+const sqliteDriverName = "sqlite"
 
 var syncVersionStoreDir = syncVersionStoreDirectory
 var afterValidateVersionStorePath = func() {}
@@ -113,7 +116,7 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	// Open database
-	db, err := sql.Open("sqlite3", anchoredDBPath+"?_journal=WAL&_timeout=5000")
+	db, err := sql.Open(sqliteDriverName, versionStoreSQLiteDSN(anchoredDBPath))
 	if err != nil {
 		_ = dirHandle.Close()
 		return nil, err
@@ -134,7 +137,7 @@ func New(cfg Config) (*Store, error) {
 		if err != nil {
 			return nil, err
 		}
-		db, err = sql.Open("sqlite3", anchoredDBPath+"?_journal=WAL&_timeout=5000")
+		db, err = sql.Open(sqliteDriverName, versionStoreSQLiteDSN(anchoredDBPath))
 		if err != nil {
 			_ = dirHandle.Close()
 			return nil, err
@@ -320,7 +323,19 @@ func prepareAnchoredVersionStorePath(dbPath string) (string, *os.File, error) {
 	}
 
 	afterValidateVersionStorePath()
-	return fmt.Sprintf("/proc/self/fd/%d/%s", dirHandle.Fd(), filepath.Base(dbPath)), dirHandle, nil
+	return anchoredFDPath(dirHandle.Fd(), filepath.Base(dbPath)), dirHandle, nil
+}
+
+func versionStoreSQLiteDSN(path string) string {
+	return path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+}
+
+func anchoredFDPath(fd uintptr, name string) string {
+	fdRoot := "/proc/self/fd"
+	if runtime.GOOS == "darwin" {
+		fdRoot = "/dev/fd"
+	}
+	return fmt.Sprintf("%s/%d/%s", fdRoot, fd, name)
 }
 
 func collectMissingVersionStoreDirs(dir string) ([]string, error) {
@@ -1033,9 +1048,7 @@ func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error {
 		return err
 	}
 	item.OriginalPath = cleanOriginalPath
-	if item.RestoreData == nil {
-		item.RestoreData = []byte{}
-	}
+	item.RestoreData = normalizeTrashRestoreData(item.RestoreData)
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data) 
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1045,6 +1058,7 @@ func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error {
 }
 
 func (s *Store) UpdateTrashRestoreData(ctx context.Context, id string, restoreData []byte) error {
+	restoreData = normalizeTrashRestoreData(restoreData)
 	result, err := s.db.ExecContext(ctx, `UPDATE trash SET restore_data = ? WHERE id = ?`, restoreData, id)
 	if err != nil {
 		return err
@@ -1075,6 +1089,7 @@ func (s *Store) GetTrashItem(ctx context.Context, id string) (*TrashItem, error)
 
 	item.DeletedAt = time.Unix(deletedAt, 0)
 	item.ExpiresAt = time.Unix(expiresAt, 0)
+	item.RestoreData = normalizeTrashRestoreData(item.RestoreData)
 	return &item, nil
 }
 
@@ -1098,10 +1113,18 @@ func (s *Store) ListTrash(ctx context.Context) ([]TrashItem, error) {
 		}
 		item.DeletedAt = time.Unix(deletedAt, 0)
 		item.ExpiresAt = time.Unix(expiresAt, 0)
+		item.RestoreData = normalizeTrashRestoreData(item.RestoreData)
 		items = append(items, item)
 	}
 
 	return items, rows.Err()
+}
+
+func normalizeTrashRestoreData(data []byte) []byte {
+	if data == nil {
+		return []byte{}
+	}
+	return data
 }
 
 // RemoveFromTrash removes a trash item

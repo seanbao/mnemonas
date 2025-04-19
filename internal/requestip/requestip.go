@@ -10,7 +10,7 @@ import (
 var trustedProxyHops atomic.Int32
 
 func init() {
-	trustedProxyHops.Store(1)
+	trustedProxyHops.Store(0)
 }
 
 func SetTrustedProxyHops(hops int) {

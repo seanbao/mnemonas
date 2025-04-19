@@ -19,7 +19,7 @@ MnemoNAS 是一个简单可靠、好看好用的开源 NAS 系统。数据在自
 - 🎨 **消费级体验**：告别"工程师 UI"，对标 iCloud/Synology Photos 的现代设计
 - 🚀 **10 分钟上手**：Docker Compose 一键启动，开箱即用
 - 🛡️ **可靠不折腾**：自动校验数据完整性，出问题能发现、能定位
-- 📱 **全平台覆盖**：Web + Android 原生 App，功能齐全不只是文件浏览器
+- 🌐 **Web 与 WebDAV 覆盖**：浏览器管理界面和主流 WebDAV 客户端均可访问，不只是文件浏览器
 
 ### 完整功能列表
 
@@ -86,6 +86,8 @@ docker compose up -d
 open http://localhost:8080
 ```
 
+首次启动会在 `~/.mnemonas/config.toml` 自动生成持久化配置；Web 登录初始密码请查看容器日志或 `~/.mnemonas/.mnemonas/initial-password.txt`。
+
 ### 二进制安装
 
 从 [Releases](https://github.com/seanbao/mnemonas/releases) 下载对应平台的二进制文件：
@@ -131,7 +133,7 @@ mnemonas/
 │   ├── api/            # REST/gRPC API
 │   ├── config/         # 配置管理
 │   ├── caslayout/      # CAS 存储布局（未来独立开源）
-│   └── webdavcas/      # WebDAV-CAS 适配层（未来独立开源）
+│   └── storage/        # 文件系统、版本、回收站与 CAS 编排
 ├── dataplane/          # Rust 数据面
 ├── web/                # React 前端
 ├── proto/              # gRPC 协议定义
@@ -145,7 +147,7 @@ mnemonas/
 
 - Go 1.25+
 - Rust 1.92+
-- Node.js 22+ (最低 20.x)
+- Node.js 22.x（或兼容的 20.19+）
 - Docker & Docker Compose
 - protoc 25+
 
@@ -179,7 +181,7 @@ nvm use
 - 构建 Go 控制面和 Rust 数据面
 - 启动服务并检查端口状态
 - 将日志写入 `logs/` 目录
-- 检测并强制使用 `.nvmrc` 指定的 Node.js 版本
+- 检测并使用 `.nvmrc` 指定的 Node.js 版本
 
 ### Makefile 命令
 

@@ -3,10 +3,16 @@
 .pids
 .vscode
 bin/
+coverage/
 coverage.out
 dataplane/bin/
 dataplane/target/
+dist/
 docs/
 logs/
 nasd
-web/
+web/node_modules/
+web/dist/
+web/coverage/
+web/playwright-report/
+web/test-results/

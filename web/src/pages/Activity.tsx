@@ -26,6 +26,9 @@ import {
   User,
   Filter,
   AlertCircle,
+  Star,
+  StarOff,
+  MessageSquareText,
 } from 'lucide-react'
 import {
   ApiError,
@@ -55,6 +58,9 @@ function ActionIcon({ action }: { action: ActionType }) {
     restore: RotateCcw,
     share: Share2,
     unshare: Share2,
+    favorite: Star,
+    unfavorite: StarOff,
+    favorite_note_update: MessageSquareText,
     login: LogIn,
     logout: LogOut,
     trash_restore: RotateCcw,

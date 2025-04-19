@@ -53,16 +53,17 @@ function isMissingUserError(error: unknown): boolean {
 function syncMissingUserInCache(queryClient: ReturnType<typeof useQueryClient>, userId: string): boolean {
   let removed = false
 
-  queryClient.setQueryData<ListUsersResponse | undefined>(['users'], (current) => {
+  queryClient.setQueriesData<ListUsersResponse | undefined>({ queryKey: ['users'] }, (current) => {
     if (!current) {
       return current
     }
 
     const users = current.users.filter((user) => user.id !== userId)
-    removed = users.length !== current.users.length
-    if (!removed) {
+    const removedFromCurrent = users.length !== current.users.length
+    if (!removedFromCurrent) {
       return current
     }
+    removed = true
 
     return {
       ...current,

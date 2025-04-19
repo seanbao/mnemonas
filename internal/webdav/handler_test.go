@@ -94,7 +94,7 @@ func setupTestHandler(t *testing.T) (*Handler, *storage.FileSystem, string) {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	handler := NewHandler(Config{
@@ -2930,8 +2930,26 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 	concurrentReq := httptest.NewRequest("PROPFIND", "/dav/cache-race", nil)
 	concurrentReq.Header.Set("Depth", "1")
 	concurrentW := httptest.NewRecorder()
-	handler.ServeHTTP(concurrentW, concurrentReq)
+	concurrentDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(concurrentW, concurrentReq)
+		close(concurrentDone)
+	}()
 
+	select {
+	case <-concurrentDone:
+		if !strings.Contains(concurrentW.Body.String(), "new.txt") {
+			t.Fatalf("concurrent PROPFIND returned stale cached body while PUT was in flight: %q", concurrentW.Body.String())
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(continueUpdate)
+
+	select {
+	case <-concurrentDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for concurrent PROPFIND to complete")
+	}
 	if concurrentW.Code != http.StatusMultiStatus {
 		t.Fatalf("concurrent PROPFIND status = %d, want %d", concurrentW.Code, http.StatusMultiStatus)
 	}
@@ -2939,7 +2957,6 @@ func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T)
 		t.Fatalf("expected concurrent PROPFIND to avoid stale cache after PUT content is written, got %q", concurrentW.Body.String())
 	}
 
-	close(continueUpdate)
 	select {
 	case <-putDone:
 	case <-time.After(2 * time.Second):
@@ -4305,7 +4322,7 @@ func TestHandler_ReadOnlyMode(t *testing.T) {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	handler := NewHandler(Config{
@@ -4361,7 +4378,7 @@ func TestHandler_BasicAuth(t *testing.T) {
 		Dataplane:          client,
 	})
 	if err != nil {
-		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+		t.Skipf("storage.New() error: %v", err)
 	}
 
 	handler := NewHandler(Config{
