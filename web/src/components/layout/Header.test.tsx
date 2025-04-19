@@ -4,6 +4,7 @@ import React from 'react'
 import { Header } from './Header'
 
 const refetchQueries = vi.fn().mockResolvedValue(undefined)
+const clearQueries = vi.fn()
 const useIsAdminMock = vi.fn(() => true)
 const mockAddToast = vi.fn()
 const openUrlInNewTabMock = vi.fn(() => true)
@@ -12,7 +13,7 @@ const logoutMock = vi.fn()
 let locationPathname = '/'
 
 vi.mock('@tanstack/react-query', () => ({
-  useQueryClient: () => ({ refetchQueries }),
+  useQueryClient: () => ({ refetchQueries, clear: clearQueries }),
 }))
 
 vi.mock('@/stores/auth', () => ({
@@ -195,6 +196,21 @@ describe('Header', () => {
         color: 'warning',
       })
     })
+    expect(clearQueries).toHaveBeenCalledTimes(1)
+    expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
+  })
+
+  it('clears cached queries when logout succeeds without warnings', async () => {
+    render(<Header />)
+
+    await act(async () => {
+      screen.getByText('退出登录').click()
+    })
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已退出登录', color: 'success' })
+    })
+    expect(clearQueries).toHaveBeenCalledTimes(1)
     expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
   })
 })

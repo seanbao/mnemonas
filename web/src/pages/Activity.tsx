@@ -25,6 +25,7 @@ import {
   Clock,
   User,
   Filter,
+  AlertCircle,
 } from 'lucide-react'
 import {
   ApiError,
@@ -37,6 +38,8 @@ import {
 import { cn, formatRelativeTime } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { useIsAdmin, useUser } from '@/stores/auth'
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
 // Format relative time
 // Get icon for action type
@@ -146,14 +149,20 @@ export function ActivityPage() {
   const [page, setPage] = useState(1)
   const [actionFilter, setActionFilter] = useState<ActionType | ''>('')
   const pageSize = 20
+  const user = useUser()
+  const isAdmin = useIsAdmin()
+  const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const authScopeKey = user?.id ?? 'anonymous'
+  const homeScopeKey = hasInvalidHomeDir ? '__invalid__' : (rootPath ?? '/')
 
   const { data, isLoading, error, refetch, isRefetching } = useQuery({
-    queryKey: ['activity', page, actionFilter],
+    queryKey: ['activity', authScopeKey, isAdmin, homeScopeKey, page, actionFilter],
     queryFn: () => listActivity({
       limit: pageSize,
       offset: (page - 1) * pageSize,
       action: actionFilter || undefined,
     }),
+    enabled: !hasInvalidHomeDir,
   })
 
   const totalPages = useMemo(() => {
@@ -186,6 +195,26 @@ export function ActivityPage() {
       return
     }
     addToast({ title: '活动日志已刷新', color: 'success' })
+  }
+
+  if (hasInvalidHomeDir) {
+    return (
+      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+        <PageHeader
+          title="活动日志"
+          subtitle={invalidHomeDirTitle}
+          icon={Activity}
+        />
+
+        <div className="flex flex-1 items-center justify-center">
+          <EmptyState
+            icon={AlertCircle}
+            title={invalidHomeDirTitle}
+            description={getInvalidHomeDirDescription('查看活动日志')}
+          />
+        </div>
+      </div>
+    )
   }
 
   if (isLoading) {

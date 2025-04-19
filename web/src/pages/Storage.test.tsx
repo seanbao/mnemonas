@@ -7,6 +7,10 @@ import * as HeroUI from '@heroui/react'
 const useIsAdminMock = vi.fn(() => true)
 const mockAddToast = vi.fn()
 
+const { mockUser } = vi.hoisted(() => ({
+  mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
+}))
+
 // Mock API
 vi.mock('@/api/files', () => ({
   ApiError: class ApiError extends Error {
@@ -28,6 +32,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
   return {
     ...actual,
+    useUser: () => mockUser,
     useIsAdmin: () => useIsAdminMock(),
   }
 })
@@ -46,6 +51,11 @@ describe('StoragePage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
     mockGetStorageStats.mockResolvedValue(mockStats)
@@ -131,6 +141,33 @@ describe('StoragePage', () => {
 
       await flushUi()
       expect(mockGetStorageStats).toHaveBeenCalledTimes(2)
+    })
+
+    it('refetches storage stats when the auth scope changes', async () => {
+    mockGetStorageStats
+      .mockResolvedValueOnce(mockStats)
+      .mockResolvedValueOnce({
+        ...mockStats,
+        totalObjects: 2048,
+      })
+
+    const { rerender } = render(<StoragePage />)
+
+    await waitFor(() => {
+      expect(mockGetStorageStats).toHaveBeenCalledTimes(1)
+    })
+
+    mockUser.id = 'u2'
+    mockUser.username = 'other-admin'
+    mockUser.email = 'other@local'
+    mockUser.role = 'admin'
+    mockUser.homeDir = '/'
+
+    rerender(<StoragePage />)
+
+    await waitFor(() => {
+      expect(mockGetStorageStats).toHaveBeenCalledTimes(2)
+    })
     })
   })
 

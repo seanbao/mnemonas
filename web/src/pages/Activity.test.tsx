@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ActivityPage } from './Activity'
 import * as HeroUI from '@heroui/react'
+
+const useIsAdminMock = vi.fn(() => true)
+const useUserMock = vi.fn(() => ({ id: 'admin-id', username: 'admin', role: 'admin' }))
 
 vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
@@ -47,6 +51,15 @@ vi.mock('@/api/activity', () => ({
   getActionColor: vi.fn(() => 'primary'),
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useIsAdmin: () => useIsAdminMock(),
+    useUser: () => useUserMock(),
+  }
+})
+
 import { ApiError, listActivity } from '@/api/activity'
 
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
@@ -55,6 +68,8 @@ describe('ActivityPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
+    useIsAdminMock.mockReturnValue(true)
+    useUserMock.mockReturnValue({ id: 'admin-id', username: 'admin', role: 'admin' })
     mockListActivity.mockResolvedValue({
       items: [
         {
@@ -94,6 +109,20 @@ describe('ActivityPage', () => {
       // Should show skeleton loaders
       const skeletons = document.querySelectorAll('[class*="skeleton"], [class*="animate"]')
       expect(skeletons.length).toBeGreaterThan(0)
+    })
+
+    it('shows an invalid-home error instead of loading activity for non-admin users without a home directory', async () => {
+      useIsAdminMock.mockReturnValue(false)
+      useUserMock.mockReturnValue({ id: 'member-id', username: 'member', role: 'user', homeDir: '' })
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('主目录配置无效').length).toBeGreaterThan(0)
+        expect(screen.getByText('当前账户未配置有效的主目录，无法查看活动日志。请联系管理员修复账户 home_dir。')).toBeTruthy()
+      })
+
+      expect(mockListActivity).not.toHaveBeenCalled()
     })
 
     it('renders page header', async () => {
@@ -175,6 +204,90 @@ describe('ActivityPage', () => {
         // Should show "5 分钟前" or similar
         expect(screen.getByText(/分钟前/)).toBeTruthy()
       })
+    })
+
+    it('does not reuse cached admin activity from another user session', async () => {
+    useIsAdminMock.mockReturnValue(false)
+      useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user', homeDir: '/member' })
+    mockListActivity.mockImplementation(() => new Promise(() => {}))
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['activity', 1, ''], {
+      items: [
+        {
+          id: 'act-admin',
+          timestamp: '2024-01-15T10:00:00Z',
+          action: 'upload',
+          path: '/admin/secret.txt',
+          user: 'admin',
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ActivityPage />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(mockListActivity).toHaveBeenCalledTimes(1)
+    })
+
+    expect(screen.queryByText('/admin/secret.txt')).toBeNull()
+  })
+
+    it('does not reuse cached activity when the same user home directory changes', async () => {
+      useIsAdminMock.mockReturnValue(false)
+      useUserMock.mockReturnValue({ id: 'scoped-user', username: 'member', role: 'user', homeDir: '/member-next' })
+      mockListActivity.mockImplementation(() => new Promise(() => {}))
+
+      const queryClient = new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: false,
+            gcTime: 0,
+            staleTime: 0,
+          },
+        },
+      })
+      queryClient.setQueryData(['activity', 'scoped-user', false, 1, ''], {
+        items: [
+          {
+            id: 'act-old-home',
+            timestamp: '2024-01-15T10:00:00Z',
+            action: 'upload',
+            path: '/member-old/secret.txt',
+            user: 'member',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      })
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ActivityPage />
+        </QueryClientProvider>
+      )
+
+      await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalledTimes(1)
+      })
+
+      expect(screen.queryByText('/member-old/secret.txt')).toBeNull()
     })
   })
 

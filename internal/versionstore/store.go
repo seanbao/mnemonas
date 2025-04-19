@@ -241,13 +241,19 @@ func rollbackRenamedVersionStoreFiles(root *os.Root, renamed [][2]string) error 
 	return rollbackErr
 }
 
-func isRecoverableVersionStoreInitError(err error) bool {
-	if isRecoverableVersionStoreSQLiteError(err) {
-		return true
+func isRecoverableVersionStoreSQLiteError(err error) bool {
+	if err == nil {
+		return false
 	}
 
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "file is not a database") || strings.Contains(message, "database disk image is malformed")
+	return strings.Contains(message, "database disk image is malformed") ||
+		strings.Contains(message, "file is not a database") ||
+		strings.Contains(message, "not a database")
+}
+
+func isRecoverableVersionStoreInitError(err error) bool {
+	return isRecoverableVersionStoreSQLiteError(err)
 }
 
 func normalizeVersionStoreFilePath(dbPath string) (string, error) {

@@ -70,6 +70,7 @@ import {
 } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
+import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
@@ -988,7 +989,12 @@ export function FilesPage() {
   const clipboard = useClipboardStore()
   const canWrite = useCanWrite()
   const user = useUser()
+  const authScopeKey = user?.id ?? 'anonymous'
+  const fileScopeKey = getFileQueryScopeKey(user)
   const { scopedHomeDir, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const favoritesScopeKey = `${authScopeKey}:${hasInvalidHomeDir ? '__invalid__' : (scopedHomeDir ?? '/')}`
+  const favoritesListQueryKey = ['favorites', favoritesScopeKey] as const
+  const favoritesCheckQueryKey = ['favorites-check', favoritesScopeKey] as const
   
   // Track focused file index for keyboard navigation
   const [focusedIndex, setFocusedIndex] = useState<number>(-1)
@@ -1105,6 +1111,7 @@ export function FilesPage() {
   }, [hasInvalidHomeDir, user, location.pathname, currentPath, scopedHomeDir, setCurrentPath])
 
   const currentPathAllowed = !hasInvalidHomeDir && (!scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath))
+  const filesQueryKey = getFilesQueryKey(fileScopeKey, currentPath)
 
   useEffect(() => {
     if (hasInvalidHomeDir) return
@@ -1135,7 +1142,7 @@ export function FilesPage() {
   }, [actionFile])
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['files', currentPath],
+    queryKey: filesQueryKey,
     queryFn: () => listFiles(currentPath),
     enabled: currentPathAllowed,
   })
@@ -1146,7 +1153,7 @@ export function FilesPage() {
     }
 
     const removedPaths = new Set(paths)
-    queryClient.setQueryData<FileListResponse>(['files', currentPath], (current) => {
+    queryClient.setQueryData<FileListResponse>(filesQueryKey, (current) => {
       if (!current) {
         return current
       }
@@ -1161,7 +1168,7 @@ export function FilesPage() {
         files,
       }
     })
-  }, [currentPath, queryClient])
+  }, [filesQueryKey, queryClient])
 
   const deleteFileWithMissingSync = useCallback(async (path: string) => {
     try {
@@ -1204,7 +1211,7 @@ export function FilesPage() {
     mutationFn: deleteFileWithMissingSync,
     onSuccess: (result, path) => {
       removeFilesFromCache([path])
-      queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+      queryClient.invalidateQueries({ queryKey: filesQueryKey })
       onDeleteClose()
       setDeleteTarget(null)
       addToast(getFilesActionSuccessToast(result, {
@@ -1223,7 +1230,7 @@ export function FilesPage() {
   const createFolderMutation = useMutation({
     mutationFn: ({ path }: { path: string; directoryPath: string; folderName: string; sessionId: number }) => createDirectory(path),
     onSuccess: (result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
+      queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, variables.directoryPath) })
       if (
         newFolderSessionRef.current === variables.sessionId
         && currentNewFolderNameRef.current.trim() === variables.folderName
@@ -1244,7 +1251,7 @@ export function FilesPage() {
       if (isMissingFileActionResult(result)) {
         removeFilesFromCache([variables.from])
       }
-      queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
+      queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, variables.directoryPath) })
       if (
         renameSessionRef.current === variables.sessionId
         && currentRenameFileRef.current?.path === variables.targetPath
@@ -1345,7 +1352,7 @@ export function FilesPage() {
     error: favoritesError,
     refetch: refetchFavorites,
   } = useQuery({
-    queryKey: ['favorites-check', filePaths],
+    queryKey: [...favoritesCheckQueryKey, filePaths],
     queryFn: () => checkFavorites(filePaths),
     enabled: !hasInvalidHomeDir && filePaths.length > 0,
     staleTime: 30000, // Cache for 30 seconds
@@ -1361,14 +1368,14 @@ export function FilesPage() {
   const favoritesBanner = favoritesError ? getFavoritesBannerContent(favoritesError) : null
   const favoriteUnavailableLabel = favoritesBanner?.title ?? '收藏状态不可用'
   const syncFavoriteStatus = useCallback((path: string, isFavorited: boolean) => {
-    queryClient.setQueriesData<Record<string, boolean>>({ queryKey: ['favorites-check'] }, (current) => {
+    queryClient.setQueriesData<Record<string, boolean>>({ queryKey: favoritesCheckQueryKey }, (current) => {
       if (!current) {
         return current
       }
 
       return { ...current, [path]: isFavorited }
     })
-  }, [queryClient])
+  }, [favoritesCheckQueryKey, queryClient])
   const shareFeatureState = shareFeatureDisabled ? 'disabled' : getShareFeatureState(shareAvailabilityError)
   const shareActionsAvailable = shareFeatureState === null
   const shareActionLabel = getShareActionLabel(shareFeatureState)
@@ -1382,8 +1389,8 @@ export function FilesPage() {
     mutationFn: ({ path, isFavorited }: { path: string; isFavorited: boolean }) => 
       toggleFavorite(path, isFavorited),
     onSuccess: (newStatus) => {
-      queryClient.invalidateQueries({ queryKey: ['favorites-check'] })
-      queryClient.invalidateQueries({ queryKey: ['favorites'] })
+      queryClient.invalidateQueries({ queryKey: favoritesCheckQueryKey })
+      queryClient.invalidateQueries({ queryKey: favoritesListQueryKey })
       addToast({ 
         title: newStatus ? '已添加收藏' : '已取消收藏', 
         color: 'success' 
@@ -1392,8 +1399,8 @@ export function FilesPage() {
     onError: (error, variables) => {
       if (getErrorCode(error) === 'FAVORITE_ALREADY_EXISTS' || getErrorStatus(error) === 409) {
         syncFavoriteStatus(variables.path, true)
-        queryClient.invalidateQueries({ queryKey: ['favorites-check'] })
-        queryClient.invalidateQueries({ queryKey: ['favorites'] })
+        queryClient.invalidateQueries({ queryKey: favoritesCheckQueryKey })
+        queryClient.invalidateQueries({ queryKey: favoritesListQueryKey })
         addToast({
           title: '已在收藏夹中',
           description: '该文件已被其他操作加入收藏，状态已同步。',
@@ -1404,8 +1411,8 @@ export function FilesPage() {
 
       if (getErrorCode(error) === 'FAVORITE_NOT_FOUND' || getErrorStatus(error) === 404) {
         syncFavoriteStatus(variables.path, false)
-        queryClient.invalidateQueries({ queryKey: ['favorites-check'] })
-        queryClient.invalidateQueries({ queryKey: ['favorites'] })
+        queryClient.invalidateQueries({ queryKey: favoritesCheckQueryKey })
+        queryClient.invalidateQueries({ queryKey: favoritesListQueryKey })
         addToast({
           title: '收藏已移除',
           description: '该文件已不在收藏夹中，状态已同步。',
@@ -1785,7 +1792,7 @@ export function FilesPage() {
       }
     }
 
-    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+    queryClient.invalidateQueries({ queryKey: filesQueryKey })
 
     if (!isCurrentUploadSession()) {
       return
@@ -1805,7 +1812,7 @@ export function FilesPage() {
       setUploadQueue(prev => prev.filter(item => item.status === 'error'))
       uploadClearTimeoutRef.current = null
     }, 3000)
-  }, [canWrite, currentPath, queryClient, ensureDirectoryExists])
+  }, [canWrite, currentPath, ensureDirectoryExists, filesQueryKey, queryClient])
 
   const handleUploadInputChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     void handleUpload(event.target.files)
@@ -1894,7 +1901,7 @@ export function FilesPage() {
       }
 
       removeFilesFromCache(succeededPaths)
-      queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+      queryClient.invalidateQueries({ queryKey: filesQueryKey })
 
       if (errorCount === 0) {
         onBatchDeleteClose()
@@ -1929,7 +1936,7 @@ export function FilesPage() {
     } finally {
       setIsBatchDeleting(false)
     }
-  }, [canWrite, selectedFiles, deleteFileWithMissingSync, removeFilesFromCache, queryClient, currentPath, clearSelection, onBatchDeleteClose, setSelection])
+  }, [canWrite, selectedFiles, deleteFileWithMissingSync, removeFilesFromCache, queryClient, clearSelection, onBatchDeleteClose, setSelection, filesQueryKey])
 
   // Batch download handler
   const handleBatchDownload = useCallback(async () => {
@@ -2044,9 +2051,9 @@ export function FilesPage() {
       }
     }
     
-    queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+    queryClient.invalidateQueries({ queryKey: filesQueryKey })
     if (sourcePath !== currentPath) {
-      queryClient.invalidateQueries({ queryKey: ['files', sourcePath] })
+      queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, sourcePath) })
     }
     
     if (errorCount === 0) {
@@ -2075,7 +2082,7 @@ export function FilesPage() {
     }
 
     addToast(getPartialBatchActionToast(`${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, successCount, errorCount, warningMessages))
-  }, [canWrite, clipboard, currentPath, moveFileWithMissingSync, copyFileWithMissingSync, queryClient])
+  }, [canWrite, clipboard, currentPath, moveFileWithMissingSync, copyFileWithMissingSync, filesQueryKey, fileScopeKey, queryClient])
 
   const handleKeyboardDelete = useCallback(() => {
     if (!canWrite) return

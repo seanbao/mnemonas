@@ -811,15 +811,20 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		}
 		return fmt.Errorf("failed to delete file index: %w", err)
 	}
+	var deleteWarning error
 	hookResult, err := fs.notifyPathDeleted(ctx, name)
 	if err != nil {
-		if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, true); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to sync delete hooks: %w", err),
-				rollbackErr,
-			)
+		if workspace.IsVisibleMutationWarning(err) || isVisibleMutationWarning(err) {
+			deleteWarning = errors.Join(deleteWarning, fmt.Errorf("failed to sync delete hooks: %w", err))
+		} else {
+			if rollbackErr := fs.rollbackSoftDelete(ctx, name, rollbackInfo, id, trashContentPath, true); rollbackErr != nil {
+				return errors.Join(
+					fmt.Errorf("failed to sync delete hooks: %w", err),
+					rollbackErr,
+				)
+			}
+			return fmt.Errorf("failed to sync delete hooks: %w", err)
 		}
-		return fmt.Errorf("failed to sync delete hooks: %w", err)
 	}
 	if hookResult != nil && len(hookResult.RestoreData) > 0 {
 		if err := fs.updateTrashRestoreData(ctx, id, hookResult.RestoreData); err != nil {
@@ -839,7 +844,14 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 		}
 	}
 	if err := fs.ensureTrashCapacityLocked(ctx, 0, id); err != nil {
-		return wrapTrashDeleteWarning(fmt.Errorf("failed to enforce trash capacity: %w", err))
+		cleanupWarning := wrapTrashDeleteWarning(fmt.Errorf("failed to enforce trash capacity: %w", err))
+		if deleteWarning != nil {
+			return errors.Join(wrapVisibleMutationWarning(deleteWarning), cleanupWarning)
+		}
+		return cleanupWarning
+	}
+	if deleteWarning != nil {
+		return wrapVisibleMutationWarning(deleteWarning)
 	}
 
 	return nil
@@ -962,21 +974,25 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 	}
 	rollbackDeleteHook, err := fs.notifyPathDeleted(ctx, name)
 	if err != nil {
-		if rollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to sync delete hooks: %w", err),
-				fmt.Errorf("failed to rollback deleted path: %w", rollbackErr),
-			)
-		}
-		if !info.IsDir {
-			if restoreIndexErr := fs.updateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(previousData)); restoreIndexErr != nil {
+		if workspace.IsVisibleMutationWarning(err) || isVisibleMutationWarning(err) {
+			deleteWarning = errors.Join(deleteWarning, fmt.Errorf("failed to sync delete hooks: %w", err))
+		} else {
+			if rollbackErr := fs.rollbackDeletedPath(ctx, name, hadPreviousFile, previousData, hadPreviousDir); rollbackErr != nil {
 				return errors.Join(
 					fmt.Errorf("failed to sync delete hooks: %w", err),
-					fmt.Errorf("failed to restore file index after rollback: %w", restoreIndexErr),
+					fmt.Errorf("failed to rollback deleted path: %w", rollbackErr),
 				)
 			}
+			if !info.IsDir {
+				if restoreIndexErr := fs.updateFileIndex(ctx, name, info.Size, info.ModTime, computeHash(previousData)); restoreIndexErr != nil {
+					return errors.Join(
+						fmt.Errorf("failed to sync delete hooks: %w", err),
+						fmt.Errorf("failed to restore file index after rollback: %w", restoreIndexErr),
+					)
+				}
+			}
+			return fmt.Errorf("failed to sync delete hooks: %w", err)
 		}
-		return fmt.Errorf("failed to sync delete hooks: %w", err)
 	}
 
 	if !info.IsDir {
@@ -1069,6 +1085,9 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 		return fmt.Errorf("failed to rename metadata: %w", err)
 	}
 	if err := fs.notifyPathRenamed(ctx, oldName, newName); err != nil {
+		if workspace.IsVisibleMutationWarning(err) || isVisibleMutationWarning(err) {
+			return wrapVisibleMutationWarning(fmt.Errorf("failed to sync rename hooks: %w", err))
+		}
 		rollbackWorkspaceErr := fs.renameWorkspacePath(ctx, newName, oldName)
 		rollbackMetadataErr := fs.renameMetadataPath(ctx, newName, oldName)
 		if rollbackWorkspaceErr != nil || rollbackMetadataErr != nil {

@@ -40,6 +40,9 @@ func TestWriteShareStoreFile_ReturnsDirectorySyncError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected writeShareStoreFile() to fail when directory sync fails")
 	}
+	if !IsPersistenceWarning(err) {
+		t.Fatalf("expected persistence warning, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "failed to sync shares directory") {
 		t.Fatalf("expected directory sync error, got %v", err)
 	}
@@ -580,6 +583,70 @@ func TestNewShareStore_LoadNormalizesValidSharesAndDropsInvalidEntries(t *testin
 	}
 	if persisted[0].Permission != PermissionRead {
 		t.Fatalf("expected normalized share permission to be persisted as read, got %q", persisted[0].Permission)
+	}
+}
+
+func TestNewShareStore_LoadNormalizationIgnoresPersistenceWarning(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	legacy := []*Share{{
+		ID:         "valid",
+		Path:       `docs\\report.pdf`,
+		Type:       ShareTypeFile,
+		CreatedBy:  "user1",
+		CreatedAt:  time.Now(),
+		Permission: PermissionReadWrite,
+		Enabled:    true,
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("Marshal(legacy shares) error: %v", err)
+	}
+	if err := os.WriteFile(storePath, data, 0600); err != nil {
+		t.Fatalf("WriteFile(shares.json) error: %v", err)
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("expected NewShareStore() to tolerate normalization persistence warning, got %v", err)
+	}
+
+	share, err := store.Get("valid")
+	if err != nil {
+		t.Fatalf("Get(valid) error: %v", err)
+	}
+	if share.Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized share path after warning, got %q", share.Path)
+	}
+	if share.Permission != PermissionRead {
+		t.Fatalf("expected normalized share permission after warning, got %q", share.Permission)
+	}
+
+	persistedData, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(shares.json) error: %v", err)
+	}
+	var persisted []*Share
+	if err := json.Unmarshal(persistedData, &persisted); err != nil {
+		t.Fatalf("Unmarshal(persisted shares) error: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected normalized shares file to contain one entry after warning, got %d", len(persisted))
+	}
+	if persisted[0].Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized share path to persist after warning, got %q", persisted[0].Path)
+	}
+	if persisted[0].Permission != PermissionRead {
+		t.Fatalf("expected normalized share permission to persist after warning, got %q", persisted[0].Permission)
 	}
 }
 
@@ -1688,6 +1755,57 @@ func TestShareStore_UpdatePathReferencesWithRestore_RestoresOnlyMovedShares(t *t
 	}
 }
 
+func TestShareStore_UpdatePathReferencesWithRestore_CommitsOnPersistenceWarning(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	createdShare, err := store.Create(CreateShareOptions{Path: "/docs/report.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	originalShares, err := store.UpdatePathReferencesWithRestore("/docs/report.txt", "/archive/docs/report.txt")
+	if !IsPersistenceWarning(err) {
+		t.Fatalf("expected persistence warning, got %v", err)
+	}
+	if len(originalShares) != 1 || originalShares[0].ID != createdShare.ID {
+		t.Fatalf("expected restore state for moved share, got %+v", originalShares)
+	}
+
+	updated, err := store.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(updated share) error: %v", err)
+	}
+	if updated.Path != "/archive/docs/report.txt" {
+		t.Fatalf("expected moved share path after warning, got %q", updated.Path)
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloaded.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if reloadedShare.Path != "/archive/docs/report.txt" {
+		t.Fatalf("expected persisted moved share path after warning, got %q", reloadedShare.Path)
+	}
+}
+
 func TestShareStore_DisableSharesUnderPath_DisablesExactAndDescendantShares(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1807,6 +1925,75 @@ func TestShareStore_DisableSharesUnderPathWithRestore_RestoresDisabledShares(t *
 	}
 }
 
+func TestShareStore_DisableSharesUnderPathWithRestore_CommitsOnPersistenceWarning(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	folderShare, err := store.Create(CreateShareOptions{Path: "/docs", Type: ShareTypeFolder, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create folder share: %v", err)
+	}
+	fileShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	disabled, err := store.DisableSharesUnderPathWithRestore("/docs")
+	if !IsPersistenceWarning(err) {
+		t.Fatalf("expected persistence warning, got %v", err)
+	}
+	if len(disabled) != 2 {
+		t.Fatalf("expected two disabled shares in restore state, got %d", len(disabled))
+	}
+
+	updatedFolder, err := store.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(updated folderShare) error: %v", err)
+	}
+	if updatedFolder.Enabled {
+		t.Fatal("expected folder share to be disabled after warning")
+	}
+	updatedFile, err := store.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(updated fileShare) error: %v", err)
+	}
+	if updatedFile.Enabled {
+		t.Fatal("expected file share to be disabled after warning")
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedFolder, err := reloaded.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloaded folderShare) error: %v", err)
+	}
+	if reloadedFolder.Enabled {
+		t.Fatal("expected persisted folder share to remain disabled after warning")
+	}
+	reloadedFile, err := reloaded.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloaded fileShare) error: %v", err)
+	}
+	if reloadedFile.Enabled {
+		t.Fatal("expected persisted file share to remain disabled after warning")
+	}
+}
+
 func TestShareStore_DisableSharesUnderPathWithRestore_ReturnsCanonicalOrder(t *testing.T) {
 	expectedPaths := []string{"/docs/a.txt", "/docs/b.txt", "/docs/c.txt"}
 
@@ -1909,6 +2096,61 @@ func TestShareStore_RestoreDisabledSharesPreservingCurrent_PreservesNewerMetadat
 	}
 }
 
+func TestShareStore_RestoreDisabledSharesPreservingCurrent_CommitsOnPersistenceWarning(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	createdShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	disabled, err := store.DisableSharesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabled) != 1 {
+		t.Fatalf("expected one disabled share in restore state, got %d", len(disabled))
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	if err := store.RestoreDisabledSharesPreservingCurrent(disabled); !IsPersistenceWarning(err) {
+		t.Fatalf("expected persistence warning, got %v", err)
+	}
+
+	restoredShare, err := store.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected share to be re-enabled after warning rollback restore")
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloaded.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if !reloadedShare.Enabled {
+		t.Fatal("expected persisted share to stay enabled after warning rollback restore")
+	}
+}
+
 func TestShareStore_RestoreShares_RewritesPathsFromRestoreState(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1958,6 +2200,63 @@ func TestShareStore_RestoreShares_RewritesPathsFromRestoreState(t *testing.T) {
 	}
 	if reloadedShare.Path != "/restored/a.txt" {
 		t.Fatalf("expected reloaded share path %q, got %q", "/restored/a.txt", reloadedShare.Path)
+	}
+}
+
+func TestShareStore_RestoreShares_NormalizesRestoreStateInvariants(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	createdShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	restoreState, err := store.DisableSharesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(restoreState) != 1 {
+		t.Fatalf("expected one disabled share in restore state, got %d", len(restoreState))
+	}
+
+	legacy := copyShare(restoreState[0])
+	legacy.Path = `docs\restored.txt`
+	legacy.Permission = PermissionReadWrite
+
+	if err := store.RestoreShares([]*Share{legacy}); err != nil {
+		t.Fatalf("RestoreShares() error: %v", err)
+	}
+
+	restoredShare, err := store.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if restoredShare.Path != "/docs/restored.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/docs/restored.txt", restoredShare.Path)
+	}
+	if restoredShare.Permission != PermissionRead {
+		t.Fatalf("expected restored share permission %q, got %q", PermissionRead, restoredShare.Permission)
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloaded.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if reloadedShare.Path != "/docs/restored.txt" {
+		t.Fatalf("expected reloaded share path %q, got %q", "/docs/restored.txt", reloadedShare.Path)
+	}
+	if reloadedShare.Permission != PermissionRead {
+		t.Fatalf("expected reloaded share permission %q, got %q", PermissionRead, reloadedShare.Permission)
 	}
 }
 
@@ -2018,6 +2317,61 @@ func TestShareStore_RestoreMovedSharesPreservingCurrent_PreservesNewerMetadata(t
 	}
 	if reloadedShare.Description != "newer" {
 		t.Fatalf("expected persisted newer description to be preserved, got %q", reloadedShare.Description)
+	}
+}
+
+func TestShareStore_RestoreMovedSharesPreservingCurrent_CommitsOnPersistenceWarning(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	createdShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	originalShares, err := store.UpdatePathReferencesWithRestore("/docs/a.txt", "/archive/a.txt")
+	if err != nil {
+		t.Fatalf("UpdatePathReferencesWithRestore() error: %v", err)
+	}
+	if len(originalShares) != 1 {
+		t.Fatalf("expected one moved share in restore state, got %d", len(originalShares))
+	}
+
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
+	}()
+
+	if err := store.RestoreMovedSharesPreservingCurrent(originalShares); !IsPersistenceWarning(err) {
+		t.Fatalf("expected persistence warning, got %v", err)
+	}
+
+	restoredShare, err := store.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if restoredShare.Path != "/docs/a.txt" {
+		t.Fatalf("expected share path restored after warning, got %q", restoredShare.Path)
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloaded.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if reloadedShare.Path != "/docs/a.txt" {
+		t.Fatalf("expected persisted share path restored after warning, got %q", reloadedShare.Path)
 	}
 }
 

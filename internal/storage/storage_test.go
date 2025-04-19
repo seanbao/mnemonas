@@ -1332,6 +1332,57 @@ func TestFileSystem_Delete(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Delete_RejectsSymlinkedTrashRootWithoutCreatingOutsideDir(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/symlinked-trash-root.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	backupTrashRoot := fs.trashRoot + "-backup"
+	if err := os.Rename(fs.trashRoot, backupTrashRoot); err != nil {
+		t.Fatalf("Rename(trash root backup) error: %v", err)
+	}
+	if err := os.Symlink(outsideRoot, fs.trashRoot); err != nil {
+		t.Fatalf("Symlink(trash root) error: %v", err)
+	}
+	t.Cleanup(func() {
+		if info, err := os.Lstat(fs.trashRoot); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(fs.trashRoot); removeErr != nil {
+				t.Errorf("Remove(trash root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupTrashRoot); err == nil {
+			if renameErr := os.Rename(backupTrashRoot, fs.trashRoot); renameErr != nil {
+				t.Errorf("Rename(backup trash root) error: %v", renameErr)
+			}
+		}
+	})
+
+	err := fs.Delete(ctx, "/symlinked-trash-root.txt")
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("Delete() error = %v, want errStoragePathSymlink", err)
+	}
+
+	entries, readErr := os.ReadDir(outsideRoot)
+	if readErr != nil {
+		t.Fatalf("ReadDir(outside root) error: %v", readErr)
+	}
+	if len(entries) != 0 {
+		entryNames := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			entryNames = append(entryNames, entry.Name())
+		}
+		t.Fatalf("expected no outside trash directories, got %d entries: %v", len(entries), entryNames)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/symlinked-trash-root.txt"); statErr != nil {
+		t.Fatalf("expected file to remain in workspace after failed delete, got %v", statErr)
+	}
+}
+
 func TestFileSystem_Delete_ReturnsEntropyFailureBeforeMovingToTrash(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1889,6 +1940,38 @@ func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenPathDeleteHo
 	}
 }
 
+func TestFileSystem_Delete_ReturnsWarningWhenDeleteHookWarns(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-hook-warning.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	restoreData := []byte(`{"favorites":[{"path":"/delete-hook-warning.txt"}]}`)
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+		return &PathDeleteHookResult{RestoreData: restoreData}, workspace.WrapVisibleMutationWarning(errors.New("favorite persistence warning"))
+	})
+
+	err := fs.Delete(ctx, "/delete-hook-warning.txt")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/delete-hook-warning.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected deleted path to remain deleted after hook warning, got %v", statErr)
+	}
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item after warned delete, got %d", len(items))
+	}
+	if string(items[0].RestoreData) != string(restoreData) {
+		t.Fatalf("expected warned delete to persist restore data %q, got %q", string(restoreData), string(items[0].RestoreData))
+	}
+}
+
 func TestFileSystem_Delete_DirectoryRollbackRestoresChildIndexesWhenTrashRestoreMetadataPersistsFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2240,6 +2323,30 @@ func TestFileSystem_PermanentDelete_RollsBackDirectoryWhenIndexDeleteFails(t *te
 	}
 	if !info.IsDir {
 		t.Fatal("Expected rolled back path to remain a directory")
+	}
+}
+
+func TestFileSystem_PermanentDelete_ReturnsWarningWhenDeleteHookWarns(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/permanent-hook-warning.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
+		return &PathDeleteHookResult{}, workspace.WrapVisibleMutationWarning(errors.New("favorite persistence warning"))
+	})
+
+	err := fs.PermanentDelete(ctx, "/permanent-hook-warning.txt")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/permanent-hook-warning.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected permanent delete to remain visible after hook warning, got %v", statErr)
+	}
+	if _, listErr := fs.ListVersions(ctx, "/permanent-hook-warning.txt"); !errors.Is(listErr, ErrNotFound) {
+		t.Fatalf("expected version metadata to be removed after hook warning, got %v", listErr)
 	}
 }
 
@@ -2664,6 +2771,40 @@ func TestFileSystem_Rename_RollsBackWhenPathRenameHookFails(t *testing.T) {
 	}
 }
 
+func TestFileSystem_Rename_ReturnsWarningWhenPathRenameHookWarns(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/rename-hook-warning.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	fs.SetPathChangeHooks(func(context.Context, string, string) error {
+		return workspace.WrapVisibleMutationWarning(errors.New("favorite persistence warning"))
+	}, nil)
+
+	err := fs.Rename(ctx, "/rename-hook-warning.txt", "/rename-hook-warning-new.txt")
+	if !isVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-hook-warning.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected original path to be absent after warned rename, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/rename-hook-warning-new.txt"); statErr != nil {
+		t.Fatalf("expected renamed path to remain visible after hook warning, got %v", statErr)
+	}
+	versions, listErr := fs.ListVersions(ctx, "/rename-hook-warning-new.txt")
+	if listErr != nil {
+		t.Fatalf("ListVersions(new path) error: %v", listErr)
+	}
+	if len(versions) == 0 {
+		t.Fatal("expected version metadata to move to new path after hook warning")
+	}
+	if _, listErr := fs.ListVersions(ctx, "/rename-hook-warning.txt"); !errors.Is(listErr, ErrNotFound) {
+		t.Fatalf("expected original path version metadata to be absent after hook warning, got %v", listErr)
+	}
+}
+
 func TestFileSystem_Rename_CompletesWhenRenameHookRegistered(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2729,6 +2870,58 @@ func TestFileSystem_RestoreFromTrash(t *testing.T) {
 	_, err = fs.Stat(ctx, "/restore.txt")
 	if err != nil {
 		t.Errorf("Stat() after restore error: %v", err)
+	}
+}
+
+func TestFileSystem_RestoreFromTrash_RejectsSymlinkParentWithoutCreatingOutsideDir(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-link/nested/original.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-link/nested/original.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	if err := fs.PermanentDelete(ctx, "/restore-link/nested"); err != nil {
+		t.Fatalf("PermanentDelete(nested) error: %v", err)
+	}
+	if err := fs.PermanentDelete(ctx, "/restore-link"); err != nil {
+		t.Fatalf("PermanentDelete(parent) error: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	if err := os.Symlink(outsideRoot, filepath.Join(fs.workspace.Root(), "restore-link")); err != nil {
+		t.Fatalf("Symlink(restore-link) error: %v", err)
+	}
+
+	err = fs.RestoreFromTrash(ctx, items[0].ID)
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("RestoreFromTrash() error = %v, want errStoragePathSymlink", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(outsideRoot, "nested")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no outside restore directory, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/restore-link/nested/original.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected original path to remain absent after failed restore, got %v", statErr)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed restore error: %v", listErr)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected trash item to remain after failed restore, got %#v", remaining)
 	}
 }
 
@@ -2907,6 +3100,51 @@ func TestFileSystem_RestoreFromTrashTo_PreservesVersions(t *testing.T) {
 	}
 	if len(versions) < 2 {
 		t.Errorf("ListVersions() returned %d versions, want at least 2", len(versions))
+	}
+}
+
+func TestFileSystem_RestoreFromTrashTo_RejectsSymlinkParentWithoutCreatingOutsideDir(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-custom.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-custom.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	outsideRoot := t.TempDir()
+	if err := os.Symlink(outsideRoot, filepath.Join(fs.workspace.Root(), "restore-escape")); err != nil {
+		t.Fatalf("Symlink(restore-escape) error: %v", err)
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, "/restore-escape/nested/restored.txt")
+	if !errors.Is(err, errStoragePathSymlink) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want errStoragePathSymlink", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(outsideRoot, "nested")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no outside restore directory, got %v", statErr)
+	}
+	if _, statErr := fs.Stat(ctx, "/restore-escape/nested/restored.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected custom restore target to remain absent, got %v", statErr)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed custom restore error: %v", listErr)
+	}
+	if len(remaining) != 1 || remaining[0].ID != items[0].ID {
+		t.Fatalf("expected trash item to remain after failed custom restore, got %#v", remaining)
 	}
 }
 

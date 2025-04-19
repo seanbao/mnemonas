@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, render, screen, waitFor, userEvent } from '@/test/utils'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { FavoritesPage } from './Favorites'
 import * as HeroUI from '@heroui/react'
 import * as favoritesApi from '@/api/favorites'
@@ -9,6 +10,7 @@ const mockAddToast = vi.fn()
 const mockNavigate = vi.fn()
 const mockBatchExecute = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
+const mockUser = { id: 'user-1', username: 'user1', role: 'user' as const, email: 'user1@local', homeDir: '/' }
 let mockUseRealBatchOperation = false
 let mockBatchResult = {
   succeeded: 1,
@@ -83,6 +85,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   return {
     ...actual,
     useCanWrite: () => useCanWriteMock(),
+    useUser: () => mockUser,
   }
 })
 
@@ -116,6 +119,11 @@ describe('FavoritesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    mockUser.id = 'user-1'
+    mockUser.username = 'user1'
+    mockUser.role = 'user'
+    mockUser.email = 'user1@local'
+    mockUser.homeDir = '/'
     mockUseRealBatchOperation = false
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockNavigate.mockClear()
@@ -169,6 +177,21 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows an invalid-home error instead of loading favorites for non-admin users without a home directory', async () => {
+    mockUser.id = 'user-2'
+    mockUser.username = 'user2'
+    mockUser.homeDir = ''
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByText('主目录配置无效').length).toBeGreaterThan(0)
+      expect(screen.getByText('当前账户未配置有效的主目录，无法查看收藏。请联系管理员修复账户 home_dir。')).toBeInTheDocument()
+    })
+
+    expect(vi.mocked(favoritesApi.listFavorites)).not.toHaveBeenCalled()
+  })
+
   it('shows a disabled state when the favorites feature is turned off', async () => {
     vi.mocked(favoritesApi.listFavorites).mockRejectedValue(new FavoritesError('favorites feature disabled', 503, 'FAVORITES_FEATURE_DISABLED'))
     render(<FavoritesPage />)
@@ -210,6 +233,77 @@ describe('FavoritesPage', () => {
       expect(screen.getByText('report.pdf')).toBeInTheDocument()
       expect(mockAddToast).toHaveBeenCalledWith({ title: '收藏夹已刷新', color: 'success' })
     })
+  })
+
+  it('does not reuse cached favorites from another user session', async () => {
+    mockUser.id = 'user-2'
+    mockUser.username = 'user2'
+    vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['favorites'], [
+      {
+        path: '/admin/secret.txt',
+        user_id: 'admin',
+        created_at: '2024-01-15T10:00:00Z',
+      },
+    ])
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FavoritesPage />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(vi.mocked(favoritesApi.listFavorites)).toHaveBeenCalledTimes(1)
+    })
+
+    expect(screen.queryByText('/admin/secret.txt')).toBeNull()
+    expect(screen.queryByText('secret.txt')).toBeNull()
+  })
+
+  it('does not reuse cached favorites when the same user home directory changes', async () => {
+    mockUser.homeDir = '/member-next'
+    vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['favorites', 'user-1'], [
+      {
+        path: '/member-old/secret.txt',
+        user_id: 'user-1',
+        created_at: '2024-01-15T10:00:00Z',
+      },
+    ])
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FavoritesPage />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(vi.mocked(favoritesApi.listFavorites)).toHaveBeenCalledTimes(1)
+    })
+
+    expect(screen.queryByText('/member-old/secret.txt')).toBeNull()
+    expect(screen.queryByText('secret.txt')).toBeNull()
   })
 
   it('shows warning toast when favorites reload becomes unavailable', async () => {

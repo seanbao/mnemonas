@@ -9,6 +9,7 @@ import {
   getStoredUser,
 } from '@/api/auth'
 import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
+import { queryClient } from '@/lib/queryClient'
 
 let authStateEpoch = 0
 let initializeRunId = 0
@@ -208,6 +209,7 @@ if (typeof window !== 'undefined') {
       }
 
       const detail = event instanceof CustomEvent ? event.detail : undefined
+      queryClient.clear()
 
       useAuthStore.setState({
         user: null,

@@ -8,6 +8,8 @@ import * as searchApi from '@/api/search'
 import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
+const useIsAdminMock = vi.fn(() => true)
+const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' }
 
 // Mock the search API
 vi.mock('@/api/search', async (importOriginal) => {
@@ -25,6 +27,15 @@ vi.mock('react-router-dom', async () => {
   return {
     ...actual,
     useNavigate: () => mockNavigate,
+  }
+})
+
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useIsAdmin: () => useIsAdminMock(),
+    useUser: () => mockUser,
   }
 })
 
@@ -89,6 +100,12 @@ describe('SearchPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
+    useIsAdminMock.mockReturnValue(true)
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     vi.mocked(searchApi.searchFiles).mockResolvedValue({
       query: 'test',
       results: mockSearchResults,
@@ -193,6 +210,46 @@ describe('SearchPage', () => {
       })
     })
 
+    it('does not reuse cached search results from another user session', async () => {
+    useIsAdminMock.mockReturnValue(false)
+    mockUser.id = 'u2'
+    mockUser.username = 'member'
+    mockUser.role = 'user'
+    mockUser.homeDir = '/member'
+    vi.mocked(searchApi.searchFiles).mockImplementation(() => new Promise(() => {}))
+
+    const queryClient = createTestQueryClient()
+    queryClient.setQueryData(['search', 'report'], {
+      query: 'report',
+      results: [
+        {
+          name: 'secret.txt',
+          path: '/admin/secret.txt',
+          isDir: false,
+          size: 128,
+          modTime: '2024-01-15T10:00:00Z',
+        },
+      ],
+      count: 1,
+    })
+
+    window.history.pushState({}, '', '/search?q=report')
+    render(
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <SearchPage />
+        </BrowserRouter>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(searchApi.searchFiles).toHaveBeenCalledWith('report')
+    })
+
+    expect(screen.queryByText('/admin/secret.txt')).toBeNull()
+    expect(screen.queryByText('secret.txt')).toBeNull()
+  })
+
     it('does not trigger search for whitespace-only queries', async () => {
       const user = userEvent.setup()
       renderSearchPage()
@@ -238,6 +295,24 @@ describe('SearchPage', () => {
         expect(screen.getByText('文件系统当前不可用，请稍后重试')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
       })
+    })
+
+    it('shows an invalid-home error and skips searching for non-admin users without a home directory', async () => {
+      useIsAdminMock.mockReturnValue(false)
+      mockUser.id = 'u2'
+      mockUser.username = 'member'
+      mockUser.role = 'user'
+      mockUser.homeDir = ''
+
+      renderSearchPage('report')
+
+      await waitFor(() => {
+        expect(screen.getByText('主目录配置无效')).toBeInTheDocument()
+        expect(screen.getByText('当前账户未配置有效的主目录，无法搜索文件。请联系管理员修复账户 home_dir。')).toBeInTheDocument()
+      })
+
+      expect(screen.getByPlaceholderText('输入文件名搜索...')).toBeDisabled()
+      expect(searchApi.searchFiles).not.toHaveBeenCalled()
     })
 
     it('shows retryable generic error state when search fails', async () => {

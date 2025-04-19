@@ -17,7 +17,7 @@ import { ApiError, getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { useIsAdmin } from '@/stores/auth'
+import { useIsAdmin, useUser } from '@/stores/auth'
 
 function formatStorageSize(value: number | undefined): string {
   return value === undefined ? '--' : formatBytes(value)
@@ -142,9 +142,10 @@ function MaintenanceCard({
 
 export function StoragePage() {
   const navigate = useNavigate()
+  const user = useUser()
   const isAdmin = useIsAdmin()
   const { data: stats, isLoading, error, refetch } = useQuery({
-    queryKey: ['stats'],
+    queryKey: ['stats', user?.id ?? 'anonymous', isAdmin],
     queryFn: getStorageStats,
     refetchInterval: 30000,
   })
