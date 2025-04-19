@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ensureDownloadSession } from '@/api/auth'
 
 const mockAddToast = vi.fn()
@@ -221,6 +222,39 @@ describe('VersionsPage', () => {
 
       expect(screen.getByPlaceholderText(/输入文件路径/)).toHaveValue('/second.txt')
       expect(screen.getByText('/second.txt')).toBeTruthy()
+    })
+
+    it('does not reuse cached versions from another user session', async () => {
+      mockUseIsAdmin.mockReturnValue(false)
+      mockUseUser.mockReturnValue({ id: 'tester', username: 'tester', role: 'user', email: '', homeDir: '/tester' })
+      mockGetVersions.mockImplementation(() => new Promise(() => {}))
+
+      const queryClient = new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: false,
+            gcTime: 0,
+            staleTime: 0,
+          },
+        },
+      })
+      queryClient.setQueryData(['versions', '/tester/report.txt'], [
+        { version: 1, hash: 'secretsecret123456', size: 1000, timestamp: '2024-01-01T00:00:00Z' },
+      ])
+
+      window.history.pushState({}, '', '/versions?path=/tester/report.txt')
+      render(
+        <QueryClientProvider client={queryClient}>
+          <VersionsPage />
+        </QueryClientProvider>
+      )
+
+      await waitFor(() => {
+        expect(mockGetVersions).toHaveBeenCalledWith('/tester/report.txt')
+      })
+
+      expect(screen.queryByRole('table', { name: '版本历史' })).toBeNull()
+      expect(screen.queryByText(/secretsecret/)).toBeNull()
     })
   })
 

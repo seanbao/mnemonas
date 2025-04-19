@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { FilesPage } from './Files'
 import * as HeroUI from '@heroui/react'
 
@@ -1767,6 +1768,135 @@ describe('FilesPage', () => {
     await waitFor(() => {
       expect(mockCheckFavorites).toHaveBeenCalledTimes(2)
     })
+  })
+
+  it('does not reuse cached favorite status from another user session', async () => {
+  const user = userEvent.setup({ writeToClipboard: false })
+  mockFilesStoreState.viewMode = 'grid'
+  mockUser.id = 'u2'
+  mockUser.username = 'member'
+  mockUser.role = 'user'
+  mockCheckFavorites.mockImplementation(() => new Promise(() => {}))
+
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        gcTime: 0,
+        staleTime: 0,
+      },
+    },
+  })
+  queryClient.setQueryData(['favorites-check', ['/documents', '/photo.jpg', '/video.mp4']], {
+    '/documents': false,
+    '/photo.jpg': true,
+    '/video.mp4': false,
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <FilesPage />
+    </QueryClientProvider>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('photo.jpg')).toBeTruthy()
+  })
+
+  await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+
+  await waitFor(() => {
+    expect(mockCheckFavorites).toHaveBeenCalledTimes(1)
+  })
+
+  expect(screen.queryByText('取消收藏')).toBeNull()
+  expect(screen.getAllByText('添加收藏').length).toBeGreaterThan(0)
+  })
+
+  it('does not reuse cached favorite status when the same user home directory changes', async () => {
+  const user = userEvent.setup({ writeToClipboard: false })
+  mockFilesStoreState.viewMode = 'grid'
+  mockFilesStoreState.currentPath = '/member-next'
+  mockLocationPathname = '/files/member-next'
+  mockUser.role = 'user'
+  mockUser.homeDir = '/member-next'
+  mockListFiles.mockResolvedValue({
+    files: [
+      { name: 'photo.jpg', path: '/member-next/photo.jpg', isDir: false, size: 1024000, modTime: '2024-01-02T00:00:00Z' },
+    ],
+    path: '/member-next',
+  })
+  mockCheckFavorites.mockImplementation(() => new Promise(() => {}))
+
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        gcTime: 0,
+        staleTime: 0,
+      },
+    },
+  })
+  queryClient.setQueryData(['favorites-check', 'u1', ['/member-next/photo.jpg']], {
+    '/member-next/photo.jpg': true,
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <FilesPage />
+    </QueryClientProvider>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('photo.jpg')).toBeTruthy()
+  })
+
+  await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+
+  await waitFor(() => {
+    expect(mockCheckFavorites).toHaveBeenCalledTimes(1)
+  })
+
+  expect(screen.queryByText('取消收藏')).toBeNull()
+  expect(screen.getAllByText('添加收藏').length).toBeGreaterThan(0)
+  })
+
+  it('does not reuse cached file listings from another user session', async () => {
+    mockFilesStoreState.currentPath = '/member'
+    mockLocationPathname = '/files/member'
+    mockUser.id = 'u2'
+    mockUser.username = 'member'
+    mockUser.role = 'user'
+    mockUser.homeDir = '/member'
+    mockListFiles.mockImplementation(() => pendingFilesRefetch())
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+      },
+    })
+    queryClient.setQueryData(['files', '/member'], {
+      files: [
+        { name: 'admin-secret.txt', path: '/member/admin-secret.txt', isDir: false, size: 10, modTime: '2024-01-01T00:00:00Z' },
+      ],
+      path: '/member',
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => {
+      expect(mockListFiles).toHaveBeenCalledWith('/member')
+    })
+
+    expect(screen.queryByText('admin-secret.txt')).toBeNull()
   })
 
   it('treats remove-favorite not found as already removed and syncs the status', async () => {

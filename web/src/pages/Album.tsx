@@ -22,6 +22,7 @@ import {
 import { refreshAuthSession } from '@/api/auth'
 import { ApiError, listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
 import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
+import { getFileQueryScopeKey } from '@/lib/fileQueryKey'
 import { useUser } from '@/stores/auth'
 import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
@@ -567,10 +568,11 @@ export function AlbumPage() {
   const abortControllerRef = useRef<AbortController | null>(null)
   const user = useUser()
   const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const fileScopeKey = getFileQueryScopeKey(user)
   const scanRootPath = rootPath ?? '/'
   
   const { data, dataUpdatedAt, isLoading, error, refetch } = useQuery<AlbumQueryResult>({
-    queryKey: ['album-images', scanRootPath],
+    queryKey: ['album-images', fileScopeKey, scanRootPath],
     queryFn: async () => {
       // Cancel previous request if any
       abortControllerRef.current?.abort()

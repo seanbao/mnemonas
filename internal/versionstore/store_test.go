@@ -122,6 +122,28 @@ func TestNew_RecoversFromCorruptDatabaseFile(t *testing.T) {
 	}
 }
 
+func TestIsRecoverableVersionStoreSQLiteError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "corrupt message", err: errors.New("database disk image is malformed"), want: true},
+		{name: "not a database message", err: errors.New("file is not a database"), want: true},
+		{name: "sqlite composite message", err: errors.New("file is encrypted or is not a database"), want: true},
+		{name: "unrelated", err: errors.New("permission denied"), want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRecoverableVersionStoreSQLiteError(tc.err); got != tc.want {
+				t.Fatalf("isRecoverableVersionStoreSQLiteError() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNew_RequiresDataplane(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := New(Config{

@@ -17,6 +17,7 @@ import { ApiError, getDiagnostics, getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { useUser } from '@/stores/auth'
 
 function StatusIndicator({ 
   status, 
@@ -124,14 +125,15 @@ function getHealthRefreshErrorToast(errors: Array<unknown>): { title: string; de
 }
 
 export function HealthPage() {
+  const user = useUser()
   const { data: diagnostics, isLoading: diagLoading, error: diagError, refetch: refetchDiag } = useQuery({
-    queryKey: ['diagnostics'],
+    queryKey: ['diagnostics', user?.id ?? 'anonymous'],
     queryFn: getDiagnostics,
     refetchInterval: 30000, // Refresh every 30 seconds
   })
 
   const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery({
-    queryKey: ['storage-stats'],
+    queryKey: ['storage-stats', user?.id ?? 'anonymous'],
     queryFn: getStorageStats,
     refetchInterval: 30000,
   })

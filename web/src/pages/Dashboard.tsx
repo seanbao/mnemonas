@@ -25,8 +25,9 @@ import { useNavigate } from 'react-router-dom'
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats } from '@/api/files'
 import { ApiError as ActivityApiError, listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
+import { resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
-import { useIsAdmin } from '@/stores/auth'
+import { useIsAdmin, useUser } from '@/stores/auth'
 
 interface QuickActionProps {
   icon: React.ComponentType<{ size?: number; className?: string }>
@@ -184,6 +185,10 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
 export function DashboardPage() {
   const navigate = useNavigate()
   const isAdmin = useIsAdmin()
+  const user = useUser()
+  const authScopeKey = user?.id ?? 'anonymous'
+  const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const homeScopeKey = hasInvalidHomeDir ? '__invalid__' : (rootPath ?? '/')
   
   const { data: health, isLoading: healthLoading, error: healthError, refetch: refetchHealth } = useQuery({
     queryKey: ['health'],
@@ -192,7 +197,7 @@ export function DashboardPage() {
   })
 
   const { data: stats, isLoading: statsLoading, error: statsError, refetch: refetchStats } = useQuery({
-    queryKey: ['stats'],
+    queryKey: ['stats', authScopeKey, isAdmin, homeScopeKey],
     queryFn: getStorageStats,
     refetchInterval: 30000,
   })
@@ -204,7 +209,7 @@ export function DashboardPage() {
   })
 
   const { data: recentActivity, error: recentActivityError, refetch: refetchRecentActivity } = useQuery({
-    queryKey: ['recent-activity'],
+    queryKey: ['recent-activity', authScopeKey, isAdmin, homeScopeKey],
     queryFn: () => listActivity({ limit: 5 }),
     refetchInterval: 30000,
   })
@@ -465,13 +470,15 @@ export function DashboardPage() {
             onClick={() => navigate('/files')}
             gradient="from-blue-500/20 to-violet-500/20"
           />
-          <QuickAction
-            icon={HardDrive}
-            label="存储管理"
-            description="查看存储状态"
-            onClick={() => navigate('/storage')}
-            gradient="from-emerald-500/20 to-cyan-500/20"
-          />
+          {isAdmin && (
+            <QuickAction
+              icon={HardDrive}
+              label="存储管理"
+              description="查看存储状态"
+              onClick={() => navigate('/storage')}
+              gradient="from-emerald-500/20 to-cyan-500/20"
+            />
+          )}
           {isAdmin && (
             <QuickAction
               icon={Activity}

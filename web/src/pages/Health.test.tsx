@@ -6,6 +6,10 @@ import * as HeroUI from '@heroui/react'
 
 const mockAddToast = vi.fn()
 
+const { mockUser } = vi.hoisted(() => ({
+  mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
+}))
+
 // Mock API
 vi.mock('@/api/files', () => ({
   ApiError: class ApiError extends Error {
@@ -23,6 +27,14 @@ vi.mock('@/api/files', () => ({
   getDiagnostics: vi.fn(),
   getStorageStats: vi.fn(),
 }))
+
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useUser: () => mockUser,
+  }
+})
 
 import { ApiError, getDiagnostics, getStorageStats } from '@/api/files'
 
@@ -72,6 +84,11 @@ describe('HealthPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockGetDiagnostics.mockResolvedValue(mockDiagnostics)
     mockGetStorageStats.mockResolvedValue(mockStats)
@@ -165,6 +182,39 @@ describe('HealthPage', () => {
         color: 'warning',
       })
     })
+    })
+
+    it('refetches health queries when the auth scope changes', async () => {
+      mockGetDiagnostics
+        .mockResolvedValueOnce(mockDiagnostics)
+        .mockResolvedValueOnce({
+          ...mockDiagnostics,
+          uptimeSecs: 172800,
+        })
+      mockGetStorageStats
+        .mockResolvedValueOnce(mockStats)
+        .mockResolvedValueOnce({
+          ...mockStats,
+          totalObjects: 2048,
+        })
+
+      const { rerender } = render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(mockGetDiagnostics).toHaveBeenCalledTimes(1)
+        expect(mockGetStorageStats).toHaveBeenCalledTimes(1)
+      })
+
+      mockUser.id = 'u2'
+      mockUser.username = 'other-admin'
+      mockUser.email = 'other@local'
+
+      rerender(<HealthPage />)
+
+      await waitFor(() => {
+        expect(mockGetDiagnostics).toHaveBeenCalledTimes(2)
+        expect(mockGetStorageStats).toHaveBeenCalledTimes(2)
+      })
     })
   })
 

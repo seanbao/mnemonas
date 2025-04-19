@@ -8,6 +8,7 @@ const getStoredUserMock = vi.fn()
 const getStoredTokenMock = vi.fn()
 const acknowledgeSetupMock = vi.fn()
 const getSetupStatusMock = vi.fn()
+const clearQueryClientMock = vi.fn()
 
 vi.mock('@/api/auth', () => ({
   AUTH_CLEARED_EVENT: 'mnemonas:auth-cleared',
@@ -21,6 +22,12 @@ vi.mock('@/api/auth', () => ({
 vi.mock('@/api/setup', () => ({
   acknowledgeSetup: (...args: unknown[]) => acknowledgeSetupMock(...args),
   getSetupStatus: (...args: unknown[]) => getSetupStatusMock(...args),
+}))
+
+vi.mock('@/lib/queryClient', () => ({
+  queryClient: {
+    clear: (...args: unknown[]) => clearQueryClientMock(...args),
+  },
 }))
 
 describe('authStore', () => {
@@ -157,6 +164,7 @@ describe('authStore', () => {
     window.dispatchEvent(new Event('mnemonas:auth-cleared'))
 
     const state = useAuthStore.getState()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
     expect(state.user).toBeNull()
     expect(state.isAuthenticated).toBe(false)
     expect(state.isLoading).toBe(false)
@@ -186,6 +194,7 @@ describe('authStore', () => {
     }))
 
     const state = useAuthStore.getState()
+    expect(clearQueryClientMock).toHaveBeenCalledTimes(1)
     expect(state.user).toBeNull()
     expect(state.isAuthenticated).toBe(false)
     expect(state.isLoading).toBe(false)

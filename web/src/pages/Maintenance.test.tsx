@@ -6,6 +6,10 @@ import Maintenance from './Maintenance'
 
 const mockAddToast = vi.fn()
 
+const { mockUser } = vi.hoisted(() => ({
+  mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
+}))
+
 vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
   return {
@@ -32,6 +36,14 @@ vi.mock('@/api/files', () => ({
   runScrub: vi.fn(),
   downloadDiagnosticsExport: vi.fn(),
 }))
+
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useUser: () => mockUser,
+  }
+})
 
 import { ApiError, getScrubResult, runScrub, downloadDiagnosticsExport } from '@/api/files'
 
@@ -104,6 +116,11 @@ describe('MaintenancePage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     mockGetScrubResult.mockResolvedValue(mockCompletedResult)
     mockRunScrub.mockResolvedValue(mockCompletedResult)
     mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
@@ -132,6 +149,31 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(screen.getByText('导出诊断信息')).toBeTruthy()
       })
+    })
+
+    it('refetches scrub history when the auth scope changes', async () => {
+    mockGetScrubResult
+      .mockResolvedValueOnce(mockCompletedResult)
+      .mockResolvedValueOnce({
+        ...mockCompletedResult,
+        id: 'scrub-999',
+      })
+
+    const { rerender } = render(<Maintenance />)
+
+    await waitFor(() => {
+      expect(mockGetScrubResult).toHaveBeenCalledTimes(1)
+    })
+
+    mockUser.id = 'u2'
+    mockUser.username = 'other-admin'
+    mockUser.email = 'other@local'
+
+    rerender(<Maintenance />)
+
+    await waitFor(() => {
+      expect(mockGetScrubResult).toHaveBeenCalledTimes(2)
+    })
     })
   })
 

@@ -18,6 +18,7 @@ import { StatCard } from '@/components/ui/StatCard'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ApiError, getScrubResult, runScrub, downloadDiagnosticsExport, type ScrubResult, type ScrubError } from '@/api/files'
 import { formatBytes, formatDuration } from '@/lib/utils'
+import { useUser } from '@/stores/auth'
 
 function getMaintenanceLoadErrorPresentation(error: unknown): { title: string; description: string } {
   if (error instanceof ApiError && error.isUnavailable) {
@@ -173,12 +174,14 @@ function ErrorList({ errors }: { errors: ScrubError[] }) {
 
 export default function Maintenance() {
   const queryClient = useQueryClient()
+  const user = useUser()
   const [isExporting, setIsExporting] = useState(false)
   const [isAwaitingRunningState, setIsAwaitingRunningState] = useState(false)
+  const scrubResultQueryKey = ['scrub-result', user?.id ?? 'anonymous'] as const
   
   // Fetch last scrub result
   const { data: scrubResult, isLoading, error, refetch } = useQuery({
-    queryKey: ['scrub-result'],
+    queryKey: scrubResultQueryKey,
     queryFn: getScrubResult,
     refetchInterval: (query) => {
       // Auto-refresh while scrub is running
@@ -213,11 +216,11 @@ export default function Maintenance() {
     mutationFn: () => runScrub(),
     onSuccess: (result) => {
       if (result.status === 'running') {
-        void queryClient.refetchQueries({ queryKey: ['scrub-result'], type: 'active' }).finally(() => {
+        void queryClient.refetchQueries({ queryKey: scrubResultQueryKey, type: 'active' }).finally(() => {
           setIsAwaitingRunningState(false)
         })
       } else {
-        void queryClient.invalidateQueries({ queryKey: ['scrub-result'] })
+        void queryClient.invalidateQueries({ queryKey: scrubResultQueryKey })
         setIsAwaitingRunningState(false)
       }
 
@@ -228,7 +231,7 @@ export default function Maintenance() {
     },
     onError: (error: unknown) => {
       if (isScrubAlreadyRunningError(error)) {
-        void queryClient.refetchQueries({ queryKey: ['scrub-result'], type: 'active' }).finally(() => {
+        void queryClient.refetchQueries({ queryKey: scrubResultQueryKey, type: 'active' }).finally(() => {
           setIsAwaitingRunningState(false)
         })
         addToast({

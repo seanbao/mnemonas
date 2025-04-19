@@ -40,6 +40,9 @@ func TestWriteFavoritesStoreFile_ReturnsDirectorySyncError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected writeFavoritesStoreFile() to fail when directory sync fails")
 	}
+	if !IsPersistenceWarning(err) {
+		t.Fatalf("expected persistence warning, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "failed to sync favorites directory") {
 		t.Fatalf("expected directory sync error, got %v", err)
 	}
@@ -949,6 +952,77 @@ func TestStore_RollsBackFailedMutations(t *testing.T) {
 	}
 }
 
+func TestStore_CommitsMutationsOnPersistenceWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/original.txt", "original note"); err != nil {
+		t.Fatalf("failed to seed favorite: %v", err)
+	}
+
+	originalSyncFavoritesStoreRootDir := syncFavoritesStoreRootDir
+	syncFavoritesStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncFavoritesStoreRootDir = originalSyncFavoritesStoreRootDir
+	}()
+
+	fav, err := store.Add("user1", "/docs/warning.txt", "warning note")
+	if !IsPersistenceWarning(err) {
+		t.Fatalf("expected add warning, got %v", err)
+	}
+	if fav == nil || fav.Path != "/docs/warning.txt" {
+		t.Fatalf("expected warned add to return persisted favorite, got %+v", fav)
+	}
+	if !store.IsFavorite("user1", "/docs/warning.txt") {
+		t.Fatal("expected warned add to commit favorite in memory")
+	}
+
+	err = store.UpdateNote("user1", "/docs/original.txt", "updated note")
+	if !IsPersistenceWarning(err) {
+		t.Fatalf("expected update warning, got %v", err)
+	}
+	listed := store.List("user1")
+	updated := false
+	for _, item := range listed {
+		if item.Path == "/docs/original.txt" && item.Note == "updated note" {
+			updated = true
+		}
+	}
+	if !updated {
+		t.Fatal("expected warned note update to commit in memory")
+	}
+
+	err = store.Remove("user1", "/docs/original.txt")
+	if !IsPersistenceWarning(err) {
+		t.Fatalf("expected remove warning, got %v", err)
+	}
+	if store.IsFavorite("user1", "/docs/original.txt") {
+		t.Fatal("expected warned remove to commit in memory")
+	}
+
+	reloadedStore, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to reload store: %v", err)
+	}
+	reloadedFavorites := reloadedStore.List("user1")
+	if len(reloadedFavorites) != 1 {
+		t.Fatalf("expected 1 persisted favorite after warned mutations, got %d", len(reloadedFavorites))
+	}
+	if reloadedFavorites[0].Path != "/docs/warning.txt" {
+		t.Fatalf("expected warned add favorite to persist, got %q", reloadedFavorites[0].Path)
+	}
+	if reloadedFavorites[0].Note != "warning note" {
+		t.Fatalf("expected warned add favorite note to persist, got %q", reloadedFavorites[0].Note)
+	}
+}
+
 func TestStore_Add_DoesNotFollowSymlinkPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
@@ -1239,6 +1313,46 @@ func TestStore_RemoveFavoritesUnderPathWithRestore_RestoresRemovedFavorites(t *t
 	}
 }
 
+func TestStore_RestoreFavorites_NormalizesRestoreStatePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/a.txt", "original"); err != nil {
+		t.Fatalf("Add(original) error: %v", err)
+	}
+
+	removed, err := store.RemoveFavoritesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("RemoveFavoritesUnderPathWithRestore() error: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected one removed favorite in restore state, got %d", len(removed))
+	}
+
+	legacy := *removed[0]
+	legacy.Path = `docs\a.txt`
+
+	if err := store.RestoreFavorites([]*Favorite{&legacy}); err != nil {
+		t.Fatalf("RestoreFavorites() error: %v", err)
+	}
+	if !store.IsFavorite("user1", "/docs/a.txt") {
+		t.Fatal("expected normalized favorite path to be restored")
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	if !reloaded.IsFavorite("user1", "/docs/a.txt") {
+		t.Fatal("expected normalized restored favorite to persist after reload")
+	}
+}
+
 func TestStore_RemoveFavoritesUnderPathWithRestore_ReturnsCanonicalOrder(t *testing.T) {
 	expected := []struct {
 		userID string
@@ -1341,6 +1455,109 @@ func TestStore_RestoreFavoritesIfMissing_PreservesRecreatedFavorite(t *testing.T
 	}
 	if reloadedFavorites[0].Note != "newer" {
 		t.Fatalf("expected persisted newer favorite note to be preserved, got %q", reloadedFavorites[0].Note)
+	}
+}
+
+func TestStore_RestoreFavoritesIfMissing_CommitsOnPersistenceWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/a.txt", "original"); err != nil {
+		t.Fatalf("Add(original) error: %v", err)
+	}
+
+	removed, err := store.RemoveFavoritesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("RemoveFavoritesUnderPathWithRestore() error: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected one removed favorite in rollback state, got %d", len(removed))
+	}
+
+	originalSyncFavoritesStoreRootDir := syncFavoritesStoreRootDir
+	syncFavoritesStoreRootDir = func(root *os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncFavoritesStoreRootDir = originalSyncFavoritesStoreRootDir
+	}()
+
+	if err := store.RestoreFavoritesIfMissing(removed); !IsPersistenceWarning(err) {
+		t.Fatalf("expected persistence warning, got %v", err)
+	}
+
+	loaded := store.List("user1")
+	if len(loaded) != 1 {
+		t.Fatalf("expected one favorite after warning rollback restore, got %d", len(loaded))
+	}
+	if loaded[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected restored favorite path %q, got %q", "/docs/a.txt", loaded[0].Path)
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	reloadedFavorites := reloaded.List("user1")
+	if len(reloadedFavorites) != 1 {
+		t.Fatalf("expected one persisted favorite after reload, got %d", len(reloadedFavorites))
+	}
+	if reloadedFavorites[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected persisted restored favorite path %q, got %q", "/docs/a.txt", reloadedFavorites[0].Path)
+	}
+}
+
+func TestStore_RestoreFavoritesIfMissing_NormalizesRestoreStatePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/a.txt", "original"); err != nil {
+		t.Fatalf("Add(original) error: %v", err)
+	}
+
+	removed, err := store.RemoveFavoritesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("RemoveFavoritesUnderPathWithRestore() error: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected one removed favorite in restore state, got %d", len(removed))
+	}
+
+	legacy := *removed[0]
+	legacy.Path = `docs\a.txt`
+
+	if err := store.RestoreFavoritesIfMissing([]*Favorite{&legacy}); err != nil {
+		t.Fatalf("RestoreFavoritesIfMissing() error: %v", err)
+	}
+
+	loaded := store.List("user1")
+	if len(loaded) != 1 {
+		t.Fatalf("expected one favorite after restore-if-missing, got %d", len(loaded))
+	}
+	if loaded[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected normalized restored favorite path %q, got %q", "/docs/a.txt", loaded[0].Path)
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	reloadedFavorites := reloaded.List("user1")
+	if len(reloadedFavorites) != 1 {
+		t.Fatalf("expected one persisted favorite after reload, got %d", len(reloadedFavorites))
+	}
+	if reloadedFavorites[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected persisted normalized restored favorite path %q, got %q", "/docs/a.txt", reloadedFavorites[0].Path)
 	}
 }
 

@@ -13,6 +13,8 @@ import { Move, AlertTriangle } from 'lucide-react'
 import { DirectoryPicker } from './DirectoryPicker'
 import { moveFile, copyFile, ApiError } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
+import { useUser } from '@/stores/auth'
+import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 
 function isMissingFileError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404
@@ -83,6 +85,8 @@ function MoveDialogContent({
   mode,
 }: Omit<MoveDialogProps, 'isOpen'>) {
   const queryClient = useQueryClient()
+  const user = useUser()
+  const fileScopeKey = getFileQueryScopeKey(user)
   const [isPickerOpen, setIsPickerOpen] = useState(false)
   const [targetPath, setTargetPath] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
@@ -152,8 +156,8 @@ function MoveDialogContent({
     }
 
     // Invalidate queries
-    queryClient.invalidateQueries({ queryKey: ['files', sourcePath] })
-    queryClient.invalidateQueries({ queryKey: ['files', destinationPath] })
+    queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, sourcePath) })
+    queryClient.invalidateQueries({ queryKey: getFilesQueryKey(fileScopeKey, destinationPath) })
 
     // Show result
     if (errorCount === 0) {
@@ -178,7 +182,7 @@ function MoveDialogContent({
     } else {
       addToast(getMoveDialogFailureToast(mode, successCount, errorCount, failedErrors))
     }
-  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText])
+  }, [targetPath, pendingFiles, mode, currentPath, fileScopeKey, queryClient, onClose, actionText])
 
   const handleClose = useCallback(() => {
     if (isProcessing) {

@@ -39,6 +39,7 @@ import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, formatWe
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { useUser } from '@/stores/auth'
 import { SettingsError, getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
 
 // Settings section component
@@ -223,6 +224,7 @@ function SettingRow({
 }
 
 export function SettingsPage() {
+  const user = useUser()
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
   const defaultSettings = {
@@ -286,7 +288,7 @@ export function SettingsPage() {
   
   // Fetch settings from API
   const { data: settingsData, dataUpdatedAt: settingsDataUpdatedAt, isLoading, error, refetch, isRefetching } = useQuery({
-    queryKey: ['settings'],
+    queryKey: ['settings', user?.id ?? 'anonymous'],
     queryFn: getSettings,
   })
   const settingsLoadErrorPresentation = error ? getSettingsLoadErrorPresentation(error) : null
@@ -298,7 +300,7 @@ export function SettingsPage() {
     refetch: refetchWebDAVCredentials,
     isRefetching: isRefetchingWebDAVCredentials,
   } = useQuery({
-    queryKey: ['webdav-credentials'],
+    queryKey: ['webdav-credentials', user?.id ?? 'anonymous'],
     queryFn: getWebDAVCredentials,
     enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
   })

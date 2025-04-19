@@ -23,6 +23,7 @@ type Handler struct {
 type responseEnvelope struct {
 	Success bool         `json:"success"`
 	Data    interface{}  `json:"data,omitempty"`
+	Warning bool         `json:"warning,omitempty"`
 	Message string       `json:"message,omitempty"`
 	Error   *errorDetail `json:"error,omitempty"`
 }
@@ -33,6 +34,8 @@ type errorDetail struct {
 }
 
 const defaultJSONRequestBodyLimit = 1 * 1024 * 1024
+
+const favoritesPersistenceWarningHeader = `199 MnemoNAS "favorites persistence incomplete"`
 
 // NewHandler creates a new favorites handler
 func NewHandler(store *Store, logger zerolog.Logger) *Handler {
@@ -50,6 +53,17 @@ func getUserID(r *http.Request) string {
 	}
 	// Fallback for when auth is disabled
 	return "anonymous"
+}
+
+func getLegacyUserIdentifiers(r *http.Request) []string {
+	claims := auth.GetClaimsFromContext(r.Context())
+	if claims == nil {
+		return nil
+	}
+	if strings.TrimSpace(claims.Username) == "" || claims.Username == claims.UserID {
+		return nil
+	}
+	return []string{claims.Username}
 }
 
 func normalizeFavoritePath(rawPath string) (string, error) {
@@ -109,7 +123,7 @@ func (h *Handler) writeJSONBodyError(w http.ResponseWriter, err error) {
 // ListFavorites handles GET /api/v1/favorites
 func (h *Handler) ListFavorites(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r)
-	favorites := h.store.List(userID)
+	favorites := h.store.List(userID, getLegacyUserIdentifiers(r)...)
 
 	h.success(w, http.StatusOK, map[string]any{
 		"favorites": favorites,
@@ -146,10 +160,15 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fav, err := h.store.Add(userID, cleanPath, req.Note)
+	fav, err := h.store.Add(userID, cleanPath, req.Note, getLegacyUserIdentifiers(r)...)
 	if err != nil {
 		if err == ErrAlreadyFavorited {
 			h.error(w, http.StatusConflict, "already favorited", "ALREADY_FAVORITED")
+			return
+		}
+		if IsPersistenceWarning(err) {
+			h.logger.Warn().Err(err).Str("path", cleanPath).Msg("Add favorite completed with persistence warning")
+			h.successWithWarning(w, http.StatusCreated, fav, "favorite added with persistence warning")
 			return
 		}
 		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to add favorite")
@@ -178,9 +197,14 @@ func (h *Handler) RemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.Remove(userID, cleanPath); err != nil {
+	if err := h.store.Remove(userID, cleanPath, getLegacyUserIdentifiers(r)...); err != nil {
 		if err == ErrFavoriteNotFound {
 			h.error(w, http.StatusNotFound, "favorite not found", "FAVORITE_NOT_FOUND")
+			return
+		}
+		if IsPersistenceWarning(err) {
+			h.logger.Warn().Err(err).Str("path", cleanPath).Msg("Remove favorite completed with persistence warning")
+			h.successWithWarning(w, http.StatusOK, nil, "favorite removed with persistence warning")
 			return
 		}
 		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to remove favorite")
@@ -210,7 +234,7 @@ func (h *Handler) CheckFavorite(w http.ResponseWriter, r *http.Request) {
 		h.error(w, http.StatusBadRequest, "path query parameter is required", "MISSING_PATH")
 		return
 	}
-	isFavorite := h.store.IsFavorite(userID, cleanPath)
+	isFavorite := h.store.IsFavorite(userID, cleanPath, getLegacyUserIdentifiers(r)...)
 
 	h.success(w, http.StatusOK, map[string]any{
 		"path":        cleanPath,
@@ -251,7 +275,7 @@ func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result := h.store.CheckPaths(userID, cleanPaths)
+	result := h.store.CheckPaths(userID, cleanPaths, getLegacyUserIdentifiers(r)...)
 
 	h.success(w, http.StatusOK, map[string]any{
 		"favorites": result,
@@ -285,9 +309,14 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.UpdateNote(userID, cleanPath, req.Note); err != nil {
+	if err := h.store.UpdateNote(userID, cleanPath, req.Note, getLegacyUserIdentifiers(r)...); err != nil {
 		if err == ErrFavoriteNotFound {
 			h.error(w, http.StatusNotFound, "favorite not found", "FAVORITE_NOT_FOUND")
+			return
+		}
+		if IsPersistenceWarning(err) {
+			h.logger.Warn().Err(err).Str("path", cleanPath).Msg("Update favorite note completed with persistence warning")
+			h.successWithWarning(w, http.StatusOK, nil, "favorite note updated with persistence warning")
 			return
 		}
 		h.logger.Error().Err(err).Str("path", cleanPath).Msg("Failed to update note")
@@ -311,12 +340,32 @@ func (h *Handler) json(w http.ResponseWriter, status int, data any) {
 }
 
 func (h *Handler) success(w http.ResponseWriter, status int, data any, message string) {
+	h.writeSuccess(w, status, data, message, false)
+}
+
+func (h *Handler) successWithWarning(w http.ResponseWriter, status int, data any, message string) {
+	markFavoritesPersistenceWarningHeaders(w)
+	h.writeSuccess(w, status, data, message, true)
+}
+
+func markFavoritesPersistenceWarningHeaders(w http.ResponseWriter) {
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == favoritesPersistenceWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", favoritesPersistenceWarningHeader)
+}
+
+func (h *Handler) writeSuccess(w http.ResponseWriter, status int, data any, message string, warning bool) {
 	if data == nil {
 		data = json.RawMessage("null")
 	}
 	h.json(w, status, responseEnvelope{
 		Success: true,
 		Data:    data,
+		Warning: warning,
 		Message: message,
 	})
 }

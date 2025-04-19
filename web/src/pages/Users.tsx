@@ -354,6 +354,8 @@ export function UsersPage() {
   const [newEmail, setNewEmail] = useState('')
   const [newRole, setNewRole] = useState<'admin' | 'user' | 'guest'>('user')
   const [resetPassword, setResetPassword] = useState('')
+  const currentUserId = getStoredUser()?.id ?? 'anonymous'
+  const usersQueryKey = ['users', currentUserId] as const
   const createSessionRef = useRef(0)
   const createDraftRef = useRef({ username: '', password: '', email: '', role: 'user' })
 
@@ -367,7 +369,7 @@ export function UsersPage() {
   }, [newEmail, newPassword, newRole, newUsername])
 
   const { data, isLoading, isRefetching, error, refetch } = useQuery({
-    queryKey: ['users'],
+    queryKey: usersQueryKey,
     queryFn: listUsers,
   })
 
@@ -378,7 +380,7 @@ export function UsersPage() {
       createSession: number
     }) => createUser(request),
     onSuccess: (result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: usersQueryKey })
       if (
         createSessionRef.current === variables.createSession
         && shallowEqualStringRecord(createDraftRef.current, variables.submittedDraft)
@@ -399,7 +401,7 @@ export function UsersPage() {
   const deleteMutation = useMutation({
     mutationFn: deleteUser,
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: usersQueryKey })
       onDeleteClose()
       setDeleteTarget(null)
       addToast(getUsersActionSuccessToast('delete', { warning: result.warning }))
@@ -424,7 +426,7 @@ export function UsersPage() {
     mutationFn: ({ userId, password }: { userId: string; password: string }) =>
       resetUserPassword(userId, { new_password: password }),
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: usersQueryKey })
       onResetClose()
       setResetTarget(null)
       setResetPassword('')
@@ -451,7 +453,7 @@ export function UsersPage() {
     mutationFn: ({ userId, disabled }: { userId: string; disabled: boolean }) =>
       toggleUserStatus(userId, disabled),
     onSuccess: (result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: usersQueryKey })
       addToast(getUsersActionSuccessToast('toggle-status', {
         warning: result.warning,
         disabled: variables.disabled,
@@ -552,9 +554,6 @@ export function UsersPage() {
     setResetTarget(null)
     setResetPassword('')
   }, [resetPasswordMutation.isPending, onResetClose])
-
-  // Get current user from stored auth state
-  const currentUserId = getStoredUser()?.id
 
   const handleToggleStatus = useCallback((user: User) => {
     if (user.id === currentUserId) return
