@@ -1224,6 +1224,9 @@ func (s *ShareStore) RestoreShares(shares []*Share) error {
 		changed := false
 
 		for _, original := range shares {
+			if original == nil {
+				continue
+			}
 			normalized := copyShare(original)
 			if err := normalizeLegacyShareInvariants(normalized); err != nil {
 				return err
@@ -1290,6 +1293,63 @@ func (s *ShareStore) RestoreDisabledSharesPreservingCurrent(shares []*Share) err
 			}
 
 			snapshot.shares[original.ID] = updated
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
+		committed, err := s.persistSnapshot(snapshot)
+		if committed {
+			return err
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// RestoreSharesPreservingCurrent restores share path/enabled state while keeping
+// newer mutable metadata on existing shares. Missing shares are recreated from
+// the supplied restore state.
+func (s *ShareStore) RestoreSharesPreservingCurrent(shares []*Share) error {
+	if len(shares) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for _, original := range shares {
+			normalized := copyShare(original)
+			if err := normalizeLegacyShareInvariants(normalized); err != nil {
+				return err
+			}
+
+			current, ok := snapshot.shares[normalized.ID]
+			if !ok {
+				snapshot.shares[normalized.ID] = normalized
+				snapshot.pathIdx[normalized.Path] = append(snapshot.pathIdx[normalized.Path], normalized.ID)
+				changed = true
+				continue
+			}
+
+			updated := copyShare(current)
+			if updated.Path != normalized.Path {
+				moveSharePathIndex(snapshot.pathIdx, updated.Path, normalized.Path, normalized.ID)
+				updated.Path = normalized.Path
+			}
+			updated.Enabled = normalized.Enabled
+
+			if sharesEqual(updated, current) {
+				continue
+			}
+
+			snapshot.shares[normalized.ID] = updated
 			changed = true
 		}
 

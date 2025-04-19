@@ -536,17 +536,8 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 
 	etag := fmt.Sprintf(`"%s"`, info.ContentHash)
-	if im := r.Header.Get("If-Match"); im != "" {
-		if !h.matchETag(im, etag) {
-			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
-			return
-		}
-	}
-	if inm := r.Header.Get("If-None-Match"); inm != "" {
-		if h.matchETag(inm, etag) {
-			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
-			return
-		}
+	if h.writeFailedMutationPrecondition(w, r, etag, info.ModTime) {
+		return
 	}
 
 	affectedPaths := []string{path.Dir(filePath), filePath}
@@ -939,6 +930,10 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 			return
 		}
 	}
+	srcETag := fmt.Sprintf(`"%s"`, srcInfo.ContentHash)
+	if h.writeFailedMutationPrecondition(w, r, srcETag, srcInfo.ModTime) {
+		return
+	}
 
 	dstExists := h.destinationExists(ctx, dst)
 	if dstExists {
@@ -1034,6 +1029,28 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) writeFailedMutationPrecondition(w http.ResponseWriter, r *http.Request, etag string, modTime time.Time) bool {
+	if im := r.Header.Get("If-Match"); im != "" {
+		if !h.matchETag(im, etag) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return true
+		}
+	}
+	if ius := r.Header.Get("If-Unmodified-Since"); ius != "" {
+		if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(modTime, unmodifiedSince) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return true
+		}
+	}
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		if h.matchETag(inm, etag) {
+			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) allocateMoveBackupPath(ctx context.Context, dst string) (string, error) {

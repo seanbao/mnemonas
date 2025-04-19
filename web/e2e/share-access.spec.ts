@@ -77,7 +77,7 @@ test.describe('公开分享页面', () => {
 
     await page.goto(`/s/${shareId}`, { waitUntil: 'domcontentloaded' })
 
-    await expect(page.getByText('分享已失效')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('分享已停用')).toBeVisible({ timeout: 5000 })
   })
 
   test('公开文件夹分享应支持浏览子目录', async ({ page }) => {

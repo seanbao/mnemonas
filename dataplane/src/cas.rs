@@ -3,9 +3,9 @@
 //! Supports optional zstd compression for storage efficiency
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -182,7 +182,9 @@ impl CasStore {
             if self.index.remove(&hash).is_some() {
                 warn!(hash = %hash, "stale CAS index entry detected; recreating missing object");
                 self.stats.total_chunks.fetch_sub(1, Ordering::Relaxed);
-                self.stats.total_size.fetch_sub(existing_size, Ordering::Relaxed);
+                self.stats
+                    .total_size
+                    .fetch_sub(existing_size, Ordering::Relaxed);
                 self.stats
                     .compressed_size
                     .fetch_sub(stale_disk_size, Ordering::Relaxed);
@@ -270,8 +272,9 @@ impl CasStore {
             self.config.compression_enabled && data.len() >= self.config.min_compress_size;
 
         if should_compress {
-            let compressed = zstd::encode_all(std::io::Cursor::new(data), self.config.compression_level)
-                .map_err(|e| CasError::Compression(e.to_string()))?;
+            let compressed =
+                zstd::encode_all(std::io::Cursor::new(data), self.config.compression_level)
+                    .map_err(|e| CasError::Compression(e.to_string()))?;
 
             if compressed.len() < data.len() {
                 let path = self.hash_to_path(hash).with_extension("zst");
@@ -584,11 +587,7 @@ impl CasStore {
 
     /// List objects with pagination (for GC)
     /// Returns (objects, next_cursor) where objects is (hash, size, created_at_unix)
-    pub fn list_objects(
-        &self,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> ObjectListPage {
+    pub fn list_objects(&self, cursor: Option<&str>, limit: usize) -> ObjectListPage {
         let mut objects: Vec<(String, u64)> = self
             .index
             .iter()
@@ -934,7 +933,10 @@ mod tests {
 
         let result = store.put_with_status(data).await.unwrap();
 
-        assert!(!result.deduplicated, "missing object should be recreated, not treated as a dedup hit");
+        assert!(
+            !result.deduplicated,
+            "missing object should be recreated, not treated as a dedup hit"
+        );
         assert_eq!(store.get(&hash).await.unwrap(), data);
 
         let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
@@ -997,9 +999,18 @@ mod tests {
             .expect_err("expected injected parent sync failure");
 
         assert!(matches!(err, CasError::Io(_)));
-        assert!(path.exists(), "renamed object should remain visible on disk");
-    assert!(list_tmp_files(&parent).is_empty(), "temporary files should not remain after rename");
-        assert!(!store.has(&hash), "index should not claim success after failed parent sync");
+        assert!(
+            path.exists(),
+            "renamed object should remain visible on disk"
+        );
+        assert!(
+            list_tmp_files(&parent).is_empty(),
+            "temporary files should not remain after rename"
+        );
+        assert!(
+            !store.has(&hash),
+            "index should not claim success after failed parent sync"
+        );
 
         let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
         assert_eq!(chunks, 0);
@@ -1011,7 +1022,10 @@ mod tests {
 
         store.rebuild_index().await.unwrap();
 
-        assert!(store.has(&hash), "rebuild should recover the on-disk object");
+        assert!(
+            store.has(&hash),
+            "rebuild should recover the on-disk object"
+        );
         assert_eq!(store.get(&hash).await.unwrap(), data);
 
         let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
@@ -1046,7 +1060,10 @@ mod tests {
 
         assert_eq!(stored_hash, hash);
         assert_eq!(store.get(&hash).await.unwrap(), data);
-        assert!(fixed_tmp_path.exists(), "existing fixed temp path should remain untouched");
+        assert!(
+            fixed_tmp_path.exists(),
+            "existing fixed temp path should remain untouched"
+        );
 
         let (chunks, logical_size, unique_size, compressed_size, hits, misses) = store.stats();
         assert_eq!(chunks, 1);
@@ -1149,8 +1166,14 @@ mod tests {
             .expect_err("expected injected parent sync failure");
 
         assert!(matches!(err, CasError::Io(_)));
-        assert!(!path.exists(), "deleted object should remain absent after sync failure");
-        assert!(!store.has(&hash), "index should reflect the visible deletion");
+        assert!(
+            !path.exists(),
+            "deleted object should remain absent after sync failure"
+        );
+        assert!(
+            !store.has(&hash),
+            "index should reflect the visible deletion"
+        );
 
         let (chunks, logical_size, unique_size, _, _, _) = store.stats();
         assert_eq!(chunks, 0);
@@ -1158,7 +1181,10 @@ mod tests {
         assert_eq!(unique_size, 0);
 
         assert!(matches!(store.get(&hash).await, Err(CasError::NotFound(_))));
-        assert!(!store.delete(&hash).await.unwrap(), "retry should observe already-deleted object");
+        assert!(
+            !store.delete(&hash).await.unwrap(),
+            "retry should observe already-deleted object"
+        );
     }
 
     #[tokio::test]

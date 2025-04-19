@@ -40,20 +40,22 @@ async function handleResponse<T>(response: Response, errorMessage: string, inval
     let message = errorMessage
     let code: string | undefined
     try {
-      const body = await response.json() as ApiResponseWrapper<never> | { error?: string; message?: string; code?: string }
-      const topLevelCode = typeof body.code === 'string' ? body.code : undefined
-      if (typeof body.error === 'string') {
-        message = body.error || errorMessage
-      } else if (body.error && typeof body.error === 'object' && 'message' in body.error && typeof body.error.message === 'string') {
-        message = body.error.message
-        if ('code' in body.error && typeof body.error.code === 'string') {
-          code = body.error.code
+      const body: unknown = await response.json()
+      if (isRecord(body)) {
+        const topLevelCode = typeof body.code === 'string' ? body.code : undefined
+        if (typeof body.error === 'string') {
+          message = body.error || errorMessage
+        } else if (isRecord(body.error) && typeof body.error.message === 'string') {
+          message = body.error.message
+          if (typeof body.error.code === 'string') {
+            code = body.error.code
+          }
+        } else if (typeof body.message === 'string' && body.message) {
+          message = body.message
         }
-      } else if (body.message) {
-        message = body.message
-      }
-      if (!code && topLevelCode) {
-        code = topLevelCode
+        if (!code && topLevelCode) {
+          code = topLevelCode
+        }
       }
     } catch { /* ignore */ }
     throw new ApiError(message, response.status, response.statusText, code)

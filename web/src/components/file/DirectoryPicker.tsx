@@ -521,7 +521,7 @@ export function DirectoryPicker({
                     selectedPath === rootPath && "bg-accent-primary/10 text-accent-primary",
                     selectedPath !== rootPath && "hover:bg-content2"
                   )}
-                  onClick={() => setSelectedPath(rootPath)}
+                  onClick={() => setSelectedPath(effectiveRootPath)}
                 >
                   <div className="w-5 h-5" />
                   <Home size={18} className={selectedPath === rootPath ? "text-accent-primary" : "text-default-500"} />

@@ -154,7 +154,7 @@ POST /api/v1/auth/login
 **失败行为**:
 - 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
 - `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
-- 客户端地址默认按一层受信代理解析；只有当请求直接来自 loopback 或私有网段代理时，才采信转发头，并按 `server.trusted_proxy_hops` 从 `X-Forwarded-For` 右侧回溯客户端地址。多跳代理部署需要显式提高该值；设置为 `0` 时始终使用直连来源
+- 客户端地址默认不信任转发头，始终使用直连来源；只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址。多跳代理部署需要设置为代理总层数
 
 ### 刷新令牌
 
@@ -227,7 +227,7 @@ Authorization: Bearer <access_token>
 - 返回 `200 OK`
 - 设置名为 `download-session` 的 `HttpOnly` cookie，路径为 `/api/v1`
 - cookie 过期时间与当前 access token 剩余有效期对齐
-- 当请求被后端识别为 HTTPS（直连 TLS 或可信代理转发 `X-Forwarded-Proto: https`）时，cookie 带 `Secure`
+- 当请求被后端识别为 HTTPS（直连 TLS，或显式启用 `trusted_proxy_hops > 0` 后由可信代理转发 `X-Forwarded-Proto: https`）时，cookie 带 `Secure`
 
 **失败行为**:
 - 该路由复用通用认证 middleware；缺少认证头时返回 `401`，错误码 `MISSING_AUTH_HEADER`
@@ -367,7 +367,7 @@ GET /api/v1/version
   "data": {
     "name": "MnemoNAS",
     "version": "0.1.0",
-    "go": "go1.22.0"
+    "go": "go1.25.0"
   },
   "timestamp": "2024-01-15T10:00:00Z"
 }
@@ -394,7 +394,7 @@ GET /api/v1/setup/
 
 **说明**:
 - 该接口不再返回任何初始密码或用户名
-- 首次启动生成的初始密码仅写入启动日志和 `secrets.json`
+- 首次启动生成的 Web 登录初始管理员密码仅写入启动日志和 `<storage.root>/.mnemonas/initial-password.txt`
 - 该接口返回 setup 专用平铺 JSON，不使用通用 `data` wrapper
 
 ### 确认已查看初始化信息
@@ -477,7 +477,7 @@ GET /api/v1/diagnostics
     "version": {
       "name": "MnemoNAS",
       "version": "0.1.0",
-      "go": "go1.22.0"
+      "go": "go1.25.0"
     },
     "system": {
       "filesystem_initialized": true,
@@ -1172,7 +1172,7 @@ POST /api/v1/public/shares/{share_id}/access
 - 一旦下载或文件夹列表响应已经开始向客户端写出字节，即使后续流式传输中断，该次访问仍计入 `access_count`
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
-- 口令失败限流默认按 share ID 与客户端地址组合统计；只有当请求直接来自 loopback 或私有网段代理时，才采信转发头，并按 `server.trusted_proxy_hops` 从 `X-Forwarded-For` 右侧回溯客户端地址
+- 口令失败限流默认按 share ID 与客户端地址组合统计；默认不信任转发头，只有显式设置 `server.trusted_proxy_hops > 0` 且请求直接来自 loopback 或私有网段代理时，才按 `X-Forwarded-For` 从右侧回溯客户端地址
 - 兼容路径 `/s/{share_id}` 与 `POST /s/{share_id}` 保持相同 JSON 行为，适用于非 SPA 或直接脚本调用
 
 **下载文件**:

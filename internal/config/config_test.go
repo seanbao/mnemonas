@@ -21,8 +21,8 @@ func TestDefault(t *testing.T) {
 		t.Errorf("Default host = %s, want 0.0.0.0", cfg.Server.Host)
 	}
 
-	if cfg.Server.TrustedProxyHops != 1 {
-		t.Errorf("Default trusted proxy hops = %d, want 1", cfg.Server.TrustedProxyHops)
+	if cfg.Server.TrustedProxyHops != 0 {
+		t.Errorf("Default trusted proxy hops = %d, want 0", cfg.Server.TrustedProxyHops)
 	}
 
 	if cfg.Storage.Root == "" {

@@ -28,6 +28,8 @@ func TestClientIP_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *testing.T
 }
 
 func TestClientIP_UsesLastForwardedAddressFromTrustedProxy(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 1)
+
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
 	req.Header.Set("X-Forwarded-For", "198.51.100.99, 198.51.100.20")
@@ -38,6 +40,8 @@ func TestClientIP_UsesLastForwardedAddressFromTrustedProxy(t *testing.T) {
 }
 
 func TestClientIP_FallsBackToXRealIPWhenForwardedForMissing(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 1)
+
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.0.0.2:8080"
 	req.Header.Set("X-Real-IP", "198.51.100.21")
@@ -74,6 +78,8 @@ func TestParseIP_AllowsCommonForwardedHeaderAddressForms(t *testing.T) {
 }
 
 func TestClientIP_UsesForwardedHeadersWithPortsFromTrustedProxy(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 1)
+
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
 	req.Header.Set("X-Forwarded-For", "198.51.100.99:8443, 198.51.100.20:443")
@@ -84,6 +90,8 @@ func TestClientIP_UsesForwardedHeadersWithPortsFromTrustedProxy(t *testing.T) {
 }
 
 func TestClientIP_IgnoresSpoofedLeadingForwardedEntriesFromTrustedProxy(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 1)
+
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
 	req.Header.Set("X-Forwarded-For", "203.0.113.250, 198.51.100.20")
@@ -94,6 +102,8 @@ func TestClientIP_IgnoresSpoofedLeadingForwardedEntriesFromTrustedProxy(t *testi
 }
 
 func TestClientIP_UsesBracketedIPv6FromTrustedProxy(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 1)
+
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "[fd00::1]:8080"
 	req.Header.Set("X-Real-IP", "[2001:db8::20]:8443")

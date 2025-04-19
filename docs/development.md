@@ -21,9 +21,9 @@
 
 | 工具 | 最低版本 | 推荐版本 | 用途 |
 | ---- | -------- | -------- | ---- |
-| **Go** | 1.21 | 1.25 | Go 控制面开发 |
-| **Rust** | 1.75 | 1.92 | Rust 数据面开发 |
-| **Node.js** | 20.19 | 22.x | 前端开发 |
+| **Go** | 1.25 | 1.25.x | Go 控制面开发 |
+| **Rust** | 1.92 | 1.92.x | Rust 数据面开发 |
+| **Node.js** | 20.19 或 22.12 | 22.x | 前端开发 |
 | **protoc** | 3.20 | 28.x | Protocol Buffers 编译器 |
 | **make** | 3.x | 4.x | 构建自动化 |
 
@@ -255,7 +255,7 @@ make proto
 #   dataplane/src/proto/mnemonas.dataplane.v1.rs
 
 # 2. 构建 Go 控制面
-CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd
+CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd
 
 # 3. 构建 Rust 数据面
 cd dataplane && cargo build --release
@@ -273,9 +273,9 @@ cd web && npm run build
 make dev
 
 # 单独构建各组件
-CGO_ENABLED=1 go build -o bin/nasd ./cmd/nasd     # Go (required for SQLite-backed version store)
-cd dataplane && cargo build                         # Rust (debug)
-cd web && npm run build                             # 前端
+CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd     # Go
+cd dataplane && cargo build                       # Rust (debug)
+cd web && npm run build                           # 前端
 ```
 
 ---
@@ -317,7 +317,7 @@ nvm use
 - **健康检查**：等待服务就绪后再继续
 - **日志管理**：所有日志写入 `logs/` 目录
 - **PID 跟踪**：使用 `.pids/` 目录跟踪进程，支持干净停止
-- **Node.js 版本**：检测并强制使用项目根 `.nvmrc`，版本不匹配时直接失败
+- **Node.js 版本**：通过 `nvm use` 使用项目根 `.nvmrc`，并校验当前 Node.js 满足前端依赖的 engine 要求
 
 启动后的服务状态表：
 
@@ -442,16 +442,17 @@ make test
 
 ```bash
 # 运行所有测试（自动启动临时 dataplane）
-CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v ./...
+GO_PACKAGES=$(go list ./... | grep -v '/web/node_modules/')
+bash ./scripts/with-test-dataplane.sh go test -v $GO_PACKAGES
 
 # 运行特定包测试（需要 dataplane 的包同样通过包装脚本执行）
-CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v ./internal/webdav/...
+bash ./scripts/with-test-dataplane.sh go test -v ./internal/webdav/...
 
 # 带覆盖率
-CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -cover ./...
+bash ./scripts/with-test-dataplane.sh go test -v -cover $GO_PACKAGES
 
 # 生成覆盖率报告
-CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out ./...
+bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PACKAGES
 go tool cover -html=coverage.out
 ```
 
@@ -476,7 +477,7 @@ cargo tarpaulin --out Html
 
 ### 前端测试
 
-> Vitest 依赖 `Array.prototype.findLastIndex`，需 Node.js 20+。
+> 前端工具链需 Node.js 20.19+ 或 22.12+；推荐使用项目 `.nvmrc` 指定的 22.x。
 
 ```bash
 cd web
