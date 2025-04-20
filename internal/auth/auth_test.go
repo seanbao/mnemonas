@@ -22,6 +22,30 @@ import (
 	"github.com/seanbao/mnemonas/internal/requestip"
 )
 
+func TestShouldPrintInitialPasswordToTerminal(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset", value: "", want: false},
+		{name: "one", value: "1", want: true},
+		{name: "true", value: "true", want: true},
+		{name: "yes uppercase", value: "YES", want: true},
+		{name: "off", value: "off", want: false},
+		{name: "random", value: "please", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(printInitialPasswordEnv, tc.value)
+			if got := shouldPrintInitialPasswordToTerminal(); got != tc.want {
+				t.Fatalf("shouldPrintInitialPasswordToTerminal() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWriteAuthFileAtomically_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	usersPath := filepath.Join(tmpDir, "users.json")

@@ -177,6 +177,30 @@ describe('useKeyboardShortcuts', () => {
     })
   })
 
+  describe('Toggle selection (Space)', () => {
+    it('calls onSpace when Space key pressed', () => {
+      const onSpace = vi.fn()
+      const handlers: KeyboardShortcutHandlers = { onSpace }
+
+      renderHook(() => useKeyboardShortcuts(handlers))
+
+      triggerKeyDown(' ')
+
+      expect(onSpace).toHaveBeenCalled()
+    })
+
+    it('calls onSpace when legacy Space key name is used', () => {
+      const onSpace = vi.fn()
+      const handlers: KeyboardShortcutHandlers = { onSpace }
+
+      renderHook(() => useKeyboardShortcuts(handlers))
+
+      triggerKeyDown('Space')
+
+      expect(onSpace).toHaveBeenCalled()
+    })
+  })
+
   describe('New folder (Ctrl+Shift+N)', () => {
     it('calls onNewFolder when Ctrl+Shift+N pressed with lowercase key', () => {
       const onNewFolder = vi.fn()

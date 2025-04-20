@@ -30,6 +30,8 @@ const (
 	RoleGuest Role = "guest" // Read-only access
 )
 
+const printInitialPasswordEnv = "MNEMONAS_PRINT_INITIAL_PASSWORD"
+
 // User represents a system user
 type User struct {
 	ID           string     `json:"id"`
@@ -861,8 +863,8 @@ This file will be automatically deleted after you login.
 		return "", err
 	}
 
-	// Also print to terminal if running interactively (for convenience)
-	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+	isInteractive := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	if isInteractive && shouldPrintInitialPasswordToTerminal() {
 		fmt.Printf("\n")
 		fmt.Printf("╔══════════════════════════════════════════════════════════╗\n")
 		fmt.Printf("║  Default admin account created                           ║\n")
@@ -873,11 +875,22 @@ This file will be automatically deleted after you login.
 		fmt.Printf("╚══════════════════════════════════════════════════════════╝\n")
 		fmt.Printf("\n")
 	} else {
-		// When not interactive, just log the file location
 		fmt.Printf("Initial admin password saved to: %s\n", passwordFile)
+		if isInteractive {
+			fmt.Printf("Set %s=1 before first run to also print it in the terminal.\n", printInitialPasswordEnv)
+		}
 	}
 
 	return password, nil
+}
+
+func shouldPrintInitialPasswordToTerminal() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(printInitialPasswordEnv))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // GetByID retrieves a user by ID

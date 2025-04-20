@@ -16,6 +16,7 @@
 
 - 初始管理员密码不会长期保存在 `secrets.json`
 - setup API 不返回初始用户名或密码
+- 默认不会把初始密码明文打印到终端；只提示 `initial-password.txt` 路径。仅本地受控调试时，可在首次启动前设置 `MNEMONAS_PRINT_INITIAL_PASSWORD=1` 临时打印
 - 首次成功登录对应管理员账号后，`initial-password.txt` 会自动删除
 - 登录后应立即修改管理员密码
 
