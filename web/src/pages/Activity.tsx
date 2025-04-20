@@ -125,6 +125,7 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
 const ALL_ACTIONS: ActionType[] = [
   'upload', 'download', 'delete', 'rename', 'move', 'copy',
   'create', 'restore', 'share', 'unshare', 'login', 'logout',
+  'favorite', 'unfavorite', 'favorite_note_update',
   'trash_restore', 'trash_delete', 'trash_empty',
 ]
 
@@ -205,7 +206,7 @@ export function ActivityPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="活动日志"
           subtitle={invalidHomeDirTitle}
@@ -225,7 +226,7 @@ export function ActivityPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+      <div className="flex h-full items-center justify-center p-6 lg:p-8">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载活动日志...</p>
@@ -237,7 +238,7 @@ export function ActivityPage() {
   if (error) {
     if (errorState === 'unavailable') {
       return (
-        <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+        <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
           <PageHeader
             title="活动日志"
             subtitle="暂不可用"
@@ -272,7 +273,7 @@ export function ActivityPage() {
     }
 
     return (
-      <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="活动日志"
           subtitle="加载失败"
@@ -310,7 +311,7 @@ export function ActivityPage() {
   const totalEntries = data?.total ?? entries.length
 
   return (
-    <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+    <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
       {/* Header */}
       <PageHeader
         title="活动日志"
@@ -370,7 +371,7 @@ export function ActivityPage() {
       )}
 
       {/* Activity list */}
-      <div className="flex-1 overflow-auto card-meridian rounded-lg">
+      <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
         {entries.length > 0 ? (
           entries.map((entry) => (
             <ActivityRow key={entry.id} entry={entry} />

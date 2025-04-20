@@ -518,13 +518,13 @@ export function DirectoryPicker({
                 <div
                   className={cn(
                     "flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors",
-                    selectedPath === rootPath && "bg-accent-primary/10 text-accent-primary",
-                    selectedPath !== rootPath && "hover:bg-content2"
+                    selectedPath === effectiveRootPath && "bg-accent-primary/10 text-accent-primary",
+                    selectedPath !== effectiveRootPath && "hover:bg-content2"
                   )}
                   onClick={() => setSelectedPath(effectiveRootPath)}
                 >
                   <div className="w-5 h-5" />
-                  <Home size={18} className={selectedPath === rootPath ? "text-accent-primary" : "text-default-500"} />
+                  <Home size={18} className={selectedPath === effectiveRootPath ? "text-accent-primary" : "text-default-500"} />
                   <span className="text-sm">{rootLabel}</span>
                 </div>
                 

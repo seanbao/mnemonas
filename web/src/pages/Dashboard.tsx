@@ -504,15 +504,15 @@ export function DashboardPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4">
             {[
               { label: '总对象数', value: storageStatsKnown ? formatCount(stats?.totalObjects) : '--' },
               { label: diskStatsKnown ? '磁盘总量' : '总大小', value: diskStatsKnown ? formatStorageSize(stats?.diskTotal) : formatStorageSize(stats?.totalSize) },
               { label: '去重率', value: storageStatsKnown && stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--' },
               { label: '版本', value: appVersion?.version ?? health?.version ?? '--' },
             ].map((item, i) => (
-              <div key={i} className="p-3 rounded-lg bg-content2/50 text-center">
-                <p className="text-2xl font-medium text-foreground data-value">{item.value}</p>
+              <div key={i} className="rounded-lg bg-content2/50 p-3 text-center">
+                <p className="data-value break-anywhere text-2xl font-medium leading-tight text-foreground">{item.value}</p>
                 <p className="text-xs text-default-500">{item.label}</p>
               </div>
             ))}

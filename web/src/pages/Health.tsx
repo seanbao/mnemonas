@@ -453,7 +453,7 @@ export function HealthPage() {
       )}
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {statsCards.map((stat) => (
           <div key={stat.title} className="stat-card">
             <div className="relative">
@@ -542,13 +542,13 @@ export function HealthPage() {
 
             <Divider />
 
-            <div className="grid grid-cols-2 gap-4 text-sm">
+            <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
               <div className="text-center p-3 rounded-lg bg-content2/50">
-                <p className="text-2xl font-semibold data-value">{storageStatsAvailable ? stats?.totalObjects ?? '--' : '--'}</p>
+                <p className="data-value break-anywhere text-2xl font-semibold leading-tight">{storageStatsAvailable ? stats?.totalObjects ?? '--' : '--'}</p>
                 <p className="text-default-500 text-xs">对象数量</p>
               </div>
               <div className="text-center p-3 rounded-lg bg-content2/50">
-                <p className="text-2xl font-semibold data-value">
+                <p className="data-value break-anywhere text-2xl font-semibold leading-tight">
                   {storageStatsAvailable && stats?.dedupRatio !== undefined
                     ? `${(stats.dedupRatio * 100).toFixed(1)}%`
                     : '--'}
@@ -573,15 +573,15 @@ export function HealthPage() {
             </div>
           </CardHeader>
           <CardBody className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="text-center p-3 rounded-lg bg-content2/50">
-                <p className="text-2xl font-semibold data-value">
+                <p className="data-value break-anywhere text-2xl font-semibold leading-tight">
                   {diagnostics?.filesystem?.trashItems ?? '--'}
                 </p>
                 <p className="text-default-500 text-xs">待删除文件</p>
               </div>
               <div className="text-center p-3 rounded-lg bg-content2/50">
-                <p className="text-2xl font-semibold data-value">
+                <p className="data-value break-anywhere text-2xl font-semibold leading-tight">
                   {diagnostics?.filesystem?.trashSize !== undefined
                     ? formatBytes(diagnostics.filesystem.trashSize)
                     : '--'}
@@ -611,15 +611,15 @@ export function HealthPage() {
           </div>
         </CardHeader>
         <CardBody>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
             {[
               { label: '当前分配', value: formatMetricWithUnit(diagnostics?.memory?.allocMb, 'MB') },
               { label: '累计分配', value: formatMetricWithUnit(diagnostics?.memory?.totalAllocMb, 'MB') },
               { label: '系统内存', value: formatMetricWithUnit(diagnostics?.memory?.sysMb, 'MB') },
               { label: 'GC 次数', value: diagnostics?.memory?.numGc ?? '--' },
             ].map((item) => (
-              <div key={item.label} className="text-center p-3 rounded-lg bg-content2/50">
-                <p className="text-2xl font-semibold data-value">{item.value}</p>
+              <div key={item.label} className="rounded-lg bg-content2/50 p-3 text-center">
+                <p className="data-value break-anywhere text-2xl font-semibold leading-tight">{item.value}</p>
                 <p className="text-default-400 text-xs">{item.label}</p>
               </div>
             ))}
@@ -627,16 +627,16 @@ export function HealthPage() {
 
           <Divider className="my-4" />
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="text-center p-3 rounded-lg bg-content2/50">
-              <p className="text-2xl font-semibold data-value">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+            <div className="rounded-lg bg-content2/50 p-3 text-center">
+              <p className="data-value break-anywhere text-2xl font-semibold leading-tight">
                 {diagnostics?.goroutines ?? '--'}
               </p>
               <p className="text-default-400 text-xs">Goroutines</p>
             </div>
             {diagnostics?.dataplane && (
               <>
-                <div className="text-center p-3 rounded-lg bg-content2/50">
+                <div className="rounded-lg bg-content2/50 p-3 text-center">
                   <div className={`inline-flex items-center gap-1 ${
                     diagnostics.dataplane.healthy === true
                       ? 'text-success'
@@ -655,14 +655,14 @@ export function HealthPage() {
                   </div>
                   <p className="text-default-400 text-xs">数据面状态</p>
                 </div>
-                <div className="text-center p-3 rounded-lg bg-content2/50">
-                  <p className="text-2xl font-semibold data-value">
+                <div className="rounded-lg bg-content2/50 p-3 text-center">
+                  <p className="data-value break-anywhere text-2xl font-semibold leading-tight">
                     {diagnostics.dataplane.version || '--'}
                   </p>
                   <p className="text-default-400 text-xs">数据面版本</p>
                 </div>
-                <div className="text-center p-3 rounded-lg bg-content2/50">
-                  <p className="text-2xl font-semibold data-value">
+                <div className="rounded-lg bg-content2/50 p-3 text-center">
+                  <p className="data-value break-anywhere text-2xl font-semibold leading-tight">
                     {diagnostics.dataplane.uptimeSec !== undefined
                       ? formatUptime(diagnostics.dataplane.uptimeSec) 
                       : '--'}

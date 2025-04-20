@@ -577,7 +577,7 @@ export function UsersPage() {
   const usersLoadError = error ? getUsersLoadErrorPresentation(error) : null
 
   return (
-    <div className="h-full flex flex-col p-4 sm:p-6">
+    <div className="flex h-full min-h-0 flex-col p-4 sm:p-6">
       {/* Header */}
       <PageHeader
         title="用户管理"
@@ -629,7 +629,7 @@ export function UsersPage() {
       </div>
 
       {/* User List */}
-      <Card className="flex-1 card-meridian overflow-hidden">
+      <Card className="card-meridian min-h-0 flex-1 overflow-hidden">
         <CardHeader className="border-b border-divider">
           <h2 className="font-semibold text-foreground">用户列表</h2>
         </CardHeader>

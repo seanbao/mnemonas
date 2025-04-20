@@ -446,7 +446,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
   return (
     <div className="h-full overflow-auto custom-scrollbar">
-      <div className="p-6 space-y-6">
+      <div className="space-y-6 p-4 sm:p-6">
       {/* Header */}
       <PageHeader
         title="版本历史"
@@ -465,7 +465,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
       {/* Search */}
       {!hasInvalidHomeDir && (
       <div className="card-meridian rounded-lg p-4">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
           <Input
             placeholder="输入文件路径，例如: /documents/report.pdf"
             value={searchPath}
@@ -477,11 +477,11 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
               inputWrapper: "bg-content2/50 border border-divider hover:border-divider",
             }}
           />
-          <Button 
+          <Button
             color="primary" 
             startContent={<Search size={16} />}
             onPress={handleSearch}
-            className="font-medium rounded-lg"
+            className="rounded-lg font-medium sm:shrink-0"
           >
             查询版本
           </Button>
@@ -491,11 +491,11 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
       {/* Version List */}
       {!hasInvalidHomeDir && selectedPath && (
-        <div className="card-meridian rounded-lg p-6 space-y-4">
-          <div className="flex items-center gap-2 text-default-400">
+        <div className="card-meridian space-y-4 rounded-lg p-4 sm:p-6">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-default-400">
             <History size={18} />
             <span>文件路径:</span>
-            <code className="bg-content2/50 border border-divider px-3 py-1 rounded-lg text-sm font-mono text-foreground">
+            <code className="break-anywhere rounded-lg border border-divider bg-content2/50 px-3 py-1 font-mono text-sm text-foreground">
               {selectedPath}
             </code>
           </div>
@@ -518,36 +518,38 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
               </Button>
             </div>
           ) : versions && versions.length > 0 ? (
-            <Table 
-              aria-label="版本历史" 
-              removeWrapper
-              classNames={{
-                th: "table-head font-medium",
-                td: "py-2.5",
-              }}
-            >
-              <TableHeader>
-                <TableColumn>版本</TableColumn>
-                <TableColumn>修改时间</TableColumn>
-                <TableColumn>大小</TableColumn>
-                <TableColumn>Hash</TableColumn>
-                <TableColumn>操作</TableColumn>
-              </TableHeader>
-              <TableBody>
-                {versions.map((version, index) => (
-                  <VersionRow
-                    key={version.hash}
-                    version={version}
-                    index={versions.length - index - 1}
-                    isLatest={index === 0}
-                    canRestore={isAdmin}
-                    onPreview={() => handlePreview(version)}
-                    onRestore={() => handleRestore(version)}
-                    onDownload={() => handleDownload(version)}
-                  />
-                ))}
-              </TableBody>
-            </Table>
+            <div className="responsive-table">
+              <Table
+                aria-label="版本历史"
+                removeWrapper
+                classNames={{
+                  th: "table-head font-medium",
+                  td: "py-2.5",
+                }}
+              >
+                <TableHeader>
+                  <TableColumn>版本</TableColumn>
+                  <TableColumn>修改时间</TableColumn>
+                  <TableColumn>大小</TableColumn>
+                  <TableColumn>Hash</TableColumn>
+                  <TableColumn>操作</TableColumn>
+                </TableHeader>
+                <TableBody>
+                  {versions.map((version, index) => (
+                    <VersionRow
+                      key={version.hash}
+                      version={version}
+                      index={versions.length - index - 1}
+                      isLatest={index === 0}
+                      canRestore={isAdmin}
+                      onPreview={() => handlePreview(version)}
+                      onRestore={() => handleRestore(version)}
+                      onDownload={() => handleDownload(version)}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-default-400">
               <div className="w-16 h-16 rounded-lg bg-default-100 flex items-center justify-center mb-4">
@@ -569,7 +571,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
             ? 'MnemoNAS 自动保留每个文件的历史版本。输入文件路径即可查看所有历史版本，支持预览、下载和一键回滚。'
             : 'MnemoNAS 自动保留主目录内文件的历史版本。输入文件路径即可查看历史版本，支持预览和下载。'}
           action={
-            <div className="flex items-center gap-2 text-sm text-default-500 bg-content2/50 px-4 py-2 rounded-lg">
+            <div className="flex flex-wrap items-center justify-center gap-2 rounded-lg bg-content2/50 px-4 py-2 text-sm text-default-500">
               <span>提示: 也可以在文件管理器中右键点击文件</span>
               <ChevronRight size={14} />
               <span className="font-medium text-primary">"版本历史"</span>
