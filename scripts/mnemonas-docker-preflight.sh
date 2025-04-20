@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+
+set -u
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker-compose.yml}"
+ENV_PATH="${ENV_PATH:-$REPO_ROOT/.env}"
+DATA_DIR="${DATA_DIR:-${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}}"
+HOST_PORT="${HOST_PORT:-${MNEMONAS_HTTP_PORT:-}}"
+MIN_FREE_BYTES="${MIN_FREE_BYTES:-10737418240}"
+
+FAILURES=0
+WARNINGS=0
+DOCKER_CLI_AVAILABLE=0
+COMPOSE_AVAILABLE=0
+HOST_PORT_VALID=0
+
+ok() {
+	printf '[OK] %s\n' "$*"
+}
+
+warn() {
+	WARNINGS=$((WARNINGS + 1))
+	printf '[WARN] %s\n' "$*"
+}
+
+fail() {
+	FAILURES=$((FAILURES + 1))
+	printf '[FAIL] %s\n' "$*"
+}
+
+have() {
+	command -v "$1" >/dev/null 2>&1
+}
+
+env_value() {
+	local key="$1"
+	local file="$2"
+
+	[[ -f "$file" ]] || return 0
+	awk -F= -v key="$key" '
+		{
+			line = $0
+			sub(/[[:space:]]*#.*$/, "", line)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			sub(/^export[[:space:]]+/, "", line)
+		}
+		line ~ "^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=" {
+			name = line
+			sub(/[[:space:]]*=.*/, "", name)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+			if (name == key) {
+				value = line
+				sub(/^[^=]*=[[:space:]]*/, "", value)
+				gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+				gsub(/^"/, "", value)
+				gsub(/"$/, "", value)
+				gsub(/^\047/, "", value)
+				gsub(/\047$/, "", value)
+				print value
+				exit
+			}
+		}
+	' "$file"
+}
+
+toml_value() {
+	local section="$1"
+	local key="$2"
+	local file="$3"
+
+	[[ -f "$file" ]] || return 0
+	awk -v section="[$section]" -v key="$key" '
+		{
+			line = $0
+			sub(/[[:space:]]*#.*$/, "", line)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			section_line = line
+			if (section_line ~ /^\[/) {
+				sub(/^\[[[:space:]]*/, "[", section_line)
+				sub(/[[:space:]]*\]$/, "]", section_line)
+				gsub(/[[:space:]]*\.[[:space:]]*/, ".", section_line)
+			}
+		}
+		section_line == section {
+			in_section = 1
+			next
+		}
+		section_line ~ /^\[/ {
+			in_section = 0
+		}
+		in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+			sub(/^[^=]*=[[:space:]]*/, "", line)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			gsub(/^"/, "", line)
+			gsub(/"$/, "", line)
+			gsub(/^\047/, "", line)
+			gsub(/\047$/, "", line)
+			print line
+			exit
+		}
+	' "$file"
+}
+
+existing_path_for_df() {
+	local path="$1"
+
+	while [[ ! -e "$path" && "$path" != "/" ]]; do
+		path="$(dirname "$path")"
+	done
+	if [[ -e "$path" ]]; then
+		printf '%s\n' "$path"
+	else
+		printf '/\n'
+	fi
+}
+
+human_bytes() {
+	local bytes="$1"
+	awk -v bytes="$bytes" '
+		BEGIN {
+			split("B KiB MiB GiB TiB", units, " ")
+			value = bytes
+			unit = 1
+			while (value >= 1024 && unit < 5) {
+				value = value / 1024
+				unit++
+			}
+			if (unit == 1) {
+				printf "%.0f %s", value, units[unit]
+			} else {
+				printf "%.1f %s", value, units[unit]
+			}
+		}
+	'
+}
+
+check_file() {
+	local path="$1"
+	local label="$2"
+
+	if [[ -f "$path" ]]; then
+		ok "$label exists: $path"
+	else
+		fail "$label missing: $path"
+	fi
+}
+
+check_docker() {
+	if ! have docker; then
+		fail "Docker CLI is not installed. Install Docker Engine before using Docker Compose."
+		return
+	fi
+	DOCKER_CLI_AVAILABLE=1
+
+	local docker_version
+	docker_version="$(docker --version 2>/dev/null || true)"
+	ok "Docker CLI available${docker_version:+: $docker_version}"
+
+	if docker info >/dev/null 2>&1; then
+		ok "Docker daemon is reachable"
+	else
+		fail "Docker daemon is not reachable. Start Docker or add this user to the docker group."
+	fi
+
+	if docker compose version >/dev/null 2>&1; then
+		local compose_version
+		COMPOSE_AVAILABLE=1
+		compose_version="$(docker compose version 2>/dev/null || true)"
+		ok "Docker Compose v2 available${compose_version:+: $compose_version}"
+	else
+		fail "Docker Compose v2 plugin is missing. On Ubuntu try: sudo apt install docker-compose-v2; with Docker's apt repo use: sudo apt install docker-compose-plugin docker-buildx-plugin"
+	fi
+
+	if docker buildx version >/dev/null 2>&1; then
+		ok "Docker Buildx plugin available"
+	else
+		warn "Docker Buildx plugin is missing. Builds still may work, but BuildKit caching and modern Docker workflows are less reliable."
+	fi
+
+	if have docker-compose; then
+		warn "Legacy docker-compose command is installed. Use 'docker compose' v2 for this project."
+	fi
+}
+
+check_env() {
+	local current_uid current_gid
+	current_uid="$(id -u)"
+	current_gid="$(id -g)"
+	MNEMONAS_UID_VALUE="$(env_value MNEMONAS_UID "$ENV_PATH")"
+	MNEMONAS_GID_VALUE="$(env_value MNEMONAS_GID "$ENV_PATH")"
+	MNEMONAS_HTTP_PORT_VALUE="$(env_value MNEMONAS_HTTP_PORT "$ENV_PATH")"
+
+	if [[ -f "$ENV_PATH" ]]; then
+		ok "Compose env file exists: $ENV_PATH"
+	else
+		warn "Compose env file is missing: $ENV_PATH. Copy .env.example to .env and set MNEMONAS_UID/MNEMONAS_GID before starting."
+	fi
+
+	if [[ -z "$HOST_PORT" ]]; then
+		HOST_PORT="${MNEMONAS_HTTP_PORT_VALUE:-8080}"
+	fi
+	if [[ "$HOST_PORT" =~ ^[0-9]+$ ]] && (( 10#$HOST_PORT >= 1 && 10#$HOST_PORT <= 65535 )); then
+		HOST_PORT_VALID=1
+		ok "Host HTTP port configured: $HOST_PORT"
+	else
+		fail "Host HTTP port must be a number from 1 to 65535, got: ${HOST_PORT:-<empty>}"
+	fi
+
+	if [[ -z "$MNEMONAS_UID_VALUE" || -z "$MNEMONAS_GID_VALUE" ]]; then
+		warn "MNEMONAS_UID/MNEMONAS_GID are not fully set; Compose will default to 1000:1000."
+		return
+	fi
+	if [[ ! "$MNEMONAS_UID_VALUE" =~ ^[0-9]+$ || ! "$MNEMONAS_GID_VALUE" =~ ^[0-9]+$ ]]; then
+		fail "MNEMONAS_UID/MNEMONAS_GID must be numeric, got $MNEMONAS_UID_VALUE:$MNEMONAS_GID_VALUE."
+		return
+	fi
+	if [[ "$MNEMONAS_UID_VALUE" == "0" || "$MNEMONAS_GID_VALUE" == "0" ]]; then
+		warn "Container is configured to run as root ($MNEMONAS_UID_VALUE:$MNEMONAS_GID_VALUE). Prefer your normal host UID/GID."
+	fi
+	if [[ "$MNEMONAS_UID_VALUE" == "$current_uid" && "$MNEMONAS_GID_VALUE" == "$current_gid" ]]; then
+		ok "Container UID/GID match current user: $MNEMONAS_UID_VALUE:$MNEMONAS_GID_VALUE"
+	else
+		warn "Container UID/GID are $MNEMONAS_UID_VALUE:$MNEMONAS_GID_VALUE, current user is $current_uid:$current_gid. Make sure $DATA_DIR is writable by the configured numeric user."
+	fi
+}
+
+mode_digit_has_write() {
+	local digit="$1"
+	(( (10#$digit & 2) != 0 ))
+}
+
+check_data_dir_writable_by_configured_user() {
+	local path="$1"
+	local uid="$2"
+	local gid="$3"
+
+	[[ -d "$path" ]] || return
+	[[ -n "$uid" && -n "$gid" ]] || return
+	[[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return
+	if ! have stat; then
+		warn "Cannot inspect data directory ownership because stat is unavailable."
+		return
+	fi
+
+	local stat_out owner group mode mode_tail owner_perm group_perm other_perm
+	stat_out="$(stat -c '%u %g %a' "$path" 2>/dev/null || true)"
+	[[ -n "$stat_out" ]] || return
+	read -r owner group mode <<< "$stat_out"
+	mode_tail="${mode: -3}"
+	owner_perm="${mode_tail:0:1}"
+	group_perm="${mode_tail:1:1}"
+	other_perm="${mode_tail:2:1}"
+
+	if [[ "$uid" == "$owner" ]] && mode_digit_has_write "$owner_perm"; then
+		ok "Data directory is writable by configured owner UID $uid"
+	elif [[ "$gid" == "$group" ]] && mode_digit_has_write "$group_perm"; then
+		ok "Data directory is writable by configured group GID $gid"
+	elif mode_digit_has_write "$other_perm"; then
+		warn "Data directory is writable through other-user permissions (mode $mode). Prefer chown/chmod instead of world-writable storage."
+	else
+		fail "Data directory may not be writable by container UID/GID $uid:$gid: $path is owned by $owner:$group with mode $mode."
+	fi
+
+	if [[ "$other_perm" == "0" ]]; then
+		ok "Data directory blocks other-user access"
+	else
+		warn "Data directory allows other-user access (mode $mode). Consider: chmod o-rwx '$path'"
+	fi
+}
+
+check_data_dir() {
+	local df_target available_kb available_bytes config_path configured_root
+
+	if [[ -d "$DATA_DIR" ]]; then
+		ok "Data directory exists: $DATA_DIR"
+	else
+		fail "Data directory missing: $DATA_DIR. Create it with: mkdir -p '$DATA_DIR' && chmod 750 '$DATA_DIR'"
+	fi
+
+	if [[ -d "$DATA_DIR" && -w "$DATA_DIR" ]]; then
+		ok "Data directory is writable by current user"
+	elif [[ -d "$DATA_DIR" ]]; then
+		warn "Data directory is not writable by current user. This is only OK if it is writable by MNEMONAS_UID/MNEMONAS_GID."
+	fi
+
+	check_data_dir_writable_by_configured_user "$DATA_DIR" "${MNEMONAS_UID_VALUE:-}" "${MNEMONAS_GID_VALUE:-}"
+
+	df_target="$(existing_path_for_df "$DATA_DIR")"
+	if available_kb="$(df -Pk "$df_target" 2>/dev/null | awk 'NR == 2 { print $4 }')" && [[ -n "$available_kb" ]]; then
+		available_bytes=$((available_kb * 1024))
+		if (( available_bytes < MIN_FREE_BYTES )); then
+			warn "Low free space near $DATA_DIR: $(human_bytes "$available_bytes") available. Recommended minimum is $(human_bytes "$MIN_FREE_BYTES")."
+		else
+			ok "Free space near $DATA_DIR: $(human_bytes "$available_bytes") available"
+		fi
+	fi
+
+	config_path="$DATA_DIR/config.toml"
+	if [[ ! -f "$config_path" ]]; then
+		ok "No existing Docker config found; first container start will create $config_path"
+		return
+	fi
+
+	configured_root="$(toml_value storage root "$config_path")"
+	if [[ -z "$configured_root" ]]; then
+		fail "$config_path exists but does not set [storage].root. For the default Compose file set: root = \"/data\""
+	elif [[ "$configured_root" == "/data" ]]; then
+		ok "Existing Docker config uses [storage].root = /data"
+	else
+		warn "$config_path uses [storage].root = $configured_root. Ensure docker-compose.yml mounts a host directory at that same container path, or data may be written into the container layer."
+	fi
+}
+
+check_port() {
+	local listeners
+
+	if [[ "$HOST_PORT_VALID" != "1" ]]; then
+		return
+	fi
+	if ! have ss; then
+		warn "Cannot check host port $HOST_PORT because ss is unavailable."
+		return
+	fi
+
+	listeners="$(ss -ltnH 2>/dev/null | awk -v suffix=":$HOST_PORT" '$4 ~ suffix "$" { print $4 }')"
+	if [[ -n "$listeners" ]]; then
+		fail "Host port $HOST_PORT is already listening: $listeners. Stop the service or change the Compose port mapping before starting MnemoNAS."
+	else
+		ok "Host port $HOST_PORT is available"
+	fi
+}
+
+check_compose_config() {
+	local config_out
+
+	[[ -f "$COMPOSE_FILE" ]] || return
+	if [[ "$DOCKER_CLI_AVAILABLE" != "1" || "$COMPOSE_AVAILABLE" != "1" ]]; then
+		return
+	fi
+	config_out="$(mktemp -t mnemonas-compose-config.XXXXXX)"
+	if [[ -f "$ENV_PATH" ]]; then
+		if docker compose -f "$COMPOSE_FILE" --env-file "$ENV_PATH" config --quiet > "$config_out" 2>&1; then
+			ok "Docker Compose config renders successfully"
+		else
+			fail "Docker Compose config failed: $(tr '\n' ' ' < "$config_out")"
+		fi
+	else
+		if docker compose -f "$COMPOSE_FILE" config --quiet > "$config_out" 2>&1; then
+			ok "Docker Compose config renders successfully"
+		else
+			fail "Docker Compose config failed: $(tr '\n' ' ' < "$config_out")"
+		fi
+	fi
+	rm -f "$config_out"
+}
+
+printf 'MnemoNAS Docker preflight\n'
+printf 'Repository: %s\n' "$REPO_ROOT"
+printf 'Data dir:   %s\n' "$DATA_DIR"
+printf '\n'
+
+check_file "$COMPOSE_FILE" "Compose file"
+check_docker
+check_env
+check_data_dir
+check_port
+check_compose_config
+
+printf '\nSummary: %d failure(s), %d warning(s)\n' "$FAILURES" "$WARNINGS"
+if (( FAILURES > 0 )); then
+	exit 1
+fi

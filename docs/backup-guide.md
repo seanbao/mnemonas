@@ -20,6 +20,10 @@ MnemoNAS 数据分为以下几个部分：
 
 默认路径使用 `storage.root = ~/.mnemonas`。如已调整 `storage.root`，以下路径需替换为实际根目录。
 
+systemd 部署通常使用 `/srv/mnemonas` 且目录归 `mnemonas` 服务用户所有；配置文件通常在 `/etc/mnemonas/config.toml`，不在数据目录内，需要单独纳入备份。直接读取备份时请用 `sudo`、root 定时任务，或把备份任务加入有权限的系统用户/组。
+
+备份内部数据时需要一致性窗口。没有 ZFS/Btrfs/LVM 快照时，建议先停止 `mnemonas` 和 `mnemonas-dataplane`，备份完成后再启动；如果底层文件系统支持快照，优先从快照目录备份。
+
 ```text
 ~/.mnemonas/
 ├── files/                  # 用户文件（原生文件）
@@ -41,26 +45,53 @@ MnemoNAS 数据分为以下几个部分：
 | `files/` | ⭐⭐⭐ 极高 | 用户文件内容，丢失无法恢复 |
 | `.mnemonas/` | ⭐⭐⭐ 极高 | 元数据与版本对象 |
 | `secrets.json` | ⭐⭐ 中等 | JWT/WebDAV 密钥；首启 Web 管理员密码不长期保存在此文件 |
-| `config.toml` | ⭐⭐ 中等 | 默认位于 `~/.mnemonas/` |
+| `config.toml` | ⭐⭐ 中等 | 直接运行默认位于 `~/.mnemonas/`；systemd 安装通常位于 `/etc/mnemonas/config.toml` |
 
 ---
 
 ## 🔄 备份方法
 
-### 方法 1：使用 rclone（推荐）
+### 备份前：先获得一致性来源
+
+备份 MnemoNAS 时不要在服务运行中直接复制活跃数据目录，尤其不要把 `files/` 和 `.mnemonas/` 分开同步。推荐二选一：
+
+1. 使用 ZFS/Btrfs/LVM 快照，从只读快照目录备份。
+2. 没有快照能力时，先停止 `mnemonas` 和 `mnemonas-dataplane`，完成备份后再启动。
+
+下面的示例都假设 `SOURCE_DIR` 是一致性来源：可以是快照挂载目录，也可以是停服务后的 `storage.root`。
+
+systemd 部署的冷备份窗口：
+
+```bash
+sudo systemctl stop mnemonas mnemonas-dataplane
+# 运行 rclone/restic/rsync 备份
+sudo install -D -m 0600 /etc/mnemonas/config.toml /backup/mnemonas-config.toml
+sudo systemctl start mnemonas-dataplane mnemonas
+```
+
+Docker 部署的冷备份窗口：
+
+```bash
+docker compose stop
+# 运行 rclone/restic/rsync 备份
+docker compose start
+```
+
+### 方法 1：使用 rclone
 
 [rclone](https://rclone.org/) 是强大的命令行同步工具，支持数十种云存储。
 
 #### 安装 rclone
 
 ```bash
-# Linux/macOS
-curl https://rclone.org/install.sh | sudo bash
-
-# 或使用包管理器
+# Debian/Ubuntu
 sudo apt install rclone      # Debian/Ubuntu
+
+# macOS
 brew install rclone          # macOS
 ```
+
+如果发行版仓库里的 rclone 版本过旧，再参考 rclone 官方安装文档选择合适的安装方式；避免在生产机器上直接复制执行未审阅的管道安装命令。
 
 #### 配置远程存储
 
@@ -86,34 +117,21 @@ rclone config
 
 ```bash
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# 配置
-MNEMONAS_DIR="$HOME/.mnemonas"
-CONFIG_FILE="$HOME/.mnemonas/config.toml"
+# 配置：SOURCE_DIR 必须是快照目录，或已停服务后的 storage.root
+SOURCE_DIR="${SOURCE_DIR:-$HOME/.mnemonas}"
 REMOTE="aliyun:mnemonas-backup"  # 改为你的远程配置
 DATE=$(date +%Y%m%d)
 
 echo "=== MnemoNAS 备份开始 $(date) ==="
 
-# 同步用户文件
-echo "正在同步 files 目录..."
-rclone sync "$MNEMONAS_DIR/files" "$REMOTE/files" \
+echo "正在同步完整存储根目录..."
+rclone sync "$SOURCE_DIR" "$REMOTE/current" \
     --progress \
     --transfers 4 \
-    --checkers 8
-
-# 同步内部数据
-echo "正在同步 .mnemonas 目录..."
-rclone sync "$MNEMONAS_DIR/.mnemonas" "$REMOTE/.mnemonas" \
-    --progress
-
-# 备份配置文件
-echo "正在备份配置..."
-if [ -f "$CONFIG_FILE" ]; then
-  rclone copy "$CONFIG_FILE" "$REMOTE/config/" \
-    --backup-dir "$REMOTE/config-history/$DATE"
-fi
+    --checkers 8 \
+    --backup-dir "$REMOTE/history/$DATE"
 
 echo "=== 备份完成 $(date) ==="
 ```
@@ -157,7 +175,8 @@ restic init --repo s3:s3.amazonaws.com/bucket/mnemonas
 
 ```bash
 # 备份
-restic backup ~/.mnemonas \
+SOURCE_DIR="${SOURCE_DIR:-$HOME/.mnemonas}"
+restic backup "$SOURCE_DIR" \
     --repo /backup/mnemonas-restic \
     --tag mnemonas
 
@@ -190,12 +209,13 @@ restic forget \
 
 ```bash
 #!/bin/bash
-# 同步到外置硬盘
+# 同步到外置硬盘；SOURCE_DIR 必须是快照目录，或已停服务后的 storage.root
+SOURCE_DIR="${SOURCE_DIR:-$HOME/.mnemonas}"
 BACKUP_DIR="/mnt/backup-drive/mnemonas"
 
-rsync -avz --delete \
+rsync -aHAX --delete \
     --exclude='*.tmp' \
-    ~/.mnemonas/ \
+    "$SOURCE_DIR/" \
     "$BACKUP_DIR/"
 ```
 
@@ -203,7 +223,7 @@ rsync -avz --delete \
 
 ### 方法 4：Docker 目录备份
 
-如果使用 Docker 部署（宿主机目录映射到 `/root/.mnemonas`）：
+如果使用 Docker 部署（宿主机 `~/.mnemonas` 映射到容器内 `/data`）：
 
 ```bash
 # 停止服务
@@ -220,15 +240,22 @@ docker compose start
 
 ## 🔙 恢复数据
 
+恢复前先停止 MnemoNAS，避免新写入和恢复目录交叉。systemd 部署通常恢复到 `/srv/mnemonas`，Docker 部署通常恢复到宿主机映射的 `~/.mnemonas`。
+
 ### 从 rclone 恢复
 
 ```bash
-# 恢复到新目录
-rclone sync aliyun:mnemonas-backup ~/.mnemonas-restored
+# systemd 示例：恢复到临时目录
+sudo systemctl stop mnemonas mnemonas-dataplane
+sudo mkdir -p /srv/mnemonas-restored
+sudo rclone sync aliyun:mnemonas-backup/current /srv/mnemonas-restored
 
 # 验证后替换原目录
-mv ~/.mnemonas ~/.mnemonas-old
-mv ~/.mnemonas-restored ~/.mnemonas
+sudo mv /srv/mnemonas /srv/mnemonas-old
+sudo mv /srv/mnemonas-restored /srv/mnemonas
+sudo chown -R mnemonas:mnemonas /srv/mnemonas
+sudo chmod 0750 /srv/mnemonas /srv/mnemonas/files
+sudo chmod 0700 /srv/mnemonas/.mnemonas
 ```
 
 ### 从 restic 恢复
@@ -237,25 +264,25 @@ mv ~/.mnemonas-restored ~/.mnemonas
 # 查看可用快照
 restic snapshots --repo /backup/mnemonas-restic
 
-# 恢复指定快照
+# 恢复指定快照到临时目录，验证后再替换原 storage.root
+sudo systemctl stop mnemonas mnemonas-dataplane
 restic restore <snapshot-id> \
     --repo /backup/mnemonas-restic \
-    --target /restore
-
-# 或恢复到指定路径的特定目录
-restic restore latest \
-    --repo /backup/mnemonas-restic \
-    --target ~/.mnemonas \
-    --include /home/user/.mnemonas/.mnemonas \
-    --include /home/user/.mnemonas/files
+    --target /restore/mnemonas
 ```
+
+如果恢复目标是 Docker 的宿主机目录，把上面的服务命令替换为 `docker compose stop` / `docker compose start`，并确认目录所有者与 `.env` 中的 `MNEMONAS_UID` / `MNEMONAS_GID` 一致。
 
 ### 验证恢复
 
 恢复后务必验证：
 
 ```bash
-# 启动服务
+# systemd 启动服务
+sudo systemctl start mnemonas-dataplane mnemonas
+sudo mnemonas-doctor
+
+# Docker 启动服务
 docker compose up -d
 
 # 检查健康状态
@@ -280,7 +307,8 @@ curl -X POST \
 restic check --repo /backup/mnemonas-restic
 
 # rclone 验证
-rclone check ~/.mnemonas aliyun:mnemonas-backup
+SOURCE_DIR="${SOURCE_DIR:-$HOME/.mnemonas}"
+rclone check "$SOURCE_DIR" aliyun:mnemonas-backup/current
 ```
 
 ### 备份加密
@@ -299,11 +327,16 @@ rclone config
 设置备份失败告警：
 
 ```bash
-# backup.sh 末尾添加
-if [ $? -ne 0 ]; then
-    curl -X POST "https://your-webhook.com/alert" \
-        -d "message=MnemoNAS 备份失败"
-fi
+# backup.sh 开头添加；set -e 退出时也能触发
+notify_failure() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        curl -fsS -X POST "https://your-webhook.com/alert" \
+            -d "message=MnemoNAS 备份失败" || true
+    fi
+    exit "$status"
+}
+trap notify_failure EXIT
 ```
 
 ### 勿备份到同一硬盘
@@ -317,8 +350,8 @@ fi
 ### 家庭用户（最小成本）
 
 ```text
-日常备份：每周 1 次 rclone 同步到网盘（阿里云盘/百度网盘）
-月度备份：每月 1 次 rsync 到外置硬盘
+日常备份：每周停服务或从快照用 rclone 同步到网盘
+月度备份：停服务或从快照用 rsync 备份到外置硬盘
 ```
 
 ### 进阶用户
@@ -332,9 +365,9 @@ fi
 ### 生产环境
 
 ```text
-实时同步：rclone/lsyncd 实时同步到热备服务器
-每日快照：restic 保留 30 天每日快照
-异地备份：跨区域复制到另一云厂商
+每日快照：从 ZFS/Btrfs/LVM 快照运行 restic，保留 30 天每日快照
+异地备份：从同一快照复制到另一云厂商或异地机器
+恢复演练：每季度至少做一次抽样恢复
 ```
 
 ---

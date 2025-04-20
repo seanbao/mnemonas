@@ -51,7 +51,7 @@ prefix = "/dav"
 read_only = false
 auth_type = "basic"          # none, basic
 username = "admin"           # Basic Auth 用户名（默认 admin）
-password = ""                # Basic Auth 密码（留空则首次启动时自动生成并显示）
+password = ""                # Basic Auth 密码（留空则首次启动时自动生成并写入 secrets.json）
 
 [auth]
 enabled = true               # 启用后所有 API 需要 JWT 认证

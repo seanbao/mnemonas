@@ -18,10 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zeebo/blake3"
+
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
-	"github.com/zeebo/blake3"
 )
 
 // Common errors
@@ -93,6 +94,9 @@ var createStorageCopyTempFile = createStorageTempFile
 var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
 	return ws.Walk(ctx, root, fn)
 }
+var readMountInfo = func() ([]byte, error) {
+	return os.ReadFile("/proc/self/mountinfo")
+}
 
 const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
 
@@ -124,6 +128,17 @@ type TrashItem struct {
 	IsDir        bool      `json:"is_dir"`
 	HadVersions  bool      `json:"had_versions"`
 	RestoreData  []byte    `json:"-"`
+}
+
+// DiskStats describes capacity for the filesystem hosting the workspace.
+type DiskStats struct {
+	TotalBytes                uint64
+	FreeBytes                 uint64
+	AvailableBytes            uint64
+	UsedBytes                 uint64
+	UsageRatio                float64
+	FileSystemType            string
+	NativeDataChecksumSupport bool
 }
 
 type PathDeleteHookResult struct {
@@ -1252,10 +1267,6 @@ func mapWorkspaceReadablePathError(err error) error {
 	return err
 }
 
-func mapWorkspaceOpenFileError(err error) error {
-	return mapWorkspaceReadablePathError(err)
-}
-
 func mapWorkspaceWritablePathError(err error) error {
 	if errors.Is(err, workspace.ErrFileTooLarge) {
 		return fmt.Errorf("%w (max: %d bytes)", ErrFileTooLarge, defaultMaxWriteSize)
@@ -2143,12 +2154,206 @@ func (fs *FileSystem) GetTrashStats(ctx context.Context) (count int, totalSize i
 	return fs.versions.GetTrashStats(ctx)
 }
 
-// GetFileCount returns the number of indexed files
+// GetFileCount returns the number of current workspace files.
 func (fs *FileSystem) GetFileCount(ctx context.Context) (int, error) {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
+	workspaceRef := fs.workspace
+	fs.mu.RUnlock()
 
-	return fs.versions.CountFiles(ctx)
+	count := 0
+	err := walkStorageWorkspace(ctx, workspaceRef, "/", func(_ string, info *workspace.FileInfo) error {
+		if info == nil || info.IsDir {
+			return nil
+		}
+		count++
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// DiskStats returns capacity for the filesystem hosting the workspace.
+func (fs *FileSystem) DiskStats() (*DiskStats, error) {
+	fs.mu.RLock()
+	workspaceRef := fs.workspace
+	fs.mu.RUnlock()
+	if workspaceRef == nil {
+		return nil, errors.New("workspace not initialized")
+	}
+
+	return diskStatsForPath(workspaceRef.Root())
+}
+
+func diskStatsForPath(root string) (*DiskStats, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(root, &stat); err != nil {
+		return nil, err
+	}
+	if stat.Bsize <= 0 {
+		return nil, errors.New("filesystem reported invalid block size")
+	}
+
+	blockSize := uint64(stat.Bsize)
+	totalBytes := stat.Blocks * blockSize
+	freeBytes := stat.Bfree * blockSize
+	availableBytes := stat.Bavail * blockSize
+	usedBytes := uint64(0)
+	if totalBytes > freeBytes {
+		usedBytes = totalBytes - freeBytes
+	}
+
+	usageRatio := 0.0
+	if totalBytes > 0 {
+		usageRatio = float64(usedBytes) / float64(totalBytes)
+	}
+
+	fsType := filesystemTypeForPath(root, uint64(stat.Type))
+	return &DiskStats{
+		TotalBytes:                totalBytes,
+		FreeBytes:                 freeBytes,
+		AvailableBytes:            availableBytes,
+		UsedBytes:                 usedBytes,
+		UsageRatio:                usageRatio,
+		FileSystemType:            fsType,
+		NativeDataChecksumSupport: filesystemHasNativeDataChecksumSupport(fsType),
+	}, nil
+}
+
+func filesystemTypeForPath(root string, magic uint64) string {
+	mountInfo, err := readMountInfo()
+	if err == nil {
+		if fsType, err := filesystemTypeFromMountInfo(root, mountInfo); err == nil && fsType != "" {
+			return fsType
+		}
+	}
+	return filesystemTypeFromMagic(magic)
+}
+
+func filesystemTypeFromMountInfo(root string, mountInfo []byte) (string, error) {
+	target, err := normalizeStorageHostPath(root)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		target = resolved
+	}
+	target = filepath.Clean(target)
+
+	bestMountLen := -1
+	bestType := ""
+	for _, line := range strings.Split(string(mountInfo), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		separator := strings.Index(line, " - ")
+		if separator < 0 {
+			continue
+		}
+		mountFields := strings.Fields(line[:separator])
+		fsFields := strings.Fields(line[separator+3:])
+		if len(mountFields) < 5 || len(fsFields) < 1 {
+			continue
+		}
+		mountPoint, err := unescapeMountInfoPath(mountFields[4])
+		if err != nil {
+			continue
+		}
+		mountPoint = filepath.Clean(mountPoint)
+		if !pathWithinMount(target, mountPoint) {
+			continue
+		}
+		if len(mountPoint) > bestMountLen {
+			bestMountLen = len(mountPoint)
+			bestType = fsFields[0]
+		}
+	}
+	if bestType == "" {
+		return "", fmt.Errorf("mount info did not contain path %s", target)
+	}
+	return strings.ToLower(bestType), nil
+}
+
+func pathWithinMount(target, mountPoint string) bool {
+	rel, err := filepath.Rel(mountPoint, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func unescapeMountInfoPath(value string) (string, error) {
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		if value[i] != '\\' {
+			builder.WriteByte(value[i])
+			continue
+		}
+		if i+3 >= len(value) {
+			return "", fmt.Errorf("invalid mountinfo escape in %q", value)
+		}
+		decoded, ok := decodeMountInfoOctal(value[i+1 : i+4])
+		if !ok {
+			return "", fmt.Errorf("invalid mountinfo escape in %q", value)
+		}
+		builder.WriteByte(decoded)
+		i += 3
+	}
+	return builder.String(), nil
+}
+
+func decodeMountInfoOctal(value string) (byte, bool) {
+	if len(value) != 3 {
+		return 0, false
+	}
+	var decoded byte
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '7' {
+			return 0, false
+		}
+		decoded = decoded*8 + value[i] - '0'
+	}
+	return decoded, true
+}
+
+func filesystemTypeFromMagic(magic uint64) string {
+	switch magic {
+	case 0x01021994:
+		return "tmpfs"
+	case 0xEF53:
+		return "ext"
+	case 0x2FC12FC1:
+		return "zfs"
+	case 0x9123683E:
+		return "btrfs"
+	case 0x58465342:
+		return "xfs"
+	case 0x65735546:
+		return "fuse"
+	case 0x2011BAB0:
+		return "exfat"
+	case 0x6969:
+		return "nfs"
+	case 0x517B:
+		return "smb"
+	case 0xFF534D42:
+		return "cifs"
+	case 0xFE534D42:
+		return "smb2"
+	default:
+		return "unknown"
+	}
+}
+
+func filesystemHasNativeDataChecksumSupport(fsType string) bool {
+	switch strings.ToLower(strings.TrimSpace(fsType)) {
+	case "zfs", "btrfs":
+		return true
+	default:
+		return false
+	}
 }
 
 // ============================================================================
@@ -2351,17 +2556,12 @@ func (fs *FileSystem) shouldForceRetentionSweepLocked() bool {
 		return false
 	}
 
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(fs.workspace.Root(), &stat); err != nil {
+	stats, err := diskStatsForPath(fs.workspace.Root())
+	if err != nil {
 		return false
 	}
 
-	freeBytes := stat.Bavail * uint64(stat.Bsize)
-	return freeBytes < fs.config.MinFreeSpace
-}
-
-func (fs *FileSystem) refreshFileIndex(ctx context.Context, name string) {
-	_ = fs.syncFileIndexFromWorkspace(ctx, name)
+	return stats.AvailableBytes < fs.config.MinFreeSpace
 }
 
 func (fs *FileSystem) describeDeleteTarget(ctx context.Context, name string, info *workspace.FileInfo) (int64, bool, error) {
@@ -2750,18 +2950,6 @@ func syncStorageDir(dir string) error {
 	defer dirHandle.Close()
 
 	return dirHandle.Sync()
-}
-
-func syncStorageRenameDirs(src, dst string) error {
-	srcDir := filepath.Dir(src)
-	dstDir := filepath.Dir(dst)
-	if srcDir == dstDir {
-		return syncStoragePathDir(srcDir)
-	}
-	if err := syncStoragePathDir(dstDir); err != nil {
-		return err
-	}
-	return syncStoragePathDir(srcDir)
 }
 
 func collectMissingStorageDirs(dir string) ([]string, error) {

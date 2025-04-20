@@ -21,7 +21,7 @@ describe('Settings API', () => {
         success: true,
         data: {
           server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
-          storage: { root: '/root/.mnemonas' },
+          storage: { root: '~/.mnemonas' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
@@ -44,7 +44,7 @@ describe('Settings API', () => {
         success: true,
         data: {
           server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
-          storage: { root: '/root/.mnemonas' },
+          storage: { root: '~/.mnemonas' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
@@ -67,7 +67,7 @@ describe('Settings API', () => {
         success: true,
         data: {
           server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
-          storage: { root: '/root/.mnemonas' },
+          storage: { root: '~/.mnemonas' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, runtime_enabled: false, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           share: { enabled: true, base_url: 'http://localhost:8080' },
@@ -98,7 +98,7 @@ describe('Settings API', () => {
         success: true,
         data: {
           server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s' },
-          storage: { root: '/root/.mnemonas' },
+          storage: { root: '~/.mnemonas' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },

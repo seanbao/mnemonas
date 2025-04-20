@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/seanbao/mnemonas/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+
+	pb "github.com/seanbao/mnemonas/proto"
 )
 
 type testDataPlaneServer struct {

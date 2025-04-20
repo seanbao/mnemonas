@@ -6,9 +6,20 @@
 
 系统按以下顺序查找配置文件：
 
-1. `$HOME/.mnemonas/config.toml` — 用户目录（与数据同目录）
+1. `nasd --config /path/to/config.toml` — 显式指定的配置文件
+2. `$HOME/.mnemonas/config.toml` — 用户目录（与数据同目录）
 
-如果未找到配置文件，系统使用默认配置。
+如果未找到配置文件，系统使用默认配置。Ubuntu/systemd 安装脚本默认生成 `/etc/mnemonas/config.toml`，并在 systemd unit 中用 `--config` 指向该文件。
+
+## 配置检查
+
+修改配置后先运行：
+
+```bash
+nasd --check-config --config /etc/mnemonas/config.toml
+```
+
+该命令会校验 TOML、端口、时长、路径等硬性错误，也会输出可部署但风险较高的安全警告。典型警告包括：关闭 `auth.enabled` 后仍监听非 loopback 地址、WebDAV 使用 `auth_type = "none"` 且外部网络可访问、dataplane gRPC 监听到外部网络。长期运行时应把这些 `warning:` 当作上线前检查项处理。
 
 ## 完整配置示例
 
@@ -64,7 +75,7 @@ prefix = "/dav"
 read_only = false
 auth_type = "basic"
 username = "admin"
-password = "changeme"
+password = ""
 
 [auth]
 enabled = true
@@ -192,8 +203,9 @@ auto_generate = true
 
 **存储目录说明：**
 
-- **root**: 存储根目录。用户文件位于 `root/files`，内部数据位于 `root/.mnemonas`
+- **root**: 存储根目录，不能设置为文件系统根目录 `/`。用户文件位于 `root/files`，内部数据位于 `root/.mnemonas`
 - 内部数据目录结构固定在 `root/.mnemonas` 下。
+- 启动时会将 `root` 和 `root/files` 权限收紧为 `0750`，内部目录为 `0700`。
 
 **示例：**
 
@@ -282,6 +294,8 @@ max_versioned_size = 104857600
 
 配置与 Rust 数据面服务的通信。
 
+数据面 gRPC 端口用于 `nasd` 和 Rust dataplane 之间的内部通信，不提供面向外部客户端的认证层。除非你有明确的私有网络隔离方案，否则保持 `127.0.0.1:9090`，不要把 dataplane gRPC 或 HTTP 健康端口直接暴露到公网或不可信局域网。
+
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
 | `grpc_address` | string | `"127.0.0.1:9090"` | Rust 数据面 gRPC 地址 |
@@ -321,6 +335,8 @@ max_retries = 5
 
 - `min_chunk_size < avg_chunk_size < max_chunk_size`
 - 建议：`min = avg / 4`，`max = avg * 4`
+
+这些参数由 Rust dataplane 在启动时读取。Docker 启动脚本和 systemd 安装的 `mnemonas-dataplane-start` helper 会把配置中的字节值传给 dataplane；修改后需要重启 dataplane 才会影响新的对象写入。
 
 **示例：**
 
@@ -362,7 +378,7 @@ max_chunk_size = 1048576  # 1MB
 3. 考虑 `read_only = true` 限制写入
 
 **自动生成行为：**
-当 `auth_type = "basic"` 且 `password` 为空时，首次启动会自动生成密码，并写入 `<storage.root>/secrets.json`；同时在 `username` 为空时使用默认值 `admin`。
+当 `auth_type = "basic"` 且 `password` 为空时，首次启动会自动生成密码，并写入 `<storage.root>/secrets.json`；同时在 `username` 为空时使用默认值 `admin`。启动日志只提示凭据位置，不输出明文 WebDAV 密码。
 
 **示例：**
 
@@ -396,6 +412,8 @@ enabled = true
 access_token_ttl = "15m"
 refresh_token_ttl = "168h"
 ```
+
+首次启动且 `users_file` 不存在时，MnemoNAS 会创建默认管理员账号，并把初始密码写入 `users_file` 同目录的 `initial-password.txt`。默认位置是 `<storage.root>/.mnemonas/initial-password.txt`；该文件会在对应管理员首次成功登录后自动删除。
 
 ---
 
@@ -441,6 +459,8 @@ base_url = "https://nas.example.com"
 | `webhook_url` | string | `""` | Webhook URL |
 | `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query |
 | `webhook_headers` | string[] | `[]` | 自定义 Header（"Key:Value"） |
+
+健康页和诊断导出会显示告警是否启用、运行态是否可用、最近一次检查级别和是否配置了 Webhook；不会暴露 `webhook_url` 或 `webhook_headers`。
 
 **示例：**
 
@@ -523,7 +543,7 @@ MNEMONAS_WEBDAV_ENABLED=false
 系统在启动时自动验证配置：
 
 - `port` 必须在 1-65535 范围内
-- `storage.root` 不能为空
+- `storage.root` 不能为空，且不能是文件系统根目录 `/`
 - `grpc_address` 不能为空
 - CDC 参数必须满足 `min < avg < max`
 
@@ -547,9 +567,14 @@ root = "~/.mnemonas"
 enabled = true
 auth_type = "none"
 
+[auth]
+enabled = false
+
 [log]
 level = "debug"
 ```
+
+仅在本机开发时禁用认证。只把 `webdav.auth_type` 设为 `none` 不会关闭 Web UI/API 登录；如需完全无认证，本地环境还需要显式设置 `auth.enabled = false`。
 
 ### 生产环境
 
@@ -573,7 +598,7 @@ min_free_space = 107374182400  # 100GB
 enabled = true
 auth_type = "basic"
 username = "admin"
-password = "${MNEMONAS_WEBDAV_PASSWORD}"
+password = ""  # 留空时首次启动自动生成；也可以改成密码管理器生成的强密码
 
 [log]
 level = "info"
@@ -581,13 +606,16 @@ format = "json"
 output = "/var/log/mnemonas/server.log"
 ```
 
+当前配置文件不会展开环境变量；不要把 `${...}` 写入 TOML 并期待运行时替换。
+
 ### 只读归档服务器
 
 ```toml
 [webdav]
 enabled = true
 read_only = true
-auth_type = "none"
+auth_type = "basic"
+password = ""
 
 [storage.retention]
 gc_interval = "0"  # 禁用自动版本清理

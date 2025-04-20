@@ -27,6 +27,7 @@ import (
 	"unsafe"
 
 	"github.com/rs/zerolog"
+
 	"github.com/seanbao/mnemonas/internal/activity"
 	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/auth"
@@ -109,11 +110,20 @@ func testDataplaneAddr() string {
 type fakeAlertMonitor struct {
 	updateCount int
 	lastConfig  alerts.Config
+	lastStats   *alerts.StorageStats
 }
 
 func (m *fakeAlertMonitor) UpdateConfig(cfg alerts.Config) {
 	m.updateCount++
 	m.lastConfig = cfg
+}
+
+func (m *fakeAlertMonitor) LastStats() *alerts.StorageStats {
+	if m.lastStats == nil {
+		return nil
+	}
+	clone := *m.lastStats
+	return &clone
 }
 
 type fakeRetentionMonitor struct {
@@ -885,6 +895,9 @@ func TestServer_Health(t *testing.T) {
 	if !strings.Contains(body, "healthy") {
 		t.Error("Response should contain 'healthy'")
 	}
+	if !strings.Contains(body, `"version"`) {
+		t.Error("Response should contain runtime version metadata")
+	}
 }
 
 func TestServer_ObservabilityEndpoints_BypassThrottle(t *testing.T) {
@@ -1340,6 +1353,44 @@ func TestServer_Version(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "MnemoNAS") {
 		t.Error("Response should contain 'MnemoNAS'")
+	}
+}
+
+func TestServer_BuildMetadataUsesConfiguredValues(t *testing.T) {
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		AppVersion: "v9.9.9-test",
+		BuildTime:  "2026-04-29T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{name: "health", path: "/health"},
+		{name: "version", path: "/api/v1/version"},
+		{name: "diagnostics", path: "/api/v1/diagnostics"},
+		{name: "diagnostics export", path: "/api/v1/diagnostics-export"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want %d: %s", tt.path, w.Code, http.StatusOK, w.Body.String())
+			}
+			body := w.Body.String()
+			if !strings.Contains(body, "v9.9.9-test") {
+				t.Fatalf("%s response should contain configured version, got %s", tt.path, body)
+			}
+			if tt.path != "/health" && !strings.Contains(body, "2026-04-29T00:00:00Z") {
+				t.Fatalf("%s response should contain configured build time, got %s", tt.path, body)
+			}
+		})
 	}
 }
 
@@ -2425,6 +2476,12 @@ func TestServer_DownloadFile_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	}
 	if cacheControl := w.Header().Get("Cache-Control"); cacheControl != "private, no-cache" {
 		t.Fatalf("download Cache-Control = %q, want %q", cacheControl, "private, no-cache")
+	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("download X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("download Content-Security-Policy = %q, want sandboxed default-src none", got)
 	}
 	etag := w.Header().Get("ETag")
 	if etag == "" {
@@ -3564,6 +3621,12 @@ func TestServer_DownloadVersion_UsesExtensionContentTypeForPreview(t *testing.T)
 	if contentType := w.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
 		t.Fatalf("version preview Content-Type = %q, want %q", contentType, "text/plain; charset=utf-8")
 	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("version preview X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("version preview Content-Security-Policy = %q, want sandboxed default-src none", got)
+	}
 	if body := w.Body.String(); body != "v1" {
 		t.Fatalf("version preview body = %q, want %q", body, "v1")
 	}
@@ -4262,6 +4325,113 @@ func TestServer_Stats_OmitsFileCountWhenCollectionFails(t *testing.T) {
 	}
 }
 
+func TestServer_Stats_UsesTimeoutForFileCount(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	originalGetFileCount := getFileCount
+	var sawDeadline bool
+	getFileCount = func(_ *storage.FileSystem, ctx context.Context) (int, error) {
+		_, sawDeadline = ctx.Deadline()
+		return 0, nil
+	}
+	defer func() { getFileCount = originalGetFileCount }()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Stats status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !sawDeadline {
+		t.Fatal("expected file count context to include a deadline")
+	}
+}
+
+func TestServer_Stats_IncludesDiskStats(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	originalGetDiskStats := getDiskStats
+	getDiskStats = func(_ *storage.FileSystem) (*storage.DiskStats, error) {
+		return &storage.DiskStats{
+			TotalBytes:                1000,
+			FreeBytes:                 250,
+			AvailableBytes:            200,
+			UsedBytes:                 750,
+			UsageRatio:                0.75,
+			FileSystemType:            "zfs",
+			NativeDataChecksumSupport: true,
+		}, nil
+	}
+	defer func() { getDiskStats = originalGetDiskStats }()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Stats status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+	if available, ok := payload.Data["disk_stats_available"].(bool); !ok || !available {
+		t.Fatalf("expected stats to mark disk stats available, got %v", payload.Data["disk_stats_available"])
+	}
+	for key, want := range map[string]float64{
+		"disk_total":       1000,
+		"disk_free":        250,
+		"disk_available":   200,
+		"disk_used":        750,
+		"disk_usage_ratio": 0.75,
+	} {
+		got, ok := payload.Data[key].(float64)
+		if !ok || got != want {
+			t.Fatalf("%s = %v, want %v", key, payload.Data[key], want)
+		}
+	}
+	if got, ok := payload.Data["disk_filesystem_type"].(string); !ok || got != "zfs" {
+		t.Fatalf("disk_filesystem_type = %v, want zfs", payload.Data["disk_filesystem_type"])
+	}
+	if got, ok := payload.Data["disk_native_data_checksum_support"].(bool); !ok || !got {
+		t.Fatalf("disk_native_data_checksum_support = %v, want true", payload.Data["disk_native_data_checksum_support"])
+	}
+}
+
+func TestServer_Stats_OmitsDiskFieldsWhenCollectionFails(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	originalGetDiskStats := getDiskStats
+	getDiskStats = func(_ *storage.FileSystem) (*storage.DiskStats, error) {
+		return nil, errors.New("disk stats failed")
+	}
+	defer func() { getDiskStats = originalGetDiskStats }()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Stats status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+	if available, ok := payload.Data["disk_stats_available"].(bool); !ok || available {
+		t.Fatalf("expected stats to mark disk stats unavailable, got %v", payload.Data["disk_stats_available"])
+	}
+	for _, key := range []string{"disk_total", "disk_free", "disk_available", "disk_used", "disk_usage_ratio", "disk_filesystem_type", "disk_native_data_checksum_support"} {
+		if _, ok := payload.Data[key]; ok {
+			t.Fatalf("expected stats to omit %s when disk stats fail, got %v", key, payload.Data[key])
+		}
+	}
+}
+
 func TestServer_Stats_OmitsStorageFieldsWhenDataplaneUnavailable(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	server.dataplane = nil
@@ -4330,7 +4500,10 @@ func TestServer_Stats_HidesGlobalStatsForNonAdminHomeScopedUser(t *testing.T) {
 	if available, ok := payload.Data["storage_stats_available"].(bool); !ok || available {
 		t.Fatalf("expected non-admin stats to hide storage stats, got %v", payload.Data["storage_stats_available"])
 	}
-	for _, key := range []string{"total_files", "total_chunks", "total_size", "unique_size", "dedup_ratio"} {
+	if available, ok := payload.Data["disk_stats_available"].(bool); !ok || available {
+		t.Fatalf("expected non-admin stats to hide disk stats, got %v", payload.Data["disk_stats_available"])
+	}
+	for _, key := range []string{"total_files", "total_chunks", "total_size", "unique_size", "dedup_ratio", "disk_total", "disk_free", "disk_available", "disk_used", "disk_usage_ratio", "disk_filesystem_type", "disk_native_data_checksum_support"} {
 		if _, ok := payload.Data[key]; ok {
 			t.Fatalf("expected non-admin stats to omit %s, got %v", key, payload.Data[key])
 		}
@@ -4491,6 +4664,126 @@ func TestServer_Diagnostics_MarksTrashStatsUnavailableWhenCollectionFails(t *tes
 	}
 	if _, ok := payload.Data.Filesystem["trash_size"]; ok {
 		t.Fatalf("expected diagnostics to omit trash_size on trash stats failure, got %v", payload.Data.Filesystem["trash_size"])
+	}
+}
+
+func TestServer_Diagnostics_IncludesDiskStats(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	originalGetDiskStats := getDiskStats
+	getDiskStats = func(_ *storage.FileSystem) (*storage.DiskStats, error) {
+		return &storage.DiskStats{
+			TotalBytes:                2000,
+			FreeBytes:                 500,
+			AvailableBytes:            450,
+			UsedBytes:                 1500,
+			UsageRatio:                0.75,
+			FileSystemType:            "btrfs",
+			NativeDataChecksumSupport: true,
+		}, nil
+	}
+	defer func() { getDiskStats = originalGetDiskStats }()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Filesystem map[string]any `json:"filesystem"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if available, ok := payload.Data.Filesystem["disk_stats_available"].(bool); !ok || !available {
+		t.Fatalf("expected diagnostics to mark disk stats available, got %v", payload.Data.Filesystem["disk_stats_available"])
+	}
+	for key, want := range map[string]float64{
+		"disk_total":       2000,
+		"disk_free":        500,
+		"disk_available":   450,
+		"disk_used":        1500,
+		"disk_usage_ratio": 0.75,
+	} {
+		got, ok := payload.Data.Filesystem[key].(float64)
+		if !ok || got != want {
+			t.Fatalf("%s = %v, want %v", key, payload.Data.Filesystem[key], want)
+		}
+	}
+	if got, ok := payload.Data.Filesystem["disk_filesystem_type"].(string); !ok || got != "btrfs" {
+		t.Fatalf("disk_filesystem_type = %v, want btrfs", payload.Data.Filesystem["disk_filesystem_type"])
+	}
+	if got, ok := payload.Data.Filesystem["disk_native_data_checksum_support"].(bool); !ok || !got {
+		t.Fatalf("disk_native_data_checksum_support = %v, want true", payload.Data.Filesystem["disk_native_data_checksum_support"])
+	}
+}
+
+func TestServer_Diagnostics_IncludesSanitizedAlertsStatus(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	cfg := server.currentConfig()
+	cfg.Alerts.Enabled = true
+	cfg.Alerts.CheckInterval = 30 * time.Minute
+	cfg.Alerts.ThresholdPct = 85
+	cfg.Alerts.CriticalPct = 92
+	cfg.Alerts.MinFreeBytes = 20 * 1024 * 1024 * 1024
+	cfg.Alerts.CooldownPeriod = 2 * time.Hour
+	cfg.Alerts.WebhookURL = "https://hooks.example.com/storage"
+	cfg.Alerts.WebhookMethod = "GET"
+	cfg.Alerts.WebhookHeaders = []string{"Authorization: Bearer token"}
+	server.storeConfig(cfg)
+	server.alertMonitor = &fakeAlertMonitor{lastStats: &alerts.StorageStats{
+		Level:     alerts.AlertLevelWarning,
+		UsedPct:   87.5,
+		FreeBytes: 9 * 1024 * 1024 * 1024,
+		CheckedAt: time.Date(2026, 4, 29, 10, 30, 0, 0, time.UTC),
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Alerts map[string]any `json:"alerts"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if enabled, ok := payload.Data.Alerts["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("alerts.enabled = %v, want true", payload.Data.Alerts["enabled"])
+	}
+	if runtimeAvailable, ok := payload.Data.Alerts["runtime_available"].(bool); !ok || !runtimeAvailable {
+		t.Fatalf("alerts.runtime_available = %v, want true", payload.Data.Alerts["runtime_available"])
+	}
+	if webhookConfigured, ok := payload.Data.Alerts["webhook_configured"].(bool); !ok || !webhookConfigured {
+		t.Fatalf("alerts.webhook_configured = %v, want true", payload.Data.Alerts["webhook_configured"])
+	}
+	if got, ok := payload.Data.Alerts["webhook_method"].(string); !ok || got != "GET" {
+		t.Fatalf("alerts.webhook_method = %v, want GET", payload.Data.Alerts["webhook_method"])
+	}
+	if got, ok := payload.Data.Alerts["last_level"].(string); !ok || got != "warning" {
+		t.Fatalf("alerts.last_level = %v, want warning", payload.Data.Alerts["last_level"])
+	}
+	if got, ok := payload.Data.Alerts["last_checked_at"].(string); !ok || got != "2026-04-29T10:30:00Z" {
+		t.Fatalf("alerts.last_checked_at = %v, want 2026-04-29T10:30:00Z", payload.Data.Alerts["last_checked_at"])
+	}
+	if got, ok := payload.Data.Alerts["last_used_pct"].(float64); !ok || got != 87.5 {
+		t.Fatalf("alerts.last_used_pct = %v, want 87.5", payload.Data.Alerts["last_used_pct"])
+	}
+	if _, ok := payload.Data.Alerts["webhook_url"]; ok {
+		t.Fatalf("alerts diagnostics must not expose webhook_url")
+	}
+	if _, ok := payload.Data.Alerts["webhook_headers"]; ok {
+		t.Fatalf("alerts diagnostics must not expose webhook_headers")
 	}
 }
 
@@ -8761,6 +9054,111 @@ func TestServer_DiagnosticsExport_MarksTrashStatsUnavailableWhenCollectionFails(
 	}
 }
 
+func TestServer_DiagnosticsExport_IncludesDiskStats(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	originalGetDiskStats := getDiskStats
+	getDiskStats = func(_ *storage.FileSystem) (*storage.DiskStats, error) {
+		return &storage.DiskStats{
+			TotalBytes:                4000,
+			FreeBytes:                 1000,
+			AvailableBytes:            900,
+			UsedBytes:                 3000,
+			UsageRatio:                0.75,
+			FileSystemType:            "ext4",
+			NativeDataChecksumSupport: false,
+		}, nil
+	}
+	defer func() { getDiskStats = originalGetDiskStats }()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics-export", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("DiagnosticsExport status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Filesystem map[string]any `json:"filesystem"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics export response: %v", err)
+	}
+	if available, ok := payload.Filesystem["disk_stats_available"].(bool); !ok || !available {
+		t.Fatalf("expected diagnostics export to mark disk stats available, got %v", payload.Filesystem["disk_stats_available"])
+	}
+	for key, want := range map[string]float64{
+		"disk_total":       4000,
+		"disk_free":        1000,
+		"disk_available":   900,
+		"disk_used":        3000,
+		"disk_usage_ratio": 0.75,
+	} {
+		got, ok := payload.Filesystem[key].(float64)
+		if !ok || got != want {
+			t.Fatalf("%s = %v, want %v", key, payload.Filesystem[key], want)
+		}
+	}
+	if got, ok := payload.Filesystem["disk_filesystem_type"].(string); !ok || got != "ext4" {
+		t.Fatalf("disk_filesystem_type = %v, want ext4", payload.Filesystem["disk_filesystem_type"])
+	}
+	if got, ok := payload.Filesystem["disk_native_data_checksum_support"].(bool); !ok || got {
+		t.Fatalf("disk_native_data_checksum_support = %v, want false", payload.Filesystem["disk_native_data_checksum_support"])
+	}
+}
+
+func TestServer_DiagnosticsExport_IncludesSanitizedAlertsStatus(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	cfg := server.currentConfig()
+	cfg.Alerts.Enabled = true
+	cfg.Alerts.CheckInterval = time.Hour
+	cfg.Alerts.ThresholdPct = 90
+	cfg.Alerts.CriticalPct = 95
+	cfg.Alerts.MinFreeBytes = 10 * 1024 * 1024 * 1024
+	cfg.Alerts.WebhookURL = "https://hooks.example.com/storage"
+	cfg.Alerts.WebhookHeaders = []string{"Authorization: Bearer token"}
+	server.storeConfig(cfg)
+	server.alertMonitor = &fakeAlertMonitor{lastStats: &alerts.StorageStats{
+		Level:     alerts.AlertLevelCritical,
+		UsedPct:   96.25,
+		FreeBytes: 512 * 1024 * 1024,
+		CheckedAt: time.Date(2026, 4, 29, 11, 15, 0, 0, time.UTC),
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics-export", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("DiagnosticsExport status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Alerts map[string]any `json:"alerts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics export response: %v", err)
+	}
+	if enabled, ok := payload.Alerts["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("alerts.enabled = %v, want true", payload.Alerts["enabled"])
+	}
+	if got, ok := payload.Alerts["last_level"].(string); !ok || got != "critical" {
+		t.Fatalf("alerts.last_level = %v, want critical", payload.Alerts["last_level"])
+	}
+	if got, ok := payload.Alerts["last_checked_at"].(string); !ok || got != "2026-04-29T11:15:00Z" {
+		t.Fatalf("alerts.last_checked_at = %v, want 2026-04-29T11:15:00Z", payload.Alerts["last_checked_at"])
+	}
+	if webhookConfigured, ok := payload.Alerts["webhook_configured"].(bool); !ok || !webhookConfigured {
+		t.Fatalf("alerts.webhook_configured = %v, want true", payload.Alerts["webhook_configured"])
+	}
+	if _, ok := payload.Alerts["webhook_url"]; ok {
+		t.Fatalf("diagnostics export must not expose webhook_url")
+	}
+	if _, ok := payload.Alerts["webhook_headers"]; ok {
+		t.Fatalf("diagnostics export must not expose webhook_headers")
+	}
+}
+
 func TestServer_DiagnosticsExport_RequiresAdminWhenAuthEnabled(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 
@@ -11220,6 +11618,68 @@ func TestServer_UpdateSettings_UpdatesServerTimeouts(t *testing.T) {
 	}
 	if server.config.Server.IdleTimeout != 5*time.Minute {
 		t.Fatalf("expected idle timeout 5m, got %s", server.config.Server.IdleTimeout)
+	}
+}
+
+func TestServer_UpdateSettings_UnchangedRestartFieldsDoNotWarn(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	current := server.config
+
+	body := fmt.Sprintf(
+		`{"server":{"host":%q,"port":%d,"read_timeout":%q,"write_timeout":%q,"idle_timeout":%q},"cdc":{"min_chunk_size":%d,"avg_chunk_size":%d,"max_chunk_size":%d},"retention":{"max_versions":%d}}`,
+		current.Server.Host,
+		current.Server.Port,
+		current.Server.ReadTimeout.String(),
+		current.Server.WriteTimeout.String(),
+		current.Server.IdleTimeout.String(),
+		current.DataPlane.CDC.MinChunkSize,
+		current.DataPlane.CDC.AvgChunkSize,
+		current.DataPlane.CDC.MaxChunkSize,
+		current.Storage.Retention.MaxVersions+1,
+	)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings unchanged restart fields status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode update settings unchanged restart fields response: %v", err)
+	}
+	if resp.Message != "settings updated" {
+		t.Fatalf("expected hot-applied settings message, got %q", resp.Message)
+	}
+}
+
+func TestServer_UpdateSettings_ChangedCDCWarnsRestart(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"cdc":{"min_chunk_size":131072,"avg_chunk_size":1048576,"max_chunk_size":4194304}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings changed cdc status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode update settings changed cdc response: %v", err)
+	}
+	if resp.Message != "settings updated, some changes may require restart" {
+		t.Fatalf("expected restart warning message, got %q", resp.Message)
 	}
 }
 

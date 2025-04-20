@@ -75,7 +75,7 @@ export function FileIcon({
 	return (
 		<div
 			className={cn(
-				'flex items-center justify-center rounded-lg border border-divider glass',
+				'flex items-center justify-center rounded-lg border border-divider',
 				sizeClass,
 				tileColors[iconType] || tileColors.file,
 				className,

@@ -6460,6 +6460,109 @@ func TestFileSystem_SearchWithinBase_RejectsTraversalRoot(t *testing.T) {
 	}
 }
 
+func TestFileSystem_GetFileCountCountsExternallyImportedFiles(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/managed.txt", strings.NewReader("managed")); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	importedDir := filepath.Join(fs.config.FilesRoot, "imported", "nested")
+	if err := os.MkdirAll(importedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(imported) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(importedDir, "external.txt"), []byte("external"), 0o644); err != nil {
+		t.Fatalf("WriteFile(external) error: %v", err)
+	}
+
+	count, err := fs.GetFileCount(ctx)
+	if err != nil {
+		t.Fatalf("GetFileCount() error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("GetFileCount() = %d, want 2", count)
+	}
+}
+
+func TestFileSystem_DiskStatsReportsWorkspaceFilesystemCapacity(t *testing.T) {
+	fs := setupStandaloneFileSystem(t)
+
+	stats, err := fs.DiskStats()
+	if err != nil {
+		t.Fatalf("DiskStats() error: %v", err)
+	}
+	if stats.TotalBytes == 0 {
+		t.Fatal("expected total disk capacity to be greater than zero")
+	}
+	if stats.UsedBytes > stats.TotalBytes {
+		t.Fatalf("UsedBytes = %d exceeds TotalBytes = %d", stats.UsedBytes, stats.TotalBytes)
+	}
+	if stats.FreeBytes > stats.TotalBytes {
+		t.Fatalf("FreeBytes = %d exceeds TotalBytes = %d", stats.FreeBytes, stats.TotalBytes)
+	}
+	if stats.AvailableBytes > stats.TotalBytes {
+		t.Fatalf("AvailableBytes = %d exceeds TotalBytes = %d", stats.AvailableBytes, stats.TotalBytes)
+	}
+	if stats.UsageRatio < 0 || stats.UsageRatio > 1 {
+		t.Fatalf("UsageRatio = %f, want between 0 and 1", stats.UsageRatio)
+	}
+	if stats.FileSystemType == "" {
+		t.Fatal("expected filesystem type to be reported")
+	}
+}
+
+func TestFilesystemTypeFromMountInfoSelectsDeepestMount(t *testing.T) {
+	mountInfo := []byte(strings.Join([]string{
+		"21 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+		"22 21 8:2 / /srv rw,relatime - xfs /dev/sdb1 rw",
+		"23 22 0:42 /mnemonas /srv/mnemonas rw,relatime - zfs mnemonas/mirror rw",
+	}, "\n"))
+
+	fsType, err := filesystemTypeFromMountInfo("/srv/mnemonas/files", mountInfo)
+	if err != nil {
+		t.Fatalf("filesystemTypeFromMountInfo() error: %v", err)
+	}
+	if fsType != "zfs" {
+		t.Fatalf("filesystemTypeFromMountInfo() = %q, want zfs", fsType)
+	}
+}
+
+func TestFilesystemTypeFromMountInfoUnescapesMountPoint(t *testing.T) {
+	mountInfo := []byte("31 1 0:43 / /srv/Mnemo\\040NAS rw,relatime - btrfs /dev/sdc1 rw\n")
+
+	fsType, err := filesystemTypeFromMountInfo("/srv/Mnemo NAS/files", mountInfo)
+	if err != nil {
+		t.Fatalf("filesystemTypeFromMountInfo() error: %v", err)
+	}
+	if fsType != "btrfs" {
+		t.Fatalf("filesystemTypeFromMountInfo() = %q, want btrfs", fsType)
+	}
+}
+
+func TestFilesystemTypeFromMagicFallback(t *testing.T) {
+	for name, tt := range map[string]struct {
+		magic      uint64
+		wantType   string
+		wantNative bool
+	}{
+		"ext":   {magic: 0xEF53, wantType: "ext"},
+		"zfs":   {magic: 0x2FC12FC1, wantType: "zfs", wantNative: true},
+		"btrfs": {magic: 0x9123683E, wantType: "btrfs", wantNative: true},
+		"xfs":   {magic: 0x58465342, wantType: "xfs"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fsType := filesystemTypeFromMagic(tt.magic)
+			if fsType != tt.wantType {
+				t.Fatalf("filesystemTypeFromMagic(%#x) = %q, want %q", tt.magic, fsType, tt.wantType)
+			}
+			if got := filesystemHasNativeDataChecksumSupport(fsType); got != tt.wantNative {
+				t.Fatalf("filesystemHasNativeDataChecksumSupport(%q) = %v, want %v", fsType, got, tt.wantNative)
+			}
+		})
+	}
+}
+
 func TestFileSystem_Search_PropagatesTraversalError(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

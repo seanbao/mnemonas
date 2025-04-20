@@ -13,7 +13,9 @@
     ]
   },
   "scripts": {
+    "predev": "node ./scripts/check-node.cjs",
     "dev": "vite",
+    "prebuild": "node ./scripts/check-node.cjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -26,13 +28,14 @@
     "test:ui": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs --ui",
     "test:run": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs run",
     "test:coverage": "node -r ./scripts/vitest-preload.cjs ./node_modules/vitest/vitest.mjs run --coverage",
-    "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui",
-    "test:e2e:update": "playwright test --update-snapshots",
-    "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build",
-    "test:visual": "storycap --serverCmd 'npm run storybook -- --ci' http://localhost:6006 && reg-cli __screenshots__ __screenshots__/expected __screenshots__/diff -R report.html",
-    "test:visual:update": "storycap --serverCmd 'npm run storybook -- --ci' http://localhost:6006 && cp -r __screenshots__/*.png __screenshots__/expected/",
+    "pretest:e2e": "node ./scripts/check-node.cjs",
+    "test:e2e": "node ./scripts/playwright.cjs test",
+    "pretest:e2e:navigation": "node ./scripts/check-node.cjs",
+    "test:e2e:navigation": "node ./scripts/playwright.cjs test navigation.spec.ts",
+    "pretest:e2e:ui": "node ./scripts/check-node.cjs",
+    "test:e2e:ui": "node ./scripts/playwright.cjs test --ui",
+    "pretest:e2e:update": "node ./scripts/check-node.cjs",
+    "test:e2e:update": "node ./scripts/playwright.cjs test --update-snapshots",
     "prepare": "husky"
   },
   "dependencies": {

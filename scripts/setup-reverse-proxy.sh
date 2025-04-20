@@ -3,7 +3,7 @@
 # 用法: sudo ./setup-reverse-proxy.sh <域名> [邮箱]
 # 示例: sudo ./setup-reverse-proxy.sh nas.example.com admin@example.com
 
-set -e
+set -euo pipefail
 
 # 颜色输出
 RED='\033[0;31m'
@@ -15,6 +15,36 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+install_cron_line_once() {
+    local line="$1"
+    local current_cron
+    current_cron="$(mktemp)"
+
+    crontab -l > "$current_cron" 2>/dev/null || true
+    if grep -Fqx "$line" "$current_cron"; then
+        log_info "证书续期 cron 已存在，跳过重复写入"
+    else
+        { cat "$current_cron"; echo "$line"; } | crontab -
+        log_info "已写入证书续期 cron"
+    fi
+    rm -f "$current_cron"
+}
+
+configure_certbot_renewal() {
+    if systemctl list-unit-files certbot.timer >/dev/null 2>&1; then
+        systemctl enable --now certbot.timer >/dev/null
+        log_info "已启用 certbot.timer 自动续期"
+        return 0
+    fi
+
+    if command -v crontab >/dev/null 2>&1; then
+        install_cron_line_once "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'"
+        return 0
+    fi
+
+    log_warn "未检测到 certbot.timer 或 crontab；请手动配置 certbot renew 自动续期"
+}
+
 # 检查参数
 DOMAIN="${1:-}"
 EMAIL="${2:-}"
@@ -25,9 +55,19 @@ if [[ -z "$DOMAIN" ]]; then
     exit 1
 fi
 
+if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ || "$DOMAIN" == .* || "$DOMAIN" == *..* || "$DOMAIN" == -* ]]; then
+    log_error "域名格式不安全: $DOMAIN"
+    exit 1
+fi
+
 if [[ -z "$EMAIL" ]]; then
     EMAIL="admin@${DOMAIN}"
     log_warn "未指定邮箱，使用默认: $EMAIL"
+fi
+
+if [[ "$EMAIL" == *[[:space:]]* ]]; then
+    log_error "邮箱不能包含空白字符"
+    exit 1
 fi
 
 # 检查 root 权限
@@ -50,7 +90,7 @@ echo "请选择反向代理方案:"
 echo "  1) Caddy (推荐，自动 HTTPS)"
 echo "  2) Nginx + Certbot"
 echo ""
-read -p "选择 [1/2]: " CHOICE
+read -r -p "选择 [1/2]: " CHOICE
 
 case "$CHOICE" in
     1|"")
@@ -75,7 +115,7 @@ install_caddy() {
     
     # 安装依赖
     apt-get update
-    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
     
     # 添加 Caddy 仓库
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
@@ -90,7 +130,7 @@ install_caddy() {
     
     # 备份原配置
     if [[ -f /etc/caddy/Caddyfile ]]; then
-        cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%Y%m%d%H%M%S)
+        cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak.$(date +%Y%m%d%H%M%S)"
     fi
     
     # 写入新配置
@@ -153,7 +193,7 @@ install_nginx() {
     log_info "配置 Nginx..."
     
     # 写入 Nginx 配置
-    cat > /etc/nginx/sites-available/$DOMAIN << 'EOF'
+    cat > "/etc/nginx/sites-available/$DOMAIN" << 'EOF'
 # MnemoNAS 反向代理配置
 # 生成时间: GENERATED_TIME
 
@@ -221,20 +261,20 @@ server {
 EOF
 
     # 替换占位符
-    sed -i "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" /etc/nginx/sites-available/$DOMAIN
-    sed -i "s/GENERATED_TIME/$(date)/g" /etc/nginx/sites-available/$DOMAIN
+    sed -i "s/DOMAIN_PLACEHOLDER/$DOMAIN/g" "/etc/nginx/sites-available/$DOMAIN"
+    sed -i "s/GENERATED_TIME/$(date)/g" "/etc/nginx/sites-available/$DOMAIN"
     
     # 创建 certbot 目录
     mkdir -p /var/www/certbot
     
     # 启用站点
-    ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/
+    ln -sf "/etc/nginx/sites-available/$DOMAIN" /etc/nginx/sites-enabled/
     
     # 删除默认站点
     rm -f /etc/nginx/sites-enabled/default
     
     # 创建临时配置用于申请证书
-    cat > /etc/nginx/sites-available/$DOMAIN.temp << EOF
+    cat > "/etc/nginx/sites-available/$DOMAIN.temp" << EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -251,7 +291,7 @@ server {
 EOF
     
     # 先用临时配置启动
-    ln -sf /etc/nginx/sites-available/$DOMAIN.temp /etc/nginx/sites-enabled/$DOMAIN
+    ln -sf "/etc/nginx/sites-available/$DOMAIN.temp" "/etc/nginx/sites-enabled/$DOMAIN"
     
     # 测试并重载
     nginx -t
@@ -260,14 +300,14 @@ EOF
     
     log_info "申请 Let's Encrypt 证书..."
     certbot certonly --webroot -w /var/www/certbot \
-        -d $DOMAIN \
-        --email $EMAIL \
+        -d "$DOMAIN" \
+        --email "$EMAIL" \
         --agree-tos \
         --non-interactive
     
     # 切换到正式配置
-    ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
-    rm -f /etc/nginx/sites-available/$DOMAIN.temp
+    ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
+    rm -f "/etc/nginx/sites-available/$DOMAIN.temp"
     
     # 重载配置
     nginx -t
@@ -275,7 +315,7 @@ EOF
     
     # 设置自动续期
     log_info "配置证书自动续期..."
-    (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+    configure_certbot_renewal
     
     log_info "Nginx + Certbot 配置完成!"
 }
@@ -323,6 +363,12 @@ main() {
     echo ""
     echo "访问地址: https://$DOMAIN"
     echo "WebDAV:   https://$DOMAIN/dav"
+    echo ""
+    echo "MnemoNAS 配置提醒:"
+    echo "  在 /etc/mnemonas/config.toml 的 [server] 中设置 trusted_proxy_hops = 1"
+    echo "  如果前面有多层受信代理，请设置为代理总层数，然后重启 mnemonas"
+    echo "  公网入口只应开放 80/443；不要把 8080、9090、9091 直接暴露到公网"
+    echo "  如果反向代理和 MnemoNAS 在同一台机器，建议将 [server].host 改为 127.0.0.1 或用防火墙限制 8080"
     echo ""
     echo "验证命令:"
     echo "  curl -I https://$DOMAIN/health"

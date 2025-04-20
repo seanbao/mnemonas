@@ -24,7 +24,7 @@ const { defaultSettingsResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
     data: {
       server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, read_timeout_seconds: 60, write_timeout_seconds: 300 },
-      storage: { root: '/root/.mnemonas' },
+      storage: { root: '~/.mnemonas' },
     trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
       retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
       versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
@@ -422,6 +422,22 @@ describe('SettingsPage', () => {
           }),
         }))
       })
+    })
+
+    it('warns before saving WebDAV without authentication on a non-loopback listener', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('WebDAV 认证方式')).toBeTruthy()
+      })
+
+      await user.selectOptions(screen.getByLabelText('WebDAV 认证方式'), 'none')
+
+      expect(screen.getByText('WebDAV 当前将无认证开放')).toBeTruthy()
+      expect(screen.getByText(/任何能访问该端口的人都可以读写 WebDAV/)).toBeTruthy()
     })
   })
 
@@ -849,7 +865,7 @@ describe('SettingsPage', () => {
     it('renders storage root as read-only display with guidance', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
-        expect(screen.getByText('/root/.mnemonas')).toBeTruthy()
+        expect(screen.getByText('~/.mnemonas')).toBeTruthy()
         expect(screen.getByText('当前值由服务端配置文件决定，界面中不可直接修改。如需调整，请修改配置文件并重启服务。')).toBeTruthy()
       })
     })
@@ -875,7 +891,7 @@ describe('SettingsPage', () => {
         .mockResolvedValueOnce({
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, read_timeout_seconds: 60, write_timeout_seconds: 300 },
-            storage: { root: '/root/.mnemonas' },
+            storage: { root: '~/.mnemonas' },
             trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
@@ -1420,6 +1436,31 @@ describe('SettingsPage', () => {
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
+  it('shows danger toast and skips save for invalid CDC chunk ordering', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('1 MB')).toBeTruthy()
+    })
+
+    const avgChunkInput = screen.getByDisplayValue('1 MB')
+    await user.clear(avgChunkInput)
+    await user.type(avgChunkInput, '128 KB')
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'CDC 分块参数无效',
+        description: '请保持最小块大小 < 平均块大小 < 最大块大小',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
     it('shows loading state on save', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -1460,7 +1501,7 @@ describe('SettingsPage', () => {
         .mockResolvedValueOnce({
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
-            storage: { root: '/root/.mnemonas' },
+            storage: { root: '~/.mnemonas' },
             trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },
@@ -1590,7 +1631,7 @@ describe('SettingsPage', () => {
         .mockResolvedValueOnce({
           data: {
             server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', read_timeout_seconds: 60, write_timeout_seconds: 300 },
-            storage: { root: '/root/.mnemonas' },
+            storage: { root: '~/.mnemonas' },
             trash: { enabled: true, retention_days: 30, max_size: 10737418240 },
             retention: { max_versions: 100, max_age: '8760h', min_free_space: 10737418240, gc_interval: '24h' },
             versioning: { auto_versioned_extensions: ['.md', '.txt', '.go'], auto_versioned_filenames: ['README', 'Dockerfile', 'Makefile'], max_versioned_size: 104857600 },

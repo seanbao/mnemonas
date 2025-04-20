@@ -14,16 +14,17 @@
 | macOS (Intel) | ✅ 完全支持 |
 | Windows | 🔄 通过 WSL2 支持 |
 
-### Q: Docker 和二进制部署有什么区别？
+### Q: Ubuntu/systemd、Docker 和手动二进制部署有什么区别？
 
 **A:**
 
 | 方式 | 优点 | 缺点 |
 | ---- | ---- | ---- |
-| **Docker** | 开箱即用、隔离性好、易于升级 | 需要 Docker 环境 |
-| **二进制** | 无依赖、性能略优 | 需手动管理进程 |
+| **Ubuntu/systemd** | 开机自启、日志清晰、适合长期运行、诊断脚本完整 | 主要面向 Linux 主机 |
+| **Docker** | 启动简单、隔离性好、易于升级 | 需要 Docker 环境，存储路径需正确挂载 |
+| **手动二进制** | 无依赖、适合调试 | 需手动管理进程，不推荐长期无人值守 |
 
-推荐普通用户使用 Docker 部署。
+闲置 Ubuntu 笔记本或小主机长期运行，优先参考 [Ubuntu 笔记本部署指南](ubuntu-laptop-deployment.md)。临时试用或已有容器平台时使用 Docker。
 
 ### Q: 如何更新到新版本？
 
@@ -32,23 +33,32 @@
 Docker 方式：
 
 ```bash
-docker compose pull
+# 源码 checkout 默认本地构建
+docker compose build --pull
 docker compose up -d
+
+# 如果使用已公开的 release 镜像，则改用：
+# docker compose pull
+# docker compose up -d
 ```
 
-二进制方式：
+Ubuntu/systemd 方式：
 
 ```bash
-# 停止服务
+tar -xzf mnemonas-<version>-linux-amd64.tar.gz
+cd mnemonas-<version>-linux-amd64
+
+sudo ./scripts/install-systemd.sh
+sudo mnemonas-doctor
+```
+
+手动二进制方式：
+
+```bash
 pkill nasd
 pkill dataplane
-
-# 下载新版本并替换二进制文件
-# ...
-
-# 重启服务
-./dataplane &
-./nasd
+./dataplane --data-dir ~/.mnemonas/.mnemonas/objects &
+./nasd --config ~/.mnemonas/config.toml
 ```
 
 ### Q: 数据存储在哪里？
@@ -59,7 +69,9 @@ pkill dataplane
 - **内部数据**（CAS/元数据）：`~/.mnemonas/.mnemonas/`
 - **配置文件**：`~/.mnemonas/config.toml`
 
-Docker 部署时，存储根目录通常映射到容器内的 `/root/.mnemonas`，内部数据位于 `/root/.mnemonas/.mnemonas`。
+Ubuntu/systemd 部署默认使用 `/srv/mnemonas` 存放数据，配置文件在 `/etc/mnemonas/config.toml`。
+
+Docker 部署时，宿主机 `~/.mnemonas` 通常映射到容器内 `/data`，内部数据位于 `/data/.mnemonas`。
 
 ---
 
@@ -172,6 +184,8 @@ curl http://localhost:9091/stats
 # 返回: {"dedup_ratio": 0.6, ...}  # 0.6 = 60% 去重率（节省 60% 存储）
 ```
 
+`9091` 是 dataplane 本机健康/统计端口，只应在服务器本机或容器内部访问，不要通过防火墙、端口映射或反向代理暴露给外部网络。
+
 ### Q: 如何清理旧版本？
 
 **A:** 默认情况下，MnemoNAS 按保留策略自动清理旧版本。可通过配置调整保留范围：
@@ -193,12 +207,9 @@ curl -X POST \
 
 ### Q: 最大支持多大的文件？
 
-**A:** 理论上无限制（受磁盘空间限制）。已测试：
+**A:** 设计上使用流式传输，文件大小主要受磁盘空间、客户端、反向代理上传限制和底层文件系统限制影响。当前不建议把“最大文件大小”理解为固定承诺；部署前应按你的真实媒体/备份文件做一次上传、下载和恢复演练。
 
-- ✅ 100GB 单文件上传/下载
-- ✅ 1TB+ 总存储容量
-
-大文件使用流式传输，不会占用过多内存。
+大文件场景需要特别检查反向代理配置，例如 Nginx 的 `client_max_body_size`、`proxy_request_buffering` 和超时时间。Docker 或 systemd 本地直连时，也需要确认目标数据盘有足够空闲空间。
 
 ---
 
@@ -212,7 +223,7 @@ curl -X POST \
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"healthy","version":"0.1.0"}
+# {"status":"healthy","version":"v0.2.0",...}
 ```
 
 性能指标：
@@ -228,6 +239,8 @@ curl -H "Authorization: Bearer <admin-access-token>" http://localhost:8080/api/v
 curl http://localhost:9091/stats
 # 返回 CAS 存储统计
 ```
+
+该端口没有面向外部客户端的认证层，长期部署时应保持 loopback 绑定。
 
 ### Q: Scrub 检查是做什么的？
 
@@ -254,22 +267,20 @@ curl -H "Authorization: Bearer <access-token>" \
 
    ```bash
    docker compose stop
-   cp -r ~/.mnemonas/files /backup/mnemonas-files
-   cp -r ~/.mnemonas/.mnemonas /backup/mnemonas-internal
+   rsync -aHAX --delete ~/.mnemonas/ /backup/mnemonas/
    docker compose start
    ```
 
-2. **热备份**：使用 rsync 增量同步
+2. **快照备份**：如果底层是 ZFS/Btrfs/LVM，先创建文件系统快照，再从快照目录同步。这样可以避免备份过程中元数据仍在变化。
+
+3. **远程备份**：从快照目录或停服务后的数据目录，用 restic、borg 或 rclone 同步到云存储
 
    ```bash
-   rsync -av ~/.mnemonas/ /backup/mnemonas/
+   SOURCE_DIR=/path/to/mnemonas-snapshot-or-cold-root
+   rclone sync "$SOURCE_DIR/" remote:mnemonas-backup/current/
    ```
 
-3. **远程备份**：使用 rclone 同步到云存储
-
-   ```bash
-   rclone sync ~/.mnemonas/ remote:mnemonas-backup/
-   ```
+没有快照能力时，不建议在服务运行中直接复制整个数据目录；优先停服务做冷备份。完整流程见 [备份指南](backup-guide.md)。
 
 ---
 
@@ -312,6 +323,8 @@ curl -H "Authorization: Bearer <access-token>" \
    ```bash
    curl http://localhost:9091/health
    ```
+
+   如果这条命令只能从服务器本机访问，这是正常且推荐的部署边界。
 
 2. 检查配置中的数据面地址：
 

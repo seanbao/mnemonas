@@ -7,11 +7,31 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: '1.25'
+  GO_VERSION: '1.25.9'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
+  PROTOC_VERSION: '3.20.1'
+  PROTOC_GEN_GO_VERSION: 'v1.36.11'
+  PROTOC_GEN_GO_GRPC_VERSION: 'v1.6.1'
+  GOLANGCI_LINT_VERSION: 'v2.11.4'
+  GOVULNCHECK_VERSION: 'v1.3.0'
+  CARGO_AUDIT_VERSION: '0.22.1'
 
 jobs:
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Validate deployment scripts
+        run: make scripts-check
+
   # Go 代码检查和测试
   go:
     name: Go
@@ -33,29 +53,35 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: '25.x'
+          version: ${{ env.PROTOC_VERSION }}
 
       - name: Install protoc-gen-go
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ env.PROTOC_GEN_GO_VERSION }}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
 
       - name: Generate protobuf
-        run: |
-          protoc --go_out=. --go_opt=paths=source_relative \
-            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-            proto/dataplane.proto
+        run: make proto
+
+      - name: Check generated protobuf is committed
+        run: git diff --exit-code -- proto/dataplane.pb.go proto/dataplane_grpc.pb.go dataplane/src/proto/mnemonas.dataplane.v1.rs
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout=5m
 
       - name: Test
         run: |
           packages=$(go list ./... | grep -v '/web/node_modules/')
           CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out $packages
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
+          packages=$(go list ./... | grep -v '/web/node_modules/')
+          "$(go env GOPATH)/bin/govulncheck" $packages
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -83,24 +109,45 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: dataplane
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.x'
+          workspaces: |
+            dataplane
+            tools/proto-gen
 
       - name: Format check
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
+
+      - name: Proto generator format check
+        working-directory: tools/proto-gen
+        run: cargo fmt --check
+
+      - name: Proto generator clippy
+        working-directory: tools/proto-gen
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Proto generator test
+        working-directory: tools/proto-gen
+        run: cargo test --locked
+
+      - name: Install cargo-audit
+        env:
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+        run: cargo install cargo-audit --version "${{ env.CARGO_AUDIT_VERSION }}" --locked
+
+      - name: Dependency audit
+        run: cargo audit
+
+      - name: Proto generator dependency audit
+        working-directory: tools/proto-gen
+        run: cargo audit
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
   # 前端测试
   frontend:
@@ -122,11 +169,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
       - name: Lint
         run: npm run lint
 
       - name: Type check
         run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
 
       - name: Test
         run: npm run test:coverage
@@ -148,6 +201,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set build metadata
+        id: build_meta
+        run: echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Build
         uses: docker/build-push-action@v5
         with:
@@ -155,6 +212,9 @@ jobs:
           push: false
           load: true
           tags: mnemonas:test
+          build-args: |
+            VERSION=ci
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -175,6 +235,8 @@ jobs:
 
           for _ in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              curl -fsS http://127.0.0.1:18080/health | grep -q '"version":"ci"'
+              curl -fsS -H 'Accept: text/html' http://127.0.0.1:18080/ | grep -q 'id="root"'
               exit 0
             fi
 

@@ -21,22 +21,22 @@
 
 | 工具 | 最低版本 | 推荐版本 | 用途 |
 | ---- | -------- | -------- | ---- |
-| **Go** | 1.25 | 1.25.x | Go 控制面开发 |
+| **Go** | 1.25.9 | 1.25.9+ | Go 控制面开发 |
 | **Rust** | 1.92 | 1.92.x | Rust 数据面开发 |
 | **Node.js** | 20.19 或 22.12 | 22.x | 前端开发 |
-| **protoc** | 3.20 | 28.x | Protocol Buffers 编译器 |
+| **protoc** | 3.20 | 3.20.1（CI 固定） | 重新生成 protobuf 代码；普通 dataplane/Docker 构建使用已提交生成代码 |
 | **make** | 3.x | 4.x | 构建自动化 |
 
 ### 可选依赖
 
 | 工具 | 用途 |
 | ---- | ---- |
-| Docker & Docker Compose | 容器化部署 |
+| Docker Engine + Compose v2 插件 | 容器化部署，需支持 `docker compose` 命令 |
 | golangci-lint | Go 代码静态检查 |
 | cargo-watch | Rust 热重载 |
 | nvm | Node.js 版本管理 |
 
-项目根目录 `.nvmrc` 固定前端开发版本为 `22`。前端相关命令默认通过 `nvm use` 进入该版本执行。
+项目根目录 `.go-version` 和 `.nvmrc` 分别提示 Go 与 Node.js 开发版本，Rust 版本要求写在 `dataplane/Cargo.toml` 的 `rust-version` 字段中。前端相关命令默认通过 `nvm use` 进入 `.nvmrc` 指定版本执行。
 
 ---
 
@@ -57,16 +57,16 @@ brew install nvm
 nvm install 22
 nvm use 22
 
-# 安装 protobuf 编译器
+# 安装 protobuf 编译器（make proto / make build 需要；普通 Docker 构建不需要）
 brew install protobuf
 
 # 安装 Go protobuf 插件
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 
 # 可选: 代码检查工具
 brew install golangci-lint
-cargo install cargo-watch
+cargo install cargo-watch --version 8.5.3
 ```
 
 ### Ubuntu/Debian
@@ -75,9 +75,10 @@ cargo install cargo-watch
 # 更新包管理器
 sudo apt update
 
-# 安装 Go (推荐从官网下载最新版)
-wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
+# 安装 Go (推荐从 https://go.dev/dl/ 选择 1.25.9 或更新的 1.25.x 补丁版本)
+GO_VERSION=1.25.9
+wget "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
 source ~/.bashrc
 
@@ -91,12 +92,15 @@ source ~/.nvm/nvm.sh
 nvm install 22
 nvm use 22
 
-# 安装 protobuf 编译器
+# 安装 protobuf 编译器（make proto / make build 需要；普通 Docker 构建不需要）
 sudo apt install protobuf-compiler
+protoc --version
+# 如果系统仓库版本低于 3.20，请改用发行版 backports 或官方预编译包安装新版 protoc。
+# CI 使用 protoc 3.20.1 以保持已提交 Go 生成文件头部稳定；提交 proto 生成文件前建议使用同一版本。
 
 # 安装 Go protobuf 插件
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 
 # 解决文件监视器限制（前端开发需要）
 echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
@@ -127,7 +131,7 @@ go version          # go version go1.25.x ...
 rustc --version     # rustc 1.92.x ...
 node --version      # v22.x.x
 npm --version       # 10.x.x
-protoc --version    # libprotoc 28.x
+protoc --version    # libprotoc 3.20+（CI 固定 3.20.1）
 
 # 验证 Go protobuf 插件
 which protoc-gen-go       # 应该在 $GOPATH/bin 下
@@ -171,10 +175,9 @@ mnemonas/
 │   │   ├── cas.rs               # CAS 存储（BLAKE3 哈希）
 │   │   ├── cdc.rs               # CDC 分块（FastCDC）
 │   │   ├── service.rs           # gRPC 服务实现
-│   │   └── proto/               # 生成的 protobuf 代码
-│   │       └── mnemonas.dataplane.v1.rs
 │   ├── Cargo.toml               # Rust 依赖配置
-│   └── build.rs                 # 构建脚本（protobuf 生成）
+│   │   └── proto/               # 已提交的 Rust protobuf 生成代码
+│   └── build.rs                 # 只声明 proto 变更依赖，普通构建不运行 protoc
 │
 ├── web/                         # React 前端
 │   ├── src/
@@ -233,15 +236,15 @@ cd mnemonas
 
 # 安装依赖
 make deps
-cd web && npm install && cd ..
 
-# 完整构建（proto → Go → Rust）
+# 完整构建（proto → Web → Go → Rust）
 make build
 
 # 构建产物
 ls -la bin/
 # -rwxr-xr-x  nasd       # Go 控制面 (~19MB)
 # -rwxr-xr-x  dataplane  # Rust 数据面 (~3.5MB)
+# 前端产物位于 web/dist/
 ```
 
 ### 分步构建
@@ -253,12 +256,13 @@ make proto
 #   proto/dataplane.pb.go
 #   proto/dataplane_grpc.pb.go
 #   dataplane/src/proto/mnemonas.dataplane.v1.rs
+# 普通 cargo build 直接使用已提交的 Rust 生成代码，不需要 protoc。
 
 # 2. 构建 Go 控制面
 CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd
 
 # 3. 构建 Rust 数据面
-cd dataplane && cargo build --release
+cd dataplane && cargo build --release --locked
 cp target/release/dataplane ../bin/
 
 # 4. 构建前端
@@ -354,6 +358,8 @@ cargo run -- --data-dir ~/.mnemonas/.mnemonas/objects --grpc 127.0.0.1:9090 --li
 go run ./cmd/nasd
 ```
 
+`nasd` 只会托管已构建的前端产物。开发时推荐使用下面的 Vite dev server；如果需要验证单进程静态 Web UI，请先在 `web/` 下执行 `npm run build`，或显式设置 `MNEMONAS_WEB_DIR=web/dist`。
+
 #### 终端 3 - 前端开发服务器
 
 ```bash
@@ -373,7 +379,8 @@ npm run dev
 
 ```bash
 # 安装 air
-go install github.com/air-verse/air@latest
+AIR_VERSION=v1.65.1
+go install "github.com/air-verse/air@${AIR_VERSION}"
 
 # 创建 .air.toml 或直接运行
 air
@@ -382,7 +389,8 @@ air
 #### Rust 热重载 (使用 cargo-watch)
 
 ```bash
-cargo install cargo-watch
+CARGO_WATCH_VERSION=8.5.3
+cargo install cargo-watch --version "${CARGO_WATCH_VERSION}"
 cd dataplane
 cargo watch -x run
 ```
@@ -507,6 +515,8 @@ npm run test:e2e
 npm run test:e2e:ui
 ```
 
+`web/playwright.config.ts` 默认会启动隔离的测试后端和 Vite 前端，不依赖当前开发服务器。`MNEMONAS_E2E_BACKEND_URL` 和 `MNEMONAS_E2E_FRONTEND_URL` 可用于调整隔离测试服务器的地址或端口；需要连接已有服务时，同时设置 `MNEMONAS_E2E_REUSE_EXISTING=1`、`MNEMONAS_E2E_BACKEND_URL`、`MNEMONAS_E2E_FRONTEND_URL` 和 `E2E_PASSWORD`。
+
 ### 集成测试
 
 ```bash
@@ -593,7 +603,8 @@ MNEMONAS_ACCESS_TOKEN="<access-token>" \
 
 ```bash
 # 使用 delve
-go install github.com/go-delve/delve/cmd/dlv@latest
+DELVE_VERSION=v1.26.3
+go install "github.com/go-delve/delve/cmd/dlv@${DELVE_VERSION}"
 
 # 调试模式运行
 dlv debug ./cmd/nasd
@@ -684,6 +695,25 @@ sudo tcpdump -i lo port 8080 -w debug.pcap
 export PATH=$PATH:$(go env GOPATH)/bin
 ```
 
+### Q: Go 尝试下载 toolchain 但网络失败
+
+仓库使用 `toolchain go1.25.9` 固定 CI 和 release 的补丁版本。若本机已经安装兼容的 Go 1.25.x，但网络无法下载指定 toolchain，可临时使用本机工具链运行本地检查：
+
+```bash
+packages=$(GOTOOLCHAIN=local go list ./... | grep -v '/web/node_modules/')
+GOTOOLCHAIN=local go test $packages
+GOTOOLCHAIN=local make build
+```
+
+`GOTOOLCHAIN=local` 只适合本地临时验证。发布构建和安全扫描必须使用 `go1.25.9` 或更新的 1.25.x 补丁版本；低于该版本的本地工具链会被 `govulncheck` 报出标准库漏洞。Playwright 隔离后端默认会使用 `GOTOOLCHAIN=local`，避免 E2E 因 toolchain 下载超时而无法启动。
+
+如果下载失败并提示 `checksum database disabled by GOSUMDB=off`，说明本机环境禁用了 Go checksum database，toolchain 模块无法完成校验。发布构建和安全扫描不要带这个覆盖值，可临时这样运行：
+
+```bash
+GOSUMDB=sum.golang.org go version
+GOSUMDB=sum.golang.org govulncheck ./...
+```
+
 ### Q: 前端开发服务器报 `ENOSPC: System limit for file watchers reached`
 
 增加文件监视器限制：
@@ -760,10 +790,11 @@ cd dataplane && cargo fmt
 
 ### TypeScript/React
 
-使用 ESLint + Prettier：
+使用 ESLint 和 TypeScript 构建检查：
 
 ```bash
 cd web && npm run lint
+cd web && npm run build
 ```
 
 ---

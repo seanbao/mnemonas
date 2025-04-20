@@ -230,7 +230,7 @@ export function PreviewModal({
       backdrop="blur"
       classNames={{
         wrapper: "z-[60]",
-        base: "bg-content1/95 backdrop-blur-lg absolute inset-4 m-0 max-w-none max-h-none rounded-xl",
+        base: "bg-content1/95 backdrop-blur-lg absolute inset-4 m-0 max-w-none max-h-none rounded-lg",
         body: "p-0",
       }}
       hideCloseButton
@@ -339,7 +339,7 @@ function VideoPreview({ path }: { path: string; filename: string }) {
   } = useRetryableMediaUrl(url, '无法加载视频')
   
   return (
-    <div className="h-full flex flex-col bg-black rounded-xl overflow-hidden">
+    <div className="h-full flex flex-col bg-black rounded-lg overflow-hidden">
       <div className="flex-1 flex items-center justify-center">
         {isLoading && <Spinner size="lg" />}
         {error && (
@@ -381,7 +381,7 @@ function AudioPreview({ path, filename }: { path: string; filename: string }) {
   } = useRetryableMediaUrl(url, '无法加载音频')
   
   return (
-    <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-xl">
+    <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-lg">
       <div className="text-center mb-8">
         <div className="w-32 h-32 mx-auto mb-4 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center">
           <Music size={56} className="text-white" aria-hidden />
@@ -425,9 +425,9 @@ function UnsupportedPreview({
   onOpenExternal: () => void 
 }) {
   return (
-    <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-xl">
+    <div className="h-full flex flex-col items-center justify-center bg-content1 rounded-lg">
       <div className="text-center max-w-md">
-        <div className="w-20 h-20 mx-auto mb-6 rounded-xl bg-default-100 flex items-center justify-center">
+        <div className="w-20 h-20 mx-auto mb-6 rounded-lg bg-default-100 flex items-center justify-center">
           <FileQuestion size={40} className="text-default-500" aria-hidden />
         </div>
         <h3 className="text-xl font-semibold mb-2">{filename}</h3>

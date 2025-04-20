@@ -294,7 +294,7 @@ export default function Maintenance() {
         icon={ShieldCheck}
         actions={
           <Button
-            className="btn-secondary rounded-xl"
+            className="btn-secondary rounded-lg"
             startContent={<Download size={18} />}
             isLoading={isExporting}
             onPress={handleExport}
@@ -308,7 +308,7 @@ export default function Maintenance() {
       <Card className="card-meridian">
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/15 flex items-center justify-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-primary/15">
               <ShieldCheck size={20} className="text-accent-primary" />
             </div>
             <div>
@@ -319,7 +319,7 @@ export default function Maintenance() {
           <div className="flex items-center gap-2">
             {scrubResult && <StatusChip status={scrubResult.status} warning={scrubResult.warning} />}
             <Button
-              className="btn-primary shadow-md rounded-xl"
+              className="btn-primary rounded-lg shadow-md"
               startContent={isRunning ? <RefreshCw size={18} className="animate-spin" /> : <Play size={18} />}
               isLoading={scrubMutation.isPending}
               isDisabled={isRunning}
@@ -342,7 +342,7 @@ export default function Maintenance() {
                 title={loadErrorPresentation.title}
                 description={loadErrorPresentation.description}
                 action={
-                  <Button variant="bordered" className="rounded-xl" onPress={handleRefreshScrubResult}>
+                  <Button variant="bordered" className="rounded-lg" onPress={handleRefreshScrubResult}>
                     重新加载
                   </Button>
                 }

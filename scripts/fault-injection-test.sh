@@ -52,14 +52,26 @@ read_config_value() {
     fi
 
     awk -v section="[$section]" -v key="$key" '
-        $0 == section { in_section = 1; next }
-        /^\[/ { in_section = 0 }
-        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+        {
             line = $0
-            sub(/^[^=]*=[[:space:]]*/, "", line)
             sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            section_line = line
+            if (section_line ~ /^\[/) {
+                sub(/^\[[[:space:]]*/, "[", section_line)
+                sub(/[[:space:]]*\]$/, "]", section_line)
+                gsub(/[[:space:]]*\.[[:space:]]*/, ".", section_line)
+            }
+        }
+        section_line == section { in_section = 1; next }
+        section_line ~ /^\[/ { in_section = 0 }
+        in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
             gsub(/^"/, "", line)
             gsub(/"$/, "", line)
+            gsub(/^\047/, "", line)
+            gsub(/\047$/, "", line)
             print line
             exit
         }
@@ -316,7 +328,7 @@ test_object_corruption() {
     if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$diag_status" == "401" || "$diag_status" == "403" ) ]]; then
         log_skip "Diagnostics export requires admin authentication"
     else
-        log_info "Diagnostics after corruption: $(echo $diag | head -c 200)..."
+        log_info "Diagnostics after corruption: $(echo "$diag" | head -c 200)..."
     fi
     
     # Restore the object
@@ -448,7 +460,7 @@ main() {
     echo -e "${YELLOW}WARNING: These tests will kill and restart the service!${NC}"
     echo -e "${YELLOW}Make sure no important operations are in progress.${NC}"
     echo ""
-    read -p "Press Enter to continue or Ctrl+C to abort..."
+    read -r -p "Press Enter to continue or Ctrl+C to abort..."
     echo ""
 
     setup

@@ -341,6 +341,7 @@ GET /health
   "status": "healthy",
   "timestamp": "2024-01-15T10:00:00Z",
   "uptime": "24h30m15s",
+  "version": "v0.2.0",
   "dataplane": {
     "healthy": true,
     "version": "0.3.0",
@@ -366,8 +367,9 @@ GET /api/v1/version
   "success": true,
   "data": {
     "name": "MnemoNAS",
-    "version": "0.1.0",
-    "go": "go1.25.0"
+    "version": "v0.2.0",
+    "build_time": "2024-01-15T09:30:00Z",
+    "go": "go1.25.9"
   },
   "timestamp": "2024-01-15T10:00:00Z"
 }
@@ -394,7 +396,7 @@ GET /api/v1/setup/
 
 **说明**:
 - 该接口不再返回任何初始密码或用户名
-- 首次启动生成的 Web 登录初始管理员密码仅写入启动日志和 `<storage.root>/.mnemonas/initial-password.txt`
+- 首次启动生成的 Web 登录初始管理员密码仅写入 `<storage.root>/.mnemonas/initial-password.txt`；非交互启动日志只提示该文件路径
 - 该接口返回 setup 专用平铺 JSON，不使用通用 `data` wrapper
 
 ### 确认已查看初始化信息
@@ -440,7 +442,15 @@ GET /api/v1/stats
   "data": {
     "total_files_available": true,
     "storage_stats_available": true,
+    "disk_stats_available": true,
     "total_files": 0,
+    "disk_total": 21474836480,
+    "disk_free": 16106127360,
+    "disk_available": 16106127360,
+    "disk_used": 5368709120,
+    "disk_usage_ratio": 0.25,
+    "disk_filesystem_type": "zfs",
+    "disk_native_data_checksum_support": true,
     "total_size": 5368709120,
     "unique_size": 2147483648,
     "dedup_ratio": 0.35,
@@ -451,10 +461,12 @@ GET /api/v1/stats
 ```
 
 **说明**:
-- `total_files` 统计文件索引中的文件数量，不包含目录。
+- `total_files` 统计当前 `files/` workspace 中的文件数量，不包含目录；直接导入到 `files/` 的现有文件也会计入。
 - `total_chunks` 统计数据面中的存储对象（chunk）数量，不等同于用户文件数。
-- `total_files_available` 表示文件计数是否可用；`storage_stats_available` 表示数据面统计是否可用。
-- 当文件计数或数据面统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
+- `disk_total` / `disk_used` / `disk_available` 来自托管 `files/` workspace 所在文件系统，可用于显示真实磁盘容量和剩余空间；`disk_free` 是底层文件系统报告的原始空闲空间。
+- `disk_filesystem_type` 是托管 `files/` workspace 所在挂载点的文件系统类型；`disk_native_data_checksum_support` 表示是否检测到 ZFS/Btrfs 级别的原生数据校验与 scrub 能力。
+- `total_files_available` 表示文件计数是否可用；`storage_stats_available` 表示数据面统计是否可用；`disk_stats_available` 表示磁盘容量统计是否可用。
+- 当文件计数、数据面统计或磁盘容量统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
 
 ### 诊断信息
 
@@ -476,8 +488,9 @@ GET /api/v1/diagnostics
     "uptime_secs": 86400,
     "version": {
       "name": "MnemoNAS",
-      "version": "0.1.0",
-      "go": "go1.25.0"
+      "version": "v0.2.0",
+      "build_time": "2024-01-15T09:30:00Z",
+      "go": "go1.25.9"
     },
     "system": {
       "filesystem_initialized": true,
@@ -497,7 +510,30 @@ GET /api/v1/diagnostics
     "filesystem": {
       "trash_stats_available": true,
       "trash_items": 5,
-      "trash_size": 52428800
+      "trash_size": 52428800,
+      "disk_stats_available": true,
+      "disk_total": 21474836480,
+      "disk_free": 16106127360,
+      "disk_available": 16106127360,
+      "disk_used": 5368709120,
+      "disk_usage_ratio": 0.25,
+      "disk_filesystem_type": "zfs",
+      "disk_native_data_checksum_support": true
+    },
+    "alerts": {
+      "enabled": true,
+      "runtime_available": true,
+      "check_interval": "30m0s",
+      "threshold_pct": 85,
+      "critical_pct": 92,
+      "min_free_bytes": 21474836480,
+      "cooldown_period": "2h0m0s",
+      "webhook_configured": true,
+      "webhook_method": "POST",
+      "last_level": "warning",
+      "last_checked_at": "2026-04-29T10:30:00Z",
+      "last_used_pct": 87.5,
+      "last_free_bytes": 9663676416
     },
     "storage": {
       "total_chunks": 1234,
@@ -518,6 +554,9 @@ GET /api/v1/diagnostics
 **说明**:
 - `filesystem.trash_stats_available` 表示回收站统计是否可用。
 - 当回收站统计暂不可用时，`filesystem.trash_stats_available` 为 `false`，并且 `filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
+- `filesystem.disk_stats_available` 表示磁盘容量统计是否可用；不可用时 `filesystem.disk_*` 字段会被省略。可用时会同时包含 `filesystem.disk_filesystem_type` 和 `filesystem.disk_native_data_checksum_support`，便于健康页提示 ZFS/Btrfs 与普通文件系统的差异。
+- `alerts.runtime_available` 表示当前进程是否挂载了告警监控；`alerts.webhook_configured` 只表示是否配置了 Webhook，不会暴露 `webhook_url` 或 `webhook_headers`。
+- `alerts.last_*` 来自上一次告警检查；尚未完成首次检查时会被省略。
 
 ### 指标信息
 
@@ -1622,11 +1661,12 @@ PUT /api/v1/settings
 ```
 
 **失败行为**:
-- 成功响应的 `message` 在仅包含热更新字段时为 `settings updated`；当请求涉及 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 时为 `settings updated, some changes may require restart`
+- 成功响应的 `message` 在仅包含热更新字段、或请求中携带但值未变化的重启类字段时为 `settings updated`；当 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 的值实际变化时为 `settings updated, some changes may require restart`
 - `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
 - `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
 - `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`；保存后需重启服务才能影响运行中的 HTTP 监听器
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
+- `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
 - `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
@@ -1865,6 +1905,8 @@ GET /api/v1/diagnostics-export
 ```
 
 **响应**: 返回 JSON 文件下载
+
+导出的 JSON 会包含脱敏后的 `alerts` 运行态信息，例如 `enabled`、`runtime_available`、`webhook_configured`、阈值和最近一次检查级别；不会包含 Webhook URL 或自定义 Header。
 
 ---
 

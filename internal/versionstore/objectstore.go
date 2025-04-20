@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/seanbao/mnemonas/internal/dataplane"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/seanbao/mnemonas/internal/dataplane"
 )
 
 // ObjectStore handles version object storage via Rust dataplane
