@@ -9,6 +9,7 @@ export interface KeyboardShortcutHandlers {
   onPaste?: () => void
   onRename?: () => void
   onEnter?: () => void
+  onSpace?: () => void
   onArrowUp?: (event?: KeyboardEvent) => void
   onArrowDown?: (event?: KeyboardEvent) => void
   onArrowLeft?: (event?: KeyboardEvent) => void
@@ -74,6 +75,7 @@ function isInputElement(target: EventTarget | null): boolean {
  * - Ctrl+V / Cmd+V: Paste files
  * - F2: Rename selected file
  * - Enter: Open selected file/folder
+ * - Space: Toggle focused file selection
  * - Arrow keys: Navigate through files
  * - Ctrl+R / Cmd+R / F5: Refresh
  * - Ctrl+Shift+N / Cmd+Shift+N: New folder
@@ -178,6 +180,15 @@ export function useKeyboardShortcuts(
       if (h.onEnter) {
         e.preventDefault()
         h.onEnter()
+      }
+      return
+    }
+
+    // Space - Toggle focused item selection
+    if ((e.key === ' ' || e.key === 'Space') && !ctrlOrCmd && !e.shiftKey) {
+      if (h.onSpace) {
+        e.preventDefault()
+        h.onSpace()
       }
       return
     }

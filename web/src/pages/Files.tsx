@@ -42,6 +42,7 @@ import {
   Move,
   Files,
   RotateCcw,
+  ArrowUpDown,
 } from 'lucide-react'
 import { ShareDialog } from '@/components/share'
 import { FileIcon } from '@/components/ui/FileIcon'
@@ -73,6 +74,14 @@ import { listShares, ShareError } from '@/api/share'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
+
+type SortKey = 'name' | 'size' | 'modTime'
+
+const sortLabels: Record<SortKey, string> = {
+  name: '名称',
+  size: '大小',
+  modTime: '修改时间',
+}
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409
@@ -511,6 +520,7 @@ function Breadcrumbs({
 function FileRow({ 
   file, 
   isSelected, 
+  isActive,
   isFavorited,
   favoriteActionsAvailable,
   favoriteUnavailableLabel,
@@ -520,7 +530,7 @@ function FileRow({
   canWrite,
   onSelect, 
   onOpen,
-  onClick,
+  onActivate,
   onRename,
   onDelete,
   onViewVersions,
@@ -530,6 +540,7 @@ function FileRow({
 }: { 
   file: FileItem
   isSelected: boolean
+  isActive: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
   favoriteUnavailableLabel: string
@@ -539,7 +550,7 @@ function FileRow({
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
-  onClick: (e: React.MouseEvent) => void
+  onActivate: (e: React.MouseEvent) => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
@@ -571,12 +582,13 @@ function FileRow({
       className={cn(
         "group grid grid-cols-[36px_minmax(0,1fr)_36px] items-center gap-3 border-b border-divider px-3 py-3 cursor-pointer transition-all duration-150 sm:grid-cols-[44px_minmax(0,1fr)_88px_118px_40px] sm:gap-4 sm:px-5 md:grid-cols-[44px_minmax(0,1fr)_100px_150px_120px_40px]",
         "hover:bg-content2/60",
+        isActive && !isSelected && "bg-content2/50",
         isMultiSelection && "bg-content2/30",
         isSelected && "bg-accent-primary/10"
       )}
       onClick={(e) => {
         e.stopPropagation()
-        onClick(e)
+        onActivate(e)
       }}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
@@ -771,6 +783,7 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
 function FileCard({
   file,
   isSelected,
+  isActive,
   isFavorited,
   favoriteActionsAvailable,
   favoriteUnavailableLabel,
@@ -780,7 +793,7 @@ function FileCard({
   canWrite,
   onSelect,
   onOpen,
-  onClick,
+  onActivate,
   onRename,
   onDelete,
   onViewVersions,
@@ -790,6 +803,7 @@ function FileCard({
 }: {
   file: FileItem
   isSelected: boolean
+  isActive: boolean
   isFavorited: boolean
   favoriteActionsAvailable: boolean
   favoriteUnavailableLabel: string
@@ -799,7 +813,7 @@ function FileCard({
   canWrite: boolean
   onSelect: (e: React.MouseEvent) => void
   onOpen: () => void
-  onClick: (e: React.MouseEvent) => void
+  onActivate: (e: React.MouseEvent) => void
   onRename: () => void
   onDelete: () => void
   onViewVersions: () => void
@@ -831,12 +845,13 @@ function FileCard({
       className={cn(
         "group relative min-h-[168px] bg-content1 border border-divider rounded-lg p-4 cursor-pointer transition-all duration-200",
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
+        isActive && !isSelected && "border-default-300 bg-content2/50",
         isMultiSelection && "bg-content2/40",
         isSelected && "border-accent-primary bg-accent-primary/5"
       )}
       onClick={(e) => {
         e.stopPropagation()
-        onClick(e)
+        onActivate(e)
       }}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
@@ -1067,6 +1082,8 @@ export function FilesPage() {
     selectAll,
     clearSelection,
     setViewMode,
+    setSortBy,
+    toggleSortOrder,
   } = useFilesStore()
 
   useEffect(() => {
@@ -1443,6 +1460,29 @@ export function FilesPage() {
   // Active file for preview panel (not selection)
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null)
 
+  const getFocusedOrActiveFile = useCallback((): { file: FileItem; index: number } | null => {
+    if (focusedIndex >= 0 && focusedIndex < sortedFiles.length) {
+      return { file: sortedFiles[focusedIndex], index: focusedIndex }
+    }
+
+    if (activeFilePath) {
+      const activeIndex = sortedFiles.findIndex((file) => file.path === activeFilePath)
+      if (activeIndex >= 0) {
+        return { file: sortedFiles[activeIndex], index: activeIndex }
+      }
+    }
+
+    if (selectedFiles.size === 1) {
+      const selectedPath = Array.from(selectedFiles)[0]
+      const selectedIndex = sortedFiles.findIndex((file) => file.path === selectedPath)
+      if (selectedIndex >= 0) {
+        return { file: sortedFiles[selectedIndex], index: selectedIndex }
+      }
+    }
+
+    return null
+  }, [activeFilePath, focusedIndex, selectedFiles, sortedFiles])
+
   const handleFileSelection = useCallback(
     (file: FileItem, index: number, event: React.MouseEvent, mode: 'primary' | 'toggle' = 'primary') => {
       const isShift = event.shiftKey
@@ -1481,6 +1521,21 @@ export function FilesPage() {
     },
     [activeFilePath, selectedFiles, setSelection, setFocusedIndex, sortedFiles, toggleFileSelection]
   )
+
+  const handleFileActivate = useCallback((file: FileItem, index: number, event: React.MouseEvent) => {
+    if (event.shiftKey || event.metaKey || event.ctrlKey) {
+      handleFileSelection(file, index, event, event.metaKey || event.ctrlKey ? 'toggle' : 'primary')
+      return
+    }
+
+    if (selectedFiles.size > 0) {
+      clearSelection()
+    }
+
+    setActiveFilePath(file.path)
+    setFocusedIndex(index)
+    lastSelectedIndexRef.current = index
+  }, [clearSelection, handleFileSelection, selectedFiles.size, setFocusedIndex])
 
   // Handle double click - open folder or preview file
   const handleFileOpen = useCallback((file: FileItem) => {
@@ -2094,19 +2149,26 @@ export function FilesPage() {
 
   const handleKeyboardDelete = useCallback(() => {
     if (!canWrite) return
-    if (selectedFiles.size === 0) return
-    onBatchDeleteOpen()
-  }, [canWrite, selectedFiles.size, onBatchDeleteOpen])
+    if (selectedFiles.size > 0) {
+      onBatchDeleteOpen()
+      return
+    }
+
+    const target = getFocusedOrActiveFile()
+    if (!target) return
+    setDeleteTarget(target.file)
+    onDeleteOpen()
+  }, [canWrite, getFocusedOrActiveFile, onBatchDeleteOpen, onDeleteOpen, selectedFiles.size])
 
   const handleKeyboardRename = useCallback(() => {
     if (!canWrite) return
-    if (selectedFiles.size !== 1) return
-    const path = Array.from(selectedFiles)[0]
-    const file = sortedFiles.find(f => f.path === path)
-    if (file) {
-      handleOpenRenameModal(file)
+    const target = selectedFiles.size === 1
+      ? sortedFiles.find(f => f.path === Array.from(selectedFiles)[0])
+      : getFocusedOrActiveFile()?.file
+    if (target) {
+      handleOpenRenameModal(target)
     }
-  }, [canWrite, selectedFiles, sortedFiles, handleOpenRenameModal])
+  }, [canWrite, getFocusedOrActiveFile, handleOpenRenameModal, selectedFiles, sortedFiles])
 
   const handleKeyboardEnter = useCallback(() => {
     // If there's a focused file, open it
@@ -2155,17 +2217,62 @@ export function FilesPage() {
     }
   }, [focusedIndex, setFocusedIndex, setSelection, setActiveFilePath, sortedFiles])
 
+  const focusFileByKeyboard = useCallback((nextIndex: number) => {
+    if (sortedFiles.length === 0) return
+
+    const clampedIndex = Math.max(0, Math.min(nextIndex, sortedFiles.length - 1))
+    const file = sortedFiles[clampedIndex]
+    if (!file) return
+
+    if (selectedFiles.size > 0) {
+      clearSelection()
+    }
+    setFocusedIndex(clampedIndex)
+    setActiveFilePath(file.path)
+    lastSelectedIndexRef.current = clampedIndex
+  }, [clearSelection, selectedFiles.size, setFocusedIndex, sortedFiles])
+
   const handleKeyboardArrowDown = useCallback((event?: KeyboardEvent) => {
     if (sortedFiles.length === 0) return
     const newIndex = focusedIndex < 0 ? 0 : Math.min(focusedIndex + 1, sortedFiles.length - 1)
-    applyKeyboardSelection(newIndex, Boolean(event?.shiftKey))
-  }, [applyKeyboardSelection, focusedIndex, sortedFiles.length])
+    if (event?.shiftKey) {
+      applyKeyboardSelection(newIndex, true)
+      return
+    }
+    focusFileByKeyboard(newIndex)
+  }, [applyKeyboardSelection, focusFileByKeyboard, focusedIndex, sortedFiles.length])
 
   const handleKeyboardArrowUp = useCallback((event?: KeyboardEvent) => {
     if (sortedFiles.length === 0) return
     const newIndex = focusedIndex <= 0 ? 0 : focusedIndex - 1
-    applyKeyboardSelection(newIndex, Boolean(event?.shiftKey))
-  }, [applyKeyboardSelection, focusedIndex, sortedFiles.length])
+    if (event?.shiftKey) {
+      applyKeyboardSelection(newIndex, true)
+      return
+    }
+    focusFileByKeyboard(newIndex)
+  }, [applyKeyboardSelection, focusFileByKeyboard, focusedIndex, sortedFiles.length])
+
+  const handleKeyboardToggleFocusedSelection = useCallback(() => {
+    const target = getFocusedOrActiveFile() ?? (sortedFiles[0] ? { file: sortedFiles[0], index: 0 } : null)
+    if (!target) return
+
+    toggleFileSelection(target.file.path)
+    setFocusedIndex(target.index)
+    lastSelectedIndexRef.current = target.index
+
+    if (target.file.isDir) {
+      setActiveFilePath(null)
+    } else {
+      setActiveFilePath(target.file.path)
+    }
+  }, [getFocusedOrActiveFile, setFocusedIndex, sortedFiles, toggleFileSelection])
+
+  const handleKeyboardEscape = useCallback(() => {
+    clearSelection()
+    setActiveFilePath(null)
+    setFocusedIndex(-1)
+    lastSelectedIndexRef.current = null
+  }, [clearSelection, setFocusedIndex])
 
   const handleKeyboardRefresh = useCallback(() => {
     void refetch().then((result) => {
@@ -2207,12 +2314,13 @@ export function FilesPage() {
   useKeyboardShortcuts({
     onDelete: canWrite ? handleKeyboardDelete : undefined,
     onSelectAll: handleSelectAll,
-    onEscape: clearSelection,
+    onEscape: handleKeyboardEscape,
     onCopy: canWrite ? handleKeyboardCopy : undefined,
     onCut: canWrite ? handleKeyboardCut : undefined,
     onPaste: canWrite ? handleKeyboardPaste : undefined,
     onRename: canWrite ? handleKeyboardRename : undefined,
     onEnter: handleKeyboardEnter,
+    onSpace: handleKeyboardToggleFocusedSelection,
     onArrowDown: handleKeyboardArrowDown,
     onArrowUp: handleKeyboardArrowUp,
     onRefresh: handleKeyboardRefresh,
@@ -2441,6 +2549,7 @@ export function FilesPage() {
                 <button 
                   onClick={() => setUploadQueue([])}
                   className="px-2 py-1 text-xs text-default-500 hover:text-default-700 hover:bg-content3 rounded transition-colors"
+                  aria-label="清空上传记录"
                 >
                   清空
                 </button>
@@ -2448,6 +2557,7 @@ export function FilesPage() {
               <button
                 onClick={() => setShowUploadPanel(false)}
                 className="p-1.5 hover:bg-content3 rounded transition-colors"
+                aria-label="隐藏上传记录"
               >
                 <X size={14} className="text-default-500" />
               </button>
@@ -2658,16 +2768,56 @@ export function FilesPage() {
           </div>
           
           <div className="flex shrink-0 items-center gap-2 self-start xl:self-auto">
+            <div className="flex items-center gap-1 rounded-lg border border-divider bg-content1 p-0.5 shadow-[var(--shadow-soft)]">
+              <Dropdown placement="bottom-end">
+                <DropdownTrigger>
+                  <button
+                    type="button"
+                    className="flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
+                    aria-label={`排序：${sortLabels[sortBy as SortKey]}`}
+                  >
+                    <ArrowUpDown size={15} />
+                    <span className="hidden sm:inline">排序：{sortLabels[sortBy as SortKey]}</span>
+                  </button>
+                </DropdownTrigger>
+                <DropdownMenu
+                  aria-label="排序字段"
+                  classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
+                >
+                  <DropdownItem key="name" onPress={() => setSortBy('name')}>
+                    按名称
+                  </DropdownItem>
+                  <DropdownItem key="size" onPress={() => setSortBy('size')}>
+                    按大小
+                  </DropdownItem>
+                  <DropdownItem key="modTime" onPress={() => setSortBy('modTime')}>
+                    按修改时间
+                  </DropdownItem>
+                </DropdownMenu>
+              </Dropdown>
+              <button
+                type="button"
+                className="flex h-9 min-w-9 items-center justify-center rounded-lg px-2 text-xs font-semibold text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
+                onClick={toggleSortOrder}
+                aria-label={sortOrder === 'asc' ? '切换为降序' : '切换为升序'}
+                title={sortOrder === 'asc' ? '升序' : '降序'}
+              >
+                {sortOrder === 'asc' ? '↑' : '↓'}
+              </button>
+            </div>
+
             <div className="flex bg-content1 border border-divider rounded-lg p-0.5 shadow-[var(--shadow-soft)]">
               <button
                 className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
                 onClick={() => setViewMode('list')}
+                aria-label="列表视图"
               >
                 <List size={16} />
               </button>
               <button
                 className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
                 onClick={() => setViewMode('grid')}
+                aria-label="网格视图"
               >
                 <Grid size={16} />
               </button>
@@ -2684,6 +2834,7 @@ export function FilesPage() {
                   : "bg-content1 border-divider text-default-500 hover:text-default-600 hover:border-default-400"
               )}
               title="上传记录"
+              aria-label="上传记录"
             >
               <Upload size={16} />
               {isUploading && (
@@ -2801,6 +2952,7 @@ export function FilesPage() {
                       <FileRow
                         file={file}
                         isSelected={selectedFiles.has(file.path)}
+                        isActive={activeFilePath === file.path}
                         isFavorited={favoritesData?.[file.path] ?? false}
                         favoriteActionsAvailable={favoriteActionsAvailable}
                         favoriteUnavailableLabel={favoriteUnavailableLabel}
@@ -2810,7 +2962,7 @@ export function FilesPage() {
                         canWrite={canWrite}
                         onSelect={(e) => handleFileSelection(file, virtualItem.index, e, 'toggle')}
                         onOpen={() => handleFileOpen(file)}
-                        onClick={(e) => handleFileSelection(file, virtualItem.index, e)}
+                        onActivate={(e) => handleFileActivate(file, virtualItem.index, e)}
                         onRename={() => handleOpenRenameModal(file)}
                         onDelete={() => handleOpenDeleteModal(file)}
                         onViewVersions={() => handleViewVersions(file)}
@@ -2879,30 +3031,31 @@ export function FilesPage() {
                 )}
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-4">
                   {sortedFiles.map((file, index) => (
-                  <FileCard
-                    key={file.path}
-                    file={file}
-                    isSelected={selectedFiles.has(file.path)}
-                    isFavorited={favoritesData?.[file.path] ?? false}
-                    favoriteActionsAvailable={favoriteActionsAvailable}
-                    favoriteUnavailableLabel={favoriteUnavailableLabel}
-                    shareActionsAvailable={shareActionsAvailable}
-                    shareActionLabel={shareActionLabel}
-                    isMultiSelection={hasMultiSelection}
-                    canWrite={canWrite}
-                    onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
-                    onOpen={() => handleFileOpen(file)}
-                    onClick={(e) => handleFileSelection(file, index, e)}
-                    onRename={() => handleOpenRenameModal(file)}
-                    onDelete={() => handleOpenDeleteModal(file)}
-                    onViewVersions={() => handleViewVersions(file)}
-                    onShare={() => handleOpenShareModal(file)}
-                    onToggleFavorite={() => favoriteMutation.mutate({ 
-                      path: file.path, 
-                      isFavorited: favoritesData?.[file.path] ?? false 
-                    })}
-                    onContextMenu={(e) => handleContextMenu(file, e)}
-                  />
+                    <FileCard
+                      key={file.path}
+                      file={file}
+                      isSelected={selectedFiles.has(file.path)}
+                      isActive={activeFilePath === file.path}
+                      isFavorited={favoritesData?.[file.path] ?? false}
+                      favoriteActionsAvailable={favoriteActionsAvailable}
+                      favoriteUnavailableLabel={favoriteUnavailableLabel}
+                      shareActionsAvailable={shareActionsAvailable}
+                      shareActionLabel={shareActionLabel}
+                      isMultiSelection={hasMultiSelection}
+                      canWrite={canWrite}
+                      onSelect={(e) => handleFileSelection(file, index, e, 'toggle')}
+                      onOpen={() => handleFileOpen(file)}
+                      onActivate={(e) => handleFileActivate(file, index, e)}
+                      onRename={() => handleOpenRenameModal(file)}
+                      onDelete={() => handleOpenDeleteModal(file)}
+                      onViewVersions={() => handleViewVersions(file)}
+                      onShare={() => handleOpenShareModal(file)}
+                      onToggleFavorite={() => favoriteMutation.mutate({
+                        path: file.path,
+                        isFavorited: favoritesData?.[file.path] ?? false
+                      })}
+                      onContextMenu={(e) => handleContextMenu(file, e)}
+                    />
                   ))}
                 </div>
               </div>

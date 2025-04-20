@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@plugin "../tailwind.heroui.cjs";
+@source "../node_modules/@heroui/theme/dist/**/*.{js,mjs}";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -731,6 +733,63 @@ label {
   word-break: break-word;
 }
 
+/* Activity log rows */
+.activity-log-row {
+  display: grid !important;
+  grid-template-columns: 2.5rem minmax(0, 1fr);
+  align-items: start;
+  column-gap: 0.75rem;
+  row-gap: 0.5rem;
+}
+
+.activity-log-icon {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+
+.activity-log-main {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.activity-log-summary {
+  min-width: 0;
+}
+
+.activity-log-action {
+  white-space: nowrap;
+}
+
+.activity-log-path,
+.activity-log-details span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-log-meta {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+@media (min-width: 640px) {
+  .activity-log-row {
+    grid-template-columns: 2.5rem minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .activity-log-icon,
+  .activity-log-main,
+  .activity-log-meta {
+    grid-row: 1;
+  }
+
+  .activity-log-meta {
+    grid-column: 3;
+    justify-content: flex-end;
+  }
+}
+
 /* Toast Customization - Meridian Style */
 [data-slot="toast-region"],
 [data-slot="toast-region"] > div,
@@ -741,6 +800,34 @@ label {
 [class*="ToastRegion"] {
   z-index: 9999 !important;
   pointer-events: none !important; /* Allow clicks to pass through to elements below */
+}
+
+.mn-toast-motion {
+  max-width: calc(100vw - 1.5rem) !important;
+  pointer-events: none !important;
+}
+
+.mn-toast {
+  width: min(22rem, calc(100vw - 1.5rem)) !important;
+  min-width: 0 !important;
+  max-width: calc(100vw - 1.5rem) !important;
+  pointer-events: auto !important;
+}
+
+.mn-toast-content {
+  align-items: flex-start !important;
+}
+
+.mn-toast-title,
+.mn-toast-description {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mn-toast-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Toast styling with Meridian theme */

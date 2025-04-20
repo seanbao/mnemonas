@@ -617,6 +617,99 @@ describe('FilesPage', () => {
       })
     })
 
+    it('activates a row for details without entering selection mode', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      const fileName = await screen.findByText('photo.jpg')
+      mockFilesStoreState.setSelection.mockClear()
+      mockFilesStoreState.toggleFileSelection.mockClear()
+      mockFilesStoreState.clearSelection.mockClear()
+
+      await user.click(fileName)
+
+      expect(mockFilesStoreState.setSelection).not.toHaveBeenCalled()
+      expect(mockFilesStoreState.toggleFileSelection).not.toHaveBeenCalled()
+      expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
+      expect(screen.queryByText('已选')).toBeNull()
+      expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(1)
+    })
+
+    it('selects a row only from its checkbox', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      const checkbox = await screen.findByRole('checkbox', { name: '选择 photo.jpg' })
+      mockFilesStoreState.setSelection.mockClear()
+      mockFilesStoreState.toggleFileSelection.mockClear()
+
+      await user.click(checkbox)
+
+      expect(mockFilesStoreState.toggleFileSelection).toHaveBeenCalledWith('/photo.jpg')
+      expect(mockFilesStoreState.setSelection).not.toHaveBeenCalledWith(['/photo.jpg'])
+    })
+
+    it('moves keyboard focus for details without selecting on arrow keys', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+      mockFilesStoreState.setSelection.mockClear()
+      mockFilesStoreState.toggleFileSelection.mockClear()
+      mockFilesStoreState.clearSelection.mockClear()
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      })
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      })
+
+      expect(mockFilesStoreState.setSelection).not.toHaveBeenCalled()
+      expect(mockFilesStoreState.toggleFileSelection).not.toHaveBeenCalled()
+      expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
+      expect(screen.queryByText('已选')).toBeNull()
+      expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(1)
+    })
+
+    it('toggles selection for the focused row with Space', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      })
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      })
+      mockFilesStoreState.toggleFileSelection.mockClear()
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }))
+      })
+
+      expect(mockFilesStoreState.toggleFileSelection).toHaveBeenCalledWith('/photo.jpg')
+    })
+
+    it('renames the active row without requiring selection', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      const fileName = await screen.findByText('photo.jpg')
+      await user.click(fileName)
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      expect(await screen.findByDisplayValue('photo.jpg')).toBeTruthy()
+    })
+
     it('shows selection summary when items are selected', async () => {
       mockFilesStoreState.selectedFiles = new Set(['/documents', '/photo.jpg'])
       render(<FilesPage />)
@@ -1536,6 +1629,19 @@ describe('FilesPage', () => {
         const buttons = document.querySelectorAll('button')
         expect(buttons.length).toBeGreaterThan(3) // Upload, new folder, list, grid
       })
+    })
+
+    it('exposes sort controls', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<FilesPage />)
+
+      await screen.findByRole('button', { name: '排序：名称' })
+
+      await user.click(screen.getByRole('button', { name: '按大小' }))
+      expect(mockFilesStoreState.setSortBy).toHaveBeenCalledWith('size')
+
+      await user.click(screen.getByRole('button', { name: '切换为降序' }))
+      expect(mockFilesStoreState.toggleSortOrder).toHaveBeenCalled()
     })
   })
 

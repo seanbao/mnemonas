@@ -77,9 +77,9 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
   const color = getActionColor(entry.action)
 
   return (
-    <div className="flex flex-wrap items-start gap-x-3 gap-y-2 border-b border-divider px-4 py-4 table-row sm:flex-nowrap sm:items-center sm:gap-4 sm:py-2.5">
+    <div className="activity-log-row grid grid-cols-[2.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 border-b border-divider px-4 py-3.5 transition-colors last:border-b-0 hover:bg-content2/40 sm:grid-cols-[2.5rem_minmax(0,1fr)_auto] sm:items-center sm:px-5">
       <div className={cn(
-        "w-8 h-8 rounded-lg flex shrink-0 items-center justify-center",
+        "activity-log-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
         color === 'success' && "bg-success/20 text-success",
         color === 'danger' && "bg-danger/20 text-danger",
         color === 'warning' && "bg-warning/20 text-warning",
@@ -89,30 +89,30 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
         <ActionIcon action={entry.action} />
       </div>
 
-      <div className="min-w-0 flex-1 basis-[calc(100%-3rem)] sm:basis-auto">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-          <span className="font-medium shrink-0">{getActionLabel(entry.action)}</span>
+      <div className="activity-log-main min-w-0">
+        <div className="activity-log-summary flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-2">
+          <span className="activity-log-action shrink-0 text-sm font-semibold text-foreground">{getActionLabel(entry.action)}</span>
           {entry.path && (
-            <span className="min-w-0 truncate text-sm text-default-400">{entry.path}</span>
+            <span className="activity-log-path min-w-0 truncate text-sm text-default-500">{entry.path}</span>
           )}
         </div>
         {entry.details && Object.keys(entry.details).length > 0 && (
-          <div className="text-xs text-default-400 mt-1">
+          <div className="activity-log-details mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-default-400">
             {Object.entries(entry.details).map(([key, value]) => (
-              <span key={key} className="mr-3">{key}: {value}</span>
+              <span key={key} className="min-w-0 truncate">{key}: {value}</span>
             ))}
           </div>
         )}
       </div>
 
-      <div className="ml-11 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-default-500 sm:ml-0 sm:flex-nowrap">
+      <div className="activity-log-meta col-start-2 flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-default-500 sm:col-start-auto sm:flex-nowrap sm:justify-end sm:text-sm">
         {entry.user && (
-          <div className="flex items-center gap-1">
+          <div className="flex min-w-0 items-center gap-1">
             <User size={14} />
-            <span>{entry.user}</span>
+            <span className="truncate">{entry.user}</span>
           </div>
         )}
-        <div className="flex items-center gap-1 w-24 justify-end">
+        <div className="flex shrink-0 items-center gap-1 sm:w-24 sm:justify-end">
           <Clock size={14} />
           <span>{formatRelativeTime(entry.timestamp)}</span>
         </div>
