@@ -470,15 +470,15 @@ function ImagePreview({
           
           {/* Bottom toolbar */}
           <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4">
-            <div className="flex items-center justify-between max-w-4xl mx-auto">
-              <div className="text-white">
-                <p className="font-medium truncate max-w-md">{currentImage?.name}</p>
+            <div className="mx-auto flex max-w-4xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 text-white">
+                <p className="max-w-md truncate font-medium">{currentImage?.name}</p>
                 <p className="text-sm text-white/60">
                   {currentIndex + 1} / {images.length}
                 </p>
               </div>
               
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <Button
                   isIconOnly
                   size="sm"

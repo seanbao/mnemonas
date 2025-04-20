@@ -349,7 +349,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex min-w-0 items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-foreground">
           我的分享 ({shares.length})
         </h2>
@@ -450,7 +450,7 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
   return (
     <Card className="card-meridian">
       <CardBody className="p-4">
-        <div className="flex items-start gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
           {/* Icon */}
           <FileIcon
             name={fileName}
@@ -459,8 +459,8 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
           />
 
           {/* Content */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
               <span className="font-medium text-foreground truncate">
                 {fileName}
               </span>
@@ -499,7 +499,7 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 self-end sm:self-start">
             <Button
               isIconOnly
               variant="flat"

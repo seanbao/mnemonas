@@ -150,9 +150,9 @@ export function SearchPage() {
   }, [setSearchParams])
 
   return (
-    <div className="h-full flex flex-col p-4 sm:p-6">
+    <div className="flex h-full min-h-0 flex-col p-4 sm:p-6">
       {/* Header */}
-      <div className="flex items-center gap-4 mb-6">
+      <div className="mb-6 flex min-w-0 items-center gap-3 sm:gap-4">
         <Button
           isIconOnly
           variant="light"
@@ -191,9 +191,9 @@ export function SearchPage() {
       </div>
 
       {/* Results */}
-      <Card className="flex-1 card-meridian overflow-hidden">
+      <Card className="card-meridian min-h-0 flex-1 overflow-hidden">
         <CardHeader className="border-b border-divider bg-content2/30">
-          <div className="flex items-center justify-between w-full">
+          <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-2">
             <h2 className="font-semibold text-foreground">搜索结果</h2>
             {data && (
               <span className="text-sm text-default-500">

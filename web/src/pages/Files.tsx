@@ -628,7 +628,7 @@ function FileRow({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button aria-label={`${file.name} 操作菜单`} className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-content2">
+              <button aria-label={`${file.name} 操作菜单`} className="rounded-md p-1.5 opacity-100 transition-opacity hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100">
                 <MoreVertical size={16} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -829,7 +829,7 @@ function FileCard({
   return (
     <div
       className={cn(
-        "group relative bg-content1 border border-divider rounded-lg p-4 cursor-pointer transition-all duration-200",
+        "group relative min-h-[168px] bg-content1 border border-divider rounded-lg p-4 cursor-pointer transition-all duration-200",
         "shadow-[var(--shadow-soft)] hover:border-accent-primary/40 hover:shadow-[var(--shadow-medium)]",
         isMultiSelection && "bg-content2/40",
         isSelected && "border-accent-primary bg-accent-primary/5"
@@ -872,7 +872,7 @@ function FileCard({
         {!isMultiSelection && (
           <Dropdown placement="bottom-end">
             <DropdownTrigger>
-              <button aria-label={`${file.name} 操作菜单`} className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity bg-content1/80 backdrop-blur-sm hover:bg-content2">
+              <button aria-label={`${file.name} 操作菜单`} className="rounded-md bg-content1/80 p-1.5 opacity-100 backdrop-blur-sm transition-opacity hover:bg-content2 sm:opacity-0 sm:group-hover:opacity-100">
                 <MoreVertical size={14} className="text-default-500" />
               </button>
             </DropdownTrigger>
@@ -2192,6 +2192,17 @@ export function FilesPage() {
     })
   }, [refetchFavorites])
 
+  const fileShortcutsEnabled = !(
+    isNewFolderOpen
+    || isRenameOpen
+    || isDeleteOpen
+    || isBatchDeleteOpen
+    || isShareOpen
+    || isMoveOpen
+    || isPreviewOpen
+    || contextMenu.state.isOpen
+  )
+
   // Register keyboard shortcuts
   useKeyboardShortcuts({
     onDelete: canWrite ? handleKeyboardDelete : undefined,
@@ -2206,6 +2217,8 @@ export function FilesPage() {
     onArrowUp: handleKeyboardArrowUp,
     onRefresh: handleKeyboardRefresh,
     onNewFolder: canWrite ? handleOpenNewFolderModal : undefined,
+  }, {
+    enabled: fileShortcutsEnabled,
   })
 
   // Determine active file for preview (prioritize activeFilePath, then single selection)
@@ -2352,8 +2365,8 @@ export function FilesPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full flex overflow-hidden relative">
-        <div className="flex-1 flex flex-col min-w-0 p-4 sm:p-5 lg:p-7">
+      <div className="relative flex h-full min-h-0 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
           <Breadcrumbs path="/" onNavigate={setCurrentPath} />
           <div className="flex-1 flex items-center justify-center surface-card">
             <EmptyState
@@ -2371,8 +2384,8 @@ export function FilesPage() {
   if (error) {
     const errorPresentation = getFilesLoadErrorPresentation(error)
     return (
-      <div className="h-full flex overflow-hidden relative">
-        <div className="flex-1 flex flex-col min-w-0 p-4 sm:p-5 lg:p-7">
+      <div className="relative flex h-full min-h-0 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
           <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
           <div className="flex-1 flex items-center justify-center surface-card">
             <EmptyState
@@ -2394,7 +2407,7 @@ export function FilesPage() {
 
   return (
     <div 
-      className="h-full flex overflow-hidden relative"
+      className="relative flex h-full min-h-0 overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -2485,7 +2498,7 @@ export function FilesPage() {
         </div>
       )}
 
-      <div className="flex-1 flex flex-col min-w-0 p-4 sm:p-5 lg:p-7">
+      <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUploadInputChange} />
         {/* @ts-expect-error - webkitdirectory is a non-standard attribute */}
         <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={handleUploadInputChange} />
@@ -2644,7 +2657,7 @@ export function FilesPage() {
             )}
           </div>
           
-          <div className="flex items-center gap-2 self-start xl:self-auto">
+          <div className="flex shrink-0 items-center gap-2 self-start xl:self-auto">
             <div className="flex bg-content1 border border-divider rounded-lg p-0.5 shadow-[var(--shadow-soft)]">
               <button
                 className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
@@ -2709,26 +2722,30 @@ export function FilesPage() {
         )}
 
         {viewMode === 'list' ? (
-          <div className="flex-1 surface-card overflow-hidden flex flex-col">
+          <div className="surface-card flex min-h-0 flex-1 flex-col overflow-hidden">
             {/* Header */}
             <div className="grid grid-cols-[36px_minmax(0,1fr)_36px] gap-3 px-3 py-3 table-head text-[11px] font-semibold sm:grid-cols-[44px_minmax(0,1fr)_88px_118px_40px] sm:gap-4 sm:px-5 md:grid-cols-[44px_minmax(0,1fr)_100px_150px_120px_40px]">
               <div className="flex items-center justify-center">
-                <div 
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={isAllSelected ? true : isPartialSelected ? 'mixed' : false}
+                  aria-label={isAllSelected ? '取消全选' : '全选当前目录'}
                   className={cn(
-                    "w-5 h-5 border-2 rounded-lg cursor-pointer transition-colors",
+                    "flex h-5 w-5 cursor-pointer items-center justify-center rounded-lg border-2 transition-colors",
                     isAllSelected || isPartialSelected ? "bg-accent-primary border-accent-primary" : "border-default-400 hover:border-accent-primary"
                   )}
                   onClick={handleSelectAll}
                 >
                   {isAllSelected && <span className="text-white text-xs font-bold">✓</span>}
                   {isPartialSelected && <span className="text-white text-xs font-bold">-</span>}
-                </div>
+                </button>
               </div>
               <div>名称</div>
               <div className="hidden sm:block">大小</div>
               <div className="hidden sm:block">修改时间</div>
               <div className="hidden md:block">时光印记</div>
-              <div className="flex items-center justify-end">
+              <div className="hidden items-center justify-end md:flex">
                 {showMultiSelectHint && (
                   <div className="flex items-center gap-2 animate-in fade-in duration-150">
                     <span className="text-[10px] text-default-500 bg-content2 border border-divider rounded-full px-2 py-0.5">
@@ -2747,7 +2764,7 @@ export function FilesPage() {
             {/* List Content */}
             <div
               ref={parentRef}
-              className="flex-1 overflow-auto custom-scrollbar relative"
+              className="relative min-h-0 flex-1 overflow-auto custom-scrollbar"
               onClick={() => {
                 if (selectedFiles.size > 0) {
                   setMultiSelectHintVisible(true)
@@ -2824,7 +2841,7 @@ export function FilesPage() {
         ) : (
           /* Grid View */
           <div
-            className="flex-1 overflow-auto custom-scrollbar"
+            className="min-h-0 flex-1 overflow-auto custom-scrollbar"
             onClick={() => {
               if (selectedFiles.size > 0) {
                 setMultiSelectHintVisible(true)

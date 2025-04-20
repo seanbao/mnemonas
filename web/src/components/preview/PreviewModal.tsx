@@ -238,9 +238,9 @@ export function PreviewModal({
       <ModalContent>
         <ModalBody className="relative h-full overflow-hidden">
           {/* Top toolbar */}
-          <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 bg-gradient-to-b from-black/60 to-transparent">
-            <div className="flex items-center gap-3 text-white">
-              <span className="font-medium truncate max-w-[400px]">
+          <div className="absolute left-0 right-0 top-0 z-20 flex items-center justify-between gap-3 bg-gradient-to-b from-black/60 to-transparent px-4 py-3">
+            <div className="flex min-w-0 items-center gap-3 text-white">
+              <span className="max-w-[calc(100vw-12rem)] truncate font-medium sm:max-w-[400px]">
                 {currentFile?.name}
               </span>
               {files.length > 1 && (
@@ -249,7 +249,7 @@ export function PreviewModal({
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex shrink-0 items-center gap-1">
               <Button
                 isIconOnly
                 size="sm"

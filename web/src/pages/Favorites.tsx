@@ -530,7 +530,7 @@ export function FavoritesPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="收藏夹"
           subtitle={invalidHomeDirTitle}
@@ -549,7 +549,7 @@ export function FavoritesPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 lg:p-8 flex items-center justify-center h-full">
+      <div className="flex h-full items-center justify-center p-6 lg:p-8">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载收藏列表...</p>
@@ -561,7 +561,7 @@ export function FavoritesPage() {
   if (error) {
     if (featureState === 'disabled') {
       return (
-        <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+        <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
           <PageHeader
             title="收藏夹"
             subtitle="功能已关闭"
@@ -580,7 +580,7 @@ export function FavoritesPage() {
 
     if (featureState === 'unavailable') {
       return (
-        <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+        <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
           <PageHeader
             title="收藏夹"
             subtitle="暂不可用"
@@ -603,7 +603,7 @@ export function FavoritesPage() {
     }
 
     return (
-      <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+      <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
           title="收藏夹"
           subtitle="加载失败"
@@ -626,7 +626,7 @@ export function FavoritesPage() {
   }
 
   return (
-    <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
+    <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
       {/* Header */}
       <PageHeader
         title="收藏夹"
@@ -683,7 +683,7 @@ export function FavoritesPage() {
       )}
 
       {/* Item list */}
-      <div className="flex-1 overflow-auto card-meridian rounded-lg">
+      <div className="card-meridian min-h-0 flex-1 overflow-auto rounded-lg">
         {favoriteItems.length > 0 ? (
           favoriteItems.map(item => (
             <FavoriteRow

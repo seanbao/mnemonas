@@ -56,13 +56,13 @@ function SettingsSection({
 }) {
   return (
     <Card className="card-meridian">
-      <CardHeader className="flex gap-4 pb-2">
-        <div className="gradient-meridian rounded-lg p-2.5 shadow-sm">
+      <CardHeader className="flex min-w-0 gap-4 pb-2">
+        <div className="gradient-meridian shrink-0 rounded-lg p-2.5 shadow-sm">
           <Icon size={20} className="text-white" />
         </div>
-        <div className="flex-1">
-          <h3 className="text-base font-semibold text-foreground">{title}</h3>
-          <p className="text-xs text-default-500 mt-0.5">{description}</p>
+        <div className="min-w-0 flex-1">
+          <h3 className="break-anywhere text-base font-semibold text-foreground">{title}</h3>
+          <p className="break-anywhere mt-0.5 text-xs text-default-500">{description}</p>
         </div>
       </CardHeader>
       <CardBody className="pt-2">
@@ -227,7 +227,7 @@ function SettingRow({
           <div className="text-xs text-default-500 mt-0.5">{description}</div>
         )}
       </div>
-      <div className="w-full sm:w-auto sm:shrink-0">
+      <div className="w-full min-w-0 sm:w-auto sm:shrink-0">
         {children}
       </div>
     </div>
