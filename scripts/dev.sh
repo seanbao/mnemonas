@@ -5,9 +5,9 @@
 #   -b, --backend: 仅启动后端 (nasd + dataplane)
 #   -f, --frontend: 仅启动前端
 #   -k, --kill: 停止所有组件
-#   -c, --creds: 显示 WebDAV 登录凭据
+#   -c, --creds: 显示 Web UI 初始密码文件和 WebDAV 登录凭据
 
-set -e
+set -eo pipefail
 
 # 颜色定义
 RED='\033[0;31m'
@@ -92,7 +92,7 @@ require_frontend_node() {
 # 检查端口是否被占用
 check_port() {
     local port=$1
-    if lsof -i :$port >/dev/null 2>&1; then
+    if lsof -i :"$port" >/dev/null 2>&1; then
         return 0  # 端口被占用
     else
         return 1  # 端口空闲
@@ -105,6 +105,7 @@ wait_for_service() {
     local url=$2
     local max_attempts=30
     local attempt=0
+    : "$name"
 
     while [ $attempt -lt $max_attempts ]; do
         if curl -s "$url" >/dev/null 2>&1; then
@@ -122,7 +123,8 @@ kill_all() {
     
     # 停止 nasd
     if [ -f "$PID_DIR/nasd.pid" ]; then
-        local pid=$(cat "$PID_DIR/nasd.pid")
+        local pid
+        pid=$(cat "$PID_DIR/nasd.pid")
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
             log_info "已停止 nasd (PID: $pid)"
@@ -132,7 +134,8 @@ kill_all() {
     
     # 停止 dataplane
     if [ -f "$PID_DIR/dataplane.pid" ]; then
-        local pid=$(cat "$PID_DIR/dataplane.pid")
+        local pid
+        pid=$(cat "$PID_DIR/dataplane.pid")
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
             log_info "已停止 dataplane (PID: $pid)"
@@ -142,7 +145,8 @@ kill_all() {
     
     # 停止前端开发服务器
     if [ -f "$PID_DIR/frontend.pid" ]; then
-        local pid=$(cat "$PID_DIR/frontend.pid")
+        local pid
+        pid=$(cat "$PID_DIR/frontend.pid")
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
             log_info "已停止前端开发服务器 (PID: $pid)"
@@ -150,16 +154,24 @@ kill_all() {
         rm -f "$PID_DIR/frontend.pid"
     fi
     
-    # 兜底: 按端口杀进程 (9090=gRPC, 9091=HTTP)
-    for port in 8080 9090 9091 5173; do
-        if check_port $port; then
-            local pid=$(lsof -t -i :$port 2>/dev/null || true)
-            if [ -n "$pid" ]; then
-                kill $pid 2>/dev/null || true
-                log_warn "已清理端口 $port 上的进程 (PID: $pid)"
+    if [ "${MNEMONAS_DEV_KILL_PORTS:-0}" = "1" ]; then
+        # 兜底: 按端口杀进程 (9090=gRPC, 9091=HTTP)。默认关闭，避免误杀用户自己的服务。
+        for port in 8080 9090 9091 5173; do
+            if check_port "$port"; then
+                local pids=()
+                local pid
+                mapfile -t pids < <(lsof -t -i :"$port" 2>/dev/null || true)
+                for pid in "${pids[@]}"; do
+                    if [ -n "$pid" ]; then
+                        kill "$pid" 2>/dev/null || true
+                        log_warn "已清理端口 $port 上的进程 (PID: $pid)"
+                    fi
+                done
             fi
-        fi
-    done
+        done
+    else
+        log_info "未启用按端口兜底清理；如确需清理占用端口的外部进程，可运行 MNEMONAS_DEV_KILL_PORTS=1 $0 --kill"
+    fi
     
     log_info "所有组件已停止"
 }
@@ -169,6 +181,7 @@ build_project() {
     log_section "构建项目"
     
     cd "$PROJECT_ROOT"
+    mkdir -p bin
     
     # 构建 Go 控制面
     log_info "构建 nasd..."
@@ -176,7 +189,7 @@ build_project() {
     
     # 构建 Rust 数据面
     log_info "构建 dataplane..."
-    cd dataplane && cargo build --release 2>&1 | tail -3
+    cd dataplane && cargo build --release
     cp target/release/dataplane ../bin/dataplane
     cd "$PROJECT_ROOT"
     
@@ -199,8 +212,16 @@ start_dataplane() {
         return 1
     fi
     
+    local storage_root
+    storage_root=$(storage_root_from_config)
+
     # 启动 dataplane
-    ./bin/dataplane > "$LOG_DIR/dataplane.log" 2>&1 &
+    CONFIG_PATH="$HOME/.mnemonas/config.toml" \
+        DATAPLANE_BIN="$PROJECT_ROOT/bin/dataplane" \
+        DATAPLANE_DATA_DIR="$storage_root/.mnemonas/objects" \
+        DATAPLANE_HTTP_ADDR="127.0.0.1:9091" \
+        DATAPLANE_GRPC_ADDR="127.0.0.1:9090" \
+        "$PROJECT_ROOT/scripts/mnemonas-dataplane-start.sh" > "$LOG_DIR/dataplane.log" 2>&1 &
     local pid=$!
     echo $pid > "$PID_DIR/dataplane.pid"
     
@@ -244,18 +265,9 @@ start_nasd() {
         log_info "  凭据:     ./scripts/dev.sh --creds"
         log_info "  API:      http://127.0.0.1:8080/api/v1/"
         
-        # 检查并显示自动生成的 WebDAV 密码
-        if grep -q "WebDAV credentials (auto-generated" "$LOG_DIR/nasd.log"; then
-            echo ""
-            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo -e "${YELLOW}🔐 WebDAV 凭据 (自动生成，请保存!):${NC}"
-            local username=$(grep "Username username=" "$LOG_DIR/nasd.log" | tail -1 | sed 's/.*username=//')
-            local password=$(grep "Password password=" "$LOG_DIR/nasd.log" | tail -1 | sed 's/.*password=//')
-            echo -e "   用户名: ${GREEN}${username}${NC}"
-            echo -e "   密码:   ${GREEN}${password}${NC}"
-            echo -e "   存储于: ~/.mnemonas/secrets.json"
-            echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo ""
+        # 开发脚本可显式读取本机 secrets；生产日志不输出明文 WebDAV 密码。
+        if grep -q "WebDAV credentials were auto-generated" "$LOG_DIR/nasd.log"; then
+            show_credentials
         fi
     else
         log_error "nasd 启动超时，请检查日志: $LOG_DIR/nasd.log"
@@ -281,7 +293,11 @@ start_frontend() {
     # 检查依赖
     if [ ! -d "node_modules" ]; then
         log_info "安装前端依赖..."
-        npm install
+        if [ -f "package-lock.json" ]; then
+            npm ci
+        else
+            npm install
+        fi
     fi
     
     # 启动开发服务器
@@ -299,65 +315,124 @@ start_frontend() {
     fi
 }
 
-# 显示 WebDAV 凭据
-show_credentials() {
-    local secrets_file="$HOME/.mnemonas/secrets.json"
+read_config_value() {
+    local file=$1
+    local section=$2
+    local key=$3
+
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+
+    awk -v section="[$section]" -v key="$key" '
+        {
+            line = $0
+            sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            section_line = line
+            if (section_line ~ /^\[/) {
+                sub(/^\[[[:space:]]*/, "[", section_line)
+                sub(/[[:space:]]*\]$/, "]", section_line)
+                gsub(/[[:space:]]*\.[[:space:]]*/, ".", section_line)
+            }
+        }
+        section_line == section { in_section = 1; next }
+        section_line ~ /^\[/ { in_section = 0 }
+        in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            gsub(/^"/, "", line)
+            gsub(/"$/, "", line)
+            gsub(/^\047/, "", line)
+            gsub(/\047$/, "", line)
+            print line
+            exit
+        }
+    ' "$file"
+}
+
+expand_path() {
+    local path=$1
+
+    case "$path" in
+        "")
+            echo "$HOME/.mnemonas"
+            ;;
+        "~")
+            echo "$HOME"
+            ;;
+        \~/*)
+            echo "$HOME/${path#\~/}"
+            ;;
+        *)
+            echo "$path"
+            ;;
+    esac
+}
+
+storage_root_from_config() {
     local config_file="$HOME/.mnemonas/config.toml"
-    
-    if [ ! -f "$secrets_file" ]; then
-        log_error "凭据文件不存在: $secrets_file"
-        log_info "请先启动服务以生成凭据: ./scripts/dev.sh"
-        return 1
+    local storage_root="$HOME/.mnemonas"
+    local configured_root
+
+    configured_root=$(read_config_value "$config_file" storage root)
+    if [ -n "$configured_root" ]; then
+        storage_root=$(expand_path "$configured_root")
+    fi
+
+    echo "$storage_root"
+}
+
+# 显示 Web UI 初始密码文件和 WebDAV 凭据
+show_credentials() {
+    local config_file="$HOME/.mnemonas/config.toml"
+    local storage_root
+    local secrets_file
+    local initial_password_file
+
+    storage_root=$(storage_root_from_config)
+
+    secrets_file="$storage_root/secrets.json"
+    initial_password_file="$storage_root/.mnemonas/initial-password.txt"
+
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}🔐 Web UI 初始登录:${NC}"
+    if [ -f "$initial_password_file" ]; then
+        echo -e "   初始密码文件: ${GREEN}${initial_password_file}${NC}"
+        echo "   首次成功登录后该文件会自动删除；登录后请立即修改管理员密码。"
+    else
+        echo "   未找到初始密码文件；可能已经完成首次登录，或认证未启用。"
     fi
 
     local username="admin"
     local configured_password=""
     if [ -f "$config_file" ]; then
         local configured_username
-        configured_username=$(awk '
-            /^\[webdav\]$/ { in_webdav = 1; next }
-            /^\[/ { in_webdav = 0 }
-            in_webdav && /^[[:space:]]*username[[:space:]]*=/ {
-                line = $0
-                sub(/^[^=]*=[[:space:]]*/, "", line)
-                sub(/[[:space:]]*#.*$/, "", line)
-                gsub(/^"/, "", line)
-                gsub(/"$/, "", line)
-                print line
-                exit
-            }
-        ' "$config_file")
+        configured_username=$(read_config_value "$config_file" webdav username)
         if [ -n "$configured_username" ]; then
             username="$configured_username"
         fi
 
-        configured_password=$(awk '
-            /^\[webdav\]$/ { in_webdav = 1; next }
-            /^\[/ { in_webdav = 0 }
-            in_webdav && /^[[:space:]]*password[[:space:]]*=/ {
-                line = $0
-                sub(/^[^=]*=[[:space:]]*/, "", line)
-                sub(/[[:space:]]*#.*$/, "", line)
-                gsub(/^"/, "", line)
-                gsub(/"$/, "", line)
-                print line
-                exit
-            }
-        ' "$config_file")
+        configured_password=$(read_config_value "$config_file" webdav password)
     fi
 
     local password="$configured_password"
     if [ -z "$password" ]; then
-        password=$(grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$secrets_file" | sed 's/.*: *"//' | sed 's/"$//' || true)
+        if [ -f "$secrets_file" ]; then
+            password=$(grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$secrets_file" | sed 's/.*: *"//' | sed 's/"$//' || true)
+        fi
     fi
-    if [ -z "$password" ]; then
-        log_warn "未找到 WebDAV 密码；请检查 $config_file 或 $secrets_file"
-        return 1
-    fi
-    
+
     echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}🔐 WebDAV 凭据:${NC}"
+    if [ -z "$password" ]; then
+        echo "   未找到 WebDAV 密码；请检查 $config_file 或 $secrets_file"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        return 0
+    fi
+
     echo -e "   用户名: ${GREEN}${username}${NC}"
     echo -e "   密码:   ${GREEN}${password}${NC}"
     echo -e "   存储于: $secrets_file"
@@ -441,11 +516,14 @@ main() {
             echo "选项:"
             echo "  (无)        启动所有组件 (默认)"
             echo "  -b, --backend   仅启动后端 (nasd + dataplane)"
-            echo "  -c, --creds     显示 WebDAV 登录凭据"
+            echo "  -c, --creds     显示 Web UI 初始密码文件和 WebDAV 登录凭据"
             echo "  -f, --frontend  仅启动前端开发服务器"
             echo "  -s, --status    查看服务状态"
             echo "  -k, --kill      停止所有组件"
             echo "  -h, --help      显示帮助"
+            echo ""
+            echo "环境变量:"
+            echo "  MNEMONAS_DEV_KILL_PORTS=1  允许 --kill 额外按端口清理占用 8080/9090/9091/5173 的进程"
             ;;
         *)
             log_error "未知选项: $1"

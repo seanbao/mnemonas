@@ -11,7 +11,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 | **用户名** | 按配置；默认启用 Basic Auth，留空时使用 `admin` |
 | **密码** | 按配置；默认可使用自定义密码或首次启动生成的 WebDAV 密码 |
 
-> 默认配置已启用 WebDAV Basic Auth。可通过启动日志、`secrets.json` 或管理接口查看当前凭据，参见 [配置说明](configuration.md)。
+> 默认配置已启用 WebDAV Basic Auth。WebDAV 凭据与 Web UI 管理员账号不同；可从服务器端 `<storage.root>/secrets.json` 或管理员登录后的设置接口查看当前 WebDAV 凭据，参见 [配置说明](configuration.md)。
 
 ---
 

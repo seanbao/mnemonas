@@ -1235,11 +1235,23 @@ func generateID() (string, error) {
 func generateRandomPassword(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
 	b := make([]byte, length)
-	if _, err := userRandomRead(b); err != nil {
-		return "", err
-	}
+	maxRandomByte := byte(256 - (256 % len(charset)))
 	for i := range b {
-		b[i] = charset[int(b[i])%len(charset)]
+		for {
+			var randomByte [1]byte
+			n, err := userRandomRead(randomByte[:])
+			if err != nil {
+				return "", err
+			}
+			if n != len(randomByte) {
+				return "", io.ErrUnexpectedEOF
+			}
+			if randomByte[0] >= maxRandomByte {
+				continue
+			}
+			b[i] = charset[int(randomByte[0])%len(charset)]
+			break
+		}
 	}
 	return string(b), nil
 }

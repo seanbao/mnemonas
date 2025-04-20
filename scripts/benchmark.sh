@@ -24,14 +24,26 @@ read_config_value() {
     fi
 
     awk -v section="[$section]" -v key="$key" '
-        $0 == section { in_section = 1; next }
-        /^\[/ { in_section = 0 }
-        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+        {
             line = $0
-            sub(/^[^=]*=[[:space:]]*/, "", line)
             sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            section_line = line
+            if (section_line ~ /^\[/) {
+                sub(/^\[[[:space:]]*/, "[", section_line)
+                sub(/[[:space:]]*\]$/, "]", section_line)
+                gsub(/[[:space:]]*\.[[:space:]]*/, ".", section_line)
+            }
+        }
+        section_line == section { in_section = 1; next }
+        section_line ~ /^\[/ { in_section = 0 }
+        in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
             gsub(/^"/, "", line)
             gsub(/"$/, "", line)
+            gsub(/^\047/, "", line)
+            gsub(/\047$/, "", line)
             print line
             exit
         }
@@ -149,8 +161,8 @@ create_test_files() {
     echo "Creating $count test files in $dir..."
     mkdir -p "$dir"
     
-    for i in $(seq 1 $count); do
-        printf 'benchmark file %05d\n' "$i" > "$dir/file-$(printf '%05d' $i).txt"
+    for i in $(seq 1 "$count"); do
+        printf 'benchmark file %05d\n' "$i" > "$dir/file-$(printf '%05d' "$i").txt"
     done
 }
 
@@ -168,9 +180,11 @@ benchmark_propfind() {
     # Measure time (3 runs, take average)
     local total=0
     for i in 1 2 3; do
-        local start=$(date +%s%N)
+        local start
+        local end
+        start=$(date +%s%N)
         run_propfind "$path" "$depth"
-        local end=$(date +%s%N)
+        end=$(date +%s%N)
         local duration=$(( (end - start) / 1000000 ))
         total=$((total + duration))
     done
@@ -186,9 +200,11 @@ benchmark_get() {
     
     echo -n "GET $desc: "
     
-    local start=$(date +%s%N)
+    local start
+    local end
+    start=$(date +%s%N)
     webdav_curl -s "$DAV_URL$path" > /dev/null 2>&1 || true
-    local end=$(date +%s%N)
+    end=$(date +%s%N)
     local duration=$(( (end - start) / 1000000 ))
     
     echo "${duration}ms"

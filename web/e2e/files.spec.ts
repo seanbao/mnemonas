@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
 /**
@@ -6,6 +6,16 @@ import { ensureAuthenticatedAt } from './helpers/auth-check'
  * 认证状态由 auth.setup.ts 通过 storageState 自动注入
  * 如果认证启用但登录失败，测试会被跳过
  */
+
+async function expectNoPageHorizontalOverflow(page: Page) {
+  const overflow = await page.evaluate(() => {
+    const root = document.documentElement
+    const body = document.body
+    return Math.max(root.scrollWidth, body.scrollWidth) - root.clientWidth
+  })
+
+  expect(overflow).toBeLessThanOrEqual(2)
+}
 
 test.describe('文件浏览页面', () => {
   test.beforeEach(async ({ page }) => {
@@ -109,6 +119,8 @@ test.describe('文件页面响应式', () => {
 
     const body = page.locator('body')
     await expect(body).toBeVisible()
+    await expect(page.getByText('根目录')).toBeVisible()
+    await expectNoPageHorizontalOverflow(page)
   })
 
   test('平板端布局', async ({ page }) => {
@@ -117,5 +129,7 @@ test.describe('文件页面响应式', () => {
 
     const body = page.locator('body')
     await expect(body).toBeVisible()
+    await expect(page.getByText('根目录')).toBeVisible()
+    await expectNoPageHorizontalOverflow(page)
   })
 })

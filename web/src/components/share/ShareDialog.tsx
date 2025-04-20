@@ -238,7 +238,7 @@ export function ShareDialog({
       placement="center"
       size="lg"
       classNames={{
-        base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+        base: "bg-content1 border border-divider shadow-xl rounded-lg",
         backdrop: "bg-black/60 backdrop-blur-md",
         closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         header: "border-b border-divider",
@@ -284,7 +284,7 @@ export function ShareDialog({
               </Snippet>
 
               <Button
-                className="w-full rounded-xl"
+                className="w-full rounded-lg"
                 color="primary"
                 startContent={<Copy size={16} />}
                 onPress={handleCopy}
@@ -422,12 +422,12 @@ export function ShareDialog({
 
         <ModalFooter>
           {createdShare || featureDisabled || !featureEnabled ? (
-            <Button onPress={handleClose} className="rounded-xl">
+            <Button onPress={handleClose} className="rounded-lg">
               关闭
             </Button>
           ) : (
             <>
-              <Button variant="flat" onPress={handleClose} isDisabled={isLoading} className="rounded-xl">
+              <Button variant="flat" onPress={handleClose} isDisabled={isLoading} className="rounded-lg">
                 取消
               </Button>
               <Button 
@@ -436,7 +436,7 @@ export function ShareDialog({
                 isDisabled={passwordRequiredButEmpty}
                 isLoading={isLoading}
                 startContent={!isLoading && <Link2 size={16} />}
-                className="rounded-xl"
+                className="rounded-lg"
               >
                 创建分享链接
               </Button>

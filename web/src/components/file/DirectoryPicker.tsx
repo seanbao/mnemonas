@@ -452,14 +452,14 @@ export function DirectoryPicker({
       size="md"
       scrollBehavior="inside"
       classNames={{
-        base: "bg-content1 border border-divider shadow-2xl rounded-2xl max-h-[80vh]",
+        base: "bg-content1 border border-divider shadow-xl rounded-lg max-h-[80vh]",
         backdrop: "bg-black/60 backdrop-blur-md",
         closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
       }}
     >
       <ModalContent>
         <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-          <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+          <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
             <Folder size={20} />
           </div>
           <div>
@@ -478,7 +478,7 @@ export function DirectoryPicker({
           </div>
           
           {/* Directory tree */}
-          <div className="border border-divider rounded-xl p-2 min-h-[200px] max-h-[300px] overflow-auto custom-scrollbar">
+          <div className="border border-divider rounded-lg p-2 min-h-[200px] max-h-[300px] overflow-auto custom-scrollbar">
             {hasInvalidHomeDir ? (
               <div className="flex items-center justify-center h-32">
                 <EmptyState
@@ -608,14 +608,14 @@ export function DirectoryPicker({
         </ModalBody>
         
         <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-          <Button variant="flat" onPress={handleClosePicker} isDisabled={isCreating} className="text-default-600 rounded-xl">
+          <Button variant="flat" onPress={handleClosePicker} isDisabled={isCreating} className="text-default-600 rounded-lg">
             取消
           </Button>
           <Button 
             color="primary" 
             onPress={handleConfirm}
             isDisabled={isCreating || hasInvalidHomeDir}
-            className="rounded-xl"
+            className="rounded-lg"
           >
             选择此目录
           </Button>

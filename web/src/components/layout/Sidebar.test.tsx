@@ -6,6 +6,7 @@ import * as HeroUI from '@heroui/react'
 
 const useIsAdminMock = vi.fn(() => true)
 const mockGetStorageStats = vi.fn()
+const mockGetAppVersion = vi.fn()
 const mockAddToast = vi.fn()
 
 vi.mock('@/api/files', () => ({
@@ -22,6 +23,7 @@ vi.mock('@/api/files', () => ({
     }
   },
   getStorageStats: (...args: unknown[]) => mockGetStorageStats(...args),
+  getAppVersion: (...args: unknown[]) => mockGetAppVersion(...args),
 }))
 
 import { ApiError } from '@/api/files'
@@ -42,14 +44,30 @@ describe('Sidebar', () => {
     mockGetStorageStats.mockResolvedValue({
       totalSize: 1024,
       dedupRatio: 0.25,
+      storageStatsAvailable: true,
+      diskStatsAvailable: true,
+      diskTotal: 4096,
+      diskAvailable: 3072,
+      diskUsed: 1024,
+      diskUsageRatio: 0.25,
+    })
+    mockGetAppVersion.mockResolvedValue({
+      name: 'MnemoNAS',
+      version: 'test-version',
+      go: 'go1.25.9',
     })
   })
 
   describe('rendering', () => {
     it('renders logo', () => {
       render(<Sidebar />)
-      expect(screen.getByText('MnemoNAS')).toBeTruthy()
+      expect(screen.getAllByText('MnemoNAS').length).toBeGreaterThan(0)
       expect(screen.getByText('Memory Palace')).toBeTruthy()
+    })
+
+    it('renders the backend version when available', async () => {
+      render(<Sidebar />)
+      expect(await screen.findByText('MnemoNAS test-version')).toBeTruthy()
     })
 
     it('renders navigation sections', () => {
@@ -195,6 +213,12 @@ describe('Sidebar', () => {
         .mockResolvedValueOnce({
           totalSize: 2048,
           dedupRatio: 0.1,
+          storageStatsAvailable: true,
+          diskStatsAvailable: true,
+          diskTotal: 4096,
+          diskAvailable: 2048,
+          diskUsed: 2048,
+          diskUsageRatio: 0.5,
         })
 
       render(<Sidebar />)
@@ -277,6 +301,7 @@ describe('Sidebar', () => {
     expect(screen.queryByText('健康')).toBeFalsy()
     expect(screen.queryByText('设置')).toBeFalsy()
     expect(screen.queryByText('存储空间')).toBeFalsy()
+    expect(screen.getAllByText('MnemoNAS').length).toBeGreaterThan(0)
     expect(screen.getByText('活动')).toBeTruthy()
     expect(mockGetStorageStats).not.toHaveBeenCalled()
   })

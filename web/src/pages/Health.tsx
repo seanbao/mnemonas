@@ -11,10 +11,14 @@ import {
   CheckCircle,
   XCircle,
   AlertCircle,
+  ShieldCheck,
   Clock,
+  BellRing,
+  type LucideIcon,
 } from 'lucide-react'
-import { ApiError, getDiagnostics, getStorageStats } from '@/api/files'
+import { ApiError, getDiagnostics, getStorageStats, type DiagnosticsInfo } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
+import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent } from '@/lib/storageStats'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
@@ -71,25 +75,148 @@ function formatMetricWithUnit(value: number | undefined, unit: string): string {
   return value === undefined ? '--' : `${value} ${unit}`
 }
 
-function areStorageStatsAvailable(stats: {
-  storageStatsAvailable?: boolean
-  totalSize?: number
-  totalObjects?: number
-  uniqueSize?: number
-  dedupRatio?: number
-} | undefined): boolean {
-  if (!stats) {
-    return false
+function formatBuildTime(value: string | undefined): string | null {
+  if (!value || value === 'unknown') {
+    return null
   }
-  if (stats.storageStatsAvailable !== undefined) {
-    return stats.storageStatsAvailable
+  return value
+}
+
+function formatGoVersion(value: string): string {
+  const normalized = value.trim()
+  if (normalized.toLowerCase().startsWith('go')) {
+    return `Go ${normalized.slice(2)}`
   }
-  return (
-    stats.totalSize !== undefined
-    || stats.totalObjects !== undefined
-    || stats.uniqueSize !== undefined
-    || stats.dedupRatio !== undefined
-  )
+  return `Go ${normalized}`
+}
+
+function getFilesystemPresentation(
+  fsType: string | undefined,
+  nativeDataChecksumSupport: boolean | undefined,
+): {
+  icon: LucideIcon
+  title: string
+  description: string
+  className: string
+  iconClassName: string
+} {
+  const normalized = fsType?.trim().toLowerCase()
+  if (nativeDataChecksumSupport === true) {
+    return {
+      icon: ShieldCheck,
+      title: '原生数据校验支持',
+      description: `${formatFilesystemType(fsType)} 具备底层校验与 scrub 能力，仍需保留独立备份。`,
+      className: 'border-success/25 bg-success/5',
+      iconClassName: 'text-success',
+    }
+  }
+
+  if (!normalized || normalized === 'unknown') {
+    return {
+      icon: AlertCircle,
+      title: '文件系统未知',
+      description: '无法识别底层文件系统，建议在部署机上运行 mnemonas-doctor 核对磁盘布局。',
+      className: 'border-default-200 bg-content2/40',
+      iconClassName: 'text-default-500',
+    }
+  }
+
+  if (normalized === 'tmpfs') {
+    return {
+      icon: AlertCircle,
+      title: '临时文件系统',
+      description: '当前存储看起来是 tmpfs，重启可能丢失数据。请迁移到持久磁盘。',
+      className: 'border-danger/25 bg-danger/5',
+      iconClassName: 'text-danger',
+    }
+  }
+
+  if (['nfs', 'cifs', 'smb', 'smb2', 'fuse'].some((prefix) => normalized.startsWith(prefix))) {
+    return {
+      icon: AlertCircle,
+      title: '网络或 FUSE 存储',
+      description: '请确认一致性、断线恢复和独立备份策略。',
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  return {
+    icon: AlertCircle,
+    title: '建议使用 ZFS/Btrfs',
+    description: '当前未检测到底层数据校验与 scrub 能力，请依赖 MnemoNAS scrub 和独立备份。',
+    className: 'border-warning/25 bg-warning/5',
+    iconClassName: 'text-warning',
+  }
+}
+
+function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
+  icon: LucideIcon
+  title: string
+  description: string
+  className: string
+  iconClassName: string
+} | undefined {
+  if (!alerts) {
+    return undefined
+  }
+
+  if (alerts.enabled !== true) {
+    return {
+      icon: AlertCircle,
+      title: '存储告警未启用',
+      description: '建议在设置中启用存储告警，避免磁盘写满后才发现问题。',
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  if (alerts.runtimeAvailable === false) {
+    return {
+      icon: AlertCircle,
+      title: '存储告警运行态不可用',
+      description: '配置已启用，但当前进程没有挂载告警监控，请检查服务启动日志。',
+      className: 'border-danger/25 bg-danger/5',
+      iconClassName: 'text-danger',
+    }
+  }
+
+  const lastLevel = alerts.lastLevel?.trim().toLowerCase()
+  const checkedText = alerts.lastCheckedAt ? `最近检查 ${alerts.lastCheckedAt}` : '等待首次检查'
+  const usageText = alerts.lastUsedPct !== undefined
+    ? `，使用率 ${alerts.lastUsedPct.toFixed(1)}%`
+    : ''
+  const freeText = alerts.lastFreeBytes !== undefined
+    ? `，剩余 ${formatBytes(alerts.lastFreeBytes)}`
+    : ''
+
+  if (lastLevel === 'critical') {
+    return {
+      icon: AlertCircle,
+      title: '存储告警处于严重级别',
+      description: `${checkedText}${usageText}${freeText}。请尽快清理或扩容。`,
+      className: 'border-danger/25 bg-danger/5',
+      iconClassName: 'text-danger',
+    }
+  }
+
+  if (lastLevel === 'warning') {
+    return {
+      icon: AlertCircle,
+      title: '存储告警处于提醒级别',
+      description: `${checkedText}${usageText}${freeText}。建议安排清理或扩容。`,
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  return {
+    icon: BellRing,
+    title: alerts.webhookConfigured ? '存储告警已启用' : '存储告警已启用，未配置 Webhook',
+    description: `${checkedText}。${alerts.webhookConfigured ? 'Webhook 通知已配置。' : '如需外部通知，请在设置中配置 Webhook。'}`,
+    className: 'border-success/25 bg-success/5',
+    iconClassName: 'text-success',
+  }
 }
 
 function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string; description: string } {
@@ -144,6 +271,17 @@ export function HealthPage() {
   const loadError = diagError || statsError
   const loadErrorPresentation = getHealthLoadErrorPresentation([diagError, statsError])
   const storageStatsAvailable = areStorageStatsAvailable(stats)
+  const diskStatsAvailable = areDiskStatsAvailable(stats)
+  const diskUsagePercent = diskStatsAvailable ? clampUsagePercent(stats?.diskUsageRatio) : undefined
+  const diskFilesystemType = stats?.diskFilesystemType ?? diagnostics?.filesystem?.diskFilesystemType
+  const diskNativeDataChecksumSupport = stats?.diskNativeDataChecksumSupport ?? diagnostics?.filesystem?.diskNativeDataChecksumSupport
+  const filesystemPresentation = diskStatsAvailable
+    ? getFilesystemPresentation(diskFilesystemType, diskNativeDataChecksumSupport)
+    : undefined
+  const FilesystemStatusIcon = filesystemPresentation?.icon
+  const alertsPresentation = getAlertsPresentation(diagnostics?.alerts)
+  const AlertsStatusIcon = alertsPresentation?.icon
+  const buildTime = formatBuildTime(diagnostics?.version?.buildTime)
 
   const handleRefresh = async () => {
     const [diagResult, statsResult] = await Promise.all([refetchDiag(), refetchStats()])
@@ -157,54 +295,41 @@ export function HealthPage() {
     addToast({ title: '健康数据已刷新', color: 'success' })
   }
 
-  // Calculate dedup savings
-  const totalSize = storageStatsAvailable ? stats?.totalSize ?? 0 : 0
-  const uniqueSize = storageStatsAvailable ? stats?.uniqueSize ?? 0 : 0
-  const dedupSavings = totalSize > 0 && uniqueSize > 0
-    ? ((totalSize - uniqueSize) / totalSize * 100).toFixed(1)
-    : '0'
-
   const statsCards = [
     {
       icon: Clock,
       title: '运行时间',
       value: diagnostics?.uptimeSecs !== undefined ? formatUptime(diagnostics.uptimeSecs) : '--',
-      gradient: 'from-blue-500/20 to-violet-500/20',
     },
     {
       icon: Cpu,
       title: '内存使用',
       value: diagnostics?.memory?.allocMb !== undefined ? `${diagnostics.memory.allocMb} MB` : '--',
       subtitle: diagnostics?.memory?.sysMb !== undefined ? `系统: ${diagnostics.memory.sysMb} MB` : undefined,
-      gradient: 'from-violet-500/20 to-fuchsia-500/20',
     },
     {
       icon: Database,
       title: '存储对象',
       value: storageStatsAvailable ? stats?.totalObjects?.toString() ?? '--' : '--',
-      subtitle: storageStatsAvailable && stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : undefined,
-      gradient: 'from-emerald-500/20 to-cyan-500/20',
+      subtitle: storageStatsAvailable && stats?.totalSize !== undefined ? `CAS ${formatBytes(stats.totalSize)}` : undefined,
     },
     {
       icon: HardDrive,
-      title: '去重率',
-      value: storageStatsAvailable && stats?.dedupRatio !== undefined
-        ? `${(stats.dedupRatio * 100).toFixed(1)}%`
-        : '--',
-      subtitle: storageStatsAvailable && dedupSavings !== '0' ? `节省 ${dedupSavings}%` : undefined,
-      gradient: 'from-amber-500/20 to-orange-500/20',
+      title: '磁盘使用',
+      value: diskStatsAvailable ? formatUsagePercent(stats?.diskUsageRatio) : '--',
+      subtitle: diskStatsAvailable && stats?.diskAvailable !== undefined ? `可用 ${formatBytes(stats.diskAvailable)}` : undefined,
     },
   ]
 
   if (!isLoading && loadError && !hasAvailableData) {
     return (
-      <div className="p-6 lg:p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         <EmptyState
           icon={AlertCircle}
           title={loadErrorPresentation.title}
           description={loadErrorPresentation.description}
           action={
-            <Button className="btn-secondary rounded-xl" onPress={handleRefresh}>
+            <Button className="btn-secondary rounded-lg" onPress={handleRefresh}>
               重新加载
             </Button>
           }
@@ -214,23 +339,23 @@ export function HealthPage() {
   }
 
   return (
-    <div className="p-6 lg:p-8 space-y-6">
+    <div className="p-4 space-y-6 sm:p-6 lg:p-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <PageHeader
-          title="系统健康"
-          subtitle="监控系统状态和性能指标"
-          icon={Activity}
-        />
-        <Button
-          className="btn-secondary rounded-xl"
-          startContent={<RefreshCw size={16} />}
-          onPress={handleRefresh}
-          isLoading={isLoading}
-        >
-          刷新
-        </Button>
-      </div>
+      <PageHeader
+        title="系统健康"
+        subtitle="监控系统状态和性能指标"
+        icon={Activity}
+        actions={
+          <Button
+            className="btn-secondary rounded-lg"
+            startContent={<RefreshCw size={16} />}
+            onPress={handleRefresh}
+            isLoading={isLoading}
+          >
+            刷新
+          </Button>
+        }
+      />
 
       {hasPartialError && (
         <Card className="border-warning/30 bg-warning/5 shadow-none">
@@ -245,7 +370,7 @@ export function HealthPage() {
             <Button
               size="sm"
               variant="flat"
-              className="rounded-xl"
+              className="rounded-lg"
               startContent={<RefreshCw size={14} />}
               onPress={handleRefresh}
             >
@@ -299,19 +424,38 @@ export function HealthPage() {
           </div>
 
           {diagnostics?.version && (
-            <div className="text-sm text-default-500">
-              <span className="font-medium">{diagnostics.version.name}</span>
-              {' '}v{diagnostics.version.version} · Go {diagnostics.version.go}
+            <div className="space-y-1 text-sm text-default-500">
+              <div>
+                <span className="font-medium">{diagnostics.version.name}</span>
+                {' '}v{diagnostics.version.version} · {formatGoVersion(diagnostics.version.go)}
+              </div>
+              {buildTime && (
+                <div className="flex items-center gap-1 text-xs">
+                  <Clock size={12} />
+                  <span>构建 {buildTime}</span>
+                </div>
+              )}
             </div>
           )}
         </CardBody>
       </Card>
 
+      {alertsPresentation && AlertsStatusIcon && (
+        <Card className={`shadow-none ${alertsPresentation.className}`}>
+          <CardBody className="flex items-start gap-3">
+            <AlertsStatusIcon size={18} className={`mt-0.5 shrink-0 ${alertsPresentation.iconClassName}`} />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-foreground">{alertsPresentation.title}</p>
+              <p className="mt-1 text-xs leading-5 text-default-600">{alertsPresentation.description}</p>
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
       {/* Stats Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {statsCards.map((stat) => (
           <div key={stat.title} className="stat-card">
-            <div className={`absolute inset-0 bg-gradient-to-br ${stat.gradient} rounded-2xl opacity-50`} />
             <div className="relative">
               <div className="flex items-start justify-between">
                 <div>
@@ -323,7 +467,7 @@ export function HealthPage() {
                     <p className="text-default-500 mt-1 text-xs">{stat.subtitle}</p>
                   )}
                 </div>
-                <div className="gradient-meridian-subtle rounded-xl p-2.5">
+                <div className="gradient-meridian-subtle rounded-lg p-2.5">
                   <stat.icon className="text-accent-primary h-5 w-5" />
                 </div>
               </div>
@@ -343,17 +487,28 @@ export function HealthPage() {
               </div>
               <div>
                 <span className="font-semibold">存储详情</span>
-                <p className="text-default-500 text-xs">CAS 存储状态</p>
+                <p className="text-default-500 text-xs">磁盘与 CAS 存储状态</p>
               </div>
             </div>
           </CardHeader>
           <CardBody className="space-y-4">
             <div>
               <div className="flex justify-between text-sm mb-2">
-                <span className="text-default-500">总存储</span>
-                <span className="data-value">{storageStatsAvailable && stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : '--'}</span>
+                <span className="text-default-500">{diskStatsAvailable ? '磁盘使用' : 'CAS 大小'}</span>
+                <span className="data-value">
+                  {diskStatsAvailable && stats?.diskUsed !== undefined
+                    ? formatBytes(stats.diskUsed)
+                    : storageStatsAvailable && stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : '--'}
+                </span>
               </div>
-              {storageStatsAvailable ? (
+              {diskStatsAvailable && diskUsagePercent !== undefined ? (
+                <Progress
+                  value={diskUsagePercent}
+                  color="primary"
+                  className="h-2"
+                  aria-label="磁盘使用"
+                />
+              ) : storageStatsAvailable ? (
                 <Progress 
                   isIndeterminate
                   color="primary" 
@@ -363,8 +518,27 @@ export function HealthPage() {
               ) : (
                 <div className="h-2 rounded-full bg-content2/50" aria-label="存储使用" />
               )}
-              <p className="text-xs text-default-400 mt-2">{storageStatsAvailable ? '容量未知' : '统计不可用'}</p>
+              <p className="text-xs text-default-400 mt-2">
+                {diskStatsAvailable
+                  ? `${stats?.diskAvailable !== undefined ? formatBytes(stats.diskAvailable) : '--'} 可用 / ${stats?.diskTotal !== undefined ? formatBytes(stats.diskTotal) : '--'} 总容量`
+                  : storageStatsAvailable ? '磁盘容量统计不可用，仅显示 CAS 数据' : '统计不可用'}
+              </p>
             </div>
+
+            {filesystemPresentation && FilesystemStatusIcon && (
+              <div className={`flex items-start gap-3 rounded-lg border p-3 ${filesystemPresentation.className}`}>
+                <FilesystemStatusIcon size={17} className={`mt-0.5 shrink-0 ${filesystemPresentation.iconClassName}`} />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">
+                    {filesystemPresentation.title}
+                    <span className="ml-2 text-xs font-normal text-default-500">
+                      {formatFilesystemType(diskFilesystemType)}
+                    </span>
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-default-600">{filesystemPresentation.description}</p>
+                </div>
+              </div>
+            )}
 
             <Divider />
 

@@ -197,7 +197,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
             aria-label="预览此版本"
             onPress={onPreview}
             title="预览"
-            className="btn-secondary btn-sm rounded-xl"
+            className="btn-secondary btn-sm rounded-lg"
           >
             <Eye size={16} />
           </Button>
@@ -208,7 +208,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
             aria-label="下载此版本"
             onPress={onDownload}
             title="下载此版本"
-            className="btn-secondary btn-sm rounded-xl"
+            className="btn-secondary btn-sm rounded-lg"
           >
             <Download size={16} />
           </Button>
@@ -221,7 +221,7 @@ function VersionRow({ version, index, isLatest, canRestore, onPreview, onRestore
               aria-label="恢复到此版本"
               onPress={onRestore}
               title="恢复到此版本"
-              className="btn-secondary btn-sm rounded-xl"
+              className="btn-secondary btn-sm rounded-lg"
             >
               <RotateCcw size={16} />
             </Button>
@@ -464,7 +464,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
       {/* Search */}
       {!hasInvalidHomeDir && (
-      <div className="card-meridian rounded-xl p-4">
+      <div className="card-meridian rounded-lg p-4">
         <div className="flex items-center gap-4">
           <Input
             placeholder="输入文件路径，例如: /documents/report.pdf"
@@ -481,7 +481,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
             color="primary" 
             startContent={<Search size={16} />}
             onPress={handleSearch}
-            className="font-medium rounded-xl"
+            className="font-medium rounded-lg"
           >
             查询版本
           </Button>
@@ -491,7 +491,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
       {/* Version List */}
       {!hasInvalidHomeDir && selectedPath && (
-        <div className="card-meridian rounded-xl p-6 space-y-4">
+        <div className="card-meridian rounded-lg p-6 space-y-4">
           <div className="flex items-center gap-2 text-default-400">
             <History size={18} />
             <span>文件路径:</span>
@@ -508,12 +508,12 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
             </div>
           ) : error ? (
             <div className="flex flex-col items-center justify-center py-12 text-default-400">
-              <div className="w-16 h-16 rounded-xl bg-danger/10 flex items-center justify-center mb-4">
+              <div className="w-16 h-16 rounded-lg bg-danger/10 flex items-center justify-center mb-4">
                 <AlertCircle size={32} className="text-danger" />
               </div>
               <p className="font-medium text-danger mb-1">{versionsErrorPresentation.title}</p>
               <p className="text-sm">{versionsErrorPresentation.description}</p>
-              <Button variant="bordered" className="mt-4 rounded-xl" onPress={handleRefreshVersions}>
+              <Button variant="bordered" className="mt-4 rounded-lg" onPress={handleRefreshVersions}>
                 重新加载
               </Button>
             </div>
@@ -550,7 +550,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
             </Table>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-default-400">
-              <div className="w-16 h-16 rounded-xl bg-default-100 flex items-center justify-center mb-4">
+              <div className="w-16 h-16 rounded-lg bg-default-100 flex items-center justify-center mb-4">
                 <History size={32} className="text-default-300" />
               </div>
               <p className="font-medium mb-1">暂无版本历史</p>
@@ -599,7 +599,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
             <div className="space-y-4">
               <p>确定要将文件恢复到以下版本吗？</p>
               {selectedVersion && (
-                <div className="bg-content2/50 border border-divider rounded-xl p-4 space-y-3">
+                <div className="bg-content2/50 border border-divider rounded-lg p-4 space-y-3">
                   <div className="flex justify-between">
                     <span className="text-default-400">修改时间</span>
                     <span className="font-medium">{formatDate(selectedVersion.timestamp)}</span>
@@ -621,7 +621,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
             </div>
           </ModalBody>
           <ModalFooter>
-            <Button variant="light" onPress={handleCloseRestoreModal} isDisabled={restoreMutation.isPending} className="rounded-xl">
+            <Button variant="light" onPress={handleCloseRestoreModal} isDisabled={restoreMutation.isPending} className="rounded-lg">
               取消
             </Button>
             {isAdmin && (
@@ -629,7 +629,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
                 color="warning" 
                 onPress={confirmRestore}
                 isLoading={restoreMutation.isPending}
-                className="rounded-xl"
+                className="rounded-lg"
               >
                 确认恢复
               </Button>

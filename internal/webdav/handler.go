@@ -34,7 +34,6 @@ var (
 	errLockTokenMatchesRequestURI         = errors.New("lock token does not match request URI")
 	errLockRefreshRequiresToken           = errors.New("LOCK refresh requires a matching lock token")
 	errPreconditionFailed                 = errors.New("precondition failed")
-	errFileAlreadyExists                  = errors.New("file already exists")
 	errOverwriteDisabled                  = errors.New("destination exists and overwrite is disabled")
 	errDestinationInsideSourceDirectory   = errors.New("destination cannot be inside source directory")
 	errDirectoryCopyOverwriteNotSupported = errors.New("overwriting an existing destination with a directory copy is not supported")
@@ -1755,10 +1754,6 @@ func (h *Handler) authorizeWriteLock(w http.ResponseWriter, r *http.Request, req
 	return h.authorizeWriteLockWithScope(w, r, requestPath, paths, nil, nil)
 }
 
-func (h *Handler) authorizeWriteLockWithDescendants(w http.ResponseWriter, r *http.Request, requestPath string, descendantRoots []string, paths ...string) bool {
-	return h.authorizeWriteLockWithScope(w, r, requestPath, paths, nil, descendantRoots)
-}
-
 func (h *Handler) authorizeWriteLockWithScope(w http.ResponseWriter, r *http.Request, requestPath string, resourcePaths, namespacePaths, descendantRoots []string) bool {
 	providedTokens := extractLockTokens(r, requestPath, h.prefix)
 
@@ -1929,34 +1924,6 @@ func (h *Handler) lockConflictsWithRequestLocked(filePath string, isDir bool, de
 	return false
 }
 
-func (h *Handler) lockCheckPathsWithDescendantsLocked(paths, descendantRoots []string) []string {
-	seen := make(map[string]struct{})
-	result := make([]string, 0, len(paths)*2)
-
-	for _, filePath := range lockCheckPaths(paths...) {
-		if _, ok := seen[filePath]; ok {
-			continue
-		}
-		seen[filePath] = struct{}{}
-		result = append(result, filePath)
-	}
-
-	for _, root := range descendantRoots {
-		for lockPath := range h.locks {
-			if !pathMatchesOrDescendant(root, lockPath) {
-				continue
-			}
-			if _, ok := seen[lockPath]; ok {
-				continue
-			}
-			seen[lockPath] = struct{}{}
-			result = append(result, lockPath)
-		}
-	}
-
-	return result
-}
-
 func pathMatchesOrDescendant(rootPath, candidatePath string) bool {
 	return rootPath == candidatePath || isDescendantPath(rootPath, candidatePath)
 }
@@ -2034,27 +2001,6 @@ func (h *Handler) moveLocksUnderPath(rootPath, newRootPath string) {
 	for lockPath, lockInfo := range moved {
 		h.locks[lockPath] = lockInfo
 	}
-}
-
-func lockCheckPaths(paths ...string) []string {
-	seen := make(map[string]struct{})
-	result := make([]string, 0, len(paths)*2)
-
-	for _, filePath := range paths {
-		current := filePath
-		for {
-			if _, ok := seen[current]; !ok {
-				seen[current] = struct{}{}
-				result = append(result, current)
-			}
-			if current == "/" {
-				break
-			}
-			current = path.Dir(current)
-		}
-	}
-
-	return result
 }
 
 func (h *Handler) removeExpiredLocksLocked(now time.Time) {

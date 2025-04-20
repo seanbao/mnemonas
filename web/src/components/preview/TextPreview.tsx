@@ -202,7 +202,7 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
   const lines = content.split('\n')
 
   return (
-    <div className={cn("h-full flex flex-col bg-content1 rounded-xl overflow-hidden", className)}>
+    <div className={cn("h-full flex flex-col bg-content1 rounded-lg overflow-hidden", className)}>
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2 bg-content2 border-b border-divider">
         <FileCode size={16} className="text-default-500" />

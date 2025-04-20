@@ -12,7 +12,7 @@
 ### 代码变更
 
 - 保持现有代码风格，不引入额外格式化变更
-- 新增接口同步声明到对应头文件
+- 修改 proto、API 或配置结构时，同步更新生成代码、文档和相关测试
 - 功能变更同步更新关联的 Markdown 文档
 - 不主动生成兼容层代码或迁移脚本，如有必要先与用户确认
 
@@ -130,7 +130,7 @@ BREAKING CHANGE: token format changed from JWT to opaque
 
 ## 项目概述
 
-MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Rust 数据面** 架构。核心理念：简单可靠、好看好用 — 数据在自己手里，体验不输云服务。
+MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Rust 数据面** 架构。核心理念：简单可靠、好看好用，优先服务家庭和小团队的日常文件管理。
 
 **语言约定**：代码注释使用英文，日志/UI 使用中文。
 
@@ -138,7 +138,7 @@ MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Ru
 
 ```
 ┌─────────────────────────────────────────┐
-│           Web UI (React, future)        │
+│            Web UI (React + Vite)        │
 ├─────────────────────────────────────────┤
 │          Go Control Plane (nasd)        │
 │  cmd/nasd/         → Main entry point   │
@@ -163,14 +163,14 @@ MnemoNAS 是一个现代化的开源 NAS 系统，采用 **Go 控制面** + **Ru
 | 层级 | 语言 | 职责 |
 |------|------|------|
 | **控制面** | Go | API、WebDAV、元数据（SQLite）、业务逻辑 |
-| **数据面** | Rust | 所有数据 I/O（CAS、CDC、压缩、哈希、Scrub） |
+| **数据面** | Rust | CAS 对象存储、CDC、压缩、哈希、Scrub |
 
 **ObjectStore 接口**（`internal/versionstore/objectstore.go`）：
 - `LocalObjectStore` — 本地文件存储（测试/独立模式）
 - `RemoteObjectStore` — 通过 gRPC 调用 Rust（生产模式）
 
 **核心设计决策**：
-- **原生文件 + 版本历史**：用户文件直接存储为原生格式，拔盘即用
+- **原生文件 + 版本历史**：当前文件保存在 `files/` 标准目录，完整存储根目录可迁移
 - **SQLite 元数据**：事务保证、高效查询、单文件易备份
 - **CAS（内容寻址存储）**：历史版本按 BLAKE3 哈希存储，支持去重
 - **软删除**：删除仅移入回收站，可恢复
@@ -186,6 +186,9 @@ make dev
 
 # Run tests
 make test
+
+# Deployment script checks
+make scripts-check
 
 # 一键启动开发环境（推荐）
 ./scripts/dev.sh                # 启动所有组件
@@ -204,7 +207,8 @@ docker compose up -d
 
 **Proto 生成**：修改 `proto/dataplane.proto` 后需执行 `make proto` 重新生成：
 - Go: `proto/dataplane.pb.go`, `proto/dataplane_grpc.pb.go`
-- Rust: `dataplane/src/proto/mnemonas.dataplane.v1.rs`（通过 `build.rs`）
+- Rust: `dataplane/src/proto/mnemonas.dataplane.v1.rs`（通过 `tools/proto-gen`，普通 Cargo 构建不运行 protoc）
+- CI 会检查这些生成文件是否已提交；提交 proto 生成结果时使用 CI 固定的 `protoc 3.20.1`，避免仅版本注释不同造成漂移。
 
 ## 关键模式
 
@@ -273,8 +277,9 @@ Rust 数据面（HTTP 端口 9091，gRPC 端口 9090）：
 ## 测试策略
 
 ```bash
-# Go tests
-go test -v ./...
+# Go tests with temporary dataplane
+packages=$(go list ./... | grep -v '/web/node_modules/')
+CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v $packages
 
 # Rust tests
 cd dataplane && cargo test
@@ -298,6 +303,7 @@ curl http://localhost:9091/stats
 
 ## 相关文档
 
-详细设计与路线图见 [../../ideas-lab-notes](../../ideas-lab-notes/)：
-- [../../ideas-lab-notes/ideas/open-source-nas-go-rust.md](../../ideas-lab-notes/ideas/open-source-nas-go-rust.md) — 完整项目规格说明
-- [../../ideas-lab-notes/ideas/mnemonas/nas-data-safety-principles.md](../../ideas-lab-notes/ideas/mnemonas/nas-data-safety-principles.md) — 数据安全设计原则
+详细设计与路线图见仓库内文档：
+- [docs/design-decisions.md](../docs/design-decisions.md) — 产品定位、技术取舍与 UI 方向
+- [docs/storage-internals.md](../docs/storage-internals.md) — CAS 存储原理与数据安全边界
+- [docs/testing-strategy.md](../docs/testing-strategy.md) — 单元、集成、E2E 与验收测试策略

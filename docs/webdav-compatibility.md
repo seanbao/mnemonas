@@ -2,7 +2,7 @@
 
 # WebDAV 客户端兼容性清单
 
-本文档记录 MnemoNAS WebDAV 服务与各客户端的兼容性状态。
+本文档记录 MnemoNAS WebDAV 服务的协议能力，以及常见客户端的预期兼容性。客户端版本、系统策略和网络环境会影响结果，发布前后应持续用真实客户端回归验证。
 
 说明：本文档描述的是 WebDAV 协议能力。REST API `/api/v1/files-copy` 现已支持递归目录复制，但不提供 `Overwrite: T/F` 控制。
 
@@ -14,15 +14,15 @@
 
 | 方法 | 状态 | 说明 |
 |------|------|------|
-| `OPTIONS` | ✅ 完整 | 返回 DAV: 1, 2 |
-| `PROPFIND` | ✅ 完整 | 支持 Depth: 0, 1, infinity |
-| `GET` | ✅ 完整 | 支持 Range 请求、ETag、条件请求 |
-| `HEAD` | ✅ 完整 | 返回文件元信息 |
-| `PUT` | ✅ 完整 | 支持 `If-Match`、`If-Unmodified-Since` 条件写入；仅接受完整覆盖写入，`Content-Range` partial PUT 返回 `400 Bad Request` |
-| `DELETE` | ✅ 完整 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
-| `MKCOL` | ✅ 完整 | 创建目录 |
-| `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理）；覆盖目标已提交后若 backup cleanup 失败，返回 `204 + Warning` |
-| `COPY` | ✅ 完整 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在目标目录已创建、仅持久化失败时返回成功并附带 `Warning` |
+| `OPTIONS` | ✅ 核心支持 | 返回 DAV: 1, 2 |
+| `PROPFIND` | ✅ 核心支持 | 支持 Depth: 0, 1, infinity |
+| `GET` | ✅ 核心支持 | 支持 Range 请求、ETag、条件请求 |
+| `HEAD` | ✅ 核心支持 | 返回文件元信息 |
+| `PUT` | ✅ 核心支持 | 支持 `If-Match`、`If-Unmodified-Since` 条件写入；仅接受完整覆盖写入，`Content-Range` partial PUT 返回 `400 Bad Request` |
+| `DELETE` | ✅ 核心支持 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
+| `MKCOL` | ✅ 核心支持 | 创建目录 |
+| `MOVE` | ✅ 核心支持 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理）；覆盖目标已提交后若 backup cleanup 失败，返回 `204 + Warning` |
+| `COPY` | ✅ 核心支持 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity`；递归目录复制在目标目录已创建、仅持久化失败时返回成功并附带 `Warning` |
 | `PROPPATCH` | ⚠️ 简化 | 解析请求并显式拒绝属性修改；返回 `207 Multi-Status`，属性状态为 `403 Forbidden`，不持久化 dead properties |
 | `LOCK` | ⚠️ 简化 | 返回虚拟锁 token，支持 `Depth: 0` / `Depth: infinity`，默认 1 小时过期 |
 | `UNLOCK` | ⚠️ 简化 | 需要匹配 `Lock-Token`，过期锁会自动清理 |
@@ -34,35 +34,43 @@
 | `ACL` | ❌ 不支持 | RFC 3744 扩展 |
 | `SEARCH` | ❌ 不支持 | RFC 5323 扩展 |
 
-## 客户端兼容性测试
+## 客户端兼容性矩阵
+
+状态说明：
+
+- ✅ 已验证：有自动化或真实客户端回归记录。
+- ◐ 预期可用：依赖标准 WebDAV 能力，尚需真实客户端回归确认。
+- ⚠️ 需要配置/待验证：已知需要额外系统设置，或还没有足够验证数据。
+
+当前自动化测试覆盖 `OPTIONS`、`MKCOL`、`PUT`、`PROPFIND`、`COPY`、`MOVE`、条件请求、Range/ETag、LOCK/UNLOCK 等核心协议行为；下表用于发布前后补齐真实客户端验证。
 
 ### Linux
 
 | 客户端 | 版本 | 状态 | 备注 |
 |--------|------|------|------|
-| Nautilus (GNOME Files) | 45+ | ✅ 完整 | 通过 GVfs davs:// |
-| Dolphin (KDE) | 23+ | ✅ 完整 | 内置 WebDAV 支持 |
-| davfs2 | 1.6+ | ✅ 完整 | 挂载为本地目录 |
-| rclone | 1.60+ | ✅ 完整 | 推荐使用 |
+| Nautilus (GNOME Files) | 45+ | ◐ 预期可用 | 通过 GVfs davs:// |
+| Dolphin (KDE) | 23+ | ◐ 预期可用 | 内置 WebDAV 支持 |
+| davfs2 | 1.6+ | ◐ 预期可用 | 挂载为本地目录 |
+| rclone | 1.60+ | ◐ 预期可用 | 推荐优先验证；脚本和文档均按 rclone 使用方式设计 |
 
 ### macOS
 
 | 客户端 | 版本 | 状态 | 备注 |
 |--------|------|------|------|
-| Finder | macOS 12+ | ✅ 完整 | 使用「连接服务器」|
-| Transmit | 5+ | ✅ 完整 | 专业文件传输工具 |
-| Cyberduck | 8+ | ✅ 完整 | 开源文件浏览器 |
-| rclone | 1.60+ | ✅ 完整 | 命令行工具 |
+| Finder | macOS 12+ | ◐ 预期可用 | 使用「连接服务器」|
+| Transmit | 5+ | ◐ 预期可用 | 专业文件传输工具 |
+| Cyberduck | 8+ | ◐ 预期可用 | 开源文件浏览器 |
+| rclone | 1.60+ | ◐ 预期可用 | 命令行工具 |
 
 ### Windows
 
 | 客户端 | 版本 | 状态 | 备注 |
 |--------|------|------|------|
-| 资源管理器 | Win 10/11 | ⚠️ 部分 | 需要启用 WebClient 服务 |
-| WinSCP | 6+ | ✅ 完整 | 推荐使用 |
-| Cyberduck | 8+ | ✅ 完整 | 开源文件浏览器 |
-| rclone | 1.60+ | ✅ 完整 | 可挂载为盘符 |
-| NetDrive | 3+ | ✅ 完整 | 商业软件 |
+| 资源管理器 | Win 10/11 | ⚠️ 需要配置 | 需要启用 WebClient 服务；HTTP 还需要注册表设置 |
+| WinSCP | 6+ | ◐ 预期可用 | 推荐优先验证 |
+| Cyberduck | 8+ | ◐ 预期可用 | 开源文件浏览器 |
+| rclone | 1.60+ | ◐ 预期可用 | 可挂载为盘符 |
+| NetDrive | 3+ | ⚠️ 待验证 | 商业软件，不同版本行为可能不同 |
 
 **Windows 资源管理器已知问题**：
 - 默认只支持 HTTPS（需要配置注册表启用 HTTP）
@@ -73,27 +81,27 @@
 
 | 客户端 | 版本 | 状态 | 备注 |
 |--------|------|------|------|
-| 文件 App | iOS 15+ | ✅ 完整 | 原生 WebDAV 支持 |
-| Documents by Readdle | 8+ | ✅ 完整 | 功能丰富 |
-| FileBrowser | 14+ | ✅ 完整 | 专业文件管理 |
+| 文件 App | iOS 15+ | ◐ 预期可用 | 原生 WebDAV 支持 |
+| Documents by Readdle | 8+ | ◐ 预期可用 | 功能丰富 |
+| FileBrowser | 14+ | ⚠️ 待验证 | 专业文件管理 |
 
 ### Android
 
 | 客户端 | 版本 | 状态 | 备注 |
 |--------|------|------|------|
-| Solid Explorer | 2.8+ | ✅ 完整 | 推荐 |
-| Total Commander + WebDAV 插件 | - | ✅ 完整 | 老牌文件管理器 |
-| FolderSync | 5+ | ✅ 完整 | 同步工具 |
-| rclone | - | ✅ 完整 | Termux 中运行 |
+| Solid Explorer | 2.8+ | ◐ 预期可用 | 推荐优先验证 |
+| Total Commander + WebDAV 插件 | - | ⚠️ 待验证 | 老牌文件管理器 |
+| FolderSync | 5+ | ⚠️ 待验证 | 同步工具 |
+| rclone | - | ◐ 预期可用 | Termux 中运行 |
 
 ### 媒体播放器
 
 | 客户端 | 平台 | 状态 | 备注 |
 |--------|------|------|------|
-| Infuse | iOS/tvOS/macOS | ✅ 完整 | 视频播放流畅 |
-| nPlayer | iOS/Android | ✅ 完整 | 支持字幕 |
-| VLC | 全平台 | ✅ 完整 | 网络流播放 |
-| Kodi | 全平台 | ✅ 完整 | 需配置 WebDAV 源 |
+| Infuse | iOS/tvOS/macOS | ⚠️ 待验证 | 支持 WebDAV 源，播放效果取决于网络和客户端缓存策略 |
+| nPlayer | iOS/Android | ⚠️ 待验证 | 支持字幕，需验证大文件拖动体验 |
+| VLC | 全平台 | ◐ 预期可用 | 网络流播放；重点验证 Range 请求和大文件拖动 |
+| Kodi | 全平台 | ⚠️ 待验证 | 需配置 WebDAV 源 |
 
 ## 已知限制
 
@@ -126,7 +134,7 @@
 1. **目录缓存**：PROPFIND 结果默认缓存 30 秒
 2. **Range 请求**：支持断点续传和视频拖动
 3. **ETag 支持**：启用客户端缓存避免重复下载
-4. **秒传**：相同内容自动去重
+4. **重复内容复用**：相同内容可复用已有对象；客户端仍需要完成一次上传请求
 
 ## 配置示例
 

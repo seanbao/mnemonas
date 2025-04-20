@@ -64,14 +64,26 @@ read_config_value() {
     fi
 
     awk -v section="[$section]" -v key="$key" '
-        $0 == section { in_section = 1; next }
-        /^\[/ { in_section = 0 }
-        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+        {
             line = $0
-            sub(/^[^=]*=[[:space:]]*/, "", line)
             sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            section_line = line
+            if (section_line ~ /^\[/) {
+                sub(/^\[[[:space:]]*/, "[", section_line)
+                sub(/[[:space:]]*\]$/, "]", section_line)
+                gsub(/[[:space:]]*\.[[:space:]]*/, ".", section_line)
+            }
+        }
+        section_line == section { in_section = 1; next }
+        section_line ~ /^\[/ { in_section = 0 }
+        in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
             gsub(/^"/, "", line)
             gsub(/"$/, "", line)
+            gsub(/^\047/, "", line)
+            gsub(/\047$/, "", line)
             print line
             exit
         }

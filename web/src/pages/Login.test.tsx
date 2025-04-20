@@ -4,8 +4,9 @@ import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { LoginPage } from './Login'
 
-const { mockAddToast, mockGetSetupStatus } = vi.hoisted(() => ({
+const { mockAddToast, mockGetHealth, mockGetSetupStatus } = vi.hoisted(() => ({
   mockAddToast: vi.fn(),
+  mockGetHealth: vi.fn(),
   mockGetSetupStatus: vi.fn(),
 }))
 
@@ -25,6 +26,10 @@ vi.mock('@/stores/auth', () => ({
 
 vi.mock('@/api/setup', () => ({
   getSetupStatus: (...args: unknown[]) => mockGetSetupStatus(...args),
+}))
+
+vi.mock('@/api/files', () => ({
+  getHealth: (...args: unknown[]) => mockGetHealth(...args),
 }))
 
 // Mock react-router-dom navigate
@@ -57,6 +62,11 @@ describe('LoginPage', () => {
       webdav_enabled: true,
       webdav_auth_type: 'basic',
     })
+    mockGetHealth.mockResolvedValue({
+      status: 'healthy',
+      uptime: '1m',
+      version: 'test-version',
+    })
 
     const { useAuthStore } = await import('@/stores/auth')
     vi.mocked(useAuthStore).mockReturnValue({
@@ -88,18 +98,33 @@ describe('LoginPage', () => {
       
       // Multiple MnemoNAS text elements exist (header, footer, etc.)
       expect(screen.getAllByText(/MnemoNAS/i).length).toBeGreaterThan(0)
-      expect(screen.getByText('请登录以继续访问系统')).toBeInTheDocument()
+      expect(screen.getByText('登录后管理文件、版本与分享')).toBeInTheDocument()
       expect(screen.getByLabelText(/用户名/i, { selector: 'input' })).toBeInTheDocument()
       expect(screen.getByLabelText(/密码/i, { selector: 'input' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /登录/i })).toBeInTheDocument()
+      expect(screen.getByText(/开源自托管文件存储/i)).toBeInTheDocument()
     })
 
     it('renders generic login guidance after setup is already completed', async () => {
       renderLogin()
 
-      expect(await screen.findByText(/使用已配置的管理员或用户账户登录/i)).toBeInTheDocument()
-      expect(screen.getByText(/首次启动时生成的初始密码不会在浏览器界面再次显示/i)).toBeInTheDocument()
-      expect(screen.getByText(/当前版本未提供浏览器内密码重置入口/i)).toBeInTheDocument()
+      expect(await screen.findByText(/使用已配置的管理员或用户账号登录/i)).toBeInTheDocument()
+      expect(screen.getByText(/初始密码只会写入服务器端文件/i)).toBeInTheDocument()
+      expect(screen.getByText(/忘记密码？请在服务器上按照文档重置管理员密码/i)).toBeInTheDocument()
+    })
+
+    it('renders the backend version in the brand panel when available', async () => {
+      renderLogin()
+
+      expect(await screen.findByText(/MnemoNAS test-version · 自托管文件管理/i)).toBeInTheDocument()
+    })
+
+    it('hides the concrete version when health cannot be loaded', async () => {
+      mockGetHealth.mockRejectedValueOnce(new Error('health unavailable'))
+
+      renderLogin()
+
+      expect(await screen.findByText(/MnemoNAS · 自托管文件管理/i)).toBeInTheDocument()
     })
 
     it('renders first-run guidance when setup status reports first run', async () => {
@@ -113,8 +138,8 @@ describe('LoginPage', () => {
 
       renderLogin()
 
-      expect(await screen.findByText(/首次运行时默认管理员账号为/i)).toBeInTheDocument()
-      expect(screen.getByText(/初始密码请查看服务器启动日志，浏览器界面不显示初始密码/i)).toBeInTheDocument()
+      expect(await screen.findByText(/首次运行默认管理员账号为/i)).toBeInTheDocument()
+      expect(screen.getByText(/初始密码位于服务器上的 initial-password.txt/i)).toBeInTheDocument()
     })
 
     it('falls back to neutral guidance when setup status cannot be loaded', async () => {
@@ -122,8 +147,8 @@ describe('LoginPage', () => {
 
       renderLogin()
 
-      expect(await screen.findByText(/使用管理员或已有账户登录/i)).toBeInTheDocument()
-      expect(screen.getByText(/首次启动凭据仅记录在服务端日志中，浏览器界面不显示初始密码/i)).toBeInTheDocument()
+      expect(await screen.findByText(/使用管理员或已有账号登录/i)).toBeInTheDocument()
+      expect(screen.getByText(/首次启动凭据只写入服务器端 initial-password.txt/i)).toBeInTheDocument()
     })
 
     it('does not initialize auth directly on mount', async () => {
@@ -142,7 +167,7 @@ describe('LoginPage', () => {
       })
 
       renderLogin()
-  await waitForSetupStatusLoad()
+      await waitForSetupStatusLoad()
 
       expect(screen.getByRole('alert')).toHaveTextContent('用户名或密码错误')
       expect(mockAddToast).not.toHaveBeenCalled()

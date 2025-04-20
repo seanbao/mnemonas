@@ -180,72 +180,77 @@ function TrashRow({
     : isExpiredForCleanup
       ? 'danger'
       : 'warning'
+  const sizeLabel = item.isDir ? '-' : formatBytes(item.size)
+  const selectionControl = canWrite ? (
+    <Checkbox
+      isSelected={isSelected}
+      onValueChange={onSelect}
+    />
+  ) : (
+    <div className="w-6 shrink-0" />
+  )
+  const actionButtons = canWrite ? (
+    <>
+      <Button
+        isIconOnly
+        size="sm"
+        variant="light"
+        color="success"
+        aria-label={`恢复 ${item.name}`}
+        onPress={onRestore}
+        title="恢复"
+        className="rounded-lg"
+      >
+        <RotateCcw size={16} />
+      </Button>
+      <Button
+        isIconOnly
+        size="sm"
+        variant="light"
+        color="danger"
+        aria-label={`永久删除 ${item.name}`}
+        onPress={onDelete}
+        title="永久删除"
+        className="rounded-lg"
+      >
+        <Trash2 size={16} />
+      </Button>
+    </>
+  ) : null
   
   return (
     <div
       className={cn(
-        "flex items-center gap-4 px-4 py-3 transition-all duration-200 border-b border-divider hover:bg-content2/50",
+        "border-b border-divider transition-all duration-200 hover:bg-content2/50",
         isSelected && "bg-accent-primary/10"
       )}
     >
-      {canWrite ? (
-        <Checkbox
-          isSelected={isSelected}
-          onValueChange={onSelect}
-        />
-      ) : (
-        <div className="w-6 shrink-0" />
-      )}
-      <div className="w-8 flex items-center justify-center">
-        <FileIcon name={item.name} isDir={item.isDir} size={24} variant="bare" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="truncate font-medium text-foreground">{item.name}</p>
-        <p className="text-xs text-default-500 truncate">{item.originalPath}</p>
-      </div>
-      <div className="w-24 text-right text-sm text-default-500">
-        {item.isDir ? '-' : formatBytes(item.size)}
-      </div>
-      <div className="w-32 text-right">
-        <div className="text-sm text-default-500 flex items-center justify-end gap-1">
-          <Clock size={12} />
-          {formatRelativeTime(item.deletedAt)}
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-2 px-4 py-4 sm:flex-nowrap sm:items-center sm:gap-4 sm:py-3">
+        {selectionControl}
+        <div className="flex w-8 shrink-0 items-center justify-center sm:w-8">
+          <FileIcon name={item.name} isDir={item.isDir} size={24} variant="bare" />
         </div>
-        {autoDeleteBadgeLabel && (
-          <Chip size="sm" variant="flat" color={autoDeleteBadgeColor} className="mt-1">
-            {autoDeleteBadgeLabel}
-          </Chip>
-        )}
-      </div>
-      <div className="w-20 flex items-center justify-end gap-1">
-        {canWrite && (
-          <>
-            <Button
-              isIconOnly
-              size="sm"
-              variant="light"
-              color="success"
-              aria-label={`恢复 ${item.name}`}
-              onPress={onRestore}
-              title="恢复"
-              className="rounded-xl"
-            >
-              <RotateCcw size={16} />
-            </Button>
-            <Button
-              isIconOnly
-              size="sm"
-              variant="light"
-              color="danger"
-              aria-label={`永久删除 ${item.name}`}
-              onPress={onDelete}
-              title="永久删除"
-              className="rounded-xl"
-            >
-              <Trash2 size={16} />
-            </Button>
-          </>
-        )}
+        <div className="min-w-0 flex-1 basis-[calc(100%-6rem)] sm:basis-auto">
+          <p className="truncate font-medium text-foreground">{item.name}</p>
+          <p className="truncate text-xs text-default-500">{item.originalPath}</p>
+        </div>
+        <div className="ml-14 text-xs text-default-500 sm:ml-0 sm:w-24 sm:text-right sm:text-sm">
+          {sizeLabel}
+        </div>
+        <div className="flex items-center gap-1 text-xs text-default-500 sm:w-32 sm:justify-end sm:text-sm">
+          <div className="flex items-center gap-1">
+            <Clock size={12} />
+            {formatRelativeTime(item.deletedAt)}
+          </div>
+          {autoDeleteBadgeLabel && (
+            <Chip size="sm" variant="flat" color={autoDeleteBadgeColor} className="sm:ml-1">
+              {autoDeleteBadgeLabel}
+            </Chip>
+          )}
+        </div>
+        <div className="ml-auto flex shrink-0 items-center justify-end gap-1 sm:w-20">
+          {actionButtons}
+        </div>
       </div>
     </div>
   )
@@ -565,7 +570,7 @@ export function TrashPage() {
 
   if (hasInvalidHomeDir) {
     return (
-      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+      <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
         <PageHeader
           title="回收站"
           subtitle={invalidHomeDirTitle}
@@ -597,7 +602,7 @@ export function TrashPage() {
     const errorPresentation = getTrashLoadErrorPresentation(error)
 
     return (
-      <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+      <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
         <PageHeader
           title="回收站"
           subtitle={errorPresentation.subtitle}
@@ -609,7 +614,7 @@ export function TrashPage() {
             title={errorPresentation.title}
             description={errorPresentation.description}
             action={
-		      <Button variant="bordered" className="rounded-xl" onPress={handleRefreshTrash}>
+		      <Button variant="bordered" className="rounded-lg" onPress={handleRefreshTrash}>
                 重新加载
               </Button>
             }
@@ -633,7 +638,7 @@ export function TrashPage() {
       : '自动清理未启用'
 
   return (
-    <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+    <div className="h-full flex flex-col space-y-4 p-4 overflow-auto custom-scrollbar sm:p-6">
       {/* Header */}
       <PageHeader
         title="回收站"
@@ -644,7 +649,7 @@ export function TrashPage() {
             <Button
               color="danger"
               variant="flat"
-              className="rounded-xl"
+              className="rounded-lg"
               startContent={<Trash2 size={16} />}
               onPress={onEmptyOpen}
             >
@@ -656,13 +661,13 @@ export function TrashPage() {
 
       {/* Selection bar */}
       {canWrite && visibleSelectedItems.size > 0 && (
-        <div className="flex items-center gap-4 px-4 py-2.5 bg-accent-primary/10 backdrop-blur-sm rounded-xl border border-divider shadow-[var(--shadow-soft)]">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-divider bg-accent-primary/10 px-4 py-2.5 shadow-[var(--shadow-soft)]">
           <div className="w-8 h-8 rounded-full bg-accent-primary/15 flex items-center justify-center">
             <span className="text-sm font-bold text-accent-primary">{visibleSelectedItems.size}</span>
           </div>
           <span className="text-sm font-medium">已选择 {visibleSelectedItems.size} 项</span>
-          <div className="flex-1" />
-          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-xl">
+          <div className="hidden flex-1 sm:block" />
+          <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-lg">
             取消选择
           </Button>
           <Button
@@ -672,7 +677,7 @@ export function TrashPage() {
             startContent={<RotateCcw size={14} />}
             onPress={handleBatchRestore}
             isLoading={isBatchRestoring}
-            className="rounded-xl"
+            className="rounded-lg"
           >
             恢复
           </Button>
@@ -683,7 +688,7 @@ export function TrashPage() {
             startContent={<Trash2 size={14} />}
             onPress={onBatchDeleteOpen}
             isLoading={isBatchDeleting}
-            className="rounded-xl"
+            className="rounded-lg"
           >
             永久删除
           </Button>
@@ -692,7 +697,7 @@ export function TrashPage() {
 
       {/* List header */}
       {items.length > 0 && (
-        <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
+        <div className="hidden items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-lg border border-divider text-sm font-medium text-default-400 sm:flex">
           {canWrite ? (
             <Checkbox
               isSelected={visibleSelectedItems.size === items.length && items.length > 0}
@@ -714,7 +719,7 @@ export function TrashPage() {
       )}
 
       {/* Item list */}
-      <div className="flex-1 overflow-auto card-meridian rounded-xl">
+      <div className="flex-1 overflow-auto card-meridian rounded-lg">
         {items.length > 0 ? (
           items.map(item => (
             <TrashRow
@@ -759,14 +764,14 @@ export function TrashPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertTriangle size={20} />
             </div>
             <div>
@@ -785,7 +790,7 @@ export function TrashPage() {
               variant="flat"
               onPress={handleCloseDeleteModal}
               isDisabled={deleteMutation.isPending}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -793,7 +798,7 @@ export function TrashPage() {
               color="danger"
               onPress={handleConfirmDelete}
               isLoading={deleteMutation.isPending}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               永久删除
             </Button>
@@ -808,14 +813,14 @@ export function TrashPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertTriangle size={20} />
             </div>
             <div>
@@ -834,7 +839,7 @@ export function TrashPage() {
               variant="flat"
               onPress={handleCloseBatchDeleteModal}
               isDisabled={isBatchDeleting}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -842,7 +847,7 @@ export function TrashPage() {
               color="danger"
               onPress={handleBatchDelete}
               isLoading={isBatchDeleting}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               永久删除
             </Button>
@@ -857,14 +862,14 @@ export function TrashPage() {
         placement="center"
         size="md"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <AlertTriangle size={20} />
             </div>
             <div>
@@ -886,7 +891,7 @@ export function TrashPage() {
               variant="flat"
               onPress={handleCloseEmptyModal}
               isDisabled={emptyMutation.isPending}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -894,7 +899,7 @@ export function TrashPage() {
               color="danger"
               onPress={() => emptyMutation.mutate()}
               isLoading={emptyMutation.isPending}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               清空回收站
             </Button>

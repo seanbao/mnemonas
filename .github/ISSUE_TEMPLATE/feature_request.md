@@ -20,6 +20,17 @@ Describe specific use cases for this feature:
 1. ...
 2. ...
 
+## Deployment / Platform Impact
+If relevant, describe where this should work:
+- [ ] Ubuntu/systemd deployment
+- [ ] Docker deployment
+- [ ] Desktop Web
+- [ ] Mobile Web
+- [ ] WebDAV clients
+
+## UX Expectations
+For UI changes, describe the expected workflow and any screenshots or rough sketches that clarify the experience.
+
 ## Additional Context
 Add any other context, mockups, or screenshots about the feature request here.
 

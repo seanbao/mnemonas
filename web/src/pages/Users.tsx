@@ -236,10 +236,10 @@ function UserCard({
   return (
     <Card className="card-meridian">
       <CardBody className="p-4">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <div className={cn(
-              "w-10 h-10 rounded-xl flex items-center justify-center",
+              "w-10 h-10 shrink-0 rounded-lg flex items-center justify-center",
               user.role === 'admin' 
                 ? "bg-rose/15 text-rose" 
                 : "bg-accent-primary/15 text-accent-primary"
@@ -248,9 +248,9 @@ function UserCard({
                 {user.username.charAt(0).toUpperCase()}
               </span>
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-medium text-foreground">{user.username}</span>
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="truncate font-medium text-foreground">{user.username}</span>
                 {isCurrentUser && (
                   <Chip size="sm" variant="flat" color="success">当前用户</Chip>
                 )}
@@ -271,7 +271,7 @@ function UserCard({
                 variant="light"
                 size="sm"
                 aria-label={`${user.username} 用户操作`}
-                className="text-default-500 rounded-xl"
+                className="text-default-500 rounded-lg"
               >
                 <MoreVertical size={16} />
               </Button>
@@ -314,24 +314,24 @@ function UserCard({
 
         <div className="mt-4 space-y-2 text-sm">
           {user.email && (
-            <div className="flex items-center gap-2 text-default-500">
-              <Mail size={14} />
-              <span>{user.email}</span>
+            <div className="flex min-w-0 items-center gap-2 text-default-500">
+              <Mail size={14} className="shrink-0" />
+              <span className="truncate">{user.email}</span>
             </div>
           )}
-          <div className="flex items-center gap-2 text-default-500">
-            <Calendar size={14} />
-            <span>创建于 {formatDate(user.created_at)}</span>
+          <div className="flex min-w-0 items-center gap-2 text-default-500">
+            <Calendar size={14} className="shrink-0" />
+            <span className="truncate">创建于 {formatDate(user.created_at)}</span>
           </div>
           {user.last_login_at && (
-            <div className="flex items-center gap-2 text-default-500">
-              <RefreshCw size={14} />
-              <span>最后登录 {formatDate(user.last_login_at)}</span>
+            <div className="flex min-w-0 items-center gap-2 text-default-500">
+              <RefreshCw size={14} className="shrink-0" />
+              <span className="truncate">最后登录 {formatDate(user.last_login_at)}</span>
             </div>
           )}
-          <div className="flex items-center gap-2 text-default-500">
-            <HardDrive size={14} />
-            <span>
+          <div className="flex min-w-0 items-center gap-2 text-default-500">
+            <HardDrive size={14} className="shrink-0" />
+            <span className="truncate">
               已用 {formatBytes(user.used_bytes)}
               {user.quota_bytes > 0 && ` / ${formatBytes(user.quota_bytes)}`}
             </span>
@@ -577,7 +577,7 @@ export function UsersPage() {
   const usersLoadError = error ? getUsersLoadErrorPresentation(error) : null
 
   return (
-    <div className="h-full flex flex-col p-6">
+    <div className="h-full flex flex-col p-4 sm:p-6">
       {/* Header */}
       <PageHeader
         title="用户管理"
@@ -590,12 +590,12 @@ export function UsersPage() {
               startContent={<RefreshCw size={16} />}
               onPress={handleRefreshUsers}
               isLoading={isLoading || isRefetching}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               刷新
             </Button>
             <Button
-              className="bg-accent-primary text-white rounded-xl"
+              className="bg-accent-primary text-white rounded-lg"
               startContent={<UserPlus size={16} />}
               onPress={handleOpenCreateModal}
             >
@@ -607,7 +607,7 @@ export function UsersPage() {
       />
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 gap-4 mb-6 sm:grid-cols-3">
         <StatCard
           title="总用户数"
           value={totalUsers}
@@ -648,7 +648,7 @@ export function UsersPage() {
                 title={usersLoadError?.title ?? '加载用户列表失败'}
                 description={usersLoadError?.description ?? '请稍后重试'}
                 action={
-                  <Button variant="bordered" className="rounded-xl" onPress={handleRefreshUsers}>
+                  <Button variant="bordered" className="rounded-lg" onPress={handleRefreshUsers}>
                     重新加载
                   </Button>
                 }
@@ -682,14 +682,14 @@ export function UsersPage() {
         size="md"
         placement="center"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
               <UserPlus size={20} />
             </div>
             <div>
@@ -781,7 +781,7 @@ export function UsersPage() {
               variant="flat"
               onPress={handleCloseCreateModal}
               isDisabled={createMutation.isPending}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -790,7 +790,7 @@ export function UsersPage() {
               onPress={handleCreate}
               isLoading={createMutation.isPending}
               isDisabled={!newUsername.trim() || !newPassword.trim() || newPassword.length < 8}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               创建
             </Button>
@@ -805,14 +805,14 @@ export function UsersPage() {
         size="md"
         placement="center"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-danger/10 text-danger flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-danger/10 text-danger flex items-center justify-center">
               <Trash2 size={20} />
             </div>
             <div>
@@ -833,7 +833,7 @@ export function UsersPage() {
               variant="flat"
               onPress={handleCloseDeleteModal}
               isDisabled={deleteMutation.isPending}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -841,7 +841,7 @@ export function UsersPage() {
               color="danger"
               onPress={handleDelete}
               isLoading={deleteMutation.isPending}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               删除
             </Button>
@@ -856,14 +856,14 @@ export function UsersPage() {
         size="md"
         placement="center"
         classNames={{
-          base: "bg-content1 border border-divider shadow-2xl rounded-2xl",
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
           backdrop: "bg-black/60 backdrop-blur-md",
           closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
         }}
       >
         <ModalContent>
           <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
-            <div className="w-10 h-10 rounded-xl bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
               <KeyRound size={20} />
             </div>
             <div>
@@ -896,7 +896,7 @@ export function UsersPage() {
               variant="flat"
               onPress={handleCloseResetModal}
               isDisabled={resetPasswordMutation.isPending}
-              className="text-default-600 rounded-xl"
+              className="text-default-600 rounded-lg"
             >
               取消
             </Button>
@@ -905,7 +905,7 @@ export function UsersPage() {
               onPress={handleResetPassword}
               isLoading={resetPasswordMutation.isPending}
               isDisabled={!resetPassword.trim() || resetPassword.length < 8}
-              className="rounded-xl"
+              className="rounded-lg"
             >
               确认重置
             </Button>

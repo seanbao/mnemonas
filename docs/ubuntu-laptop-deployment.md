@@ -1,0 +1,261 @@
+# Ubuntu 笔记本部署指南
+
+本文面向一台长期放在家里运行的闲置 Ubuntu 笔记本、小主机或旧工作站。目标是：安装步骤少、开机自启、日志可查、数据目录固定、出问题时能快速诊断。
+
+## 适用场景
+
+- Ubuntu 22.04/24.04 LTS 或相近版本
+- 单机家庭 NAS、照片/文档归档、局域网 WebDAV
+- 使用系统文件系统承载物理可靠性，MnemoNAS 负责 Web UI、WebDAV、版本、回收站、校验和 scrub
+
+MnemoNAS 不自己实现 RAID。多盘可靠性建议交给 ZFS mirror、Btrfs RAID1 或 mdadm，再把挂载后的目录交给 MnemoNAS 使用。
+
+## 推荐目录
+
+| 路径 | 用途 |
+| --- | --- |
+| `/srv/mnemonas` | MnemoNAS 主数据目录 |
+| `/etc/mnemonas/config.toml` | 服务配置 |
+| `/usr/local/bin/nasd` | 控制面与 Web UI 服务 |
+| `/usr/local/bin/dataplane` | 数据面服务 |
+| `/usr/local/share/mnemonas/web` | Web UI 静态资源 |
+| `/backup/mnemonas` | 本机或外接盘备份目标 |
+
+## 存储准备
+
+最推荐的家庭方案是两块 SSD 做 ZFS mirror，另配一块 HDD 或外接盘做离线/定期备份：
+
+以下命令会清空被选中的磁盘。先用 `ls -l /dev/disk/by-id/` 核对设备型号和序列号，确认不是系统盘后再执行。
+
+```bash
+sudo apt update
+sudo apt install -y zfsutils-linux
+
+sudo zpool create \
+  -o ashift=12 \
+  -o autotrim=on \
+  -O compression=lz4 \
+  -O atime=off \
+  -O xattr=sa \
+  -O acltype=posixacl \
+  mnemonas mirror /dev/disk/by-id/<disk-a> /dev/disk/by-id/<disk-b>
+sudo zfs create -o mountpoint=/srv/mnemonas -o recordsize=1M mnemonas/data
+sudo mkdir -p /srv/mnemonas
+```
+
+如果暂时只有单盘，也可以先使用 ext4/XFS/Btrfs，但要明确它不能抵御硬盘损坏。至少准备一个外接盘或另一台机器做备份。
+
+如果这台笔记本还会跑 Docker、下载器、转码、模型缓存或其他服务，不要把这些数据放进 `/srv/mnemonas`。建议单独准备 `/srv/fast-scratch` 一类可丢弃工作区，必要时把 Docker `data-root` 挪过去，避免系统根分区或 MnemoNAS 生产数据目录被缓存挤满。
+
+## 安装 MnemoNAS
+
+从 GitHub Releases 下载 Linux release 包：
+
+```bash
+tar -xzf mnemonas-<version>-linux-amd64.tar.gz
+cd mnemonas-<version>-linux-amd64
+
+sudo ./scripts/install-systemd.sh
+```
+
+默认安装行为：
+
+- 创建 `mnemonas` 系统用户
+- 创建 `/srv/mnemonas/files` 和 `/srv/mnemonas/.mnemonas`
+- 安装 `mnemonas-dataplane.service` 和 `mnemonas.service`
+- 监听 `0.0.0.0:8080`
+- 自动启用并启动服务
+
+自定义数据目录或端口：
+
+```bash
+sudo env STORAGE_ROOT=/srv/mnemonas SERVER_PORT=8080 ./scripts/install-systemd.sh
+```
+
+安装脚本默认只修正 `/srv/mnemonas`、`files` 和 `.mnemonas` 这些顶层托管目录的所有者，不会在升级时递归改动已有数据。若你手动复制过数据导致服务用户无权访问，可显式运行：
+
+```bash
+sudo env FIX_STORAGE_OWNERSHIP=1 ./scripts/install-systemd.sh
+```
+
+如果还没有可用的 release 包，也可以在目标机器或另一台 Linux 机器上从源码构建后安装：
+
+```bash
+git clone https://github.com/seanbao/mnemonas.git
+cd mnemonas
+
+make deps
+make build
+sudo env RELEASE_DIR="$PWD" ./scripts/install-systemd.sh
+sudo mnemonas-doctor
+```
+
+源码构建需要 Go、Rust、Node.js 和 protobuf 编译器；版本要求见 [开发指南](development.md)。
+
+安装后运行诊断：
+
+```bash
+sudo mnemonas-doctor
+```
+
+首次登录密码：
+
+```bash
+sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
+```
+
+打开浏览器访问：
+
+```text
+http://<ubuntu-laptop-ip>:8080
+```
+
+登录后请立即修改管理员密码；初始密码文件如果仍存在，`mnemonas-doctor` 会提示。
+
+## 日常管理
+
+```bash
+systemctl status mnemonas --no-pager
+systemctl status mnemonas-dataplane --no-pager
+
+journalctl -u mnemonas -f
+journalctl -u mnemonas-dataplane -f
+
+sudo systemctl restart mnemonas
+sudo systemctl restart mnemonas-dataplane
+sudo mnemonas-doctor
+```
+
+`mnemonas-doctor` 会检查服务状态、Web UI、目录权限、存储挂载类型和剩余磁盘空间。Web UI 的“系统健康”和“存储管理”页也会显示底层文件系统类型、ZFS/Btrfs 原生校验提示，以及存储告警运行态。默认低于 10GB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
+
+如果系统安装了 UFW，`mnemonas-doctor` 也会检查防火墙是否启用，并提示不要放行 dataplane 的 `9090/9091` 端口。
+
+修改配置后检查并重启：
+
+```bash
+sudo nasd --check-config --config /etc/mnemonas/config.toml
+sudo systemctl restart mnemonas-dataplane
+sudo systemctl restart mnemonas
+```
+
+`--check-config` 会同时输出安全警告。配置语法合法但风险较高时，例如关闭登录认证后仍监听非 loopback 地址、WebDAV 选择无认证、或 dataplane gRPC 监听到外部网络，命令仍会通过但会打印 `warning:`。生产或长期家庭部署不要忽略这些警告。
+
+`[dataplane.cdc]` 和 `dataplane.grpc_address` 会在 `mnemonas-dataplane` 每次启动时从配置文件读取；修改这些项后需要重启 `mnemonas-dataplane`，再重启 `mnemonas`。
+
+## 网络建议
+
+家庭 NAS 的默认原则是先只服务内网。
+
+- 管理入口优先走局域网或 Tailscale/Headscale 这类私有网络
+- 不建议把 SSH 直接暴露到公网
+- 如果需要分享给外部用户，优先只暴露 HTTPS 反向代理后的 Web 入口
+- 使用 Caddy/Nginx/Traefik 时参考 [反向代理配置](reverse-proxy-setup.md)，并正确配置 `server.trusted_proxy_hops`
+
+推荐把两条链路分开规划：
+
+| 链路 | 用途 | 建议 |
+| --- | --- | --- |
+| 局域网 / Tailscale / Headscale | 管理、SSH、家庭成员访问 | 只允许可信网段访问 `8080`；SSH 仅走私有网络 |
+| HTTPS 反向代理 / FRP / 隧道 | 给外部用户打开分享链接 | 公网只开放 `80/443`，代理到 MnemoNAS 的 Web 入口 |
+| dataplane `9090/9091` | `nasd` 与 Rust 数据面内部通信 | 只绑定 loopback，不做端口映射，不走公网代理 |
+
+如果使用 UFW，先按自己的 LAN/Tailnet 网段替换示例中的地址，再应用规则：
+
+```bash
+sudo ufw allow from 192.168.0.0/16 to any port 22 proto tcp comment "SSH LAN"
+sudo ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "SSH Tailnet"
+sudo ufw allow from 192.168.0.0/16 to any port 8080 proto tcp comment "MnemoNAS LAN"
+sudo ufw allow from 100.64.0.0/10 to any port 8080 proto tcp comment "MnemoNAS Tailnet"
+sudo ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
+sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
+
+# 如果使用公网 HTTPS 入口，再开放反向代理端口。
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+
+sudo ufw enable
+sudo ufw status numbered
+```
+
+如果反向代理和 MnemoNAS 在同一台机器，最稳妥的做法是把 `[server].host` 改为 `127.0.0.1`，让公网只通过代理访问。需要局域网直连时，再用防火墙把 `8080` 限制到可信网段。
+
+WebDAV 地址：
+
+```text
+http://<ubuntu-laptop-ip>:8080/dav
+```
+
+## 备份策略
+
+ZFS mirror、Btrfs RAID1 或 mdadm 只能降低单盘故障风险，不等于备份。建议至少保留一份独立备份。
+
+最小可行方案是在低峰期短暂停服务后同步，避免复制到一半时元数据还在变化：
+
+```bash
+sudo mkdir -p /backup/mnemonas
+sudo systemctl stop mnemonas
+sudo systemctl stop mnemonas-dataplane
+sudo rsync -aHAX --delete /srv/mnemonas/ /backup/mnemonas/
+sudo systemctl start mnemonas-dataplane
+sudo systemctl start mnemonas
+```
+
+如果底层是 ZFS/Btrfs，更可靠的做法是先创建文件系统快照，再从快照目录备份。也可以使用 restic 或 borg，把 `/srv/mnemonas` 定期备份到外接盘、另一台机器或对象存储。备份完成后需要定期做恢复演练，确认文件能取回。
+
+更多策略见 [备份指南](backup-guide.md)。
+
+## 升级
+
+下载新的 release 包后重新运行安装脚本即可覆盖二进制和 Web UI，已有配置和数据会保留：
+
+```bash
+tar -xzf mnemonas-<version>-linux-amd64.tar.gz
+cd mnemonas-<version>-linux-amd64
+
+sudo ./scripts/install-systemd.sh
+sudo mnemonas-doctor
+```
+
+升级前建议先完成一次备份，尤其是跨大版本升级。
+
+## 卸载
+
+如果只是停止试用或重新安装，默认卸载会移除 systemd 服务、二进制和 Web UI 文件，但保留 `/etc/mnemonas` 配置和 `/srv/mnemonas` 数据：
+
+```bash
+sudo mnemonas-uninstall-systemd
+```
+
+确认已经完成备份、并且确实要删除配置和数据时，才使用显式确认：
+
+```bash
+sudo env REMOVE_CONFIG=1 REMOVE_DATA=1 CONFIRM_REMOVE_DATA=/srv/mnemonas mnemonas-uninstall-systemd
+```
+
+服务账号默认保留，便于之后重新安装复用同一 UID/GID；如果确实要删除账号，可额外设置 `REMOVE_SERVICE_USER=1`。
+
+## 故障排查
+
+先运行：
+
+```bash
+sudo mnemonas-doctor
+```
+
+常见问题：
+
+| 现象 | 检查项 |
+| --- | --- |
+| Web 打不开 | `systemctl status mnemonas`、防火墙、端口是否被占用 |
+| 登录后写入失败 | `/srv/mnemonas` 和 `/etc/mnemonas` 是否归 `mnemonas` 用户所有 |
+| WebDAV 连不上 | 地址是否为 `/dav`，客户端是否使用当前账号密码 |
+| 上传大文件失败 | 磁盘空间、反向代理上传限制、`journalctl -u mnemonas` |
+| scrub 报错 | 先停止写入，保留日志，检查底层文件系统和备份可用性 |
+
+如果需要提交 issue，请附上：
+
+```bash
+sudo mnemonas-doctor
+systemctl status mnemonas --no-pager
+journalctl -u mnemonas --since "1 hour ago" --no-pager
+```

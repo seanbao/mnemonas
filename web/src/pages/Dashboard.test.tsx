@@ -39,6 +39,11 @@ vi.mock('@/api/files', () => ({
     totalSize: 1073741824, // 1 GB
     totalObjects: 100,
     dedupRatio: 1.5,
+    diskStatsAvailable: true,
+    diskTotal: 21474836480, // 20 GB
+    diskAvailable: 20401094656, // 19 GB
+    diskUsed: 1073741824, // 1 GB
+    diskUsageRatio: 0.05,
   }),
 }))
 
@@ -117,6 +122,11 @@ describe('DashboardPage', () => {
       totalSize: 1073741824, // 1 GB
       totalObjects: 100,
       dedupRatio: 1.5,
+      diskStatsAvailable: true,
+      diskTotal: 21474836480, // 20 GB
+      diskAvailable: 20401094656, // 19 GB
+      diskUsed: 1073741824, // 1 GB
+      diskUsageRatio: 0.05,
     })
     mockListActivity.mockResolvedValue({
       items: [
@@ -132,7 +142,7 @@ describe('DashboardPage', () => {
       
       render(<DashboardPage />)
       // Should show skeleton loaders (HeroUI Skeleton component)
-      expect(document.querySelector('.rounded-lg, .rounded-xl')).toBeTruthy()
+      expect(document.querySelector('.rounded-lg, .rounded-lg')).toBeTruthy()
     })
 
     it('shows skeleton placeholders while loading', () => {
@@ -140,7 +150,7 @@ describe('DashboardPage', () => {
       mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
       
       render(<DashboardPage />)
-      const skeletons = document.querySelectorAll('.rounded-lg, .rounded-xl, [class*="animate"]')
+      const skeletons = document.querySelectorAll('.rounded-lg, .rounded-lg, [class*="animate"]')
       expect(skeletons.length).toBeGreaterThan(0)
     })
   })
@@ -234,11 +244,52 @@ describe('DashboardPage', () => {
       })
     })
 
-    it('shows unknown capacity guidance instead of a full usage bar', async () => {
+    it('shows disk capacity guidance when disk stats are available', async () => {
       render(<DashboardPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('总容量未配置，无法计算占用比例')).toBeTruthy()
+        expect(screen.getByText(/可用 .* 总容量/)).toBeTruthy()
+        expect(screen.getByText('磁盘总量')).toBeTruthy()
+      })
+    })
+
+    it('surfaces critical disk space risk from the overview', async () => {
+      mockGetStorageStats.mockResolvedValueOnce({
+        fileCount: 42,
+        fileCountAvailable: true,
+        storageStatsAvailable: true,
+        totalSize: 1073741824,
+        totalObjects: 100,
+        dedupRatio: 1.5,
+        diskStatsAvailable: true,
+        diskTotal: 21474836480,
+        diskAvailable: 512 * 1024 * 1024,
+        diskUsed: 20937965568,
+        diskUsageRatio: 0.975,
+      })
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储空间严重不足')).toBeTruthy()
+        expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
+        expect(screen.getByRole('button', { name: '查看存储' })).toBeTruthy()
+      })
+    })
+
+    it('falls back to CAS guidance when disk stats are unavailable', async () => {
+      mockGetStorageStats.mockResolvedValueOnce({
+        fileCount: 42,
+        fileCountAvailable: true,
+        storageStatsAvailable: true,
+        totalSize: 1073741824,
+        totalObjects: 100,
+        dedupRatio: 1.5,
+      })
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘容量统计不可用，仅显示 CAS 数据')).toBeTruthy()
       })
     })
   })

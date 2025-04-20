@@ -140,7 +140,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
   }, [blobUrl])
 
   return (
-    <div className={cn("h-full flex flex-col bg-content1 rounded-xl overflow-hidden", className)}>
+    <div className={cn("h-full flex flex-col bg-content1 rounded-lg overflow-hidden", className)}>
       {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-2 bg-content2 border-b border-divider">
         <span className="text-sm font-medium truncate max-w-[200px]">{filename}</span>

@@ -5,7 +5,7 @@ bin/
 *.dll
 *.so
 *.dylib
-nasd
+/nasd
 dataplane/bin/
 
 # Build artifacts
@@ -21,6 +21,7 @@ go.work
 
 # Rust
 dataplane/target/
+tools/proto-gen/target/
 
 # Node.js
 web/node_modules/

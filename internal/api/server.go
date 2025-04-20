@@ -21,6 +21,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
+	"github.com/zeebo/blake3"
+
 	"github.com/seanbao/mnemonas/internal/activity"
 	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/auth"
@@ -35,7 +37,6 @@ import (
 	"github.com/seanbao/mnemonas/internal/thumbnail"
 	"github.com/seanbao/mnemonas/internal/versionstore"
 	"github.com/seanbao/mnemonas/internal/workspace"
-	"github.com/zeebo/blake3"
 )
 
 const maxObjectsCursorLength = 256
@@ -43,6 +44,7 @@ const maxListObjectsLimit = 1000
 const maxGCGracePeriodHours = int64((1<<63 - 1) / int64(time.Hour))
 
 const scrubFailurePublicMessage = "scrub failed; check server logs for details"
+const untrustedDownloadContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
 
 var startScrub = func(store *maintenance.HistoryStore) (*maintenance.ScrubResult, error) {
 	return store.StartScrub()
@@ -62,6 +64,10 @@ var getTrashStats = func(fs *storage.FileSystem, ctx context.Context) (int, int6
 
 var getFileCount = func(fs *storage.FileSystem, ctx context.Context) (int, error) {
 	return fs.GetFileCount(ctx)
+}
+
+var getDiskStats = func(fs *storage.FileSystem) (*storage.DiskStats, error) {
+	return fs.DiskStats()
 }
 
 var serverConnectDataplaneClient = func(s *Server, parent context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
@@ -88,6 +94,8 @@ type Server struct {
 	maintenanceConfigured bool
 	activityConfigured    bool
 	startTime             time.Time
+	appVersion            string
+	buildTime             string
 	// Auth components
 	userStore    *auth.UserStore
 	tokenManager *auth.TokenManager
@@ -546,6 +554,10 @@ type AlertMonitor interface {
 	UpdateConfig(cfg alerts.Config)
 }
 
+type alertStatsProvider interface {
+	LastStats() *alerts.StorageStats
+}
+
 type RetentionMonitor interface {
 	UpdateConfig(cfg storage.RetentionMonitorConfig)
 }
@@ -776,8 +788,24 @@ type ServerConfig struct {
 	// Config (for settings API)
 	Config       *config.Config
 	ConfigPath   string
+	AppVersion   string
+	BuildTime    string
 	ActiveWebDAV *WebDAVRuntimeConfig
 	UpdateWebDAV func(WebDAVRuntimeConfig)
+}
+
+func serverBuildMetadata(cfg *ServerConfig) (string, string) {
+	appVersion := AppVersion
+	buildTime := AppBuildTime
+	if cfg != nil {
+		if strings.TrimSpace(cfg.AppVersion) != "" {
+			appVersion = strings.TrimSpace(cfg.AppVersion)
+		}
+		if strings.TrimSpace(cfg.BuildTime) != "" {
+			buildTime = strings.TrimSpace(cfg.BuildTime)
+		}
+	}
+	return appVersion, buildTime
 }
 
 // NewServer creates a new API server
@@ -794,10 +822,13 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	// budget is saturated by slow data operations.
 	r.Use(throttleExceptPaths(DefaultMaxConcurrentRequests, "/health", "/api/v1/version", "/api/v1/metrics"))
 
+	appVersion, buildTime := serverBuildMetadata(cfg)
 	s := &Server{
-		router:    r,
-		logger:    logger,
-		startTime: time.Now(),
+		router:     r,
+		logger:     logger,
+		startTime:  time.Now(),
+		appVersion: appVersion,
+		buildTime:  buildTime,
 	}
 	requestip.SetTrustedProxyHops(config.Default().Server.TrustedProxyHops)
 	if cfg != nil {
@@ -981,7 +1012,7 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/api/v1/version", s.handleVersion)
 
-	// Setup status (public, for showing credentials on first run)
+	// Setup status (public, for first-run guidance without exposing passwords)
 	s.router.Route("/api/v1/setup", func(r chi.Router) {
 		r.Get("/", s.handleGetSetupStatus)
 		if s.authEnabled {
@@ -1571,6 +1602,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "healthy",
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 		"uptime":    time.Since(s.startTime).String(),
+		"version":   s.appVersion,
 	}
 
 	// Reflect dataplane availability in the overall health status when configured.
@@ -1617,9 +1649,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(map[string]any{
-		"name":    AppName,
-		"version": AppVersion,
-		"go":      runtime.Version(),
+		"name":       AppName,
+		"version":    s.appVersion,
+		"build_time": s.buildTime,
+		"go":         runtime.Version(),
 	}).Write(w, http.StatusOK)
 }
 
@@ -1998,6 +2031,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		defer reader.Close()
 
 		versionETag := fmt.Sprintf(`"%s"`, versionHash)
+		setUntrustedDownloadHeaders(w)
 		w.Header().Set("ETag", versionETag)
 		w.Header().Set("Cache-Control", "private, no-cache")
 		if apiETagMatch(r.Header.Get("If-None-Match"), versionETag) {
@@ -2051,6 +2085,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Set cache headers
+	setUntrustedDownloadHeaders(w)
 	if snapshotInfo.ContentHash != "" {
 		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, snapshotInfo.ContentHash))
 	}
@@ -2592,6 +2627,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats := map[string]any{
 		"total_files_available":   false,
 		"storage_stats_available": false,
+		"disk_stats_available":    false,
 	}
 
 	if _, scoped, err := s.currentUserHomeDir(r.Context()); err != nil || scoped {
@@ -2600,11 +2636,20 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.fs != nil {
-		if count, err := getFileCount(s.fs, r.Context()); err == nil {
+		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
+		defer cancel()
+		if count, err := getFileCount(s.fs, ctx); err == nil {
 			stats["total_files_available"] = true
 			stats["total_files"] = count
 		} else {
 			s.logger.Warn().Err(err).Msg("failed to collect file count for stats")
+		}
+
+		if diskStats, err := getDiskStats(s.fs); err == nil {
+			stats["disk_stats_available"] = true
+			addDiskStatsToMap(stats, diskStats)
+		} else {
+			s.logger.Warn().Err(err).Msg("failed to collect disk stats")
 		}
 	}
 
@@ -2626,8 +2671,57 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(stats).Write(w, http.StatusOK)
 }
 
+func addDiskStatsToMap(target map[string]any, stats *storage.DiskStats) {
+	if stats == nil {
+		return
+	}
+	target["disk_total"] = stats.TotalBytes
+	target["disk_free"] = stats.FreeBytes
+	target["disk_available"] = stats.AvailableBytes
+	target["disk_used"] = stats.UsedBytes
+	target["disk_usage_ratio"] = stats.UsageRatio
+	if stats.FileSystemType != "" {
+		target["disk_filesystem_type"] = stats.FileSystemType
+	}
+	target["disk_native_data_checksum_support"] = stats.NativeDataChecksumSupport
+}
+
+func (s *Server) alertsDiagnostics(cfg *config.Config) map[string]any {
+	info := map[string]any{
+		"enabled":            false,
+		"runtime_available":  s.alertMonitor != nil,
+		"webhook_configured": false,
+	}
+	if cfg != nil {
+		info["enabled"] = cfg.Alerts.Enabled
+		info["check_interval"] = cfg.Alerts.CheckInterval.String()
+		info["threshold_pct"] = cfg.Alerts.ThresholdPct
+		info["critical_pct"] = cfg.Alerts.CriticalPct
+		info["min_free_bytes"] = cfg.Alerts.MinFreeBytes
+		info["cooldown_period"] = cfg.Alerts.CooldownPeriod.String()
+		info["webhook_configured"] = strings.TrimSpace(cfg.Alerts.WebhookURL) != ""
+		method := strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
+		if method == "" {
+			method = http.MethodPost
+		}
+		info["webhook_method"] = method
+	}
+
+	if provider, ok := s.alertMonitor.(alertStatsProvider); ok {
+		if stats := provider.LastStats(); stats != nil {
+			info["last_level"] = string(stats.Level)
+			info["last_checked_at"] = stats.CheckedAt.UTC().Format(time.RFC3339)
+			info["last_used_pct"] = stats.UsedPct
+			info["last_free_bytes"] = stats.FreeBytes
+		}
+	}
+
+	return info
+}
+
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	dataplaneConnected := s.ensureDataplaneConnected(r.Context())
+	cfg := s.currentConfig()
 
 	// Collect diagnostic information
 	diag := map[string]any{
@@ -2635,9 +2729,10 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"uptime":      time.Since(s.startTime).String(),
 		"uptime_secs": int64(time.Since(s.startTime).Seconds()),
 		"version": map[string]any{
-			"name":    AppName,
-			"version": AppVersion,
-			"go":      runtime.Version(),
+			"name":       AppName,
+			"version":    s.appVersion,
+			"build_time": s.buildTime,
+			"go":         runtime.Version(),
 		},
 	}
 
@@ -2649,13 +2744,14 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"maintenance_history_ready": s.maintenance != nil,
 		"activity_log_ready":        s.activity != nil,
 	}
-	if cfg := s.currentConfig(); cfg != nil && cfg.WebDAV.Enabled {
+	if cfg != nil && cfg.WebDAV.Enabled {
 		systemStatus["webdav_runtime_ready"] = !s.webDAVConfiguredButUnavailable()
 	}
 	if s.favoritesConfigured {
 		systemStatus["favorites_store_ready"] = !s.favoritesConfiguredButUnavailable()
 	}
 	diag["system"] = systemStatus
+	diag["alerts"] = s.alertsDiagnostics(cfg)
 
 	// Memory stats
 	var memStats runtime.MemStats
@@ -2682,6 +2778,14 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		} else {
 			fsStats["trash_stats_available"] = false
 			s.logger.Warn().Err(err).Msg("failed to collect trash stats for diagnostics")
+		}
+
+		if diskStats, err := getDiskStats(s.fs); err == nil {
+			fsStats["disk_stats_available"] = true
+			addDiskStatsToMap(fsStats, diskStats)
+		} else {
+			fsStats["disk_stats_available"] = false
+			s.logger.Warn().Err(err).Msg("failed to collect disk stats for diagnostics")
 		}
 
 		diag["filesystem"] = fsStats
@@ -3059,9 +3163,11 @@ func (s *Server) handleGetScrubResult(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request) {
+	cfg := s.currentConfig()
 	export := map[string]any{
 		"export_time": time.Now().Format(time.RFC3339),
-		"version":     AppVersion,
+		"version":     s.appVersion,
+		"build_time":  s.buildTime,
 	}
 
 	// System info
@@ -3081,6 +3187,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 		},
 		"uptime_sec": int64(time.Since(s.startTime).Seconds()),
 	}
+	export["alerts"] = s.alertsDiagnostics(cfg)
 
 	// Filesystem stats (sanitized)
 	if s.fs != nil {
@@ -3094,6 +3201,14 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 		} else {
 			fsStats["trash_stats_available"] = false
 			s.logger.Warn().Err(err).Msg("failed to collect trash stats for diagnostics export")
+		}
+
+		if diskStats, err := getDiskStats(s.fs); err == nil {
+			fsStats["disk_stats_available"] = true
+			addDiskStatsToMap(fsStats, diskStats)
+		} else {
+			fsStats["disk_stats_available"] = false
+			s.logger.Warn().Err(err).Msg("failed to collect disk stats for diagnostics export")
 		}
 
 		export["filesystem"] = fsStats
@@ -3158,6 +3273,12 @@ func formatAttachmentHeader(filename string) string {
 		return value
 	}
 	return "attachment"
+}
+
+func setUntrustedDownloadHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", untrustedDownloadContentSecurityPolicy)
 }
 
 func streamAPIResponse(w http.ResponseWriter, reader io.Reader) error {
@@ -4316,21 +4437,47 @@ type CDCSettingsUpdate struct {
 	MaxChunkSize *uint32 `json:"max_chunk_size,omitempty"`
 }
 
-func settingsUpdateMayRequireRestart(req UpdateSettingsRequest) bool {
+func settingsUpdateMayRequireRestart(req UpdateSettingsRequest, currentConfig, updatedConfig config.Config) bool {
 	if req.Server != nil {
-		if req.Server.Host != nil || req.Server.Port != nil || req.Server.ReadTimeout != nil || req.Server.WriteTimeout != nil || req.Server.IdleTimeout != nil {
+		if req.Server.Host != nil && currentConfig.Server.Host != updatedConfig.Server.Host {
 			return true
 		}
-		if req.Server.TLS != nil && (req.Server.TLS.Enabled != nil || req.Server.TLS.CertFile != nil || req.Server.TLS.KeyFile != nil || req.Server.TLS.AutoGenerate != nil || req.Server.TLS.CertDir != nil) {
+		if req.Server.Port != nil && currentConfig.Server.Port != updatedConfig.Server.Port {
+			return true
+		}
+		if req.Server.ReadTimeout != nil && currentConfig.Server.ReadTimeout != updatedConfig.Server.ReadTimeout {
+			return true
+		}
+		if req.Server.WriteTimeout != nil && currentConfig.Server.WriteTimeout != updatedConfig.Server.WriteTimeout {
+			return true
+		}
+		if req.Server.IdleTimeout != nil && currentConfig.Server.IdleTimeout != updatedConfig.Server.IdleTimeout {
+			return true
+		}
+		if req.Server.TLS != nil && serverTLSUpdateMayRequireRestart(*req.Server.TLS, currentConfig, updatedConfig) {
 			return true
 		}
 	}
 
-	if req.CDC != nil && (req.CDC.MinChunkSize != nil || req.CDC.AvgChunkSize != nil || req.CDC.MaxChunkSize != nil) {
+	if req.CDC != nil && cdcUpdateMayRequireRestart(*req.CDC, currentConfig, updatedConfig) {
 		return true
 	}
 
 	return false
+}
+
+func serverTLSUpdateMayRequireRestart(req ServerTLSSettingsUpdate, currentConfig, updatedConfig config.Config) bool {
+	return (req.Enabled != nil && currentConfig.Server.TLS.Enabled != updatedConfig.Server.TLS.Enabled) ||
+		(req.CertFile != nil && currentConfig.Server.TLS.CertFile != updatedConfig.Server.TLS.CertFile) ||
+		(req.KeyFile != nil && currentConfig.Server.TLS.KeyFile != updatedConfig.Server.TLS.KeyFile) ||
+		(req.AutoGenerate != nil && currentConfig.Server.TLS.AutoGenerate != updatedConfig.Server.TLS.AutoGenerate) ||
+		(req.CertDir != nil && currentConfig.Server.TLS.CertDir != updatedConfig.Server.TLS.CertDir)
+}
+
+func cdcUpdateMayRequireRestart(req CDCSettingsUpdate, currentConfig, updatedConfig config.Config) bool {
+	return (req.MinChunkSize != nil && currentConfig.DataPlane.CDC.MinChunkSize != updatedConfig.DataPlane.CDC.MinChunkSize) ||
+		(req.AvgChunkSize != nil && currentConfig.DataPlane.CDC.AvgChunkSize != updatedConfig.DataPlane.CDC.AvgChunkSize) ||
+		(req.MaxChunkSize != nil && currentConfig.DataPlane.CDC.MaxChunkSize != updatedConfig.DataPlane.CDC.MaxChunkSize)
 }
 
 func (s *Server) validateWebDAVIdentity(cfg config.Config) error {
@@ -4689,7 +4836,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info().Msg("settings updated and saved")
 
 	message := "settings updated"
-	if settingsUpdateMayRequireRestart(req) {
+	if settingsUpdateMayRequireRestart(req, *currentConfig, updatedConfig) {
 		message = "settings updated, some changes may require restart"
 	}
 

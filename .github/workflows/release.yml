@@ -6,9 +6,12 @@ on:
       - 'v*'
 
 env:
-  GO_VERSION: '1.25'
+  GO_VERSION: '1.25.9'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
+  PROTOC_VERSION: '3.20.1'
+  PROTOC_GEN_GO_VERSION: 'v1.36.11'
+  PROTOC_GEN_GO_GRPC_VERSION: 'v1.6.1'
 
 permissions:
   contents: write
@@ -60,12 +63,12 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: '25.x'
+          version: ${{ env.PROTOC_VERSION }}
 
       - name: Install protoc-gen-go
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@${{ env.PROTOC_GEN_GO_VERSION }}
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${{ env.PROTOC_GEN_GO_GRPC_VERSION }}
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.os == 'linux' && matrix.arch == 'arm64'
@@ -74,10 +77,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Generate protobuf
-        run: |
-          protoc --go_out=. --go_opt=paths=source_relative \
-            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-            proto/dataplane.proto
+        run: make proto
 
       - name: Build frontend
         working-directory: web
@@ -85,13 +85,18 @@ jobs:
           npm ci
           npm run build
 
+      - name: Set build metadata
+        id: build_meta
+        run: echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Build Go binary
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+          mkdir -p dist
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }} -X main.buildTime=${{ steps.build_meta.outputs.build_time }}" \
             -o dist/nasd-${{ matrix.os }}-${{ matrix.arch }} ./cmd/nasd
 
       - name: Build Rust binary
@@ -99,26 +104,24 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          cargo build --release --target ${{ matrix.rust_target }}
+          cargo build --release --locked --target ${{ matrix.rust_target }}
           cp target/${{ matrix.rust_target }}/release/dataplane \
             ../dist/dataplane-${{ matrix.os }}-${{ matrix.arch }}
 
       - name: Create archive
         run: |
-          rm -rf dist/package
-          mkdir -p dist/package/web
-          install -m 755 dist/nasd-${{ matrix.os }}-${{ matrix.arch }} dist/package/nasd
-          install -m 755 dist/dataplane-${{ matrix.os }}-${{ matrix.arch }} dist/package/dataplane
-          cp -R web/dist/. dist/package/web/
-          install -m 644 mnemonas.example.toml README.md LICENSE dist/package/
+          package_name=mnemonas-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}
+          rm -rf dist/package "dist/$package_name"
+          mkdir -p "dist/$package_name/web" "dist/$package_name/scripts" "dist/$package_name/docs"
+          install -m 755 dist/nasd-${{ matrix.os }}-${{ matrix.arch }} "dist/$package_name/nasd"
+          install -m 755 dist/dataplane-${{ matrix.os }}-${{ matrix.arch }} "dist/$package_name/dataplane"
+          cp -R web/dist/. "dist/$package_name/web/"
+          install -m 755 scripts/*.sh "dist/$package_name/scripts/"
+          cp -R docs/. "dist/$package_name/docs/"
+          install -m 644 mnemonas.example.toml README.md CHANGELOG.md SECURITY.md LICENSE "dist/$package_name/"
           tar -czvf dist/mnemonas-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz \
-            -C dist/package \
-            nasd \
-            dataplane \
-            web \
-            mnemonas.example.toml \
-            README.md \
-            LICENSE
+            -C dist \
+            "$package_name"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -139,12 +142,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -157,11 +154,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/mnemonas
             ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Set build metadata
+        id: build_meta
+        run: echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -171,6 +172,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

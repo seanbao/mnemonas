@@ -28,6 +28,7 @@ import { useNavigate } from 'react-router-dom'
 import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats } from '@/api/files'
 import { ApiError as ActivityApiError, listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
+import { areDiskStatsAvailable, clampUsagePercent, formatUsagePercent, getDiskSpaceStatus } from '@/lib/storageStats'
 import { resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useIsAdmin, useUser } from '@/stores/auth'
@@ -37,18 +38,16 @@ interface QuickActionProps {
   label: string
   description: string
   onClick: () => void
-  gradient: string
 }
 
-function QuickAction({ icon: Icon, label, description, onClick, gradient }: QuickActionProps) {
+function QuickAction({ icon: Icon, label, description, onClick }: QuickActionProps) {
   return (
     <button 
-      className="group stat-card p-5 text-left transition-all hover:scale-[1.02] rounded-2xl"
+      className="group stat-card p-5 text-left transition-colors hover:border-primary/35"
       onClick={onClick}
     >
-      <div className={`absolute inset-0 bg-gradient-to-br ${gradient} rounded-2xl opacity-50`} />
       <div className="relative">
-        <div className="gradient-meridian-subtle w-10 h-10 rounded-xl flex items-center justify-center mb-3">
+        <div className="gradient-meridian-subtle mb-3 flex h-10 w-10 items-center justify-center rounded-lg">
           <Icon size={20} className="text-accent-primary" />
         </div>
         <h3 className="font-medium text-foreground mb-0.5">{label}</h3>
@@ -134,6 +133,26 @@ function getDashboardRefreshErrorToast(errors: Array<unknown>): { title: string;
   }
 }
 
+function getDiskSpaceAlertClass(level: 'unknown' | 'normal' | 'warning' | 'critical'): string {
+  return level === 'critical'
+    ? 'border-danger/30 bg-danger/5'
+    : 'border-warning/30 bg-warning/5'
+}
+
+function getDiskSpaceIconClass(level: 'unknown' | 'normal' | 'warning' | 'critical'): string {
+  return level === 'critical' ? 'text-danger' : 'text-warning'
+}
+
+function getDiskUsageBarClass(level: 'unknown' | 'normal' | 'warning' | 'critical'): string {
+  if (level === 'critical') {
+    return 'bg-danger/70'
+  }
+  if (level === 'warning') {
+    return 'bg-warning/70'
+  }
+  return 'bg-accent-primary/60'
+}
+
 // Recent activity item
 function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
   const colorMap: Record<string, string> = {
@@ -161,17 +180,22 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
   }
 
   return (
-    <div className="bg-content2/30 hover:bg-content2/50 flex items-center justify-between rounded-xl p-3 transition-colors">
-      <div className="flex items-center gap-4">
-        <span className="data-value text-default-500 w-20 text-xs">
+    <div className="flex items-center justify-between gap-3 rounded-lg bg-content2/30 p-3 transition-colors hover:bg-content2/50">
+      <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
+        <span className="data-value hidden w-20 shrink-0 text-xs text-default-500 sm:block">
           {formatRelativeTime(entry.timestamp)}
         </span>
-        <div className={cn("w-2 h-2 rounded-full", colorMap[entry.action] ? 'status-online' : 'bg-primary')} />
-        <div className={cn("w-7 h-7 rounded-full flex items-center justify-center bg-content2", colorMap[entry.action])}>
+        <div className={cn("h-2 w-2 shrink-0 rounded-full", colorMap[entry.action] ? 'status-online' : 'bg-primary')} />
+        <div className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-content2", colorMap[entry.action])}>
           <ActionIcon action={entry.action} />
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-foreground truncate">{getActionLabel(entry.action)}</p>
+          <div className="flex min-w-0 items-center gap-2">
+            <p className="truncate text-sm font-medium text-foreground">{getActionLabel(entry.action)}</p>
+            <span className="data-value shrink-0 text-[11px] text-default-400 sm:hidden">
+              {formatRelativeTime(entry.timestamp)}
+            </span>
+          </div>
           {entry.path && (
             <p className="text-xs text-default-500 truncate">{entry.path}</p>
           )}
@@ -181,6 +205,7 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
         size="sm"
         color={statusMap[entry.action] || 'primary'}
         variant="flat"
+        className="hidden shrink-0 sm:inline-flex"
       >
         {entry.action}
       </Chip>
@@ -250,8 +275,8 @@ export function DashboardPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 lg:p-8 space-y-6">
-        <div className="flex items-center justify-between">
+      <div className="p-4 space-y-6 sm:p-6 lg:p-8">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <Skeleton className="w-48 h-8 rounded-lg mb-2 bg-content3" />
             <Skeleton className="w-64 h-4 rounded-lg bg-content2" />
@@ -273,8 +298,8 @@ export function DashboardPage() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <Skeleton className="rounded-2xl h-64 w-full lg:col-span-2 bg-content1/50" />
-          <Skeleton className="rounded-2xl h-64 w-full bg-content1/50" />
+          <Skeleton className="h-64 w-full rounded-lg bg-content1/50 lg:col-span-2" />
+          <Skeleton className="h-64 w-full rounded-lg bg-content1/50" />
         </div>
       </div>
     )
@@ -287,54 +312,57 @@ export function DashboardPage() {
     : health?.status
       ? 'unhealthy'
       : 'unknown'
-  const hasStorageData = stats?.storageStatsAvailable === true && stats.totalSize !== undefined && stats.totalSize > 0
+  const diskStatsKnown = areDiskStatsAvailable(stats)
+  const diskUsagePercent = diskStatsKnown ? clampUsagePercent(stats?.diskUsageRatio) : undefined
+  const diskSpaceStatus = getDiskSpaceStatus(stats)
+  const shouldShowDiskSpaceAlert = diskSpaceStatus.level === 'warning' || diskSpaceStatus.level === 'critical'
+  const hasStorageData = diskStatsKnown
+    ? stats?.diskUsed !== undefined && stats.diskUsed > 0
+    : stats?.storageStatsAvailable === true && stats.totalSize !== undefined && stats.totalSize > 0
   const storageStatsKnown = stats?.storageStatsAvailable === true
   const fileCountKnown = stats?.fileCountAvailable === true
+  const storageUsageValue = diskStatsKnown ? formatStorageSize(stats?.diskUsed) : formatStorageSize(stats?.totalSize)
 
   const statsCards = [
     {
       title: '存储使用',
-      value: formatStorageSize(stats?.totalSize),
+      value: storageUsageValue,
       icon: HardDrive,
-      trend: storageStatsKnown ? '实时监控中' : '统计不可用',
-      gradient: 'from-blue-500/20 to-violet-500/20',
+      trend: diskStatsKnown
+        ? `${formatUsagePercent(stats?.diskUsageRatio)} 已用 · ${diskSpaceStatus.label}`
+        : storageStatsKnown ? 'CAS 统计可用' : '统计不可用',
     },
     {
       title: '文件数量',
       value: fileCountKnown ? formatCount(stats?.fileCount) : '--',
       icon: FileBox,
       trend: fileCountKnown ? '文件索引计数' : '统计不可用',
-      gradient: 'from-emerald-500/20 to-cyan-500/20',
     },
     {
       title: '去重率',
-      value: stats?.dedupRatio !== undefined
+      value: storageStatsKnown && stats?.dedupRatio !== undefined
         ? `${(stats.dedupRatio * 100).toFixed(1)}%`
         : '--',
       icon: Activity,
       trend: '存储效率',
-      gradient: 'from-violet-500/20 to-fuchsia-500/20',
     },
     {
       title: '运行时间',
       value: health?.uptime ?? '--',
       icon: Clock,
       trend: health ? '稳定运行' : '状态未知',
-      gradient: 'from-amber-500/20 to-orange-500/20',
     },
   ]
 
   return (
-    <div className="p-6 lg:p-8 space-y-6">
+    <div className="p-4 space-y-6 sm:p-6 lg:p-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <PageHeader
-          title="系统概览"
-          subtitle="实时监控存储状态"
-        />
-        <div className="flex items-center gap-2 text-sm">
+      <PageHeader
+        title="系统概览"
+        subtitle="实时监控存储状态"
+        actions={
           <div className={cn(
-            "flex items-center gap-2 px-3 py-1.5 rounded-full",
+            "flex items-center gap-2 rounded-full px-3 py-1.5 text-sm",
             healthStatus === 'healthy'
               ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
               : healthStatus === 'degraded'
@@ -365,8 +393,8 @@ export function DashboardPage() {
               </>
             )}
           </div>
-        </div>
-      </div>
+        }
+      />
 
       {hasPartialError && (
         <Card className="border-warning/30 bg-warning/5 shadow-none">
@@ -381,7 +409,7 @@ export function DashboardPage() {
             <Button
               size="sm"
               variant="flat"
-              className="rounded-xl"
+              className="rounded-lg"
               startContent={<RefreshCw size={14} />}
               onPress={handleRetry}
             >
@@ -391,11 +419,33 @@ export function DashboardPage() {
         </Card>
       )}
 
+      {shouldShowDiskSpaceAlert && (
+        <Card className={cn('shadow-none', getDiskSpaceAlertClass(diskSpaceStatus.level))}>
+          <CardBody className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-start gap-3">
+              <AlertCircle size={18} className={cn('mt-0.5 shrink-0', getDiskSpaceIconClass(diskSpaceStatus.level))} />
+              <div>
+                <p className="text-sm font-medium text-foreground">{diskSpaceStatus.title}</p>
+                <p className="text-xs text-default-600">{diskSpaceStatus.description}</p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-lg"
+              startContent={<HardDrive size={14} />}
+              onPress={() => navigate('/storage')}
+            >
+              查看存储
+            </Button>
+          </CardBody>
+        </Card>
+      )}
+
       {/* Stats Grid - Meridian Style */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {statsCards.map((stat) => (
           <div key={stat.title} className="stat-card">
-            <div className={`absolute inset-0 bg-gradient-to-br ${stat.gradient} rounded-2xl opacity-50`} />
             <div className="relative">
               <div className="flex items-start justify-between">
                 <div>
@@ -405,7 +455,7 @@ export function DashboardPage() {
                   </div>
                   <p className="text-default-500 mt-2 text-xs">{stat.trend}</p>
                 </div>
-                <div className="gradient-meridian-subtle rounded-xl p-2.5">
+                <div className="gradient-meridian-subtle rounded-lg p-2.5">
                   <stat.icon className="text-accent-primary h-5 w-5" />
                 </div>
               </div>
@@ -431,18 +481,23 @@ export function DashboardPage() {
           <div className="space-y-2 mb-5">
             <div className="flex justify-between text-sm">
               <span className="text-default-600">已用空间</span>
-              <span className="data-value">{formatStorageSize(stats?.totalSize)}</span>
+              <span className="data-value">{storageUsageValue}</span>
             </div>
             <div className="h-2 rounded-full bg-content2 overflow-hidden">
               {hasStorageData ? (
-                <div className="h-full w-12 rounded-full bg-accent-primary/60 flow-line" />
+                <div
+                  className={cn('h-full rounded-full flow-line', getDiskUsageBarClass(diskSpaceStatus.level))}
+                  style={{ width: diskUsagePercent !== undefined ? `${diskUsagePercent}%` : '3rem' }}
+                />
               ) : (
                 <div className="h-full w-0 rounded-full bg-accent-primary/30" />
               )}
             </div>
             <div className="text-xs text-default-400">
-              {hasStorageData
-                ? '总容量未配置，无法计算占用比例'
+              {diskStatsKnown
+                ? `${formatStorageSize(stats?.diskAvailable)} 可用 / ${formatStorageSize(stats?.diskTotal)} 总容量`
+                : hasStorageData
+                  ? '磁盘容量统计不可用，仅显示 CAS 数据'
                 : storageStatsKnown
                   ? '暂无存储数据'
                   : '统计不可用'}
@@ -451,9 +506,9 @@ export function DashboardPage() {
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
-              { label: '总对象数', value: formatCount(stats?.totalObjects) },
-              { label: '总大小', value: formatStorageSize(stats?.totalSize) },
-              { label: '去重率', value: stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--' },
+              { label: '总对象数', value: storageStatsKnown ? formatCount(stats?.totalObjects) : '--' },
+              { label: diskStatsKnown ? '磁盘总量' : '总大小', value: diskStatsKnown ? formatStorageSize(stats?.diskTotal) : formatStorageSize(stats?.totalSize) },
+              { label: '去重率', value: storageStatsKnown && stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--' },
               { label: '版本', value: appVersion?.version ?? health?.version ?? '--' },
             ].map((item, i) => (
               <div key={i} className="p-3 rounded-lg bg-content2/50 text-center">
@@ -474,7 +529,6 @@ export function DashboardPage() {
             label="文件管理"
             description="浏览和管理文件"
             onClick={() => navigate('/files')}
-            gradient="from-blue-500/20 to-violet-500/20"
           />
           {isAdmin && (
             <QuickAction
@@ -482,7 +536,6 @@ export function DashboardPage() {
               label="存储管理"
               description="查看存储状态"
               onClick={() => navigate('/storage')}
-              gradient="from-emerald-500/20 to-cyan-500/20"
             />
           )}
           {isAdmin && (
@@ -491,7 +544,6 @@ export function DashboardPage() {
               label="系统健康"
               description="检查系统状态"
               onClick={() => navigate('/system-health')}
-              gradient="from-violet-500/20 to-fuchsia-500/20"
             />
           )}
           <QuickAction
@@ -499,7 +551,6 @@ export function DashboardPage() {
             label="版本历史"
             description="查看文件版本"
             onClick={() => navigate('/versions')}
-            gradient="from-amber-500/20 to-orange-500/20"
           />
         </div>
       </div>
@@ -520,7 +571,7 @@ export function DashboardPage() {
             <Button
               size="sm"
               variant="light"
-              className="text-accent-primary rounded-xl"
+              className="rounded-lg text-accent-primary"
               onPress={() => navigate('/activity')}
             >
               查看全部

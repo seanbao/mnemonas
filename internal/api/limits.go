@@ -39,6 +39,9 @@ const (
 	// AppName is the application name
 	AppName = "MnemoNAS"
 
-	// AppVersion is the application version
-	AppVersion = "0.1.0"
+	// AppVersion is the fallback application version when the binary did not inject build metadata.
+	AppVersion = "dev"
+
+	// AppBuildTime is the fallback build time when the binary did not inject build metadata.
+	AppBuildTime = "unknown"
 )
