@@ -5,6 +5,8 @@ set -u
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker-compose.yml}"
 ENV_PATH="${ENV_PATH:-$REPO_ROOT/.env}"
+DATA_DIR_SET="${DATA_DIR+x}"
+HOST_PORT_SET="${HOST_PORT+x}"
 DATA_DIR="${DATA_DIR:-${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}}"
 HOST_PORT="${HOST_PORT:-${MNEMONAS_HTTP_PORT:-}}"
 MIN_FREE_BYTES="${MIN_FREE_BYTES:-10737418240}"
@@ -354,6 +356,21 @@ check_compose_config() {
 	fi
 	rm -f "$config_out"
 }
+
+apply_env_file_defaults() {
+	local env_data_dir env_host_port
+
+	env_data_dir="$(env_value MNEMONAS_DATA_DIR "$ENV_PATH")"
+	env_host_port="$(env_value MNEMONAS_HTTP_PORT "$ENV_PATH")"
+	if [[ -z "$DATA_DIR_SET" && -n "$env_data_dir" ]]; then
+		DATA_DIR="$env_data_dir"
+	fi
+	if [[ -z "$HOST_PORT_SET" && -z "${MNEMONAS_HTTP_PORT:-}" && -n "$env_host_port" ]]; then
+		HOST_PORT="$env_host_port"
+	fi
+}
+
+apply_env_file_defaults
 
 printf 'MnemoNAS Docker preflight\n'
 printf 'Repository: %s\n' "$REPO_ROOT"
