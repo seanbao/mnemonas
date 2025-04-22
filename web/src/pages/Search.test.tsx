@@ -7,9 +7,13 @@ import { SearchPage } from './Search'
 import * as searchApi from '@/api/search'
 
 // Mock the search API
-vi.mock('@/api/search', () => ({
-  searchFiles: vi.fn(),
-}))
+vi.mock('@/api/search', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/search')>()
+  return {
+    ...actual,
+    searchFiles: vi.fn(),
+  }
+})
 
 // Mock useNavigate
 const mockNavigate = vi.fn()
@@ -46,6 +50,8 @@ const mockSearchResults = [
     hash: 'def456',
   },
 ]
+
+const { SearchError } = searchApi
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -194,6 +200,35 @@ describe('SearchPage', () => {
         expect(screen.getByText('输入关键词开始搜索')).toBeInTheDocument()
       })
       expect(searchApi.searchFiles).not.toHaveBeenCalled()
+    })
+
+    it('shows unavailable state when search backend is unavailable', async () => {
+      vi.mocked(searchApi.searchFiles).mockRejectedValue(new SearchError(
+        'filesystem not initialized',
+        503,
+        'Service Unavailable',
+        'SERVICE_UNAVAILABLE'
+      ))
+
+      renderSearchPage('report')
+
+      await waitFor(() => {
+        expect(screen.getByText('搜索暂不可用')).toBeInTheDocument()
+        expect(screen.getByText('文件系统当前不可用，请稍后重试')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
+      })
+    })
+
+    it('shows retryable generic error state when search fails', async () => {
+      vi.mocked(searchApi.searchFiles).mockRejectedValue(new Error('Network error'))
+
+      renderSearchPage('report')
+
+      await waitFor(() => {
+        expect(screen.getByText('搜索失败')).toBeInTheDocument()
+        expect(screen.getByText('Network error')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
+      })
     })
   })
 

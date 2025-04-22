@@ -7,6 +7,18 @@ import { ActivityPage } from './Activity'
 vi.mock('@/api/activity', () => ({
   listActivity: vi.fn(),
   getActivityStats: vi.fn(),
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getActionLabel: vi.fn((action: string) => {
     const labels: Record<string, string> = {
       upload: '上传文件',
@@ -19,7 +31,7 @@ vi.mock('@/api/activity', () => ({
   getActionColor: vi.fn(() => 'primary'),
 }))
 
-import { listActivity } from '@/api/activity'
+import { ApiError, listActivity } from '@/api/activity'
 
 const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 
@@ -174,6 +186,17 @@ describe('ActivityPage', () => {
         expect(screen.getByText('加载活动日志失败')).toBeTruthy()
         expect(screen.getByText('Network error')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
+    it('shows an unavailable state when the activity log service returns 503', async () => {
+      mockListActivity.mockRejectedValue(new ApiError('activity log unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('活动日志暂不可用')).toBeTruthy()
+        expect(screen.getByText('活动日志存储当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
       })
     })
   })

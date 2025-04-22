@@ -32,7 +32,7 @@ import {
   AlertCircle,
   Sparkles
 } from 'lucide-react'
-import { getVersions, buildDownloadUrl, downloadFile, restoreVersion, type VersionInfo } from '@/api/files'
+import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type VersionInfo } from '@/api/files'
 import { useIsAdmin, useUser } from '@/stores/auth'
 import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -43,6 +43,46 @@ function pathWithinBase(basePath: string, targetPath: string): boolean {
     return targetPath.startsWith('/')
   }
   return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
+}
+
+function getVersionsErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '版本历史暂不可用',
+      description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+    }
+  }
+
+  return {
+    title: '获取版本历史失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+  }
+}
+
+function getVersionsActionErrorToast(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: titles.unavailable,
+      description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
 }
 
 interface VersionRowProps {
@@ -147,6 +187,7 @@ export function VersionsPage() {
     queryFn: () => getVersions(selectedPath!),
     enabled: !!selectedPath && selectedPathAllowed,
   })
+  const versionsErrorPresentation = getVersionsErrorPresentation(error)
 
   useEffect(() => {
     if (!selectedPath || !scopedHomeDir || selectedPathAllowed) {
@@ -171,6 +212,12 @@ export function VersionsPage() {
       queryClient.invalidateQueries({ queryKey: ['versions', selectedPath] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
       onClose()
+    },
+    onError: (error: unknown) => {
+      addToast(getVersionsActionErrorToast(error, {
+        unavailable: '恢复版本暂不可用',
+        failure: '恢复版本失败',
+      }))
     },
   })
 
@@ -212,7 +259,12 @@ export function VersionsPage() {
   }
 
   const handleDownload = (version: VersionInfo) => {
-    void downloadFile(selectedPath!, { version: version.hash })
+    void downloadFile(selectedPath!, { version: version.hash }).catch((error: unknown) => {
+      addToast(getVersionsActionErrorToast(error, {
+        unavailable: '下载版本暂不可用',
+        failure: '下载版本失败',
+      }))
+    })
   }
 
   const handlePreview = (version: VersionInfo) => {
@@ -280,8 +332,8 @@ export function VersionsPage() {
               <div className="w-16 h-16 rounded-xl bg-danger/10 flex items-center justify-center mb-4">
                 <AlertCircle size={32} className="text-danger" />
               </div>
-              <p className="font-medium text-danger mb-1">获取版本历史失败</p>
-              <p className="text-sm">{(error as Error).message}</p>
+              <p className="font-medium text-danger mb-1">{versionsErrorPresentation.title}</p>
+              <p className="text-sm">{versionsErrorPresentation.description}</p>
               <Button variant="bordered" className="mt-4 rounded-xl" onPress={() => refetch()}>
                 重新加载
               </Button>

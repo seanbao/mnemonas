@@ -27,6 +27,18 @@ vi.mock('@/api/activity', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/activity')>()
   return {
     ...actual,
+    ApiError: class ApiError extends Error {
+      status: number
+      code?: string
+      constructor(message: string, status: number, code?: string) {
+        super(message)
+        this.status = status
+        this.code = code
+      }
+      get isUnavailable() {
+        return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+      }
+    },
     listActivity: vi.fn().mockResolvedValue({
       items: [
         { id: 'act-1', action: 'upload', path: '/docs/report.pdf', timestamp: '2024-01-15T10:00:00Z' },
@@ -54,7 +66,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 })
 
 import { getAppVersion, getHealth, getStorageStats } from '@/api/files'
-import { listActivity } from '@/api/activity'
+import { ApiError, listActivity } from '@/api/activity'
 
 const mockGetHealth = getHealth as ReturnType<typeof vi.fn>
 const mockGetAppVersion = getAppVersion as ReturnType<typeof vi.fn>
@@ -372,14 +384,25 @@ describe('DashboardPage', () => {
       })
     })
 
-    it('shows a recent-activity error state when activity loading fails', async () => {
-      mockListActivity.mockRejectedValueOnce(new Error('Activity unavailable'))
+    it('shows a dedicated unavailable state when recent activity is temporarily unavailable', async () => {
+      mockListActivity.mockRejectedValueOnce(new ApiError('activity log unavailable', 503, 'SERVICE_UNAVAILABLE'))
 
       render(<DashboardPage />)
 
       await waitFor(() => {
         expect(screen.getByText('活动记录暂时不可用')).toBeTruthy()
-        expect(screen.getByText('请稍后重试，或前往活动页查看最新状态。')).toBeTruthy()
+        expect(screen.getByText('活动日志当前不可用，请稍后重试，或前往活动页查看最新状态。')).toBeTruthy()
+      })
+    })
+
+    it('shows a generic recent-activity load failure state for non-503 errors', async () => {
+      mockListActivity.mockRejectedValueOnce(new Error('Network error'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('活动记录加载失败')).toBeTruthy()
+        expect(screen.getByText('请刷新页面后重试，或前往活动页查看详细状态。')).toBeTruthy()
       })
     })
 

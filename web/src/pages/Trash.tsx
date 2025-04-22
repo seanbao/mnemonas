@@ -24,12 +24,13 @@ import {
   restoreFromTrash,
   deleteFromTrash,
   emptyTrash,
+  ApiError,
   type TrashItem
 } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
-import { useBatchOperation } from '@/lib/useBatchOperation'
+import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useCanWrite } from '@/stores/auth'
 
@@ -42,6 +43,73 @@ function daysUntilDelete(deletedAt: string, retentionDays: number): number | nul
   const autoDelete = new Date(deleted.getTime() + retentionDays * 24 * 60 * 60 * 1000)
   const now = new Date()
   return Math.max(0, Math.ceil((autoDelete.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
+}
+
+const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
+
+function getTrashLoadErrorPresentation(error: unknown): {
+  title: string
+  subtitle: string
+  description: string
+} {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '回收站暂不可用',
+      subtitle: '暂不可用',
+      description: trashUnavailableDescription,
+    }
+  }
+
+  return {
+    title: '加载回收站失败',
+    subtitle: '加载失败',
+    description: error instanceof Error && error.message ? error.message : '请稍后重试',
+  }
+}
+
+function getTrashActionErrorPresentation(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: titles.unavailable,
+      description: trashUnavailableDescription,
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error && error.message ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
+function getTrashBatchActionToast(
+  result: BatchOperationResult,
+  titles: {
+    unavailable: string
+  }
+) {
+  if (result.succeeded === 0 && result.failedErrors.length > 0 && result.failedErrors.every((error) => {
+    return error instanceof ApiError && error.isUnavailable
+  })) {
+    return {
+      title: titles.unavailable,
+      description: trashUnavailableDescription,
+      color: 'warning' as const,
+    }
+  }
+
+  return undefined
 }
 
 // Trash item row
@@ -160,7 +228,10 @@ export function TrashPage() {
       addToast({ title: '恢复成功', color: 'success' })
     },
     onError: (error) => {
-      addToast({ title: '恢复失败', description: error.message, color: 'danger' })
+      addToast(getTrashActionErrorPresentation(error, {
+        unavailable: '恢复暂不可用',
+        failure: '恢复失败',
+      }))
     },
   })
 
@@ -173,7 +244,10 @@ export function TrashPage() {
       setActionItem(null)
     },
     onError: (error) => {
-      addToast({ title: '删除失败', description: error.message, color: 'danger' })
+      addToast(getTrashActionErrorPresentation(error, {
+        unavailable: '永久删除暂不可用',
+        failure: '删除失败',
+      }))
     },
   })
 
@@ -189,7 +263,10 @@ export function TrashPage() {
       onEmptyClose()
     },
     onError: (error) => {
-      addToast({ title: '清空失败', description: error.message, color: 'danger' })
+      addToast(getTrashActionErrorPresentation(error, {
+        unavailable: '清空回收站暂不可用',
+        failure: '清空失败',
+      }))
     },
   })
 
@@ -211,6 +288,9 @@ export function TrashPage() {
       failure: '{count} 项恢复失败',
       partial: '{succeeded} 项恢复成功，{failed} 项失败',
     },
+    getToast: (result) => getTrashBatchActionToast(result, {
+      unavailable: '批量恢复暂不可用',
+    }),
     onComplete: (result) => {
       setSelectedItems(new Set(result.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: ['trash'] })
@@ -233,6 +313,9 @@ export function TrashPage() {
       failure: '{count} 项永久删除失败',
       partial: '{succeeded} 项永久删除成功，{failed} 项失败',
     },
+    getToast: (result) => getTrashBatchActionToast(result, {
+      unavailable: '批量永久删除暂不可用',
+    }),
     onComplete: (result) => {
       setSelectedItems(new Set(result.failedItems as string[]))
       queryClient.invalidateQueries({ queryKey: ['trash'] })
@@ -272,18 +355,20 @@ export function TrashPage() {
   }
 
   if (error) {
+    const errorPresentation = getTrashLoadErrorPresentation(error)
+
     return (
       <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
         <PageHeader
           title="回收站"
-          subtitle="加载失败"
+          subtitle={errorPresentation.subtitle}
           icon={Trash2}
         />
         <div className="flex flex-1 items-center justify-center">
           <EmptyState
             icon={AlertCircle}
-            title="加载回收站失败"
-            description={(error as Error).message || '请稍后重试'}
+            title={errorPresentation.title}
+            description={errorPresentation.description}
             action={
               <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
                 重新加载

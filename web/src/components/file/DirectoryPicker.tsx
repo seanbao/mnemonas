@@ -20,7 +20,7 @@ import {
   FolderPlus,
   AlertCircle,
 } from 'lucide-react'
-import { listFiles, createDirectory, type FileItem } from '@/api/files'
+import { listFiles, createDirectory, ApiError, type FileItem } from '@/api/files'
 import { useUser } from '@/stores/auth'
 import { cn, normalizePath } from '@/lib/utils'
 
@@ -41,6 +41,34 @@ interface TreeNodeData {
   isExpanded: boolean
   children: TreeNodeData[]
   isLoaded: boolean
+}
+
+const directoryPickerUnavailableDescription = '文件系统当前不可用，请检查系统健康状态或稍后重试。'
+
+function getDirectoryPickerErrorPresentation(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: titles.unavailable,
+      description: directoryPickerUnavailableDescription,
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
 }
 
 function pathWithinBase(basePath: string, targetPath: string): boolean {
@@ -184,11 +212,10 @@ export function DirectoryPicker({
       setLoadedPaths(prev => new Set(prev).add(path))
       return true
     } catch (error) {
-      addToast({
-        title: '加载目录失败',
-        description: error instanceof Error ? error.message : '无法读取目录内容',
-        color: 'danger',
-      })
+      addToast(getDirectoryPickerErrorPresentation(error, {
+        unavailable: '目录暂不可用',
+        failure: '加载目录失败',
+      }))
       return false
     }
   }, [loadedPaths])
@@ -251,11 +278,10 @@ export function DirectoryPicker({
       setNewFolderName('')
       setIsCreatingFolder(false)
     } catch (error) {
-      addToast({
-        title: '创建文件夹失败',
-        description: error instanceof Error ? error.message : '无法创建文件夹',
-        color: 'danger',
-      })
+      addToast(getDirectoryPickerErrorPresentation(error, {
+        unavailable: '创建目录暂不可用',
+        failure: '创建文件夹失败',
+      }))
     } finally {
       setIsCreating(false)
     }
@@ -306,16 +332,25 @@ export function DirectoryPicker({
                 <Spinner size="sm" />
               </div>
             ) : rootError ? (
+              (() => {
+                const errorPresentation = getDirectoryPickerErrorPresentation(rootError, {
+                  unavailable: '目录暂不可用',
+                  failure: '加载目录失败',
+                })
+
+                return (
               <div className="flex h-32 flex-col items-center justify-center gap-3 text-center">
-                <AlertCircle size={20} className="text-danger" />
+                <AlertCircle size={20} className={errorPresentation.color === 'warning' ? 'text-warning' : 'text-danger'} />
                 <div>
-                  <p className="text-sm font-medium text-foreground">加载目录失败</p>
-                  <p className="text-xs text-default-500">{(rootError as Error).message || '请稍后重试'}</p>
+                  <p className="text-sm font-medium text-foreground">{errorPresentation.title}</p>
+                  <p className="text-xs text-default-500">{errorPresentation.description}</p>
                 </div>
                 <Button size="sm" variant="bordered" className="rounded-lg" onPress={() => refetchRoot()}>
                   重新加载
                 </Button>
               </div>
+                )
+              })()
             ) : (
               <>
                 {/* Root selector */}

@@ -15,13 +15,29 @@ vi.mock('@heroui/react', async () => {
 })
 
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    statusText: string
+    code?: string
+
+    constructor(message: string, status: number, statusText: string, code?: string) {
+      super(message)
+      this.status = status
+      this.statusText = statusText
+      this.code = code
+    }
+
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   moveFile: vi.fn(),
   copyFile: vi.fn(),
   listFiles: vi.fn(),
   createDirectory: vi.fn(),
 }))
 
-import { moveFile, copyFile, listFiles, createDirectory } from '@/api/files'
+import { ApiError, moveFile, copyFile, listFiles, createDirectory } from '@/api/files'
 
 const mockMoveFile = vi.mocked(moveFile)
 const mockCopyFile = vi.mocked(copyFile)
@@ -120,6 +136,34 @@ describe('MoveDialog', () => {
       title: '批量复制失败',
       description: '共 2 个项目失败',
       color: 'danger',
+    })
+  })
+
+  it('shows unavailable feedback when full move fails due to unavailable filesystem', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockMoveFile.mockRejectedValue(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+    renderDialog({ onClose })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    await waitFor(() => {
+      expect(mockMoveFile).toHaveBeenCalledTimes(2)
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '批量移动暂不可用',
+      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      color: 'warning',
     })
   })
 })

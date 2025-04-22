@@ -34,10 +34,63 @@ import {
   updateShare, 
   copyShareUrl,
   formatExpiration,
+  ShareError,
   type Share,
 } from '@/api/share'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
+
+function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
+  if (!(error instanceof ShareError)) {
+    return null
+  }
+
+  if (error.isFeatureDisabled) {
+    return 'disabled'
+  }
+
+  if (error.isUnavailable) {
+    return 'unavailable'
+  }
+
+  return null
+}
+
+function getShareActionErrorToast(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description?: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof ShareError) {
+    if (error.isFeatureDisabled) {
+      return {
+        title: '分享功能已关闭',
+        description: '当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。',
+        color: 'warning',
+      }
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: titles.unavailable,
+        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
 
 interface ShareManagerProps {
   showAllShares?: boolean
@@ -47,7 +100,7 @@ interface ShareManagerProps {
 export function ShareManager({ showAllShares = false, featureEnabled = true }: ShareManagerProps) {
   const [shares, setShares] = useState<Share[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<unknown | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Share | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
 
@@ -58,12 +111,13 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       const data = await listShares(showAllShares)
       setShares(data)
     } catch (err) {
-      const message = err instanceof Error ? err.message : '加载分享列表失败'
-      setLoadError(message)
-      addToast({ 
-        title: message,
-        color: 'danger' 
-      })
+      setLoadError(err)
+      if (getShareFeatureState(err) === null) {
+        addToast({ 
+          title: err instanceof Error ? err.message : '加载分享列表失败',
+          color: 'danger' 
+        })
+      }
     } finally {
       setIsLoading(false)
     }
@@ -90,6 +144,8 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     )
   }
 
+  const loadFeatureState = getShareFeatureState(loadError)
+
   const handleCopy = async (share: Share) => {
     try {
       await copyShareUrl(share)
@@ -110,10 +166,10 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         color: 'success' 
       })
     } catch (err) {
-      addToast({ 
-        title: err instanceof Error ? err.message : '操作失败', 
-        color: 'danger' 
-      })
+      addToast(getShareActionErrorToast(err, {
+        unavailable: '分享操作暂不可用',
+        failure: '操作失败',
+      }))
     }
   }
 
@@ -126,10 +182,10 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       addToast({ title: '分享已删除', color: 'success' })
       setDeleteTarget(null)
     } catch (err) {
-      addToast({ 
-        title: err instanceof Error ? err.message : '删除失败', 
-        color: 'danger' 
-      })
+      addToast(getShareActionErrorToast(err, {
+        unavailable: '删除分享暂不可用',
+        failure: '删除失败',
+      }))
     } finally {
       setIsDeleting(false)
     }
@@ -147,11 +203,38 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   }
 
   if (loadError && shares.length === 0) {
+    if (loadFeatureState === 'disabled') {
+      return (
+        <EmptyState
+          icon={Link2}
+          title="分享功能已关闭"
+          description="当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。"
+          className="py-12"
+        />
+      )
+    }
+
+    if (loadFeatureState === 'unavailable') {
+      return (
+        <EmptyState
+          icon={AlertCircle}
+          title="分享功能暂不可用"
+          description="分享服务当前不可用，请检查系统健康状态或稍后重试。"
+          action={
+            <Button variant="bordered" className="rounded-xl" onPress={() => loadShares()}>
+              重新加载
+            </Button>
+          }
+          className="py-12"
+        />
+      )
+    }
+
     return (
       <EmptyState
         icon={AlertCircle}
         title="加载分享列表失败"
-        description={loadError}
+        description={loadError instanceof Error ? loadError.message : '请稍后重试'}
         action={
           <Button variant="bordered" className="rounded-xl" onPress={() => loadShares()}>
             重新加载
@@ -326,6 +409,7 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
               variant="flat"
               size="sm"
               onPress={onCopy}
+              aria-label={`${fileName} 复制分享链接`}
               className="rounded-xl"
             >
               <Copy size={16} />
@@ -333,7 +417,7 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
             
             <Dropdown>
               <DropdownTrigger>
-                <Button isIconOnly variant="flat" size="sm" className="rounded-xl">
+                <Button isIconOnly variant="flat" size="sm" aria-label={`${fileName} 分享操作`} className="rounded-xl">
                   <MoreVertical size={16} />
                 </Button>
               </DropdownTrigger>

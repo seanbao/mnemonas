@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { searchFiles } from './search'
+import { SearchError, searchFiles } from './search'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -63,14 +63,42 @@ describe('Search API', () => {
     expect(mockAuthFetch).not.toHaveBeenCalled()
   })
 
-  it('uses structured error message on failure', async () => {
+  it('preserves unavailable search metadata on failure', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
       status: 503,
+      statusText: 'Service Unavailable',
       json: () => Promise.resolve({ success: false, error: { message: 'search unavailable' } }),
     })
 
-    await expect(searchFiles('report')).rejects.toThrow('search unavailable')
+    try {
+      await searchFiles('report')
+      throw new Error('Expected searchFiles to throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(SearchError)
+      expect((error as SearchError).message).toBe('search unavailable')
+      expect((error as SearchError).status).toBe(503)
+      expect((error as SearchError).statusText).toBe('Service Unavailable')
+      expect((error as SearchError).isUnavailable).toBe(true)
+    }
+  })
+
+  it('preserves backend error codes on failure', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      json: () => Promise.resolve({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'search unavailable' } }),
+    })
+
+    try {
+      await searchFiles('report')
+      throw new Error('Expected searchFiles to throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(SearchError)
+      expect((error as SearchError).code).toBe('SERVICE_UNAVAILABLE')
+      expect((error as SearchError).isUnavailable).toBe(true)
+    }
   })
 
   it('falls back to a generic error when the error body is invalid', async () => {

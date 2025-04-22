@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, userEvent } from '@/test/utils'
 import { ShareManager } from './ShareManager'
 import * as shareApi from '@/api/share'
+import { ShareError } from '@/api/share'
 
 const mockAddToast = vi.fn()
 
@@ -60,6 +61,32 @@ describe('ShareManager', () => {
     expect(screen.queryByText('暂无分享')).not.toBeInTheDocument()
   })
 
+  it('shows a disabled state when the backend reports sharing is off', async () => {
+    vi.mocked(shareApi.listShares).mockRejectedValue(new ShareError('share feature disabled', 503, 'SHARE_FEATURE_DISABLED'))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('分享功能已关闭')).toBeInTheDocument()
+      expect(screen.getByText('当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。')).toBeInTheDocument()
+    })
+
+    expect(mockAddToast).not.toHaveBeenCalled()
+  })
+
+  it('shows an unavailable state when share listing returns a generic 503', async () => {
+    vi.mocked(shareApi.listShares).mockRejectedValue(new ShareError('share service unavailable', 503))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('分享功能暂不可用')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    expect(mockAddToast).not.toHaveBeenCalled()
+  })
+
   it('shows a disabled state without loading shares when the feature is off', async () => {
     render(<ShareManager featureEnabled={false} />)
 
@@ -85,6 +112,66 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
       expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+  })
+
+  it('shows unavailable toast when toggling a share fails because the share service is unavailable', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.updateShare).mockRejectedValue(new ShareError('share service unavailable', 503))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+
+    await waitFor(() => {
+      expect(screen.getByText('禁用分享')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('禁用分享'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享操作暂不可用',
+        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows unavailable toast when deleting a share fails because the share service is unavailable', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.deleteShare).mockRejectedValue(new ShareError('share service unavailable', 503))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+
+    await waitFor(() => {
+      expect(screen.getByText('删除分享')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('删除分享'))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '删除' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '删除分享暂不可用',
+        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 })

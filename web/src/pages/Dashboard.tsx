@@ -23,7 +23,7 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { getAppVersion, getHealth, getStorageStats } from '@/api/files'
-import { listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
+import { ApiError, listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useIsAdmin } from '@/stores/auth'
@@ -88,6 +88,20 @@ function formatStorageSize(value: number | undefined): string {
 
 function formatCount(value: number | undefined): string {
   return value === undefined ? '--' : value.toLocaleString()
+}
+
+function getRecentActivityErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '活动记录暂时不可用',
+      description: '活动日志当前不可用，请稍后重试，或前往活动页查看最新状态。',
+    }
+  }
+
+  return {
+    title: '活动记录加载失败',
+    description: '请刷新页面后重试，或前往活动页查看详细状态。',
+  }
 }
 
 // Recent activity item
@@ -174,6 +188,9 @@ export function DashboardPage() {
 
   const isLoading = healthLoading || statsLoading || versionLoading
   const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError)
+  const recentActivityErrorPresentation = recentActivityError
+    ? getRecentActivityErrorPresentation(recentActivityError)
+    : null
 
   const handleRetry = () => {
     void refetchHealth()
@@ -460,8 +477,8 @@ export function DashboardPage() {
           ) : recentActivityError ? (
             <div className="py-8 text-center text-default-500">
               <AlertCircle size={24} className="mx-auto mb-2 text-warning" />
-              <p className="text-sm font-medium text-foreground">活动记录暂时不可用</p>
-              <p className="mt-1 text-xs text-default-500">请稍后重试，或前往活动页查看最新状态。</p>
+              <p className="text-sm font-medium text-foreground">{recentActivityErrorPresentation?.title}</p>
+              <p className="mt-1 text-xs text-default-500">{recentActivityErrorPresentation?.description}</p>
             </div>
           ) : (
             <div className="py-8 text-center text-default-500">

@@ -107,6 +107,141 @@ function getFavoritesBannerContent(error: unknown): { title: string; description
   }
 }
 
+function getFilesLoadErrorPresentation(error: unknown): { title: string; description: string } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '当前目录暂不可用',
+      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+    }
+  }
+
+  return {
+    title: '当前目录加载失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+  }
+}
+
+function getErrorStatus(error: unknown): number | undefined {
+  if (error && typeof error === 'object' && 'status' in error && typeof error.status === 'number') {
+    return error.status
+  }
+  return undefined
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
+    return error.code
+  }
+  return undefined
+}
+
+function isFilesystemUnavailableError(error: unknown): boolean {
+  const status = getErrorStatus(error)
+  const code = getErrorCode(error)
+  return status === 503 || code === 'SERVICE_UNAVAILABLE'
+}
+
+function getFilesActionErrorToast(
+  error: unknown,
+  titles: {
+    unavailable: string
+    failure: string
+  }
+): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (isFilesystemUnavailableError(error)) {
+    return {
+      title: titles.unavailable,
+      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: titles.failure,
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
+function getFavoriteActionErrorToast(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  const code = getErrorCode(error)
+  const status = getErrorStatus(error)
+
+  if (code === 'FAVORITES_FEATURE_DISABLED') {
+    return {
+      title: '收藏功能已关闭',
+      description: '当前服务已关闭收藏功能。启用后重新加载即可恢复收藏状态与相关操作。',
+      color: 'warning',
+    }
+  }
+
+  if (code === 'FAVORITES_UNAVAILABLE' || (status === 503 && code !== 'FAVORITES_FEATURE_DISABLED')) {
+    return {
+      title: '收藏功能暂不可用',
+      description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '操作失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
+function getUploadQueueErrorMessage(error: unknown): string {
+  if (isFilesystemUnavailableError(error)) {
+    return '文件系统当前不可用，请检查系统健康状态或稍后重试。'
+  }
+
+  return error instanceof Error ? error.message : '上传失败'
+}
+
+function getFolderUploadSummaryToast(successCount: number, errorCount: number, errors: unknown[]): {
+  title: string
+  description: string
+  color: 'success' | 'warning' | 'danger'
+} {
+  if (errorCount === 0) {
+    return {
+      title: '文件夹上传完成',
+      description: `成功上传 ${successCount} 个文件`,
+      color: 'success',
+    }
+  }
+
+  if (successCount === 0) {
+    if (errors.length > 0 && errors.every(isFilesystemUnavailableError)) {
+      return {
+        title: '文件夹上传暂不可用',
+        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      }
+    }
+
+    return {
+      title: '文件夹上传失败',
+      description: `共 ${errorCount} 个文件上传失败`,
+      color: 'danger',
+    }
+  }
+
+  return {
+    title: '文件夹上传部分完成',
+    description: `成功上传 ${successCount} 个文件，失败 ${errorCount} 个`,
+    color: 'warning',
+  }
+}
+
 function getShareBannerContent(): { title: string; description: string } {
   return {
     title: '分享功能已关闭',
@@ -201,8 +336,11 @@ function FileRow({
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
-    void downloadFile(file.path, { filename: file.name }).catch((error: Error) => {
-      addToast({ title: '下载失败', description: error.message, color: 'danger' })
+    void downloadFile(file.path, { filename: file.name }).catch((error: unknown) => {
+      addToast(getFilesActionErrorToast(error, {
+        unavailable: '下载暂不可用',
+        failure: '下载失败',
+      }))
     })
   }, [file.path, file.name])
 
@@ -304,7 +442,7 @@ function FileRow({
                     下载
                   </DropdownItem>
                 )}
-                {canWrite && (
+                {canWrite ? (
                   <DropdownItem 
                     key="rename" 
                     startContent={<Pencil size={16} />}
@@ -312,7 +450,7 @@ function FileRow({
                   >
                     重命名
                   </DropdownItem>
-                )}
+                ) : null}
                 <DropdownItem 
                   key="copy-path" 
                   startContent={<Copy size={16} />}
@@ -321,7 +459,7 @@ function FileRow({
                   复制路径
                 </DropdownItem>
               </DropdownSection>
-              {canWrite && (
+              {canWrite ? (
                 <DropdownSection title="分享">
                   <DropdownItem 
                     key="favorite" 
@@ -340,7 +478,7 @@ function FileRow({
                     {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
                   </DropdownItem>
                 </DropdownSection>
-              )}
+              ) : null}
               <DropdownSection title="历史">
                 <DropdownItem 
                   key="versions" 
@@ -351,7 +489,7 @@ function FileRow({
                   查看版本历史
                 </DropdownItem>
               </DropdownSection>
-              {canWrite && (
+              {canWrite ? (
                 <DropdownSection>
                   <DropdownItem 
                     key="delete" 
@@ -362,7 +500,7 @@ function FileRow({
                     删除
                   </DropdownItem>
                 </DropdownSection>
-              )}
+              ) : null}
             </DropdownMenu>
           </Dropdown>
         )}
@@ -454,8 +592,11 @@ function FileCard({
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const handleDownload = useCallback(() => {
-    void downloadFile(file.path, { filename: file.name }).catch((error: Error) => {
-      addToast({ title: '下载失败', description: error.message, color: 'danger' })
+    void downloadFile(file.path, { filename: file.name }).catch((error: unknown) => {
+      addToast(getFilesActionErrorToast(error, {
+        unavailable: '下载暂不可用',
+        failure: '下载失败',
+      }))
     })
   }, [file.path, file.name])
 
@@ -541,7 +682,7 @@ function FileCard({
                     下载
                   </DropdownItem>
                 )}
-                {canWrite && (
+                {canWrite ? (
                   <DropdownItem 
                     key="rename" 
                     startContent={<Pencil size={16} />}
@@ -549,7 +690,7 @@ function FileCard({
                   >
                     重命名
                   </DropdownItem>
-                )}
+                ) : null}
                 <DropdownItem 
                   key="copy-path" 
                   startContent={<Copy size={16} />}
@@ -558,7 +699,7 @@ function FileCard({
                   复制路径
                 </DropdownItem>
               </DropdownSection>
-              {canWrite && (
+              {canWrite ? (
                 <DropdownSection title="分享" showDivider>
                   <DropdownItem 
                     key="favorite" 
@@ -577,7 +718,7 @@ function FileCard({
                     {shareActionsAvailable ? '创建分享链接' : '分享功能已关闭'}
                   </DropdownItem>
                 </DropdownSection>
-              )}
+              ) : null}
               <DropdownSection title="历史">
                 <DropdownItem 
                   key="versions" 
@@ -588,7 +729,7 @@ function FileCard({
                   查看版本历史
                 </DropdownItem>
               </DropdownSection>
-              {canWrite && (
+              {canWrite ? (
                 <DropdownSection>
                   <DropdownItem 
                     key="delete" 
@@ -599,7 +740,7 @@ function FileCard({
                     删除
                   </DropdownItem>
                 </DropdownSection>
-              )}
+              ) : null}
             </DropdownMenu>
           </Dropdown>
         )}
@@ -765,7 +906,10 @@ export function FilesPage() {
       addToast({ title: '删除成功', color: 'success' })
     },
     onError: (error) => {
-      addToast({ title: '删除失败', description: error.message, color: 'danger' })
+      addToast(getFilesActionErrorToast(error, {
+        unavailable: '删除暂不可用',
+        failure: '删除失败',
+      }))
     },
   })
   
@@ -778,7 +922,10 @@ export function FilesPage() {
       addToast({ title: '文件夹创建成功', color: 'success' })
     },
     onError: (error) => {
-      addToast({ title: '创建失败', description: error.message, color: 'danger' })
+      addToast(getFilesActionErrorToast(error, {
+        unavailable: '创建暂不可用',
+        failure: '创建失败',
+      }))
     },
   })
   
@@ -791,7 +938,10 @@ export function FilesPage() {
       addToast({ title: '重命名成功', color: 'success' })
     },
     onError: (error) => {
-      addToast({ title: '重命名失败', description: error.message, color: 'danger' })
+      addToast(getFilesActionErrorToast(error, {
+        unavailable: '重命名暂不可用',
+        failure: '重命名失败',
+      }))
     },
   })
 
@@ -872,7 +1022,7 @@ export function FilesPage() {
       })
     },
     onError: (error) => {
-      addToast({ title: '操作失败', description: error.message, color: 'danger' })
+      addToast(getFavoriteActionErrorToast(error))
     },
   })
 
@@ -1035,8 +1185,11 @@ export function FilesPage() {
   const handleContextMenuDownload = useCallback(() => {
     if (!contextMenuFile || contextMenuFile.isDir) return
     void downloadFile(contextMenuFile.path, { filename: contextMenuFile.name })
-      .catch((error: Error) => {
-        addToast({ title: '下载失败', description: error.message, color: 'danger' })
+      .catch((error: unknown) => {
+        addToast(getFilesActionErrorToast(error, {
+          unavailable: '下载暂不可用',
+          failure: '下载失败',
+        }))
       })
       .finally(() => {
         contextMenu.hide()
@@ -1140,6 +1293,7 @@ export function FilesPage() {
 
     let successCount = 0
     let errorCount = rejectedEntries.length
+  const uploadErrors: unknown[] = []
     
     for (const { item, index } of uploadableEntries) {
       const file = item.file
@@ -1175,8 +1329,9 @@ export function FilesPage() {
         ))
       } catch (error) {
         errorCount++
+        uploadErrors.push(error)
         setUploadQueue(prev => prev.map((item, j) => 
-          j === index ? { ...item, status: 'error' as const, error: error instanceof Error ? error.message : '上传失败' } : item
+          j === index ? { ...item, status: 'error' as const, error: getUploadQueueErrorMessage(error) } : item
         ))
       }
     }
@@ -1186,25 +1341,7 @@ export function FilesPage() {
     
     // Show summary toast for folder upload
     if (isFolderUpload) {
-      if (errorCount === 0) {
-        addToast({ 
-          title: '文件夹上传完成', 
-          description: `成功上传 ${successCount} 个文件`,
-          color: 'success' 
-        })
-      } else if (successCount === 0) {
-        addToast({ 
-          title: '文件夹上传失败', 
-          description: `共 ${errorCount} 个文件上传失败`,
-          color: 'danger' 
-        })
-      } else {
-        addToast({ 
-          title: '文件夹上传部分完成', 
-          description: `成功上传 ${successCount} 个文件，失败 ${errorCount} 个`,
-          color: 'warning' 
-        })
-      }
+      addToast(getFolderUploadSummaryToast(successCount, errorCount, uploadErrors))
     }
     
     // Auto-clear successful uploads after 3 seconds
@@ -1274,14 +1411,16 @@ export function FilesPage() {
     let successCount = 0
     let errorCount = 0
     const failedPaths: string[] = []
+    const failedErrors: unknown[] = []
     
     for (const path of paths) {
       try {
         await deleteFile(path)
         successCount++
-      } catch {
+      } catch (error) {
         errorCount++
         failedPaths.push(path)
+        failedErrors.push(error)
       }
     }
     
@@ -1297,7 +1436,15 @@ export function FilesPage() {
     setSelection(failedPaths)
 
     if (successCount === 0) {
-      addToast({ title: '批量删除失败', description: `共 ${errorCount} 个项目删除失败`, color: 'danger' })
+      if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
+        addToast({
+          title: '批量删除暂不可用',
+          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
+      } else {
+        addToast({ title: '批量删除失败', description: `共 ${errorCount} 个项目删除失败`, color: 'danger' })
+      }
       return
     }
 
@@ -1315,6 +1462,9 @@ export function FilesPage() {
     }
 
     const results = await Promise.allSettled(files.map((file) => downloadFile(file.path, { filename: file.name })))
+    const failedErrors = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason)
     const failed = results.filter((result) => result.status === 'rejected').length
     const succeeded = files.length - failed
 
@@ -1324,7 +1474,15 @@ export function FilesPage() {
     }
 
     if (succeeded === 0) {
-      addToast({ title: '批量下载失败', description: `共 ${failed} 个文件下载失败`, color: 'danger' })
+      if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
+        addToast({
+          title: '批量下载暂不可用',
+          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
+      } else {
+        addToast({ title: '批量下载失败', description: `共 ${failed} 个文件下载失败`, color: 'danger' })
+      }
       return
     }
 
@@ -1356,6 +1514,7 @@ export function FilesPage() {
     let successCount = 0
     let errorCount = 0
     const failedPaths: string[] = []
+    const failedErrors: unknown[] = []
     
     for (const path of paths) {
       const fileName = path.split('/').pop() || ''
@@ -1368,9 +1527,10 @@ export function FilesPage() {
           await copyFile(path, destPath)
         }
         successCount++
-      } catch {
+      } catch (error) {
         errorCount++
         failedPaths.push(path)
+        failedErrors.push(error)
       }
     }
     
@@ -1393,7 +1553,15 @@ export function FilesPage() {
     }
 
     if (successCount === 0) {
-      addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}失败`, description: `共 ${errorCount} 个项目失败`, color: 'danger' })
+      if (failedErrors.length > 0 && failedErrors.every(isFilesystemUnavailableError)) {
+        addToast({
+          title: `${operation === 'cut' ? '批量移动' : '批量复制'}暂不可用`,
+          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
+      } else {
+        addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}失败`, description: `共 ${errorCount} 个项目失败`, color: 'danger' })
+      }
       return
     }
 
@@ -1639,6 +1807,7 @@ export function FilesPage() {
   }
 
   if (error) {
+    const errorPresentation = getFilesLoadErrorPresentation(error)
     return (
       <div className="h-full flex overflow-hidden relative">
         <div className="flex-1 flex flex-col min-w-0 p-7">
@@ -1646,8 +1815,8 @@ export function FilesPage() {
           <div className="flex-1 flex items-center justify-center surface-card">
             <EmptyState
               icon={AlertCircle}
-              title="当前目录加载失败"
-              description={(error as Error).message || '请稍后重试'}
+              title={errorPresentation.title}
+              description={errorPresentation.description}
               className="max-w-md"
               action={
                 <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>

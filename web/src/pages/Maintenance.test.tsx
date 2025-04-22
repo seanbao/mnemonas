@@ -15,12 +15,24 @@ vi.mock('@heroui/react', async () => {
 
 // Mock API
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getScrubResult: vi.fn(),
   runScrub: vi.fn(),
   downloadDiagnosticsExport: vi.fn(),
 }))
 
-import { getScrubResult, runScrub, downloadDiagnosticsExport } from '@/api/files'
+import { ApiError, getScrubResult, runScrub, downloadDiagnosticsExport } from '@/api/files'
 
 const mockGetScrubResult = getScrubResult as ReturnType<typeof vi.fn>
 const mockRunScrub = runScrub as ReturnType<typeof vi.fn>
@@ -328,6 +340,28 @@ describe('MaintenancePage', () => {
         color: 'danger',
       })
     })
+
+    it('shows an unavailable warning when diagnostics export is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      mockDownloadDiagnosticsExport.mockRejectedValue(new ApiError('diagnostics unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('导出诊断信息')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('导出诊断信息'))
+
+      await waitFor(() => {
+        expect(mockDownloadDiagnosticsExport).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '诊断导出暂不可用',
+        description: '诊断导出服务当前不可用，请检查系统状态后重试。',
+        color: 'warning',
+      })
+    })
   })
 
   describe('info card', () => {
@@ -350,6 +384,17 @@ describe('MaintenancePage', () => {
   })
 
   describe('error handling', () => {
+    it('shows an unavailable state when scrub history is temporarily unavailable', async () => {
+      mockGetScrubResult.mockRejectedValue(new ApiError('maintenance history not initialized', 503, 'SERVICE_UNAVAILABLE'))
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('校验结果暂不可用')).toBeTruthy()
+        expect(screen.getByText('维护历史或数据面当前不可用，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('shows retryable error state when loading scrub result fails', async () => {
       mockGetScrubResult.mockRejectedValue(new Error('Network error'))
       render(<Maintenance />)
@@ -382,6 +427,29 @@ describe('MaintenancePage', () => {
         title: '启动校验失败',
         description: 'Already running',
         color: 'danger',
+      })
+    })
+
+    it('shows an unavailable warning when starting scrub is temporarily unavailable', async () => {
+      mockGetScrubResult.mockResolvedValue(mockNoResult)
+      mockRunScrub.mockRejectedValue(new ApiError('dataplane not connected', 503, 'SERVICE_UNAVAILABLE'))
+      const user = userEvent.setup()
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('开始校验')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('开始校验'))
+
+      await waitFor(() => {
+        expect(mockRunScrub).toHaveBeenCalled()
+      })
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '数据校验暂不可用',
+        description: '数据面或维护服务当前不可用，请检查系统状态后重试。',
+        color: 'warning',
       })
     })
   })

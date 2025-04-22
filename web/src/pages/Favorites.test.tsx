@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, userEvent } from '@/test/utils'
 import { FavoritesPage } from './Favorites'
+import * as HeroUI from '@heroui/react'
 import * as favoritesApi from '@/api/favorites'
 import { FavoritesError } from '@/api/favorites'
 
+const mockAddToast = vi.fn()
 const mockNavigate = vi.fn()
 const mockBatchExecute = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
@@ -74,6 +76,7 @@ describe('FavoritesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockNavigate.mockClear()
     mockBatchExecute.mockClear()
     mockBatchResult = {
@@ -218,5 +221,57 @@ describe('FavoritesPage', () => {
     await user.click(navigateButton)
 
     expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
+  })
+
+  it('shows unavailable toast when removing a favorite is unavailable', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockRejectedValueOnce(
+      new FavoritesError('favorites unavailable', 503, 'FAVORITES_UNAVAILABLE')
+    )
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能暂不可用',
+        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows disabled toast when updating a note after favorites are disabled', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockRejectedValueOnce(
+      new FavoritesError('favorites feature disabled', 503, 'FAVORITES_FEATURE_DISABLED')
+    )
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能已关闭',
+        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        color: 'warning',
+      })
+    })
   })
 })
