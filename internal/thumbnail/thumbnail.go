@@ -23,6 +23,7 @@ import (
 )
 
 var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")
+var syncThumbnailCacheDir = syncThumbnailDir
 
 // Size represents thumbnail size preset
 type Size string
@@ -288,7 +289,20 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 		return err
 	}
 	cleanup = false
+	if err := syncThumbnailCacheDir(dir); err != nil {
+		return fmt.Errorf("failed to sync thumbnail cache directory: %w", err)
+	}
 	return nil
+}
+
+func syncThumbnailDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 func validateThumbnailCachePath(path string) error {

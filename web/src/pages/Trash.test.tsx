@@ -228,6 +228,61 @@ describe('TrashPage', () => {
       })
     })
 
+    it('shows success toast when trash reload succeeds', async () => {
+      const user = userEvent.setup()
+      mockListTrash
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({
+          items: [
+            {
+              id: 'item1',
+              originalPath: '/deleted-file.txt',
+              deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+              name: 'deleted-file.txt',
+              isDir: false,
+              size: 1024,
+            },
+          ],
+          count: 1,
+          totalSize: 1024,
+        })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when trash reload becomes unavailable', async () => {
+      const user = userEvent.setup()
+      mockListTrash
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '回收站暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
+      })
+    })
+
     it('shows unknown retention copy when retention settings are missing', async () => {
       mockListTrash.mockResolvedValue({
         items: [

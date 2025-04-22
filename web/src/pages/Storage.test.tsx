@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { StoragePage } from './Storage'
+import * as HeroUI from '@heroui/react'
 
 const useIsAdminMock = vi.fn(() => true)
+const mockAddToast = vi.fn()
 
 // Mock API
 vi.mock('@/api/files', () => ({
@@ -43,6 +45,7 @@ describe('StoragePage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
     mockGetStorageStats.mockResolvedValue(mockStats)
   })
@@ -246,6 +249,46 @@ describe('StoragePage', () => {
         expect(screen.getByText('加载存储统计失败')).toBeTruthy()
         expect(screen.getByText('Network error')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
+    it('shows success toast when storage reload succeeds', async () => {
+      const user = userEvent.setup()
+      mockGetStorageStats
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce(mockStats)
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '存储统计已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when storage reload is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      mockGetStorageStats
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new ApiError('storage stats unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '存储统计暂不可用',
+          description: '存储统计服务当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
       })
     })
 

@@ -20,7 +20,7 @@ import {
   AlertCircle,
 } from 'lucide-react'
 import { refreshAuthSession } from '@/api/auth'
-import { listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
+import { ApiError, listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
 import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
 import { useUser } from '@/stores/auth'
 import { formatBytes, formatDate, isImageFile, cn, normalizePath } from '@/lib/utils'
@@ -44,6 +44,22 @@ interface AlbumFetchErrorState {
 interface AlbumQueryResult {
   images: FileItem[]
   hadPartialError: boolean
+}
+
+function getAlbumRefreshErrorToast(error: unknown): { title: string; description: string; color: 'warning' | 'danger' } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '刷新暂不可用',
+      description: '图片目录当前不可用，请检查服务状态后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '刷新失败',
+    description: error instanceof Error ? error.message : '相册刷新失败，请稍后重试。',
+    color: 'danger',
+  }
 }
 
 // Recursively fetch all images with safety limits
@@ -595,7 +611,14 @@ export function AlbumPage() {
             title="加载相册失败"
             description="无法扫描图片目录，当前结果不可用。请检查连接状态后重试。"
             action={
-              <Button className="rounded-xl" variant="bordered" onPress={() => void refetch()}>
+              <Button className="rounded-xl" variant="bordered" onPress={async () => {
+                const result = await refetch()
+                if (result.error) {
+                  addToast(getAlbumRefreshErrorToast(result.error))
+                  return
+                }
+                addToast({ title: '相册已刷新', color: 'success' })
+              }}>
                 重新加载
               </Button>
             }

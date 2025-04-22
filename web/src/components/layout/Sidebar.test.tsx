@@ -2,9 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { Sidebar } from './Sidebar'
+import * as HeroUI from '@heroui/react'
 
 const useIsAdminMock = vi.fn(() => true)
 const mockGetStorageStats = vi.fn()
+const mockAddToast = vi.fn()
 
 vi.mock('@/api/files', () => ({
   ApiError: class ApiError extends Error {
@@ -34,6 +36,8 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 
 describe('Sidebar', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
     mockGetStorageStats.mockResolvedValue({
       totalSize: 1024,
@@ -190,6 +194,26 @@ describe('Sidebar', () => {
       await user.click(screen.getByRole('button', { name: '重新加载' }))
 
       expect(await screen.findByText('2 KB')).toBeTruthy()
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '存储统计已刷新', color: 'success' })
+    })
+
+    it('shows warning toast when reloading storage stats is temporarily unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetStorageStats
+        .mockRejectedValueOnce(new Error('stats unavailable'))
+        .mockRejectedValueOnce(new ApiError('stats unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<Sidebar />)
+
+      expect(await screen.findByText('统计加载失败')).toBeTruthy()
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '统计暂不可用',
+        description: '存储统计服务当前不可用。',
+        color: 'warning',
+      })
     })
 
     it('shows an unavailable storage state when stats service returns 503', async () => {

@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useIsAdmin } from '@/stores/auth'
-import { Button } from '@heroui/react'
+import { Button, addToast } from '@heroui/react'
 import { 
   Folder, 
   Image, 
@@ -86,6 +86,21 @@ function getSidebarStorageErrorPresentation(error: unknown): { title: string; de
   }
 }
 
+function getSidebarStorageRetryErrorToast(error: unknown): { title: string; description: string; color: 'warning' | 'danger' } {
+  const presentation = getSidebarStorageErrorPresentation(error)
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      ...presentation,
+      color: 'warning',
+    }
+  }
+
+  return {
+    ...presentation,
+    color: 'danger',
+  }
+}
+
 export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const location = useLocation()
   const isAdmin = useIsAdmin()
@@ -102,6 +117,15 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
   const hasUsage = usedBytes !== undefined && usedBytes > 0
   const storageStatsKnown = storageStats?.totalSize !== undefined || storageStats?.dedupRatio !== undefined
   const storageErrorPresentation = storageStatsError ? getSidebarStorageErrorPresentation(storageStatsError) : null
+
+  const handleRetryStorageStats = async () => {
+    const result = await refetchStorageStats()
+    if (result.error) {
+      addToast(getSidebarStorageRetryErrorToast(result.error))
+      return
+    }
+    addToast({ title: '存储统计已刷新', color: 'success' })
+  }
 
   return (
     <aside 
@@ -226,7 +250,7 @@ export function Sidebar({ collapsed = false, onClose }: SidebarProps) {
                   size="sm"
                   variant="bordered"
                   className="w-full rounded-lg"
-                  onPress={() => refetchStorageStats()}
+                  onPress={handleRetryStorageStats}
                   isLoading={isRefetchingStorageStats}
                   startContent={!isRefetchingStorageStats ? <RefreshCw size={14} /> : undefined}
                 >

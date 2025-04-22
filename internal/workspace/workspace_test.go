@@ -3,11 +3,115 @@ package workspace
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestWorkspace_WriteFile_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
+	w := setupWorkspace(t)
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncWorkspaceDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	}()
+
+	err := w.WriteFile(context.Background(), "/durable.txt", []byte("content"))
+	if err == nil {
+		t.Fatal("expected WriteFile() to fail when parent directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "sync parent directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(w.Root(), "durable.txt"))
+	if readErr != nil {
+		t.Fatalf("expected file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected written content to be preserved, got %q", string(data))
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
+	w := setupWorkspace(t)
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncWorkspaceDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	}()
+
+	err := w.WriteFileFromReader(context.Background(), "/stream.txt", strings.NewReader("streamed content"))
+	if err == nil {
+		t.Fatal("expected WriteFileFromReader() to fail when parent directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "sync parent directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(w.Root(), "stream.txt"))
+	if readErr != nil {
+		t.Fatalf("expected streamed file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "streamed content" {
+		t.Fatalf("expected streamed content to be preserved, got %q", string(data))
+	}
+}
+
+func TestWorkspace_Copy_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
+	w := setupWorkspace(t)
+	if err := w.WriteFile(context.Background(), "/source.txt", []byte("copy content")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncWorkspaceDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	}()
+
+	err := w.Copy(context.Background(), "/source.txt", "/copied.txt")
+	if err == nil {
+		t.Fatal("expected Copy() to fail when parent directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "sync parent directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(w.Root(), "copied.txt"))
+	if readErr != nil {
+		t.Fatalf("expected copied file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "copy content" {
+		t.Fatalf("expected copied content to be preserved, got %q", string(data))
+	}
+}
+
+type chunkedCancelReader struct {
+	chunks [][]byte
+	index  int
+	cancel func()
+}
+
+func (r *chunkedCancelReader) Read(p []byte) (int, error) {
+	if r.index >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	chunk := r.chunks[r.index]
+	r.index++
+	if r.index == 1 && r.cancel != nil {
+		r.cancel()
+	}
+	return copy(p, chunk), nil
+}
 
 func setupWorkspace(t *testing.T) *Workspace {
 	tmpDir := t.TempDir()
@@ -207,6 +311,54 @@ func TestWorkspace_ReadDir_ReturnsErrNotDirWhenPathIsFile(t *testing.T) {
 	}
 }
 
+func TestWorkspace_ReadDir_ReturnsContextCanceledBeforeRead(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	entries, err := w.ReadDir(ctx, "/")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if entries != nil {
+		t.Fatalf("expected no entries after cancellation, got %d", len(entries))
+	}
+}
+
+func TestWorkspace_ReadDir_StopsWhenContextIsCanceledMidIteration(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	if err := w.Mkdir(ctx, "/dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/dir/a.txt", []byte("a")); err != nil {
+		t.Fatalf("WriteFile(a.txt) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/dir/b.txt", []byte("b")); err != nil {
+		t.Fatalf("WriteFile(b.txt) error: %v", err)
+	}
+
+	originalReadDirEntryInfo := readDirEntryInfo
+	readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+		if entry.Name() == "a.txt" {
+			cancel()
+		}
+		return originalReadDirEntryInfo(entry)
+	}
+	defer func() {
+		readDirEntryInfo = originalReadDirEntryInfo
+	}()
+
+	entries, err := w.ReadDir(ctx, "/dir")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled after mid-iteration cancel, got %v", err)
+	}
+	if entries != nil {
+		t.Fatalf("expected no partial entries on cancellation, got %d", len(entries))
+	}
+}
+
 func TestWorkspace_ReadDir_ReturnsEntryInfoError(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -380,6 +532,37 @@ func TestWorkspace_Copy(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Copy_ReturnsContextCanceledAndCleansUpTempFile(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	if err := w.WriteFile(context.Background(), "/source.txt", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	originalCopyWorkspaceData := copyWorkspaceData
+	copyWorkspaceData = func(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+		cancel()
+		return 0, ctx.Err()
+	}
+	defer func() {
+		copyWorkspaceData = originalCopyWorkspaceData
+	}()
+
+	err := w.Copy(ctx, "/source.txt", "/dest.txt")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Root(), "dest.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no destination file after canceled copy, got %v", statErr)
+	}
+	if matches, globErr := filepath.Glob(filepath.Join(w.Root(), ".workspace-*.tmp")); globErr != nil {
+		t.Fatalf("Glob(.workspace-*.tmp) error: %v", globErr)
+	} else if len(matches) != 0 {
+		t.Fatalf("expected no leftover temp files after canceled copy, got %v", matches)
+	}
+}
+
 func TestWorkspace_Copy_ReturnsErrNotFoundWhenDestinationParentMissing(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -428,6 +611,22 @@ func TestWorkspace_Copy_ReturnsErrNotDirWhenDestinationParentIsFile(t *testing.T
 	}
 }
 
+func TestWorkspace_WriteFileFromReader_StopsWhenContextIsCanceled(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	err := w.WriteFileFromReader(ctx, "/stream.txt", &chunkedCancelReader{
+		chunks: [][]byte{[]byte("hello "), []byte("world")},
+		cancel: cancel,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Root(), "stream.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no destination file after canceled write, got %v", statErr)
+	}
+}
+
 func TestWorkspace_Walk(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -449,6 +648,49 @@ func TestWorkspace_Walk(t *testing.T) {
 
 	if len(paths) != 4 {
 		t.Errorf("Walk() visited %d paths, want 4: %v", len(paths), paths)
+	}
+}
+
+func TestWorkspace_Walk_ReturnsContextCanceledBeforeTraversal(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := w.Walk(ctx, "/", func(path string, info *FileInfo) error {
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestWorkspace_Walk_StopsWhenContextCanceledDuringTraversal(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	if err := w.Mkdir(ctx, "/walktest"); err != nil {
+		t.Fatalf("Mkdir(walktest) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/walktest/a.txt", []byte("a")); err != nil {
+		t.Fatalf("WriteFile(a.txt) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/walktest/b.txt", []byte("b")); err != nil {
+		t.Fatalf("WriteFile(b.txt) error: %v", err)
+	}
+
+	visited := 0
+	err := w.Walk(ctx, "/walktest", func(path string, info *FileInfo) error {
+		visited++
+		if path == "/walktest" {
+			cancel()
+		}
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if visited != 1 {
+		t.Fatalf("expected traversal to stop after root when context is canceled, visited %d entries", visited)
 	}
 }
 
@@ -548,6 +790,20 @@ func TestWorkspace_CleanupStaging(t *testing.T) {
 	}
 	if bytes != 11 {
 		t.Errorf("CleanupStaging() bytes = %d, want 11", bytes)
+	}
+}
+
+func TestWorkspace_CleanupStaging_ReturnsContextCanceledBeforeWalk(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	files, bytes, err := w.CleanupStaging(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if files != 0 || bytes != 0 {
+		t.Fatalf("expected zero cleanup counts on canceled context, got files=%d bytes=%d", files, bytes)
 	}
 }
 

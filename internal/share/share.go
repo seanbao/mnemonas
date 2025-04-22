@@ -119,6 +119,7 @@ type ShareStore struct {
 }
 
 var shareStoreWriter = writeShareStoreFile
+var syncShareStoreDir = syncShareDir
 
 type shareStoreSnapshot struct {
 	shares   map[string]*Share
@@ -334,8 +335,21 @@ func writeShareStoreFile(path string, data []byte) error {
 		return fmt.Errorf("failed to replace shares file: %w", err)
 	}
 	cleanup = false
+	if err := syncShareStoreDir(dir); err != nil {
+		return fmt.Errorf("failed to sync shares directory: %w", err)
+	}
 
 	return nil
+}
+
+func syncShareDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 // CreateShareOptions contains options for creating a share

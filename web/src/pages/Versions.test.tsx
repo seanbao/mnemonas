@@ -465,6 +465,32 @@ describe('VersionsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByRole('table', { name: '版本历史' })).toBeTruthy()
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '版本历史已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when version reload becomes unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetVersions
+        .mockRejectedValueOnce(new Error('文件不存在'))
+        .mockRejectedValueOnce(new ApiError('version storage unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+	  await user.type(input, '/retry-unavailable.txt{enter}')
+
+	  await waitFor(() => {
+	    expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+	  })
+
+	  await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+	  await waitFor(() => {
+	    expect(mockAddToast).toHaveBeenCalledWith({
+	      title: '版本历史暂不可用',
+	      description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+	      color: 'warning',
+	    })
       })
     })
   })

@@ -406,6 +406,46 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('shows success toast when scrub result reload succeeds', async () => {
+      const user = userEvent.setup()
+      mockGetScrubResult
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce(mockNoResult)
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '校验结果已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when scrub result reload becomes unavailable', async () => {
+      const user = userEvent.setup()
+      mockGetScrubResult
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new ApiError('maintenance history not initialized', 503, 'SERVICE_UNAVAILABLE'))
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '校验结果暂不可用',
+          description: '维护历史或数据面当前不可用，请检查系统状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('handles start scrub error', async () => {
       mockGetScrubResult.mockResolvedValue(mockNoResult)
       mockRunScrub.mockRejectedValue(new Error('Already running'))

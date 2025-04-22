@@ -1349,6 +1349,9 @@ func (fs *FileSystem) DeleteFromTrash(ctx context.Context, id string) error {
 func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 	release := fs.beginMutation()
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 
 	// Get all trash items
 	items, err := fs.versions.ListTrash(ctx)
@@ -1358,6 +1361,9 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 
 	deleted := 0
 	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
 		if err := fs.deleteTrashItem(ctx, &item); err != nil {
 			return deleted, err
 		}
@@ -1371,6 +1377,9 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 	release := fs.beginMutation()
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 
 	// Get expired items first so metadata is removed only after content deletion succeeds.
 	items, err := fs.versions.ListTrash(ctx)
@@ -1381,6 +1390,9 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 	now := time.Now()
 	deleted := 0
 	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
 		if !item.ExpiresAt.Before(now) {
 			continue
 		}
@@ -1552,6 +1564,12 @@ func (fs *FileSystem) deleteUnreferencedVersionObjects(ctx context.Context, hash
 	seen := make(map[string]struct{}, len(hashes))
 	var deleteErr error
 	for _, hash := range hashes {
+		if err := ctx.Err(); err != nil {
+			if deleteErr != nil {
+				return errors.Join(deleteErr, err)
+			}
+			return err
+		}
 		if _, ok := seen[hash]; ok {
 			continue
 		}
@@ -1574,12 +1592,18 @@ func (fs *FileSystem) deleteUnreferencedVersionObjects(ctx context.Context, hash
 }
 
 func (fs *FileSystem) runRetentionSweepLocked(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	paths, err := fs.versions.ListVersionPaths(ctx)
 	if err != nil {
 		return fmt.Errorf("list version paths: %w", err)
 	}
 
 	for _, name := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := fs.cleanupVersions(ctx, name); err != nil {
 			return fmt.Errorf("cleanup versions for %s: %w", name, err)
 		}

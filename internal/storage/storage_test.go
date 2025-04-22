@@ -1858,6 +1858,20 @@ func TestFileSystem_EmptyTrash(t *testing.T) {
 	}
 }
 
+func TestFileSystem_EmptyTrash_ReturnsContextCanceledBeforeListing(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	deleted, err := fs.EmptyTrash(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected zero deleted items on canceled context, got %d", deleted)
+	}
+}
+
 func TestFileSystem_DeleteFromTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2139,6 +2153,20 @@ func TestFileSystem_CleanupExpiredTrash_KeepsContentWhenMetadataDeleteFails(t *t
 	}
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, original.ID)); statErr != nil {
 		t.Fatalf("Expected expired trash content to remain after failed metadata cleanup: %v", statErr)
+	}
+}
+
+func TestFileSystem_CleanupExpiredTrash_ReturnsContextCanceledBeforeListing(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	deleted, err := fs.CleanupExpiredTrash(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected zero deleted items on canceled context, got %d", deleted)
 	}
 }
 
@@ -2932,6 +2960,28 @@ func TestFileSystem_CleanupVersions_ZeroRetentionKeepsAllHistory(t *testing.T) {
 	}
 	if len(versions) != 55 {
 		t.Fatalf("expected current version plus 54 historical versions, got %d entries", len(versions))
+	}
+}
+
+func TestFileSystem_DeleteUnreferencedVersionObjects_ReturnsContextCanceled(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := fs.deleteUnreferencedVersionObjects(ctx, []string{"abc123"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestFileSystem_RunRetentionSweep_ReturnsContextCanceledBeforeListingPaths(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := fs.RunRetentionSweep(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
 
