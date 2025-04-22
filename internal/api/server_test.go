@@ -2827,6 +2827,26 @@ func TestServer_MoveFile_RejectsUnknownJSONFields(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized move file status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(w.Body.String(), "request body too large") {
+		t.Fatalf("expected payload too large message, got %s", w.Body.String())
+	}
+	if _, err := server.fs.Stat(context.Background(), "/move-dest.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent after oversized move body, got %v", err)
+	}
+}
+
 func TestServer_MoveFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -3009,6 +3029,26 @@ func TestServer_CopyFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("copy file conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestServer_CopyFile_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized copy file status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(w.Body.String(), "request body too large") {
+		t.Fatalf("expected payload too large message, got %s", w.Body.String())
+	}
+	if _, err := server.fs.Stat(context.Background(), "/copy-dest.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination to remain absent after oversized copy body, got %v", err)
 	}
 }
 
@@ -3767,6 +3807,23 @@ func TestServer_Scrub_ChunkedInvalidBodyDoesNotBypassValidation(t *testing.T) {
 	}
 }
 
+func TestServer_Scrub_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", io.LimitReader(repeatingReader{}, DefaultScrubRequestBodyLimit+1))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized scrub status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(w.Body.String(), "request body too large") {
+		t.Fatalf("expected payload too large message, got %s", w.Body.String())
+	}
+}
+
 func TestServer_Scrub_SaveCompletedResultFailureReturnsInternalServerError(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	if server.maintenance == nil {
@@ -4394,6 +4451,37 @@ func TestServer_CreateShare_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_CreateShare_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, true, false)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized share create status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(w.Body.String(), "request body too large") {
+		t.Fatalf("expected payload too large message, got %s", w.Body.String())
+	}
+}
+
+func TestServer_Login_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, _, _, _ := setupAuthServerWithFeatures(t, true, false)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized login status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestServer_PublicShareAccess_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
 	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
 
@@ -4612,6 +4700,36 @@ func TestServer_CheckFavorites_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 	if !strings.Contains(allowedRec.Body.String(), `"/tester/own.txt":true`) {
 		t.Fatalf("expected own home favorite batch result, got %s", allowedRec.Body.String())
+	}
+}
+
+func TestServer_AddFavorite_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized add favorite status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestServer_CheckFavorites_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized favorite batch check status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
 	}
 }
 
@@ -4998,6 +5116,28 @@ func TestServer_UpdateSettings_RejectsUnknownFields(t *testing.T) {
 	}
 	if server.config.Storage.Retention.MaxAge != originalMaxAge {
 		t.Fatalf("expected unknown-field update to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_RejectsOversizedRequestBody(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalPort := server.config.Server.Port
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", io.LimitReader(repeatingReader{}, DefaultJSONRequestBodyLimit+1))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized update settings status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(w.Body.String(), "request body too large") {
+		t.Fatalf("expected payload too large message, got %s", w.Body.String())
+	}
+	if server.config.Server.Port != originalPort {
+		t.Fatalf("expected oversized settings update to leave in-memory config unchanged")
 	}
 }
 

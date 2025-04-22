@@ -1,6 +1,7 @@
 package share
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -83,6 +84,7 @@ const (
 	defaultPasswordFailureDelay  = 200 * time.Millisecond
 	defaultPasswordLockDuration  = 5 * time.Minute
 	defaultRateLimitErrorMessage = "too many attempts, try later"
+	defaultJSONRequestBodyLimit  = 1 * 1024 * 1024
 )
 
 var errInvalidSharePermission = errors.New("invalid permission")
@@ -218,6 +220,15 @@ func normalizeShareRelativePath(rawPath string) (string, error) {
 }
 
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, defaultJSONRequestBodyLimit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > defaultJSONRequestBodyLimit {
+		return &http.MaxBytesError{Limit: defaultJSONRequestBodyLimit}
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -235,11 +246,21 @@ func decodeJSONBodyStrict(r *http.Request, dst any) error {
 	return nil
 }
 
+func writeShareJSONBodyError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writeShareError(w, http.StatusRequestEntityTooLarge, "request body too large", "PAYLOAD_TOO_LARGE")
+		return
+	}
+
+	writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+}
+
 // CreateShare creates a new share link
 func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 	var req CreateShareRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeShareJSONBodyError(w, err)
 		return
 	}
 
@@ -397,7 +418,7 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 
 	var req UpdateShareRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeShareJSONBodyError(w, err)
 		return
 	}
 
@@ -652,7 +673,7 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 
 	var req AccessShareRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeShareError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeShareJSONBodyError(w, err)
 		return
 	}
 

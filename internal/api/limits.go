@@ -12,6 +12,9 @@ const (
 	// DefaultScrubRequestBodyLimit is the maximum scrub request body size (1MB)
 	DefaultScrubRequestBodyLimit = 1 * 1024 * 1024
 
+	// DefaultJSONRequestBodyLimit is the maximum JSON request body size for non-upload endpoints (1MB)
+	DefaultJSONRequestBodyLimit = 1 * 1024 * 1024
+
 	// DefaultRequestTimeout is the default request timeout (30 minutes)
 	DefaultRequestTimeout = 30 * 60
 

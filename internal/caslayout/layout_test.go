@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -293,6 +294,77 @@ func TestStore_PutRejectsSymlinkObjectPath(t *testing.T) {
 	}
 	if string(data) != "original" {
 		t.Fatalf("expected symlink target unchanged, got %q", string(data))
+	}
+}
+
+func TestStore_PutReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalSyncDir := syncDir
+	syncDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncDir = originalSyncDir
+	}()
+
+	hash := "fedcba0987654321fedcba0987654321"
+	err = store.Put(hash, []byte("payload"))
+	if err == nil {
+		t.Fatal("expected Put() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	objectPath := store.layout.FullPath(store.root, hash)
+	data, readErr := os.ReadFile(objectPath)
+	if readErr != nil {
+		t.Fatalf("expected renamed object to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("expected object payload to be preserved, got %q", string(data))
+	}
+	if matches, globErr := filepath.Glob(filepath.Join(filepath.Dir(objectPath), ".cas-*.tmp")); globErr != nil {
+		t.Fatalf("Glob(.cas-*.tmp) error: %v", globErr)
+	} else if len(matches) != 0 {
+		t.Fatalf("expected no leftover temp files, got %v", matches)
+	}
+}
+
+func TestStore_DeleteReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "0123456789abcdef0123456789abcdef"
+	if err := store.Put(hash, []byte("payload")); err != nil {
+		t.Fatalf("Put() error: %v", err)
+	}
+
+	originalSyncDir := syncDir
+	syncDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncDir = originalSyncDir
+	}()
+
+	err = store.Delete(hash)
+	if err == nil {
+		t.Fatal("expected Delete() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+	if store.Has(hash) {
+		t.Fatal("expected object to remain deleted after directory sync failure")
 	}
 }
 

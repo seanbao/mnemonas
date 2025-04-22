@@ -5,10 +5,13 @@ import { Search, Bell, Menu, RefreshCw } from 'lucide-react'
 import { useAuthStore, useIsAdmin, useUser } from '@/stores/auth'
 import { useQueryClient } from '@tanstack/react-query'
 import { ThemeToggle } from '@/components/ThemeToggle'
+import { openUrlInNewTab } from '@/lib/utils'
 
 interface HeaderProps {
   onMenuClick?: () => void
 }
+
+const HELP_DOCS_URL = 'https://github.com/seanbao/mnemonas/tree/main/docs'
 
 export function Header({ onMenuClick }: HeaderProps) {
   const navigate = useNavigate()
@@ -28,6 +31,21 @@ export function Header({ onMenuClick }: HeaderProps) {
   const handleSettings = () => {
     navigate('/settings')
   }
+
+  const handleHelp = useCallback(() => {
+    if (!openUrlInNewTab(HELP_DOCS_URL)) {
+      addToast({ title: '浏览器拦截了新标签页，请允许弹窗后重试', color: 'warning' })
+    }
+  }, [])
+
+  const handleAlertsSettings = useCallback(() => {
+    if (!isAdmin) {
+      addToast({ title: '系统提醒设置仅管理员可用', color: 'warning' })
+      return
+    }
+
+    navigate('/settings?tab=advanced')
+  }, [isAdmin, navigate])
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
@@ -108,7 +126,7 @@ export function Header({ onMenuClick }: HeaderProps) {
           <RefreshCw size={18} className={isRefreshing ? 'animate-spin' : ''} />
         </Button>
 
-        <Button isIconOnly variant="light" size="sm" aria-label="通知" className="rounded-xl">
+        <Button isIconOnly variant="light" size="sm" aria-label="系统提醒设置" onPress={handleAlertsSettings} className="rounded-xl">
           <Bell size={18} />
         </Button>
 
@@ -147,7 +165,7 @@ export function Header({ onMenuClick }: HeaderProps) {
               </div>
             </DropdownItem>
             {isAdmin && <DropdownItem key="settings">设置</DropdownItem>}
-            <DropdownItem key="help">帮助文档</DropdownItem>
+            <DropdownItem key="help" onPress={handleHelp}>帮助文档</DropdownItem>
             <DropdownItem key="logout" className="text-rose data-[hover=true]:text-rose data-[hover=true]:bg-rose/10">
               退出登录
             </DropdownItem>

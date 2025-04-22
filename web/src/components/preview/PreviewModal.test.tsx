@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { refreshAuthSession } from '@/api/auth'
+import { downloadFile } from '@/api/files'
 import { PreviewModal, type PreviewFile } from './PreviewModal'
 
 vi.mock('@/api/auth', () => ({
@@ -39,10 +40,12 @@ vi.mock('@/lib/preview-utils', async () => {
 
 describe('PreviewModal', () => {
   const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
+  const mockDownloadFile = vi.mocked(downloadFile)
 
   beforeEach(() => {
     vi.restoreAllMocks()
     mockRefreshAuthSession.mockResolvedValue(false)
+    mockDownloadFile.mockResolvedValue(undefined)
   })
 
   it('renders video preview without auth query', () => {
@@ -167,6 +170,34 @@ describe('PreviewModal', () => {
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '浏览器拦截了新标签页，请允许弹窗后重试',
       color: 'warning',
+    })
+  })
+
+  it('shows unavailable toast when preview download fails because the filesystem is unavailable', async () => {
+    mockDownloadFile.mockRejectedValue(Object.assign(new Error('filesystem unavailable'), {
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+    }))
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    screen.getByTitle('下载').click()
+
+    await waitFor(() => {
+      expect(mockDownloadFile).toHaveBeenCalledWith('/video.mp4', { filename: 'video.mp4' })
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '下载暂不可用',
+        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
     })
   })
 })

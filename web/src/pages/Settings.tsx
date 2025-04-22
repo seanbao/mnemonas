@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { 
   Card, 
   CardBody, 
@@ -124,6 +125,22 @@ function getSettingsActionErrorToast(
   }
 }
 
+const SETTINGS_TABS = ['general', 'retention', 'webdav', 'advanced', 'shares'] as const
+
+type SettingsTabKey = (typeof SETTINGS_TABS)[number]
+
+function isSettingsTabKey(value: string): value is SettingsTabKey {
+  return SETTINGS_TABS.includes(value as SettingsTabKey)
+}
+
+function normalizeSettingsTab(value: string | null): SettingsTabKey {
+  if (value && isSettingsTabKey(value)) {
+    return value
+  }
+
+  return 'general'
+}
+
 // Setting row component
 function SettingRow({ 
   label, 
@@ -150,7 +167,8 @@ function SettingRow({
 }
 
 export function SettingsPage() {
-  const [selectedTab, setSelectedTab] = useState('general')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
   const queryClient = useQueryClient()
   const defaultSettings = {
     serverHost: '0.0.0.0',
@@ -242,6 +260,17 @@ export function SettingsPage() {
 
   const [draftSettings, setDraftSettings] = useState(defaultSettings)
   const [isDirty, setIsDirty] = useState(false)
+
+  const handleTabSelectionChange = useCallback((key: React.Key) => {
+    const nextTab = normalizeSettingsTab(String(key))
+
+    if (nextTab === 'general') {
+      setSearchParams({})
+      return
+    }
+
+    setSearchParams({ tab: nextTab })
+  }, [setSearchParams])
 
   const mapServerSettings = useCallback((data: NonNullable<typeof settingsData>['data']) => {
     return {
@@ -667,7 +696,7 @@ export function SettingsPage() {
         {/* Tabs */}
         <Tabs 
           selectedKey={selectedTab}
-          onSelectionChange={(key) => setSelectedTab(key as string)}
+          onSelectionChange={handleTabSelectionChange}
           classNames={{
             tabList: "bg-content1 border border-divider rounded-xl p-1 gap-1 shadow-[var(--shadow-soft)]",
             tab: "px-4 py-2 rounded-lg text-default-600 data-[selected=true]:bg-accent-primary data-[selected=true]:text-white data-[selected=true]:shadow-sm whitespace-nowrap",
@@ -699,6 +728,10 @@ export function SettingsPage() {
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">端口</label>
                       <Input
                         placeholder="8080"
+                        type="number"
+                        min={1}
+                        max={65535}
+                        inputMode="numeric"
                         value={settings.serverPort}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverPort: v }))}
                         classNames={{ 
@@ -875,6 +908,8 @@ export function SettingsPage() {
                   <Input
                     aria-label="回收站保留天数"
                     type="number"
+                    min={0}
+                    inputMode="numeric"
                     value={settings.trashRetentionDays}
                     onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashRetentionDays: v }))}
                     className="w-24"
@@ -905,6 +940,8 @@ export function SettingsPage() {
                   >
                     <Input
                       type="number"
+                      min={0}
+                      inputMode="numeric"
                       value={settings.maxVersions}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxVersions: v }))}
                       className="w-24"
@@ -1381,6 +1418,8 @@ export function SettingsPage() {
                   >
                     <Input
                       type="number"
+                      min={0}
+                      inputMode="numeric"
                       value={settings.dataplaneMaxRetries}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneMaxRetries: v }))}
                       className="w-24"
@@ -1435,6 +1474,9 @@ export function SettingsPage() {
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">普通告警阈值 (%)</label>
                       <Input
                         type="number"
+                        min={0}
+                        max={100}
+                        inputMode="numeric"
                         value={settings.alertsThresholdPct}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsThresholdPct: v }))}
                         isDisabled={!settings.alertsEnabled}
@@ -1445,6 +1487,9 @@ export function SettingsPage() {
                       <label className="text-sm font-medium text-default-600 mb-1.5 block">严重告警阈值 (%)</label>
                       <Input
                         type="number"
+                        min={0}
+                        max={100}
+                        inputMode="numeric"
                         value={settings.alertsCriticalPct}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCriticalPct: v }))}
                         isDisabled={!settings.alertsEnabled}
@@ -1488,6 +1533,7 @@ export function SettingsPage() {
                     description="发送告警通知的目标地址"
                   >
                     <Input
+                      type="url"
                       value={settings.alertsWebhookURL}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsWebhookURL: v }))}
                       placeholder="https://hooks.example.com/alert"
@@ -1590,6 +1636,7 @@ export function SettingsPage() {
                     description="用于生成完整分享链接，可留空使用当前访问地址；保存后会立即影响新创建的分享"
                   >
                     <Input
+                      type="url"
                       value={settings.shareBaseURL}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareBaseURL: v }))}
                       placeholder="https://nas.example.com"

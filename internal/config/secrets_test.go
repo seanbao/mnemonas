@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -179,6 +180,37 @@ func TestSaveSecrets_TightensExistingFilePermissions(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("expected SaveSecrets to tighten permissions to 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestSaveSecrets_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalSyncManagedDir := syncManagedDir
+	syncManagedDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncManagedDir = originalSyncManagedDir
+	}()
+
+	err := SaveSecrets(tmpDir, &Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if err == nil {
+		t.Fatal("expected SaveSecrets to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync secrets directory") {
+		t.Fatalf("expected secrets directory sync error, got %v", err)
+	}
+
+	secrets, loadErr := LoadSecrets(tmpDir)
+	if loadErr != nil {
+		t.Fatalf("expected secrets file to remain readable after sync failure, got %v", loadErr)
+	}
+	if secrets == nil {
+		t.Fatal("expected secrets to remain present after sync failure")
+	}
+	if secrets.JWTSecret != "jwt" || secrets.WebDAVPassword != "password" {
+		t.Fatalf("expected saved secrets to persist despite sync failure, got %+v", secrets)
 	}
 }
 

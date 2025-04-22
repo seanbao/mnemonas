@@ -718,6 +718,52 @@ describe('FilesPage', () => {
       })
     })
 
+    it('shows success toast only after keyboard refresh succeeds', async () => {
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalledTimes(1)
+      })
+
+      mockAddToast.mockClear()
+      mockListFiles.mockResolvedValueOnce({ files: [], path: '/' })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F5', bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalledTimes(2)
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '刷新成功', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when keyboard refresh fails due to unavailable filesystem', async () => {
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalledTimes(1)
+      })
+
+      mockAddToast.mockClear()
+      mockListFiles.mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'SERVICE_UNAVAILABLE'))
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalledTimes(2)
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新暂不可用',
+          description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('keeps failed cut items in clipboard after partial paste failure', async () => {
       mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
       mockClipboardState.operation = 'cut'

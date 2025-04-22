@@ -323,6 +323,39 @@ func TestCreateShare_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestCreateShare_RejectsOversizedRequestBody(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, nil)
+	body := bytes.Repeat([]byte{'x'}, defaultJSONRequestBodyLimit+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status 413, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "PAYLOAD_TOO_LARGE" {
+		t.Fatalf("expected PAYLOAD_TOO_LARGE code, got %v", errorPayload["code"])
+	}
+	if len(store.ListAll()) != 0 {
+		t.Fatal("expected oversized share creation to be rejected before persistence")
+	}
+}
+
 func TestCreateShare_NegativeMaxAccessReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
