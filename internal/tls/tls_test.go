@@ -168,6 +168,30 @@ func TestWriteTLSFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
+func TestWriteTLSFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "nested", "tls", "server.crt")
+
+	originalSyncTLSDir := syncTLSDir
+	syncTLSDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncTLSDir = originalSyncTLSDir
+	}()
+
+	err := writeTLSFile(filePath, []byte("certificate"), 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file")
+	if err == nil {
+		t.Fatal("expected writeTLSFile() to fail when directory tree sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync certificate file directory tree") {
+		t.Fatalf("expected directory tree sync error, got %v", err)
+	}
+	if _, statErr := os.Stat(filePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no TLS file to be created, got %v", statErr)
+	}
+}
+
 func TestGetTLSConfig_RejectsSymlinkPaths(t *testing.T) {
 	tempDir := t.TempDir()
 	certTarget := filepath.Join(tempDir, "real-server.crt")

@@ -417,7 +417,7 @@ func (c *Config) Save(path string) error {
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureManagedDir(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -500,6 +500,47 @@ func syncManagedDirectory(dir string) error {
 		return fmt.Errorf("close directory %s: %w", dir, err)
 	}
 	return nil
+}
+
+func collectMissingManagedDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedManagedDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncManagedDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync managed directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureManagedDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingManagedDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedManagedDirs(createdDirs)
 }
 
 func writeConfigFile(path string, data []byte) error {

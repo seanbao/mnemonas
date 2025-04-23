@@ -286,8 +286,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	r.Use(zerologMiddleware(logger))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(DefaultRequestTimeout * time.Second))
-	// REM-4 fix: Add rate limiting
-	r.Use(middleware.Throttle(DefaultMaxConcurrentRequests))
+	// Keep observability endpoints reachable even when the request concurrency
+	// budget is saturated by slow data operations.
+	r.Use(throttleExceptPaths(DefaultMaxConcurrentRequests, "/health", "/api/v1/version"))
 
 	s := &Server{
 		router:    r,
@@ -413,6 +414,20 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize share store: %w", err)
 		}
 		s.shareStore = shareStore
+		if s.fs != nil {
+			s.fs.SetPathChangeHooks(
+				func(ctx context.Context, oldPath, newPath string) {
+					if err := shareStore.UpdatePathReferences(oldPath, newPath); err != nil {
+						logger.Error().Err(err).Str("old_path", oldPath).Str("new_path", newPath).Msg("failed to sync share paths after rename")
+					}
+				},
+				func(ctx context.Context, path string) {
+					if err := shareStore.DisableSharesUnderPath(path); err != nil {
+						logger.Error().Err(err).Str("path", path).Msg("failed to disable shares after delete")
+					}
+				},
+			)
+		}
 		// Pass filesystem adapter to share handler
 		var fsAdapter share.FileOpener
 		if s.fs != nil {
@@ -449,6 +464,25 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 
 	s.setupRoutes()
 	return s, nil
+}
+
+func throttleExceptPaths(limit int, bypassPaths ...string) func(http.Handler) http.Handler {
+	bypass := make(map[string]struct{}, len(bypassPaths))
+	for _, bypassPath := range bypassPaths {
+		bypass[bypassPath] = struct{}{}
+	}
+	throttle := middleware.Throttle(limit)
+
+	return func(next http.Handler) http.Handler {
+		throttled := throttle(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := bypass[r.URL.Path]; ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			throttled.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (s *Server) setupRoutes() {
@@ -2821,12 +2855,16 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Generate or retrieve cached thumbnail
 	data, err := s.thumbnail.GetThumbnail(r.Context(), filePath, size, reader)
 	if err != nil {
+		if errors.Is(err, thumbnail.ErrThumbnailSourceTooLarge) {
+			BadRequest(w, "source image too large to thumbnail")
+			return
+		}
 		s.respondInternalError(w, "generate thumbnail", err)
 		return
 	}
 
 	// Set appropriate headers
-	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Content-Type", http.DetectContentType(data))
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 24 hours
 	w.WriteHeader(http.StatusOK)

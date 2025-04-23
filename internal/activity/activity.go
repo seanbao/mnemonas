@@ -52,8 +52,8 @@ type Store struct {
 	root    string
 	entries []Entry
 	mu      sync.RWMutex
+	writeMu sync.Mutex
 	maxSize int // Maximum number of entries to keep in memory
-	version uint64
 }
 
 var activityLogWriter = writeActivityLogFile
@@ -78,7 +78,7 @@ func copyEntry(entry Entry) Entry {
 
 // NewStore creates a new activity store
 func NewStore(root string) (*Store, error) {
-	if err := os.MkdirAll(root, 0750); err != nil {
+	if err := ensureActivityDir(root, 0750); err != nil {
 		return nil, fmt.Errorf("create activity dir: %w", err)
 	}
 
@@ -186,28 +186,23 @@ func cloneEntries(entries []Entry) []Entry {
 }
 
 func (s *Store) updateEntries(mutator func([]Entry) []Entry) error {
-	for {
-		s.mu.RLock()
-		baseVersion := s.version
-		currentEntries := cloneEntries(s.entries)
-		logPath := s.logFilePath()
-		s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
-		nextEntries := mutator(currentEntries)
-		if err := saveEntries(logPath, nextEntries); err != nil {
-			return err
-		}
+	s.mu.RLock()
+	currentEntries := cloneEntries(s.entries)
+	logPath := s.logFilePath()
+	s.mu.RUnlock()
 
-		s.mu.Lock()
-		if s.version != baseVersion {
-			s.mu.Unlock()
-			continue
-		}
-		s.entries = nextEntries
-		s.version++
-		s.mu.Unlock()
-		return nil
+	nextEntries := mutator(currentEntries)
+	if err := saveEntries(logPath, nextEntries); err != nil {
+		return err
 	}
+
+	s.mu.Lock()
+	s.entries = nextEntries
+	s.mu.Unlock()
+	return nil
 }
 
 func validateActivityLogPath(path string) error {
@@ -262,7 +257,7 @@ func writeActivityLogFile(path string, data []byte) error {
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := ensureActivityDir(dir, 0750); err != nil {
 		return err
 	}
 
@@ -302,6 +297,47 @@ func writeActivityLogFile(path string, data []byte) error {
 		return fmt.Errorf("failed to sync activity log directory: %w", err)
 	}
 	return nil
+}
+
+func collectMissingActivityDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedActivityDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncActivityLogDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync activity directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureActivityDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingActivityDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedActivityDirs(createdDirs)
 }
 
 func syncActivityDir(dir string) error {
