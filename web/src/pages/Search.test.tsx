@@ -393,6 +393,36 @@ describe('SearchPage', () => {
       })
     })
 
+    it('encodes special characters when navigating to a file location', async () => {
+      const user = userEvent.setup()
+      vi.mocked(searchApi.searchFiles).mockResolvedValue({
+        query: 'special',
+        results: [
+          {
+            name: 'report?.pdf',
+            path: '/docs/a #1?/report?.pdf',
+            isDir: false,
+            size: 1024,
+            modTime: '2024-01-15T10:00:00Z',
+          },
+        ],
+        count: 1,
+      })
+      renderSearchPage()
+
+      await user.type(screen.getByPlaceholderText('输入文件名搜索...'), 'special')
+
+      await waitFor(() => {
+        expect(screen.getByText('report?.pdf')).toBeInTheDocument()
+      }, { timeout: 1000 })
+
+      await user.click(screen.getByText('report?.pdf'))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/files/docs/a%20%231%3F', {
+        state: { highlightPath: '/docs/a #1?/report?.pdf' },
+      })
+    })
+
     it('navigates to folder on click', async () => {
       const user = userEvent.setup()
       renderSearchPage()

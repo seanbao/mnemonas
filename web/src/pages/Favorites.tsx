@@ -32,7 +32,7 @@ import {
 } from '@/api/favorites'
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { cn, formatRelativeTime } from '@/lib/utils'
+import { cn, encodePathForUrl, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useCanWrite, useUser } from '@/stores/auth'
@@ -489,11 +489,11 @@ export function FavoritesPage() {
     const isDir = path.endsWith('/')
     if (isDir) {
       // Go to the folder
-      navigate(`/files${encodeURI(path)}`)
+      navigate(`/files${encodePathForUrl(path)}`)
     } else {
       // Go to the parent folder and highlight the file
       const parentPath = getParentPath(path)
-      navigate(`/files${encodeURI(parentPath || '/')}`, { state: { highlightPath: path } })
+      navigate(`/files${encodePathForUrl(parentPath || '/')}`, { state: { highlightPath: path } })
     }
   }, [navigate])
 
