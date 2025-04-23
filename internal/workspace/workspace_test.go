@@ -490,6 +490,52 @@ func TestWorkspace_Rename(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Rename_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+	if err := w.Mkdir(ctx, "/src-dir"); err != nil {
+		t.Fatalf("Mkdir(src-dir) error: %v", err)
+	}
+	if err := w.Mkdir(ctx, "/dst-dir"); err != nil {
+		t.Fatalf("Mkdir(dst-dir) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/src-dir/source.txt", []byte("content")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncFailed := false
+	syncWorkspaceDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	})
+
+	err := w.Rename(ctx, "/src-dir/source.txt", "/dst-dir/renamed.txt")
+	if err == nil {
+		t.Fatal("expected Rename() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync directory") {
+		t.Fatalf("expected sync failure in error, got %v", err)
+	}
+
+	data, readErr := w.ReadFile(ctx, "/src-dir/source.txt")
+	if readErr != nil {
+		t.Fatalf("ReadFile(source.txt) after rollback error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected source content after rollback, got %q", string(data))
+	}
+	if _, statErr := w.Stat(ctx, "/dst-dir/renamed.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected destination to be absent after rollback, got %v", statErr)
+	}
+}
+
 func TestWorkspace_Rename_ReturnsErrNotFoundWhenDestinationParentMissing(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()

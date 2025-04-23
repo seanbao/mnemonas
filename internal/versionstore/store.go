@@ -67,7 +67,7 @@ type Store struct {
 	db      *sql.DB
 	objects *ObjectStore
 
-	deleteObjectFn   func(hash string) error
+	deleteObjectFn   func(ctx context.Context, hash string) error
 	deleteChunkRefFn func(ctx context.Context, chunkHash string) error
 }
 
@@ -105,8 +105,8 @@ func New(cfg Config) (*Store, error) {
 		db:      db,
 		objects: NewObjectStore(cfg.Dataplane),
 	}
-	store.deleteObjectFn = func(hash string) error {
-		return store.DeleteObject(hash)
+	store.deleteObjectFn = func(ctx context.Context, hash string) error {
+		return store.DeleteObject(ctx, hash)
 	}
 	store.deleteChunkRefFn = func(ctx context.Context, chunkHash string) error {
 		return store.DeleteChunkRef(ctx, chunkHash)
@@ -785,24 +785,24 @@ func (s *Store) SearchFiles(ctx context.Context, query string, limit int) ([]str
 // Object Storage Operations (delegated to ObjectStore backend)
 // ============================================================================
 
-// PutObject stores version content and returns its hash
-func (s *Store) PutObject(data []byte) (string, error) {
-	return s.objects.Put(context.Background(), data)
+// PutObject stores version content and returns its hash.
+func (s *Store) PutObject(ctx context.Context, data []byte) (string, error) {
+	return s.objects.Put(ctx, data)
 }
 
-// GetObject retrieves version content by hash
-func (s *Store) GetObject(hash string) ([]byte, error) {
-	return s.objects.Get(context.Background(), hash)
+// GetObject retrieves version content by hash.
+func (s *Store) GetObject(ctx context.Context, hash string) ([]byte, error) {
+	return s.objects.Get(ctx, hash)
 }
 
-// HasObject checks if an object exists
-func (s *Store) HasObject(hash string) (bool, error) {
-	return s.objects.Has(context.Background(), hash)
+// HasObject checks if an object exists.
+func (s *Store) HasObject(ctx context.Context, hash string) (bool, error) {
+	return s.objects.Has(ctx, hash)
 }
 
-// DeleteObject removes an object
-func (s *Store) DeleteObject(hash string) error {
-	return s.objects.Delete(context.Background(), hash)
+// DeleteObject removes an object.
+func (s *Store) DeleteObject(ctx context.Context, hash string) error {
+	return s.objects.Delete(ctx, hash)
 }
 
 // ============================================================================
@@ -924,7 +924,7 @@ func (s *Store) RunGC(ctx context.Context, batchSize int) (int, int64, error) {
 
 		// Delete from CAS
 		objectDeleted := true
-		if err := s.deleteObjectFn(hash); err != nil {
+		if err := s.deleteObjectFn(ctx, hash); err != nil {
 			if errors.Is(err, ErrNotFound) {
 				objectDeleted = false
 			} else {
