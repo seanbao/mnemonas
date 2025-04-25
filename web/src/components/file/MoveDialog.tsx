@@ -11,8 +11,35 @@ import {
 } from '@heroui/react'
 import { Move, AlertTriangle } from 'lucide-react'
 import { DirectoryPicker } from './DirectoryPicker'
-import { moveFile, copyFile } from '@/api/files'
+import { moveFile, copyFile, ApiError } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
+
+function getMoveDialogFailureToast(
+  mode: 'move' | 'copy',
+  successCount: number,
+  errorCount: number,
+  errors: unknown[]
+): {
+  title: string
+  description?: string
+  color: 'warning' | 'danger'
+} {
+  const actionText = mode === 'move' ? '移动' : '复制'
+
+  if (successCount === 0 && errors.length > 0 && errors.every((error) => error instanceof ApiError && error.isUnavailable)) {
+    return {
+      title: `批量${actionText}暂不可用`,
+      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: `批量${actionText}失败`,
+    description: `共 ${errorCount} 个项目失败`,
+    color: 'danger',
+  }
+}
 
 export interface MoveDialogProps {
   isOpen: boolean
@@ -61,6 +88,7 @@ export function MoveDialog({
     let successCount = 0
     let errorCount = 0
     const failedFiles: typeof pendingFiles = []
+    const failedErrors: unknown[] = []
 
     for (const file of pendingFiles) {
       const fileName = file.path.split('/').pop() || ''
@@ -73,9 +101,10 @@ export function MoveDialog({
           await copyFile(file.path, destPath)
         }
         successCount++
-      } catch {
+      } catch (error) {
         errorCount++
         failedFiles.push(file)
+        failedErrors.push(error)
       }
     }
 
@@ -104,11 +133,7 @@ export function MoveDialog({
         color: 'warning',
       })
     } else {
-      addToast({
-        title: `批量${actionText}失败`,
-        description: `共 ${errorCount} 个项目失败`,
-        color: 'danger',
-      })
+      addToast(getMoveDialogFailureToast(mode, successCount, errorCount, failedErrors))
     }
   }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText, resetState])
 

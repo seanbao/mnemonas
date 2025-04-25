@@ -5,11 +5,23 @@ import { HealthPage } from './Health'
 
 // Mock API
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getDiagnostics: vi.fn(),
   getStorageStats: vi.fn(),
 }))
 
-import { getDiagnostics, getStorageStats } from '@/api/files'
+import { ApiError, getDiagnostics, getStorageStats } from '@/api/files'
 
 const mockGetDiagnostics = getDiagnostics as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
@@ -297,6 +309,18 @@ describe('HealthPage', () => {
   })
 
   describe('error handling', () => {
+    it('shows an unavailable state when diagnostics or stats return service unavailable', async () => {
+      mockGetDiagnostics.mockRejectedValue(new ApiError('diagnostics unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      mockGetStorageStats.mockResolvedValue(mockStats)
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('系统健康信息暂不可用')).toBeTruthy()
+        expect(screen.getByText('诊断或存储统计服务当前不可用，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('shows retryable error state when health queries fail', async () => {
       mockGetDiagnostics.mockRejectedValue(new Error('Network error'))
       mockGetStorageStats.mockRejectedValue(new Error('Network error'))

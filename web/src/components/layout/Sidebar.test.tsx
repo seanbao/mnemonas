@@ -7,8 +7,22 @@ const useIsAdminMock = vi.fn(() => true)
 const mockGetStorageStats = vi.fn()
 
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getStorageStats: (...args: unknown[]) => mockGetStorageStats(...args),
 }))
+
+import { ApiError } from '@/api/files'
 
 vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
@@ -176,6 +190,15 @@ describe('Sidebar', () => {
       await user.click(screen.getByRole('button', { name: '重新加载' }))
 
       expect(await screen.findByText('2 KB')).toBeTruthy()
+    })
+
+    it('shows an unavailable storage state when stats service returns 503', async () => {
+      mockGetStorageStats.mockRejectedValueOnce(new ApiError('stats unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<Sidebar />)
+
+      expect(await screen.findByText('统计暂不可用')).toBeTruthy()
+      expect(screen.getByText('存储统计服务当前不可用。')).toBeTruthy()
     })
 
     it('shows unknown storage values when stats payload is incomplete', async () => {

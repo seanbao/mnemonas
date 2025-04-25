@@ -8,13 +8,17 @@ const mockAddToast = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
 
 // Mock API functions
-vi.mock('@/api/files', () => ({
-  listTrash: vi.fn(),
-  restoreFromTrash: vi.fn(),
-  deleteFromTrash: vi.fn(),
-  emptyTrash: vi.fn(),
-  getFileIcon: vi.fn(() => 'file'),
-}))
+vi.mock('@/api/files', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/files')>()
+  return {
+    ...actual,
+    listTrash: vi.fn(),
+    restoreFromTrash: vi.fn(),
+    deleteFromTrash: vi.fn(),
+    emptyTrash: vi.fn(),
+    getFileIcon: vi.fn(() => 'file'),
+  }
+})
 
 // Mock useBatchOperation hook
 const mockBatchExecute = vi.fn()
@@ -48,7 +52,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { listTrash, restoreFromTrash, deleteFromTrash, emptyTrash } from '@/api/files'
+import { ApiError, listTrash, restoreFromTrash, deleteFromTrash, emptyTrash } from '@/api/files'
 
 const mockListTrash = vi.mocked(listTrash)
 const mockRestoreFromTrash = vi.mocked(restoreFromTrash)
@@ -207,6 +211,23 @@ describe('TrashPage', () => {
       })
     })
 
+    it('shows unavailable state when trash backend is unavailable', async () => {
+      mockListTrash.mockRejectedValue(new ApiError(
+        'filesystem not initialized',
+        503,
+        'Service Unavailable',
+        'SERVICE_UNAVAILABLE'
+      ))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('回收站暂不可用')).toBeTruthy()
+        expect(screen.getByText('文件系统当前不可用，请稍后重试')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('shows unknown retention copy when retention settings are missing', async () => {
       mockListTrash.mockResolvedValue({
         items: [
@@ -258,6 +279,32 @@ describe('TrashPage', () => {
         expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1')
       })
     })
+
+    it('shows unavailable toast when restore is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockRejectedValue(new ApiError(
+        'filesystem not initialized',
+        503,
+        'Service Unavailable',
+        'SERVICE_UNAVAILABLE'
+      ))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '恢复暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
+      })
+    })
   })
 
   describe('delete functionality', () => {
@@ -292,6 +339,38 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockDeleteFromTrash).toHaveBeenCalledWith('item1')
+      })
+    })
+
+    it('shows unavailable toast when permanent delete is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockDeleteFromTrash.mockRejectedValue(new ApiError(
+        'filesystem not initialized',
+        503,
+        'Service Unavailable',
+        'SERVICE_UNAVAILABLE'
+      ))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '永久删除' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '永久删除暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
       })
     })
   })
@@ -380,6 +459,41 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({ title: '回收站已部分清空，删除 1 项', color: 'warning' })
+      })
+    })
+
+    it('shows unavailable toast when empty trash is unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockEmptyTrash.mockRejectedValue(new ApiError(
+        'filesystem not initialized',
+        503,
+        'Service Unavailable',
+        'SERVICE_UNAVAILABLE'
+      ))
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('清空回收站')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('清空回收站'))
+
+      await waitFor(() => {
+        const buttons = screen.getAllByText('清空回收站')
+        const confirmBtn = buttons.find(btn => btn.closest('[class*="ModalFooter"], footer'))
+        if (confirmBtn) {
+          return user.click(confirmBtn)
+        }
+        return user.click(buttons[buttons.length - 1])
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '清空回收站暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
       })
     })
   })

@@ -53,14 +53,30 @@ interface UsersApiResponse<T> {
   error?: UsersApiError
 }
 
+export class UsersError extends Error {
+  status: number
+  code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'UsersError'
+    this.status = status
+    this.code = code
+  }
+
+  get isUnavailable(): boolean {
+    return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+  }
+}
+
 const API_BASE = '/api/v1/admin/users'
 
-async function parseUsersError(response: Response, fallback: string): Promise<Error> {
+async function parseUsersError(response: Response, fallback: string): Promise<UsersError> {
   try {
     const body = await response.json() as UsersApiResponse<never>
-    return new Error(body.error?.message || body.message || fallback)
+    return new UsersError(body.error?.message || body.message || fallback, response.status, body.error?.code)
   } catch {
-    return new Error(fallback)
+    return new UsersError(fallback, response.status)
   }
 }
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { createUser, deleteUser, listUsers, resetUserPassword, toggleUserStatus } from './users'
+import { createUser, deleteUser, listUsers, resetUserPassword, toggleUserStatus, UsersError } from './users'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -71,10 +71,29 @@ describe('Users API', () => {
   it('uses structured error messages', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
+      status: 409,
       json: () => Promise.resolve({ success: false, error: { message: 'user already exists', code: 'USER_EXISTS' } }),
     })
 
     await expect(createUser({ username: 'admin', password: 'password123' })).rejects.toThrow('user already exists')
+  })
+
+  it('preserves unavailable users API metadata', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, error: { message: 'configuration not available' } }),
+    })
+
+    try {
+      await listUsers()
+      throw new Error('Expected listUsers to throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(UsersError)
+      expect((error as UsersError).message).toBe('configuration not available')
+      expect((error as UsersError).status).toBe(503)
+      expect((error as UsersError).isUnavailable).toBe(true)
+    }
   })
 
   it('falls back to top-level message when structured error is absent', async () => {

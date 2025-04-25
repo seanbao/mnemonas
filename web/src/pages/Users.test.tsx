@@ -6,6 +6,7 @@ import { BrowserRouter } from 'react-router-dom'
 import { UsersPage } from './Users'
 import * as usersApi from '@/api/users'
 import * as authApi from '@/api/auth'
+import { UsersError } from '@/api/users'
 
 const mockAddToast = vi.fn()
 
@@ -18,13 +19,17 @@ vi.mock('@heroui/react', async () => {
 })
 
 // Mock the users API
-vi.mock('@/api/users', () => ({
-  listUsers: vi.fn(),
-  createUser: vi.fn(),
-  deleteUser: vi.fn(),
-  resetUserPassword: vi.fn(),
-	 toggleUserStatus: vi.fn(),
-}))
+vi.mock('@/api/users', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/users')>()
+  return {
+    ...actual,
+    listUsers: vi.fn(),
+    createUser: vi.fn(),
+    deleteUser: vi.fn(),
+    resetUserPassword: vi.fn(),
+    toggleUserStatus: vi.fn(),
+  }
+})
 
 vi.mock('@/api/auth', () => ({
   getStoredUser: vi.fn(),
@@ -394,6 +399,18 @@ describe('UsersPage', () => {
         expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
       })
     })
+
+    it('shows unavailable state when users configuration is unavailable', async () => {
+      vi.mocked(usersApi.listUsers).mockRejectedValue(new UsersError('configuration not available', 503))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('用户管理暂不可用')).toBeInTheDocument()
+        expect(screen.getByText('用户配置当前不可用，请检查系统配置状态或稍后重试。')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+      })
+    })
   })
 
   describe('validation feedback', () => {
@@ -412,6 +429,58 @@ describe('UsersPage', () => {
 
       expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
       expect(usersApi.createUser).not.toHaveBeenCalled()
+    })
+
+    it('shows unavailable toast when creating a user is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.createUser).mockRejectedValue(new UsersError('configuration not available', 503))
+
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      await waitFor(() => {
+        expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
+      })
+
+      await user.type(screen.getByLabelText(/用户名/i), 'newuser')
+      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '创建用户暂不可用',
+          description: '用户配置当前不可用，请检查系统配置状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows unavailable toast when toggling user status is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.toggleUserStatus).mockRejectedValue(new UsersError('configuration not available', 503))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('禁用用户')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('禁用用户'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '状态更新暂不可用',
+          description: '用户配置当前不可用，请检查系统配置状态或稍后重试。',
+          color: 'warning',
+        })
+      })
     })
   })
 })

@@ -3,6 +3,8 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ShareDialog } from './ShareDialog'
 
+const mockAddToast = vi.fn()
+
 // Mock HeroUI components
 vi.mock('@heroui/react', () => ({
   Modal: ({ children, isOpen }: { children: React.ReactNode; isOpen: boolean }) =>
@@ -21,7 +23,7 @@ vi.mock('@heroui/react', () => ({
   SelectItem: ({ children }: { children: React.ReactNode }) => <option>{children}</option>,
   Switch: () => <input type="checkbox" />,
   Snippet: ({ children }: { children: React.ReactNode }) => <code>{children}</code>,
-  addToast: vi.fn(),
+  addToast: (...args: unknown[]) => mockAddToast(...args),
 }))
 
 // Mock share API
@@ -146,5 +148,26 @@ describe('ShareDialog', () => {
 
     expect(await screen.findByText('分享功能已关闭')).toBeInTheDocument()
     expect(screen.getByText('当前服务已关闭分享功能。重新启用后，才能为文件或文件夹创建分享链接。')).toBeInTheDocument()
+  })
+
+  it('shows unavailable toast when share creation is temporarily unavailable', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockRejectedValue(new ShareError('share service unavailable', 503))
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '创建分享暂不可用',
+      description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+      color: 'warning',
+    })
   })
 })

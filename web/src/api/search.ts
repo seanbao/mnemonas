@@ -32,6 +32,24 @@ export interface SearchResponse {
   count: number
 }
 
+export class SearchError extends Error {
+  status: number
+  statusText: string
+  code?: string
+
+  constructor(message: string, status: number, statusText: string, code?: string) {
+    super(message)
+    this.name = 'SearchError'
+    this.status = status
+    this.statusText = statusText
+    this.code = code
+  }
+
+  get isUnavailable(): boolean {
+    return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+  }
+}
+
 interface SearchResultWire {
   name: string
   path: string
@@ -74,15 +92,19 @@ export async function searchFiles(query: string, limit: number = 50): Promise<Se
   
   if (!response.ok) {
     let message = 'Search failed'
+    let code: string | undefined
     try {
       const body = await response.json() as SearchApiResponse<never>
       message = typeof body.error === 'string'
         ? body.error
         : body.error?.message || body.message || 'Search failed'
+      if (typeof body.error !== 'string' && typeof body.error?.code === 'string') {
+        code = body.error.code
+      }
     } catch {
       // Fall back to a generic error when the backend did not return valid JSON.
     }
-    throw new Error(message)
+    throw new SearchError(message, response.status, response.statusText, code)
   }
 
   let result: unknown

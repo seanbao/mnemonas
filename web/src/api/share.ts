@@ -96,6 +96,10 @@ export class ShareError extends Error {
   get isFeatureDisabled(): boolean {
     return this.code === 'SHARE_FEATURE_DISABLED'
   }
+
+  get isUnavailable(): boolean {
+    return this.status === 503 && !this.isFeatureDisabled
+  }
 }
 
 interface ShareApiError {
@@ -344,14 +348,16 @@ export async function getPublicShare(id: string): Promise<PublicShareInfo> {
   
   if (!response.ok) {
     let message = '分享不存在或已失效'
+    let code: string | undefined
     if (response.status === 410) {
       message = '分享已过期、已禁用或访问次数已达上限'
     }
     try {
       const body = await response.json() as ShareApiResponse<never> | { error?: string; message?: string }
       message = getShareErrorMessage(body, message)
+      code = getShareErrorCode(body)
     } catch { /* ignore */ }
-    throw new ShareError(message, response.status)
+    throw new ShareError(message, response.status, code)
   }
   
   return parsePublicShareSuccess<PublicShareInfo>(response, '分享信息无效')

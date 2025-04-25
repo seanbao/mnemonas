@@ -7,6 +7,18 @@ const useIsAdminMock = vi.fn(() => true)
 
 // Mock API
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   getStorageStats: vi.fn(),
 }))
 
@@ -18,7 +30,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { getStorageStats } from '@/api/files'
+import { ApiError, getStorageStats } from '@/api/files'
 
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 
@@ -215,6 +227,17 @@ describe('StoragePage', () => {
   })
 
   describe('error handling', () => {
+    it('shows an unavailable state when storage stats return service unavailable', async () => {
+      mockGetStorageStats.mockRejectedValue(new ApiError('storage stats unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储统计暂不可用')).toBeTruthy()
+        expect(screen.getByText('存储统计服务当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+    })
+
     it('shows retryable error state on stats fetch failure', async () => {
       mockGetStorageStats.mockRejectedValue(new Error('Network error'))
       render(<StoragePage />)

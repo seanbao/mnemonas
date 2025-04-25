@@ -26,6 +26,7 @@ import {
   Filter,
 } from 'lucide-react'
 import {
+  ApiError,
   listActivity,
   getActionLabel,
   getActionColor,
@@ -117,6 +118,13 @@ const ALL_ACTIONS: ActionType[] = [
   'trash_restore', 'trash_delete', 'trash_empty',
 ]
 
+function getActivityErrorState(error: unknown): 'unavailable' | null {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return 'unavailable'
+  }
+  return null
+}
+
 export function ActivityPage() {
   const [page, setPage] = useState(1)
   const [actionFilter, setActionFilter] = useState<ActionType | ''>('')
@@ -135,6 +143,7 @@ export function ActivityPage() {
     if (!data?.total) return 1
     return Math.ceil(data.total / pageSize)
   }, [data?.total])
+  const errorState = getActivityErrorState(error)
 
   if (isLoading) {
     return (
@@ -148,6 +157,42 @@ export function ActivityPage() {
   }
 
   if (error) {
+    if (errorState === 'unavailable') {
+      return (
+        <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
+          <PageHeader
+            title="活动日志"
+            subtitle="暂不可用"
+            icon={Activity}
+            actions={
+              <Button
+                className="btn-secondary h-8 rounded-xl"
+                size="sm"
+                startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
+                onPress={() => refetch()}
+                isLoading={isRefetching}
+              >
+                刷新
+              </Button>
+            }
+          />
+
+          <div className="flex flex-1 items-center justify-center">
+            <EmptyState
+              icon={Activity}
+              title="活动日志暂不可用"
+              description="活动日志存储当前不可用，请检查系统健康状态或稍后重试。"
+              action={
+                <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                  重新加载
+                </Button>
+              }
+            />
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className="h-full flex flex-col space-y-4 p-6 overflow-auto custom-scrollbar">
         <PageHeader

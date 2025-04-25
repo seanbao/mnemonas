@@ -13,7 +13,7 @@ import {
   AlertCircle,
   Clock,
 } from 'lucide-react'
-import { getDiagnostics, getStorageStats } from '@/api/files'
+import { ApiError, getDiagnostics, getStorageStats } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -70,6 +70,21 @@ function formatMetricWithUnit(value: number | undefined, unit: string): string {
   return value === undefined ? '--' : `${value} ${unit}`
 }
 
+function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string; description: string } {
+  if (errors.some((error) => error instanceof ApiError && error.isUnavailable)) {
+    return {
+      title: '系统健康信息暂不可用',
+      description: '诊断或存储统计服务当前不可用，请检查系统状态或稍后重试。',
+    }
+  }
+
+  const firstError = errors.find(Boolean)
+  return {
+    title: '加载系统健康信息失败',
+    description: firstError instanceof Error ? firstError.message : '请稍后重试',
+  }
+}
+
 export function HealthPage() {
   const { data: diagnostics, isLoading: diagLoading, error: diagError, refetch: refetchDiag } = useQuery({
     queryKey: ['diagnostics'],
@@ -85,6 +100,7 @@ export function HealthPage() {
 
   const isLoading = diagLoading || statsLoading
   const loadError = diagError || statsError
+  const loadErrorPresentation = getHealthLoadErrorPresentation([diagError, statsError])
 
   const handleRefresh = () => {
     void refetchDiag()
@@ -133,8 +149,8 @@ export function HealthPage() {
       <div className="p-6 lg:p-8">
         <EmptyState
           icon={AlertCircle}
-          title="加载系统健康信息失败"
-          description={loadError instanceof Error ? loadError.message : '请稍后重试'}
+          title={loadErrorPresentation.title}
+          description={loadErrorPresentation.description}
           action={
             <Button className="btn-secondary rounded-xl" onPress={handleRefresh}>
               重新加载

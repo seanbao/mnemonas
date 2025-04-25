@@ -10,6 +10,13 @@ export interface BatchOperationResult {
   total: number
   succeededItems: unknown[]
   failedItems: unknown[]
+  failedErrors: unknown[]
+}
+
+export interface BatchOperationToast {
+  title: string
+  description?: string
+  color: 'success' | 'warning' | 'danger'
 }
 
 /**
@@ -27,6 +34,8 @@ export interface UseBatchOperationOptions<T, R = void> {
     /** Message when partial success. Use {succeeded} and {failed} placeholders */
     partial: string
   }
+  /** Optional custom toast builder for batch results */
+  getToast?: (result: BatchOperationResult) => BatchOperationToast | null | undefined
   /** Optional callback when operation completes */
   onComplete?: (result: BatchOperationResult) => void
 }
@@ -54,7 +63,7 @@ export interface UseBatchOperationOptions<T, R = void> {
 export function useBatchOperation<T, R = void>(
   options: UseBatchOperationOptions<T, R>
 ) {
-  const { operation, messages, onComplete } = options
+  const { operation, messages, getToast, onComplete } = options
   const [isLoading, setIsLoading] = useState(false)
 
   const execute = useCallback(
@@ -75,35 +84,41 @@ export function useBatchOperation<T, R = void>(
         const total = items.length
         const succeededItems = items.filter((_, index) => results[index]?.status === 'fulfilled')
         const failedItems = items.filter((_, index) => results[index]?.status === 'rejected')
+        const failedErrors = results
+          .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          .map((result) => result.reason)
+
+        const result = { succeeded, failed, total, succeededItems, failedItems, failedErrors }
 
         // Show appropriate toast
-        if (failed === 0) {
-          addToast({
-            title: messages.success.replace('{count}', String(succeeded)),
-            color: 'success',
-          })
-        } else if (succeeded === 0) {
-          addToast({
-            title: messages.failure.replace('{count}', String(failed)),
-            color: 'danger',
-          })
-        } else {
-          addToast({
-            title: messages.partial
-              .replace('{succeeded}', String(succeeded))
-              .replace('{failed}', String(failed)),
-            color: 'warning',
-          })
+        const toast = getToast?.(result) ?? (failed === 0
+          ? {
+              title: messages.success.replace('{count}', String(succeeded)),
+              color: 'success' as const,
+            }
+          : succeeded === 0
+            ? {
+                title: messages.failure.replace('{count}', String(failed)),
+                color: 'danger' as const,
+              }
+            : {
+                title: messages.partial
+                  .replace('{succeeded}', String(succeeded))
+                  .replace('{failed}', String(failed)),
+                color: 'warning' as const,
+              })
+
+        if (toast) {
+          addToast(toast)
         }
 
-        const result = { succeeded, failed, total, succeededItems, failedItems }
         onComplete?.(result)
         return result
       } finally {
         setIsLoading(false)
       }
     },
-    [operation, messages, onComplete]
+    [operation, messages, getToast, onComplete]
   )
 
   return { execute, isLoading }

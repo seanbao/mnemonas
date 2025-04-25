@@ -32,7 +32,7 @@ import {
 import { FileIcon } from '@/components/ui/FileIcon'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { cn, formatRelativeTime } from '@/lib/utils'
-import { useBatchOperation } from '@/lib/useBatchOperation'
+import { useBatchOperation, type BatchOperationResult } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useCanWrite } from '@/stores/auth'
 
@@ -53,6 +53,60 @@ function getFavoritesFeatureState(error: unknown): 'disabled' | 'unavailable' | 
     return 'unavailable'
   }
   return null
+}
+
+function getFavoritesActionErrorPresentation(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof FavoritesError) {
+    if (error.isFeatureDisabled) {
+      return {
+        title: '收藏功能已关闭',
+        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        color: 'warning',
+      }
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: '收藏功能暂不可用',
+        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return {
+    title: '操作失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
+function getFavoritesBatchActionToast(result: BatchOperationResult) {
+  if (result.succeeded !== 0 || result.failedErrors.length === 0) {
+    return undefined
+  }
+
+  if (result.failedErrors.every((error) => error instanceof FavoritesError && error.isFeatureDisabled)) {
+    return {
+      title: '收藏功能已关闭',
+      description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+      color: 'warning' as const,
+    }
+  }
+
+  if (result.failedErrors.every((error) => error instanceof FavoritesError && error.isUnavailable)) {
+    return {
+      title: '收藏功能暂不可用',
+      description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+      color: 'warning' as const,
+    }
+  }
+
+  return undefined
 }
 
 // Get parent directory from path
@@ -199,7 +253,7 @@ export function FavoritesPage() {
       addToast({ title: '已取消收藏', color: 'success' })
     },
     onError: (error) => {
-      addToast({ title: '取消收藏失败', description: error.message, color: 'danger' })
+      addToast(getFavoritesActionErrorPresentation(error))
     },
   })
 
@@ -214,7 +268,7 @@ export function FavoritesPage() {
       setEditingItem(null)
     },
     onError: (error) => {
-      addToast({ title: '更新备注失败', description: error.message, color: 'danger' })
+      addToast(getFavoritesActionErrorPresentation(error))
     },
   })
 
@@ -235,6 +289,7 @@ export function FavoritesPage() {
       failure: '{count} 项取消收藏失败',
       partial: '{succeeded} 项取消收藏成功，{failed} 项失败',
     },
+    getToast: getFavoritesBatchActionToast,
     onComplete: (result) => {
       const failedPaths = result.failedItems.filter((item): item is string => typeof item === 'string')
       setSelectedItems(new Set(failedPaths))

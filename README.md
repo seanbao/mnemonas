@@ -24,7 +24,7 @@ MnemoNAS 是一个简单可靠、好看好用的开源 NAS 系统。数据在自
 ### 完整功能列表
 
 | 功能模块 | 描述 |
-|---------|------|
+| --- | --- |
 | **文件管理** | 列表/网格视图、拖拽上传、批量操作、面包屑导航、缩略图预览 |
 | **版本历史** | 自动保留历史版本、版本对比、一键回退到任意版本 |
 | **回收站** | 软删除、按时间浏览、单个/批量恢复、定期自动清理 |
@@ -39,7 +39,7 @@ MnemoNAS 是一个简单可靠、好看好用的开源 NAS 系统。数据在自
 
 ## 🏗️ 架构
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                      Web UI (React)                      │
 ├─────────────────────────────────────────────────────────┤
@@ -110,7 +110,7 @@ cp mnemonas.example.toml ~/.mnemonas/config.toml
 MnemoNAS 通过 WebDAV 协议提供文件访问，支持所有主流客户端：
 
 | 平台 | 推荐客户端 | 连接地址 |
-|------|-----------|---------|
+| --- | --- | --- |
 | macOS | Finder | `http://localhost:8080/dav` |
 | Windows | 文件资源管理器 | `http://localhost:8080/dav` |
 | iOS | Files / Documents | `http://your-ip:8080/dav` |
@@ -121,7 +121,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问，支持所有主流客户端：
 
 ## 📁 项目结构
 
-```
+```text
 mnemonas/
 ├── cmd/nasd/           # Go 主程序入口
 ├── internal/           # Go 内部包
@@ -172,6 +172,7 @@ nvm use
 ```
 
 脚本会自动：
+
 - 构建 Go 控制面和 Rust 数据面
 - 启动服务并检查端口状态
 - 将日志写入 `logs/` 目录
@@ -217,7 +218,7 @@ make help
 ### 端口说明
 
 | 服务 | 端口 | 说明 |
-|------|------|------|
+| --- | --- | --- |
 | Go 控制面 (nasd) | 8080 | REST API + WebDAV |
 | Rust 数据面 HTTP | 9091 | 健康检查 + 统计 |
 | Rust 数据面 gRPC | 9090 | CAS 存储服务 |
@@ -228,7 +229,7 @@ make help
 ## 📖 文档
 
 | 文档 | 说明 |
-|------|------|
+| --- | --- |
 | [开发指南](docs/development.md) | 本地开发环境搭建与调试 |
 | [Docker 部署](docs/docker-deployment.md) | 生产环境部署指南 |
 | [挂载指南](docs/mounting-guide.md) | 各平台 WebDAV 连接教程 |
@@ -241,7 +242,7 @@ make help
 ## 🔧 脚本工具
 
 | 脚本 | 说明 |
-|------|------|
+| --- | --- |
 | [scripts/dev.sh](scripts/dev.sh) | 开发环境启动脚本 |
 | [scripts/e2e-test.sh](scripts/e2e-test.sh) | E2E 验收测试 |
 | [scripts/benchmark.sh](scripts/benchmark.sh) | 性能基准测试 |

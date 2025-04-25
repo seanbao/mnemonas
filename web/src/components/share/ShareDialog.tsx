@@ -47,6 +47,35 @@ const PERMISSION_OPTIONS = [
   { value: 'read', label: '仅查看', icon: Eye },
 ]
 
+function getShareDialogActionErrorToast(error: unknown): {
+  title: string
+  description?: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof ShareError) {
+    if (error.isFeatureDisabled) {
+      return {
+        title: '分享功能已关闭',
+        color: 'warning',
+      }
+    }
+
+    if (error.isUnavailable) {
+      return {
+        title: '创建分享暂不可用',
+        description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return {
+    title: '创建分享失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
 export function ShareDialog({ 
   isOpen, 
   onClose, 
@@ -124,11 +153,10 @@ export function ShareDialog({
       if (err instanceof ShareError && err.isFeatureDisabled) {
         setFeatureDisabled(true)
         onFeatureDisabled?.()
+        addToast(getShareDialogActionErrorToast(err))
+        return
       }
-      addToast({ 
-        title: err instanceof Error ? err.message : '创建分享失败', 
-        color: 'danger' 
-      })
+      addToast(getShareDialogActionErrorToast(err))
     } finally {
       setIsLoading(false)
     }
