@@ -160,6 +160,14 @@ export function useIsAdmin() {
   return useAuthStore((state) => state.user?.role === 'admin')
 }
 
+export function useIsGuest() {
+  return useAuthStore((state) => state.user?.role === 'guest')
+}
+
+export function useCanWrite() {
+  return useAuthStore((state) => !state.authEnabled || state.user?.role === 'admin' || state.user?.role === 'user')
+}
+
 export function useAuthLoading() {
   return useAuthStore((state) => state.isLoading)
 }
@@ -174,18 +182,20 @@ if (typeof window !== 'undefined') {
   const markerWindow = window as Window & { [AUTH_CLEARED_LISTENER_KEY]?: boolean }
 
   if (!markerWindow[AUTH_CLEARED_LISTENER_KEY]) {
-    window.addEventListener(AUTH_CLEARED_EVENT, () => {
+    window.addEventListener(AUTH_CLEARED_EVENT, (event) => {
       bumpAuthStateEpoch()
       const state = useAuthStore.getState()
       if (!state.isAuthenticated && !state.user && !state.isLoading) {
         return
       }
 
+      const detail = event instanceof CustomEvent ? event.detail : undefined
+
       useAuthStore.setState({
         user: null,
         isAuthenticated: false,
         isLoading: false,
-        error: state.error ?? '登录已过期，请重新登录',
+        error: detail?.message ?? state.error ?? '登录已过期，请重新登录',
       })
     })
 

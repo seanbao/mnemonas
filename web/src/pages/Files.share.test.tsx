@@ -4,6 +4,8 @@ import React from 'react'
 import { act } from '@testing-library/react'
 import { FilesPage } from './Files'
 
+const useCanWriteMock = vi.fn(() => true)
+
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: ({ count }: { count: number }) => ({
     getTotalSize: () => count * 72,
@@ -113,6 +115,14 @@ vi.mock('@/stores/files', () => ({
   }),
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useCanWrite: () => useCanWriteMock(),
+  }
+})
+
 import { listFiles } from '@/api/files'
 
 const mockListFiles = vi.mocked(listFiles)
@@ -120,6 +130,7 @@ const mockListFiles = vi.mocked(listFiles)
 describe('FilesPage sharing behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useCanWriteMock.mockReturnValue(true)
     mockListFiles.mockResolvedValue({
       files: [
         { name: 'folder', path: '/folder', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },

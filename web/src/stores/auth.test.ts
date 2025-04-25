@@ -131,6 +131,35 @@ describe('authStore', () => {
     expect(state.error).toBe('登录已过期，请重新登录')
   })
 
+  it('preserves explicit auth-cleared messages from the auth layer', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/users/user',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+
+    window.dispatchEvent(new CustomEvent('mnemonas:auth-cleared', {
+      detail: {
+        reason: 'disabled',
+        message: '账户已被禁用，请联系管理员',
+      },
+    }))
+
+    const state = useAuthStore.getState()
+    expect(state.user).toBeNull()
+    expect(state.isAuthenticated).toBe(false)
+    expect(state.isLoading).toBe(false)
+    expect(state.error).toBe('账户已被禁用，请联系管理员')
+  })
+
   it('fails closed when current user validation throws even if a cached user exists', async () => {
     getStoredTokenMock.mockReturnValue('access-1')
     getStoredUserMock.mockReturnValue({

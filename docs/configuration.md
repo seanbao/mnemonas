@@ -116,6 +116,7 @@ time_format = "RFC3339"
 
 - 通过设置 API 更新 `webdav` 配置后，运行中的 WebDAV handler 会立即切换到新前缀、读写模式和认证配置
 - `password = ""` 且 `auth_type = "basic"` 时，运行态继续使用已有自动生成密码，不要求重启
+- 认证启用时，`username` 不应复用现有普通用户或 guest 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
 
 **示例：**
 

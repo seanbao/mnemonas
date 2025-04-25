@@ -47,38 +47,38 @@ export interface HealthStatus {
 export interface DiagnosticsInfo {
   timestamp: string
   uptime: string
-  uptimeSecs: number
+  uptimeSecs?: number
   version: {
     name: string
     version: string
     go: string
   }
-  system: {
-    filesystemInitialized: boolean
-    dataplaneConnected: boolean
-    thumbnailServiceReady: boolean
+  system?: {
+    filesystemInitialized?: boolean
+    dataplaneConnected?: boolean
+    thumbnailServiceReady?: boolean
   }
-  memory: {
-    allocMb: number
-    totalAllocMb: number
-    sysMb: number
-    numGc: number
+  memory?: {
+    allocMb?: number
+    totalAllocMb?: number
+    sysMb?: number
+    numGc?: number
   }
-  goroutines: number
+  goroutines?: number
   filesystem?: {
-    trashItems: number
-    trashSize: number
+    trashItems?: number
+    trashSize?: number
   }
   storage?: {
-    totalChunks: number
-    totalSize: number
-    uniqueSize: number
-    dedupRatio: number
+    totalChunks?: number
+    totalSize?: number
+    uniqueSize?: number
+    dedupRatio?: number
   }
   dataplane?: {
-    healthy: boolean
-    version: string
-    uptimeSec: number
+    healthy?: boolean
+    version?: string
+    uptimeSec?: number
   }
 }
 
@@ -253,34 +253,34 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
   return {
     timestamp: data.timestamp,
     uptime: data.uptime,
-    uptimeSecs: data.uptime_secs || 0,
+    uptimeSecs: data.uptime_secs,
     version: data.version,
-    system: {
-      filesystemInitialized: data.system?.filesystem_initialized || false,
-      dataplaneConnected: data.system?.dataplane_connected || false,
-      thumbnailServiceReady: data.system?.thumbnail_service_ready || false,
-    },
-    memory: {
-      allocMb: data.memory?.alloc_mb || 0,
-      totalAllocMb: data.memory?.total_alloc_mb || 0,
-      sysMb: data.memory?.sys_mb || 0,
-      numGc: data.memory?.num_gc || 0,
-    },
-    goroutines: data.goroutines || 0,
+    system: data.system ? {
+      filesystemInitialized: data.system.filesystem_initialized,
+      dataplaneConnected: data.system.dataplane_connected,
+      thumbnailServiceReady: data.system.thumbnail_service_ready,
+    } : undefined,
+    memory: data.memory ? {
+      allocMb: data.memory.alloc_mb,
+      totalAllocMb: data.memory.total_alloc_mb,
+      sysMb: data.memory.sys_mb,
+      numGc: data.memory.num_gc,
+    } : undefined,
+    goroutines: data.goroutines,
     filesystem: data.filesystem ? {
-      trashItems: data.filesystem.trash_items || 0,
-      trashSize: data.filesystem.trash_size || 0,
+      trashItems: data.filesystem.trash_items,
+      trashSize: data.filesystem.trash_size,
     } : undefined,
     storage: data.storage ? {
-      totalChunks: data.storage.total_chunks || 0,
-      totalSize: data.storage.total_size || 0,
-      uniqueSize: data.storage.unique_size || 0,
-      dedupRatio: data.storage.dedup_ratio || 0,
+      totalChunks: data.storage.total_chunks,
+      totalSize: data.storage.total_size,
+      uniqueSize: data.storage.unique_size,
+      dedupRatio: data.storage.dedup_ratio,
     } : undefined,
     dataplane: data.dataplane ? {
-      healthy: data.dataplane.healthy || false,
-      version: data.dataplane.version || '',
-      uptimeSec: data.dataplane.uptime_sec || 0,
+      healthy: data.dataplane.healthy,
+      version: data.dataplane.version,
+      uptimeSec: data.dataplane.uptime_sec,
     } : undefined,
   }
 }

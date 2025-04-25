@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@/test/utils'
+import userEvent from '@testing-library/user-event'
 import { Sidebar } from './Sidebar'
 
 const useIsAdminMock = vi.fn(() => true)
+const mockGetStorageStats = vi.fn()
+
+vi.mock('@/api/files', () => ({
+  getStorageStats: (...args: unknown[]) => mockGetStorageStats(...args),
+}))
 
 vi.mock('@/stores/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/stores/auth')>()
@@ -15,6 +21,10 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 describe('Sidebar', () => {
   beforeEach(() => {
     useIsAdminMock.mockReturnValue(true)
+    mockGetStorageStats.mockResolvedValue({
+      totalSize: 1024,
+      dedupRatio: 0.25,
+    })
   })
 
   describe('rendering', () => {
@@ -148,6 +158,25 @@ describe('Sidebar', () => {
       const progressBar = storageSection?.querySelector('div.bg-accent-primary')
       expect(progressBar).toBeTruthy()
     })
+
+    it('shows a retryable error state when storage stats fail to load', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetStorageStats
+        .mockRejectedValueOnce(new Error('stats unavailable'))
+        .mockResolvedValueOnce({
+          totalSize: 2048,
+          dedupRatio: 0.1,
+        })
+
+      render(<Sidebar />)
+
+      expect(await screen.findByText('统计加载失败')).toBeTruthy()
+      expect(screen.getByText('stats unavailable')).toBeTruthy()
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      expect(await screen.findByText('2 KB')).toBeTruthy()
+    })
   })
 
   describe('collapsed mode', () => {
@@ -176,6 +205,7 @@ describe('Sidebar', () => {
 
     expect(screen.queryByText('守护')).toBeFalsy()
     expect(screen.queryByText('用户')).toBeFalsy()
+    expect(screen.queryByText('健康')).toBeFalsy()
     expect(screen.queryByText('设置')).toBeFalsy()
     expect(screen.getByText('活动')).toBeTruthy()
   })

@@ -296,4 +296,135 @@ describe('auth API', () => {
 
     window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
   })
+
+  it('clears local auth state when an authenticated request reports USER_DISABLED', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'user',
+      role: 'user',
+      home_dir: '/users/user',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code: 'USER_DISABLED',
+          message: 'user account is disabled',
+        },
+      }),
+    })
+
+    const response = await authFetch('/api/v1/files')
+
+    expect(response.status).toBe(403)
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    const event = authCleared.mock.calls[0]?.[0] as CustomEvent<{ message?: string; reason?: string }>
+    expect(event.detail).toEqual({
+      reason: 'disabled',
+      message: 'user account is disabled',
+    })
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('clears local auth state when current user lookup reports USER_DISABLED', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'user',
+      role: 'user',
+      home_dir: '/users/user',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code: 'USER_DISABLED',
+          message: 'user account is disabled',
+        },
+      }),
+    })
+
+    await expect(getCurrentUser()).resolves.toBeNull()
+
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('clears local auth state when current user lookup returns invalid JSON', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'user',
+      role: 'user',
+      home_dir: '/users/user',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new Error('invalid json')),
+    })
+
+    await expect(getCurrentUser()).resolves.toBeNull()
+
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
+
+  it('clears local auth state when current user lookup returns no user payload', async () => {
+    const authCleared = vi.fn()
+    window.addEventListener(AUTH_CLEARED_EVENT, authCleared)
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'user',
+      role: 'user',
+      home_dir: '/users/user',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ success: true }),
+    })
+
+    await expect(getCurrentUser()).resolves.toBeNull()
+
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+    expect(authCleared).toHaveBeenCalledTimes(1)
+
+    window.removeEventListener(AUTH_CLEARED_EVENT, authCleared)
+  })
 })

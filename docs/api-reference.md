@@ -1479,6 +1479,7 @@ PUT /api/v1/settings
 - 请求中的 `trash.retention_days` 不能为负数，`trash.max_size` 必须是正整数
 - 请求中的 `versioning.max_versioned_size` 必须是正整数，`versioning.auto_versioned_extensions` 每项必须以 `.` 开头，`versioning.auto_versioned_filenames` 不能包含空项
 - `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
+- 认证启用时，`webdav.username` 不得复用现有非 admin 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
@@ -1508,6 +1509,7 @@ GET /api/v1/settings/webdav-credentials
 ```
 
 **说明**:
+- 认证启用时，该端点仅对 `admin` 角色开放
 - 该端点返回当前运行中的 WebDAV 服务凭据，并与最近一次成功应用到运行态的 WebDAV 配置保持一致
 - `password` 仅在使用自动生成密码时可返回
 

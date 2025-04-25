@@ -33,6 +33,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { cn, formatRelativeTime } from '@/lib/utils'
 import { useBatchOperation } from '@/lib/useBatchOperation'
 import { PageHeader } from '@/components/ui/PageHeader'
+import { useCanWrite } from '@/stores/auth'
 
 // Get filename from path
 function getFileName(path: string): string {
@@ -51,6 +52,7 @@ function getParentPath(path: string): string {
 function FavoriteRow({
   item,
   isSelected,
+  canWrite,
   onSelect,
   onNavigate,
   onRemove,
@@ -58,6 +60,7 @@ function FavoriteRow({
 }: {
   item: Favorite
   isSelected: boolean
+  canWrite: boolean
   onSelect: () => void
   onNavigate: () => void
   onRemove: () => void
@@ -74,10 +77,14 @@ function FavoriteRow({
         isSelected && "bg-accent-primary/10"
       )}
     >
-      <Checkbox
-        isSelected={isSelected}
-        onValueChange={onSelect}
-      />
+      {canWrite ? (
+        <Checkbox
+          isSelected={isSelected}
+          onValueChange={onSelect}
+        />
+      ) : (
+        <div className="w-6 shrink-0" />
+      )}
       <div className="w-8 flex items-center justify-center">
         <FileIcon name={fileName} isDir={isDir} size={24} variant="bare" />
       </div>
@@ -120,29 +127,33 @@ function FavoriteRow({
         >
           <ExternalLink size={16} />
         </Button>
-        <Button
-          isIconOnly
-          size="sm"
-          variant="light"
-          onPress={onEditNote}
-          aria-label={`编辑备注 ${item.path}`}
-          title="编辑备注"
-          className="rounded-xl"
-        >
-          <Edit3 size={16} />
-        </Button>
-        <Button
-          isIconOnly
-          size="sm"
-          variant="light"
-          color="danger"
-          onPress={onRemove}
-          aria-label={`取消收藏 ${item.path}`}
-          title="取消收藏"
-          className="rounded-xl"
-        >
-          <Trash2 size={16} />
-        </Button>
+        {canWrite && (
+          <Button
+            isIconOnly
+            size="sm"
+            variant="light"
+            onPress={onEditNote}
+            aria-label={`编辑备注 ${item.path}`}
+            title="编辑备注"
+            className="rounded-xl"
+          >
+            <Edit3 size={16} />
+          </Button>
+        )}
+        {canWrite && (
+          <Button
+            isIconOnly
+            size="sm"
+            variant="light"
+            color="danger"
+            onPress={onRemove}
+            aria-label={`取消收藏 ${item.path}`}
+            title="取消收藏"
+            className="rounded-xl"
+          >
+            <Trash2 size={16} />
+          </Button>
+        )}
       </div>
     </div>
   )
@@ -151,6 +162,7 @@ function FavoriteRow({
 export function FavoritesPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const canWrite = useCanWrite()
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [editingItem, setEditingItem] = useState<Favorite | null>(null)
   const [noteValue, setNoteValue] = useState('')
@@ -192,12 +204,13 @@ export function FavoritesPage() {
   })
 
   const handleSelectAll = useCallback(() => {
+    if (!canWrite) return
     if (selectedItems.size === favoriteItems.length) {
       setSelectedItems(new Set())
     } else {
       setSelectedItems(new Set(favoriteItems.map(item => item.path)))
     }
-  }, [favoriteItems, selectedItems.size])
+  }, [canWrite, favoriteItems, selectedItems.size])
 
   // Batch remove using custom hook
   const { execute: executeBatchRemove, isLoading: isBatchRemoving } = useBatchOperation({
@@ -215,10 +228,11 @@ export function FavoritesPage() {
   })
 
   const handleBatchRemove = useCallback(async () => {
+    if (!canWrite) return
     const paths = Array.from(selectedItems)
     if (paths.length === 0) return
     await executeBatchRemove(paths)
-  }, [selectedItems, executeBatchRemove])
+  }, [canWrite, selectedItems, executeBatchRemove])
 
   const handleNavigate = useCallback((path: string) => {
     // Navigate to the file location in Files page
@@ -234,16 +248,18 @@ export function FavoritesPage() {
   }, [navigate])
 
   const handleEditNote = useCallback((item: Favorite) => {
+    if (!canWrite) return
     setEditingItem(item)
     setNoteValue(item.note || '')
     onEditOpen()
-  }, [onEditOpen])
+  }, [canWrite, onEditOpen])
 
   const handleSaveNote = useCallback(() => {
+    if (!canWrite) return
     if (editingItem) {
       updateNoteMutation.mutate({ path: editingItem.path, note: noteValue })
     }
-  }, [editingItem, noteValue, updateNoteMutation])
+  }, [canWrite, editingItem, noteValue, updateNoteMutation])
 
   if (isLoading) {
     return (
@@ -290,7 +306,7 @@ export function FavoritesPage() {
       />
 
       {/* Selection bar */}
-      {selectedItems.size > 0 && (
+      {canWrite && selectedItems.size > 0 && (
         <div className="flex items-center gap-4 px-4 py-2.5 bg-accent-primary/10 backdrop-blur-sm rounded-xl border border-divider shadow-[var(--shadow-soft)]">
           <div className="w-8 h-8 rounded-full bg-accent-primary/15 flex items-center justify-center">
             <span className="text-sm font-bold text-accent-primary">{selectedItems.size}</span>
@@ -317,14 +333,18 @@ export function FavoritesPage() {
       {/* List header */}
       {favoriteItems.length > 0 && (
         <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
-          <Checkbox
-            isSelected={selectedItems.size === favoriteItems.length && favoriteItems.length > 0}
-            isIndeterminate={selectedItems.size > 0 && selectedItems.size < favoriteItems.length}
-            onValueChange={handleSelectAll}
-            classNames={{
-              wrapper: "before:border-divider",
-            }}
-          />
+          {canWrite ? (
+            <Checkbox
+              isSelected={selectedItems.size === favoriteItems.length && favoriteItems.length > 0}
+              isIndeterminate={selectedItems.size > 0 && selectedItems.size < favoriteItems.length}
+              onValueChange={handleSelectAll}
+              classNames={{
+                wrapper: "before:border-divider",
+              }}
+            />
+          ) : (
+            <div className="w-6 shrink-0" />
+          )}
           <div className="w-8" />
           <div className="flex-1">名称</div>
           <div className="max-w-[200px]">备注</div>
@@ -341,7 +361,9 @@ export function FavoritesPage() {
               key={item.path}
               item={item}
               isSelected={selectedItems.has(item.path)}
+              canWrite={canWrite}
               onSelect={() => {
+                if (!canWrite) return
                 const newSet = new Set(selectedItems)
                 if (newSet.has(item.path)) {
                   newSet.delete(item.path)
@@ -351,7 +373,10 @@ export function FavoritesPage() {
                 setSelectedItems(newSet)
               }}
               onNavigate={() => handleNavigate(item.path)}
-              onRemove={() => removeMutation.mutate(item.path)}
+              onRemove={() => {
+                if (!canWrite) return
+                removeMutation.mutate(item.path)
+              }}
               onEditNote={() => handleEditNote(item)}
             />
           ))

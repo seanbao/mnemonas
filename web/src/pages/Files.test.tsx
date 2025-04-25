@@ -3,8 +3,11 @@ import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { FilesPage } from './Files'
 import * as HeroUI from '@heroui/react'
+import * as favoritesApi from '@/api/favorites'
 
 const mockAddToast = vi.fn()
+const useCanWriteMock = vi.fn(() => true)
+const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' }
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
@@ -15,6 +18,11 @@ vi.mock('@/api/files', () => ({
   moveFile: vi.fn(),
   copyFile: vi.fn(),
   downloadFile: vi.fn(),
+}))
+
+vi.mock('@/api/favorites', () => ({
+  checkFavorites: vi.fn(),
+  toggleFavorite: vi.fn(),
 }))
 
 // Mock navigation
@@ -65,8 +73,22 @@ vi.mock('@/stores/clipboard', () => ({
   useClipboardStore: () => mockClipboardState,
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useCanWrite: () => useCanWriteMock(),
+    useUser: () => mockUser,
+  }
+})
+
+vi.mock('@/components/share', () => ({
+  ShareDialog: () => null,
+}))
+
 import { listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
 import { downloadFile } from '@/api/files'
+import { checkFavorites, toggleFavorite } from '@/api/favorites'
 
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
@@ -74,10 +96,18 @@ const mockDeleteFile = vi.mocked(deleteFile)
 const mockMoveFile = vi.mocked(moveFile)
 const mockCopyFile = vi.mocked(copyFile)
 const mockDownloadFile = vi.mocked(downloadFile)
+const mockCheckFavorites = vi.mocked(checkFavorites)
+const mockToggleFavorite = vi.mocked(toggleFavorite)
 
 describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useCanWriteMock.mockReturnValue(true)
+    mockUser.id = 'u1'
+    mockUser.username = 'admin'
+    mockUser.role = 'admin'
+    mockUser.email = 'admin@local'
+    mockUser.homeDir = '/'
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockFilesStoreState.selectedFiles = new Set<string>()
     mockFilesStoreState.currentPath = '/'
@@ -93,6 +123,12 @@ describe('FilesPage', () => {
     mockClipboardState.clear.mockClear()
     mockClipboardState.hasPaths.mockReturnValue(false)
     mockDownloadFile.mockResolvedValue(undefined)
+    mockCheckFavorites.mockResolvedValue({
+      '/documents': false,
+      '/photo.jpg': false,
+      '/video.mp4': false,
+    })
+    mockToggleFavorite.mockResolvedValue(true)
     // Default mock response
     mockListFiles.mockResolvedValue({
       files: [
@@ -167,6 +203,43 @@ describe('FilesPage', () => {
       expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: true })
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/')
     })
+
+    it('redirects non-admin root browsing to the assigned home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = '/tester'
+      mockFilesStoreState.currentPath = '/'
+      mockLocationPathname = '/files'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/tester')
+      })
+    })
+
+    it('redirects non-admin out-of-home file routes back to the assigned home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = '/tester'
+      mockFilesStoreState.currentPath = '/'
+      mockLocationPathname = '/files/shared'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '仅可访问主目录内的文件',
+          color: 'warning',
+        }))
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/tester')
+      })
+
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/shared')
+      expect(mockListFiles).not.toHaveBeenCalled()
+    })
   })
 
   describe('toolbar', () => {
@@ -194,6 +267,23 @@ describe('FilesPage', () => {
         const buttons = document.querySelectorAll('button')
         expect(buttons.length).toBeGreaterThan(2)
       })
+    })
+
+    it('hides guest write actions from the selection toolbar but keeps batch download', async () => {
+      useCanWriteMock.mockReturnValue(false)
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+      })
+
+      expect(screen.queryByText('批量移动')).toBeNull()
+      expect(screen.queryByText('批量复制')).toBeNull()
+      expect(screen.queryByText('批量删除')).toBeNull()
+      expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+      expect(screen.getByText('访客账户为只读，仅可查看和下载')).toBeTruthy()
     })
   })
 
@@ -695,6 +785,31 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockListFiles).toHaveBeenCalledTimes(1)
         expect(screen.getByText('这里空空如也')).toBeTruthy()
+      })
+    })
+
+    it('shows a retryable warning when favorites status fails to load', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCheckFavorites
+        .mockRejectedValueOnce(new Error('favorites unavailable'))
+        .mockResolvedValueOnce({
+          '/documents': false,
+          '/photo.jpg': true,
+          '/video.mp4': false,
+        })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('收藏状态加载失败')).toBeTruthy()
+        expect(screen.getByText('favorites unavailable')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '重新加载收藏状态' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载收藏状态' }))
+
+      await waitFor(() => {
+        expect(screen.queryByText('收藏状态加载失败')).toBeNull()
       })
     })
   })

@@ -5,6 +5,7 @@ import * as favoritesApi from '@/api/favorites'
 
 const mockNavigate = vi.fn()
 const mockBatchExecute = vi.fn()
+const useCanWriteMock = vi.fn(() => true)
 let mockBatchResult = {
   succeeded: 1,
   failed: 0,
@@ -42,6 +43,14 @@ vi.mock('@/lib/useBatchOperation', () => ({
   }),
 }))
 
+vi.mock('@/stores/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/auth')>()
+  return {
+    ...actual,
+    useCanWrite: () => useCanWriteMock(),
+  }
+})
+
 const mockFavorites = [
   {
     path: '/docs/report.pdf',
@@ -59,6 +68,7 @@ const mockFavorites = [
 describe('FavoritesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    useCanWriteMock.mockReturnValue(true)
     mockNavigate.mockClear()
     mockBatchExecute.mockClear()
     mockBatchResult = {
@@ -161,5 +171,25 @@ describe('FavoritesPage', () => {
       expect(mockBatchExecute).toHaveBeenCalledWith(['/docs/report.pdf', '/photos/'])
       expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
     })
+  })
+
+  it('hides guest write controls but keeps navigation', async () => {
+    const user = userEvent.setup()
+    useCanWriteMock.mockReturnValue(false)
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByRole('button', { name: /编辑备注/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消收藏/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('取消收藏')).not.toBeInTheDocument()
+
+    const navigateButton = screen.getByRole('button', { name: '打开文件 /docs/report.pdf' })
+    await user.click(navigateButton)
+
+    expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
   })
 })
