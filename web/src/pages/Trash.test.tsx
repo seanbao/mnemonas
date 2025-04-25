@@ -206,6 +206,29 @@ describe('TrashPage', () => {
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
+
+    it('shows unknown retention copy when retention settings are missing', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/自动清理设置未知/)).toBeTruthy()
+      })
+    })
   })
 
   describe('restore functionality', () => {

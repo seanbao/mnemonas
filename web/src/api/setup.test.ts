@@ -25,6 +25,15 @@ describe('Setup API', () => {
     expect(result.webdav_auth_type).toBe('basic')
   })
 
+  it('rejects malformed successful setup status responses', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, is_first_run: true }),
+    } as Response)
+
+    await expect(getSetupStatus()).rejects.toThrow('Invalid setup status response')
+  })
+
   it('reads legacy string error for acknowledge setup', async () => {
     vi.mocked(authFetch).mockResolvedValueOnce({
       ok: false,
@@ -41,5 +50,14 @@ describe('Setup API', () => {
     } as Response)
 
     await expect(acknowledgeSetup()).rejects.toThrow('failed to acknowledge setup')
+  })
+
+  it('rejects malformed successful acknowledge responses', async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ message: 'acknowledged' }),
+    } as Response)
+
+    await expect(acknowledgeSetup()).rejects.toThrow('Invalid acknowledge setup response')
   })
 })

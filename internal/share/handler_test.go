@@ -288,6 +288,41 @@ func TestCreateShare_InvalidNegativeExpiresInReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestCreateShare_RejectsUnknownFields(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		statInfo: &storage.FileInfo{Path: "/docs/report.pdf", Name: "report.pdf", Size: 256},
+	})
+	body := []byte(`{"path":"/docs/report.pdf","type":"file","unexpected":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.CreateShare(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_REQUEST" {
+		t.Fatalf("expected INVALID_REQUEST code, got %v", errorPayload["code"])
+	}
+	if len(store.ListAll()) != 0 {
+		t.Fatal("expected share creation to be rejected before persistence")
+	}
+}
+
 func TestCreateShare_NegativeMaxAccessReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -712,6 +747,72 @@ func TestUpdateShare_InvalidExpiresInReturnsBadRequest(t *testing.T) {
 	}
 	if payload.Error.Message != "invalid expires_in format" {
 		t.Fatalf("unexpected error message: %q", payload.Error.Message)
+	}
+}
+
+func TestUpdateShare_ReturnsUpdatedShare(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:        "/docs/report.pdf",
+		Type:        ShareTypeFile,
+		CreatedBy:   "user1",
+		Description: "before",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"enabled":false,"description":"after"}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var payload struct {
+		Success bool      `json:"success"`
+		Data    ShareInfo `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", recorder.Body.String())
+	}
+	if payload.Data.ID != share.ID {
+		t.Fatalf("expected updated share id %q, got %q", share.ID, payload.Data.ID)
+	}
+	if payload.Data.Description != "after" {
+		t.Fatalf("expected updated description, got %q", payload.Data.Description)
+	}
+	if payload.Data.Enabled {
+		t.Fatal("expected updated share to be disabled")
+	}
+	if !strings.Contains(payload.Data.URL, share.ID) {
+		t.Fatalf("expected share url to include id %q, got %q", share.ID, payload.Data.URL)
+	}
+
+	reloaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if reloaded.Description != "after" {
+		t.Fatalf("expected stored description to be updated, got %q", reloaded.Description)
+	}
+	if reloaded.Enabled {
+		t.Fatal("expected stored share to be disabled")
 	}
 }
 
@@ -1146,6 +1247,51 @@ func TestAccessShareWithPassword_FolderInfo(t *testing.T) {
 	}
 }
 
+func TestAccessShareWithPassword_RejectsUnknownFields(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItems: []*storage.FileInfo{{Path: "/docs/a.txt", Name: "a.txt"}},
+	})
+
+	body := []byte(`{"password":"secret","unexpected":true}`)
+	req := newRouteRequest(http.MethodPost, "/s/"+share.ID, share.ID, body)
+	recorder := httptest.NewRecorder()
+
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+	payload := decodeResponseBody(t, recorder)
+	errorPayload, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %v", payload)
+	}
+	if errorPayload["code"] != "INVALID_REQUEST" {
+		t.Fatalf("expected INVALID_REQUEST code, got %v", errorPayload["code"])
+	}
+	if len(recorder.Result().Cookies()) != 0 {
+		t.Fatal("expected no access cookie on rejected request")
+	}
+}
+
 func TestAccessShareWithPassword_BackendFailureReturnsInternalServerErrorWithoutCookie(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1185,6 +1331,21 @@ func TestAccessShareWithPassword_BackendFailureReturnsInternalServerErrorWithout
 	}
 	if len(recorder.Result().Cookies()) != 0 {
 		t.Fatalf("expected no access cookie on failed share info load, got %d cookies", len(recorder.Result().Cookies()))
+	}
+}
+
+func TestWriteShareSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
+	recorder := httptest.NewRecorder()
+
+	writeShareSuccess(recorder, http.StatusOK, map[string]any{
+		"bad": make(chan int),
+	}, "ok")
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", recorder.Code)
+	}
+	if recorder.Body.String() != "Internal Server Error\n" {
+		t.Fatalf("expected internal server error body, got %q", recorder.Body.String())
 	}
 }
 

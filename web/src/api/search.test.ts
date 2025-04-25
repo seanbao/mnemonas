@@ -82,4 +82,55 @@ describe('Search API', () => {
 
     await expect(searchFiles('report')).rejects.toThrow('Search failed')
   })
+
+  it('rejects malformed successful wrapped search responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          results: [],
+        },
+      }),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('rejects wrapped search responses when success is false', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: false,
+        data: {
+          query: 'report',
+          count: 0,
+          results: [],
+        },
+      }),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('still accepts legacy raw search responses when valid', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        query: 'report',
+        count: 1,
+        results: [{ name: 'report.pdf', path: '/docs/report.pdf', is_dir: false, size: 100, mod_time: '2026-03-14T00:00:00Z' }],
+      }),
+    })
+
+    const result = await searchFiles('report')
+
+    expect(result.count).toBe(1)
+    expect(result.results[0]).toMatchObject({
+      name: 'report.pdf',
+      path: '/docs/report.pdf',
+      isDir: false,
+      modTime: '2026-03-14T00:00:00Z',
+    })
+  })
 })

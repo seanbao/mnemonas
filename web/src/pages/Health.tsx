@@ -114,7 +114,7 @@ export function HealthPage() {
       icon: Database,
       title: '存储对象',
       value: stats?.totalObjects?.toString() ?? '--',
-      subtitle: stats?.totalSize ? formatBytes(stats.totalSize) : undefined,
+      subtitle: stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : undefined,
       gradient: 'from-emerald-500/20 to-cyan-500/20',
     },
     {
@@ -191,6 +191,20 @@ export function HealthPage() {
               status={diagnostics?.system?.thumbnailServiceReady ?? 'unknown'} 
               label="缩略图服务" 
             />
+            <StatusIndicator 
+              status={diagnostics?.system?.maintenanceHistoryReady ?? 'unknown'} 
+              label="维护历史" 
+            />
+            <StatusIndicator 
+              status={diagnostics?.system?.activityLogReady ?? 'unknown'} 
+              label="活动日志" 
+            />
+            {diagnostics?.system?.favoritesStoreReady !== undefined && (
+              <StatusIndicator 
+                status={diagnostics.system.favoritesStoreReady} 
+                label="收藏存储" 
+              />
+            )}
           </div>
 
           {diagnostics?.version && (
@@ -246,7 +260,7 @@ export function HealthPage() {
             <div>
               <div className="flex justify-between text-sm mb-2">
                 <span className="text-default-500">总存储</span>
-                <span className="data-value">{stats ? formatBytes(stats.totalSize) : '--'}</span>
+                <span className="data-value">{stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : '--'}</span>
               </div>
               <Progress 
                 isIndeterminate

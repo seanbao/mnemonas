@@ -191,6 +191,20 @@ describe('UsersPage', () => {
         expect(screen.getByText('2')).toBeInTheDocument()
       })
     })
+
+    it('derives total users from the list when the summary field is missing', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: mockUsers,
+        total: undefined as unknown as number,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('3')).toBeInTheDocument()
+      })
+    })
   })
 
   describe('create user modal', () => {

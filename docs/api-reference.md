@@ -9,6 +9,7 @@
 - **Base URL**: `http://localhost:8080` (默认)
 - **Content-Type**: `application/json` (除文件上传外)
 - **认证**: 支持 JWT Token 认证（可通过配置启用/禁用）
+- JSON 请求体采用严格解析：写接口会拒绝未知字段和拼接的多个 JSON 值，并返回 `400 invalid request body`
 
 ### 认证方式
 
@@ -296,6 +297,9 @@ GET /health
 }
 ```
 
+**说明**:
+- 当已配置的数据面、缩略图缓存、维护历史、活动日志或收藏存储子系统未能初始化时，`status` 会降级为 `degraded`
+
 ### 版本信息
 
 获取系统版本信息。
@@ -365,6 +369,7 @@ GET /api/v1/stats
 
 **说明**:
 - `total_files` 统计文件索引中的文件数量，不包含目录。
+- 当文件计数或数据面统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
 
 ### 诊断信息
 
@@ -390,7 +395,10 @@ GET /api/v1/diagnostics
     "system": {
       "filesystem_initialized": true,
       "dataplane_connected": true,
-      "thumbnail_service_ready": true
+      "thumbnail_service_ready": true,
+      "maintenance_history_ready": true,
+      "activity_log_ready": true,
+      "favorites_store_ready": true
     },
     "memory": {
       "alloc_mb": 50,
@@ -418,6 +426,9 @@ GET /api/v1/diagnostics
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
+
+**说明**:
+- 当回收站统计暂不可用时，`filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
 
 ### 指标信息
 
@@ -585,17 +596,28 @@ POST /api/v1/files-move
 }
 ```
 
-### 复制文件
+### 复制资源
 
 ```
 POST /api/v1/files-copy
 ```
+
+说明：该 REST 端点支持复制单个文件或递归复制目录。目标路径必须不存在；如需 `Overwrite: T/F` 语义，请使用 WebDAV `COPY`。
 
 **请求体**:
 ```json
 {
   "from": "/documents/source.txt",
   "to": "/documents/copy.txt"
+}
+```
+
+目录复制示例：
+
+```json
+{
+  "from": "/projects/demo",
+  "to": "/projects/demo-copy"
 }
 ```
 
@@ -607,7 +629,7 @@ POST /api/v1/files-copy
     "from": "/documents/source.txt",
     "to": "/documents/copy.txt"
   },
-  "message": "file copied successfully",
+  "message": "resource copied successfully",
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
@@ -890,6 +912,8 @@ POST /api/v1/shares
 **字段说明**:
 - `type`: `file` | `folder`
 - `permission`: `read`
+- 响应中的 `url` 为动态生成字段：当 `share.base_url` 已配置时返回 `<base_url>/s/{id}`；未配置时返回相对路径 `/s/{id}`
+- `share.base_url` 配置错误不会破坏分享记录本身，但会让返回给前端/调用方的公开链接不可直接访问
 
 **响应示例**:
 ```json
@@ -954,11 +978,17 @@ GET /api/v1/shares
 GET /api/v1/shares/{id}
 ```
 
+**说明**:
+- 返回中的 `url` 字段遵循相同规则：优先使用 `share.base_url`，否则返回相对路径 `/s/{id}`
+
 ### 更新分享
 
 ```
 PUT /api/v1/shares/{id}
 ```
+
+**说明**:
+- 更新分享不会改变 `id`；响应中的 `url` 会根据当前运行时 `share.base_url` 重新生成
 
 **响应示例**:
 ```json
@@ -1210,6 +1240,8 @@ PATCH /api/v1/favorites/{path}
 
 **说明**:
 - 启用认证时，管理员可查看全量活动日志；普通用户仅返回当前账号自己的活动记录，`user` 查询参数不会越权查看其他账号
+- 未配置活动日志时，接口返回空列表
+- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
 ```
 GET /api/v1/activity
@@ -1251,6 +1283,8 @@ GET /api/v1/activity
 
 **说明**:
 - 启用认证时，管理员可查看全局统计；普通用户仅返回当前账号自己的活动统计
+- 未配置活动日志时，接口返回零统计
+- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`
 
 ```
 GET /api/v1/activity/stats
@@ -1291,6 +1325,9 @@ DELETE /api/v1/activity
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
+
+**说明**:
+- 若活动日志已配置但初始化失败或当前不可用，接口返回 `503 Service Unavailable`，而不是伪装成清理成功
 
 ---
 
@@ -1558,7 +1595,7 @@ GET /api/v1/maintenance/scrub
 
 ### 执行数据校验
 
-启动数据完整性校验任务。
+执行数据完整性校验，并在当前请求内返回本次校验结果摘要。
 
 ```
 POST /api/v1/maintenance/scrub
@@ -1572,6 +1609,33 @@ POST /api/v1/maintenance/scrub
 ```
 
 如果不提供 `hashes`，将校验所有对象。
+
+**说明**:
+- 此接口为同步执行，不会先返回 `running` 再异步完成
+- 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "total_objects": 1000,
+    "valid_objects": 998,
+    "corrupted_objects": 1,
+    "missing_objects": 1,
+    "total_size": 5368709120,
+    "duration_ms": 5000,
+    "errors": [
+      {
+        "hash": "abc123...",
+        "error_type": "corrupted",
+        "message": "Hash mismatch"
+      }
+    ]
+  },
+  "timestamp": "2024-01-15T10:00:05Z"
+}
+```
 
 ### 列出存储对象
 
@@ -1623,6 +1687,8 @@ POST /api/v1/maintenance/gc
 - GC 会跳过 grace period 内的新对象，避免删除正在上传或刚写入的数据块
 - 当对象缺少可用时间戳时，也会按保守策略计入 `skipped_by_grace`，不会直接进入删除集合
 - dataplane 会优先使用对象创建时间，无法获取时回退到修改时间
+- `deleted_count` 表示实际删除成功的对象数量
+- 当 `dry_run=false` 且存在部分失败时，响应会额外返回 `failed_count` 和 `delete_failures`
 
 **响应示例**:
 ```json
@@ -1636,7 +1702,33 @@ POST /api/v1/maintenance/gc
     "unreferenced": 100,
     "unreferenced_size": 104857600,
     "skipped_by_grace": 5,
-    "deleted": 0
+    "deleted_count": 0
+  },
+  "timestamp": "2024-01-15T10:00:00Z"
+}
+```
+
+执行删除时，如果存在部分失败：
+
+```json
+{
+  "success": true,
+  "data": {
+    "dry_run": false,
+    "grace_period_hours": 0,
+    "total_objects": 1000,
+    "referenced": 900,
+    "unreferenced": 100,
+    "unreferenced_size": 104857600,
+    "skipped_by_grace": 0,
+    "deleted_count": 99,
+    "failed_count": 1,
+    "delete_failures": [
+      {
+        "hash": "abc123...",
+        "message": "failed to delete chunk"
+      }
+    ]
   },
   "timestamp": "2024-01-15T10:00:00Z"
 }

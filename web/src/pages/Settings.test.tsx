@@ -201,6 +201,19 @@ describe('SettingsPage', () => {
   })
 
   describe('webdav settings', () => {
+    it('describes WebDAV changes as taking effect immediately', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByText('配置 WebDAV 协议接入；保存后会立即更新运行中的 WebDAV 配置')).toBeTruthy()
+        expect(screen.getByText('配置访问凭据；保存后会立即作用到运行中的 WebDAV 服务')).toBeTruthy()
+        expect(screen.getByText('用于挂载当前运行中的 WebDAV 服务；保存成功后这里会显示最新的运行配置')).toBeTruthy()
+      })
+    })
+
     it('allows changing WebDAV auth type and saves it', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -225,6 +238,18 @@ describe('SettingsPage', () => {
   })
 
   describe('dataplane settings', () => {
+    it('explains CDC and dataplane connection effect timing', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('配置内容定义分块算法；保存后需重启数据面服务，且仅影响后续新写入数据')).toBeTruthy()
+        expect(screen.getByText('配置与 Rust 数据面的 gRPC 连接；地址变更会立即校验并切换，超时与重试设置用于后续连接建立')).toBeTruthy()
+      })
+    })
+
     it('allows editing dataplane connection settings and saves them', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -413,6 +438,17 @@ describe('SettingsPage', () => {
   })
 
   describe('versioning settings', () => {
+    it('describes versioning rules as affecting future writes immediately', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await waitFor(() => {
+        expect(screen.getByText('配置默认自动版本化规则；保存后会立即影响后续新写入文件的版本策略')).toBeTruthy()
+      })
+    })
+
     it('allows editing auto-versioning rules and saves them', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)

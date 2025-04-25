@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, userEvent } from '@/test/utils'
 import { FavoritesPage } from './Favorites'
 import * as favoritesApi from '@/api/favorites'
+import { FavoritesError } from '@/api/favorites'
 
 const mockNavigate = vi.fn()
 const mockBatchExecute = vi.fn()
@@ -22,11 +23,15 @@ vi.mock('react-router-dom', async () => {
   }
 })
 
-vi.mock('@/api/favorites', () => ({
-  listFavorites: vi.fn(),
-  removeFavorite: vi.fn(),
-  updateFavoriteNote: vi.fn(),
-}))
+vi.mock('@/api/favorites', async () => {
+  const actual = await vi.importActual<typeof import('@/api/favorites')>('@/api/favorites')
+  return {
+    ...actual,
+    listFavorites: vi.fn(),
+    removeFavorite: vi.fn(),
+    updateFavoriteNote: vi.fn(),
+  }
+})
 
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: (options: { onComplete?: (result: typeof mockBatchResult) => void }) => ({
@@ -106,6 +111,28 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(screen.getByText('加载收藏列表失败')).toBeInTheDocument()
       expect(screen.getByText('Network error')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+  })
+
+  it('shows a disabled state when the favorites feature is turned off', async () => {
+    vi.mocked(favoritesApi.listFavorites).mockRejectedValue(new FavoritesError('favorites feature disabled', 503, 'FAVORITES_FEATURE_DISABLED'))
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('收藏功能已关闭')).toBeInTheDocument()
+      expect(screen.getByText('当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('加载收藏列表失败')).not.toBeInTheDocument()
+  })
+
+  it('shows an unavailable state when the favorites store is unhealthy', async () => {
+    vi.mocked(favoritesApi.listFavorites).mockRejectedValue(new FavoritesError('favorites feature unavailable', 503, 'FAVORITES_UNAVAILABLE'))
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('收藏功能暂不可用')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
     })
   })

@@ -41,9 +41,10 @@ import { FileIcon } from '@/components/ui/FileIcon'
 
 interface ShareManagerProps {
   showAllShares?: boolean
+  featureEnabled?: boolean
 }
 
-export function ShareManager({ showAllShares = false }: ShareManagerProps) {
+export function ShareManager({ showAllShares = false, featureEnabled = true }: ShareManagerProps) {
   const [shares, setShares] = useState<Share[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -69,8 +70,25 @@ export function ShareManager({ showAllShares = false }: ShareManagerProps) {
   }, [showAllShares])
 
   useEffect(() => {
+  if (!featureEnabled) {
+    setIsLoading(false)
+    setLoadError(null)
+    setShares([])
+    return
+  }
     loadShares()
-  }, [loadShares])
+  }, [featureEnabled, loadShares])
+
+  if (!featureEnabled) {
+    return (
+      <EmptyState
+        icon={Link2}
+        title="分享功能已关闭"
+        description="当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。"
+        className="py-12"
+      />
+    )
+  }
 
   const handleCopy = async (share: Share) => {
     try {

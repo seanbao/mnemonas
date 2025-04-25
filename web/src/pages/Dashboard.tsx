@@ -22,7 +22,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { getHealth, getStorageStats } from '@/api/files'
+import { getAppVersion, getHealth, getStorageStats } from '@/api/files'
 import { listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -160,18 +160,25 @@ export function DashboardPage() {
     refetchInterval: 30000,
   })
 
+  const { data: appVersion, isLoading: versionLoading, error: versionError, refetch: refetchVersion } = useQuery({
+    queryKey: ['app-version'],
+    queryFn: getAppVersion,
+    staleTime: 5 * 60 * 1000,
+  })
+
   const { data: recentActivity, error: recentActivityError, refetch: refetchRecentActivity } = useQuery({
     queryKey: ['recent-activity'],
     queryFn: () => listActivity({ limit: 5 }),
     refetchInterval: 30000,
   })
 
-  const isLoading = healthLoading || statsLoading
-  const hasPartialError = Boolean(healthError || statsError || recentActivityError)
+  const isLoading = healthLoading || statsLoading || versionLoading
+  const hasPartialError = Boolean(healthError || statsError || versionError || recentActivityError)
 
   const handleRetry = () => {
     void refetchHealth()
     void refetchStats()
+    void refetchVersion()
     void refetchRecentActivity()
   }
 
@@ -371,7 +378,7 @@ export function DashboardPage() {
               { label: '总对象数', value: formatCount(stats?.totalObjects) },
               { label: '总大小', value: formatStorageSize(stats?.totalSize) },
               { label: '去重率', value: stats?.dedupRatio !== undefined ? `${(stats.dedupRatio * 100).toFixed(1)}%` : '--' },
-              { label: '版本', value: health?.version ?? '--' },
+              { label: '版本', value: appVersion?.version ?? health?.version ?? '--' },
             ].map((item, i) => (
               <div key={i} className="p-3 rounded-lg bg-content2/50 text-center">
                 <p className="text-2xl font-medium text-foreground data-value">{item.value}</p>

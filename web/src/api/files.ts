@@ -6,6 +6,9 @@ export type { FileItem }
 
 const API_BASE = '/api/v1'
 
+export const MAX_UPLOAD_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024
+export const MAX_UPLOAD_FILE_SIZE_LABEL = '10 GB'
+
 export interface FileListResponse {
   files: FileItem[]
   path: string
@@ -28,19 +31,25 @@ export function versionToDisplayFormat(v: VersionInfo): { modTime: string; size:
 }
 
 export interface StorageStats {
-  totalSize: number
-  totalObjects: number
-  uniqueSize: number
-  dedupRatio: number
+  totalSize?: number
+  totalObjects?: number
+  uniqueSize?: number
+  dedupRatio?: number
 }
 
 export interface HealthStatus {
   status: string
-  version: string
   uptime: string
-  storage: {
-    dataDir: string
-    writable: boolean
+  timestamp?: string
+  version?: string
+  storage?: {
+    dataDir?: string
+    writable?: boolean
+  }
+  dataplane?: {
+    healthy?: boolean
+    version?: string
+    uptime?: number
   }
 }
 
@@ -57,6 +66,9 @@ export interface DiagnosticsInfo {
     filesystemInitialized?: boolean
     dataplaneConnected?: boolean
     thumbnailServiceReady?: boolean
+    maintenanceHistoryReady?: boolean
+    activityLogReady?: boolean
+     favoritesStoreReady?: boolean
   }
   memory?: {
     allocMb?: number
@@ -81,6 +93,8 @@ export interface DiagnosticsInfo {
     uptimeSec?: number
   }
 }
+
+export type AppVersionInfo = DiagnosticsInfo['version']
 
 // API Error class for better error handling
 export class ApiError extends Error {
@@ -144,10 +158,33 @@ async function handleResponse<T>(response: Response, errorPrefix: string): Promi
 
 async function handleWrappedResponse<T>(response: Response, errorPrefix: string): Promise<T> {
   const body = await handleResponse<ApiResponseWrapper<T>>(response, errorPrefix)
-  if (!body || typeof body !== 'object' || !('data' in body)) {
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    body.success !== true ||
+    !('data' in body)
+  ) {
     throw new Error('服务器返回了无效的数据')
   }
   return body.data
+}
+
+async function throwApiErrorFromResponse(response: Response, fallback: string): Promise<never> {
+  let message = fallback
+  try {
+    const body = await response.json() as { error?: string | { message?: string }; message?: string }
+    if (typeof body.error === 'string') {
+      message = body.error || fallback
+    } else if (body.error?.message) {
+      message = body.error.message
+    } else if (body.message) {
+      message = body.message
+    }
+  } catch {
+    // Keep the fallback message when the body is missing or invalid.
+  }
+
+  throw new ApiError(message, response.status, response.statusText)
 }
 
 // API Response wrapper from backend
@@ -158,13 +195,224 @@ interface ApiResponseWrapper<T> {
   timestamp: string
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isDiagnosticsVersionShape(value: unknown): value is DiagnosticsInfo['version'] {
+  return isRecord(value)
+    && typeof value.name === 'string'
+    && typeof value.version === 'string'
+    && typeof value.go === 'string'
+}
+
+function isHealthShape(value: unknown): value is HealthStatus {
+  if (!isRecord(value) || typeof value.status !== 'string' || typeof value.uptime !== 'string') {
+    return false
+  }
+
+  if (!isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
+    return false
+  }
+
+  if (value.storage !== undefined) {
+    if (!isRecord(value.storage)
+      || !isStringOrUndefined(value.storage.dataDir)
+      || !isBooleanOrUndefined(value.storage.writable)) {
+      return false
+    }
+  }
+
+  if (value.dataplane !== undefined) {
+    if (!isRecord(value.dataplane)
+      || !isBooleanOrUndefined(value.dataplane.healthy)
+      || !isStringOrUndefined(value.dataplane.version)
+      || !isNumberOrUndefined(value.dataplane.uptime)) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === 'boolean'
+}
+
+function isNumberOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || typeof value === 'number'
+}
+
+function isStringOrUndefined(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === 'string'
+}
+
+function isDiagnosticsShape(value: unknown): value is {
+  timestamp: string
+  uptime: string
+  uptime_secs?: number
+  version: DiagnosticsInfo['version']
+  system?: {
+    filesystem_initialized?: boolean
+    dataplane_connected?: boolean
+    thumbnail_service_ready?: boolean
+    maintenance_history_ready?: boolean
+    activity_log_ready?: boolean
+     favorites_store_ready?: boolean
+  }
+  memory?: {
+    alloc_mb?: number
+    total_alloc_mb?: number
+    sys_mb?: number
+    num_gc?: number
+  }
+  goroutines?: number
+  filesystem?: {
+    trash_items?: number
+    trash_size?: number
+  }
+  storage?: {
+    total_chunks?: number
+    total_size?: number
+    unique_size?: number
+    dedup_ratio?: number
+  }
+  dataplane?: {
+    healthy?: boolean
+    version?: string
+    uptime_sec?: number
+  }
+} {
+  if (!isRecord(value) || typeof value.timestamp !== 'string' || typeof value.uptime !== 'string' || !isDiagnosticsVersionShape(value.version)) {
+    return false
+  }
+
+  if (!isNumberOrUndefined(value.uptime_secs) || !isNumberOrUndefined(value.goroutines)) {
+    return false
+  }
+
+  if (value.system !== undefined) {
+    if (!isRecord(value.system)
+      || !isBooleanOrUndefined(value.system.filesystem_initialized)
+      || !isBooleanOrUndefined(value.system.dataplane_connected)
+      || !isBooleanOrUndefined(value.system.thumbnail_service_ready)
+      || !isBooleanOrUndefined(value.system.maintenance_history_ready)
+      || !isBooleanOrUndefined(value.system.activity_log_ready)
+      || !isBooleanOrUndefined(value.system.favorites_store_ready)) {
+      return false
+    }
+  }
+
+  if (value.memory !== undefined) {
+    if (!isRecord(value.memory)
+      || !isNumberOrUndefined(value.memory.alloc_mb)
+      || !isNumberOrUndefined(value.memory.total_alloc_mb)
+      || !isNumberOrUndefined(value.memory.sys_mb)
+      || !isNumberOrUndefined(value.memory.num_gc)) {
+      return false
+    }
+  }
+
+  if (value.filesystem !== undefined) {
+    if (!isRecord(value.filesystem)
+      || !isNumberOrUndefined(value.filesystem.trash_items)
+      || !isNumberOrUndefined(value.filesystem.trash_size)) {
+      return false
+    }
+  }
+
+  if (value.storage !== undefined) {
+    if (!isRecord(value.storage)
+      || !isNumberOrUndefined(value.storage.total_chunks)
+      || !isNumberOrUndefined(value.storage.total_size)
+      || !isNumberOrUndefined(value.storage.unique_size)
+      || !isNumberOrUndefined(value.storage.dedup_ratio)) {
+      return false
+    }
+  }
+
+  if (value.dataplane !== undefined) {
+    if (!isRecord(value.dataplane)
+      || !isBooleanOrUndefined(value.dataplane.healthy)
+      || !isStringOrUndefined(value.dataplane.version)
+      || !isNumberOrUndefined(value.dataplane.uptime_sec)) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function isScrubErrorShape(value: unknown): value is ScrubError {
+  return isRecord(value)
+    && typeof value.hash === 'string'
+    && typeof value.error_type === 'string'
+    && typeof value.message === 'string'
+}
+
+function isScrubResultShape(value: unknown): value is ScrubResult {
+  if (!isRecord(value) || typeof value.has_result !== 'boolean') {
+    return false
+  }
+
+  if (value.message !== undefined && typeof value.message !== 'string') {
+    return false
+  }
+  if (value.id !== undefined && typeof value.id !== 'string') {
+    return false
+  }
+  if (value.start_time !== undefined && typeof value.start_time !== 'string') {
+    return false
+  }
+  if (value.end_time !== undefined && typeof value.end_time !== 'string') {
+    return false
+  }
+  if (value.status !== undefined && value.status !== 'running' && value.status !== 'completed' && value.status !== 'failed') {
+    return false
+  }
+
+  const numericKeys = [
+    'total_objects',
+    'valid_objects',
+    'corrupted_objects',
+    'missing_objects',
+    'total_size',
+    'duration_ms',
+  ] as const
+  for (const key of numericKeys) {
+    if (value[key] !== undefined && typeof value[key] !== 'number') {
+      return false
+    }
+  }
+
+  if (value.error_message !== undefined && typeof value.error_message !== 'string') {
+    return false
+  }
+  if (value.errors !== undefined && (!Array.isArray(value.errors) || !value.errors.every(isScrubErrorShape))) {
+    return false
+  }
+
+  return true
+}
+
+function isRunScrubResponseShape(value: unknown): value is Omit<ScrubResult, 'has_result'> {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const candidate: ScrubResult = {
+    has_result: true,
+    ...value,
+  }
+  return isScrubResultShape(candidate)
+}
+
 // List files in a directory
 export async function listFiles(path: string): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/files${encodedPath}`)
-  const result = await handleResponse<ApiResponseWrapper<FileListResponse>>(response, '获取文件列表失败')
-  return result.data
+  return handleWrappedResponse<FileListResponse>(response, '获取文件列表失败')
 }
 
 // Get file versions
@@ -172,8 +420,8 @@ export async function getVersions(path: string): Promise<VersionInfo[]> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/versions${encodedPath}`)
-  const result = await handleResponse<ApiResponseWrapper<{path: string, versions: VersionInfo[]}>>(response, '获取版本历史失败')
-  return result.data.versions
+  const data = await handleWrappedResponse<{path: string, versions: VersionInfo[]}>(response, '获取版本历史失败')
+  return data.versions
 }
 
 // Delete a file (soft delete)
@@ -184,7 +432,7 @@ export async function deleteFile(path: string): Promise<void> {
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError('删除文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '删除文件失败')
   }
 }
 
@@ -192,16 +440,16 @@ export async function deleteFile(path: string): Promise<void> {
 export async function getStorageStats(): Promise<StorageStats> {
   const response = await authFetch(`${API_BASE}/stats`)
   const data = await handleWrappedResponse<{
-    total_size: number
-    total_chunks: number
-    unique_size: number
-    dedup_ratio: number
+    total_size?: number
+    total_chunks?: number
+    unique_size?: number
+    dedup_ratio?: number
   }>(response, '获取存储统计失败')
   return {
-    totalSize: data.total_size || 0,
-    totalObjects: data.total_chunks || 0,
-    uniqueSize: data.unique_size || 0,
-    dedupRatio: data.dedup_ratio || 0,
+    totalSize: data.total_size,
+    totalObjects: data.total_chunks,
+    uniqueSize: data.unique_size,
+    dedupRatio: data.dedup_ratio,
   }
 }
 
@@ -211,45 +459,37 @@ export async function getHealth(): Promise<HealthStatus> {
   if (!response.ok) {
     throw new ApiError('获取健康状态失败', response.status, response.statusText)
   }
-  return response.json()
+
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  if (!isHealthShape(body)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  return body
+}
+
+export async function getAppVersion(): Promise<AppVersionInfo> {
+  const response = await authFetch(`${API_BASE}/version`)
+  const data = await handleWrappedResponse<unknown>(response, '获取版本信息失败')
+  if (!isDiagnosticsVersionShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
 }
 
 // Get diagnostics info (direct response, not wrapped)
 export async function getDiagnostics(): Promise<DiagnosticsInfo> {
   const response = await authFetch(`${API_BASE}/diagnostics`)
-  const data = await handleWrappedResponse<{
-    timestamp: string
-    uptime: string
-    uptime_secs?: number
-    version: DiagnosticsInfo['version']
-    system?: {
-      filesystem_initialized?: boolean
-      dataplane_connected?: boolean
-      thumbnail_service_ready?: boolean
-    }
-    memory?: {
-      alloc_mb?: number
-      total_alloc_mb?: number
-      sys_mb?: number
-      num_gc?: number
-    }
-    goroutines?: number
-    filesystem?: {
-      trash_items?: number
-      trash_size?: number
-    }
-    storage?: {
-      total_chunks?: number
-      total_size?: number
-      unique_size?: number
-      dedup_ratio?: number
-    }
-    dataplane?: {
-      healthy?: boolean
-      version?: string
-      uptime_sec?: number
-    }
-  }>(response, '获取诊断信息失败')
+  const data = await handleWrappedResponse<unknown>(response, '获取诊断信息失败')
+  if (!isDiagnosticsShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
   return {
     timestamp: data.timestamp,
     uptime: data.uptime,
@@ -259,6 +499,9 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
       filesystemInitialized: data.system.filesystem_initialized,
       dataplaneConnected: data.system.dataplane_connected,
       thumbnailServiceReady: data.system.thumbnail_service_ready,
+      maintenanceHistoryReady: data.system.maintenance_history_ready,
+      activityLogReady: data.system.activity_log_ready,
+      favoritesStoreReady: data.system.favorites_store_ready,
     } : undefined,
     memory: data.memory ? {
       allocMb: data.memory.alloc_mb,
@@ -293,7 +536,7 @@ export async function createDirectory(path: string): Promise<void> {
     method: 'POST',
   })
   if (!response.ok) {
-    throw new ApiError('创建文件夹失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '创建文件夹失败')
   }
 }
 
@@ -338,6 +581,11 @@ export async function uploadFile(
           }
           return
         }
+      }
+
+      if (xhr.status === 413) {
+        reject(new ApiError(`文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`, xhr.status, xhr.statusText))
+        return
       }
 
       reject(new ApiError('上传失败', xhr.status, xhr.statusText))
@@ -433,7 +681,7 @@ export async function downloadFile(
   const response = await authFetch(url)
 
   if (!response.ok) {
-    throw new ApiError('下载文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '下载文件失败')
   }
 
   const fallbackFilename = options?.filename ?? normalizedPath.split('/').filter(Boolean).pop() ?? 'download'
@@ -468,7 +716,7 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
     }),
   })
   if (!response.ok) {
-    throw new ApiError('移动文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '移动文件失败')
   }
 }
 
@@ -488,7 +736,7 @@ export async function copyFile(fromPath: string, toPath: string): Promise<void> 
     }),
   })
   if (!response.ok) {
-    throw new ApiError('复制文件失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '复制文件失败')
   }
 }
 
@@ -500,7 +748,7 @@ export async function restoreVersion(path: string, hash: string): Promise<void> 
     method: 'POST',
   })
   if (!response.ok) {
-    throw new ApiError('恢复版本失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '恢复版本失败')
   }
 }
 
@@ -534,8 +782,8 @@ export interface TrashListResponse {
 // List trash items
 export async function listTrash(): Promise<TrashListResponse> {
   const response = await authFetch(`${API_BASE}/trash/`)
-  const result = await handleResponse<ApiResponseWrapper<{
-    items: Array<{
+  const data = await handleWrappedResponse<{
+    items?: Array<{
       id: string
       originalPath: string
       deletedAt: string
@@ -545,15 +793,15 @@ export async function listTrash(): Promise<TrashListResponse> {
       hash?: string
       hadVersions?: boolean
     }>
-    count: number
-    totalSize: number
+    count?: number
+    totalSize?: number
     retentionDays?: number
     retentionEnabled?: boolean
     retentionMaxSize?: number
-  }>>(response, '获取回收站列表失败')
-  
-  return {
-    items: result.data.items.map(item => ({
+  }>(response, '获取回收站列表失败')
+
+  const items = Array.isArray(data.items)
+    ? data.items.map(item => ({
       id: item.id,
       originalPath: item.originalPath,
       deletedAt: item.deletedAt,
@@ -562,12 +810,16 @@ export async function listTrash(): Promise<TrashListResponse> {
       size: item.size,
       hash: item.hash,
       versions: item.hadVersions ? 1 : 0,
-    })),
-    count: result.data.count,
-    totalSize: result.data.totalSize,
-    retentionDays: result.data.retentionDays,
-    retentionEnabled: result.data.retentionEnabled,
-    retentionMaxSize: result.data.retentionMaxSize,
+    }))
+    : []
+  
+  return {
+    items,
+    count: data.count ?? items.length,
+    totalSize: data.totalSize ?? items.reduce((sum, item) => sum + item.size, 0),
+    retentionDays: data.retentionDays,
+    retentionEnabled: data.retentionEnabled,
+    retentionMaxSize: data.retentionMaxSize,
   }
 }
 
@@ -581,12 +833,7 @@ export async function restoreFromTrash(id: string, newPath?: string): Promise<vo
     method: 'POST',
   })
   if (!response.ok) {
-    let message = '恢复文件失败'
-    try {
-      const body = await response.json()
-      if (body.message) message = body.message
-    } catch { /* ignore */ }
-    throw new ApiError(message, response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '恢复文件失败')
   }
 }
 
@@ -596,7 +843,7 @@ export async function deleteFromTrash(id: string): Promise<void> {
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError('永久删除失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '永久删除失败')
   }
 }
 
@@ -605,10 +852,10 @@ export async function emptyTrash(): Promise<EmptyTrashResult> {
   const response = await authFetch(`${API_BASE}/trash/`, {
     method: 'DELETE',
   })
-  const result = await handleResponse<ApiResponseWrapper<{deleted_count: number, partial?: boolean}>>(response, '清空回收站失败')
+  const data = await handleWrappedResponse<{deleted_count: number, partial?: boolean}>(response, '清空回收站失败')
   return {
-    deletedCount: result.data.deleted_count,
-    partial: !!result.data.partial,
+    deletedCount: data.deleted_count,
+    partial: !!data.partial,
   }
 }
 
@@ -640,8 +887,11 @@ export interface ScrubResult {
 // Get last scrub result
 export async function getScrubResult(): Promise<ScrubResult> {
   const response = await authFetch(`${API_BASE}/maintenance/scrub`)
-  const result = await handleResponse<ApiResponseWrapper<ScrubResult>>(response, '获取校验结果失败')
-  return result.data
+  const data = await handleWrappedResponse<unknown>(response, '获取校验结果失败')
+  if (!isScrubResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
 }
 
 // Run scrub operation
@@ -651,28 +901,31 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,
   })
-  const result = await handleResponse<ApiResponseWrapper<Omit<ScrubResult, 'has_result'>>>(response, '执行数据校验失败')
-  return {
-    has_result: true,
-    ...result.data,
+  const data = await handleWrappedResponse<unknown>(response, '执行数据校验失败')
+  if (!isRunScrubResponseShape(data)) {
+    throw new Error('服务器返回了无效的数据')
   }
+
+  const result: ScrubResult = {
+    has_result: true,
+    ...data,
+  }
+  if (!result.status) {
+    result.status = 'completed'
+  }
+  return result
 }
 
 // Download diagnostics export
 export async function downloadDiagnosticsExport(): Promise<void> {
   const response = await authFetch(`${API_BASE}/diagnostics-export`)
   if (!response.ok) {
-    throw new ApiError('导出诊断信息失败', response.status, response.statusText)
+    await throwApiErrorFromResponse(response, '导出诊断信息失败')
   }
-  
-  // Get filename from Content-Disposition header or generate one
-  const contentDisposition = response.headers.get('Content-Disposition')
-  let filename = `mnemonas-diagnostics-${new Date().toISOString().slice(0, 10)}.json`
-  if (contentDisposition) {
-    const match = contentDisposition.match(/filename=(.+)/)
-    if (match) filename = match[1]
-  }
-  
+
+  const fallbackFilename = `mnemonas-diagnostics-${new Date().toISOString().slice(0, 10)}.json`
+  const filename = getFilenameFromContentDisposition(response.headers.get('Content-Disposition'), fallbackFilename)
+
   const blob = await response.blob()
   triggerBrowserDownload(blob, filename)
 }
