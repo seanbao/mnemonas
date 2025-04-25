@@ -23,7 +23,7 @@
 | ---- | -------- | -------- | ---- |
 | **Go** | 1.25.9 | 1.25.9+ | Go 控制面开发 |
 | **Rust** | 1.92 | 1.92.x | Rust 数据面开发 |
-| **Node.js** | 20.19 或 22.12 | 22.x | 前端开发 |
+| **Node.js** | `^20.19.0` 或 `>=22.12.0` | `.nvmrc` 指定的 22.x | 前端开发 |
 | **protoc** | 3.20 | 3.20.1（CI 固定） | 重新生成 protobuf 代码；普通 dataplane/Docker 构建使用已提交生成代码 |
 | **make** | 3.x | 4.x | 构建自动化 |
 
@@ -36,7 +36,7 @@
 | cargo-watch | Rust 热重载 |
 | nvm | Node.js 版本管理 |
 
-项目根目录 `.go-version` 和 `.nvmrc` 分别提示 Go 与 Node.js 开发版本，Rust 版本要求写在 `dataplane/Cargo.toml` 的 `rust-version` 字段中。前端相关命令默认通过 `nvm use` 进入 `.nvmrc` 指定版本执行。
+项目根目录 `.go-version` 和 `.nvmrc` 分别提示 Go 与 Node.js 开发版本，Rust 版本要求写在 `dataplane/Cargo.toml` 的 `rust-version` 字段中。前端相关命令默认通过 `nvm use` 进入 `.nvmrc` 指定版本执行，并由 `web/package.json` 与 `web/scripts/check-node.cjs` 校验实际 Node.js engine 范围。
 
 ---
 
@@ -129,7 +129,7 @@ scoop install go rust nodejs-lts protobuf
 # 验证版本
 go version          # go version go1.25.x ...
 rustc --version     # rustc 1.92.x ...
-node --version      # v22.x.x
+node --version      # v22.12.0 或更新的 22.x
 npm --version       # 10.x.x
 protoc --version    # libprotoc 3.20+（CI 固定 3.20.1）
 
@@ -485,7 +485,7 @@ cargo tarpaulin --out Html
 
 ### 前端测试
 
-> 前端工具链需 Node.js 20.19+ 或 22.12+；推荐使用项目 `.nvmrc` 指定的 22.x。
+> 前端工具链需 Node.js `^20.19.0` 或 `>=22.12.0`；推荐使用项目 `.nvmrc` 指定的 22.x。
 
 ```bash
 cd web
