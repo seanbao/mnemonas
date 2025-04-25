@@ -87,10 +87,9 @@ test.describe('搜索页面响应式', () => {
 
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
-    await page.goto('/search')
-    await page.waitForLoadState('networkidle')
+    await ensureAuthenticatedAt(page, '/search')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    const searchInput = page.getByPlaceholder(/输入文件名/i)
+    await expect(searchInput).toBeVisible({ timeout: 3000 })
   })
 })

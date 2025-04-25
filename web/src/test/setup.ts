@@ -256,13 +256,7 @@ Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
 global.URL.createObjectURL = vi.fn(() => 'mock-url')
 global.URL.revokeObjectURL = vi.fn()
 
-global.fetch = vi.fn().mockResolvedValue({
-  ok: true,
-  status: 200,
-  statusText: 'OK',
-  headers: new Headers(),
-  json: async () => ({}),
-  text: async () => '',
-  blob: async () => new Blob(),
-})
+global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+  throw new Error(`Unexpected fetch in test setup: ${String(input)}`)
+}) as typeof fetch
 

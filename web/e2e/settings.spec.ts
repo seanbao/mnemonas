@@ -82,9 +82,8 @@ test.describe('设置选项卡切换', () => {
       await advancedTab.click()
       await page.waitForTimeout(500)
 
-      // 检查 CDC 相关设置项
-      const cdcSection = page.getByText(/CDC 分块|内容定义分块/i)
-      await expect(cdcSection).toBeVisible({ timeout: 5000 })
+      const cdcHeading = page.getByRole('heading', { name: 'CDC 分块参数' })
+      await expect(cdcHeading).toBeVisible({ timeout: 5000 })
     }
   })
 })
@@ -116,19 +115,17 @@ test.describe('设置表单交互', () => {
 test.describe('设置页面响应式', () => {
   test('移动端布局', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 })
-    await page.goto('/settings')
-    await page.waitForLoadState('networkidle')
+    await ensureAuthenticatedAt(page, '/settings')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    const title = page.getByRole('heading', { name: /系统设置|设置/i })
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
-    await page.goto('/settings')
-    await page.waitForLoadState('networkidle')
+    await ensureAuthenticatedAt(page, '/settings')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    const title = page.getByRole('heading', { name: /系统设置|设置/i })
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 })

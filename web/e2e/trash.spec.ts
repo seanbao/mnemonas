@@ -83,18 +83,13 @@ test.describe('回收站单项操作', () => {
   test('每个项目应有恢复和删除按钮', async ({ page }) => {
     // 等待页面稳定
     await page.waitForTimeout(1000)
-    
-    // 如果有项目，检查操作按钮
-    const trashItem = page.locator('[class*="trash"], [class*="item"]').first()
-    const isItemVisible = await trashItem.isVisible({ timeout: 2000 }).catch(() => false)
 
-    test.skip(!isItemVisible, '当前测试数据中没有回收站条目')
+    const emptyState = page.getByText(/回收站是空的|暂无|empty/i)
+    const isEmpty = await emptyState.isVisible({ timeout: 1000 }).catch(() => false)
+    test.skip(isEmpty, '当前测试数据中没有回收站条目')
 
-    await trashItem.hover()
-    await page.waitForTimeout(500)
-
-    const restoreBtn = trashItem.getByRole('button', { name: /恢复/i })
-    const deleteBtn = trashItem.getByRole('button', { name: /删除/i })
+    const restoreBtn = page.getByRole('button', { name: /恢复/i }).first()
+    const deleteBtn = page.getByRole('button', { name: /永久删除|删除/i }).first()
 
     const hasRestore = await restoreBtn.isVisible({ timeout: 1000 }).catch(() => false)
     const hasDelete = await deleteBtn.isVisible({ timeout: 1000 }).catch(() => false)
@@ -142,10 +137,9 @@ test.describe('回收站页面响应式', () => {
 
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
-    await page.goto('/trash')
-    await page.waitForLoadState('networkidle')
+    await ensureAuthenticatedAt(page, '/trash')
 
-    const body = page.locator('body')
-    await expect(body).toBeVisible()
+    const title = page.getByText('回收站').first()
+    await expect(title).toBeVisible({ timeout: 5000 })
   })
 })

@@ -29,6 +29,11 @@ describe('Sidebar', () => {
       expect(screen.getByText('相册')).toBeTruthy()
     })
 
+    it('renders search link', () => {
+      render(<Sidebar />)
+      expect(screen.getByText('搜索')).toBeTruthy()
+    })
+
     it('renders versions link with badge', () => {
       render(<Sidebar />)
       expect(screen.getByText('时光回溯')).toBeTruthy()
@@ -74,6 +79,12 @@ describe('Sidebar', () => {
       expect(link).toHaveAttribute('href', '/album')
     })
 
+    it('has correct href for search', () => {
+      render(<Sidebar />)
+      const link = screen.getByText('搜索').closest('a')
+      expect(link).toHaveAttribute('href', '/search')
+    })
+
     it('has correct href for versions', () => {
       render(<Sidebar />)
       const link = screen.getByText('时光回溯').closest('a')
@@ -101,7 +112,7 @@ describe('Sidebar', () => {
     it('has correct href for health', () => {
       render(<Sidebar />)
       const link = screen.getByText('健康').closest('a')
-      expect(link).toHaveAttribute('href', '/health')
+      expect(link).toHaveAttribute('href', '/system-health')
     })
 
     it('has correct href for settings', () => {

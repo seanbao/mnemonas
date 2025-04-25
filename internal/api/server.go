@@ -364,10 +364,10 @@ func (s *Server) setupRoutes() {
 		// Share endpoints (require auth)
 		if s.shareHandler != nil {
 			r.Route("/shares", func(r chi.Router) {
-				r.Get("/", s.shareHandler.ListShares)
+				r.Get("/", s.handleListShares)
 				r.Post("/", s.handleCreateShareWithActivity)
-				r.Get("/{id}", s.shareHandler.GetShare)
-				r.Put("/{id}", s.shareHandler.UpdateShare)
+				r.Get("/{id}", s.handleGetShare)
+				r.Put("/{id}", s.handleUpdateShare)
 				r.Delete("/{id}", s.handleDeleteShareWithActivity)
 			})
 		}
@@ -2987,9 +2987,13 @@ func (s *Server) isFavoritesFeatureEnabled() bool {
 	return s.config != nil && s.config.Favorites.Enabled
 }
 
+func (s *Server) writeShareFeatureDisabled(w http.ResponseWriter, status int) {
+	writeShareErrorResponse(w, status, "share feature disabled", "SHARE_FEATURE_DISABLED")
+}
+
 func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
-		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
 	}
 	s.shareHandler.AccessShare(w, r)
@@ -2997,7 +3001,7 @@ func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
-		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
 	}
 	s.shareHandler.AccessShareWithPassword(w, r)
@@ -3005,7 +3009,7 @@ func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
-		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
 	}
 	s.shareHandler.DownloadShare(w, r)
@@ -3013,7 +3017,7 @@ func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
-		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
 	}
 	s.shareHandler.DownloadShareFile(w, r)
@@ -3021,10 +3025,34 @@ func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleListShareItems(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
-		writeShareErrorResponse(w, http.StatusGone, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
 	}
 	s.shareHandler.ListShareItems(w, r)
+}
+
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
+		return
+	}
+	s.shareHandler.ListShares(w, r)
+}
+
+func (s *Server) handleGetShare(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
+		return
+	}
+	s.shareHandler.GetShare(w, r)
+}
+
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
+		return
+	}
+	s.shareHandler.UpdateShare(w, r)
 }
 
 func (s *Server) handleListFavorites(w http.ResponseWriter, r *http.Request) {
@@ -3078,7 +3106,7 @@ func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request
 // handleCreateShareWithActivity wraps share creation to log activity
 func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
-		writeShareErrorResponse(w, http.StatusServiceUnavailable, "share feature disabled", "SHARE_FEATURE_DISABLED")
+		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -3107,6 +3135,11 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 
 // handleDeleteShareWithActivity wraps share deletion to log activity
 func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Request) {
+	if !s.isShareFeatureEnabled() {
+		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
+		return
+	}
+
 	sharePath := ""
 	if s.shareStore != nil {
 		if shareInfo, err := s.shareStore.Get(chi.URLParam(r, "id")); err == nil {

@@ -6,6 +6,7 @@ package versionstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -196,6 +197,34 @@ func TestStore_DeleteOldVersions(t *testing.T) {
 	versions, _ := s.GetVersions(ctx, "/test.txt")
 	if len(versions) != 3 {
 		t.Errorf("After cleanup: %d versions, want 3", len(versions))
+	}
+}
+
+func TestStore_DeleteOldVersions_ZeroLimitsKeepAllVersions(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 55; i++ {
+		hash := fmt.Sprintf("hash-%02d", i)
+		if err := s.AddVersion(ctx, "/unlimited.txt", hash, int64(i+1), ""); err != nil {
+			t.Fatalf("AddVersion(%s) error: %v", hash, err)
+		}
+	}
+
+	hashes, err := s.DeleteOldVersions(ctx, "/unlimited.txt", 0, 0)
+	if err != nil {
+		t.Fatalf("DeleteOldVersions() error: %v", err)
+	}
+	if len(hashes) != 0 {
+		t.Fatalf("DeleteOldVersions() deleted %d hashes, want 0", len(hashes))
+	}
+
+	versions, err := s.GetVersions(ctx, "/unlimited.txt")
+	if err != nil {
+		t.Fatalf("GetVersions() error: %v", err)
+	}
+	if len(versions) != 55 {
+		t.Fatalf("GetVersions() returned %d versions, want 55", len(versions))
 	}
 }
 
@@ -840,6 +869,49 @@ func TestStore_RunGC_ReturnsChunkRefDeleteErrors(t *testing.T) {
 	}
 	if len(remaining) != 1 || remaining[0] != "orphan-ref-fail" {
 		t.Fatalf("expected orphan to remain when ref deletion fails, got %v", remaining)
+	}
+}
+
+func TestStore_RunGC_CleansChunkRefWhenObjectAlreadyMissing(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO chunk_refs (hash, ref_count, size, created_at) VALUES (?, 0, ?, ?)`, "orphan-missing", 30, time.Now().Unix()); err != nil {
+		t.Fatalf("insert orphan-missing error: %v", err)
+	}
+
+	s.deleteObjectFn = func(hash string) error {
+		if hash != "orphan-missing" {
+			t.Fatalf("unexpected hash %q", hash)
+		}
+		return ErrNotFound
+	}
+
+	deleted, freed, err := s.RunGC(ctx, 10)
+	if err != nil {
+		t.Fatalf("RunGC() error = %v, want nil", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected zero object deletions when CAS object is already missing, got %d", deleted)
+	}
+	if freed != 0 {
+		t.Fatalf("expected zero freed bytes when CAS object is already missing, got %d", freed)
+	}
+
+	remaining, getErr := s.GetOrphanedChunks(ctx, 10)
+	if getErr != nil {
+		t.Fatalf("GetOrphanedChunks() error: %v", getErr)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected orphan ref to be cleaned up, got %v", remaining)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunk_refs WHERE hash = ?`, "orphan-missing").Scan(&count); err != nil {
+		t.Fatalf("chunk ref lookup error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected orphan chunk ref to be removed, count=%d", count)
 	}
 }
 
