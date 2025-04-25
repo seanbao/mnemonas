@@ -699,7 +699,7 @@ describe('useThemeStore', () => {
 
 **运行命令**：
 
-> 前端工具链需 Node.js 20.19+ 或 22.12+；推荐使用项目 `.nvmrc` 指定的 22.x。
+> 前端工具链需 Node.js `^20.19.0` 或 `>=22.12.0`；推荐使用项目 `.nvmrc` 指定的 22.x。
 
 ```bash
 cd web

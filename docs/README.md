@@ -42,11 +42,14 @@
 | [配置参考](configuration.md) | 完整配置选项说明 |
 | [mnemonas.example.toml](../mnemonas.example.toml) | 配置文件示例 |
 | [CHANGELOG](../CHANGELOG.md) | 版本更新记录 |
+| [支持说明](../SUPPORT.md) | 支持渠道、问题分流和维护边界 |
+| [行为准则](../CODE_OF_CONDUCT.md) | 社区协作规则 |
 
 ## 🔗 相关链接
 
 - [GitHub 仓库](https://github.com/seanbao/mnemonas)
 - [问题反馈](https://github.com/seanbao/mnemonas/issues)
+- [支持说明](../SUPPORT.md)
 
 ## 📖 阅读建议
 
@@ -58,9 +61,9 @@
 **遇到问题**：
 1. 查看 [FAQ](faq.md) 寻找解决方案
 2. 检查 [WebDAV 兼容性](webdav-compatibility.md) 确认客户端支持
-3. 在 GitHub Issues 提交问题
+3. 按 [支持说明](../SUPPORT.md) 选择 Discussions、Issues 或安全报告渠道
 
 **参与开发**：
 1. 阅读 [架构设计](architecture.md) 了解系统结构
 2. 按照 [开发指南](development.md) 搭建环境
-3. 查看 [CONTRIBUTING](../CONTRIBUTING.md) 了解贡献流程
+3. 查看 [CONTRIBUTING](../CONTRIBUTING.md) 和 [行为准则](../CODE_OF_CONDUCT.md) 了解贡献流程
