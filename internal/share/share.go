@@ -41,6 +41,13 @@ const (
 	PermissionReadWrite Permission = "read_write"
 )
 
+func normalizePermission(permission Permission) Permission {
+	if permission != PermissionRead {
+		return PermissionRead
+	}
+	return permission
+}
+
 // Share represents a shared file or folder
 type Share struct {
 	ID           string     `json:"id"`
@@ -159,6 +166,7 @@ func (s *ShareStore) load() error {
 	s.pathIdx = make(map[string][]string)
 
 	for _, share := range shares {
+		share.Permission = normalizePermission(share.Permission)
 		s.shares[share.ID] = share
 		s.pathIdx[share.Path] = append(s.pathIdx[share.Path], share.ID)
 	}
@@ -375,9 +383,7 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 		share.PasswordHash = string(hash)
 	}
 
-	if share.Permission == "" {
-		share.Permission = PermissionRead
-	}
+	share.Permission = normalizePermission(share.Permission)
 
 	for {
 		snapshot := s.snapshotState()
@@ -683,7 +689,7 @@ func (s *Share) ToInfo() *ShareInfo {
 		CreatedAt:   s.CreatedAt,
 		ExpiresAt:   s.ExpiresAt,
 		HasPassword: s.HasPassword(),
-		Permission:  s.Permission,
+		Permission:  normalizePermission(s.Permission),
 		Enabled:     s.Enabled,
 		AccessCount: s.AccessCount,
 		MaxAccess:   s.MaxAccess,

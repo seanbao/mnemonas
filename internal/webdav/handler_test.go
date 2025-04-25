@@ -597,6 +597,53 @@ func TestHandler_DELETE(t *testing.T) {
 	}
 }
 
+func TestHandler_DELETE_ConditionalHeaders(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/deltest"); err != nil {
+		t.Fatalf("Mkdir(deltest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/deltest/file.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile(file.txt) error: %v", err)
+	}
+	info, err := fs.Stat(ctx, "/deltest/file.txt")
+	if err != nil {
+		t.Fatalf("Stat(file.txt) error: %v", err)
+	}
+	etag := `"` + info.ContentHash + `"`
+
+	t.Run("IfMatchMismatchPreventsDelete", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+		req.Header.Set("If-Match", `"wrong-etag"`)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("DELETE If-Match mismatch status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/deltest/file.txt"); err != nil {
+			t.Fatalf("expected file to remain after failed conditional DELETE, got %v", err)
+		}
+	})
+
+	t.Run("IfNoneMatchHitPreventsDelete", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/dav/deltest/file.txt", nil)
+		req.Header.Set("If-None-Match", etag)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("DELETE If-None-Match hit status = %d, want %d", w.Code, http.StatusPreconditionFailed)
+		}
+		if _, err := fs.Stat(ctx, "/deltest/file.txt"); err != nil {
+			t.Fatalf("expected file to remain after failed If-None-Match DELETE, got %v", err)
+		}
+	})
+}
+
 func TestHandler_HandleError_DoesNotLeakInternalDetails(t *testing.T) {
 	handler := NewHandler(Config{AuthType: "none"})
 	w := httptest.NewRecorder()
@@ -1645,6 +1692,50 @@ func TestHandler_PROPFIND_InvalidatesAncestorCacheAfterNestedWrite(t *testing.T)
 	}
 }
 
+func TestHandler_PROPFIND_InvalidatesDeletedDirectoryCache(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/cached-dir"); err != nil {
+		t.Fatalf("Mkdir(cached-dir) error: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("/cached-dir/file-%02d.txt", i)
+		if err := fs.WriteFile(ctx, name, bytes.NewReader([]byte("seed"))); err != nil {
+			t.Fatalf("WriteFile(%s) error: %v", name, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/cached-dir/file-10.txt", bytes.NewReader([]byte("seed"))); err != nil {
+		t.Fatalf("WriteFile(file-10.txt) error: %v", err)
+	}
+
+	firstReq := httptest.NewRequest("PROPFIND", "/dav/cached-dir", nil)
+	firstReq.Header.Set("Depth", "infinity")
+	firstW := httptest.NewRecorder()
+	handler.ServeHTTP(firstW, firstReq)
+
+	if firstW.Code != http.StatusMultiStatus {
+		t.Fatalf("first PROPFIND status = %d, want %d", firstW.Code, http.StatusMultiStatus)
+	}
+
+	deleteReq := httptest.NewRequest("DELETE", "/dav/cached-dir", nil)
+	deleteW := httptest.NewRecorder()
+	handler.ServeHTTP(deleteW, deleteReq)
+
+	if deleteW.Code != http.StatusNoContent {
+		t.Fatalf("DELETE cached directory status = %d, want %d", deleteW.Code, http.StatusNoContent)
+	}
+
+	secondReq := httptest.NewRequest("PROPFIND", "/dav/cached-dir", nil)
+	secondReq.Header.Set("Depth", "infinity")
+	secondW := httptest.NewRecorder()
+	handler.ServeHTTP(secondW, secondReq)
+
+	if secondW.Code != http.StatusNotFound {
+		t.Fatalf("second PROPFIND status = %d, want %d", secondW.Code, http.StatusNotFound)
+	}
+}
+
 func TestHandler_PROPPATCH_MissingResourceReturnsNotFound(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 	req := httptest.NewRequest("PROPPATCH", "/dav/missing-proppatch.txt", strings.NewReader(`<?xml version="1.0"?><propertyupdate xmlns="DAV:"/>`))
@@ -1800,6 +1891,32 @@ func TestHandler_LOCK_RefreshWithMatchingIfToken(t *testing.T) {
 	}
 }
 
+func TestHandler_LOCK_RefreshWithNegatedIfTokenFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/lock-refresh-negated.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(lock-refresh-negated.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-negated.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("initial LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	refreshReq := httptest.NewRequest("LOCK", "/dav/lock-refresh-negated.txt", nil)
+	refreshReq.Header.Set("If", "(Not <"+strings.Trim(lockToken, "<>")+">)")
+	refreshW := httptest.NewRecorder()
+	handler.ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusLocked {
+		t.Fatalf("refresh LOCK with negated If token status = %d, want %d", refreshW.Code, http.StatusLocked)
+	}
+}
+
 func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -1856,6 +1973,24 @@ func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 		}
 	})
 
+	t.Run("CopyFromLockedResourceDoesNotRequireToken", func(t *testing.T) {
+		req := httptest.NewRequest("COPY", "/dav/locked/file.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/locked-dst/copied.txt")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("COPY from locked source status = %d, want %d", w.Code, http.StatusCreated)
+		}
+		if _, err := fs.Stat(ctx, "/locked/file.txt"); err != nil {
+			t.Fatalf("expected locked source file to remain after COPY, got %v", err)
+		}
+		if _, err := fs.Stat(ctx, "/locked-dst/copied.txt"); err != nil {
+			t.Fatalf("expected copied destination file to exist, got %v", err)
+		}
+	})
+
 	t.Run("PutWithMatchingTokenSucceeds", func(t *testing.T) {
 		req := httptest.NewRequest("PUT", "/dav/locked/file.txt", strings.NewReader("updated"))
 		req.Header.Set("Lock-Token", lockToken)
@@ -1877,6 +2012,18 @@ func TestHandler_LockedResourceBlocksWritesWithoutMatchingToken(t *testing.T) {
 
 		if w.Code != http.StatusNoContent {
 			t.Fatalf("PUT with If token status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("PutWithNegatedIfHeaderTokenFails", func(t *testing.T) {
+		req := httptest.NewRequest("PUT", "/dav/locked/file.txt", strings.NewReader("updated via negated if"))
+		req.Header.Set("If", "(Not <"+strings.Trim(lockToken, "<>")+">)")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("PUT with negated If token status = %d, want %d", w.Code, http.StatusLocked)
 		}
 	})
 }
@@ -1937,6 +2084,18 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 		}
 	})
 
+	t.Run("CopyIntoLockedCollectionRequiresToken", func(t *testing.T) {
+		req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/locked-dir/copied.txt")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusLocked {
+			t.Fatalf("COPY into locked collection without token status = %d, want %d", w.Code, http.StatusLocked)
+		}
+	})
+
 	t.Run("PutChildWithMatchingTokenSucceeds", func(t *testing.T) {
 		req := httptest.NewRequest("PUT", "/dav/locked-dir/new.txt", strings.NewReader("new content"))
 		req.Header.Set("Lock-Token", lockToken)
@@ -1959,6 +2118,19 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 
 		if w.Code != http.StatusCreated {
 			t.Fatalf("MOVE with If token status = %d, want %d", w.Code, http.StatusCreated)
+		}
+	})
+
+	t.Run("CopyIntoLockedCollectionWithIfHeaderTokenSucceeds", func(t *testing.T) {
+		req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+		req.Header.Set("Destination", "http://example.com/dav/locked-dir/copied-if.txt")
+		req.Header.Set("If", "</dav/locked-dir> (<"+strings.Trim(lockToken, "<>")+">)")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("COPY with If token status = %d, want %d", w.Code, http.StatusCreated)
 		}
 	})
 }
@@ -2095,6 +2267,7 @@ func TestHandler_PathTraversal(t *testing.T) {
 		"/dav/../etc/passwd",
 		"/dav/test/../../etc/passwd",
 		"/dav/..%2F..%2Fetc/passwd",
+		"/dav/..%5Csecret.txt",
 	}
 
 	for _, path := range tests {

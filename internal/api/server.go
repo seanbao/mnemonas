@@ -67,11 +67,13 @@ type Server struct {
 	config       *config.Config
 	configPath   string
 	activeWebDAV WebDAVRuntimeConfig
+	updateWebDAV func(WebDAVRuntimeConfig)
 }
 
 type WebDAVRuntimeConfig struct {
 	Enabled             bool
 	Prefix              string
+	ReadOnly            bool
 	AuthType            string
 	Username            string
 	Password            string
@@ -91,6 +93,42 @@ func formatSettingsDuration(d time.Duration) string {
 		return "0"
 	}
 	return d.String()
+}
+
+func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConfig {
+	runtimeCfg := WebDAVRuntimeConfig{
+		Enabled:  cfg.WebDAV.Enabled,
+		Prefix:   cfg.WebDAV.Prefix,
+		ReadOnly: cfg.WebDAV.ReadOnly,
+		AuthType: cfg.WebDAV.AuthType,
+		Username: cfg.WebDAV.Username,
+		Password: cfg.WebDAV.Password,
+	}
+
+	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
+		return runtimeCfg
+	}
+
+	if strings.TrimSpace(runtimeCfg.Username) == "" {
+		runtimeCfg.Username = "admin"
+	}
+
+	if strings.TrimSpace(runtimeCfg.Password) != "" || cfg.Storage.Root == "" {
+		return runtimeCfg
+	}
+
+	secrets, err := config.LoadSecrets(cfg.Storage.Root)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to load secrets for WebDAV runtime config")
+		return runtimeCfg
+	}
+	if secrets == nil || strings.TrimSpace(secrets.WebDAVPassword) == "" {
+		return runtimeCfg
+	}
+
+	runtimeCfg.Password = secrets.WebDAVPassword
+	runtimeCfg.PasswordIsGenerated = true
+	return runtimeCfg
 }
 
 // ServerConfig holds server configuration
@@ -121,6 +159,7 @@ type ServerConfig struct {
 	Config       *config.Config
 	ConfigPath   string
 	ActiveWebDAV *WebDAVRuntimeConfig
+	UpdateWebDAV func(WebDAVRuntimeConfig)
 }
 
 // NewServer creates a new API server
@@ -142,13 +181,25 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		logger:    logger,
 		startTime: time.Now(),
 	}
+	if cfg != nil {
+		s.updateWebDAV = cfg.UpdateWebDAV
+	}
+
+	// Store config early so runtime dataplane connection settings are available
+	// during initial client setup.
+	if cfg != nil && cfg.Config != nil {
+		s.config = cfg.Config
+		s.configPath = cfg.ConfigPath
+		s.activeWebDAV = s.resolveWebDAVRuntimeConfig(*cfg.Config)
+	}
+	if cfg != nil && cfg.ActiveWebDAV != nil {
+		s.activeWebDAV = *cfg.ActiveWebDAV
+	}
 
 	// Initialize data plane client if address provided
 	if cfg != nil && cfg.DataplaneAddr != "" {
 		s.dataplane = dataplane.NewClient(cfg.DataplaneAddr)
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultDataplaneConnectTimeout*time.Second)
-		defer cancel()
-		if err := s.dataplane.Connect(ctx); err != nil {
+		if err := s.connectDataplaneClient(context.Background(), s.dataplane, DefaultDataplaneConnectTimeout*time.Second); err != nil {
 			logger.Warn().Err(err).Msg("Failed to connect to data plane, will retry later")
 		} else {
 			logger.Info().Str("addr", cfg.DataplaneAddr).Msg("Connected to data plane")
@@ -279,22 +330,6 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		}
 	}
 
-	// Store config for settings API
-	if cfg != nil && cfg.Config != nil {
-		s.config = cfg.Config
-		s.configPath = cfg.ConfigPath
-		s.activeWebDAV = WebDAVRuntimeConfig{
-			Enabled:  cfg.Config.WebDAV.Enabled,
-			Prefix:   cfg.Config.WebDAV.Prefix,
-			AuthType: cfg.Config.WebDAV.AuthType,
-			Username: cfg.Config.WebDAV.Username,
-			Password: cfg.Config.WebDAV.Password,
-		}
-	}
-	if cfg != nil && cfg.ActiveWebDAV != nil {
-		s.activeWebDAV = *cfg.ActiveWebDAV
-	}
-
 	s.setupRoutes()
 	return s, nil
 }
@@ -309,7 +344,9 @@ func (s *Server) setupRoutes() {
 		r.Get("/", s.handleGetSetupStatus)
 		if s.authEnabled {
 			r.With(s.authMw.RequireAuth, s.authMw.RequireRole(auth.RoleAdmin)).Post("/acknowledge", s.handleAcknowledgeSetup)
+			return
 		}
+		r.Post("/acknowledge", s.handleAcknowledgeSetup)
 	})
 
 	// Auth endpoints (public)
@@ -409,6 +446,10 @@ func (s *Server) setupRoutes() {
 		// Version history
 		r.Route("/versions", func(r chi.Router) {
 			r.Get("/*", s.handleListVersions)
+			if s.authEnabled {
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Post("/{hash}/restore", s.handleRestoreVersion)
+				return
+			}
 			r.Post("/{hash}/restore", s.handleRestoreVersion)
 		})
 
@@ -434,7 +475,11 @@ func (s *Server) setupRoutes() {
 		r.Route("/activity", func(r chi.Router) {
 			r.Get("/", s.handleListActivity)
 			r.Get("/stats", s.handleActivityStats)
-			r.Delete("/", s.handleClearActivity) // Admin only in production
+			if s.authEnabled {
+				r.With(s.authMw.RequireRole(auth.RoleAdmin)).Delete("/", s.handleClearActivity)
+				return
+			}
+			r.Delete("/", s.handleClearActivity)
 		})
 
 		// Settings (admin only when auth enabled)
@@ -468,11 +513,13 @@ func (s *Server) Router() http.Handler {
 
 // validatePath validates and cleans a file path, preventing path traversal attacks.
 func validatePath(filePath string) (string, error) {
+	normalized := strings.ReplaceAll(filePath, "\\", "/")
+
 	// Clean the path first
-	cleaned := path.Clean("/" + filePath)
+	cleaned := path.Clean("/" + normalized)
 
 	// Reject any path with .. segments while allowing legal names like foo..txt.
-	if hasTraversalSegment(filePath) {
+	if hasTraversalSegment(normalized) {
 		return "", errors.New("invalid path")
 	}
 
@@ -539,6 +586,81 @@ func shouldSkipGCObjectByGrace(obj dataplane.ObjectInfo, graceCutoff time.Time) 
 	return obj.CreatedAt.After(graceCutoff)
 }
 
+func (s *Server) dataplaneConnectRetries() int {
+	if s.config == nil || s.config.DataPlane.MaxRetries < 0 {
+		return 0
+	}
+	return s.config.DataPlane.MaxRetries
+}
+
+func (s *Server) connectDataplaneClient(parent context.Context, client *dataplane.Client, totalTimeout time.Duration) error {
+	if client == nil {
+		return fmt.Errorf("dataplane not configured")
+	}
+
+	totalCtx, cancelTotal := context.WithTimeout(parent, totalTimeout)
+	defer cancelTotal()
+
+	retries := s.dataplaneConnectRetries()
+	attempts := retries + 1
+	attemptBudget := totalTimeout
+	if attempts > 1 {
+		attemptBudget = totalTimeout / time.Duration(attempts)
+		if attemptBudget <= 0 {
+			attemptBudget = totalTimeout
+		}
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := totalCtx.Err(); err != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return err
+		}
+
+		budget := attemptBudget
+		if deadline, ok := totalCtx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
+			}
+			if budget > remaining {
+				budget = remaining
+			}
+		}
+
+		attemptCtx, cancelAttempt := context.WithTimeout(totalCtx, budget)
+		lastErr = client.Connect(attemptCtx)
+		cancelAttempt()
+		if lastErr == nil {
+			return nil
+		}
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+	return totalCtx.Err()
+}
+
+func (s *Server) ensureDataplaneConnected(ctx context.Context, timeout time.Duration) bool {
+	if s.dataplane == nil {
+		return false
+	}
+	if s.dataplane.IsConnected() {
+		return true
+	}
+
+	if err := s.connectDataplaneClient(ctx, s.dataplane, timeout); err != nil {
+		s.logger.Warn().Err(err).Msg("Failed to connect to data plane")
+		return false
+	}
+
+	return true
+}
+
 // === Handlers ===
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -550,7 +672,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Reflect dataplane availability in the overall health status when configured.
 	if s.dataplane != nil {
-		if !s.dataplane.IsConnected() {
+		if !s.ensureDataplaneConnected(r.Context(), DefaultHealthCheckTimeout*time.Second) {
 			health["status"] = "degraded"
 			health["dataplane"] = map[string]any{
 				"healthy": false,
@@ -1280,7 +1402,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get stats from data plane if connected
-	if s.dataplane != nil && s.dataplane.IsConnected() {
+	if s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second) {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		defer cancel()
 		if dpStats, err := s.dataplane.Stats(ctx); err == nil {
@@ -1295,6 +1417,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	dataplaneConnected := s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second)
+
 	// Collect diagnostic information
 	diag := map[string]any{
 		"timestamp":   time.Now().UTC().Format(time.RFC3339),
@@ -1310,7 +1434,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// System status
 	diag["system"] = map[string]any{
 		"filesystem_initialized":  s.fs != nil,
-		"dataplane_connected":     s.dataplane != nil && s.dataplane.IsConnected(),
+		"dataplane_connected":     dataplaneConnected,
 		"thumbnail_service_ready": s.thumbnail != nil,
 	}
 
@@ -1340,7 +1464,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Data plane stats
-	if s.dataplane != nil && s.dataplane.IsConnected() {
+	if dataplaneConnected {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		defer cancel()
 		if dpStats, err := s.dataplane.Stats(ctx); err == nil {
@@ -1378,7 +1502,7 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
+	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -1474,7 +1598,7 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
+	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -1518,7 +1642,7 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 		gracePeriod = time.Duration(hours) * time.Hour
 	}
 
-	if s.dataplane == nil || !s.dataplane.IsConnected() {
+	if !s.ensureDataplaneConnected(r.Context(), DefaultDataplaneConnectTimeout*time.Second) {
 		ServiceUnavailable(w, "dataplane not connected")
 		return
 	}
@@ -1695,7 +1819,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Dataplane stats (sanitized)
-	if s.dataplane != nil && s.dataplane.IsConnected() {
+	if s.ensureDataplaneConnected(r.Context(), DefaultStatsTimeout*time.Second) {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		dpInfo := map[string]any{"status": "connected"}
 		if dpHealth, err := s.dataplane.Health(ctx); err == nil {
@@ -2167,6 +2291,9 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	offsetStr := r.URL.Query().Get("offset")
 	actionFilter := r.URL.Query().Get("action")
 	userFilter := r.URL.Query().Get("user")
+	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
+		userFilter = currentUserFilter
+	}
 
 	limit := 50
 	if limitStr != "" {
@@ -2220,8 +2347,53 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
+		entries, _ := s.activity.List(s.activity.Count(), 0, "", currentUserFilter)
+		NewAPIResponse(buildActivityStats(entries)).Write(w, http.StatusOK)
+		return
+	}
+
 	stats := s.activity.Statistics()
 	NewAPIResponse(stats).Write(w, http.StatusOK)
+}
+
+func (s *Server) currentActivityUserFilter(r *http.Request) string {
+	if !s.authEnabled || auth.IsAdmin(r.Context()) {
+		return ""
+	}
+	claims := auth.GetClaimsFromContext(r.Context())
+	if claims == nil {
+		return ""
+	}
+	return claims.Username
+}
+
+func buildActivityStats(entries []activity.Entry) map[string]any {
+	stats := map[string]any{
+		"total":     len(entries),
+		"by_action": map[activity.ActionType]int{},
+		"by_user":   map[string]int{},
+	}
+
+	actionCounts := make(map[activity.ActionType]int)
+	userCounts := make(map[string]int)
+	today := time.Now().Truncate(24 * time.Hour)
+	todayCount := 0
+
+	for _, entry := range entries {
+		actionCounts[entry.Action]++
+		if entry.User != "" {
+			userCounts[entry.User]++
+		}
+		if entry.Timestamp.After(today) {
+			todayCount++
+		}
+	}
+
+	stats["today"] = todayCount
+	stats["by_action"] = actionCounts
+	stats["by_user"] = userCounts
+	return stats
 }
 
 // handleClearActivity clears all activity log entries
@@ -2785,6 +2957,25 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Config) {
+	if req.DataPlane != nil && req.DataPlane.GRPCAddress != nil {
+		swapDataplane := s.dataplane == nil || s.dataplane.Addr() != cfg.DataPlane.GRPCAddress
+		if swapDataplane {
+			replacement := dataplane.NewClient(cfg.DataPlane.GRPCAddress)
+			if err := s.connectDataplaneClient(context.Background(), replacement, cfg.DataPlane.Timeout); err != nil {
+				s.logger.Warn().Err(err).Str("addr", cfg.DataPlane.GRPCAddress).Msg("Failed to connect updated data plane address")
+			}
+
+			previous := s.dataplane
+			s.dataplane = replacement
+			if s.fs != nil {
+				s.fs.SetDataplaneClient(replacement)
+			}
+			if previous != nil {
+				_ = previous.Close()
+			}
+		}
+	}
+
 	if req.Retention != nil {
 		if s.retentionMonitor != nil {
 			s.retentionMonitor.UpdateConfig(storage.RetentionMonitorConfig{
@@ -2810,8 +3001,24 @@ func (s *Server) applyRuntimeSettings(req UpdateSettingsRequest, cfg config.Conf
 		)
 	}
 
+	if req.Versioning != nil && s.fs != nil {
+		s.fs.UpdateVersioningSettings(
+			cfg.Storage.Versioning.AutoVersionedExtensions,
+			cfg.Storage.Versioning.AutoVersionedFilenames,
+			cfg.Storage.Versioning.MaxVersionedSize,
+		)
+	}
+
 	if req.Share != nil && req.Share.BaseURL != nil && s.shareHandler != nil {
 		s.shareHandler.SetBaseURL(cfg.Share.BaseURL)
+	}
+
+	if req.WebDAV != nil {
+		runtimeCfg := s.resolveWebDAVRuntimeConfig(cfg)
+		s.activeWebDAV = runtimeCfg
+		if s.updateWebDAV != nil {
+			s.updateWebDAV(runtimeCfg)
+		}
 	}
 
 	if req.Alerts != nil && s.alertMonitor != nil {
@@ -2892,6 +3099,11 @@ type SetupStatusResponse struct {
 // handleGetSetupStatus returns setup status for first run.
 // Initial credentials are intentionally only exposed through server-side logs.
 func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		ServiceUnavailable(w, "configuration not available")
+		return
+	}
+
 	secrets, err := config.LoadSecrets(s.config.Storage.Root)
 	if err != nil {
 		// Error reading secrets file

@@ -448,12 +448,18 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 		return err
 	}
 
-	// Ensure destination parent exists
-	if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+	parentInfo, err := os.Stat(filepath.Dir(newPath))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
 		if errors.Is(err, syscall.ENOTDIR) {
 			return ErrNotDir
 		}
 		return err
+	}
+	if !parentInfo.IsDir() {
+		return ErrNotDir
 	}
 
 	if err := os.Rename(oldPath, newPath); err != nil {
@@ -493,12 +499,18 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 		return ErrIsDir
 	}
 
-	// Ensure destination parent exists
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+	parentInfo, err := os.Stat(filepath.Dir(dstPath))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
 		if errors.Is(err, syscall.ENOTDIR) {
 			return ErrNotDir
 		}
 		return err
+	}
+	if !parentInfo.IsDir() {
+		return ErrNotDir
 	}
 
 	// Copy file

@@ -1059,6 +1059,43 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("login rate limiting ignores spoofed leading forwarded for entries", func(t *testing.T) {
+		h.loginFailureLimit = 2
+		h.loginFailureWindow = time.Minute
+		h.loginLockDuration = time.Minute
+		h.loginAttempts = newLoginAttemptTracker()
+		now := time.Date(2026, 3, 19, 12, 30, 0, 0, time.UTC)
+		h.loginAttempts.now = func() time.Time { return now }
+
+		firstReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(`{"username":"handleruser","password":"wrongpassword"}`))
+		firstReq.RemoteAddr = "127.0.0.1:8080"
+		firstReq.Header.Set("X-Forwarded-For", "203.0.113.10, 198.51.100.20")
+		firstRec := httptest.NewRecorder()
+		h.HandleLogin(firstRec, firstReq)
+
+		if firstRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected first spoofed forwarded attempt to return 401, got %d", firstRec.Code)
+		}
+
+		secondReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(`{"username":"handleruser","password":"wrongpassword"}`))
+		secondReq.RemoteAddr = "127.0.0.1:8080"
+		secondReq.Header.Set("X-Forwarded-For", "203.0.113.11, 198.51.100.20")
+		secondRec := httptest.NewRecorder()
+		h.HandleLogin(secondRec, secondReq)
+
+		if secondRec.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected repeated spoofed forwarded attempts to return 429, got %d", secondRec.Code)
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(secondRec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "LOGIN_RATE_LIMITED" {
+			t.Fatalf("expected LOGIN_RATE_LIMITED error, got %+v", envelope.Error)
+		}
+	})
+
 	t.Run("login missing credentials", func(t *testing.T) {
 		body := `{"username":"handleruser"}`
 		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
