@@ -65,7 +65,7 @@ make test
 make quick-check
 
 # 仅 Go 测试
-packages=$(go list ./... | grep -v '/web/node_modules/')
+packages=$(make --no-print-directory go-packages)
 CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $packages
 
 # 仅 Rust 测试
