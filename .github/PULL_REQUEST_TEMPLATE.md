@@ -23,6 +23,7 @@ Fixes #(issue number)
 - [ ] New and existing unit tests pass locally with my changes
 - [ ] Any dependent changes have been merged and published
 - [ ] I ran `make quick-check` or an equivalent focused validation
+- [ ] I ran `make workflows-check` if GitHub Actions workflows changed
 - [ ] I ran `make scripts-check` if deployment scripts, packaging, or docs changed
 - [ ] Proto changes include regenerated Go and Rust protobuf files from `make proto`
 - [ ] Deployment changes were tested with Docker, systemd, or the relevant install script

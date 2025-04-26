@@ -25,6 +25,22 @@ env:
   CARGO_AUDIT_VERSION: '0.22.1'
 
 jobs:
+  workflows:
+    name: Workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Validate GitHub Actions workflows
+        run: make workflows-check
+
   scripts:
     name: Scripts
     runs-on: ubuntu-latest
@@ -83,14 +99,14 @@ jobs:
 
       - name: Test
         run: |
-          packages=$(make --no-print-directory go-packages)
-          CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out $packages
+          mapfile -t packages < <(make --no-print-directory go-packages)
+          CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out "${packages[@]}"
 
       - name: Vulnerability scan
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
-          packages=$(make --no-print-directory go-packages)
-          "$(go env GOPATH)/bin/govulncheck" $packages
+          mapfile -t packages < <(make --no-print-directory go-packages)
+          "$(go env GOPATH)/bin/govulncheck" "${packages[@]}"
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -235,13 +251,14 @@ jobs:
           set -euo pipefail
 
           docker run -d --name mnemonas-smoke -p 18080:8080 mnemonas:test >/dev/null
+          # shellcheck disable=SC2317
           cleanup() {
             status=$?
-            if [ $status -ne 0 ]; then
+            if [ "$status" -ne 0 ]; then
               docker logs mnemonas-smoke || true
             fi
             docker rm -f mnemonas-smoke >/dev/null 2>&1 || true
-            exit $status
+            exit "$status"
           }
           trap cleanup EXIT
 

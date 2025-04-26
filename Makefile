@@ -1,4 +1,4 @@
-.PHONY: all build web-build test clean deps dev proto proto-go proto-rust go-packages fmt lint scripts-check security-check install-audit-tools docker e2e bench coverage check help
+.PHONY: all build web-build test clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check security-check install-audit-tools docker e2e bench coverage check help
 
 # 版本信息
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -10,6 +10,9 @@ GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/
 GO_LINT_PACKAGES ?= ./...
 GOVULNCHECK_VERSION ?= v1.3.0
 CARGO_AUDIT_VERSION ?= 0.22.1
+ACTIONLINT_VERSION ?= v1.7.7
+ACTIONLINT_CMD ?= actionlint
+ACTIONLINT_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 GO_SECURITY_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 NPM_AUDIT ?= 0
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
@@ -47,6 +50,7 @@ help:
 	@echo "  security-check - Run dependency vulnerability checks"
 	@echo "  install-audit-tools - Install pinned security scan tools"
 	@echo "  fmt        - Format code (Go + Rust)"
+	@echo "  workflows-check - Validate GitHub Actions workflows"
 	@echo "  e2e        - Run E2E acceptance tests"
 	@echo "  bench      - Run performance benchmarks"
 	@echo "  proto      - Generate protobuf code"
@@ -173,6 +177,15 @@ lint:
 	@echo "🔍 Linting frontend..."
 	cd web && npm run lint
 
+# GitHub Actions 工作流检查
+workflows-check:
+	@echo "🔍 Checking GitHub Actions workflows..."
+	@if command -v "$(ACTIONLINT_CMD)" >/dev/null 2>&1; then \
+		"$(ACTIONLINT_CMD)"; \
+	else \
+		$(ACTIONLINT_ENV) go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION); \
+	fi
+
 # 部署脚本检查
 scripts-check:
 	@echo "🔍 Checking deployment scripts..."
@@ -226,7 +239,7 @@ docker:
 	@echo "✅ Docker image: mnemonas:$(VERSION)"
 
 # 运行所有检查 (CI 使用)
-check: scripts-check lint test
+check: workflows-check scripts-check lint test
 	@echo "✅ All checks passed"
 
 # 快速检查 (commit 前)
