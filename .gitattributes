@@ -1,0 +1,37 @@
+# Normalize text files across platforms.
+* text=auto eol=lf
+
+# Source and project files.
+*.go text eol=lf
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.cjs text eol=lf
+*.mjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.proto text eol=lf
+*.sh text eol=lf
+Makefile text eol=lf
+
+# Binary assets and archives.
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.gz binary
+*.zip binary
+
+# Generated files are committed for reproducible builds but should not dominate reviews.
+proto/dataplane.pb.go linguist-generated=true
+proto/dataplane_grpc.pb.go linguist-generated=true
+dataplane/src/proto/*.rs linguist-generated=true
+web/package-lock.json linguist-generated=true
