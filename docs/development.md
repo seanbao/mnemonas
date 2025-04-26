@@ -450,7 +450,7 @@ make test
 
 ```bash
 # 运行所有测试（自动启动临时 dataplane）
-GO_PACKAGES=$(go list ./... | grep -v '/web/node_modules/')
+GO_PACKAGES=$(make --no-print-directory go-packages)
 bash ./scripts/with-test-dataplane.sh go test -v $GO_PACKAGES
 
 # 运行特定包测试（需要 dataplane 的包同样通过包装脚本执行）
@@ -700,7 +700,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 仓库使用 `toolchain go1.25.9` 固定 CI 和 release 的补丁版本。若本机已经安装兼容的 Go 1.25.x，但网络无法下载指定 toolchain，可临时使用本机工具链运行本地检查：
 
 ```bash
-packages=$(GOTOOLCHAIN=local go list ./... | grep -v '/web/node_modules/')
+packages=$(GOTOOLCHAIN=local make --no-print-directory go-packages)
 GOTOOLCHAIN=local go test $packages
 GOTOOLCHAIN=local make build
 ```
