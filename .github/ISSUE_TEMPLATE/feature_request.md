@@ -33,7 +33,3 @@ For UI changes, describe the expected workflow and any screenshots or rough sket
 
 ## Additional Context
 Add any other context, mockups, or screenshots about the feature request here.
-
-## Would you like to implement this?
-- [ ] Yes, I'd like to contribute this feature
-- [ ] No, I'm just suggesting
