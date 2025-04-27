@@ -147,7 +147,7 @@
 - 新增 `make workflows-check` 并接入 CI，用 actionlint 检查 GitHub Actions workflow 配置
 - 统一 README、CONTRIBUTING、开发与测试文档中的前端 Node.js engine 要求，匹配 `web/package.json`
 - 安全策略文档补充 `make security-check NPM_AUDIT=1` 用法，避免误解前端审计默认行为
-- CI 和 release 工作流增加最小权限、并发控制和 job 超时，减少权限面、重复运行和挂起风险
+- CI 和 release 工作流增加最小权限、job 级权限收缩、并发控制和 job 超时，减少权限面、重复运行和挂起风险
 - Release archive 随包附带 `SUPPORT.md` 和 `CODE_OF_CONDUCT.md`
 - 安全文档区分 Web UI 初始管理员密码与 WebDAV Basic Auth 自动密码
 - 安全文档和 doctor 明确提示 dataplane `9090/9091` 不应被防火墙放行到不可信网络
