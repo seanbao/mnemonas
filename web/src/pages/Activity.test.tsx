@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { ActivityPage } from './Activity'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
 
 // Mock activity API
 vi.mock('@/api/activity', () => ({
@@ -38,6 +41,7 @@ const mockListActivity = listActivity as ReturnType<typeof vi.fn>
 describe('ActivityPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockListActivity.mockResolvedValue({
       items: [
         {
@@ -235,7 +239,29 @@ describe('ActivityPage', () => {
 
       await waitFor(() => {
         expect(mockListActivity).toHaveBeenCalledTimes(1)
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '活动日志已刷新', color: 'success' })
       })
+    })
+
+    it('shows warning toast when activity reload is temporarily unavailable', async () => {
+        const user = userEvent.setup({ writeToClipboard: false })
+        mockListActivity.mockRejectedValueOnce(new Error('Network error'))
+        render(<ActivityPage />)
+
+        await waitFor(() => {
+          expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+        })
+
+        mockListActivity.mockRejectedValueOnce(new ApiError('activity log unavailable', 503, 'SERVICE_UNAVAILABLE'))
+        await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+        await waitFor(() => {
+          expect(mockAddToast).toHaveBeenCalledWith({
+            title: '活动日志暂不可用',
+            description: '活动日志存储当前不可用，请检查系统健康状态或稍后重试。',
+            color: 'warning',
+          })
+        })
     })
   })
 

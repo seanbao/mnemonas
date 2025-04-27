@@ -30,13 +30,25 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 
 // Mock API
 vi.mock('@/api/files', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status: number, code?: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+    get isUnavailable() {
+      return this.status === 503 || this.code === 'SERVICE_UNAVAILABLE'
+    }
+  },
   listFiles: vi.fn(),
   getDownloadUrl: vi.fn((path: string) => `/api/v1/download${path}?download=true`),
   getThumbnailUrl: vi.fn((path: string) => `/api/v1/thumbnails${path}?size=medium`),
   downloadFile: vi.fn(),
 }))
 
-import { downloadFile, listFiles } from '@/api/files'
+import { ApiError as FilesApiError, downloadFile, listFiles } from '@/api/files'
 
 const mockListFiles = listFiles as ReturnType<typeof vi.fn>
 const mockDownloadFile = vi.mocked(downloadFile)
@@ -285,6 +297,30 @@ describe('AlbumPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('共 3 张图片')).toBeTruthy()
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '相册已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when retry is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      mockListFiles
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new FilesApiError('album unavailable', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新暂不可用',
+          description: '图片目录当前不可用，请检查服务状态后重试。',
+          color: 'warning',
+        })
       })
     })
   })

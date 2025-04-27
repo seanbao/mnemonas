@@ -51,6 +51,13 @@ export function Header({ onMenuClick }: HeaderProps) {
     setIsRefreshing(true)
     try {
       await queryClient.invalidateQueries()
+      addToast({ title: '数据已刷新', color: 'success' })
+    } catch (error) {
+      addToast({
+        title: '刷新失败',
+        description: error instanceof Error ? error.message : '数据刷新失败，请稍后重试。',
+        color: 'danger',
+      })
     } finally {
       setIsRefreshing(false)
     }

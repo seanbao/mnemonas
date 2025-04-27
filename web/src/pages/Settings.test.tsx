@@ -908,6 +908,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(screen.queryByText('WebDAV 凭据加载失败')).toBeNull()
         expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
+        expect(mockAddToast).toHaveBeenCalledWith({ title: 'WebDAV 凭据已刷新', color: 'success' })
       })
     })
 
@@ -923,6 +924,30 @@ describe('SettingsPage', () => {
         expect(screen.getByText('WebDAV 凭据暂不可用')).toBeTruthy()
         expect(screen.getByText('当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载凭据' })).toBeTruthy()
+      })
+    })
+
+    it('shows warning toast when reloading WebDAV credentials becomes unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetWebDAVCredentials.mockRejectedValueOnce(new Error('webdav credentials unavailable'))
+
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载凭据' })).toBeTruthy()
+      })
+
+      mockGetWebDAVCredentials.mockRejectedValueOnce(new SettingsError('webdav credentials unavailable', 503, 'SERVICE_UNAVAILABLE'))
+      await user.click(screen.getByRole('button', { name: '重新加载凭据' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'WebDAV 凭据暂不可用',
+          description: '当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。',
+          color: 'warning',
+        })
       })
     })
   })
@@ -1186,6 +1211,30 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('系统设置')).toBeTruthy()
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '设置已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when settings reload becomes unavailable', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new SettingsError('settings not available', 503, 'SERVICE_UNAVAILABLE'))
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '设置服务暂不可用',
+          description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+          color: 'warning',
+        })
       })
     })
   })

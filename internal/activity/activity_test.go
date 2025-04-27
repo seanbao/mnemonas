@@ -10,6 +10,42 @@ import (
 	"time"
 )
 
+func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "activity.json")
+
+	originalSyncActivityLogDir := syncActivityLogDir
+	syncActivityLogDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncActivityLogDir = originalSyncActivityLogDir
+	}()
+
+	err := writeActivityLogFile(logPath, []byte("[]"))
+	if err == nil {
+		t.Fatal("expected writeActivityLogFile() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync activity log directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("expected activity log to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("expected activity log content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(logPath)
+	if statErr != nil {
+		t.Fatalf("expected activity log file to exist after sync failure, got %v", statErr)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Fatalf("expected activity log permissions 0640, got %o", info.Mode().Perm())
+	}
+}
+
 func TestNewStore(t *testing.T) {
 	tmpDir := t.TempDir()
 

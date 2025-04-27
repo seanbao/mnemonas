@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Button, Skeleton, Card, CardBody, CardHeader } from '@heroui/react'
+import { Button, Skeleton, Card, CardBody, CardHeader, addToast } from '@heroui/react'
 import { 
   HardDrive, 
   Activity, 
@@ -38,6 +38,21 @@ function getStorageErrorPresentation(error: unknown): { title: string; descripti
   return {
     title: '加载存储统计失败',
     description: (error as Error).message || '请稍后重试',
+  }
+}
+
+function getStorageRefreshErrorToast(error: unknown): { title: string; description: string; color: 'warning' | 'danger' } {
+  const presentation = getStorageErrorPresentation(error)
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      ...presentation,
+      color: 'warning',
+    }
+  }
+
+  return {
+    ...presentation,
+    color: 'danger',
   }
 }
 
@@ -113,6 +128,15 @@ export function StoragePage() {
   })
   const storageErrorPresentation = error ? getStorageErrorPresentation(error) : null
 
+  const handleRefresh = async () => {
+    const result = await refetch()
+    if (result.error) {
+      addToast(getStorageRefreshErrorToast(result.error))
+      return
+    }
+    addToast({ title: '存储统计已刷新', color: 'success' })
+  }
+
   if (isLoading) {
     return (
       <div className="p-6 lg:p-8 space-y-6">
@@ -150,7 +174,7 @@ export function StoragePage() {
           <Button
             variant="flat"
             startContent={<RefreshCw size={16} />}
-            onPress={() => refetch()}
+            onPress={handleRefresh}
             className="rounded-xl"
           >
             刷新
@@ -162,7 +186,7 @@ export function StoragePage() {
           title={storageErrorPresentation?.title}
           description={storageErrorPresentation?.description}
           action={
-            <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+            <Button variant="bordered" className="rounded-xl" onPress={handleRefresh}>
               重新加载
             </Button>
           }
@@ -218,7 +242,7 @@ export function StoragePage() {
         <Button 
           variant="flat" 
           startContent={<RefreshCw size={16} />}
-          onPress={() => refetch()}
+          onPress={handleRefresh}
           className="rounded-xl"
         >
           刷新

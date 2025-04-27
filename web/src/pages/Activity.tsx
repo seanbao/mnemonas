@@ -6,6 +6,7 @@ import {
   Select,
   SelectItem,
   Pagination,
+  addToast,
 } from '@heroui/react'
 import {
   Activity,
@@ -125,6 +126,22 @@ function getActivityErrorState(error: unknown): 'unavailable' | null {
   return null
 }
 
+function getActivityRefreshErrorToast(error: unknown): { title: string; description: string; color: 'warning' | 'danger' } {
+  if (error instanceof ApiError && error.isUnavailable) {
+    return {
+      title: '活动日志暂不可用',
+      description: '活动日志存储当前不可用，请检查系统健康状态或稍后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '刷新失败',
+    description: error instanceof Error ? error.message : '请稍后重试',
+    color: 'danger',
+  }
+}
+
 export function ActivityPage() {
   const [page, setPage] = useState(1)
   const [actionFilter, setActionFilter] = useState<ActionType | ''>('')
@@ -144,6 +161,15 @@ export function ActivityPage() {
     return Math.ceil(data.total / pageSize)
   }, [data?.total])
   const errorState = getActivityErrorState(error)
+
+  const handleRefresh = async () => {
+    const result = await refetch()
+    if (result.error) {
+      addToast(getActivityRefreshErrorToast(result.error))
+      return
+    }
+    addToast({ title: '活动日志已刷新', color: 'success' })
+  }
 
   if (isLoading) {
     return (
@@ -169,7 +195,7 @@ export function ActivityPage() {
                 className="btn-secondary h-8 rounded-xl"
                 size="sm"
                 startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
-                onPress={() => refetch()}
+                onPress={handleRefresh}
                 isLoading={isRefetching}
               >
                 刷新
@@ -183,7 +209,7 @@ export function ActivityPage() {
               title="活动日志暂不可用"
               description="活动日志存储当前不可用，请检查系统健康状态或稍后重试。"
               action={
-                <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+                <Button variant="bordered" className="rounded-xl" onPress={handleRefresh}>
                   重新加载
                 </Button>
               }
@@ -204,7 +230,7 @@ export function ActivityPage() {
               className="btn-secondary h-8 rounded-xl"
               size="sm"
               startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
-              onPress={() => refetch()}
+              onPress={handleRefresh}
               isLoading={isRefetching}
             >
               刷新
@@ -218,7 +244,7 @@ export function ActivityPage() {
             title="加载活动日志失败"
             description={(error as Error).message || '请稍后重试'}
             action={
-              <Button variant="bordered" className="rounded-xl" onPress={() => refetch()}>
+              <Button variant="bordered" className="rounded-xl" onPress={handleRefresh}>
                 重新加载
               </Button>
             }
@@ -264,7 +290,7 @@ export function ActivityPage() {
               className="btn-secondary h-8 rounded-xl"
               size="sm"
               startContent={<RefreshCw size={14} className={isRefetching ? 'animate-spin' : ''} />}
-              onPress={() => refetch()}
+              onPress={handleRefresh}
               isLoading={isRefetching}
             >
               刷新

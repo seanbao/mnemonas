@@ -17,6 +17,8 @@ var errHistoryFileSymlink = errors.New("maintenance history file path must not b
 
 const interruptedScrubErrorMessage = "scrub interrupted before completion"
 
+var syncHistoryFileDir = syncHistoryDir
+
 // gcRunning tracks whether GC is currently running (atomic for thread-safety)
 var gcRunning atomic.Bool
 
@@ -278,7 +280,20 @@ func writeHistoryFile(path string, data []byte) error {
 		return fmt.Errorf("failed to replace maintenance history file: %w", err)
 	}
 	cleanup = false
+	if err := syncHistoryFileDir(dir); err != nil {
+		return fmt.Errorf("failed to sync maintenance history directory: %w", err)
+	}
 	return nil
+}
+
+func syncHistoryDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
 }
 
 // GCIsRunning checks if GC is currently in progress

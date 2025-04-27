@@ -189,6 +189,18 @@ export function VersionsPage() {
   })
   const versionsErrorPresentation = getVersionsErrorPresentation(error)
 
+  const handleRefreshVersions = async () => {
+  const result = await refetch()
+  if (result.error) {
+    addToast(getVersionsActionErrorToast(result.error, {
+      unavailable: '版本历史暂不可用',
+      failure: '刷新失败',
+    }))
+    return
+  }
+  addToast({ title: '版本历史已刷新', color: 'success' })
+  }
+
   useEffect(() => {
     if (!selectedPath || !scopedHomeDir || selectedPathAllowed) {
       return
@@ -334,7 +346,7 @@ export function VersionsPage() {
               </div>
               <p className="font-medium text-danger mb-1">{versionsErrorPresentation.title}</p>
               <p className="text-sm">{versionsErrorPresentation.description}</p>
-              <Button variant="bordered" className="mt-4 rounded-xl" onPress={() => refetch()}>
+              <Button variant="bordered" className="mt-4 rounded-xl" onPress={handleRefreshVersions}>
                 重新加载
               </Button>
             </div>

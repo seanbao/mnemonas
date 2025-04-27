@@ -5,6 +5,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import { SearchPage } from './Search'
 import * as searchApi from '@/api/search'
+import * as HeroUI from '@heroui/react'
+
+const mockAddToast = vi.fn()
 
 // Mock the search API
 vi.mock('@/api/search', async (importOriginal) => {
@@ -85,6 +88,7 @@ function renderSearchPage(initialQuery = '') {
 describe('SearchPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     vi.mocked(searchApi.searchFiles).mockResolvedValue({
       query: 'test',
       results: mockSearchResults,
@@ -228,6 +232,52 @@ describe('SearchPage', () => {
         expect(screen.getByText('搜索失败')).toBeInTheDocument()
         expect(screen.getByText('Network error')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
+      })
+    })
+
+    it('shows success toast when retrying search succeeds', async () => {
+      const user = userEvent.setup()
+      vi.mocked(searchApi.searchFiles)
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({
+          query: 'report',
+          results: mockSearchResults,
+          count: mockSearchResults.length,
+        })
+
+      renderSearchPage('report')
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重试搜索' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '搜索结果已刷新', color: 'success' })
+      })
+    })
+
+    it('shows warning toast when retrying search becomes unavailable', async () => {
+      const user = userEvent.setup()
+      vi.mocked(searchApi.searchFiles)
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new SearchError('filesystem not initialized', 503, 'Service Unavailable', 'SERVICE_UNAVAILABLE'))
+
+      renderSearchPage('report')
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重试搜索' })).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重试搜索' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '搜索暂不可用',
+          description: '文件系统当前不可用，请稍后重试',
+          color: 'warning',
+        })
       })
     })
   })
