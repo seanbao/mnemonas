@@ -6,12 +6,11 @@
 
 | 场景 | 推荐渠道 | 说明 |
 | --- | --- | --- |
-| 安装、部署、WebDAV 客户端、使用问题 | [GitHub Discussions](https://github.com/seanbao/mnemonas/discussions) | 适合问答、配置讨论和经验分享 |
 | 可复现 Bug | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 请使用 Bug Report 模板并附诊断信息 |
 | 新功能或产品建议 | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 请使用 Feature Request 模板，说明使用场景 |
 | 安全漏洞 | GitHub Private Vulnerability Reporting | 不要公开提交漏洞细节，详见 [SECURITY.md](SECURITY.md) |
 
-如果 Discussions 未启用，也可以先使用 Issues，但请在标题和内容中说明这是使用问题而不是已确认 Bug。
+使用问题也可以先通过 Issues 记录，但请在标题和内容中说明这是使用问题而不是已确认 Bug。
 
 ## 提交问题前
 
@@ -21,7 +20,7 @@
 - [FAQ](docs/faq.md)
 - [Docker 部署指南](docs/docker-deployment.md) 或 [Ubuntu 笔记本部署指南](docs/ubuntu-laptop-deployment.md)
 - [WebDAV 兼容性](docs/webdav-compatibility.md)
-- 现有 Issues 和 Discussions 是否已有相同问题
+- 现有 Issues 是否已有相同问题
 
 ## 提交 Bug 时请包含
 
@@ -37,7 +36,7 @@
 
 ## 支持边界
 
-MnemoNAS 是社区开源项目，维护者会尽力处理清晰、可复现、影响明确的问题，但不承诺固定响应时间或商业级 SLA。
+维护者会尽力处理清晰、可复现、影响明确的问题，但不承诺固定响应时间或商业级 SLA。
 
 当前重点支持：
 

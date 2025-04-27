@@ -21,11 +21,10 @@ This file records verified review progress so future work can continue from the 
 - systemd deployments now install a tested `mnemonas-uninstall-systemd` helper that removes services and binaries while preserving config/data by default, with explicit confirmation required before deleting storage.
 - Deployment doctor checks UFW state and warns if dataplane gRPC/HTTP ports are allowed through the firewall.
 - Security docs now explicitly call out dataplane 9090/9091 firewall denies and doctor verification.
-- GitHub issue/PR templates ask for systemd doctor output, Docker preflight/Compose logs, focused validation commands, and regenerated protobuf files when relevant.
-- `CONTRIBUTING.md` now points contributors at `make deps`, `make quick-check`, locked Rust/proto-gen tests, `make scripts-check`, and in-repo design/deployment docs.
+- GitHub issue templates ask for systemd doctor output, Docker preflight/Compose logs, focused validation commands, and regenerated protobuf files when relevant.
 - `make security-check` now scans Go, dataplane Rust, and proto-gen Rust advisories by default while leaving frontend `npm audit` as explicit opt-in (`NPM_AUDIT=1`) because it sends the dependency tree to the configured npm registry.
 - Toolchain hints are documented through `.go-version`, existing `.nvmrc`, Go `toolchain`, and Rust `rust-version` without forcing rustup network syncs.
-- Web contributors have a focused `npm run test:e2e:navigation` script for desktop/mobile shell regression checks, documented in both Web README and testing strategy.
+- Web development has a focused `npm run test:e2e:navigation` script for desktop/mobile shell regression checks, documented in both Web README and testing strategy.
 - Dependabot covers the main dataplane Cargo project and the `tools/proto-gen` Cargo project separately.
 - Browser security headers include CSP, `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, and `Permissions-Policy`.
 - Go protobuf files were regenerated with the CI-pinned generator versions: `protoc-gen-go v1.36.11` and `protoc-gen-go-grpc v1.6.1`.
