@@ -37,6 +37,8 @@ var (
 	errStoragePathSymlink = errors.New("storage path contains symlink")
 )
 
+var syncStoragePathDir = syncStorageDir
+
 const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
 
 // FileInfo represents file metadata
@@ -115,9 +117,11 @@ type FileSystem struct {
 	getVersions          func(ctx context.Context, path string) ([]versionstore.Version, error)
 	deleteFileIndex      func(ctx context.Context, path string) error
 	updateFileIndex      func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error
-	putVersionObject     func(data []byte) (string, error)
+	hasVersionObject     func(ctx context.Context, hash string) (bool, error)
+	getVersionObject     func(ctx context.Context, hash string) ([]byte, error)
+	putVersionObject     func(ctx context.Context, data []byte) (string, error)
 	addFileVersion       func(ctx context.Context, path, hash string, size int64, comment string) error
-	deleteVersionObject  func(hash string) error
+	deleteVersionObject  func(ctx context.Context, hash string) error
 	addTrashMetadata     func(ctx context.Context, item *versionstore.TrashItem) error
 	removeTrashMetadata  func(ctx context.Context, id string) error
 	renameWorkspacePath  func(ctx context.Context, oldName, newName string) error
@@ -249,6 +253,8 @@ func New(cfg *Config) (*FileSystem, error) {
 		getVersions:          vs.GetVersions,
 		deleteFileIndex:      vs.DeleteFileIndex,
 		updateFileIndex:      vs.UpdateFileIndex,
+		hasVersionObject:     vs.HasObject,
+		getVersionObject:     vs.GetObject,
 		putVersionObject:     vs.PutObject,
 		addFileVersion:       vs.AddVersion,
 		deleteVersionObject:  vs.DeleteObject,
@@ -438,7 +444,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 		oldData := previousData
 		candidateHash := computeHash(oldData)
 		rollbackVersionHash = candidateHash
-		hasObject, err := fs.versions.HasObject(candidateHash)
+		hasObject, err := fs.hasVersionObject(ctx, candidateHash)
 		if err != nil {
 			os.Remove(tmpPath)
 			return fmt.Errorf("failed to check existing version object: %w", err)
@@ -452,7 +458,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 			return fmt.Errorf("failed to check existing version: %w", versionErr)
 		}
 
-		oldHash, err := fs.putVersionObject(oldData)
+		oldHash, err := fs.putVersionObject(ctx, oldData)
 		if err != nil {
 			os.Remove(tmpPath)
 			return fmt.Errorf("failed to store version: %w", err)
@@ -463,7 +469,7 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 			if err := fs.addFileVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
 				os.Remove(tmpPath)
 				if rollbackVersionObjectCreated {
-					if deleteErr := fs.deleteVersionObject(oldHash); deleteErr != nil {
+					if deleteErr := fs.deleteVersionObject(ctx, oldHash); deleteErr != nil {
 						return errors.Join(
 							fmt.Errorf("failed to record version: %w", err),
 							fmt.Errorf("failed to cleanup version object during rollback: %w", deleteErr),
@@ -485,6 +491,26 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 			)
 		}
 		return fmt.Errorf("failed to replace file: %w", err)
+	}
+	if err := syncStoragePathDir(filepath.Dir(fullPath)); err != nil {
+		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
+		if rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData); rollbackErr != nil {
+			joinedErr := errors.Join(
+				fmt.Errorf("failed to sync parent directory: %w", err),
+				fmt.Errorf("failed to rollback file content: %w", rollbackErr),
+			)
+			if versionRollbackErr != nil {
+				joinedErr = errors.Join(joinedErr, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
+			}
+			return joinedErr
+		}
+		if versionRollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync parent directory: %w", err),
+				fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr),
+			)
+		}
+		return fmt.Errorf("failed to sync parent directory: %w", err)
 	}
 
 	newHash := fmt.Sprintf("%x", hasher.Sum(nil))
@@ -945,7 +971,7 @@ func (fs *FileSystem) GetVersion(ctx context.Context, name, hash string) (io.Rea
 	}
 
 	// Get from version store
-	data, err := fs.versions.GetObject(hash)
+	data, err := fs.getVersionObject(ctx, hash)
 	if err != nil {
 		if errors.Is(err, versionstore.ErrNotFound) {
 			return nil, ErrVersionNotFound
@@ -996,7 +1022,7 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 		data = previousData
 	} else {
 		// Get version data
-		data, err = fs.versions.GetObject(hash)
+		data, err = fs.getVersionObject(ctx, hash)
 		if err != nil {
 			if errors.Is(err, versionstore.ErrNotFound) {
 				return ErrVersionNotFound
@@ -1013,12 +1039,12 @@ func (fs *FileSystem) RestoreVersion(ctx context.Context, name, hash string) err
 	if hadPreviousFile {
 		currentHash := computeHash(previousData)
 		if currentHash != hash {
-			hasObject, err := fs.versions.HasObject(currentHash)
+			hasObject, err := fs.hasVersionObject(ctx, currentHash)
 			if err != nil {
 				return fmt.Errorf("failed to check current version object before restore: %w", err)
 			}
 			rollbackObjectCreated := !hasObject
-			storedHash, err := fs.putVersionObject(previousData)
+			storedHash, err := fs.putVersionObject(ctx, previousData)
 			if err != nil {
 				return fmt.Errorf("failed to store current version before restore: %w", err)
 			}
@@ -1583,7 +1609,7 @@ func (fs *FileSystem) deleteUnreferencedVersionObjects(ctx context.Context, hash
 		if referenced {
 			continue
 		}
-		if err := fs.deleteVersionObject(hash); err != nil {
+		if err := fs.deleteVersionObject(ctx, hash); err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("delete version object %s: %w", hash, err))
 		}
 	}
@@ -1732,6 +1758,28 @@ func validateStoragePath(target string) error {
 	return nil
 }
 
+func syncStorageDir(dir string) error {
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
+}
+
+func syncStorageRenameDirs(src, dst string) error {
+	srcDir := filepath.Dir(src)
+	dstDir := filepath.Dir(dst)
+	if srcDir == dstDir {
+		return syncStoragePathDir(srcDir)
+	}
+	if err := syncStoragePathDir(dstDir); err != nil {
+		return err
+	}
+	return syncStoragePathDir(srcDir)
+}
+
 func copyFile(src, dst string) error {
 	if err := validateStoragePath(src); err != nil {
 		return err
@@ -1781,7 +1829,26 @@ func copyFile(src, dst string) error {
 		return err
 	}
 
-	return os.Rename(tmpPath, dst)
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return err
+	}
+	if err := syncStoragePathDir(path.Dir(dst)); err != nil {
+		if rollbackErr := os.Remove(dst); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync copied file: %w", err),
+				fmt.Errorf("failed to rollback copied file: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncStoragePathDir(path.Dir(dst)); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync copied file: %w", err),
+				fmt.Errorf("failed to sync copy rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("failed to sync copied file: %w", err)
+	}
+
+	return nil
 }
 
 func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name string) ([]byte, bool, error) {
@@ -1829,7 +1896,7 @@ func (fs *FileSystem) rollbackWriteVersion(ctx context.Context, name, hash strin
 		}
 	}
 	if objectCreated {
-		if err := fs.deleteVersionObject(hash); err != nil {
+		if err := fs.deleteVersionObject(ctx, hash); err != nil {
 			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete version object %s: %w", hash, err))
 		}
 	}
@@ -1871,6 +1938,21 @@ func movePath(src, dst string) error {
 	}
 
 	if err := os.Rename(src, dst); err == nil {
+		if syncErr := syncStorageRenameDirs(src, dst); syncErr != nil {
+			if rollbackErr := os.Rename(dst, src); rollbackErr != nil {
+				return errors.Join(
+					fmt.Errorf("failed to sync renamed path: %w", syncErr),
+					fmt.Errorf("failed to rollback renamed path: %w", rollbackErr),
+				)
+			}
+			if rollbackSyncErr := syncStorageRenameDirs(dst, src); rollbackSyncErr != nil {
+				return errors.Join(
+					fmt.Errorf("failed to sync renamed path: %w", syncErr),
+					fmt.Errorf("failed to sync rollback path: %w", rollbackSyncErr),
+				)
+			}
+			return fmt.Errorf("failed to sync renamed path: %w", syncErr)
+		}
 		return nil
 	}
 
