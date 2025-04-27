@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Card, CardBody, CardHeader, Skeleton, Button, Chip } from '@heroui/react'
+import { Card, CardBody, CardHeader, Skeleton, Button, Chip, addToast } from '@heroui/react'
 import { 
   HardDrive, 
   FileBox, 
@@ -22,8 +22,8 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { getAppVersion, getHealth, getStorageStats } from '@/api/files'
-import { ApiError, listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
+import { ApiError as FilesApiError, getAppVersion, getHealth, getStorageStats } from '@/api/files'
+import { ApiError as ActivityApiError, listActivity, getActionLabel, type ActionType, type ActivityEntry } from '@/api/activity'
 import { formatBytes, cn, formatRelativeTime } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { useIsAdmin } from '@/stores/auth'
@@ -91,7 +91,7 @@ function formatCount(value: number | undefined): string {
 }
 
 function getRecentActivityErrorPresentation(error: unknown): { title: string; description: string } {
-  if (error instanceof ApiError && error.isUnavailable) {
+  if (error instanceof ActivityApiError && error.isUnavailable) {
     return {
       title: '活动记录暂时不可用',
       description: '活动日志当前不可用，请稍后重试，或前往活动页查看最新状态。',
@@ -101,6 +101,29 @@ function getRecentActivityErrorPresentation(error: unknown): { title: string; de
   return {
     title: '活动记录加载失败',
     description: '请刷新页面后重试，或前往活动页查看详细状态。',
+  }
+}
+
+function isUnavailableRefreshError(error: unknown): boolean {
+  return (
+    (error instanceof FilesApiError && error.isUnavailable) ||
+    (error instanceof ActivityApiError && error.isUnavailable)
+  )
+}
+
+function getDashboardRefreshErrorToast(errors: Array<unknown>): { title: string; description: string; color: 'warning' | 'danger' } {
+  if (errors.some(isUnavailableRefreshError)) {
+    return {
+      title: '刷新暂不可用',
+      description: '部分系统概览数据当前不可用，请检查服务状态后重试。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '刷新失败',
+    description: '系统概览刷新失败，请稍后重试。',
+    color: 'danger',
   }
 }
 
@@ -192,11 +215,26 @@ export function DashboardPage() {
     ? getRecentActivityErrorPresentation(recentActivityError)
     : null
 
-  const handleRetry = () => {
-    void refetchHealth()
-    void refetchStats()
-    void refetchVersion()
-    void refetchRecentActivity()
+  const handleRetry = async () => {
+    const [healthResult, statsResult, versionResult, recentActivityResult] = await Promise.all([
+      refetchHealth(),
+      refetchStats(),
+      refetchVersion(),
+      refetchRecentActivity(),
+    ])
+    const refreshErrors = [
+      healthResult.error,
+      statsResult.error,
+      versionResult.error,
+      recentActivityResult.error,
+    ].filter((error): error is unknown => Boolean(error))
+
+    if (refreshErrors.length > 0) {
+      addToast(getDashboardRefreshErrorToast(refreshErrors))
+      return
+    }
+
+    addToast({ title: '系统概览已刷新', color: 'success' })
   }
 
   if (isLoading) {

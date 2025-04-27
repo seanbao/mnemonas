@@ -14,6 +14,8 @@ import (
 
 var errConfigFileSymlink = errors.New("config file path must not be a symlink")
 
+var syncManagedDir = syncManagedDirectory
+
 var durationFieldPaths = [][]string{
 	{"server", "read_timeout"},
 	{"server", "write_timeout"},
@@ -483,6 +485,23 @@ func validateManagedFilePath(path string, symlinkErr error, label string) error 
 	return nil
 }
 
+func syncManagedDirectory(dir string) error {
+	parentDir, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open directory %s: %w", dir, err)
+	}
+	defer func() {
+		_ = parentDir.Close()
+	}()
+	if err := parentDir.Sync(); err != nil {
+		return fmt.Errorf("sync directory %s: %w", dir, err)
+	}
+	if err := parentDir.Close(); err != nil {
+		return fmt.Errorf("close directory %s: %w", dir, err)
+	}
+	return nil
+}
+
 func writeConfigFile(path string, data []byte) error {
 	if err := validateConfigFilePath(path); err != nil {
 		return err
@@ -520,6 +539,9 @@ func writeConfigFile(path string, data []byte) error {
 		return fmt.Errorf("failed to replace config file: %w", err)
 	}
 	cleanup = false
+	if err := syncManagedDir(dir); err != nil {
+		return fmt.Errorf("failed to sync config directory: %w", err)
+	}
 	return nil
 }
 

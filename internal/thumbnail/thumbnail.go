@@ -57,8 +57,14 @@ type Service struct {
 	cacheDir string
 	mu       sync.RWMutex
 	// In-progress generation to prevent duplicate work
-	inProgress map[string]chan struct{}
+	inProgress map[string]*thumbnailGenerationResult
 	ipMu       sync.Mutex
+}
+
+type thumbnailGenerationResult struct {
+	done chan struct{}
+	data []byte
+	err  error
 }
 
 // NewService creates a new thumbnail service
@@ -70,7 +76,7 @@ func NewService(cacheDir string) (*Service, error) {
 
 	return &Service{
 		cacheDir:   cacheDir,
-		inProgress: make(map[string]chan struct{}),
+		inProgress: make(map[string]*thumbnailGenerationResult),
 	}, nil
 }
 
@@ -102,12 +108,18 @@ func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, 
 
 	// Check if generation is already in progress
 	s.ipMu.Lock()
-	if ch, ok := s.inProgress[cacheKey]; ok {
+	if result, ok := s.inProgress[cacheKey]; ok {
 		s.ipMu.Unlock()
 		// Wait for in-progress generation
 		select {
-		case <-ch:
-			// Generation complete, try cache again
+		case <-result.done:
+			if result.err != nil {
+				return nil, result.err
+			}
+			if len(result.data) > 0 {
+				return append([]byte(nil), result.data...), nil
+			}
+			// Fallback for older or incomplete in-progress state.
 			if data, err := s.loadFromCache(cachePath); err == nil {
 				return data, nil
 			}
@@ -118,22 +130,24 @@ func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, 
 	}
 
 	// Mark generation as in-progress
-	ch := make(chan struct{})
-	s.inProgress[cacheKey] = ch
+	result := &thumbnailGenerationResult{done: make(chan struct{})}
+	s.inProgress[cacheKey] = result
 	s.ipMu.Unlock()
 
 	defer func() {
 		s.ipMu.Lock()
 		delete(s.inProgress, cacheKey)
-		close(ch)
+		close(result.done)
 		s.ipMu.Unlock()
 	}()
 
 	// Generate thumbnail
 	data, err := s.generate(ctx, reader, dim)
 	if err != nil {
+		result.err = err
 		return nil, err
 	}
+	result.data = append([]byte(nil), data...)
 
 	// Save to cache (async, don't block return)
 	go func() {
@@ -385,14 +399,18 @@ func (s *Service) InvalidateCache(filePath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var removeErr error
+
 	// Remove all size variants
 	for size := range SizeDimensions {
 		cacheKey := s.cacheKey(filePath, size)
 		cachePath := s.cachePath(cacheKey)
-		os.Remove(cachePath) // Ignore errors
+		if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removeErr = errors.Join(removeErr, fmt.Errorf("remove thumbnail cache %q: %w", cachePath, err))
+		}
 	}
 
-	return nil
+	return removeErr
 }
 
 // hasAlpha checks if an image has an alpha channel

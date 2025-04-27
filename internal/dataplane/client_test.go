@@ -2,9 +2,130 @@ package dataplane
 
 import (
 	"context"
+	"errors"
+	"io"
 	"testing"
 	"time"
+
+	pb "github.com/seanbao/mnemonas/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
+
+type fakeDataPlaneClient struct {
+	putFileStream grpc.ClientStreamingClient[pb.PutFileRequest, pb.PutFileResponse]
+	putFileErr    error
+	getFileStream grpc.ServerStreamingClient[pb.GetFileResponse]
+	getFileErr    error
+}
+
+func (f *fakeDataPlaneClient) PutChunk(context.Context, *pb.PutChunkRequest, ...grpc.CallOption) (*pb.PutChunkResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeDataPlaneClient) GetChunk(context.Context, *pb.GetChunkRequest, ...grpc.CallOption) (*pb.GetChunkResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeDataPlaneClient) HasChunk(context.Context, *pb.HasChunkRequest, ...grpc.CallOption) (*pb.HasChunkResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeDataPlaneClient) DeleteChunk(context.Context, *pb.DeleteChunkRequest, ...grpc.CallOption) (*pb.DeleteChunkResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeDataPlaneClient) PutFile(context.Context, ...grpc.CallOption) (grpc.ClientStreamingClient[pb.PutFileRequest, pb.PutFileResponse], error) {
+	return f.putFileStream, f.putFileErr
+}
+
+func (f *fakeDataPlaneClient) GetFile(context.Context, *pb.GetFileRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[pb.GetFileResponse], error) {
+	return f.getFileStream, f.getFileErr
+}
+
+func (f *fakeDataPlaneClient) Health(context.Context, *pb.HealthRequest, ...grpc.CallOption) (*pb.HealthResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeDataPlaneClient) Stats(context.Context, *pb.StatsRequest, ...grpc.CallOption) (*pb.StatsResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeDataPlaneClient) Scrub(context.Context, *pb.ScrubRequest, ...grpc.CallOption) (*pb.ScrubResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeDataPlaneClient) ListObjects(context.Context, *pb.ListObjectsRequest, ...grpc.CallOption) (*pb.ListObjectsResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+type fakePutFileStream struct {
+	closeSendCalled bool
+	closeAndRecvErr error
+	sendErr         error
+	sentRequests    []*pb.PutFileRequest
+}
+
+func (f *fakePutFileStream) Send(req *pb.PutFileRequest) error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
+	f.sentRequests = append(f.sentRequests, req)
+	return nil
+}
+
+func (f *fakePutFileStream) CloseAndRecv() (*pb.PutFileResponse, error) {
+	if f.closeAndRecvErr != nil {
+		return nil, f.closeAndRecvErr
+	}
+	return &pb.PutFileResponse{}, nil
+}
+
+func (f *fakePutFileStream) Header() (metadata.MD, error) { return nil, nil }
+func (f *fakePutFileStream) Trailer() metadata.MD         { return nil }
+func (f *fakePutFileStream) CloseSend() error {
+	f.closeSendCalled = true
+	return nil
+}
+func (f *fakePutFileStream) Context() context.Context { return context.Background() }
+func (f *fakePutFileStream) SendMsg(any) error        { return nil }
+func (f *fakePutFileStream) RecvMsg(any) error        { return nil }
+
+type fakeGetFileStream struct {
+	closeSendCalled bool
+	responses       []*pb.GetFileResponse
+	recvErr         error
+}
+
+func (f *fakeGetFileStream) Recv() (*pb.GetFileResponse, error) {
+	if len(f.responses) > 0 {
+		resp := f.responses[0]
+		f.responses = f.responses[1:]
+		return resp, nil
+	}
+	if f.recvErr != nil {
+		return nil, f.recvErr
+	}
+	return nil, io.EOF
+}
+
+func (f *fakeGetFileStream) Header() (metadata.MD, error) { return nil, nil }
+func (f *fakeGetFileStream) Trailer() metadata.MD         { return nil }
+func (f *fakeGetFileStream) CloseSend() error {
+	f.closeSendCalled = true
+	return nil
+}
+func (f *fakeGetFileStream) Context() context.Context { return context.Background() }
+func (f *fakeGetFileStream) SendMsg(any) error        { return nil }
+func (f *fakeGetFileStream) RecvMsg(any) error        { return nil }
+
+type errReader struct {
+	err error
+}
+
+func (r errReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
 
 func TestNewClient(t *testing.T) {
 	client := NewClient("localhost:9090")
@@ -143,6 +264,37 @@ func TestGetFileNotConnected(t *testing.T) {
 	}
 	if err.Error() != "not connected" {
 		t.Errorf("Expected 'not connected' error, got: %v", err)
+	}
+}
+
+func TestPutFileClosesStreamOnReadError(t *testing.T) {
+	stream := &fakePutFileStream{}
+	client := NewClient("localhost:9090")
+	client.client = &fakeDataPlaneClient{putFileStream: stream}
+
+	_, err := client.PutFile(context.Background(), "/test.txt", errReader{err: errors.New("read failed")})
+	if err == nil || err.Error() != "read failed" {
+		t.Fatalf("PutFile error = %v, want read failed", err)
+	}
+	if !stream.closeSendCalled {
+		t.Fatal("expected PutFile to close the stream on read error")
+	}
+	if len(stream.sentRequests) != 1 {
+		t.Fatalf("expected metadata send before read failure, got %d sends", len(stream.sentRequests))
+	}
+}
+
+func TestGetFileClosesStreamOnRecvError(t *testing.T) {
+	stream := &fakeGetFileStream{recvErr: errors.New("recv failed")}
+	client := NewClient("localhost:9090")
+	client.client = &fakeDataPlaneClient{getFileStream: stream}
+
+	err := client.GetFile(context.Background(), "manifest-1", io.Discard)
+	if err == nil || err.Error() != "recv failed" {
+		t.Fatalf("GetFile error = %v, want recv failed", err)
+	}
+	if !stream.closeSendCalled {
+		t.Fatal("expected GetFile to close the stream on recv error")
 	}
 }
 

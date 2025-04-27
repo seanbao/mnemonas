@@ -1,6 +1,7 @@
 package favorites
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -31,6 +32,8 @@ type errorDetail struct {
 	Message string `json:"message"`
 }
 
+const defaultJSONRequestBodyLimit = 1 * 1024 * 1024
+
 // NewHandler creates a new favorites handler
 func NewHandler(store *Store, logger zerolog.Logger) *Handler {
 	return &Handler{
@@ -54,6 +57,15 @@ func normalizeFavoritePath(rawPath string) string {
 }
 
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, defaultJSONRequestBodyLimit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > defaultJSONRequestBodyLimit {
+		return &http.MaxBytesError{Limit: defaultJSONRequestBodyLimit}
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -69,6 +81,16 @@ func decodeJSONBodyStrict(r *http.Request, dst any) error {
 	}
 
 	return nil
+}
+
+func (h *Handler) writeJSONBodyError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		h.error(w, http.StatusRequestEntityTooLarge, "request body too large", "PAYLOAD_TOO_LARGE")
+		return
+	}
+
+	h.error(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 }
 
 // ListFavorites handles GET /api/v1/favorites
@@ -92,7 +114,7 @@ func (h *Handler) AddFavorite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		h.error(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		h.writeJSONBodyError(w, err)
 		return
 	}
 
@@ -176,7 +198,7 @@ func (h *Handler) CheckFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		h.error(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		h.writeJSONBodyError(w, err)
 		return
 	}
 
@@ -215,7 +237,7 @@ func (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		h.error(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		h.writeJSONBodyError(w, err)
 		return
 	}
 

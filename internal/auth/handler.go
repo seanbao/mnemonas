@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,6 +40,7 @@ const (
 	defaultLoginFailureWindow    = 15 * time.Minute
 	defaultLoginLockDuration     = 5 * time.Minute
 	defaultLoginRateLimitMessage = "too many login attempts, try later"
+	defaultJSONRequestBodyLimit  = 1 * 1024 * 1024
 )
 
 func newLoginAttemptTracker() *loginAttemptTracker {
@@ -117,6 +119,15 @@ func NewHandler(us *UserStore, tm *TokenManager) *Handler {
 }
 
 func decodeJSONBodyStrict(r *http.Request, dst any) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, defaultJSONRequestBodyLimit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > defaultJSONRequestBodyLimit {
+		return &http.MaxBytesError{Limit: defaultJSONRequestBodyLimit}
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -132,6 +143,16 @@ func decodeJSONBodyStrict(r *http.Request, dst any) error {
 	}
 
 	return nil
+}
+
+func writeJSONBodyError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large", "PAYLOAD_TOO_LARGE")
+		return
+	}
+
+	writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
 }
 
 // LoginRequest is the login request body
@@ -184,7 +205,7 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	var req LoginRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeJSONBodyError(w, err)
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
@@ -264,7 +285,7 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	var req RefreshRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeJSONBodyError(w, err)
 		return
 	}
 
@@ -445,7 +466,7 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	var req ChangePasswordRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeJSONBodyError(w, err)
 		return
 	}
 
@@ -536,7 +557,7 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	var req CreateUserRequest
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeJSONBodyError(w, err)
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
@@ -631,7 +652,7 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 		NewPassword string `json:"new_password"`
 	}
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeJSONBodyError(w, err)
 		return
 	}
 
@@ -674,7 +695,7 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 		Disabled *bool `json:"disabled"`
 	}
 	if err := decodeJSONBodyStrict(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if req.Disabled == nil {

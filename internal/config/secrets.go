@@ -189,6 +189,9 @@ func writeSecretsFile(secretsPath string, data []byte) error {
 	if err := ensureSecretsFilePermissions(secretsPath); err != nil {
 		return err
 	}
+	if err := syncManagedDir(dir); err != nil {
+		return fmt.Errorf("failed to sync secrets directory: %w", err)
+	}
 	return nil
 }
 

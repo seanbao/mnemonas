@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -128,6 +129,42 @@ func TestGetTLSConfig_MissingCertNoAutoGenerate(t *testing.T) {
 	_, err := manager.GetTLSConfig()
 	if err == nil {
 		t.Fatal("expected error for missing certificate")
+	}
+}
+
+func TestWriteTLSFile_ReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "server.crt")
+
+	originalSyncTLSDir := syncTLSDir
+	syncTLSDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncTLSDir = originalSyncTLSDir
+	}()
+
+	err := writeTLSFile(filePath, []byte("certificate"), 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file")
+	if err == nil {
+		t.Fatal("expected writeTLSFile() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync certificate file directory") {
+		t.Fatalf("expected directory sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(filePath)
+	if readErr != nil {
+		t.Fatalf("expected TLS file to remain readable after sync failure, got %v", readErr)
+	}
+	if string(data) != "certificate" {
+		t.Fatalf("expected TLS file content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(filePath)
+	if statErr != nil {
+		t.Fatalf("expected TLS file to exist after sync failure, got %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected TLS file permissions 0644, got %o", info.Mode().Perm())
 	}
 }
 

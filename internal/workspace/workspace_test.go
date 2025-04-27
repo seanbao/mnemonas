@@ -207,6 +207,43 @@ func TestWorkspace_ReadDir_ReturnsErrNotDirWhenPathIsFile(t *testing.T) {
 	}
 }
 
+func TestWorkspace_ReadDir_ReturnsEntryInfoError(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/dir"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/dir/ok.txt", []byte("ok")); err != nil {
+		t.Fatalf("WriteFile(ok.txt) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/dir/broken.txt", []byte("broken")); err != nil {
+		t.Fatalf("WriteFile(broken.txt) error: %v", err)
+	}
+
+	originalReadDirEntryInfo := readDirEntryInfo
+	readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+		if entry.Name() == "broken.txt" {
+			return nil, errors.New("stat failed")
+		}
+		return originalReadDirEntryInfo(entry)
+	}
+	defer func() {
+		readDirEntryInfo = originalReadDirEntryInfo
+	}()
+
+	entries, err := w.ReadDir(ctx, "/dir")
+	if err == nil {
+		t.Fatal("expected ReadDir() to fail when entry info lookup fails")
+	}
+	if err.Error() != "stat failed" {
+		t.Fatalf("expected stat failed error, got %v", err)
+	}
+	if entries != nil {
+		t.Fatalf("expected no entries on entry-info failure, got %d", len(entries))
+	}
+}
+
 func TestWorkspace_Delete(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
