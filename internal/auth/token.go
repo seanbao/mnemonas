@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,6 +145,9 @@ func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenClaims, e
 	if !ok || !token.Valid {
 		return nil, ErrInvalidToken
 	}
+	if claims.UserID == "" || claims.Username == "" || claims.TokenID == "" {
+		return nil, ErrInvalidToken
+	}
 
 	// Check if token is revoked
 	if tm.isRevoked(claims.TokenID) {
@@ -157,8 +161,7 @@ func (tm *TokenManager) ValidateAccessToken(tokenString string) (*TokenClaims, e
 	return claims, nil
 }
 
-// ValidateRefreshToken validates a refresh token
-func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error) {
+func (tm *TokenManager) validateRefreshTokenClaims(tokenString string) (*jwt.RegisteredClaims, error) {
 	tm.CleanupRevokedTokens()
 
 	token, err := jwt.ParseWithClaims(tokenString, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
@@ -170,27 +173,41 @@ func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error)
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			return "", ErrTokenExpired
+			return nil, ErrTokenExpired
 		}
-		return "", ErrInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	claims, ok := token.Claims.(*jwt.RegisteredClaims)
 	if !ok || !token.Valid {
-		return "", ErrInvalidToken
+		return nil, ErrInvalidToken
+	}
+	if !strings.HasSuffix(claims.ID, "-refresh") {
+		return nil, ErrInvalidToken
+	}
+
+	if tm.isRevoked(claims.ID) {
+		return nil, ErrTokenRevoked
 	}
 
 	// Check if associated access token is revoked
-	tokenID := claims.ID
-	if len(tokenID) > 8 && tokenID[len(tokenID)-8:] == "-refresh" {
-		accessTokenID := tokenID[:len(tokenID)-8]
-		if tm.isRevoked(accessTokenID) {
-			return "", ErrTokenRevoked
-		}
+	accessTokenID := strings.TrimSuffix(claims.ID, "-refresh")
+	if tm.isRevoked(accessTokenID) {
+		return nil, ErrTokenRevoked
 	}
 
 	if tm.isUserRevoked(claims.Subject, claims.IssuedAt) {
-		return "", ErrTokenRevoked
+		return nil, ErrTokenRevoked
+	}
+
+	return claims, nil
+}
+
+// ValidateRefreshToken validates a refresh token
+func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error) {
+	claims, err := tm.validateRefreshTokenClaims(tokenString)
+	if err != nil {
+		return "", err
 	}
 
 	return claims.Subject, nil

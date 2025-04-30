@@ -299,6 +299,54 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("list users sorts by username case-insensitively", func(t *testing.T) {
+		store, _, err := NewUserStore(filepath.Join(dir, "users8-order.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		if _, err := store.Create("zeta", "password123", "", RoleUser); err != nil {
+			t.Fatalf("failed to create zeta user: %v", err)
+		}
+		if _, err := store.Create("Alpha", "password123", "", RoleUser); err != nil {
+			t.Fatalf("failed to create Alpha user: %v", err)
+		}
+		if _, err := store.Create("beta", "password123", "", RoleUser); err != nil {
+			t.Fatalf("failed to create beta user: %v", err)
+		}
+
+		users := store.List()
+		if len(users) < 4 {
+			t.Fatalf("expected at least 4 users including default admin, got %d", len(users))
+		}
+
+		orderedNames := make([]string, len(users))
+		for i, user := range users {
+			orderedNames[i] = user.Username
+		}
+
+		alphaIndex := -1
+		betaIndex := -1
+		zetaIndex := -1
+		for i, name := range orderedNames {
+			switch name {
+			case "Alpha":
+				alphaIndex = i
+			case "beta":
+				betaIndex = i
+			case "zeta":
+				zetaIndex = i
+			}
+		}
+
+		if alphaIndex == -1 || betaIndex == -1 || zetaIndex == -1 {
+			t.Fatalf("expected Alpha, beta, and zeta in listed users, got %v", orderedNames)
+		}
+		if !(alphaIndex < betaIndex && betaIndex < zetaIndex) {
+			t.Fatalf("expected alphabetical order Alpha < beta < zeta, got %v", orderedNames)
+		}
+	})
+
 	t.Run("get by username stays responsive during login persistence", func(t *testing.T) {
 		storeDir := t.TempDir()
 		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
@@ -544,6 +592,46 @@ func TestTokenManager(t *testing.T) {
 		}
 	})
 
+	t.Run("access token rejected as refresh token", func(t *testing.T) {
+		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+
+		user := &User{
+			ID:       "user-refresh-confusion",
+			Username: "refresh-confusion",
+			Role:     RoleUser,
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(user)
+		if err != nil {
+			t.Fatalf("failed to generate token pair: %v", err)
+		}
+
+		_, err = tm.ValidateRefreshToken(tokenPair.AccessToken)
+		if err != ErrInvalidToken {
+			t.Fatalf("expected ErrInvalidToken for access token used as refresh token, got %v", err)
+		}
+	})
+
+	t.Run("refresh token rejected as access token", func(t *testing.T) {
+		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
+
+		user := &User{
+			ID:       "user-access-confusion",
+			Username: "access-confusion",
+			Role:     RoleUser,
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(user)
+		if err != nil {
+			t.Fatalf("failed to generate token pair: %v", err)
+		}
+
+		_, err = tm.ValidateAccessToken(tokenPair.RefreshToken)
+		if err != ErrInvalidToken {
+			t.Fatalf("expected ErrInvalidToken for refresh token used as access token, got %v", err)
+		}
+	})
+
 	t.Run("revoke token", func(t *testing.T) {
 		tm := NewTokenManager(secret, 15*time.Minute, 24*time.Hour)
 
@@ -774,6 +862,25 @@ func TestMiddleware(t *testing.T) {
 		}
 		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"INVALID_TOKEN"`)) {
 			t.Fatalf("expected INVALID_TOKEN payload, got %s", rec.Body.String())
+		}
+	})
+
+	t.Run("require auth - refresh token rejected", func(t *testing.T) {
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler should not be called")
+		}))
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("Authorization", "Bearer "+userToken.RefreshToken)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected status 401, got %d", rec.Code)
+		}
+		if !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"INVALID_TOKEN"`)) {
+			t.Fatalf("expected INVALID_TOKEN payload for refresh token bearer auth, got %s", rec.Body.String())
 		}
 	})
 
@@ -1349,6 +1456,57 @@ func TestAuthHandler(t *testing.T) {
 
 		if refreshResp.AccessToken == "" {
 			t.Error("expected new access token")
+		}
+		if refreshResp.RefreshToken == "" {
+			t.Error("expected rotated refresh token")
+		}
+
+		replayReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", bytes.NewBuffer(refreshBody))
+		replayRec := httptest.NewRecorder()
+		h.HandleRefresh(replayRec, replayReq)
+
+		if replayRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected replayed refresh token status 401, got %d: %s", replayRec.Code, replayRec.Body.String())
+		}
+
+		var replayEnvelope authEnvelope
+		if err := json.Unmarshal(replayRec.Body.Bytes(), &replayEnvelope); err != nil {
+			t.Fatalf("unmarshal replay envelope error: %v", err)
+		}
+		if replayEnvelope.Error == nil {
+			t.Fatalf("expected replay refresh token error payload, got %s", replayRec.Body.String())
+		}
+		if replayEnvelope.Error.Code != "TOKEN_REVOKED" {
+			t.Fatalf("expected replay refresh token code TOKEN_REVOKED, got %s", replayEnvelope.Error.Code)
+		}
+
+		newRefreshBody, _ := json.Marshal(RefreshRequest{RefreshToken: refreshResp.RefreshToken})
+		newRefreshReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", bytes.NewBuffer(newRefreshBody))
+		newRefreshRec := httptest.NewRecorder()
+		h.HandleRefresh(newRefreshRec, newRefreshReq)
+
+		if newRefreshRec.Code != http.StatusOK {
+			t.Fatalf("expected rotated refresh token to remain usable, got %d: %s", newRefreshRec.Code, newRefreshRec.Body.String())
+		}
+
+		accessTokenBody, _ := json.Marshal(RefreshRequest{RefreshToken: loginResp.AccessToken})
+		accessTokenReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", bytes.NewBuffer(accessTokenBody))
+		accessTokenRec := httptest.NewRecorder()
+		h.HandleRefresh(accessTokenRec, accessTokenReq)
+
+		if accessTokenRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected access token masquerading as refresh token status 401, got %d: %s", accessTokenRec.Code, accessTokenRec.Body.String())
+		}
+
+		var accessTokenEnvelope authEnvelope
+		if err := json.Unmarshal(accessTokenRec.Body.Bytes(), &accessTokenEnvelope); err != nil {
+			t.Fatalf("unmarshal access-token refresh envelope error: %v", err)
+		}
+		if accessTokenEnvelope.Error == nil {
+			t.Fatalf("expected invalid refresh token error payload, got %s", accessTokenRec.Body.String())
+		}
+		if accessTokenEnvelope.Error.Code != "INVALID_TOKEN" {
+			t.Fatalf("expected access-token refresh code INVALID_TOKEN, got %s", accessTokenEnvelope.Error.Code)
 		}
 	})
 
