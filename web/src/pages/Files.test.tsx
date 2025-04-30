@@ -268,6 +268,18 @@ describe('FilesPage', () => {
       })
     })
 
+    it('does not rewrite a valid folder route back to the stale store path while syncing', async () => {
+      mockLocationPathname = '/files/documents'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/documents')
+      })
+
+      expect(mockNavigate).not.toHaveBeenCalledWith('/files', expect.objectContaining({ replace: true }))
+    })
+
     it('redirects non-admin root browsing to the assigned home directory', async () => {
       mockUser.id = 'u2'
       mockUser.username = 'tester'
@@ -672,6 +684,22 @@ describe('FilesPage', () => {
       await user.dblClick(checkbox)
 
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/documents')
+    })
+
+    it('opens a folder by syncing the file path state and route together', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      const folderName = await screen.findByText('documents')
+      mockFilesStoreState.setCurrentPath.mockClear()
+      mockNavigate.mockClear()
+
+      await user.dblClick(folderName)
+
+      expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/documents')
+      expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: true })
+      expect(mockNavigate).not.toHaveBeenCalledWith('/files', expect.objectContaining({ replace: true }))
     })
 
     it('marks only selected rows as multi-selected', async () => {
