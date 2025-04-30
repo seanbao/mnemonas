@@ -11448,7 +11448,7 @@ func TestServer_UpdateSettings_UnreachableDataplaneRejectedBeforeSave(t *testing
 	server.dataplane = oldClient
 	setVersionStoreObjectClient(t, fs, oldClient)
 
-	body := `{"dataplane":{"grpc_address":"127.0.0.1:1"}}`
+	body := `{"dataplane":{"grpc_address":"127.0.0.1:1","timeout":"100ms","max_retries":0}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

@@ -94,6 +94,11 @@ function pathWithinBase(basePath: string, targetPath: string): boolean {
   return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
 }
 
+function getFilesRoutePath(filePath: string): string {
+  const normalizedPath = normalizePath(filePath)
+  return normalizedPath === '/' ? '/files' : `/files${encodePathForUrl(normalizedPath)}`
+}
+
 function getUploadSizeError(relativePath: string | undefined, file: File): string {
   return `${relativePath || file.name} 超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`
 }
@@ -1114,6 +1119,23 @@ export function FilesPage() {
     currentPathRef.current = currentPath
   }, [currentPath])
 
+  const setFilePathState = useCallback((filePath: string): string => {
+    const normalizedPath = normalizePath(filePath)
+    if (currentPathRef.current !== normalizedPath) {
+      currentPathRef.current = normalizedPath
+      setCurrentPath(normalizedPath)
+    }
+    return normalizedPath
+  }, [setCurrentPath])
+
+  const navigateToFilePath = useCallback((filePath: string) => {
+    const normalizedPath = setFilePathState(filePath)
+    const routePath = getFilesRoutePath(normalizedPath)
+    if (location.pathname !== routePath) {
+      navigate(routePath, { replace: true })
+    }
+  }, [location.pathname, navigate, setFilePathState])
+
   useEffect(() => {
     if (hasInvalidHomeDir) return
     if (!location.pathname.startsWith('/files')) return
@@ -1124,7 +1146,7 @@ export function FilesPage() {
         finalPath = normalizePath(decodePathFromUrl(routePath))
       } catch {
         const fallbackPath = currentPathRef.current || '/'
-        const fallbackRoute = fallbackPath === '/' ? '/files' : `/files${encodePathForUrl(fallbackPath)}`
+        const fallbackRoute = getFilesRoutePath(fallbackPath)
         addToast({
           title: fallbackPath === '/' ? '路径格式无效，已返回根目录' : '路径格式无效，已返回上一个有效位置',
           color: 'warning',
@@ -1140,40 +1162,47 @@ export function FilesPage() {
         title: '仅可访问主目录内的文件',
         color: 'warning',
       })
-      if (currentPathRef.current !== scopedHomeDir) {
-        setCurrentPath(scopedHomeDir)
-      }
+      navigateToFilePath(scopedHomeDir)
       return
     }
-    if (finalPath !== currentPathRef.current) {
-      setCurrentPath(finalPath)
-    }
-  }, [hasInvalidHomeDir, location.pathname, navigate, scopedHomeDir, setCurrentPath])
+    setFilePathState(finalPath)
+  }, [hasInvalidHomeDir, location.pathname, navigate, navigateToFilePath, scopedHomeDir, setFilePathState])
 
   useEffect(() => {
     if (!hasInvalidHomeDir) return
     if (currentPath !== '/') {
-      setCurrentPath('/')
+      setFilePathState('/')
     }
     if (location.pathname !== '/files') {
       navigate('/files', { replace: true })
     }
-  }, [hasInvalidHomeDir, currentPath, location.pathname, navigate, setCurrentPath])
+  }, [hasInvalidHomeDir, currentPath, location.pathname, navigate, setFilePathState])
 
   useEffect(() => {
     if (hasInvalidHomeDir) return
     if (!user || user.role === 'admin' || !scopedHomeDir || scopedHomeDir === '/') return
-    if (location.pathname !== '/files' || currentPath !== '/') return
-    setCurrentPath(scopedHomeDir)
-  }, [hasInvalidHomeDir, user, location.pathname, currentPath, scopedHomeDir, setCurrentPath])
+    if (location.pathname !== '/files' || currentPath !== '/' || currentPathRef.current !== '/') return
+    navigateToFilePath(scopedHomeDir)
+  }, [hasInvalidHomeDir, user, location.pathname, currentPath, scopedHomeDir, navigateToFilePath])
 
   const currentPathAllowed = !hasInvalidHomeDir && (!scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath))
   const filesQueryKey = getFilesQueryKey(fileScopeKey, currentPath)
 
   useEffect(() => {
     if (hasInvalidHomeDir) return
-    const encodedPath = currentPath === '/' ? '' : encodePathForUrl(currentPath)
-    const targetPath = `/files${encodedPath}`
+    if (location.pathname.startsWith('/files')) {
+      try {
+        const routePath = location.pathname.replace(/^\/files/, '')
+        const routeFilePath = routePath ? normalizePath(decodePathFromUrl(routePath)) : '/'
+        if (routeFilePath !== currentPath) {
+          return
+        }
+      } catch {
+        return
+      }
+    }
+
+    const targetPath = getFilesRoutePath(currentPath)
     if (location.pathname !== targetPath) {
       navigate(targetPath, { replace: true })
     }
@@ -1568,13 +1597,13 @@ export function FilesPage() {
   // Handle double click - open folder or preview file
   const handleFileOpen = useCallback((file: FileItem) => {
     if (file.isDir) {
-      setCurrentPath(file.path)
+      navigateToFilePath(file.path)
       setActiveFilePath(null)
       return
     }
     setPreviewFile({ path: file.path, name: file.name })
     onPreviewOpen()
-  }, [setCurrentPath, onPreviewOpen])
+  }, [navigateToFilePath, onPreviewOpen])
 
   const handleSelectAll = useCallback(() => {
     if (selectedFiles.size === sortedFiles.length) {
@@ -2503,7 +2532,7 @@ export function FilesPage() {
     return (
       <div className="relative flex h-full min-h-0 overflow-hidden">
         <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
-          <Breadcrumbs path="/" onNavigate={setCurrentPath} />
+          <Breadcrumbs path="/" onNavigate={navigateToFilePath} />
           <div className="flex-1 flex items-center justify-center surface-card">
             <EmptyState
               icon={AlertCircle}
@@ -2522,7 +2551,7 @@ export function FilesPage() {
     return (
       <div className="relative flex h-full min-h-0 overflow-hidden">
         <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-5 lg:p-7">
-          <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
+          <Breadcrumbs path={currentPath} onNavigate={navigateToFilePath} />
           <div className="flex-1 flex items-center justify-center surface-card">
             <EmptyState
               icon={AlertCircle}
@@ -2642,7 +2671,7 @@ export function FilesPage() {
         <input ref={folderInputRef} type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={handleUploadInputChange} />
         
         {/* Breadcrumbs */}
-        <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} />
+        <Breadcrumbs path={currentPath} onNavigate={navigateToFilePath} />
         
         {/* Toolbar */}
         <div className="mb-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
@@ -3394,7 +3423,7 @@ export function FilesPage() {
                     <ContextMenuItem
                       icon={<FolderOpen size={16} />}
                       onClick={() => {
-                        setCurrentPath(contextMenuFile.path)
+                        navigateToFilePath(contextMenuFile.path)
                         contextMenu.hide()
                       }}
                     >
