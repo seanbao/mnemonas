@@ -73,6 +73,8 @@ const mockFavorites = [
 ]
 
 describe('FavoritesPage', () => {
+  const pendingFavoritesRefetch = () => new Promise<Awaited<ReturnType<typeof favoritesApi.listFavorites>>>(() => {})
+
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
@@ -96,6 +98,16 @@ describe('FavoritesPage', () => {
       expect(screen.getByText('收藏夹')).toBeInTheDocument()
       expect(screen.getByText('2 项收藏')).toBeInTheDocument()
     })
+  })
+
+  it('shows the leaf folder name for directory favorites', async () => {
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('photos')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('/photos/')).not.toBeInTheDocument()
   })
 
   it('shows empty state when there are no favorites', async () => {
@@ -267,6 +279,82 @@ describe('FavoritesPage', () => {
         description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
         color: 'warning',
       })
+    })
+  })
+
+  it('optimistically removes a selected favorite before refetch completes', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValue(undefined)
+    vi.mocked(favoritesApi.listFavorites).mockReset()
+    vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
+    vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(favoritesApi.removeFavorite).toHaveBeenCalledWith('/docs/report.pdf')
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+      expect(screen.queryByText('月报')).not.toBeInTheDocument()
+      expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '打开文件夹 /photos/' })).toBeInTheDocument()
+    })
+  })
+
+  it('optimistically removes batch-removed favorites before refetch completes', async () => {
+    const user = userEvent.setup()
+    mockBatchResult = {
+      succeeded: 2,
+      failed: 0,
+      total: 2,
+      succeededItems: ['/docs/report.pdf', '/photos/'],
+      failedItems: [],
+    }
+    vi.mocked(favoritesApi.listFavorites).mockReset()
+    vi.mocked(favoritesApi.listFavorites).mockResolvedValueOnce(mockFavorites)
+    vi.mocked(favoritesApi.listFavorites).mockImplementation(() => pendingFavoritesRefetch())
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockBatchExecute).toHaveBeenCalledWith(['/docs/report.pdf', '/photos/'])
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '打开文件夹 /photos/' })).not.toBeInTheDocument()
+      expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).not.toBeInTheDocument()
+      expect(screen.getByText('还没有收藏')).toBeInTheDocument()
     })
   })
 

@@ -101,6 +101,14 @@ vi.mock('@/api/favorites', () => ({
   toggleFavorite: vi.fn(),
 }))
 
+vi.mock('@/api/share', async () => {
+  const actual = await vi.importActual<typeof import('@/api/share')>('@/api/share')
+  return {
+    ...actual,
+    listShares: vi.fn().mockResolvedValue([]),
+  }
+})
+
 vi.mock('@/stores/files', () => ({
   useFilesStore: () => ({
     currentPath: '/',
@@ -127,13 +135,16 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 })
 
 import { listFiles } from '@/api/files'
+import { listShares, ShareError } from '@/api/share'
 
 const mockListFiles = vi.mocked(listFiles)
+const mockListShares = vi.mocked(listShares)
 
 describe('FilesPage sharing behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    mockListShares.mockResolvedValue([])
     mockListFiles.mockResolvedValue({
       files: [
         { name: 'folder', path: '/folder', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
@@ -194,6 +205,18 @@ describe('FilesPage sharing behavior', () => {
     })
 
     await user.click(screen.getByText('disable share feature'))
+
+    expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
+    expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
+  })
+
+  it('disables share entry points when the initial share availability check reports the feature is off', async () => {
+    mockListShares.mockRejectedValueOnce(new ShareError('share disabled', 503, 'SHARE_FEATURE_DISABLED'))
+
+    await act(async () => {
+      render(<FilesPage />)
+      await Promise.resolve()
+    })
 
     expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
     expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()

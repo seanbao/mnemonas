@@ -86,14 +86,17 @@ type Monitor struct {
 	dataDir string
 	baseCtx context.Context
 
-	mu        sync.Mutex
-	lastAlert time.Time
-	lastLevel AlertLevel
-	lastStats *StorageStats
+	lifecycleMu sync.Mutex
+	mu          sync.Mutex
+	lastAlert   time.Time
+	lastLevel   AlertLevel
+	lastStats   *StorageStats
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
+
+var onAlertMonitorLoopStart = func(context.Context) {}
 
 // NewMonitor creates a new storage monitor
 func NewMonitor(cfg Config, dataDir string, logger zerolog.Logger) *Monitor {
@@ -106,27 +109,36 @@ func NewMonitor(cfg Config, dataDir string, logger zerolog.Logger) *Monitor {
 
 // Start begins the monitoring loop
 func (m *Monitor) Start(ctx context.Context) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	m.mu.Lock()
 	m.baseCtx = ctx
 	cfg := m.cfg
 	m.mu.Unlock()
 
-	m.restart(cfg)
+	m.restartLocked(cfg)
 }
 
 // Stop stops the monitoring loop
 func (m *Monitor) Stop() {
-	m.stopLoop()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	m.stopLoopLocked()
 	m.wg.Wait()
 }
 
 // UpdateConfig replaces the monitor configuration and applies it immediately.
 func (m *Monitor) UpdateConfig(cfg Config) {
-	m.restart(cfg)
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	m.restartLocked(cfg)
 }
 
-func (m *Monitor) restart(cfg Config) {
-	m.stopLoop()
+func (m *Monitor) restartLocked(cfg Config) {
+	m.stopLoopLocked()
 	m.wg.Wait()
 
 	m.mu.Lock()
@@ -155,6 +167,7 @@ func (m *Monitor) restart(cfg Config) {
 
 	go func(cfg Config) {
 		defer m.wg.Done()
+		onAlertMonitorLoopStart(loopCtx)
 
 		// Initial check
 		m.check(loopCtx)
@@ -178,7 +191,7 @@ func (m *Monitor) restart(cfg Config) {
 		Msg("Storage monitoring started")
 }
 
-func (m *Monitor) stopLoop() {
+func (m *Monitor) stopLoopLocked() {
 	m.mu.Lock()
 	cancel := m.cancel
 	m.cancel = nil
