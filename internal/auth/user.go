@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mattn/go-isatty"
 	"golang.org/x/crypto/bcrypt"
@@ -58,6 +59,7 @@ var userStoreWriter = func(path string, data []byte) error {
 	return writeAuthFileAtomically(path, data, errUserStoreSymlink, ".users-*.tmp", "users")
 }
 var syncAuthFileDir = syncAuthDir
+var userRandomRead = rand.Read
 
 type userStoreSnapshot struct {
 	users    map[string]*User
@@ -84,6 +86,7 @@ var (
 	ErrUserExists          = errors.New("user already exists")
 	ErrUserDisabled        = errors.New("user is disabled")
 	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrInvalidUsername     = errors.New("invalid username")
 	ErrPasswordTooShort    = errors.New("password must be at least 8 characters")
 	ErrLastAdmin           = errors.New("cannot delete last admin user")
 	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
@@ -400,10 +403,17 @@ func syncAuthDir(dir string) error {
 }
 
 func (s *UserStore) createDefaultAdmin() (string, error) {
-	password := generateRandomPassword(16)
+	password, err := generateRandomPassword(16)
+	if err != nil {
+		return "", fmt.Errorf("generate default admin password: %w", err)
+	}
+	adminID, err := generateID()
+	if err != nil {
+		return "", fmt.Errorf("generate default admin ID: %w", err)
+	}
 
 	admin := &User{
-		ID:        generateID(),
+		ID:        adminID,
 		Username:  "admin",
 		Role:      RoleAdmin,
 		HomeDir:   "/",
@@ -542,6 +552,11 @@ func removeInitialPasswordFile(usersFilePath string) error {
 
 // Create creates a new user
 func (s *UserStore) Create(username, password, email string, role Role) (*User, error) {
+	cleanUsername, err := normalizeNewUsername(username)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(password) < 8 {
 		return nil, ErrPasswordTooShort
 	}
@@ -550,18 +565,22 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
+	userID, err := generateID()
+	if err != nil {
+		return nil, fmt.Errorf("generate user ID: %w", err)
+	}
 
 	user := &User{
-		ID:           generateID(),
-		Username:     username,
+		ID:           userID,
+		Username:     cleanUsername,
 		Email:        email,
 		PasswordHash: string(hash),
 		Role:         role,
-		HomeDir:      "/" + username,
+		HomeDir:      "/" + cleanUsername,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
-	normalizedUsername := normalizeUsername(username)
+	normalizedUsername := normalizeUsername(cleanUsername)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -757,20 +776,38 @@ func (s *UserStore) Count() int {
 }
 
 // Helper functions
-func generateID() string {
+func generateID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := userRandomRead(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
-func generateRandomPassword(length int) string {
+func generateRandomPassword(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
 	b := make([]byte, length)
-	rand.Read(b)
+	if _, err := userRandomRead(b); err != nil {
+		return "", err
+	}
 	for i := range b {
 		b[i] = charset[int(b[i])%len(charset)]
 	}
-	return string(b)
+	return string(b), nil
+}
+
+func normalizeNewUsername(username string) (string, error) {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" || trimmed == "." || trimmed == ".." {
+		return "", ErrInvalidUsername
+	}
+	if strings.ContainsAny(trimmed, "/\\") {
+		return "", ErrInvalidUsername
+	}
+	if strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return "", ErrInvalidUsername
+	}
+	return trimmed, nil
 }
 
 func normalizeUsername(username string) string {

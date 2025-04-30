@@ -835,6 +835,116 @@ func TestStore_RenamePath_DoesNotTreatPercentAsWildcard(t *testing.T) {
 	}
 }
 
+func TestStore_OperationsRejectTraversalLikePaths(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+	testCases := []string{
+		"../escape.txt",
+		`..\\escape.txt`,
+		"   ",
+	}
+
+	for _, rawPath := range testCases {
+		t.Run(rawPath, func(t *testing.T) {
+			if err := s.AddVersion(ctx, rawPath, "hash1", 1, ""); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("AddVersion() error = %v, want %v", err, errInvalidStorePath)
+			}
+			if _, err := s.GetVersions(ctx, rawPath); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("GetVersions() error = %v, want %v", err, errInvalidStorePath)
+			}
+			if err := s.SetVersioningOverride(ctx, rawPath, true); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("SetVersioningOverride() error = %v, want %v", err, errInvalidStorePath)
+			}
+			if err := s.UpdateFileIndex(ctx, rawPath, 1, time.Now(), "hash1"); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("UpdateFileIndex() error = %v, want %v", err, errInvalidStorePath)
+			}
+			if err := s.AcquireLock(ctx, rawPath, "tester", WriteLock, time.Minute); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("AcquireLock() error = %v, want %v", err, errInvalidStorePath)
+			}
+			if err := s.AddToTrash(ctx, &TrashItem{ID: "trash-" + strings.ReplaceAll(rawPath, " ", "_"), OriginalPath: rawPath, DeletedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("AddToTrash() error = %v, want %v", err, errInvalidStorePath)
+			}
+			if err := s.RenamePath(ctx, rawPath, "/dest"); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("RenamePath(source) error = %v, want %v", err, errInvalidStorePath)
+			}
+			if err := s.RenamePath(ctx, "/source", rawPath); !errors.Is(err, errInvalidStorePath) {
+				t.Fatalf("RenamePath(destination) error = %v, want %v", err, errInvalidStorePath)
+			}
+		})
+	}
+}
+
+func TestStore_NormalizesDirectPathInputs(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	rawPath := `docs\\report.txt`
+
+	if err := s.AddVersion(ctx, rawPath, "hash1", 100, ""); err != nil {
+		t.Fatalf("AddVersion() error: %v", err)
+	}
+	versions, err := s.GetVersions(ctx, "/docs/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(normalized) error: %v", err)
+	}
+	if len(versions) != 1 || versions[0].Path != "/docs/report.txt" {
+		t.Fatalf("expected normalized version path, got %+v", versions)
+	}
+
+	if err := s.UpdateFileIndex(ctx, rawPath, 100, now, "hash1"); err != nil {
+		t.Fatalf("UpdateFileIndex() error: %v", err)
+	}
+	if _, _, hash, err := s.GetFileIndex(ctx, "/docs/report.txt"); err != nil || hash != "hash1" {
+		t.Fatalf("GetFileIndex(normalized) = (%q, %v), want (hash1, nil)", hash, err)
+	}
+
+	if err := s.SetVersioningOverride(ctx, rawPath, true); err != nil {
+		t.Fatalf("SetVersioningOverride() error: %v", err)
+	}
+	if enabled, exists := s.GetVersioningOverride(ctx, "/docs/report.txt"); !exists || !enabled {
+		t.Fatalf("GetVersioningOverride(normalized) = (%v, %v), want (true, true)", enabled, exists)
+	}
+
+	if err := s.AcquireLock(ctx, rawPath, "tester", WriteLock, time.Minute); err != nil {
+		t.Fatalf("AcquireLock() error: %v", err)
+	}
+	lock, err := s.GetLock(ctx, "/docs/report.txt")
+	if err != nil {
+		t.Fatalf("GetLock(normalized) error: %v", err)
+	}
+	if lock.Path != "/docs/report.txt" {
+		t.Fatalf("expected normalized lock path, got %q", lock.Path)
+	}
+
+	if err := s.AddToTrash(ctx, &TrashItem{ID: "trash-normalized", OriginalPath: rawPath, DeletedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("AddToTrash() error: %v", err)
+	}
+	item, err := s.GetTrashItem(ctx, "trash-normalized")
+	if err != nil {
+		t.Fatalf("GetTrashItem() error: %v", err)
+	}
+	if item.OriginalPath != "/docs/report.txt" {
+		t.Fatalf("expected normalized trash original path, got %q", item.OriginalPath)
+	}
+
+	if err := s.RenamePath(ctx, `docs`, `archive\\docs`); err != nil {
+		t.Fatalf("RenamePath() error: %v", err)
+	}
+	renamedVersions, err := s.GetVersions(ctx, "/archive/docs/report.txt")
+	if err != nil {
+		t.Fatalf("GetVersions(renamed normalized path) error: %v", err)
+	}
+	if len(renamedVersions) != 1 {
+		t.Fatalf("expected one renamed normalized version entry, got %d", len(renamedVersions))
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/archive/docs/report.txt"); err != nil {
+		t.Fatalf("GetFileIndex(renamed normalized path) error: %v", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/docs/report.txt"); err != ErrNotFound {
+		t.Fatalf("expected old normalized path index to be absent, got %v", err)
+	}
+}
+
 func TestStore_SearchFiles(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,11 +18,12 @@ import (
 
 // Common errors
 var (
-	ErrNotFound      = errors.New("not found")
-	ErrAlreadyExists = errors.New("already exists")
-	ErrFileLocked    = errors.New("file is locked")
-	ErrLockExpired   = errors.New("lock has expired")
-	ErrUnavailable   = errors.New("version object store unavailable")
+	ErrNotFound         = errors.New("not found")
+	ErrAlreadyExists    = errors.New("already exists")
+	ErrFileLocked       = errors.New("file is locked")
+	ErrLockExpired      = errors.New("lock has expired")
+	ErrUnavailable      = errors.New("version object store unavailable")
+	errInvalidStorePath = errors.New("invalid path")
 )
 
 var syncVersionStoreDir = syncVersionStoreDirectory
@@ -176,6 +178,19 @@ func syncVersionStoreDirectory(dir string) error {
 	return dirHandle.Sync()
 }
 
+func normalizeVersionStorePath(rawPath string) (string, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	if normalized == "" {
+		return "", errInvalidStorePath
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return "", errInvalidStorePath
+		}
+	}
+	return path.Clean("/" + normalized), nil
+}
+
 // SetDataplaneClient swaps the dataplane client used by the backing object store.
 func (s *Store) SetDataplaneClient(client *dataplane.Client) {
 	if s == nil || s.objects == nil {
@@ -273,7 +288,11 @@ func (s *Store) Close() error {
 
 // AddVersion adds a new version record
 func (s *Store) AddVersion(ctx context.Context, path, hash string, size int64, comment string) error {
-	_, err := s.db.ExecContext(ctx,
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO versions (path, hash, size, created_at, comment) VALUES (?, ?, ?, ?, ?)`,
 		path, hash, size, time.Now().Unix(), comment)
 	return err
@@ -281,6 +300,10 @@ func (s *Store) AddVersion(ctx context.Context, path, hash string, size int64, c
 
 // GetVersions returns all versions of a file, newest first
 func (s *Store) GetVersions(ctx context.Context, path string) ([]Version, error) {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, path, hash, size, created_at, COALESCE(comment, '') 
 		 FROM versions WHERE path = ? ORDER BY created_at DESC, id DESC`,
@@ -306,10 +329,14 @@ func (s *Store) GetVersions(ctx context.Context, path string) ([]Version, error)
 
 // GetVersion returns a specific version by hash
 func (s *Store) GetVersion(ctx context.Context, path, hash string) (*Version, error) {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return nil, err
+	}
 	var v Version
 	var createdAt int64
 
-	err := s.db.QueryRowContext(ctx,
+	err = s.db.QueryRowContext(ctx,
 		`SELECT id, path, hash, size, created_at, COALESCE(comment, '') 
 		 FROM versions WHERE path = ? AND hash = ?`,
 		path, hash).Scan(&v.ID, &v.Path, &v.Hash, &v.Size, &createdAt, &v.Comment)
@@ -326,18 +353,30 @@ func (s *Store) GetVersion(ctx context.Context, path, hash string) (*Version, er
 
 // DeleteVersions deletes all versions of a file
 func (s *Store) DeleteVersions(ctx context.Context, path string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM versions WHERE path = ?`, path)
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM versions WHERE path = ?`, path)
 	return err
 }
 
 // DeleteVersion deletes a specific version record for a file.
 func (s *Store) DeleteVersion(ctx context.Context, path, hash string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM versions WHERE path = ? AND hash = ?`, path, hash)
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM versions WHERE path = ? AND hash = ?`, path, hash)
 	return err
 }
 
 // DeleteOldVersions deletes versions older than maxAge or exceeding maxCount
 func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int, maxAge time.Duration) ([]string, error) {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return nil, err
+	}
 	conditions := make([]string, 0, 2)
 	args := []any{path}
 
@@ -442,7 +481,11 @@ func (s *Store) ListVersionPaths(ctx context.Context) ([]string, error) {
 
 // SetVersioningOverride sets a user override for versioning on a path
 func (s *Store) SetVersioningOverride(ctx context.Context, path string, enabled bool) error {
-	_, err := s.db.ExecContext(ctx,
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO versioning_overrides (path, enabled, created_at) VALUES (?, ?, ?)`,
 		path, enabled, time.Now().Unix())
 	return err
@@ -451,8 +494,12 @@ func (s *Store) SetVersioningOverride(ctx context.Context, path string, enabled 
 // GetVersioningOverride gets the user override for a path
 // Returns (enabled, exists)
 func (s *Store) GetVersioningOverride(ctx context.Context, path string) (bool, bool) {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return false, false
+	}
 	var enabled bool
-	err := s.db.QueryRowContext(ctx,
+	err = s.db.QueryRowContext(ctx,
 		`SELECT enabled FROM versioning_overrides WHERE path = ?`,
 		path).Scan(&enabled)
 	if err != nil {
@@ -463,12 +510,24 @@ func (s *Store) GetVersioningOverride(ctx context.Context, path string) (bool, b
 
 // DeleteVersioningOverride removes the user override for a path
 func (s *Store) DeleteVersioningOverride(ctx context.Context, path string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM versioning_overrides WHERE path = ?`, path)
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM versioning_overrides WHERE path = ?`, path)
 	return err
 }
 
 // RenamePath updates all metadata paths after a file or directory rename.
 func (s *Store) RenamePath(ctx context.Context, oldPath, newPath string) error {
+	oldPath, err := normalizeVersionStorePath(oldPath)
+	if err != nil {
+		return err
+	}
+	newPath, err = normalizeVersionStorePath(newPath)
+	if err != nil {
+		return err
+	}
 	if oldPath == newPath {
 		return nil
 	}
@@ -560,7 +619,12 @@ func renamePathInTable(ctx context.Context, tx *sql.Tx, table, oldPath, newPath 
 
 // AddToTrash adds a file to trash
 func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error {
-	_, err := s.db.ExecContext(ctx,
+	cleanOriginalPath, err := normalizeVersionStorePath(item.OriginalPath)
+	if err != nil {
+		return err
+	}
+	item.OriginalPath = cleanOriginalPath
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions) 
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.OriginalPath, item.Size, item.DeletedAt.Unix(),
@@ -682,6 +746,10 @@ func (s *Store) GetTrashStats(ctx context.Context) (count int, totalSize int64, 
 
 // AcquireLock tries to acquire a lock on a path
 func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType LockType, duration time.Duration) error {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	expiresAt := now.Add(duration)
 
@@ -693,7 +761,7 @@ func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType L
 	var existingType int
 	var existingExpires int64
 
-	err := s.db.QueryRowContext(ctx,
+	err = s.db.QueryRowContext(ctx,
 		`SELECT holder, lock_type, expires_at FROM file_locks WHERE path = ?`,
 		path).Scan(&existingHolder, &existingType, &existingExpires)
 
@@ -723,6 +791,10 @@ func (s *Store) AcquireLock(ctx context.Context, path, holder string, lockType L
 
 // ReleaseLock releases a lock
 func (s *Store) ReleaseLock(ctx context.Context, path, holder string) error {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
 	result, err := s.db.ExecContext(ctx,
 		`DELETE FROM file_locks WHERE path = ? AND holder = ?`, path, holder)
 	if err != nil {
@@ -737,11 +809,15 @@ func (s *Store) ReleaseLock(ctx context.Context, path, holder string) error {
 
 // GetLock returns the lock info for a path
 func (s *Store) GetLock(ctx context.Context, path string) (*FileLock, error) {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return nil, err
+	}
 	var lock FileLock
 	var lockType int
 	var expiresAt, createdAt int64
 
-	err := s.db.QueryRowContext(ctx,
+	err = s.db.QueryRowContext(ctx,
 		`SELECT path, holder, lock_type, expires_at, created_at FROM file_locks WHERE path = ?`,
 		path).Scan(&lock.Path, &lock.Holder, &lockType, &expiresAt, &createdAt)
 	if err != nil {
@@ -782,7 +858,11 @@ func (s *Store) CleanupExpiredLocks(ctx context.Context) (int, error) {
 
 // UpdateFileIndex updates the file index
 func (s *Store) UpdateFileIndex(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
-	_, err := s.db.ExecContext(ctx,
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO files (path, size, mod_time, content_hash) VALUES (?, ?, ?, ?)`,
 		path, size, modTime.Unix(), hash)
 	return err
@@ -790,6 +870,10 @@ func (s *Store) UpdateFileIndex(ctx context.Context, path string, size int64, mo
 
 // GetFileIndex returns file index entry
 func (s *Store) GetFileIndex(ctx context.Context, path string) (size int64, modTime time.Time, hash string, err error) {
+	path, err = normalizeVersionStorePath(path)
+	if err != nil {
+		return 0, time.Time{}, "", err
+	}
 	var modTimeUnix int64
 	err = s.db.QueryRowContext(ctx,
 		`SELECT size, mod_time, content_hash FROM files WHERE path = ?`,
@@ -806,7 +890,11 @@ func (s *Store) GetFileIndex(ctx context.Context, path string) (size int64, modT
 
 // DeleteFileIndex removes a file from the index
 func (s *Store) DeleteFileIndex(ctx context.Context, path string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path)
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path)
 	return err
 }
 

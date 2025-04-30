@@ -1155,10 +1155,8 @@ func TestHandler_MOVE_UpdatesSharePathsWhenFilesystemHooksConfigured(t *testing.
 	if err != nil {
 		t.Fatalf("Create() error: %v", err)
 	}
-	fs.SetPathChangeHooks(func(ctx context.Context, oldPath, newPath string) {
-		if err := shareStore.UpdatePathReferences(oldPath, newPath); err != nil {
-			t.Errorf("UpdatePathReferences() error: %v", err)
-		}
+	fs.SetPathChangeHooks(func(ctx context.Context, oldPath, newPath string) error {
+		return shareStore.UpdatePathReferences(oldPath, newPath)
 	}, nil)
 
 	req := httptest.NewRequest("MOVE", "/dav/movetest/orig.txt", nil)
@@ -1929,6 +1927,87 @@ func TestHandler_LOCK_ReplacesExpiredLock(t *testing.T) {
 	}
 }
 
+func TestHandler_LOCK_RetriesDuplicateGeneratedToken(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/lock-duplicate-a.txt", bytes.NewReader([]byte("a"))); err != nil {
+		t.Fatalf("WriteFile(lock-duplicate-a.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/lock-duplicate-b.txt", bytes.NewReader([]byte("b"))); err != nil {
+		t.Fatalf("WriteFile(lock-duplicate-b.txt) error: %v", err)
+	}
+
+	handler.newLockToken = func() (string, error) {
+		return "opaquelocktoken:duplicate", nil
+	}
+
+	firstReq := httptest.NewRequest("LOCK", "/dav/lock-duplicate-a.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	firstW := httptest.NewRecorder()
+	handler.ServeHTTP(firstW, firstReq)
+	if firstW.Code != http.StatusOK {
+		t.Fatalf("first LOCK status = %d, want %d", firstW.Code, http.StatusOK)
+	}
+
+	secondReq := httptest.NewRequest("LOCK", "/dav/lock-duplicate-b.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	secondW := httptest.NewRecorder()
+	handler.ServeHTTP(secondW, secondReq)
+	if secondW.Code != http.StatusInternalServerError {
+		t.Fatalf("second LOCK with exhausted duplicate token attempts status = %d, want %d", secondW.Code, http.StatusInternalServerError)
+	}
+
+	sequence := []string{"opaquelocktoken:duplicate", "opaquelocktoken:unique"}
+	callIndex := 0
+	handler.newLockToken = func() (string, error) {
+		token := sequence[callIndex]
+		if callIndex < len(sequence)-1 {
+			callIndex++
+		}
+		return token, nil
+	}
+
+	thirdReq := httptest.NewRequest("LOCK", "/dav/lock-duplicate-b.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	thirdW := httptest.NewRecorder()
+	handler.ServeHTTP(thirdW, thirdReq)
+	if thirdW.Code != http.StatusOK {
+		t.Fatalf("LOCK with duplicate retry status = %d, want %d", thirdW.Code, http.StatusOK)
+	}
+	if thirdW.Header().Get("Lock-Token") != "<opaquelocktoken:unique>" {
+		t.Fatalf("expected retried lock token to use unique token, got %q", thirdW.Header().Get("Lock-Token"))
+	}
+}
+
+func TestHandler_LOCK_ReturnsServerErrorWhenTokenGenerationFails(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/lock-rand-fail.txt", bytes.NewReader([]byte("lock target"))); err != nil {
+		t.Fatalf("WriteFile(lock-rand-fail.txt) error: %v", err)
+	}
+
+	handler.newLockToken = func() (string, error) {
+		return "", errors.New("entropy failure")
+	}
+
+	req := httptest.NewRequest("LOCK", "/dav/lock-rand-fail.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("LOCK with token generation failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if lockToken := w.Header().Get("Lock-Token"); lockToken != "" {
+		t.Fatalf("expected failed LOCK not to emit a lock token, got %q", lockToken)
+	}
+
+	handler.locksMu.Lock()
+	_, exists := handler.locks["/lock-rand-fail.txt"]
+	handler.locksMu.Unlock()
+	if exists {
+		t.Fatal("expected failed LOCK not to persist lock state")
+	}
+}
+
 func TestHandler_LOCK_RefreshWithMatchingIfToken(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -2211,6 +2290,151 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 			t.Fatalf("COPY with If token status = %d, want %d", w.Code, http.StatusCreated)
 		}
 	})
+}
+
+func TestHandler_DeleteLockedCollectionRequiresDescendantToken(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/locked-parent"); err != nil {
+		t.Fatalf("Mkdir(locked-parent) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/locked-parent/child.txt", bytes.NewReader([]byte("locked child"))); err != nil {
+		t.Fatalf("WriteFile(child.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/locked-parent/child.txt", strings.NewReader(`<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK child status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/dav/locked-parent", nil)
+	deleteW := httptest.NewRecorder()
+	handler.ServeHTTP(deleteW, deleteReq)
+	if deleteW.Code != http.StatusLocked {
+		t.Fatalf("DELETE locked parent without descendant token status = %d, want %d", deleteW.Code, http.StatusLocked)
+	}
+
+	deleteReq = httptest.NewRequest(http.MethodDelete, "/dav/locked-parent", nil)
+	deleteReq.Header.Set("Lock-Token", lockToken)
+	deleteW = httptest.NewRecorder()
+	handler.ServeHTTP(deleteW, deleteReq)
+	if deleteW.Code != http.StatusNoContent {
+		t.Fatalf("DELETE locked parent with descendant token status = %d, want %d", deleteW.Code, http.StatusNoContent)
+	}
+
+	if _, err := fs.Stat(ctx, "/locked-parent"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected locked parent directory to be deleted, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/locked-parent/child.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected locked child to be deleted with parent, got %v", err)
+	}
+
+	handler.locksMu.Lock()
+	_, stillLocked := handler.locks["/locked-parent/child.txt"]
+	handler.locksMu.Unlock()
+	if stillLocked {
+		t.Fatal("expected descendant lock to be cleared after deleting the locked collection")
+	}
+}
+
+func TestHandler_DeleteWithMatchingTokenClearsLockState(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-locked.txt", bytes.NewReader([]byte("delete me"))); err != nil {
+		t.Fatalf("WriteFile(delete-locked.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/delete-locked.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/dav/delete-locked.txt", nil)
+	deleteReq.Header.Set("Lock-Token", lockToken)
+	deleteW := httptest.NewRecorder()
+	handler.ServeHTTP(deleteW, deleteReq)
+	if deleteW.Code != http.StatusNoContent {
+		t.Fatalf("DELETE with token status = %d, want %d", deleteW.Code, http.StatusNoContent)
+	}
+
+	handler.locksMu.Lock()
+	_, stillLocked := handler.locks["/delete-locked.txt"]
+	handler.locksMu.Unlock()
+	if stillLocked {
+		t.Fatal("expected file lock to be cleared after successful DELETE")
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/dav/delete-locked.txt", strings.NewReader("recreated"))
+	putW := httptest.NewRecorder()
+	handler.ServeHTTP(putW, putReq)
+	if putW.Code != http.StatusCreated {
+		t.Fatalf("PUT after deleting locked file status = %d, want %d", putW.Code, http.StatusCreated)
+	}
+}
+
+func TestHandler_MoveWithMatchingTokenTransfersLockToDestination(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/move-lock-dst"); err != nil {
+		t.Fatalf("Mkdir(move-lock-dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/move-lock-src.txt", bytes.NewReader([]byte("move me"))); err != nil {
+		t.Fatalf("WriteFile(move-lock-src.txt) error: %v", err)
+	}
+
+	lockReq := httptest.NewRequest("LOCK", "/dav/move-lock-src.txt", strings.NewReader(`<?xml version="1.0"?><lockinfo/>`))
+	lockW := httptest.NewRecorder()
+	handler.ServeHTTP(lockW, lockReq)
+	if lockW.Code != http.StatusOK {
+		t.Fatalf("LOCK status = %d, want %d", lockW.Code, http.StatusOK)
+	}
+	lockToken := lockW.Header().Get("Lock-Token")
+
+	moveReq := httptest.NewRequest("MOVE", "/dav/move-lock-src.txt", nil)
+	moveReq.Header.Set("Destination", "http://example.com/dav/move-lock-dst/moved.txt")
+	moveReq.Header.Set("Lock-Token", lockToken)
+	moveW := httptest.NewRecorder()
+	handler.ServeHTTP(moveW, moveReq)
+	if moveW.Code != http.StatusCreated {
+		t.Fatalf("MOVE with token status = %d, want %d", moveW.Code, http.StatusCreated)
+	}
+
+	handler.locksMu.Lock()
+	_, oldLocked := handler.locks["/move-lock-src.txt"]
+	movedLock, newLocked := handler.locks["/move-lock-dst/moved.txt"]
+	handler.locksMu.Unlock()
+	if oldLocked {
+		t.Fatal("expected source lock to be removed after MOVE")
+	}
+	if !newLocked {
+		t.Fatal("expected lock to transfer to destination after MOVE")
+	}
+	if movedLock.token != strings.Trim(lockToken, "<>") {
+		t.Fatalf("expected transferred lock token %q, got %q", strings.Trim(lockToken, "<>"), movedLock.token)
+	}
+
+	putOldReq := httptest.NewRequest(http.MethodPut, "/dav/move-lock-src.txt", strings.NewReader("new source"))
+	putOldW := httptest.NewRecorder()
+	handler.ServeHTTP(putOldW, putOldReq)
+	if putOldW.Code != http.StatusCreated {
+		t.Fatalf("PUT old source path after MOVE status = %d, want %d", putOldW.Code, http.StatusCreated)
+	}
+
+	putMovedReq := httptest.NewRequest(http.MethodPut, "/dav/move-lock-dst/moved.txt", strings.NewReader("overwrite moved"))
+	putMovedW := httptest.NewRecorder()
+	handler.ServeHTTP(putMovedW, putMovedReq)
+	if putMovedW.Code != http.StatusLocked {
+		t.Fatalf("PUT moved destination without token status = %d, want %d", putMovedW.Code, http.StatusLocked)
+	}
 }
 
 func TestHandler_ReadOnlyMode(t *testing.T) {

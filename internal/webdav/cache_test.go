@@ -199,6 +199,34 @@ func TestPropfindCache_InvalidateAll(t *testing.T) {
 	}
 }
 
+func TestPropfindCache_SetIfUnchangedStoresWhenGenerationMatches(t *testing.T) {
+	cache := NewPropfindCache(time.Minute, 100)
+	generation := cache.SnapshotGeneration()
+
+	stored := cache.SetIfUnchanged("/dir", "1", []propfindResponse{{Href: "/dir"}}, generation)
+	if !stored {
+		t.Fatal("expected SetIfUnchanged to store when generation is unchanged")
+	}
+	if got, ok := cache.Get("/dir", "1"); !ok || len(got) != 1 || got[0].Href != "/dir" {
+		t.Fatalf("expected cached response to be stored, got %v ok=%v", got, ok)
+	}
+}
+
+func TestPropfindCache_SetIfUnchangedSkipsStaleResponseAfterInvalidate(t *testing.T) {
+	cache := NewPropfindCache(time.Minute, 100)
+	generation := cache.SnapshotGeneration()
+
+	cache.Invalidate("/dir")
+
+	stored := cache.SetIfUnchanged("/dir", "1", []propfindResponse{{Href: "/dir"}}, generation)
+	if stored {
+		t.Fatal("expected SetIfUnchanged to reject stale response after invalidate")
+	}
+	if _, ok := cache.Get("/dir", "1"); ok {
+		t.Fatal("expected stale response not to be cached after invalidate")
+	}
+}
+
 func TestPropfindCache_Eviction(t *testing.T) {
 	cache := NewPropfindCache(time.Minute, 10)
 

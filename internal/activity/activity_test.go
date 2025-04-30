@@ -244,6 +244,84 @@ func TestLogAndList(t *testing.T) {
 	}
 }
 
+func TestLogRetriesDuplicateActivityID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalIDGenerator := activityIDGenerator
+	var calls int32
+	activityIDGenerator = func() (string, error) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			return "duplicate-id", nil
+		case 2:
+			return "duplicate-id", nil
+		default:
+			return "unique-id", nil
+		}
+	}
+	defer func() {
+		activityIDGenerator = originalIDGenerator
+	}()
+
+	if err := store.Log(ActionUpload, "/first.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("first Log() error: %v", err)
+	}
+	if err := store.Log(ActionDelete, "/second.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("second Log() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 2 || len(entries) != 2 {
+		t.Fatalf("expected two activity entries, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].ID != "unique-id" {
+		t.Fatalf("expected most recent entry to use retried unique ID, got %q", entries[0].ID)
+	}
+	if entries[1].ID != "duplicate-id" {
+		t.Fatalf("expected first entry to keep original ID, got %q", entries[1].ID)
+	}
+}
+
+func TestLogReturnsActivityIDGenerationFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionUpload, "/original.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("initial Log() error: %v", err)
+	}
+
+	originalIDGenerator := activityIDGenerator
+	activityIDGenerator = func() (string, error) {
+		return "", errors.New("entropy unavailable")
+	}
+	defer func() {
+		activityIDGenerator = originalIDGenerator
+	}()
+
+	err = store.Log(ActionDelete, "/should-not-persist.txt", "user", "127.0.0.1", nil)
+	if err == nil {
+		t.Fatal("expected Log() to fail when activity ID generation fails")
+	}
+	if !strings.Contains(err.Error(), "generate activity ID") {
+		t.Fatalf("expected activity ID generation error, got %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected original entries to remain after activity ID failure, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].Path != "/original.txt" {
+		t.Fatalf("expected original entry to remain after failed log, got %s", entries[0].Path)
+	}
+}
+
 func TestLogRollsBackWhenSaveFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
