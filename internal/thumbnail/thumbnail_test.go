@@ -361,7 +361,8 @@ func TestGetThumbnail_DefaultSize(t *testing.T) {
 }
 
 func TestGetThumbnail_Caching(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -394,7 +395,8 @@ func TestGetThumbnail_Caching(t *testing.T) {
 }
 
 func TestGetThumbnail_ReturnsInProgressGeneratedBytesBeforeCacheSaveCompletes(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -440,7 +442,8 @@ func TestGetThumbnail_ReturnsInProgressGeneratedBytesBeforeCacheSaveCompletes(t 
 }
 
 func TestGetThumbnail_ReturnsInProgressGenerationError(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -617,7 +620,8 @@ func TestGetThumbnail_ContextCancel(t *testing.T) {
 }
 
 func TestGetThumbnail_RejectsOversizedSourceImage(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -661,7 +665,8 @@ func TestGetThumbnail_AlphaChannel(t *testing.T) {
 }
 
 func TestGetThumbnail_SupportsDeclaredNonPNGFormats(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -694,7 +699,8 @@ func TestGetThumbnail_SupportsDeclaredNonPNGFormats(t *testing.T) {
 }
 
 func TestCacheStats(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -735,8 +741,73 @@ func TestCacheStats(t *testing.T) {
 	}
 }
 
-func TestCleanCache(t *testing.T) {
+func TestCacheStats_DoesNotBlockSaveToCache(t *testing.T) {
 	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	originalWalkThumbnailCache := walkThumbnailCache
+	walkThumbnailCache = func(root string, walkFn filepath.WalkFunc) error {
+		close(started)
+		<-release
+		return nil
+	}
+	t.Cleanup(func() {
+		walkThumbnailCache = originalWalkThumbnailCache
+	})
+
+	type cacheStatsResult struct {
+		count int
+		size  int64
+		err   error
+	}
+	statsDone := make(chan cacheStatsResult, 1)
+	go func() {
+		count, size, err := svc.CacheStats(context.Background())
+		statsDone <- cacheStatsResult{count: count, size: size, err: err}
+	}()
+
+	<-started
+
+	cachePath := svc.cachePath(svc.cacheKey("/test/concurrent.png", SizeSmall))
+	saveDone := make(chan error, 1)
+	go func() {
+		saveDone <- svc.saveToCache(cachePath, []byte("thumbnail"))
+	}()
+
+	select {
+	case err := <-saveDone:
+		if err != nil {
+			t.Fatalf("saveToCache() during CacheStats() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-statsDone
+		t.Fatal("expected CacheStats() traversal not to block cache writes")
+	}
+
+	close(release)
+	stats := <-statsDone
+	if stats.err != nil {
+		t.Fatalf("CacheStats() error: %v", stats.err)
+	}
+
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("ReadFile(cachePath) failed: %v", err)
+	}
+	if string(data) != "thumbnail" {
+		t.Fatalf("cache content = %q, want thumbnail", string(data))
+	}
+}
+
+func TestCleanCache(t *testing.T) {
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
@@ -799,7 +870,8 @@ func TestSaveToCache_ReplacesFileAtomically(t *testing.T) {
 }
 
 func TestInvalidateCache(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
 	svc, err := NewService(tmpDir)
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)

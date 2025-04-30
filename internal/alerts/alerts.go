@@ -61,6 +61,14 @@ type StorageStats struct {
 	CheckedAt  time.Time  `json:"checked_at"`
 }
 
+func cloneStorageStats(stats *StorageStats) *StorageStats {
+	if stats == nil {
+		return nil
+	}
+	clone := *stats
+	return &clone
+}
+
 // AlertPayload is the webhook payload
 type AlertPayload struct {
 	Type      string       `json:"type"`
@@ -133,6 +141,10 @@ func (m *Monitor) restart(cfg Config) {
 		m.logger.Info().Msg("Storage alerting disabled")
 		return
 	}
+	if cfg.CheckInterval <= 0 {
+		m.logger.Warn().Dur("interval", cfg.CheckInterval).Msg("Storage alerting disabled due to non-positive interval")
+		return
+	}
 
 	loopCtx, cancel := context.WithCancel(baseCtx)
 
@@ -179,14 +191,19 @@ func (m *Monitor) stopLoop() {
 
 // Check performs a manual check and returns current stats
 func (m *Monitor) Check() (*StorageStats, error) {
-	return m.getStats()
+	stats, err := m.getStats()
+	if err != nil {
+		return nil, err
+	}
+	stats.Level = m.determineLevel(stats)
+	return stats, nil
 }
 
 // LastStats returns the last checked stats
 func (m *Monitor) LastStats() *StorageStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.lastStats
+	return cloneStorageStats(m.lastStats)
 }
 
 func (m *Monitor) check(ctx context.Context) {
@@ -195,13 +212,13 @@ func (m *Monitor) check(ctx context.Context) {
 		m.logger.Error().Err(err).Msg("Failed to get storage stats")
 		return
 	}
+	stats.Level = m.determineLevel(stats)
 
 	m.mu.Lock()
-	m.lastStats = stats
+	m.lastStats = cloneStorageStats(stats)
 	m.mu.Unlock()
 
-	level := m.determineLevel(stats)
-	stats.Level = level
+	level := stats.Level
 
 	if level == AlertLevelNone {
 		m.mu.Lock()

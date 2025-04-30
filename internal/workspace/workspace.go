@@ -3,6 +3,8 @@ package workspace
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,9 @@ var readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
 
 var copyWorkspaceData = copyWithContext
 var syncWorkspaceDir = syncWorkspaceParentDir
+var afterValidateWorkspacePaths = func() error { return nil }
+
+const workspaceRootEscapeError = "path escapes from parent"
 
 func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
 	buffer := make([]byte, 32*1024)
@@ -55,6 +60,13 @@ func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, 
 
 func cleanupTempPath(tmpPath string, operationErr error) error {
 	if removeErr := os.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
+	}
+	return operationErr
+}
+
+func cleanupWorkspaceTempPath(root *os.Root, tmpPath string, operationErr error) error {
+	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
 	}
 	return operationErr
@@ -140,7 +152,8 @@ type FileInfo struct {
 
 // Workspace provides native file operations on a root directory
 type Workspace struct {
-	root string
+	root       string
+	rootHandle *os.Root
 }
 
 // New creates a new Workspace with the given root directory
@@ -173,7 +186,12 @@ func New(root string) (*Workspace, error) {
 		return nil, err
 	}
 
-	return &Workspace{root: absRoot}, nil
+	rootHandle, err := os.OpenRoot(absRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Workspace{root: absRoot, rootHandle: rootHandle}, nil
 }
 
 func (w *Workspace) validatePath(fullPath string) error {
@@ -220,6 +238,92 @@ func validateWorkspaceComponent(path string) error {
 	return nil
 }
 
+func workspaceRootRelativeName(name string) string {
+	cleanName := strings.TrimPrefix(CleanPath(name), "/")
+	if cleanName == "" {
+		return "."
+	}
+	return cleanName
+}
+
+func workspaceParentRelativeName(name string) string {
+	return workspaceRootRelativeName(path.Dir(CleanPath(name)))
+}
+
+func isWorkspaceRootEscapeError(err error) bool {
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		return false
+	}
+	return pathErr.Err != nil && pathErr.Err.Error() == workspaceRootEscapeError
+}
+
+func mapWorkspaceRootPathError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isWorkspaceRootEscapeError(err) || errors.Is(err, os.ErrNotExist) {
+		return ErrNotFound
+	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		return ErrNotDir
+	}
+	return err
+}
+
+func (w *Workspace) mapWorkspaceCreatePathError(fullPath string, err error) error {
+	if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
+		return mappedErr
+	}
+	if errors.Is(err, os.ErrExist) {
+		if validateErr := w.validatePath(fullPath); validateErr != nil {
+			return validateErr
+		}
+	}
+	return err
+}
+
+func newWorkspaceTempName(parentName string) (string, error) {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", err
+	}
+	tempName := ".workspace-" + hex.EncodeToString(suffix[:]) + ".tmp"
+	if parentName == "." {
+		return tempName, nil
+	}
+	return path.Join(parentName, tempName), nil
+}
+
+func createWorkspaceTempFile(root *os.Root, parentName string) (*os.File, string, error) {
+	for range 32 {
+		tempName, err := newWorkspaceTempName(parentName)
+		if err != nil {
+			return nil, "", err
+		}
+		tempFile, err := root.OpenFile(tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			return tempFile, tempName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapWorkspaceRootPathError(err)
+	}
+
+	return nil, "", errors.New("failed to allocate unique temp file")
+}
+
+// Close releases the workspace root handle.
+func (w *Workspace) Close() error {
+	if w == nil || w.rootHandle == nil {
+		return nil
+	}
+	err := w.rootHandle.Close()
+	w.rootHandle = nil
+	return err
+}
+
 // Root returns the workspace root directory
 func (w *Workspace) Root() string {
 	return w.root
@@ -249,16 +353,13 @@ func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
 	}
-
-	info, err := os.Stat(fullPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return nil, ErrNotDir
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
 		return nil, err
+	}
+
+	info, err := w.rootHandle.Stat(workspaceRootRelativeName(name))
+	if err != nil {
+		return nil, mapWorkspaceRootPathError(err)
 	}
 
 	return &FileInfo{
@@ -279,16 +380,27 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	entries, err := os.ReadDir(fullPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return nil, ErrNotDir
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
 		return nil, err
+	}
+
+	dirHandle, err := w.rootHandle.Open(workspaceRootRelativeName(name))
+	if err != nil {
+		return nil, mapWorkspaceRootPathError(err)
+	}
+	defer dirHandle.Close()
+
+	dirInfo, err := dirHandle.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !dirInfo.IsDir() {
+		return nil, ErrNotDir
+	}
+
+	entries, err := dirHandle.ReadDir(-1)
+	if err != nil {
+		return nil, mapWorkspaceRootPathError(err)
 	}
 
 	result := make([]*FileInfo, 0, len(entries))
@@ -320,23 +432,26 @@ func (w *Workspace) OpenFile(ctx context.Context, name string) (*os.File, error)
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
 	}
-
-	info, err := os.Stat(fullPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return nil, ErrNotDir
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
 		return nil, err
 	}
 
+	fileHandle, err := w.rootHandle.Open(workspaceRootRelativeName(name))
+	if err != nil {
+		return nil, mapWorkspaceRootPathError(err)
+	}
+
+	info, err := fileHandle.Stat()
+	if err != nil {
+		_ = fileHandle.Close()
+		return nil, err
+	}
 	if info.IsDir() {
+		_ = fileHandle.Close()
 		return nil, ErrIsDir
 	}
 
-	return os.Open(fullPath)
+	return fileHandle, nil
 }
 
 // ReadFile reads entire file content
@@ -345,23 +460,25 @@ func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error) {
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
 	}
-
-	info, err := os.Stat(fullPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return nil, ErrNotDir
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
 		return nil, err
 	}
 
+	fileHandle, err := w.rootHandle.Open(workspaceRootRelativeName(name))
+	if err != nil {
+		return nil, mapWorkspaceRootPathError(err)
+	}
+	defer fileHandle.Close()
+
+	info, err := fileHandle.Stat()
+	if err != nil {
+		return nil, err
+	}
 	if info.IsDir() {
 		return nil, ErrIsDir
 	}
 
-	return os.ReadFile(fullPath)
+	return io.ReadAll(fileHandle)
 }
 
 // WriteFile writes data to a file, creating parent directories as needed
@@ -373,41 +490,47 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return err
+	}
+
+	rootName := workspaceRootRelativeName(name)
+	parentName := workspaceParentRelativeName(name)
 
 	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
-		return err
+	if err := w.rootHandle.MkdirAll(parentName, 0755); err != nil {
+		return w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
 	}
 
 	// Atomic write: write to temp file then rename
-	tmpFile, err := os.CreateTemp(filepath.Dir(fullPath), ".workspace-*.tmp")
+	tmpFile, tmpPath, err := createWorkspaceTempFile(w.rootHandle, parentName)
 	if err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
 		return err
 	}
-	tmpPath := tmpFile.Name()
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
+	}
 
 	_, writeErr := tmpFile.Write(data)
 	syncErr := tmpFile.Sync()
 	closeErr := tmpFile.Close()
 
 	if writeErr != nil {
-		return cleanupTempPath(tmpPath, writeErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, writeErr)
 	}
 	if syncErr != nil {
-		return cleanupTempPath(tmpPath, syncErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr)
 	}
 	if closeErr != nil {
-		return cleanupTempPath(tmpPath, closeErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
 	}
 
-	if err := os.Rename(tmpPath, fullPath); err != nil {
-		return cleanupTempPath(tmpPath, err)
+	if err := w.rootHandle.Rename(tmpPath, rootName); err != nil {
+		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
+			return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
+		}
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
 		return fmt.Errorf("sync parent directory: %w", err)
@@ -425,41 +548,47 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return err
+	}
+
+	rootName := workspaceRootRelativeName(name)
+	parentName := workspaceParentRelativeName(name)
 
 	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
-		return err
+	if err := w.rootHandle.MkdirAll(parentName, 0755); err != nil {
+		return w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
 	}
 
 	// Atomic write: write to temp file then rename
-	tmpFile, err := os.CreateTemp(filepath.Dir(fullPath), ".workspace-*.tmp")
+	tmpFile, tmpPath, err := createWorkspaceTempFile(w.rootHandle, parentName)
 	if err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
 		return err
 	}
-	tmpPath := tmpFile.Name()
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
+	}
 
 	_, copyErr := copyWorkspaceData(ctx, tmpFile, r)
 	syncErr := tmpFile.Sync()
 	closeErr := tmpFile.Close()
 
 	if copyErr != nil {
-		return cleanupTempPath(tmpPath, copyErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, copyErr)
 	}
 	if syncErr != nil {
-		return cleanupTempPath(tmpPath, syncErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr)
 	}
 	if closeErr != nil {
-		return cleanupTempPath(tmpPath, closeErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
 	}
 
-	if err := os.Rename(tmpPath, fullPath); err != nil {
-		return cleanupTempPath(tmpPath, err)
+	if err := w.rootHandle.Rename(tmpPath, rootName); err != nil {
+		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
+			return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
+		}
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
 		return fmt.Errorf("sync parent directory: %w", err)
@@ -474,9 +603,14 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 	if err := w.validatePath(fullPath); err != nil {
 		return err
 	}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return err
+	}
+
+	rootName := workspaceRootRelativeName(name)
 
 	// Check if already exists
-	info, err := os.Stat(fullPath)
+	info, err := w.rootHandle.Stat(rootName)
 	if err == nil {
 		if info.IsDir() {
 			return ErrAlreadyExists
@@ -486,17 +620,17 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 	if errors.Is(err, syscall.ENOTDIR) {
 		return ErrNotDir
 	}
+	if isWorkspaceRootEscapeError(err) {
+		return ErrNotFound
+	}
 
 	createdDirs, err := collectMissingWorkspaceDirs(fullPath)
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(fullPath, 0755); err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
-		return err
+	if err := w.rootHandle.MkdirAll(rootName, 0755); err != nil {
+		return w.mapWorkspaceCreatePathError(fullPath, err)
 	}
 	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
 		return fmt.Errorf("failed to sync directory: %w", err)
@@ -511,21 +645,20 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 	if err := w.validatePath(fullPath); err != nil {
 		return err
 	}
-
-	info, err := os.Stat(fullPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
 		return err
 	}
 
+	rootName := workspaceRootRelativeName(name)
+
+	info, err := w.rootHandle.Stat(rootName)
+	if err != nil {
+		return mapWorkspaceRootPathError(err)
+	}
+
 	if info.IsDir() {
-		if err := os.Remove(fullPath); err != nil {
-			return err
+		if err := w.rootHandle.Remove(rootName); err != nil {
+			return mapWorkspaceRootPathError(err)
 		}
 		if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
 			return fmt.Errorf("failed to sync directory: %w", err)
@@ -533,8 +666,8 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 		return nil
 	}
 
-	if err := os.Remove(fullPath); err != nil {
-		return err
+	if err := w.rootHandle.Remove(rootName); err != nil {
+		return mapWorkspaceRootPathError(err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
 		return fmt.Errorf("failed to sync directory: %w", err)
@@ -548,20 +681,19 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 	if err := w.validatePath(fullPath); err != nil {
 		return err
 	}
-
-	_, err := os.Stat(fullPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
 		return err
 	}
 
-	if err := os.RemoveAll(fullPath); err != nil {
-		return err
+	rootName := workspaceRootRelativeName(name)
+
+	_, err := w.rootHandle.Stat(rootName)
+	if err != nil {
+		return mapWorkspaceRootPathError(err)
+	}
+
+	if err := w.rootHandle.RemoveAll(rootName); err != nil {
+		return mapWorkspaceRootPathError(err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
 		return fmt.Errorf("failed to sync directory: %w", err)
@@ -579,47 +711,38 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 	if err := w.validatePath(newPath); err != nil {
 		return err
 	}
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return err
+	}
+
+	oldRootName := workspaceRootRelativeName(oldName)
+	newRootName := workspaceRootRelativeName(newName)
 
 	// Check source exists
-	_, err := os.Stat(oldPath)
+	_, err := w.rootHandle.Stat(oldRootName)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
-		return err
+		return mapWorkspaceRootPathError(err)
 	}
 
-	if _, err := os.Stat(newPath); err == nil {
+	if _, err := w.rootHandle.Stat(newRootName); err == nil {
 		return ErrAlreadyExists
-	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) && !isWorkspaceRootEscapeError(err) {
 		return err
 	}
 
-	parentInfo, err := os.Stat(filepath.Dir(newPath))
+	parentInfo, err := w.rootHandle.Stat(workspaceParentRelativeName(newName))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
-		return err
+		return mapWorkspaceRootPathError(err)
 	}
 	if !parentInfo.IsDir() {
 		return ErrNotDir
 	}
 
-	if err := os.Rename(oldPath, newPath); err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
-		return err
+	if err := w.rootHandle.Rename(oldRootName, newRootName); err != nil {
+		return mapWorkspaceRootPathError(err)
 	}
 	if err := syncWorkspaceRenameDirs(oldPath, newPath); err != nil {
-		if rollbackErr := os.Rename(newPath, oldPath); rollbackErr != nil {
+		if rollbackErr := w.rootHandle.Rename(newRootName, oldRootName); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to sync directory: %w", err),
 				fmt.Errorf("failed to rollback renamed path: %w", rollbackErr),
@@ -650,66 +773,66 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	// Check source exists and is a file
-	srcInfo, err := os.Stat(srcPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
+	if err := afterValidateWorkspacePaths(); err != nil {
 		return err
 	}
 
+	srcRootName := workspaceRootRelativeName(srcName)
+	dstRootName := workspaceRootRelativeName(dstName)
+	dstParentName := workspaceParentRelativeName(dstName)
+
+	// Check source exists and is a file
+	srcFile, err := w.rootHandle.Open(srcRootName)
+	if err != nil {
+		return mapWorkspaceRootPathError(err)
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
 	if srcInfo.IsDir() {
 		return ErrIsDir
 	}
 
-	parentInfo, err := os.Stat(filepath.Dir(dstPath))
+	parentInfo, err := w.rootHandle.Stat(dstParentName)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
-		if errors.Is(err, syscall.ENOTDIR) {
-			return ErrNotDir
-		}
-		return err
+		return mapWorkspaceRootPathError(err)
 	}
 	if !parentInfo.IsDir() {
 		return ErrNotDir
 	}
 
 	// Copy file
-	srcFile, err := os.Open(srcPath)
+	dstFile, tmpPath, err := createWorkspaceTempFile(w.rootHandle, dstParentName)
 	if err != nil {
 		return err
 	}
-	defer srcFile.Close()
-
-	dstFile, err := os.CreateTemp(filepath.Dir(dstPath), ".workspace-*.tmp")
-	if err != nil {
-		return err
+	if err := dstFile.Chmod(0644); err != nil {
+		_ = dstFile.Close()
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
-	tmpPath := dstFile.Name()
 
 	_, copyErr := copyWorkspaceData(ctx, dstFile, srcFile)
 	syncErr := dstFile.Sync()
 	closeErr := dstFile.Close()
 
 	if copyErr != nil {
-		return cleanupTempPath(tmpPath, copyErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, copyErr)
 	}
 	if syncErr != nil {
-		return cleanupTempPath(tmpPath, syncErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr)
 	}
 	if closeErr != nil {
-		return cleanupTempPath(tmpPath, closeErr)
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
 	}
 
-	if err := os.Rename(tmpPath, dstPath); err != nil {
-		return cleanupTempPath(tmpPath, err)
+	if err := w.rootHandle.Rename(tmpPath, dstRootName); err != nil {
+		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
+			return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
+		}
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(dstPath)); err != nil {
 		return fmt.Errorf("sync parent directory: %w", err)
@@ -803,7 +926,10 @@ func (w *Workspace) Exists(ctx context.Context, name string) bool {
 	if err := w.validatePath(fullPath); err != nil {
 		return false
 	}
-	_, err := os.Stat(fullPath)
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return false
+	}
+	_, err := w.rootHandle.Stat(workspaceRootRelativeName(name))
 	return err == nil
 }
 
@@ -813,6 +939,9 @@ func (w *Workspace) IsDir(ctx context.Context, name string) bool {
 	if err := w.validatePath(fullPath); err != nil {
 		return false
 	}
-	info, err := os.Stat(fullPath)
+	if err := afterValidateWorkspacePaths(); err != nil {
+		return false
+	}
+	info, err := w.rootHandle.Stat(workspaceRootRelativeName(name))
 	return err == nil && info.IsDir()
 }

@@ -509,12 +509,13 @@ func (s *Store) hasMetadataPathConflict(ctx context.Context, targetPath string) 
 		return false, nil
 	}
 
-	likePattern := targetPath + "/%"
+	prefix := targetPath + "/"
+	prefixLen := len(prefix)
 	tables := []string{"versions", "files", "versioning_overrides", "file_locks"}
 	for _, table := range tables {
-		query := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE path = ? OR path LIKE ? LIMIT 1)`, table)
+		query := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE path = ? OR substr(path, 1, ?) = ? LIMIT 1)`, table)
 		var exists bool
-		if err := s.db.QueryRowContext(ctx, query, targetPath, likePattern).Scan(&exists); err != nil {
+		if err := s.db.QueryRowContext(ctx, query, targetPath, prefixLen, prefix).Scan(&exists); err != nil {
 			return false, err
 		}
 		if exists {
@@ -537,12 +538,11 @@ func renamePathInTable(ctx context.Context, tx *sql.Tx, table, oldPath, newPath 
 	}
 
 	prefix := oldPath + "/"
-	likePattern := prefix + "%"
-	prefixStart := len(oldPath) + 1
+	prefixLen := len(prefix)
 
 	_, err := tx.ExecContext(ctx,
-		fmt.Sprintf(`UPDATE %s SET path = ? || substr(path, ?) WHERE path LIKE ?`, table),
-		newPath, prefixStart, likePattern)
+		fmt.Sprintf(`UPDATE %s SET path = ? || substr(path, ?) WHERE substr(path, 1, ?) = ?`, table),
+		newPath, prefixLen, prefixLen, prefix)
 	return err
 }
 
