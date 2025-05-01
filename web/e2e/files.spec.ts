@@ -68,6 +68,31 @@ test.describe('文件浏览页面', () => {
     
     expect(hasEmpty || hasFiles).toBe(true)
   })
+
+  test('双击文件夹后路径和面包屑应保持稳定', async ({ page }, testInfo) => {
+    const folderName = `e2e-nav-${testInfo.workerIndex}-${Date.now()}`
+
+    await page.getByRole('button', { name: /新建空间|新建文件夹/i }).click()
+    await page.getByPlaceholder('请输入文件夹名称').fill(folderName)
+    await page.getByRole('button', { name: '创建' }).click()
+
+    const folder = page.getByText(folderName, { exact: true }).first()
+    await expect(folder).toBeVisible({ timeout: 10_000 })
+
+    await folder.dblclick()
+
+    const expectedPath = `/files/${folderName}`
+    await expect(page).toHaveURL(new RegExp(`${expectedPath}$`), { timeout: 10_000 })
+    await expect(page.getByRole('button', { name: folderName })).toBeVisible({ timeout: 5_000 })
+
+    await page.waitForTimeout(500)
+    await expect(page).toHaveURL(new RegExp(`${expectedPath}$`))
+    await expect(page.getByText('这里空空如也')).toBeVisible({ timeout: 5_000 })
+
+    await page.getByRole('button', { name: /根目录/ }).click()
+    await expect(page).toHaveURL(/\/files$/)
+    await expect(page.getByText(folderName, { exact: true }).first()).toBeVisible({ timeout: 5_000 })
+  })
 })
 
 test.describe('文件批量操作', () => {
