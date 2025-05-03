@@ -14,6 +14,9 @@ ACTIONLINT_VERSION ?= v1.7.7
 ACTIONLINT_CMD ?= actionlint
 ACTIONLINT_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 GO_SECURITY_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
+GO_COVERAGE_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
+GO_COVERAGE_MIN ?= 75
+RUST_COVERAGE_MIN ?= 70
 NPM_AUDIT ?= 0
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
 ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh
@@ -49,6 +52,7 @@ help:
 	@echo "  scripts-check - Validate deployment shell scripts"
 	@echo "  security-check - Run dependency vulnerability checks"
 	@echo "  install-audit-tools - Install pinned security scan tools"
+	@echo "  rust-coverage - Run Rust coverage with cargo-llvm-cov"
 	@echo "  fmt        - Format code (Go + Rust)"
 	@echo "  workflows-check - Validate GitHub Actions workflows"
 	@echo "  e2e        - Run E2E acceptance tests"
@@ -123,11 +127,28 @@ test:
 coverage:
 	@echo "📊 Generating coverage reports..."
 	@mkdir -p coverage
-	@$(RESOLVE_GO_PACKAGES); \
-	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out $$packages
-	go tool cover -html=coverage/go.out -o coverage/go.html
+	@GO_LIST_ENV="$(GO_COVERAGE_ENV)"; \
+	$(RESOLVE_GO_PACKAGES); \
+	CGO_ENABLED=0 $(GO_COVERAGE_ENV) bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage/go.out $$packages
+	@coverage="$$($(GO_COVERAGE_ENV) go tool cover -func=coverage/go.out | awk '/^total:/ { gsub("%", "", $$3); print $$3 }')"; \
+	awk -v coverage="$$coverage" -v min="$(GO_COVERAGE_MIN)" 'BEGIN { \
+		if ((coverage + 0) < (min + 0)) { \
+			printf "❌ Go coverage %.1f%% is below %.1f%%\n", coverage, min; \
+			exit 1; \
+		} \
+		printf "✅ Go coverage %.1f%% meets %.1f%%\n", coverage, min; \
+	}'
+	$(GO_COVERAGE_ENV) go tool cover -html=coverage/go.out -o coverage/go.html
 	cd web && npm run test:coverage
 	@echo "✅ Coverage reports: coverage/go.html, web/coverage/"
+
+rust-coverage:
+	@echo "🦀 Running Rust coverage..."
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "❌ cargo-llvm-cov is required. Install with: cargo install cargo-llvm-cov --locked"; \
+		exit 1; \
+	fi
+	cd dataplane && cargo llvm-cov --all-features --locked --summary-only --fail-under-lines $(RUST_COVERAGE_MIN)
 
 # E2E 测试
 e2e:

@@ -55,6 +55,50 @@ describe('TextPreview', () => {
     })
   })
 
+  it('reads preview content from streaming responses', async () => {
+    const encoder = new TextEncoder()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers(),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode('streamed '))
+          controller.enqueue(encoder.encode('content'))
+          controller.close()
+        },
+      }),
+    } as Response)
+
+    render(<TextPreview path="/stream.txt" filename="stream.txt" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('streamed content')).toBeInTheDocument()
+    })
+  })
+
+  it('cancels streaming reads when the preview exceeds the byte limit', async () => {
+    let cancelled = false
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers(),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(1024 * 1024 + 1))
+        },
+        cancel() {
+          cancelled = true
+        },
+      }),
+    } as Response)
+
+    render(<TextPreview path="/large-stream.txt" filename="large-stream.txt" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('文件过大，无法预览')).toBeInTheDocument()
+      expect(cancelled).toBe(true)
+    })
+  })
+
   it('renders preview content as inert text instead of injecting HTML', async () => {
     const mockContent = '<img src=x onerror=alert(1)>\nconst value = "500"'
     mockAuthFetch.mockResolvedValueOnce({
@@ -154,6 +198,21 @@ describe('TextPreview', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/TSX/)).toBeInTheDocument()
+    })
+  })
+
+  it('highlights hash comments for scripting languages', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers(),
+      text: () => Promise.resolve('# comment\nvalue = 42'),
+    } as Response)
+
+    render(<TextPreview path="/script.py" filename="script.py" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('# comment')).toHaveClass('text-default-400')
+      expect(screen.getByText('42')).toHaveClass('text-amber-500')
     })
   })
 

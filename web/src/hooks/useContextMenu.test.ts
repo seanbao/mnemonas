@@ -11,6 +11,7 @@ describe('useContextMenu', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
@@ -199,6 +200,18 @@ describe('useContextMenu', () => {
       const { result } = renderHook(() => useContextMenu())
       expect(typeof result.current.setContainerRef).toBe('function')
     })
+
+    it('accepts and clears a container element ref', () => {
+      const { result } = renderHook(() => useContextMenu())
+      const container = document.createElement('div')
+
+      expect(() => {
+        act(() => {
+          result.current.setContainerRef(container)
+          result.current.setContainerRef(null)
+        })
+      }).not.toThrow()
+    })
   })
 
   describe('edge cases', () => {
@@ -212,6 +225,81 @@ describe('useContextMenu', () => {
       // Should clamp to minimum 8
       expect(result.current.state.position.x).toBe(8)
       expect(result.current.state.position.y).toBe(8)
+    })
+  })
+
+  describe('global close behavior', () => {
+    it('keeps the menu open when clicking inside a context menu element', () => {
+      vi.useFakeTimers()
+      const { result } = renderHook(() => useContextMenu())
+      const menu = document.createElement('div')
+      menu.setAttribute('data-context-menu', 'true')
+      const item = document.createElement('button')
+      menu.appendChild(item)
+      document.body.appendChild(menu)
+
+      act(() => {
+        result.current.show('item', 100, 200)
+      })
+      act(() => {
+        vi.advanceTimersByTime(11)
+      })
+      act(() => {
+        item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      })
+
+      expect(result.current.state.isOpen).toBe(true)
+    })
+
+    it('closes the menu when clicking outside after listeners attach', () => {
+      vi.useFakeTimers()
+      const { result } = renderHook(() => useContextMenu())
+
+      act(() => {
+        result.current.show('item', 100, 200)
+      })
+      act(() => {
+        vi.advanceTimersByTime(11)
+      })
+      act(() => {
+        document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      })
+
+      expect(result.current.state.isOpen).toBe(false)
+    })
+
+    it('closes the menu on Escape', () => {
+      vi.useFakeTimers()
+      const { result } = renderHook(() => useContextMenu())
+
+      act(() => {
+        result.current.show('item', 100, 200)
+      })
+      act(() => {
+        vi.advanceTimersByTime(11)
+      })
+      act(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      })
+
+      expect(result.current.state.isOpen).toBe(false)
+    })
+
+    it('closes the menu on scroll', () => {
+      vi.useFakeTimers()
+      const { result } = renderHook(() => useContextMenu())
+
+      act(() => {
+        result.current.show('item', 100, 200)
+      })
+      act(() => {
+        vi.advanceTimersByTime(11)
+      })
+      act(() => {
+        document.dispatchEvent(new Event('scroll', { bubbles: true }))
+      })
+
+      expect(result.current.state.isOpen).toBe(false)
     })
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@/test/utils'
+import { act, fireEvent, render, screen, waitFor, within } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { FilesPage } from './Files'
@@ -139,6 +139,17 @@ function createDeferred<T>() {
 
 function pendingFilesRefetch() {
   return new Promise<Awaited<ReturnType<typeof listFiles>>>(() => {})
+}
+
+async function openContextMenuFor(name: string, coordinates = { clientX: 120, clientY: 80 }) {
+  const target = (await screen.findAllByText(name))[0]
+  fireEvent.contextMenu(target, coordinates)
+
+  return waitFor(() => {
+    const menu = document.querySelector('[data-context-menu]')
+    expect(menu).toBeTruthy()
+    return menu as HTMLElement
+  })
 }
 
 describe('FilesPage', () => {
@@ -629,7 +640,7 @@ describe('FilesPage', () => {
     })
   })
 
-  describe('file selection', () => {
+	  describe('file selection', () => {
     it('renders checkboxes for each file', async () => {
       render(<FilesPage />)
       
@@ -871,6 +882,106 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])
       })
+    })
+	  })
+
+  describe('context menu', () => {
+    it('executes file actions from the custom context menu', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      mockFilesStoreState.viewMode = 'grid'
+
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+      mockFilesStoreState.setSelection.mockClear()
+      mockNavigate.mockClear()
+      mockDownloadFile.mockClear()
+
+      let menu = await openContextMenuFor('photo.jpg')
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg'])
+      await user.click(within(menu).getByRole('button', { name: '复制路径' }))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith('/photo.jpg')
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '路径已复制', color: 'success' })
+      })
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 140, clientY: 90 })
+      await user.click(within(menu).getByRole('button', { name: '下载' }))
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+      })
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 160, clientY: 100 })
+      await user.click(within(menu).getByRole('button', { name: '查看版本历史' }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/versions?path=%2Fphoto.jpg')
+    })
+
+    it('opens folders and protects folder-only actions from the custom context menu', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      await screen.findByText('documents')
+      mockFilesStoreState.setCurrentPath.mockClear()
+      mockNavigate.mockClear()
+
+      const menu = await openContextMenuFor('documents')
+      expect(within(menu).getByRole('button', { name: '查看版本历史' })).toBeDisabled()
+
+      await user.click(within(menu).getByRole('button', { name: '打开文件夹' }))
+
+      expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/documents')
+      expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: false })
+    })
+
+    it('runs multi-selection commands from the custom context menu', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile.mockResolvedValue(undefined)
+
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+      mockFilesStoreState.clearSelection.mockClear()
+      mockFilesStoreState.setSelection.mockClear()
+
+      let menu = await openContextMenuFor('photo.jpg')
+      expect(within(menu).getByText('已选 2 项')).toBeTruthy()
+      await user.click(within(menu).getByRole('button', { name: '反选' }))
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents'])
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 150, clientY: 90 })
+      await user.click(within(menu).getByRole('button', { name: '仅文件（2）' }))
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'])
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 160, clientY: 100 })
+      await user.click(within(menu).getByRole('button', { name: '仅文件夹（1）' }))
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents'])
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 170, clientY: 110 })
+      await user.click(within(menu).getByRole('button', { name: '批量下载（仅文件）' }))
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+        expect(mockDownloadFile).toHaveBeenCalledWith('/video.mp4', { filename: 'video.mp4' })
+      })
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 180, clientY: 120 })
+      await user.click(within(menu).getByRole('button', { name: '清空选择' }))
+      expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 190, clientY: 130 })
+      await user.click(within(menu).getByRole('button', { name: '批量删除（进回收站）' }))
+      expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
     })
   })
 
