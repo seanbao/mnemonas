@@ -70,6 +70,17 @@ export function normalizeUserHomeDir(homeDir: string): string {
   return normalizePath(trimmed.replace(/\\/g, '/'))
 }
 
+export function pathWithinBase(basePath: string, targetPath: string): boolean {
+  const normalizedBase = normalizePath(basePath)
+  const normalizedTarget = normalizePath(targetPath)
+
+  if (normalizedBase === '/') {
+    return normalizedTarget.startsWith('/')
+  }
+
+  return normalizedTarget === normalizedBase || normalizedTarget.startsWith(`${normalizedBase}/`)
+}
+
 /**
  * Normalize WebDAV prefix input for config updates.
  */

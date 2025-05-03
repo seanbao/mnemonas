@@ -72,7 +72,7 @@ import {
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
-import { copyTextToClipboard, decodePathFromUrl, encodePathForUrl, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
+import { copyTextToClipboard, decodePathFromUrl, encodePathForUrl, formatBytes, formatDate, cn, normalizePath, pathWithinBase } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
 type SortKey = 'name' | 'size' | 'modTime'
@@ -85,13 +85,6 @@ const sortLabels: Record<SortKey, string> = {
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409
-}
-
-function pathWithinBase(basePath: string, targetPath: string): boolean {
-  if (basePath === '/') {
-    return targetPath.startsWith('/')
-  }
-  return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
 }
 
 function getFilesRoutePath(filePath: string): string {
@@ -1128,11 +1121,11 @@ export function FilesPage() {
     return normalizedPath
   }, [setCurrentPath])
 
-  const navigateToFilePath = useCallback((filePath: string) => {
+  const navigateToFilePath = useCallback((filePath: string, options?: { replace?: boolean }) => {
     const normalizedPath = setFilePathState(filePath)
     const routePath = getFilesRoutePath(normalizedPath)
     if (location.pathname !== routePath) {
-      navigate(routePath, { replace: true })
+      navigate(routePath, { replace: options?.replace ?? false })
     }
   }, [location.pathname, navigate, setFilePathState])
 
@@ -1162,7 +1155,7 @@ export function FilesPage() {
         title: '仅可访问主目录内的文件',
         color: 'warning',
       })
-      navigateToFilePath(scopedHomeDir)
+      navigateToFilePath(scopedHomeDir, { replace: true })
       return
     }
     setFilePathState(finalPath)
@@ -1182,7 +1175,7 @@ export function FilesPage() {
     if (hasInvalidHomeDir) return
     if (!user || user.role === 'admin' || !scopedHomeDir || scopedHomeDir === '/') return
     if (location.pathname !== '/files' || currentPath !== '/' || currentPathRef.current !== '/') return
-    navigateToFilePath(scopedHomeDir)
+    navigateToFilePath(scopedHomeDir, { replace: true })
   }, [hasInvalidHomeDir, user, location.pathname, currentPath, scopedHomeDir, navigateToFilePath])
 
   const currentPathAllowed = !hasInvalidHomeDir && (!scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath))
