@@ -402,6 +402,7 @@ describe('ShareDialog', () => {
     )
 
     fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: '7 天' } })
+    fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: '仅查看' } })
     await user.type(screen.getByPlaceholderText('不限制'), '12')
     await user.type(screen.getByPlaceholderText('添加备注信息'), '  release package  ')
     await user.click(screen.getByText('创建分享链接'))

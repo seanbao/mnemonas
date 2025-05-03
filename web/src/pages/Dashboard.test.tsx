@@ -254,6 +254,7 @@ describe('DashboardPage', () => {
     })
 
     it('surfaces critical disk space risk from the overview', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
       mockGetStorageStats.mockResolvedValueOnce({
         fileCount: 42,
         fileCountAvailable: true,
@@ -272,9 +273,12 @@ describe('DashboardPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('存储空间严重不足')).toBeTruthy()
-        expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
-        expect(screen.getByRole('button', { name: '查看存储' })).toBeTruthy()
-      })
+          expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
+          expect(screen.getByRole('button', { name: '查看存储' })).toBeTruthy()
+        })
+
+      await user.click(screen.getByRole('button', { name: '查看存储' }))
+      expect(mockNavigate).toHaveBeenCalledWith('/storage')
     })
 
     it('falls back to CAS guidance when disk stats are unavailable', async () => {
@@ -575,6 +579,20 @@ describe('DashboardPage', () => {
       await waitFor(() => {
         expect(screen.getByText('0.1.0')).toBeTruthy()
       })
+    })
+  })
+
+  describe('recent activity', () => {
+    it('navigates to the activity page from the recent activity header', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /查看全部/i })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /查看全部/i }))
+      expect(mockNavigate).toHaveBeenCalledWith('/activity')
     })
   })
 

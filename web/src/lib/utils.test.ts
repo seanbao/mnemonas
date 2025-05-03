@@ -7,6 +7,7 @@ import {
   openUrlInNewTab,
   formatDate, 
   formatDuration,
+  formatRelativeTime,
   sanitizeFilename,
   normalizePath,
   normalizeWebDAVPrefix,
@@ -79,6 +80,23 @@ describe('openUrlInNewTab', () => {
 
     openSpy.mockRestore()
   })
+
+  it('returns false when window.open is unavailable', () => {
+    const originalOpen = window.open
+    Object.defineProperty(window, 'open', {
+      configurable: true,
+      value: undefined,
+    })
+
+    try {
+      expect(openUrlInNewTab('/download')).toBe(false)
+    } finally {
+      Object.defineProperty(window, 'open', {
+        configurable: true,
+        value: originalOpen,
+      })
+    }
+  })
 })
 
 describe('formatBytes', () => {
@@ -108,6 +126,10 @@ describe('formatBytes', () => {
     expect(formatBytes(1536, 0)).toBe('2 KB')
     expect(formatBytes(1536, 3)).toBe('1.5 KB')
   })
+
+  it('clamps negative decimals to zero', () => {
+    expect(formatBytes(1536, -2)).toBe('2 KB')
+  })
 })
 
 describe('parseByteSize', () => {
@@ -128,6 +150,10 @@ describe('parseByteSize', () => {
 })
 
 describe('formatDuration', () => {
+  it('formats sub-second durations as milliseconds', () => {
+    expect(formatDuration(500)).toBe('500 毫秒')
+  })
+
   it('formats milliseconds to seconds', () => {
     expect(formatDuration(5000)).toBe('5 秒')
   })
@@ -143,6 +169,25 @@ describe('formatDuration', () => {
   it('formats mixed durations', () => {
     expect(formatDuration(3660000)).toBe('1 小时 1 分钟')
     expect(formatDuration(90000)).toBe('1 分 30 秒')
+  })
+})
+
+describe('formatRelativeTime', () => {
+  it('formats recent and older timestamps relative to now', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-05-04T12:00:00Z'))
+
+      expect(formatRelativeTime('2026-05-04T11:59:30Z')).toBe('刚刚')
+      expect(formatRelativeTime('2026-05-04T11:30:00Z')).toBe('30 分钟前')
+      expect(formatRelativeTime('2026-05-04T09:00:00Z')).toBe('3 小时前')
+      expect(formatRelativeTime('2026-05-03T12:00:00Z')).toBe('昨天')
+      expect(formatRelativeTime('2026-05-01T12:00:00Z')).toBe('3 天前')
+      expect(formatRelativeTime('2026-04-20T12:00:00Z')).toBe('2 周前')
+      expect(formatRelativeTime('2026-03-01T12:00:00Z')).toContain('2026')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -250,6 +295,7 @@ describe('file type detection', () => {
     it('rejects non-image files', () => {
       expect(isImageFile('document.txt')).toBe(false)
       expect(isImageFile('video.mp4')).toBe(false)
+      expect(isImageFile('')).toBe(false)
     })
   })
 
@@ -263,6 +309,7 @@ describe('file type detection', () => {
     it('rejects non-video files', () => {
       expect(isVideoFile('photo.jpg')).toBe(false)
       expect(isVideoFile('song.mp3')).toBe(false)
+      expect(isVideoFile('')).toBe(false)
     })
   })
 })
@@ -303,6 +350,7 @@ describe('getFileIcon', () => {
   it('returns file for unknown types', () => {
     expect(getFileIcon('unknown.xyz', false)).toBe('file')
     expect(getFileIcon('readme.txt', false)).toBe('file')
+    expect(getFileIcon('', false)).toBe('file')
   })
 })
 

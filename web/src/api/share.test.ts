@@ -61,6 +61,25 @@ describe('Share API', () => {
       expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:share')
     })
 
+    it('downloads nested shared files and falls back to the file path name', async () => {
+      const blob = new Blob(['nested-share-content'], { type: 'text/plain' })
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:nested-share')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1', { filePath: '/folder/report.txt' })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/folder/report.txt', { credentials: 'same-origin' })
+      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
+      expect(clickedLink.download).toBe('report.txt')
+    })
+
     it('uses decoded UTF-8 filenames from content disposition', async () => {
       const blob = new Blob(['share-content'], { type: 'text/plain' })
       vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:utf8-share')
@@ -236,6 +255,24 @@ describe('Share API', () => {
         status: 200,
       })
     })
+
+    it.each([
+      ['non-object item', null],
+      ['invalid is_dir', { name: 'file.txt', path: '/file.txt', is_dir: 'false', size: 1, mod_time: '2026-03-13T00:00:00Z' }],
+      ['invalid size', { name: 'file.txt', path: '/file.txt', is_dir: false, size: '1', mod_time: '2026-03-13T00:00:00Z' }],
+      ['invalid mod_time', { name: 'file.txt', path: '/file.txt', is_dir: false, size: 1, mod_time: 123 }],
+    ])('rejects folder item responses with %s', async (_label, item) => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ path: 'docs', items: [item] }),
+      })
+
+      await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
+        message: '分享文件夹响应无效',
+        status: 200,
+      })
+    })
   })
 
   describe('getPublicShare', () => {
@@ -317,6 +354,30 @@ describe('Share API', () => {
         status: 200,
       })
     })
+
+    it.each([
+      ['description', { description: 42 }],
+      ['file_name', { file_name: 42 }],
+      ['file_size', { file_size: '42' }],
+      ['folder_items', { folder_items: '2' }],
+    ])('rejects public share payloads with invalid optional %s', async (_label, overrides) => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          id: 'share-1',
+          type: 'folder',
+          has_password: false,
+          permission: 'read',
+          ...overrides,
+        }),
+      })
+
+      await expect(getPublicShare('share-1')).rejects.toMatchObject({
+        message: '分享信息无效',
+        status: 200,
+      })
+    })
   })
 
   describe('authenticated share APIs', () => {
@@ -361,6 +422,19 @@ describe('Share API', () => {
 
       await expect(getShare('share-detail')).resolves.toMatchObject({
         id: 'share-detail',
+      })
+    })
+
+    it('throws ShareError when loading share details fails', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ success: false, error: { message: 'share missing' } }),
+      })
+
+      await expect(getShare('missing')).rejects.toMatchObject({
+        message: 'share missing',
+        status: 404,
       })
     })
 
@@ -488,6 +562,24 @@ describe('Share API', () => {
         ok: true,
         status: 200,
         json: () => Promise.resolve({ success: true, data: [{}] }),
+      })
+
+      await expect(listShares()).rejects.toMatchObject({
+        message: '获取分享列表响应无效',
+        status: 200,
+      })
+    })
+
+    it.each([
+      ['non-object share', null],
+      ['invalid expires_at', createValidShare({ expires_at: 123 as unknown as string })],
+      ['invalid max_access', createValidShare({ max_access: '5' as unknown as number })],
+      ['invalid description', createValidShare({ description: 42 as unknown as string })],
+    ])('rejects share list responses with %s', async (_label, share) => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: [share] }),
       })
 
       await expect(listShares()).rejects.toMatchObject({
@@ -792,6 +884,8 @@ describe('Share API', () => {
       expect(formatDuration('7d')).toBe('7 天')
       expect(formatDuration('12h')).toBe('12 小时')
       expect(formatDuration('30m')).toBe('30 分钟')
+      expect(formatDuration('d')).toBe('d')
+      expect(formatDuration('h')).toBe('h')
       expect(formatDuration('custom')).toBe('custom')
     })
   })

@@ -95,6 +95,17 @@ describe('MoveDialog', () => {
     mockCreateDirectory.mockResolvedValue(successActionResult)
   })
 
+  it('closes from the cancel button while idle', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+
+    renderDialog({ onClose })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps only failed files visible after partial move failure', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()

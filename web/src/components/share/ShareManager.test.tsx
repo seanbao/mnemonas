@@ -112,6 +112,26 @@ describe('ShareManager', () => {
     expect(mockAddToast).not.toHaveBeenCalled()
   })
 
+  it('retries loading from the unavailable empty state', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares)
+      .mockRejectedValueOnce(new ShareError('share service unavailable', 503))
+      .mockResolvedValueOnce(mockShares)
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('分享功能暂不可用')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+  })
+
   it('shows a disabled state without loading shares when the feature is off', async () => {
     render(<ShareManager featureEnabled={false} />)
 

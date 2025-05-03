@@ -270,6 +270,42 @@ describe('themeStore module initialization', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(true)
   })
 
+  it('ignores system preference changes while a fixed theme is selected', async () => {
+    let prefersDark = false
+    let changeListener: (() => void) | null = null
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: prefersDark && query.includes('dark'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((event: string, listener: EventListenerOrEventListenerObject) => {
+        if (event === 'change') {
+          changeListener = () => {
+            if (typeof listener === 'function') {
+              listener(new Event('change'))
+              return
+            }
+            listener.handleEvent(new Event('change'))
+          }
+        }
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+
+    await vi.resetModules()
+    const { useThemeStore: isolatedThemeStore } = await import('./theme')
+    isolatedThemeStore.getState().setTheme('light')
+
+    prefersDark = true
+    changeListener?.()
+
+    expect(isolatedThemeStore.getState().theme).toBe('light')
+    expect(isolatedThemeStore.getState().resolvedTheme).toBe('light')
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+  })
+
   it('ignores malformed stored theme data during module initialization', async () => {
     vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
       matches: !query.includes('dark'),

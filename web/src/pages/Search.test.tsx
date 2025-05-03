@@ -375,6 +375,15 @@ describe('SearchPage', () => {
   })
 
   describe('navigation', () => {
+    it('navigates back from the header button', async () => {
+      const user = userEvent.setup()
+      renderSearchPage()
+
+      await user.click(screen.getByRole('button', { name: '返回上一页' }))
+
+      expect(mockNavigate).toHaveBeenCalledWith(-1)
+    })
+
     it('navigates to file location on click', async () => {
       const user = userEvent.setup()
       renderSearchPage()

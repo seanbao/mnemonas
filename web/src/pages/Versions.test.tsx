@@ -166,6 +166,27 @@ describe('VersionsPage', () => {
       })
     })
 
+    it('clears the selected path and query string when submitting an empty search', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.getByText('/test.txt')).toBeTruthy()
+      })
+
+      await user.clear(screen.getByPlaceholderText(/输入文件路径/))
+      await user.click(screen.getByText('查询版本'))
+
+      await waitFor(() => {
+        expect(screen.queryByText('/test.txt')).toBeNull()
+        expect(screen.getByText('查看文件版本历史')).toBeTruthy()
+      })
+      expect(window.location.search).toBe('')
+    })
+
     it('blocks non-admin searches outside the assigned home directory', async () => {
       mockUseIsAdmin.mockReturnValue(false)
       mockUseUser.mockReturnValue({ id: 'tester', username: 'tester', role: 'user', email: '', homeDir: '/tester' })
@@ -373,6 +394,30 @@ describe('VersionsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('确认恢复版本')).toBeTruthy()
+      })
+    })
+
+    it('closes the restore modal when cancellation is allowed', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+
+      await waitFor(() => {
+        expect(screen.getByText('确认恢复版本')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('取消'))
+
+      await waitFor(() => {
+        expect(screen.queryByText('确认恢复版本')).toBeNull()
       })
     })
 

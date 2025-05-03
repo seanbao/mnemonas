@@ -82,6 +82,20 @@ describe('Users API', () => {
     await expect(listUsers()).rejects.toThrow('Invalid users response')
   })
 
+  it('rejects list users responses with non-object user entries', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          users: [null],
+        },
+      }),
+    })
+
+    await expect(listUsers()).rejects.toThrow('Invalid users response')
+  })
+
   it('rejects malformed successful create user responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
