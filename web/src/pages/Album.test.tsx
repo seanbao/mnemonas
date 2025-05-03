@@ -112,6 +112,19 @@ describe('AlbumPage', () => {
     })
   })
 
+  async function openPreviewImage(user: ReturnType<typeof userEvent.setup>, fileName = 'photo1.jpg') {
+    const thumbnail = await screen.findByAltText(fileName)
+    await user.click(thumbnail)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '下载当前图片' })).toBeTruthy()
+    })
+
+    const previewImage = screen.getAllByRole('img', { name: fileName }).at(-1)
+    expect(previewImage).toBeTruthy()
+    return previewImage as HTMLImageElement
+  }
+
   describe('loading state', () => {
     it('shows loading state initially', () => {
       mockListFiles.mockImplementation(() => new Promise(() => {}))
@@ -277,6 +290,36 @@ describe('AlbumPage', () => {
         expect(mockListFiles).toHaveBeenCalledWith('/subfolder')
       }, { timeout: 3000 })
     })
+
+    it('stops scanning once the recursive depth limit is reached', async () => {
+      const nestedDirectories = new Map<string, string>([
+        ['/', '/d1'],
+        ['/d1', '/d2'],
+        ['/d2', '/d3'],
+        ['/d3', '/d4'],
+        ['/d4', '/d5'],
+        ['/d5', '/d6'],
+      ])
+
+      mockListFiles.mockImplementation(async (path: string) => {
+        const nextPath = nestedDirectories.get(path)
+        return {
+          files: nextPath
+            ? [{ name: nextPath.slice(1), path: nextPath, isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }]
+            : [],
+          path,
+        }
+      })
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('暂无图片')).toBeTruthy()
+      })
+
+      expect(mockListFiles).toHaveBeenCalledWith('/d5')
+      expect(mockListFiles).not.toHaveBeenCalledWith('/d6')
+    })
   })
 
   describe('different image formats', () => {
@@ -371,6 +414,29 @@ describe('AlbumPage', () => {
         })
       })
     })
+
+    it('shows danger toast when retry fails with a generic error', async () => {
+      const user = userEvent.setup()
+      mockListFiles
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new Error('still down'))
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: 'still down',
+          color: 'danger',
+        })
+      })
+    })
   })
 
   describe('filters only image files', () => {
@@ -394,6 +460,17 @@ describe('AlbumPage', () => {
   })
 
   describe('image preview boundary cases', () => {
+    it('marks a thumbnail as loaded when its image finishes loading', async () => {
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      fireEvent.load(thumbnail)
+
+      await waitFor(() => {
+        expect(thumbnail).toHaveClass('opacity-100')
+      })
+    })
+
     it('retries thumbnail loading once after refreshing the auth session', async () => {
       mockRefreshAuthSession.mockResolvedValueOnce(true)
 
@@ -405,6 +482,25 @@ describe('AlbumPage', () => {
       await waitFor(() => {
         expect(mockRefreshAuthSession).toHaveBeenCalledTimes(1)
         expect(thumbnail).toHaveAttribute('src', '/api/v1/thumbnails/photos/photo1.jpg?size=medium&session_retry=1')
+      })
+    })
+
+    it('shows thumbnail warning when the retried thumbnail URL also fails', async () => {
+      mockRefreshAuthSession.mockResolvedValueOnce(true)
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      fireEvent.error(thumbnail)
+
+      await waitFor(() => {
+        expect(thumbnail).toHaveAttribute('src', '/api/v1/thumbnails/photos/photo1.jpg?size=medium&session_retry=1')
+      })
+
+      fireEvent.error(thumbnail)
+
+      await waitFor(() => {
+        expect(screen.getByText('部分缩略图加载失败')).toBeTruthy()
       })
     })
 
@@ -443,20 +539,33 @@ describe('AlbumPage', () => {
       })
     })
 
+    it('shows preview error when the retried fullscreen URL also fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRefreshAuthSession.mockResolvedValueOnce(true)
+
+      render(<AlbumPage />)
+
+      const previewImage = await openPreviewImage(user)
+      fireEvent.error(previewImage)
+
+      await waitFor(() => {
+        expect(previewImage).toHaveAttribute('src', '/api/v1/download/photos/photo1.jpg?download=true&session_retry=1')
+      })
+
+      fireEvent.error(previewImage)
+
+      await waitFor(() => {
+        expect(screen.getByText('图片预览加载失败')).toBeTruthy()
+        expect(screen.getByText('可尝试下载原图，或稍后重试。')).toBeTruthy()
+      })
+    })
+
     it('shows an explicit preview error state when fullscreen loading still fails after retry cannot recover', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
 
       render(<AlbumPage />)
 
-      const thumbnail = await screen.findByAltText('photo1.jpg')
-      await user.click(thumbnail)
-
-      await waitFor(() => {
-        expect(screen.getAllByRole('img', { name: 'photo1.jpg' }).length).toBeGreaterThan(1)
-      })
-
-      const previewImage = screen.getAllByRole('img', { name: 'photo1.jpg' }).at(-1)
-      expect(previewImage).toBeTruthy()
+      const previewImage = await openPreviewImage(user)
       fireEvent.error(previewImage)
 
       await waitFor(() => {
@@ -488,6 +597,110 @@ describe('AlbumPage', () => {
       })
     })
 
+    it('updates image state from preview toolbar controls', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<AlbumPage />)
+
+      const previewImage = await openPreviewImage(user)
+      fireEvent.load(previewImage)
+
+      await waitFor(() => {
+        expect(previewImage).toHaveClass('opacity-100')
+      })
+
+      await user.click(screen.getByRole('button', { name: '放大图片' }))
+      await waitFor(() => {
+        expect(previewImage).toHaveStyle({ transform: 'scale(1.25) rotate(0deg)' })
+      })
+
+      await user.click(screen.getByRole('button', { name: '缩小图片' }))
+      await waitFor(() => {
+        expect(previewImage).toHaveStyle({ transform: 'scale(1) rotate(0deg)' })
+      })
+
+      await user.click(screen.getByRole('button', { name: '旋转图片' }))
+      await waitFor(() => {
+        expect(previewImage).toHaveStyle({ transform: 'scale(1) rotate(90deg)' })
+      })
+    })
+
+    it('supports keyboard navigation, transforms, reset, and close', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<AlbumPage />)
+
+      await openPreviewImage(user)
+
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      await waitFor(() => {
+        expect(screen.getByText('2 / 3')).toBeTruthy()
+        expect(screen.getAllByRole('img', { name: 'photo2.png' }).at(-1)).toHaveAttribute(
+          'src',
+          '/api/v1/download/photos/photo2.png?download=true'
+        )
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowLeft' })
+      await waitFor(() => {
+        expect(screen.getByText('1 / 3')).toBeTruthy()
+      })
+
+      const activePreviewImage = screen.getAllByRole('img', { name: 'photo1.jpg' }).at(-1) as HTMLImageElement
+
+      fireEvent.keyDown(window, { key: '+' })
+      await waitFor(() => {
+        expect(activePreviewImage).toHaveStyle({ transform: 'scale(1.25) rotate(0deg)' })
+      })
+
+      fireEvent.keyDown(window, { key: '-' })
+      fireEvent.keyDown(window, { key: 'r' })
+      await waitFor(() => {
+        expect(activePreviewImage).toHaveStyle({ transform: 'scale(1) rotate(90deg)' })
+      })
+
+      fireEvent.keyDown(window, { key: '0' })
+      await waitFor(() => {
+        expect(activePreviewImage).toHaveStyle({ transform: 'scale(1) rotate(0deg)' })
+      })
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: '关闭预览' })).toBeNull()
+      })
+    })
+
+    it('supports horizontal touch swipes in fullscreen preview', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<AlbumPage />)
+
+      const previewImage = await openPreviewImage(user)
+
+      fireEvent.touchStart(previewImage, {
+        touches: [{ clientX: 300, clientY: 100 }],
+      })
+      fireEvent.touchEnd(previewImage, {
+        changedTouches: [{ clientX: 100, clientY: 120 }],
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('2 / 3')).toBeTruthy()
+      })
+
+      const secondPreviewImage = screen.getAllByRole('img', { name: 'photo2.png' }).at(-1) as HTMLImageElement
+      fireEvent.touchStart(secondPreviewImage, {
+        touches: [{ clientX: 100, clientY: 100 }],
+      })
+      fireEvent.touchEnd(secondPreviewImage, {
+        changedTouches: [{ clientX: 280, clientY: 110 }],
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('1 / 3')).toBeTruthy()
+      })
+    })
+
     it('updates the fullscreen preview source when navigating to the next image', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
 
@@ -512,6 +725,24 @@ describe('AlbumPage', () => {
           '/api/v1/download/photos/photo2.png?download=true'
         )
       })
+    })
+
+    it('does not render the preview modal when a selected image has no path', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockListFiles.mockResolvedValue({
+        files: [
+          { name: 'orphan.jpg', path: '', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
+        ],
+        path: '/',
+      })
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('orphan.jpg')
+      await user.click(thumbnail)
+
+      expect(screen.queryByRole('button', { name: '关闭预览' })).toBeNull()
+      expect(screen.queryByRole('button', { name: '下载当前图片' })).toBeNull()
     })
 
     it('shows unknown size instead of 0 B when preview metadata is incomplete', async () => {

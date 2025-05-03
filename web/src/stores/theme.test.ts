@@ -191,3 +191,102 @@ describe('themeStore', () => {
     })
   })
 })
+
+describe('themeStore module initialization', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    localStorage.clear()
+    document.documentElement.classList.remove('dark')
+  })
+
+  it('applies a stored dark theme during module initialization', async () => {
+    localStorage.setItem('mnemonas-theme', JSON.stringify({
+      state: { theme: 'dark', resolvedTheme: 'dark' },
+      version: 0,
+    }))
+    document.documentElement.classList.remove('dark')
+
+    await vi.resetModules()
+    await import('./theme')
+
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+  })
+
+  it('applies the system preference for a stored system theme during module initialization', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: query.includes('dark'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+    localStorage.setItem('mnemonas-theme', JSON.stringify({
+      state: { theme: 'system', resolvedTheme: 'light' },
+      version: 0,
+    }))
+
+    await vi.resetModules()
+    await import('./theme')
+
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+  })
+
+  it('updates the resolved theme when the system preference changes while following system theme', async () => {
+    let prefersDark = false
+    let changeListener: (() => void) | null = null
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: prefersDark && query.includes('dark'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((event: string, listener: EventListenerOrEventListenerObject) => {
+        if (event === 'change') {
+          changeListener = () => {
+            if (typeof listener === 'function') {
+              listener(new Event('change'))
+              return
+            }
+            listener.handleEvent(new Event('change'))
+          }
+        }
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+
+    await vi.resetModules()
+    const { useThemeStore: isolatedThemeStore } = await import('./theme')
+    isolatedThemeStore.getState().setTheme('system')
+
+    prefersDark = true
+    changeListener?.()
+
+    expect(isolatedThemeStore.getState().resolvedTheme).toBe('dark')
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+  })
+
+  it('ignores malformed stored theme data during module initialization', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: !query.includes('dark'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+    localStorage.setItem('mnemonas-theme', '{')
+    document.documentElement.classList.add('dark')
+
+    await vi.resetModules()
+    await import('./theme')
+
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+  })
+})

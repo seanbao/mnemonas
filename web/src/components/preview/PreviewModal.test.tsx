@@ -52,6 +52,19 @@ describe('PreviewModal', () => {
     mockDownloadFile.mockResolvedValue(undefined)
   })
 
+  it('renders a loading placeholder when opened without a current file', () => {
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={null}
+        files={[]}
+      />
+    )
+
+    expect(screen.getByText('loading')).toBeInTheDocument()
+  })
+
   it('renders video preview without auth query', () => {
     const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
 
@@ -110,6 +123,53 @@ describe('PreviewModal', () => {
     })
   })
 
+  it('clears the media loading state after video metadata loads', () => {
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    const video = document.querySelector('video') as HTMLVideoElement | null
+    expect(screen.getByText('loading')).toBeInTheDocument()
+
+    fireEvent.loadedData(video!)
+
+    expect(screen.queryByText('loading')).not.toBeInTheDocument()
+  })
+
+  it('shows an error when retried video preview still fails', async () => {
+    mockRefreshAuthSession.mockResolvedValueOnce(true)
+    const file: PreviewFile = { path: '/video.mp4', name: 'video.mp4' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    const video = document.querySelector('video') as HTMLVideoElement | null
+    fireEvent.error(video!)
+
+    await waitFor(() => {
+      expect(video?.getAttribute('src')).toBe('/api/v1/download/video.mp4?session_retry=1')
+    })
+
+    fireEvent.error(video!)
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载视频')).toBeInTheDocument()
+    })
+  })
+
   it('shows an error when audio preview still cannot recover after session refresh', async () => {
     mockRefreshAuthSession.mockResolvedValueOnce(false)
     const file: PreviewFile = { path: '/audio.mp3', name: 'audio.mp3' }
@@ -156,6 +216,68 @@ describe('PreviewModal', () => {
         '_blank',
         'noopener,noreferrer'
       )
+    })
+  })
+
+  it('supports button and keyboard navigation between preview files', () => {
+    const onFileChange = vi.fn()
+    const onClose = vi.fn()
+    const files: PreviewFile[] = [
+      { path: '/first.txt', name: 'first.txt' },
+      { path: '/second.txt', name: 'second.txt' },
+      { path: '/third.txt', name: 'third.txt' },
+    ]
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={onClose}
+        file={files[1]}
+        files={files}
+        onFileChange={onFileChange}
+      />
+    )
+
+    screen.getByTitle('上一个 (←)').click()
+    expect(onFileChange).toHaveBeenCalledWith(files[0])
+
+    screen.getByTitle('下一个 (→)').click()
+    expect(onFileChange).toHaveBeenCalledWith(files[2])
+
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(onFileChange).toHaveBeenCalledWith(files[0])
+
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(onFileChange).toHaveBeenCalledWith(files[2])
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('renders unsupported file actions', async () => {
+    vi.spyOn(window, 'open').mockReturnValue({ opener: null } as Window)
+    const file: PreviewFile = { path: '/archive.bin', name: 'archive.bin' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    expect(screen.getByText('此文件类型暂不支持预览')).toBeInTheDocument()
+
+    screen.getByText('下载文件').click()
+    await waitFor(() => {
+      expect(mockDownloadFile).toHaveBeenCalledWith('/archive.bin', { filename: 'archive.bin' })
+    })
+
+    screen.getByText('在新标签页打开').click()
+    await waitFor(() => {
+      expect(mockEnsureDownloadSession).toHaveBeenCalled()
+      expect(window.open).toHaveBeenCalledWith('/api/v1/download/archive.bin', '_blank', 'noopener,noreferrer')
     })
   })
 
