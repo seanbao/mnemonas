@@ -17,6 +17,26 @@ async function expectNoPageHorizontalOverflow(page: Page) {
   expect(overflow).toBeLessThanOrEqual(2)
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+async function createFolder(page: Page, folderName: string) {
+  await page.getByRole('button', { name: /新建空间|新建文件夹/i }).click()
+  await page.getByPlaceholder('请输入文件夹名称').fill(folderName)
+  await page.getByRole('button', { name: '创建' }).click()
+  await expect(page.getByText(folderName, { exact: true }).first()).toBeVisible({ timeout: 10_000 })
+}
+
+async function openFolder(page: Page, folderName: string) {
+  await page.getByText(folderName, { exact: true }).first().dblclick()
+}
+
+async function expectFolderView(page: Page, expectedPath: string, breadcrumbName: string) {
+  await expect(page).toHaveURL(new RegExp(`${escapeRegExp(expectedPath)}$`), { timeout: 10_000 })
+  await expect(page.getByRole('button', { name: breadcrumbName })).toBeVisible({ timeout: 5_000 })
+}
+
 test.describe('文件浏览页面', () => {
   test.beforeEach(async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
@@ -72,26 +92,49 @@ test.describe('文件浏览页面', () => {
   test('双击文件夹后路径和面包屑应保持稳定', async ({ page }, testInfo) => {
     const folderName = `e2e-nav-${testInfo.workerIndex}-${Date.now()}`
 
-    await page.getByRole('button', { name: /新建空间|新建文件夹/i }).click()
-    await page.getByPlaceholder('请输入文件夹名称').fill(folderName)
-    await page.getByRole('button', { name: '创建' }).click()
-
-    const folder = page.getByText(folderName, { exact: true }).first()
-    await expect(folder).toBeVisible({ timeout: 10_000 })
-
-    await folder.dblclick()
+    await createFolder(page, folderName)
+    await openFolder(page, folderName)
 
     const expectedPath = `/files/${folderName}`
-    await expect(page).toHaveURL(new RegExp(`${expectedPath}$`), { timeout: 10_000 })
-    await expect(page.getByRole('button', { name: folderName })).toBeVisible({ timeout: 5_000 })
+    await expectFolderView(page, expectedPath, folderName)
 
     await page.waitForTimeout(500)
-    await expect(page).toHaveURL(new RegExp(`${expectedPath}$`))
+    await expect(page).toHaveURL(new RegExp(`${escapeRegExp(expectedPath)}$`))
     await expect(page.getByText('这里空空如也')).toBeVisible({ timeout: 5_000 })
 
     await page.getByRole('button', { name: /根目录/ }).click()
     await expect(page).toHaveURL(/\/files$/)
     await expect(page.getByText(folderName, { exact: true }).first()).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('目录导航历史流程应保持 URL、面包屑和列表一致', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
+    const rootFolderName = `e2e-flow-${testInfo.workerIndex}-${Date.now()}`
+    const childFolderName = `nested-${testInfo.workerIndex}-${Date.now()}`
+
+    await createFolder(page, rootFolderName)
+    await openFolder(page, rootFolderName)
+    await expectFolderView(page, `/files/${rootFolderName}`, rootFolderName)
+
+    await createFolder(page, childFolderName)
+    await openFolder(page, childFolderName)
+    await expectFolderView(page, `/files/${rootFolderName}/${childFolderName}`, childFolderName)
+    await expect(page.getByText('这里空空如也')).toBeVisible({ timeout: 5_000 })
+
+    await page.goBack()
+    await expectFolderView(page, `/files/${rootFolderName}`, rootFolderName)
+    await expect(page.getByText(childFolderName, { exact: true }).first()).toBeVisible({ timeout: 5_000 })
+
+    await page.goForward()
+    await expectFolderView(page, `/files/${rootFolderName}/${childFolderName}`, childFolderName)
+
+    await page.getByRole('button', { name: rootFolderName }).click()
+    await expectFolderView(page, `/files/${rootFolderName}`, rootFolderName)
+
+    await page.getByRole('button', { name: /根目录/ }).click()
+    await expect(page).toHaveURL(/\/files$/)
+    await expect(page.getByText(rootFolderName, { exact: true }).first()).toBeVisible({ timeout: 5_000 })
   })
 })
 
