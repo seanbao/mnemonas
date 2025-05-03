@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@/test/utils'
-import { act } from '@testing-library/react'
+import { act, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SettingsPage } from './Settings'
 import * as HeroUI from '@heroui/react'
@@ -529,14 +529,13 @@ describe('SettingsPage', () => {
       await user.click(switches[0])
 
       const certInput = screen.getByPlaceholderText('/path/to/server.crt')
-      await user.type(certInput, '/etc/mnemonas/tls/server.crt')
+      fireEvent.change(certInput, { target: { value: '/etc/mnemonas/tls/server.crt' } })
 
       const keyInput = screen.getByPlaceholderText('/path/to/server.key')
-      await user.type(keyInput, '/etc/mnemonas/tls/server.key')
+      fireEvent.change(keyInput, { target: { value: '/etc/mnemonas/tls/server.key' } })
 
       const certDirInput = screen.getByPlaceholderText('~/.mnemonas/certs')
-      await user.clear(certDirInput)
-      await user.type(certDirInput, '/etc/mnemonas/tls')
+      fireEvent.change(certDirInput, { target: { value: '/etc/mnemonas/tls' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -570,32 +569,27 @@ describe('SettingsPage', () => {
       await user.click(screen.getByRole('switch', { name: '启用告警' }))
 
       const checkIntervalInput = screen.getByDisplayValue('1h')
-      await user.clear(checkIntervalInput)
-      await user.type(checkIntervalInput, '30m')
+      fireEvent.change(checkIntervalInput, { target: { value: '30m' } })
 
       const thresholdInput = screen.getByDisplayValue('90')
-      await user.clear(thresholdInput)
-      await user.type(thresholdInput, '85')
+      fireEvent.change(thresholdInput, { target: { value: '85' } })
 
       const criticalInput = screen.getByDisplayValue('95')
-      await user.clear(criticalInput)
-      await user.type(criticalInput, '92')
+      fireEvent.change(criticalInput, { target: { value: '92' } })
 
       const minFreeInput = screen.getByDisplayValue('10 GB')
-      await user.clear(minFreeInput)
-      await user.type(minFreeInput, '20GB')
+      fireEvent.change(minFreeInput, { target: { value: '20GB' } })
 
       const cooldownInput = screen.getByDisplayValue('4h')
-      await user.clear(cooldownInput)
-      await user.type(cooldownInput, '2h')
+      fireEvent.change(cooldownInput, { target: { value: '2h' } })
 
       const webhookInput = screen.getByPlaceholderText('https://hooks.example.com/alert')
-      await user.type(webhookInput, 'https://hooks.example.com/storage')
+      fireEvent.change(webhookInput, { target: { value: 'https://hooks.example.com/storage' } })
 
       await user.selectOptions(screen.getByLabelText('Webhook 方法'), 'GET')
 
       const headersInput = screen.getByLabelText('Webhook 自定义 Header')
-      await user.type(headersInput, 'Authorization: Bearer token{enter}X-MnemoNAS: alerts')
+      fireEvent.change(headersInput, { target: { value: 'Authorization: Bearer token\nX-MnemoNAS: alerts' } })
 
       await user.click(screen.getByText('保存设置'))
 

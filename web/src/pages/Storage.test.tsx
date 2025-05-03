@@ -1,15 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
-import { StoragePage } from './Storage'
 import * as HeroUI from '@heroui/react'
 
 const useIsAdminMock = vi.fn(() => true)
 const mockAddToast = vi.fn()
 
-const { mockUser } = vi.hoisted(() => ({
+const { mockNavigate, mockUser } = vi.hoisted(() => ({
+  mockNavigate: vi.fn(),
   mockUser: { id: 'u1', username: 'admin', role: 'admin' as const, email: 'admin@local', homeDir: '/' },
 }))
+
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>()
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+  }
+})
+
+import { StoragePage } from './Storage'
 
 // Mock API
 vi.mock('@/api/files', () => ({
@@ -65,6 +75,7 @@ describe('StoragePage', () => {
     mockUser.homeDir = '/'
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     useIsAdminMock.mockReturnValue(true)
+    mockNavigate.mockClear()
     mockGetStorageStats.mockResolvedValue(mockStats)
   })
 
@@ -219,6 +230,22 @@ describe('StoragePage', () => {
         expect(screen.getByText(/尽快清理回收站/)).toBeTruthy()
       })
     })
+
+    it('shows a warning-level disk space alert before capacity becomes critical', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskAvailable: 5 * 1024 * 1024 * 1024,
+        diskUsed: 15 * 1024 * 1024 * 1024,
+        diskUsageRatio: 0.91,
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储空间偏紧')).toBeTruthy()
+        expect(screen.getByText(/建议开启告警/)).toBeTruthy()
+      })
+    })
   })
 
   describe('stats cards', () => {
@@ -338,6 +365,22 @@ describe('StoragePage', () => {
         buttons.forEach((button) => expect(button).toBeDisabled())
       })
     })
+
+    it('navigates to maintenance from both admin maintenance actions', async () => {
+      const user = userEvent.setup()
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByRole('button', { name: '打开维护工具' })).toHaveLength(2)
+      })
+
+      const buttons = screen.getAllByRole('button', { name: '打开维护工具' })
+      await user.click(buttons[0])
+      await user.click(buttons[1])
+
+      expect(mockNavigate).toHaveBeenNthCalledWith(1, '/maintenance')
+      expect(mockNavigate).toHaveBeenNthCalledWith(2, '/maintenance')
+    })
   })
 
   describe('error handling', () => {
@@ -399,6 +442,28 @@ describe('StoragePage', () => {
           title: '存储统计暂不可用',
           description: '存储统计服务当前不可用，请检查系统健康状态或稍后重试。',
           color: 'warning',
+        })
+      })
+    })
+
+    it('shows danger toast when storage reload fails with a generic error', async () => {
+      const user = userEvent.setup()
+      mockGetStorageStats
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockRejectedValueOnce(new Error('still offline'))
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '加载存储统计失败',
+          description: 'still offline',
+          color: 'danger',
         })
       })
     })

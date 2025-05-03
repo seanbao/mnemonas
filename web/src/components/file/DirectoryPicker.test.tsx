@@ -142,6 +142,83 @@ describe('DirectoryPicker', () => {
     })
   })
 
+  it('selects a folder and confirms the selected path', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    const onSelect = vi.fn()
+
+    renderPicker({ onClose, onSelect })
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('docs'))
+
+    await waitFor(() => {
+      expect(screen.getByText('/docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    expect(onSelect).toHaveBeenCalledWith('/docs')
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not select or expand excluded folders', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onSelect = vi.fn()
+
+    renderPicker({ excludePaths: ['/docs'], onSelect })
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('docs'))
+
+    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
+    expect(docsToggle).toBeTruthy()
+    await user.click(docsToggle as HTMLButtonElement)
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    expect(onSelect).toHaveBeenCalledWith('/')
+    expect(mockListFiles).not.toHaveBeenCalledWith('/docs')
+  })
+
+  it('cancels folder creation before submitting', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'draft')
+    await user.click(screen.getAllByRole('button', { name: '取消' })[0])
+
+    expect(screen.queryByDisplayValue('draft')).toBeNull()
+    expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    expect(mockCreateDirectory).not.toHaveBeenCalled()
+  })
+
+  it('closes from the footer cancel button when idle', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+
+    renderPicker({ onClose })
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('does not reuse cached root directory entries from another user session', async () => {
     mockUser.id = 'u2'
     mockUser.username = 'member'

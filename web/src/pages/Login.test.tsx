@@ -68,7 +68,8 @@ describe('LoginPage', () => {
       version: 'test-version',
     })
 
-    const { useAuthStore } = await import('@/stores/auth')
+    const { useAuthStore, useIsAuthenticated } = await import('@/stores/auth')
+    vi.mocked(useIsAuthenticated).mockReturnValue(false)
     vi.mocked(useAuthStore).mockReturnValue({
       login: mockLogin,
       error: null,
@@ -155,6 +156,17 @@ describe('LoginPage', () => {
       renderLogin()
       await waitForSetupStatusLoad()
       expect(mockLogin).not.toHaveBeenCalled()
+    })
+
+    it('redirects immediately when the user is already authenticated', async () => {
+      const { useIsAuthenticated } = await import('@/stores/auth')
+      vi.mocked(useIsAuthenticated).mockReturnValue(true)
+
+      renderLogin()
+
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      })
     })
 
     it('shows a persistent inline error when auth store reports a login error', async () => {
@@ -253,6 +265,35 @@ describe('LoginPage', () => {
       await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
 
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('clears inline validation error after user edits the password input', async () => {
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+      expect(screen.getByRole('alert')).toHaveTextContent('请输入用户名和密码')
+
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('clears auth store errors when credentials are edited', async () => {
+      const { useAuthStore } = await import('@/stores/auth')
+      vi.mocked(useAuthStore).mockReturnValue({
+        login: mockLogin,
+        error: '用户名或密码错误',
+        isLoading: false,
+        clearError: mockClearError,
+      })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'a')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'b')
+
+      expect(mockClearError).toHaveBeenCalledTimes(2)
     })
 
     it('navigates to home on successful login', async () => {

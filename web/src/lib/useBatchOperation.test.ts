@@ -13,6 +13,41 @@ describe('useBatchOperation', () => {
     vi.clearAllMocks()
   })
 
+  it('returns an empty result without calling the operation or showing a toast', async () => {
+    const operation = vi.fn(async () => undefined)
+    const onComplete = vi.fn()
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+      onComplete,
+    }))
+
+    let batchResult: Awaited<ReturnType<typeof result.current.execute>> | undefined
+    await act(async () => {
+      batchResult = await result.current.execute([])
+    })
+
+    expect(batchResult).toEqual({
+      succeeded: 0,
+      failed: 0,
+      total: 0,
+      succeededItems: [],
+      failedItems: [],
+      failedErrors: [],
+      warningCount: 0,
+      warningMessages: [],
+    })
+    expect(operation).not.toHaveBeenCalled()
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(mockAddToast).not.toHaveBeenCalled()
+    expect(result.current.isLoading).toBe(false)
+  })
+
   it('returns failed errors and uses default failure toast', async () => {
     const operation = vi.fn(async (item: string) => {
       if (item === 'b') {

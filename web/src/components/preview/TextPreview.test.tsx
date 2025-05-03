@@ -87,6 +87,7 @@ describe('TextPreview', () => {
         },
         cancel() {
           cancelled = true
+          return Promise.reject(new Error('cancel failed'))
         },
       }),
     } as Response)

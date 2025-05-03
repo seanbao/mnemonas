@@ -15,6 +15,7 @@ import {
   deleteFromTrash,
   emptyTrash,
   ApiError,
+  buildDownloadUrl,
   downloadFile,
   getDownloadUrl,
   getThumbnailUrl,
@@ -39,6 +40,11 @@ type MockXHRResult = {
   statusText?: string
   responseText?: string
   responseHeaders?: Record<string, string>
+  progressEvents?: Array<{
+    lengthComputable: boolean
+    loaded: number
+    total: number
+  }>
 }
 
 class MockXMLHttpRequest {
@@ -50,10 +56,6 @@ class MockXMLHttpRequest {
     MockXMLHttpRequest.instances = []
   }
 
-  upload = {
-    addEventListener: vi.fn(),
-  }
-
   status = 0
   statusText = ''
   responseText = ''
@@ -62,7 +64,16 @@ class MockXMLHttpRequest {
   url = ''
   body: Document | XMLHttpRequestBodyInit | null = null
   headers = new Map<string, string>()
+  private uploadListeners = new Map<string, Array<(event: ProgressEvent) => void>>()
   private listeners = new Map<string, Array<() => void>>()
+
+  upload = {
+    addEventListener: vi.fn((type: string, listener: (event: ProgressEvent) => void) => {
+      const existing = this.uploadListeners.get(type) ?? []
+      existing.push(listener)
+      this.uploadListeners.set(type, existing)
+    }),
+  }
 
   constructor() {
     MockXMLHttpRequest.instances.push(this)
@@ -100,6 +111,13 @@ class MockXMLHttpRequest {
     this.responseHeaders = new Map(
       Object.entries(next.responseHeaders ?? {}).map(([key, value]) => [key.toLowerCase(), value])
     )
+    const progressListeners = this.uploadListeners.get('progress') ?? []
+    for (const event of next.progressEvents ?? []) {
+      for (const listener of progressListeners) {
+        listener(event as ProgressEvent)
+      }
+    }
+
     const listeners = this.listeners.get(next.type) ?? []
     for (const listener of listeners) {
       listener()
@@ -293,6 +311,82 @@ describe('API: files', () => {
         warning: true,
         message: 'file uploaded with persistence warning',
       })
+    })
+
+    it('reports computable upload progress and preserves data warnings', async () => {
+      const onProgress = vi.fn()
+      MockXMLHttpRequest.queuedResults.push({
+        type: 'load',
+        status: 201,
+        statusText: 'Created',
+        responseText: JSON.stringify({
+          success: true,
+          data: {
+            path: '/docs/report.txt',
+            warning: true,
+          },
+          message: 'file uploaded with data warning',
+          timestamp: '2024-01-01',
+        }),
+        progressEvents: [
+          { lengthComputable: false, loaded: 10, total: 100 },
+          { lengthComputable: true, loaded: 25, total: 100 },
+          { lengthComputable: true, loaded: 100, total: 100 },
+        ],
+      })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'), onProgress)).resolves.toEqual({
+        warning: true,
+        message: 'file uploaded with data warning',
+      })
+      expect(onProgress).toHaveBeenNthCalledWith(1, 25)
+      expect(onProgress).toHaveBeenNthCalledWith(2, 100)
+    })
+
+    it('rejects when the upload retry fails after a successful refresh', async () => {
+      localStorage.setItem('mnemonas_token', 'access-1')
+      localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+
+      MockXMLHttpRequest.queuedResults.push(
+        { type: 'load', status: 401, statusText: 'Unauthorized' },
+        {
+          type: 'load',
+          status: 503,
+          statusText: 'Service Unavailable',
+          responseText: JSON.stringify({ error: { code: 'SERVICE_UNAVAILABLE', message: 'retry upload failed' } }),
+        },
+      )
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              access_token: 'access-2',
+              refresh_token: 'refresh-2',
+              expires_at: '2026-03-13T00:00:00Z',
+              token_type: 'Bearer',
+              user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '/' },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
+
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toMatchObject({
+        message: 'retry upload failed',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+      })
+    })
+
+    it('surfaces upload network and timeout failures', async () => {
+      MockXMLHttpRequest.queuedResults.push({ type: 'error' })
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toThrow('网络错误，上传失败')
+
+      MockXMLHttpRequest.queuedResults.push({ type: 'timeout' })
+      await expect(uploadFile('/docs', new File(['content'], 'report.txt'))).rejects.toThrow('上传超时')
     })
   })
 
@@ -745,6 +839,41 @@ describe('API: files', () => {
 
       await expect(getHealth()).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it('throws ApiError when the health endpoint is unavailable', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+      })
+
+      await expect(getHealth()).rejects.toMatchObject({
+        message: '获取健康状态失败',
+        status: 503,
+      })
+    })
+
+    it('rejects unreadable health JSON', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.reject(new Error('Invalid JSON')),
+      })
+
+      await expect(getHealth()).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it.each([
+      ['invalid timestamp', { status: 'healthy', uptime: '1h30m', timestamp: 123 }],
+      ['invalid storage details', { status: 'healthy', uptime: '1h30m', storage: { dataDir: 42 } }],
+      ['invalid dataplane details', { status: 'healthy', uptime: '1h30m', dataplane: { uptime: 'bad' } }],
+    ])('rejects health responses with %s', async (_label, body) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(body),
+      })
+
+      await expect(getHealth()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getAppVersion', () => {
@@ -847,6 +976,82 @@ describe('API: files', () => {
       })
 
       await expect(createDirectory('/new-folder')).rejects.toThrow('目录已存在')
+    })
+
+    it('rejects action wrappers that omit data', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it('falls back when backend error body is not an object', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: () => Promise.resolve(null),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toMatchObject({
+        message: '创建文件夹失败',
+        status: 500,
+      })
+    })
+
+    it('uses top-level messages when structured errors omit a message', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: () => Promise.resolve({
+          error: { code: 'DIRECTORY_EXISTS' },
+          message: '目录已存在',
+        }),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toMatchObject({
+        message: '目录已存在',
+        status: 409,
+        code: 'DIRECTORY_EXISTS',
+      })
+    })
+
+    it('keeps structured error codes when no message is available', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({
+          error: { code: 'SERVICE_UNAVAILABLE' },
+        }),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toMatchObject({
+        message: '创建文件夹失败',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+      })
+    })
+
+    it('keeps top-level error codes when no message is available', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({ code: 'SERVICE_UNAVAILABLE' }),
+      })
+
+      await expect(createDirectory('/new-folder')).rejects.toMatchObject({
+        message: '创建文件夹失败',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+      })
     })
   })
 
@@ -1393,6 +1598,18 @@ describe('API: files', () => {
         })
       })
 
+      it('rejects malformed empty trash wrappers', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: false,
+            timestamp: '2024-01-01',
+          }),
+        })
+
+        await expect(emptyTrash()).rejects.toThrow('服务器返回了无效的数据')
+      })
+
       it('rejects malformed successful empty trash responses', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
@@ -1409,6 +1626,17 @@ describe('API: files', () => {
   })
 
   describe('URL helpers', () => {
+    describe('buildDownloadUrl', () => {
+      it('returns an empty URL when path is missing', () => {
+        expect(buildDownloadUrl()).toBe('')
+      })
+
+      it('adds optional version and download parameters', () => {
+        expect(buildDownloadUrl('/docs/file.pdf', { version: 'abc123', download: true }))
+          .toBe('/api/v1/download/docs/file.pdf?version=abc123&download=true')
+      })
+    })
+
     describe('getDownloadUrl', () => {
       it('generates correct download URL', () => {
         expect(getDownloadUrl('/docs/file.pdf')).toBe('/api/v1/download/docs/file.pdf')
@@ -1479,6 +1707,36 @@ describe('API: files', () => {
         createElementSpy.mockRestore()
       })
 
+      it('passes version parameters and keeps undecodable UTF-8 filenames', async () => {
+        const blob = new Blob(['file-content'])
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'Content-Disposition': "attachment; filename*=UTF-8''%E0%A4%A" }),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs/report.txt', { version: 'abc123' })
+
+        expectFetchCall(1, '/api/v1/download/docs/report.txt?version=abc123&download=true')
+        expect(createdLink?.download).toBe('%E0%A4%A')
+        createElementSpy.mockRestore()
+      })
+
       it('surfaces structured backend errors', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: false,
@@ -1534,6 +1792,10 @@ describe('API: files', () => {
     })
 
     describe('getThumbnailUrl', () => {
+      it('returns an empty URL when path is missing', () => {
+        expect(getThumbnailUrl()).toBe('')
+      })
+
       it('generates thumbnail URL with default size', () => {
         expect(getThumbnailUrl('/photo.jpg')).toBe('/api/v1/thumbnails/photo.jpg?size=medium')
       })
@@ -1722,6 +1984,31 @@ describe('API: files', () => {
 
       await expect(getDiagnostics()).rejects.toThrow('服务器返回了无效的数据')
     })
+
+    it.each([
+      ['uptime counters', { uptime_secs: 'bad' }],
+      ['system state', { system: { filesystem_initialized: 'yes' } }],
+      ['memory stats', { memory: { alloc_mb: '50' } }],
+      ['filesystem stats', { filesystem: { trash_items: '5' } }],
+      ['alert settings', { alerts: { enabled: 'yes' } }],
+      ['storage stats', { storage: { total_chunks: '100' } }],
+      ['dataplane status', { dataplane: { healthy: 'yes' } }],
+    ])('rejects diagnostics responses with invalid %s', async (_label, overrides) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            timestamp: '2024-01-15T10:00:00Z',
+            uptime: '1h30m',
+            version: { name: 'MnemoNAS', version: '0.1.0', go: '1.21' },
+            ...overrides,
+          },
+        }),
+      })
+
+      await expect(getDiagnostics()).rejects.toThrow('服务器返回了无效的数据')
+    })
   })
 
   describe('getScrubResult', () => {
@@ -1750,6 +2037,28 @@ describe('API: files', () => {
       expect(result.corrupted_objects).toBe(2)
     })
 
+    it('accepts scrub results with detailed errors', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            has_result: true,
+            status: 'failed',
+            errors: [
+              { hash: 'hash1', error_type: 'corrupt', message: 'checksum mismatch' },
+            ],
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      const result = await getScrubResult()
+      expect(result.errors).toEqual([
+        { hash: 'hash1', error_type: 'corrupt', message: 'checksum mismatch' },
+      ])
+    })
+
     it('rejects wrapped scrub responses when success is false', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1758,6 +2067,41 @@ describe('API: files', () => {
           data: {
             has_result: true,
             status: 'completed',
+          },
+        }),
+      })
+
+      await expect(getScrubResult()).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it('rejects malformed successful scrub result payloads', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: null,
+        }),
+      })
+
+      await expect(getScrubResult()).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it.each([
+      ['message', { message: 123 }],
+      ['id', { id: 123 }],
+      ['start time', { start_time: 123 }],
+      ['end time', { end_time: 123 }],
+      ['status', { status: 'unknown' }],
+      ['numeric counters', { total_objects: '100' }],
+      ['error message', { error_message: 404 }],
+    ])('rejects scrub results with invalid %s', async (_label, overrides) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            has_result: true,
+            ...overrides,
           },
         }),
       })
@@ -1846,12 +2190,35 @@ describe('API: files', () => {
 
       const hashes = ['hash1', 'hash2']
       await runScrub(hashes)
-      
+
       expectFetchCall(1, '/api/v1/maintenance/scrub', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hashes }),
       })
+    })
+
+    it('rejects malformed scrub-run wrappers', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: false,
+        }),
+      })
+
+      await expect(runScrub()).rejects.toThrow('服务器返回了无效的数据')
+    })
+
+    it('rejects scrub-run payloads that are not objects', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: null,
+        }),
+      })
+
+      await expect(runScrub()).rejects.toThrow('服务器返回了无效的数据')
     })
 
     it('rejects malformed successful scrub-run responses', async () => {

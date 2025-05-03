@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { ApiError, clearActivity, getActivityStats, listActivity } from './activity'
+import { ApiError, clearActivity, getActionColor, getActivityStats, listActivity, type ActionType } from './activity'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -72,6 +72,25 @@ describe('Activity API', () => {
     expect(result.offset).toBe(40)
   })
 
+  it('sends optional activity filters as query parameters', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [],
+          total: 0,
+          limit: 10,
+          offset: 20,
+        },
+      }),
+    })
+
+    await listActivity({ limit: 10, offset: 20, action: 'delete', user: 'admin' })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/activity/?limit=10&offset=20&action=delete&user=admin')
+  })
+
   it('rejects malformed successful activity list responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -93,6 +112,38 @@ describe('Activity API', () => {
           offset: 0,
         },
       }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('rejects activity entries with non-string detail values', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{
+            id: '1',
+            timestamp: '2026-03-14T00:00:00Z',
+            action: 'login',
+            user: 'admin',
+            details: { attempts: 2 },
+          }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('rejects unreadable successful activity list responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.reject(new SyntaxError('bad json')),
     })
 
     await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
@@ -160,6 +211,20 @@ describe('Activity API', () => {
     })
 
     await expect(getActivityStats()).rejects.toThrow('stats unavailable')
+  })
+
+  it('reads legacy string activity errors', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      json: () => Promise.resolve({ success: false, error: 'invalid activity filter' }),
+    })
+
+    await expect(listActivity()).rejects.toMatchObject({
+      message: 'invalid activity filter',
+      status: 400,
+    })
   })
 
   it('preserves service-unavailable activity error codes', async () => {
@@ -245,5 +310,47 @@ describe('Activity API', () => {
     })
 
     await expect(clearActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('rejects clear activity responses with non-string messages', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve({
+        success: true,
+        data: { message: 42 },
+      }),
+    })
+
+    await expect(clearActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('maps every activity action to a UI color and falls back for unknown actions', () => {
+    const expected: Record<ActionType, ReturnType<typeof getActionColor>> = {
+      upload: 'success',
+      download: 'primary',
+      delete: 'danger',
+      rename: 'warning',
+      move: 'warning',
+      copy: 'primary',
+      create: 'success',
+      restore: 'success',
+      share: 'primary',
+      unshare: 'warning',
+      favorite: 'primary',
+      unfavorite: 'warning',
+      favorite_note_update: 'primary',
+      login: 'success',
+      logout: 'default',
+      trash_restore: 'success',
+      trash_delete: 'danger',
+      trash_empty: 'danger',
+    }
+
+    for (const [action, color] of Object.entries(expected) as Array<[ActionType, ReturnType<typeof getActionColor>]>) {
+      expect(getActionColor(action)).toBe(color)
+    }
+    expect(getActionColor('unknown' as ActionType)).toBe('default')
   })
 })
