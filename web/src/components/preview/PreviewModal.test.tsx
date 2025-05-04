@@ -39,6 +39,14 @@ vi.mock('@/lib/preview-utils', async () => {
   }
 })
 
+vi.mock('./ImagePreview', () => ({
+  ImagePreview: ({ filename }: { filename: string }) => <div>image preview {filename}</div>,
+}))
+
+vi.mock('./PdfPreview', () => ({
+  PdfPreview: ({ filename }: { filename: string }) => <div>pdf preview {filename}</div>,
+}))
+
 describe('PreviewModal', () => {
   const mockEnsureDownloadSession = vi.mocked(ensureDownloadSession)
   const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
@@ -63,6 +71,24 @@ describe('PreviewModal', () => {
     )
 
     expect(screen.getByText('loading')).toBeInTheDocument()
+  })
+
+  it('ignores toolbar file actions when no current file is available', async () => {
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={null}
+        files={[]}
+      />
+    )
+
+    screen.getByTitle('下载').click()
+    screen.getByTitle('在新标签页打开').click()
+
+    await Promise.resolve()
+    expect(mockDownloadFile).not.toHaveBeenCalled()
+    expect(mockEnsureDownloadSession).not.toHaveBeenCalled()
   })
 
   it('renders video preview without auth query', () => {
@@ -97,6 +123,36 @@ describe('PreviewModal', () => {
     const audio = document.querySelector('audio') as HTMLAudioElement | null
     expect(audio).toBeTruthy()
     expect(audio?.getAttribute('src')).toBe('/api/v1/download/audio.mp3')
+  })
+
+  it('renders image previews through the image preview component', () => {
+    const file: PreviewFile = { path: '/photo.png', name: 'photo.png' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    expect(screen.getByText('image preview photo.png')).toBeInTheDocument()
+  })
+
+  it('renders PDF previews through the PDF preview component', () => {
+    const file: PreviewFile = { path: '/manual.pdf', name: 'manual.pdf' }
+
+    render(
+      <PreviewModal
+        isOpen={true}
+        onClose={() => {}}
+        file={file}
+        files={[file]}
+      />
+    )
+
+    expect(screen.getByText('pdf preview manual.pdf')).toBeInTheDocument()
   })
 
   it('retries video preview once after refreshing the auth session', async () => {

@@ -268,6 +268,16 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows a generic error state for non-feature favorites errors', async () => {
+    vi.mocked(favoritesApi.listFavorites).mockRejectedValue(new FavoritesError('favorites crashed', 500, 'FAVORITES_ERROR'))
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('加载收藏列表失败')).toBeInTheDocument()
+      expect(screen.getByText('favorites crashed')).toBeInTheDocument()
+    })
+  })
+
   it('retries loading favorites from the error state', async () => {
     const user = userEvent.setup()
     vi.mocked(favoritesApi.listFavorites)
@@ -406,6 +416,29 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('shows danger toast when favorites reload fails with a generic error', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.listFavorites)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce(new Error('still down'))
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '刷新失败',
+        description: 'still down',
+        color: 'danger',
+      })
+    })
+  })
+
   it('supports keyboard navigation to a favorite item', async () => {
     const user = userEvent.setup()
     render(<FavoritesPage />)
@@ -499,6 +532,27 @@ describe('FavoritesPage', () => {
     })
 
     await user.click(screen.getByRole('button', { name: '取消选择' }))
+
+    expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).not.toBeInTheDocument()
+  })
+
+  it('deselects a selected favorite from its row checkbox', async () => {
+    const user = userEvent.setup()
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const reportCheckbox = screen.getAllByRole('checkbox')[1]
+    await user.click(reportCheckbox)
+
+    await waitFor(() => {
+      expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
+    })
+
+    await user.click(reportCheckbox)
 
     expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).not.toBeInTheDocument()
   })
@@ -979,9 +1033,49 @@ describe('FavoritesPage', () => {
     })
   })
 
+  it('uses the localized remove success toast for alternate backend messages', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.removeFavorite).mockResolvedValueOnce({ message: 'removed' })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已取消收藏', color: 'success' })
+    })
+  })
+
   it('shows the localized note update success toast after a successful save', async () => {
     const user = userEvent.setup()
     vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ message: 'favorite note updated successfully' })
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '备注已更新', color: 'success' })
+    })
+  })
+
+  it('uses the localized note update success toast for alternate backend messages', async () => {
+    const user = userEvent.setup()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockResolvedValueOnce({ message: 'updated' })
 
     render(<FavoritesPage />)
 

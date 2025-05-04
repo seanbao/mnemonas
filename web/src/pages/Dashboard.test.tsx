@@ -281,6 +281,28 @@ describe('DashboardPage', () => {
       expect(mockNavigate).toHaveBeenCalledWith('/storage')
     })
 
+    it('surfaces warning disk space risk from the overview', async () => {
+      mockGetStorageStats.mockResolvedValueOnce({
+        fileCount: 42,
+        fileCountAvailable: true,
+        storageStatsAvailable: true,
+        totalSize: 1073741824,
+        totalObjects: 100,
+        dedupRatio: 1.5,
+        diskStatsAvailable: true,
+        diskTotal: 21474836480,
+        diskAvailable: 2147483648,
+        diskUsed: 19327352832,
+        diskUsageRatio: 0.9,
+      })
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储空间偏紧')).toBeTruthy()
+      })
+    })
+
     it('falls back to CAS guidance when disk stats are unavailable', async () => {
       mockGetStorageStats.mockResolvedValueOnce({
         fileCount: 42,
@@ -342,6 +364,28 @@ describe('DashboardPage', () => {
           title: '刷新暂不可用',
           description: '部分系统概览数据当前不可用，请检查服务状态后重试。',
           color: 'warning',
+        })
+      })
+    })
+
+    it('shows danger toast when retry fails without an unavailable error', async () => {
+      const user = userEvent.setup()
+      mockGetHealth.mockRejectedValue(new Error('health failed'))
+      mockGetStorageStats.mockRejectedValue(new Error('stats failed'))
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('重新加载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('重新加载'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: '系统概览刷新失败，请稍后重试。',
+          color: 'danger',
         })
       })
     })

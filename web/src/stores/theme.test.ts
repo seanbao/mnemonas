@@ -325,4 +325,23 @@ describe('themeStore module initialization', () => {
 
     expect(document.documentElement.classList.contains('dark')).toBe(false)
   })
+
+  it('can initialize and update without browser globals', async () => {
+    vi.stubGlobal('window', undefined)
+    vi.stubGlobal('document', undefined)
+
+    try {
+      await vi.resetModules()
+      const { useThemeStore: isolatedThemeStore } = await import('./theme')
+
+      expect(isolatedThemeStore.getState().resolvedTheme).toBe('light')
+
+      isolatedThemeStore.getState().setTheme('dark')
+
+      expect(isolatedThemeStore.getState().theme).toBe('dark')
+      expect(isolatedThemeStore.getState().resolvedTheme).toBe('dark')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
