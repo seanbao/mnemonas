@@ -16,6 +16,7 @@ type PropfindCache struct {
 	entries map[string]*cacheEntry
 	ttl     time.Duration
 	maxSize int
+	gen     uint64
 }
 
 type cacheEntry struct {
@@ -87,10 +88,34 @@ func (c *PropfindCache) Get(path, depth string) ([]propfindResponse, bool) {
 	return clonePropfindResponses(entry.responses), true
 }
 
+// SnapshotGeneration returns the current invalidation generation.
+func (c *PropfindCache) SnapshotGeneration() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.gen
+}
+
 // Set stores PROPFIND responses in cache
 func (c *PropfindCache) Set(path, depth string, responses []propfindResponse) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setLocked(path, depth, responses)
+}
+
+// SetIfUnchanged stores responses only if no invalidation happened since generation was observed.
+func (c *PropfindCache) SetIfUnchanged(path, depth string, responses []propfindResponse, generation uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.gen != generation {
+		return false
+	}
+
+	c.setLocked(path, depth, responses)
+	return true
+}
+
+func (c *PropfindCache) setLocked(path, depth string, responses []propfindResponse) {
 
 	// Evict oldest entries if cache is full
 	if len(c.entries) >= c.maxSize {
@@ -108,6 +133,7 @@ func (c *PropfindCache) Set(path, depth string, responses []propfindResponse) {
 func (c *PropfindCache) Invalidate(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.gen++
 
 	for key := range c.entries {
 		cachedPath, _, ok := strings.Cut(key, "|")
@@ -133,6 +159,7 @@ func affectsCachedPropfind(changedPath, cachedPath string) bool {
 func (c *PropfindCache) InvalidateAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.gen++
 	c.entries = make(map[string]*cacheEntry)
 }
 

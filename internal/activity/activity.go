@@ -2,6 +2,8 @@
 package activity
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,8 @@ import (
 )
 
 var errActivityLogSymlink = errors.New("activity log path must not be a symlink")
+
+const maxActivityIDAttempts = 4
 
 // ActionType represents the type of activity
 type ActionType string
@@ -58,6 +62,8 @@ type Store struct {
 
 var activityLogWriter = writeActivityLogFile
 var syncActivityLogDir = syncActivityDir
+var activityRandomRead = rand.Read
+var activityIDGenerator = generateID
 
 func copyDetails(details map[string]string) map[string]string {
 	if details == nil {
@@ -185,7 +191,7 @@ func cloneEntries(entries []Entry) []Entry {
 	return append([]Entry(nil), entries...)
 }
 
-func (s *Store) updateEntries(mutator func([]Entry) []Entry) error {
+func (s *Store) updateEntries(mutator func([]Entry) ([]Entry, error)) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -194,7 +200,10 @@ func (s *Store) updateEntries(mutator func([]Entry) []Entry) error {
 	logPath := s.logFilePath()
 	s.mu.RUnlock()
 
-	nextEntries := mutator(currentEntries)
+	nextEntries, err := mutator(currentEntries)
+	if err != nil {
+		return err
+	}
 	if err := saveEntries(logPath, nextEntries); err != nil {
 		return err
 	}
@@ -350,31 +359,57 @@ func syncActivityDir(dir string) error {
 	return dirHandle.Sync()
 }
 
-// generateID creates a unique ID for an entry
-func generateID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+func generateID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := activityRandomRead(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func generateUniqueActivityID(entries []Entry) (string, error) {
+	existing := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		existing[entry.ID] = struct{}{}
+	}
+
+	for attempt := 0; attempt < maxActivityIDAttempts; attempt++ {
+		id, err := activityIDGenerator()
+		if err != nil {
+			return "", fmt.Errorf("generate activity ID: %w", err)
+		}
+		if _, ok := existing[id]; !ok {
+			return id, nil
+		}
+	}
+
+	return "", errors.New("generate unique activity ID: collision limit exceeded")
 }
 
 // Log records a new activity entry
 func (s *Store) Log(action ActionType, path, user, ip string, details map[string]string) error {
-	entry := Entry{
-		ID:        generateID(),
-		Timestamp: time.Now(),
-		Action:    action,
-		Path:      path,
-		User:      user,
-		IP:        ip,
-		Details:   copyDetails(details),
-	}
+	return s.updateEntries(func(entries []Entry) ([]Entry, error) {
+		id, err := generateUniqueActivityID(entries)
+		if err != nil {
+			return nil, err
+		}
+		entry := Entry{
+			ID:        id,
+			Timestamp: time.Now(),
+			Action:    action,
+			Path:      path,
+			User:      user,
+			IP:        ip,
+			Details:   copyDetails(details),
+		}
 
-	return s.updateEntries(func(entries []Entry) []Entry {
 		nextEntries := make([]Entry, 0, len(entries)+1)
 		nextEntries = append(nextEntries, entry)
 		nextEntries = append(nextEntries, entries...)
 		if len(nextEntries) > s.maxSize {
 			nextEntries = nextEntries[:s.maxSize]
 		}
-		return nextEntries
+		return nextEntries, nil
 	})
 }
 
@@ -419,8 +454,8 @@ func (s *Store) Count() int {
 
 // Clear removes all entries
 func (s *Store) Clear() error {
-	return s.updateEntries(func([]Entry) []Entry {
-		return make([]Entry, 0)
+	return s.updateEntries(func([]Entry) ([]Entry, error) {
+		return make([]Entry, 0), nil
 	})
 }
 

@@ -572,6 +572,12 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username and password required", "MISSING_FIELDS")
 		return
 	}
+	cleanUsername, err := normalizeNewUsername(req.Username)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid username", "INVALID_USERNAME")
+		return
+	}
+	req.Username = cleanUsername
 
 	role := Role(strings.ToLower(req.Role))
 	if role == "" {

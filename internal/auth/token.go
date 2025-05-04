@@ -2,8 +2,10 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,8 @@ func init() {
 		jwt.TimePrecision = time.Nanosecond
 	}
 }
+
+var tokenRandomRead = rand.Read
 
 // TokenManager handles JWT token generation and validation
 type TokenManager struct {
@@ -53,7 +57,10 @@ func NewTokenManager(secretKey string, accessExpiry, refreshExpiry time.Duration
 	if len(key) < 32 {
 		// Generate a secure key if not provided
 		key = make([]byte, 32)
-		rand.Read(key)
+		if _, err := tokenRandomRead(key); err != nil {
+			fallback := sha256.Sum256([]byte(secretKey))
+			key = append([]byte(nil), fallback[:]...)
+		}
 	}
 
 	return &TokenManager{
@@ -75,7 +82,10 @@ func (tm *TokenManager) GenerateTokenPair(user *User) (*TokenPair, error) {
 	refreshExpiry := now.Add(tm.refreshExpiry)
 
 	// Generate unique token ID
-	tokenID := generateTokenID()
+	tokenID, err := generateTokenID()
+	if err != nil {
+		return nil, fmt.Errorf("generate token id: %w", err)
+	}
 
 	// Access token claims
 	accessClaims := TokenClaims{
@@ -298,10 +308,12 @@ var (
 	ErrTokenRevoked = errors.New("token revoked")
 )
 
-func generateTokenID() string {
+func generateTokenID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := tokenRandomRead(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func jwtTimestamp(now time.Time) time.Time {

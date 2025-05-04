@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -31,6 +32,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
@@ -2437,6 +2439,9 @@ func TestServer_Stats_OmitsFileCountWhenCollectionFails(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("Failed to parse response JSON: %v", err)
 	}
+	if available, ok := payload.Data["total_files_available"].(bool); !ok || available {
+		t.Fatalf("expected stats to mark total_files unavailable, got %v", payload.Data["total_files_available"])
+	}
 	if _, ok := payload.Data["total_files"]; ok {
 		t.Fatalf("expected stats to omit total_files on file count failure, got %v", payload.Data["total_files"])
 	}
@@ -2458,6 +2463,9 @@ func TestServer_Stats_OmitsStorageFieldsWhenDataplaneUnavailable(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+	if available, ok := payload.Data["storage_stats_available"].(bool); !ok || available {
+		t.Fatalf("expected stats to mark storage stats unavailable, got %v", payload.Data["storage_stats_available"])
 	}
 	for _, key := range []string{"total_chunks", "total_size", "unique_size", "dedup_ratio"} {
 		if _, ok := payload.Data[key]; ok {
@@ -2546,7 +2554,7 @@ func TestServer_Diagnostics_ReportsFavoritesStoreUnavailableWhenInitializationFa
 	}
 }
 
-func TestServer_Diagnostics_OmitsTrashStatsWhenCollectionFails(t *testing.T) {
+func TestServer_Diagnostics_MarksTrashStatsUnavailableWhenCollectionFails(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	originalGetTrashStats := getTrashStats
 	getTrashStats = func(_ *storage.FileSystem, _ context.Context) (int, int64, error) {
@@ -2573,6 +2581,9 @@ func TestServer_Diagnostics_OmitsTrashStatsWhenCollectionFails(t *testing.T) {
 	}
 	if !payload.Success {
 		t.Fatal("expected diagnostics response success=true")
+	}
+	if available, ok := payload.Data.Filesystem["trash_stats_available"].(bool); !ok || available {
+		t.Fatalf("expected diagnostics to mark trash stats unavailable, got %v", payload.Data.Filesystem["trash_stats_available"])
 	}
 	if _, ok := payload.Data.Filesystem["trash_items"]; ok {
 		t.Fatalf("expected diagnostics to omit trash_items on trash stats failure, got %v", payload.Data.Filesystem["trash_items"])
@@ -3159,6 +3170,101 @@ func TestServer_MoveFile_UpdatesFavoritePaths(t *testing.T) {
 	}
 	if !server.favoritesStore.IsFavorite("tester", "/archive/docs/a.txt") {
 		t.Fatal("expected file favorite path to be updated")
+	}
+}
+
+func TestServer_MoveFile_RollsBackWhenFavoritePathSyncFails(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/archive"); err != nil {
+		t.Fatalf("Mkdir(/archive) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/report.txt", bytes.NewReader([]byte("report"))); err != nil {
+		t.Fatalf("WriteFile(/docs/report.txt) error: %v", err)
+	}
+
+	shareDir := filepath.Join(tmpDir, "move-hook-share")
+	if err := os.MkdirAll(shareDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(shareDir) error: %v", err)
+	}
+	shareStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	folderShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs", Type: share.ShareTypeFolder, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(folder share) error: %v", err)
+	}
+	fileShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs/report.txt", Type: share.ShareTypeFile, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	favoritesDir := filepath.Join(tmpDir, "move-hook-favorites")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs", "folder"); err != nil {
+		t.Fatalf("Add(/docs) error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs/report.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/report.txt) error: %v", err)
+	}
+
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := os.Chmod(favoritesDir, 0o500); err != nil {
+		t.Fatalf("Chmod(favoritesDir) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(favoritesDir, 0o755)
+	}()
+
+	body := `{"from":"/docs","to":"/archive/docs"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("move with favorites sync failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/docs/report.txt"); err != nil {
+		t.Fatalf("expected original file path to remain after rollback, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/archive/docs/report.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination file to be absent after rollback, got %v", err)
+	}
+
+	loadedFolderShare, err := server.shareStore.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(folder share) error: %v", err)
+	}
+	if loadedFolderShare.Path != "/docs" {
+		t.Fatalf("expected folder share path rollback to /docs, got %q", loadedFolderShare.Path)
+	}
+	loadedFileShare, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(file share) error: %v", err)
+	}
+	if loadedFileShare.Path != "/docs/report.txt" {
+		t.Fatalf("expected file share path rollback to /docs/report.txt, got %q", loadedFileShare.Path)
+	}
+	if !server.favoritesStore.IsFavorite("tester", "/docs") || !server.favoritesStore.IsFavorite("tester", "/docs/report.txt") {
+		t.Fatal("expected favorites to remain on original paths after rollback")
+	}
+	if server.favoritesStore.IsFavorite("tester", "/archive/docs") || server.favoritesStore.IsFavorite("tester", "/archive/docs/report.txt") {
+		t.Fatal("expected destination favorites not to be persisted after rollback")
 	}
 }
 
@@ -4746,7 +4852,7 @@ func TestServer_DiagnosticsExport(t *testing.T) {
 	}
 }
 
-func TestServer_DiagnosticsExport_OmitsTrashStatsWhenCollectionFails(t *testing.T) {
+func TestServer_DiagnosticsExport_MarksTrashStatsUnavailableWhenCollectionFails(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	originalGetTrashStats := getTrashStats
 	getTrashStats = func(_ *storage.FileSystem, _ context.Context) (int, int64, error) {
@@ -4767,6 +4873,9 @@ func TestServer_DiagnosticsExport_OmitsTrashStatsWhenCollectionFails(t *testing.
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to parse diagnostics export response: %v", err)
+	}
+	if available, ok := payload.Filesystem["trash_stats_available"].(bool); !ok || available {
+		t.Fatalf("expected diagnostics export to mark trash stats unavailable, got %v", payload.Filesystem["trash_stats_available"])
 	}
 	if _, ok := payload.Filesystem["trash_count"]; ok {
 		t.Fatalf("expected diagnostics export to omit trash_count on trash stats failure, got %v", payload.Filesystem["trash_count"])
@@ -5616,6 +5725,128 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 	if server.config.WebDAV.Prefix != "/dav" {
 		t.Fatalf("expected prefix normalized to /dav, got %q", server.config.WebDAV.Prefix)
+	}
+}
+
+func TestServer_UpdateSettings_SerializesConcurrentRuntimeApply(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.WebDAV.Enabled = true
+	server.config.WebDAV.Prefix = "/dav"
+	server.config.WebDAV.ReadOnly = false
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Username = "runtime-user"
+	server.config.WebDAV.Password = "initial-pass"
+	if err := server.config.Save(server.configPath); err != nil {
+		t.Fatalf("failed to save baseline config: %v", err)
+	}
+	server.storeActiveWebDAV(WebDAVRuntimeConfig{
+		Enabled:  true,
+		Prefix:   "/dav",
+		ReadOnly: false,
+		AuthType: "basic",
+		Username: "runtime-user",
+		Password: "initial-pass",
+	})
+
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	allowFirst := make(chan struct{})
+
+	var appliedMu sync.Mutex
+	applied := make([]string, 0, 2)
+	callCount := 0
+	server.updateWebDAV = func(cfg WebDAVRuntimeConfig) {
+		appliedMu.Lock()
+		callCount++
+		call := callCount
+		appliedMu.Unlock()
+
+		if call == 1 {
+			close(firstEntered)
+			<-allowFirst
+		} else if call == 2 {
+			close(secondEntered)
+		}
+
+		appliedMu.Lock()
+		applied = append(applied, cfg.Password)
+		appliedMu.Unlock()
+	}
+
+	doRequest := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		server.Router().ServeHTTP(w, req)
+		return w
+	}
+
+	firstResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		firstResponse <- doRequest(`{"webdav":{"enabled":true,"auth_type":"basic","username":"runtime-user","password":"first-pass"}}`)
+	}()
+
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first WebDAV runtime update")
+	}
+
+	secondResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		secondResponse <- doRequest(`{"webdav":{"enabled":true,"auth_type":"basic","username":"runtime-user","password":"second-pass"}}`)
+	}()
+
+	select {
+	case <-secondEntered:
+		t.Fatal("expected second settings update to wait for the first runtime apply")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(allowFirst)
+
+	firstResult := <-firstResponse
+	secondResult := <-secondResponse
+	if firstResult.Code != http.StatusOK {
+		t.Fatalf("first update settings status = %d, want %d: %s", firstResult.Code, http.StatusOK, firstResult.Body.String())
+	}
+	if secondResult.Code != http.StatusOK {
+		t.Fatalf("second update settings status = %d, want %d: %s", secondResult.Code, http.StatusOK, secondResult.Body.String())
+	}
+
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second WebDAV runtime update")
+	}
+
+	current := server.currentConfig()
+	if current == nil {
+		t.Fatal("expected current config snapshot")
+	}
+	if current.WebDAV.Password != "second-pass" {
+		t.Fatalf("expected persisted config snapshot to reflect second password, got %q", current.WebDAV.Password)
+	}
+	active := server.currentActiveWebDAV()
+	if active.Password != "second-pass" {
+		t.Fatalf("expected active WebDAV config to reflect second password, got %q", active.Password)
+	}
+
+	appliedMu.Lock()
+	defer appliedMu.Unlock()
+	if len(applied) != 2 {
+		t.Fatalf("expected two WebDAV runtime applies, got %d", len(applied))
+	}
+	if applied[0] != "first-pass" || applied[1] != "second-pass" {
+		t.Fatalf("expected serialized WebDAV runtime apply order [first-pass second-pass], got %v", applied)
+	}
+	configBytes, err := os.ReadFile(server.configPath)
+	if err != nil {
+		t.Fatalf("failed to read persisted config: %v", err)
+	}
+	if !strings.Contains(string(configBytes), "password = \"second-pass\"") {
+		t.Fatalf("expected persisted config file to reflect second password, got %s", string(configBytes))
 	}
 }
 

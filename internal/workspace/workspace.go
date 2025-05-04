@@ -347,8 +347,21 @@ func CleanPath(name string) string {
 	return path.Clean("/" + name)
 }
 
+func validateWorkspaceName(name string) error {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return ErrNotFound
+		}
+	}
+	return nil
+}
+
 // Stat returns file information
 func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
+	if err := validateWorkspaceName(name); err != nil {
+		return nil, err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
@@ -373,6 +386,9 @@ func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
 
 // ReadDir lists directory contents
 func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, error) {
+	if err := validateWorkspaceName(name); err != nil {
+		return nil, err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
@@ -428,6 +444,9 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 
 // OpenFile opens a file for reading
 func (w *Workspace) OpenFile(ctx context.Context, name string) (*os.File, error) {
+	if err := validateWorkspaceName(name); err != nil {
+		return nil, err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
@@ -456,6 +475,9 @@ func (w *Workspace) OpenFile(ctx context.Context, name string) (*os.File, error)
 
 // ReadFile reads entire file content
 func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	if err := validateWorkspaceName(name); err != nil {
+		return nil, err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return nil, err
@@ -483,6 +505,9 @@ func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error) {
 
 // WriteFile writes data to a file, creating parent directories as needed
 func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) error {
+	if err := validateWorkspaceName(name); err != nil {
+		return err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return err
@@ -541,6 +566,9 @@ func (w *Workspace) WriteFile(ctx context.Context, name string, data []byte) err
 
 // WriteFileFromReader writes data from a reader to a file
 func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.Reader) error {
+	if err := validateWorkspaceName(name); err != nil {
+		return err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return err
@@ -599,6 +627,9 @@ func (w *Workspace) WriteFileFromReader(ctx context.Context, name string, r io.R
 
 // Mkdir creates a directory
 func (w *Workspace) Mkdir(ctx context.Context, name string) error {
+	if err := validateWorkspaceName(name); err != nil {
+		return err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return err
@@ -641,6 +672,9 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 
 // Delete removes a file or empty directory
 func (w *Workspace) Delete(ctx context.Context, name string) error {
+	if err := validateWorkspaceName(name); err != nil {
+		return err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return err
@@ -677,6 +711,9 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 
 // DeleteAll removes a file or directory recursively
 func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
+	if err := validateWorkspaceName(name); err != nil {
+		return err
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return err
@@ -703,6 +740,12 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 
 // Rename moves or renames a file or directory
 func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
+	if err := validateWorkspaceName(oldName); err != nil {
+		return err
+	}
+	if err := validateWorkspaceName(newName); err != nil {
+		return err
+	}
 	oldPath := w.FullPath(oldName)
 	newPath := w.FullPath(newName)
 	if err := w.validatePath(oldPath); err != nil {
@@ -762,6 +805,12 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 
 // Copy copies a file
 func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
+	if err := validateWorkspaceName(srcName); err != nil {
+		return err
+	}
+	if err := validateWorkspaceName(dstName); err != nil {
+		return err
+	}
 	srcPath := w.FullPath(srcName)
 	dstPath := w.FullPath(dstName)
 	if err := w.validatePath(srcPath); err != nil {
@@ -846,6 +895,9 @@ type WalkFunc func(path string, info *FileInfo) error
 
 // Walk walks the file tree rooted at root, calling fn for each file or directory
 func (w *Workspace) Walk(ctx context.Context, root string, fn WalkFunc) error {
+	if err := validateWorkspaceName(root); err != nil {
+		return err
+	}
 	rootPath := w.FullPath(root)
 	rootClean := CleanPath(root)
 	if err := w.validatePath(rootPath); err != nil {
@@ -922,6 +974,9 @@ func isWorkspaceStagingFile(name string) bool {
 
 // Exists checks if a path exists
 func (w *Workspace) Exists(ctx context.Context, name string) bool {
+	if err := validateWorkspaceName(name); err != nil {
+		return false
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return false
@@ -935,6 +990,9 @@ func (w *Workspace) Exists(ctx context.Context, name string) bool {
 
 // IsDir checks if a path is a directory
 func (w *Workspace) IsDir(ctx context.Context, name string) bool {
+	if err := validateWorkspaceName(name); err != nil {
+		return false
+	}
 	fullPath := w.FullPath(name)
 	if err := w.validatePath(fullPath); err != nil {
 		return false

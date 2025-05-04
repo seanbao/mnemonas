@@ -25,6 +25,8 @@ var (
 	ErrShareAccessLimit  = errors.New("share access limit reached")
 	ErrInvalidPassword   = errors.New("invalid password")
 	ErrShareDisabled     = errors.New("share is disabled")
+	errInvalidSharePath  = errors.New("invalid share path")
+	errInvalidMaxAccess  = errors.New("invalid max access")
 	errShareStoreSymlink = errors.New("share store path must not be a symlink")
 )
 
@@ -176,9 +178,13 @@ func (s *ShareStore) load() error {
 	s.pathIdx = make(map[string][]string)
 
 	for _, share := range shares {
-		share.Permission = normalizePermission(share.Permission)
-		s.shares[share.ID] = share
-		s.pathIdx[share.Path] = append(s.pathIdx[share.Path], share.ID)
+		normalized := copyShare(share)
+		normalized.Permission = normalizePermission(normalized.Permission)
+		if err := validateShareInvariants(normalized); err != nil {
+			continue
+		}
+		s.shares[normalized.ID] = normalized
+		s.pathIdx[normalized.Path] = append(s.pathIdx[normalized.Path], normalized.ID)
 	}
 
 	return nil
@@ -265,6 +271,39 @@ func clonePathIndex(pathIdx map[string][]string) map[string][]string {
 		cloned[path] = append([]string(nil), ids...)
 	}
 	return cloned
+}
+
+func normalizeStoredSharePath(rawPath string) (string, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	if normalized == "" {
+		return "", errInvalidSharePath
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return "", errInvalidSharePath
+		}
+	}
+	return path.Clean("/" + normalized), nil
+}
+
+func validateShareInvariants(share *Share) error {
+	cleanPath, err := normalizeStoredSharePath(share.Path)
+	if err != nil {
+		return err
+	}
+	share.Path = cleanPath
+
+	if share.MaxAccess < 0 {
+		return errInvalidMaxAccess
+	}
+
+	switch share.Permission {
+	case "", PermissionRead:
+		share.Permission = PermissionRead
+		return nil
+	default:
+		return errInvalidSharePermission
+	}
 }
 
 func removeShareID(ids []string, id string) []string {
@@ -524,7 +563,9 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 		share.PasswordHash = string(hash)
 	}
 
-	share.Permission = normalizePermission(share.Permission)
+	if err := validateShareInvariants(share); err != nil {
+		return nil, err
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -620,6 +661,9 @@ func (s *ShareStore) Update(id string, fn func(*Share) error) error {
 
 		updated := copyShare(share)
 		if err := fn(updated); err != nil {
+			return err
+		}
+		if err := validateShareInvariants(updated); err != nil {
 			return err
 		}
 
@@ -803,28 +847,30 @@ func (s *ShareStore) rollbackAuthorizedAccess(reservation *authorizedAccessReser
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		snapshot := s.snapshotState()
+		share, ok := snapshot.shares[reservation.id]
+		if !ok {
+			return ErrShareNotFound
+		}
+		if share.AccessCount == 0 {
+			return nil
+		}
 
-	share, ok := s.shares[reservation.id]
-	if !ok {
-		return ErrShareNotFound
-	}
-	if share.AccessCount == 0 {
-		return nil
-	}
+		updated := copyShare(share)
+		updated.AccessCount--
+		if updated.LastAccess != nil && updated.LastAccess.Equal(reservation.currentLastAccess) {
+			updated.LastAccess = cloneTimePtr(reservation.previousLastAccess)
+		}
+		snapshot.shares[reservation.id] = updated
 
-	share.AccessCount--
-	if share.LastAccess != nil && share.LastAccess.Equal(reservation.currentLastAccess) {
-		share.LastAccess = cloneTimePtr(reservation.previousLastAccess)
+		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
+			return err
+		}
+		if s.commitSnapshot(snapshot) {
+			return nil
+		}
 	}
-	s.version++
-
-	if err := s.save(); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // Access validates and records access to a share

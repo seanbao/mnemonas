@@ -92,6 +92,7 @@ type Server struct {
 	// Config
 	config       *config.Config
 	configMu     sync.RWMutex
+	settingsMu   sync.Mutex
 	configPath   string
 	activeWebDAV WebDAVRuntimeConfig
 	webdavMu     sync.RWMutex
@@ -140,17 +141,29 @@ func (s *Server) storeActiveWebDAV(cfg WebDAVRuntimeConfig) {
 	s.activeWebDAV = cfg
 }
 
-func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) {
+func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) error {
+	shareUpdated := false
 	if s.shareStore != nil {
 		if err := s.shareStore.UpdatePathReferences(oldPath, newPath); err != nil {
-			s.logger.Error().Err(err).Str("old_path", oldPath).Str("new_path", newPath).Msg("failed to sync share paths after rename")
+			return fmt.Errorf("sync share paths after rename: %w", err)
 		}
+		shareUpdated = true
 	}
 	if s.favoritesStore != nil {
 		if err := s.favoritesStore.UpdatePathReferences(oldPath, newPath); err != nil {
-			s.logger.Error().Err(err).Str("old_path", oldPath).Str("new_path", newPath).Msg("failed to sync favorite paths after rename")
+			if shareUpdated {
+				if rollbackErr := s.shareStore.UpdatePathReferences(newPath, oldPath); rollbackErr != nil {
+					return errors.Join(
+						fmt.Errorf("sync favorite paths after rename: %w", err),
+						fmt.Errorf("rollback share paths after rename: %w", rollbackErr),
+					)
+				}
+			}
+			return fmt.Errorf("sync favorite paths after rename: %w", err)
 		}
 	}
+
+	return nil
 }
 
 func (s *Server) handlePathDeleted(_ context.Context, targetPath string) {
@@ -1977,10 +1990,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats := map[string]any{}
+	stats := map[string]any{
+		"total_files_available":   false,
+		"storage_stats_available": false,
+	}
 
 	if s.fs != nil {
 		if count, err := getFileCount(s.fs, r.Context()); err == nil {
+			stats["total_files_available"] = true
 			stats["total_files"] = count
 		} else {
 			s.logger.Warn().Err(err).Msg("failed to collect file count for stats")
@@ -1992,6 +2009,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), DefaultStatsTimeout*time.Second)
 		defer cancel()
 		if dpStats, err := s.dataplane.Stats(ctx); err == nil {
+			stats["storage_stats_available"] = true
 			stats["total_chunks"] = dpStats.TotalChunks
 			stats["total_size"] = dpStats.TotalSize
 			stats["unique_size"] = dpStats.UniqueSize
@@ -2051,9 +2069,11 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 		// Get trash stats
 		if trashCount, trashSize, err := getTrashStats(s.fs, r.Context()); err == nil {
+			fsStats["trash_stats_available"] = true
 			fsStats["trash_items"] = trashCount
 			fsStats["trash_size"] = trashSize
 		} else {
+			fsStats["trash_stats_available"] = false
 			s.logger.Warn().Err(err).Msg("failed to collect trash stats for diagnostics")
 		}
 
@@ -2430,9 +2450,11 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 
 		// Trash stats
 		if trashCount, trashSize, err := getTrashStats(s.fs, r.Context()); err == nil {
+			fsStats["trash_stats_available"] = true
 			fsStats["trash_count"] = trashCount
 			fsStats["trash_size"] = trashSize
 		} else {
+			fsStats["trash_stats_available"] = false
 			s.logger.Warn().Err(err).Msg("failed to collect trash stats for diagnostics export")
 		}
 
@@ -2749,7 +2771,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	// Check if custom restore path is provided
 	newPath := r.URL.Query().Get("path")
-	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
+	activityPath := item.OriginalPath
 
 	if newPath != "" {
 		// Restore to custom path
@@ -2820,7 +2842,7 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		s.respondNotFound(w, "delete from trash", storage.ErrNotFound)
 		return
 	}
-	activityPath := s.lookupTrashOriginalPath(r.Context(), id)
+	activityPath := item.OriginalPath
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
 		if isStorageNotFound(err) {
@@ -2839,24 +2861,6 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 		"id":      id,
 		"deleted": true,
 	}).WithMessage("item permanently deleted").Write(w, http.StatusOK)
-}
-
-func (s *Server) lookupTrashOriginalPath(ctx context.Context, id string) string {
-	if s.fs == nil || id == "" {
-		return ""
-	}
-
-	items, err := s.fs.ListTrash(ctx)
-	if err != nil {
-		return ""
-	}
-	for _, item := range items {
-		if item.ID == id {
-			return item.OriginalPath
-		}
-	}
-
-	return ""
 }
 
 func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
@@ -3496,6 +3500,9 @@ func (s *Server) validateWebDAVIdentity(cfg config.Config) error {
 
 // handleUpdateSettings updates settings
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
 	currentConfig := s.currentConfig()
 	if currentConfig == nil || s.configPath == "" {
 		ServiceUnavailable(w, "settings not available or no config file path")
