@@ -42,9 +42,9 @@ func TestCheck(t *testing.T) {
 	cfg := Config{
 		Enabled:       true,
 		CheckInterval: 1 * time.Hour,
-		ThresholdPct:  99.9,
-		CriticalPct:   99.99,
-		MinFreeBytes:  1,
+		ThresholdPct:  150,
+		CriticalPct:   200,
+		MinFreeBytes:  ^uint64(0),
 	}
 
 	monitor := NewMonitor(cfg, "/tmp", logger)
@@ -57,9 +57,37 @@ func TestCheck(t *testing.T) {
 	if stats.TotalBytes == 0 {
 		t.Error("expected non-zero total bytes")
 	}
+	if stats.Level != AlertLevelWarning {
+		t.Fatalf("expected Check() to populate warning level, got %s", stats.Level)
+	}
+}
 
-	if stats.Level != AlertLevelNone {
-		t.Logf("alert level: %s, stats: %+v", stats.Level, stats)
+func TestLastStatsReturnsCopy(t *testing.T) {
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	monitor := NewMonitor(Config{}, "/tmp", logger)
+	monitor.lastStats = &StorageStats{
+		Path:       "/tmp",
+		TotalBytes: 100,
+		FreeBytes:  50,
+		UsedBytes:  50,
+		UsedPct:    50,
+		Level:      AlertLevelWarning,
+		CheckedAt:  time.Now(),
+	}
+
+	stats := monitor.LastStats()
+	if stats == nil {
+		t.Fatal("expected LastStats() to return stats")
+	}
+	stats.Level = AlertLevelCritical
+	stats.Path = "/mutated"
+
+	again := monitor.LastStats()
+	if again.Level != AlertLevelWarning {
+		t.Fatalf("expected stored level to remain warning, got %s", again.Level)
+	}
+	if again.Path != "/tmp" {
+		t.Fatalf("expected stored path to remain /tmp, got %s", again.Path)
 	}
 }
 
@@ -117,4 +145,41 @@ func TestUpdateConfig_StartsMonitorAfterEnable(t *testing.T) {
 	}
 
 	t.Fatal("expected monitor to collect stats after enabling via UpdateConfig")
+}
+
+func TestStart_IgnoresNonPositiveIntervalAndRecoversAfterUpdate(t *testing.T) {
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	monitor := NewMonitor(Config{
+		Enabled:       true,
+		CheckInterval: 0,
+		ThresholdPct:  99.9,
+		CriticalPct:   99.99,
+		MinFreeBytes:  1,
+	}, "/tmp", logger)
+	monitor.Start(context.Background())
+	t.Cleanup(func() { monitor.Stop() })
+
+	time.Sleep(100 * time.Millisecond)
+	if stats := monitor.LastStats(); stats != nil {
+		t.Fatalf("expected no stats to be collected for non-positive interval, got %+v", stats)
+	}
+
+	monitor.UpdateConfig(Config{
+		Enabled:        true,
+		CheckInterval:  50 * time.Millisecond,
+		ThresholdPct:   99.9,
+		CriticalPct:    99.99,
+		MinFreeBytes:   1,
+		CooldownPeriod: time.Second,
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if stats := monitor.LastStats(); stats != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatal("expected monitor to recover after updating to a positive interval")
 }

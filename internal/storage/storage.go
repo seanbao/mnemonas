@@ -38,6 +38,9 @@ var (
 )
 
 var syncStoragePathDir = syncStorageDir
+var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
+	return ws.Walk(ctx, root, fn)
+}
 
 const defaultMaxWriteSize int64 = 10 * 1024 * 1024 * 1024 // 10GB
 
@@ -1559,9 +1562,6 @@ func (fs *FileSystem) GetFileCount(ctx context.Context) (int, error) {
 
 // Search searches for files matching the query
 func (fs *FileSystem) Search(ctx context.Context, query string, limit int) ([]*SearchResult, error) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
 	if query == "" {
 		return nil, errors.New("search query cannot be empty")
 	}
@@ -1570,11 +1570,15 @@ func (fs *FileSystem) Search(ctx context.Context, query string, limit int) ([]*S
 		limit = 50
 	}
 
+	fs.mu.RLock()
+	workspaceRef := fs.workspace
+	fs.mu.RUnlock()
+
 	query = strings.ToLower(query)
 	var results []*SearchResult
 
 	// Walk through workspace
-	err := fs.workspace.Walk(ctx, "/", func(filePath string, info *workspace.FileInfo) error {
+	err := walkStorageWorkspace(ctx, workspaceRef, "/", func(filePath string, info *workspace.FileInfo) error {
 		if len(results) >= limit {
 			return io.EOF // Stop walking
 		}

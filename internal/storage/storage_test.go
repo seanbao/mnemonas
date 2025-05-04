@@ -2608,6 +2608,46 @@ func TestFileSystem_RestoreVersion_AllowsCurrentHashWithoutStoredObject(t *testi
 	}
 }
 
+func TestFileSystem_RestoreVersion_PreservesReadableFilePermissions(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/docs/perm.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/perm.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/docs/perm.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected a historical version to restore")
+	}
+
+	if err := fs.RestoreVersion(ctx, "/docs/perm.txt", historicalHash); err != nil {
+		t.Fatalf("RestoreVersion() error: %v", err)
+	}
+
+	info, err := os.Stat(fs.workspace.FullPath("/docs/perm.txt"))
+	if err != nil {
+		t.Fatalf("Stat(perm.txt) error: %v", err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected restored file permissions 0644, got %o", info.Mode().Perm())
+	}
+}
+
 func TestMapWorkspaceReadablePathError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -3646,6 +3686,70 @@ func TestFileSystem_Search_EmptyQuery(t *testing.T) {
 	_, err := fs.Search(ctx, "", 10)
 	if err == nil {
 		t.Error("Search with empty query should return error")
+	}
+}
+
+func TestFileSystem_Search_DoesNotBlockWritesWhileTraversing(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	previousWalk := walkStorageWorkspace
+	walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
+		close(started)
+		<-release
+		return fn("/readme.md", &workspace.FileInfo{
+			Path:    "/readme.md",
+			Name:    "readme.md",
+			IsDir:   false,
+			Size:    1,
+			ModTime: time.Now(),
+		})
+	}
+	t.Cleanup(func() {
+		walkStorageWorkspace = previousWalk
+	})
+
+	type searchResult struct {
+		results []*SearchResult
+		err     error
+	}
+	searchDone := make(chan searchResult, 1)
+	go func() {
+		results, err := fs.Search(ctx, "readme", 10)
+		searchDone <- searchResult{results: results, err: err}
+	}()
+
+	<-started
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- fs.WriteFile(ctx, "/concurrent.txt", bytes.NewReader([]byte("content")))
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("WriteFile() during Search() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-searchDone
+		t.Fatal("expected Search() traversal not to block concurrent writes")
+	}
+
+	close(release)
+	searchOutcome := <-searchDone
+	if searchOutcome.err != nil {
+		t.Fatalf("Search() error: %v", searchOutcome.err)
+	}
+	if len(searchOutcome.results) != 1 || searchOutcome.results[0].Path != "/readme.md" {
+		t.Fatalf("Search() results = %#v, want single /readme.md result", searchOutcome.results)
+	}
+
+	if _, err := fs.Stat(ctx, "/concurrent.txt"); err != nil {
+		t.Fatalf("Stat(/concurrent.txt) error: %v", err)
 	}
 }
 

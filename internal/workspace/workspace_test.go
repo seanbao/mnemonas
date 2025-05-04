@@ -35,6 +35,13 @@ func TestWorkspace_WriteFile_ReturnsDirectorySyncErrorAfterRename(t *testing.T) 
 	if string(data) != "content" {
 		t.Fatalf("expected written content to be preserved, got %q", string(data))
 	}
+	info, statErr := os.Stat(filepath.Join(w.Root(), "durable.txt"))
+	if statErr != nil {
+		t.Fatalf("Stat(durable.txt) error: %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected durable.txt permissions 0644, got %o", info.Mode().Perm())
+	}
 }
 
 func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
@@ -61,6 +68,13 @@ func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *t
 	}
 	if string(data) != "streamed content" {
 		t.Fatalf("expected streamed content to be preserved, got %q", string(data))
+	}
+	info, statErr := os.Stat(filepath.Join(w.Root(), "stream.txt"))
+	if statErr != nil {
+		t.Fatalf("Stat(stream.txt) error: %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected stream.txt permissions 0644, got %o", info.Mode().Perm())
 	}
 }
 
@@ -93,6 +107,13 @@ func TestWorkspace_Copy_ReturnsDirectorySyncErrorAfterRename(t *testing.T) {
 	if string(data) != "copy content" {
 		t.Fatalf("expected copied content to be preserved, got %q", string(data))
 	}
+	info, statErr := os.Stat(filepath.Join(w.Root(), "copied.txt"))
+	if statErr != nil {
+		t.Fatalf("Stat(copied.txt) error: %v", statErr)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("expected copied.txt permissions 0644, got %o", info.Mode().Perm())
+	}
 }
 
 type chunkedCancelReader struct {
@@ -119,6 +140,11 @@ func setupWorkspace(t *testing.T) *Workspace {
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := w.Close(); err != nil {
+			t.Errorf("Close() error: %v", err)
+		}
+	})
 	return w
 }
 
@@ -1113,6 +1139,69 @@ func TestWorkspace_WriteFile_RejectsSymlinkParent(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(outsideDir, "child.txt")); !os.IsNotExist(statErr) {
 		t.Fatalf("expected symlink target file to remain absent, got %v", statErr)
+	}
+}
+
+func TestWorkspace_WriteFile_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	safeDir := filepath.Join(w.Root(), "safe")
+	if err := os.Mkdir(safeDir, 0755); err != nil {
+		t.Fatalf("Mkdir(safe) error: %v", err)
+	}
+	outsideDir := t.TempDir()
+
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Remove(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, safeDir)
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+	})
+
+	err := w.WriteFile(ctx, "/safe/child.txt", []byte("blocked"))
+	if err != ErrNotFound {
+		t.Fatalf("WriteFile() error = %v, want ErrNotFound", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "child.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected external target file to remain absent, got %v", statErr)
+	}
+}
+
+func TestWorkspace_ReadFile_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	safeDir := filepath.Join(w.Root(), "safe")
+	if err := os.Mkdir(safeDir, 0755); err != nil {
+		t.Fatalf("Mkdir(safe) error: %v", err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("outside secret"), 0644); err != nil {
+		t.Fatalf("WriteFile(secret.txt) error: %v", err)
+	}
+
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Remove(safeDir); err != nil {
+			return err
+		}
+		return os.Symlink(outsideDir, safeDir)
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+	})
+
+	data, err := w.ReadFile(ctx, "/safe/secret.txt")
+	if err != ErrNotFound {
+		t.Fatalf("ReadFile() error = %v, want ErrNotFound", err)
+	}
+	if data != nil {
+		t.Fatal("expected no data for post-validation symlink swap")
 	}
 }
 

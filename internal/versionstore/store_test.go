@@ -731,6 +731,110 @@ func TestStore_RenamePath_TargetAlreadyExists(t *testing.T) {
 	}
 }
 
+func TestStore_RenamePath_DoesNotTouchCaseDistinctSiblings(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	if err := s.AddVersion(ctx, "/Docs/readme.md", "hash1", 100, ""); err != nil {
+		t.Fatalf("AddVersion(source) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/Docs/readme.md", 100, now, "hash1"); err != nil {
+		t.Fatalf("UpdateFileIndex(source) error: %v", err)
+	}
+	if err := s.AddVersion(ctx, "/docs/keep.md", "hash2", 200, ""); err != nil {
+		t.Fatalf("AddVersion(sibling) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docs/keep.md", 200, now, "hash2"); err != nil {
+		t.Fatalf("UpdateFileIndex(sibling) error: %v", err)
+	}
+
+	if err := s.RenamePath(ctx, "/Docs", "/Notes"); err != nil {
+		t.Fatalf("RenamePath() error: %v", err)
+	}
+
+	if _, _, _, err := s.GetFileIndex(ctx, "/Notes/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(renamed) error: %v", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/docs/keep.md"); err != nil {
+		t.Fatalf("GetFileIndex(case-distinct sibling) error: %v", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/Notes/keep.md"); err != ErrNotFound {
+		t.Fatalf("GetFileIndex(unexpectedly renamed sibling) error = %v, want ErrNotFound", err)
+	}
+
+	versions, err := s.GetVersions(ctx, "/docs/keep.md")
+	if err != nil {
+		t.Fatalf("GetVersions(case-distinct sibling) error: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("GetVersions(case-distinct sibling) returned %d versions, want 1", len(versions))
+	}
+}
+
+func TestStore_RenamePath_TargetCaseDistinctPathDoesNotConflict(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	if err := s.AddVersion(ctx, "/docs/readme.md", "hash1", 100, ""); err != nil {
+		t.Fatalf("AddVersion(source) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docs/readme.md", 100, now, "hash1"); err != nil {
+		t.Fatalf("UpdateFileIndex(source) error: %v", err)
+	}
+	if err := s.AddVersion(ctx, "/notes/existing.md", "hash2", 200, ""); err != nil {
+		t.Fatalf("AddVersion(case-distinct target) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/notes/existing.md", 200, now, "hash2"); err != nil {
+		t.Fatalf("UpdateFileIndex(case-distinct target) error: %v", err)
+	}
+
+	if err := s.RenamePath(ctx, "/docs", "/Notes"); err != nil {
+		t.Fatalf("RenamePath() error: %v", err)
+	}
+
+	if _, _, _, err := s.GetFileIndex(ctx, "/Notes/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(renamed) error: %v", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/notes/existing.md"); err != nil {
+		t.Fatalf("GetFileIndex(case-distinct target) error: %v", err)
+	}
+}
+
+func TestStore_RenamePath_DoesNotTreatPercentAsWildcard(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	now := time.Now().Truncate(time.Second)
+	if err := s.AddVersion(ctx, "/docs%2024/readme.md", "hash1", 100, ""); err != nil {
+		t.Fatalf("AddVersion(source) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docs%2024/readme.md", 100, now, "hash1"); err != nil {
+		t.Fatalf("UpdateFileIndex(source) error: %v", err)
+	}
+	if err := s.AddVersion(ctx, "/docsX2024/keep.md", "hash2", 200, ""); err != nil {
+		t.Fatalf("AddVersion(sibling) error: %v", err)
+	}
+	if err := s.UpdateFileIndex(ctx, "/docsX2024/keep.md", 200, now, "hash2"); err != nil {
+		t.Fatalf("UpdateFileIndex(sibling) error: %v", err)
+	}
+
+	if err := s.RenamePath(ctx, "/docs%2024", "/notes%2024"); err != nil {
+		t.Fatalf("RenamePath() error: %v", err)
+	}
+
+	if _, _, _, err := s.GetFileIndex(ctx, "/notes%2024/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(renamed) error: %v", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/docsX2024/keep.md"); err != nil {
+		t.Fatalf("GetFileIndex(percent sibling) error: %v", err)
+	}
+	if _, _, _, err := s.GetFileIndex(ctx, "/notes%2024/keep.md"); err != ErrNotFound {
+		t.Fatalf("GetFileIndex(unexpectedly renamed percent sibling) error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestStore_SearchFiles(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()
