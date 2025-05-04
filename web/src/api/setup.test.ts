@@ -34,6 +34,15 @@ describe('Setup API', () => {
     await expect(getSetupStatus()).rejects.toThrow('Invalid setup status response')
   })
 
+  it('reads structured error for setup status', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.resolve({ code: 'SERVICE_UNAVAILABLE', message: 'setup status unavailable' }),
+    } as Response)
+
+    await expect(getSetupStatus()).rejects.toThrow('setup status unavailable')
+  })
+
   it('reads legacy string error for acknowledge setup', async () => {
     vi.mocked(authFetch).mockResolvedValueOnce({
       ok: false,

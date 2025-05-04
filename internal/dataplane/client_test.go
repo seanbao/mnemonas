@@ -4,13 +4,48 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"testing"
 	"time"
 
 	pb "github.com/seanbao/mnemonas/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
+
+type testDataPlaneServer struct {
+	pb.UnimplementedDataPlaneServer
+}
+
+func (s *testDataPlaneServer) Health(context.Context, *pb.HealthRequest) (*pb.HealthResponse, error) {
+	return &pb.HealthResponse{Healthy: true, Version: "test", UptimeSecs: 1}, nil
+}
+
+func startTestDataPlaneServer(t *testing.T) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error: %v", err)
+	}
+
+	server := grpc.NewServer()
+	pb.RegisterDataPlaneServer(server, &testDataPlaneServer{})
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = server.Serve(listener)
+	}()
+
+	cleanup := func() {
+		server.Stop()
+		_ = listener.Close()
+		<-serveDone
+	}
+
+	return listener.Addr().String(), cleanup
+}
 
 type fakeDataPlaneClient struct {
 	putFileStream grpc.ClientStreamingClient[pb.PutFileRequest, pb.PutFileResponse]
@@ -336,6 +371,97 @@ func TestConnectInvalidAddress(t *testing.T) {
 	}
 	if client.IsConnected() {
 		t.Fatal("expected client to remain disconnected after failed connect")
+	}
+}
+
+func TestIsConnected_FalseForIdleConnection(t *testing.T) {
+	addr, cleanup := startTestDataPlaneServer(t)
+	defer cleanup()
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error: %v", err)
+	}
+	defer conn.Close()
+
+	client := NewClient(addr)
+	client.conn = conn
+
+	if client.IsConnected() {
+		t.Fatal("expected idle gRPC connection to report disconnected")
+	}
+}
+
+func TestConnect_ReusesExistingIdleConnection(t *testing.T) {
+	addr, cleanup := startTestDataPlaneServer(t)
+	defer cleanup()
+
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(100*1024*1024),
+			grpc.MaxCallSendMsgSize(100*1024*1024),
+		),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error: %v", err)
+	}
+
+	client := NewClient(addr)
+	client.conn = conn
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect() error: %v", err)
+	}
+	if !client.IsConnected() {
+		t.Fatal("expected client to report connected after reusing idle connection")
+	}
+	if _, err := client.Health(ctx); err != nil {
+		t.Fatalf("Health() error after Connect(): %v", err)
+	}
+}
+
+func TestConnect_RecreatesShutdownConnection(t *testing.T) {
+	addr, cleanup := startTestDataPlaneServer(t)
+	defer cleanup()
+
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(100*1024*1024),
+			grpc.MaxCallSendMsgSize(100*1024*1024),
+		),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("conn.Close() error: %v", err)
+	}
+
+	client := NewClient(addr)
+	client.conn = conn
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect() error after shutdown connection: %v", err)
+	}
+	if !client.IsConnected() {
+		t.Fatal("expected client to reconnect after shutdown connection")
+	}
+	if _, err := client.Health(ctx); err != nil {
+		t.Fatalf("Health() error after reconnect: %v", err)
 	}
 }
 

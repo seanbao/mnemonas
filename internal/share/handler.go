@@ -203,7 +203,19 @@ type CreateShareRequest struct {
 
 func normalizeShareAbsolutePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	if hasShareTraversalSegment(normalized) {
+		return "", errors.New("invalid path")
+	}
 	return path.Clean("/" + normalized), nil
+}
+
+func hasShareTraversalSegment(filePath string) bool {
+	for _, segment := range strings.Split(filePath, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeShareRelativePath(rawPath string) (string, error) {

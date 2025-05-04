@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -568,6 +569,8 @@ func (s *ShareStore) GetByPath(path string) []*Share {
 		}
 	}
 
+	sortSharesForOutput(shares)
+
 	return shares
 }
 
@@ -583,6 +586,8 @@ func (s *ShareStore) ListByUser(userID string) []*Share {
 		}
 	}
 
+	sortSharesForOutput(shares)
+
 	return shares
 }
 
@@ -595,6 +600,8 @@ func (s *ShareStore) ListAll() []*Share {
 	for _, share := range s.shares {
 		shares = append(shares, copyShare(share))
 	}
+
+	sortSharesForOutput(shares)
 
 	return shares
 }
@@ -879,6 +886,20 @@ func cloneTimePtr(value *time.Time) *time.Time {
 	}
 	cloned := *value
 	return &cloned
+}
+
+func sortSharesForOutput(shares []*Share) {
+	sort.Slice(shares, func(i, j int) bool {
+		left := shares[i]
+		right := shares[j]
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.After(right.CreatedAt)
+		}
+		if left.ID != right.ID {
+			return left.ID < right.ID
+		}
+		return left.Path < right.Path
+	})
 }
 
 func generateShareID() (string, error) {

@@ -140,6 +140,64 @@ func TestPasswordFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestAuthenticate_FailsWhenInitialPasswordFileCannotBeRemoved(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+
+	store, password, err := NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+	if password == "" {
+		t.Fatal("expected initial admin password")
+	}
+
+	if err := os.Remove(passwordFile); err != nil {
+		t.Fatalf("failed to remove initial password file: %v", err)
+	}
+	if err := os.Mkdir(passwordFile, 0700); err != nil {
+		t.Fatalf("failed to replace password file with directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(passwordFile, "blocker"), []byte("x"), 0600); err != nil {
+		t.Fatalf("failed to make password directory non-empty: %v", err)
+	}
+
+	user, err := store.Authenticate("admin", password)
+	if err == nil {
+		t.Fatal("expected Authenticate to fail when initial password file removal fails")
+	}
+	if !strings.Contains(err.Error(), "failed to remove initial password file") {
+		t.Fatalf("expected initial password file removal error, got %v", err)
+	}
+	if user != nil {
+		t.Fatalf("expected no authenticated user on cleanup failure, got %+v", user)
+	}
+
+	admin, err := store.GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("failed to reload admin after cleanup failure: %v", err)
+	}
+	if admin.LastLoginAt != nil {
+		t.Fatalf("expected failed cleanup to leave LastLoginAt unset, got %v", admin.LastLoginAt)
+	}
+
+	if err := os.Remove(filepath.Join(passwordFile, "blocker")); err != nil {
+		t.Fatalf("failed to remove blocker file: %v", err)
+	}
+	if err := os.Remove(passwordFile); err != nil {
+		t.Fatalf("failed to remove blocker directory: %v", err)
+	}
+
+	user, err = store.Authenticate("admin", password)
+	if err != nil {
+		t.Fatalf("Authenticate after cleanup recovery failed: %v", err)
+	}
+	if user == nil || user.Username != "admin" {
+		t.Fatalf("expected recovered admin login, got %+v", user)
+	}
+}
+
 // TestPasswordFilePermissions tests that password file has secure permissions
 func TestPasswordFilePermissions(t *testing.T) {
 	dir := t.TempDir()

@@ -266,6 +266,15 @@ func TestLoadSecrets_TightensExistingFilePermissions(t *testing.T) {
 	}
 }
 
+func TestMarkSetupShown_WithoutSecretsFileReturnsErrSecretsNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	err := MarkSetupShown(tmpDir)
+	if !errors.Is(err, ErrSecretsNotFound) {
+		t.Fatalf("expected ErrSecretsNotFound, got %v", err)
+	}
+}
+
 func TestLoadSecrets_TightensInvalidExistingFilePermissionsBeforeParseError(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretsPath := filepath.Join(tmpDir, SecretsFile)

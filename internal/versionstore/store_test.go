@@ -968,6 +968,60 @@ func TestStore_RunGC_ReturnsDeleteErrorsAndContinues(t *testing.T) {
 	}
 }
 
+func TestStore_RunGC_ReturnsChunkRefSizeLookupErrorsAndSkipsDelete(t *testing.T) {
+	s := setupStore(t)
+	ctx := context.Background()
+
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO chunk_refs (hash, ref_count, size, created_at) VALUES (?, 0, ?, ?)`, "orphan-size-fail", 10, time.Now().Unix()); err != nil {
+		t.Fatalf("insert orphan-size-fail error: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO chunk_refs (hash, ref_count, size, created_at) VALUES (?, 0, ?, ?)`, "orphan-ok", 20, time.Now().Unix()); err != nil {
+		t.Fatalf("insert orphan-ok error: %v", err)
+	}
+
+	originalGetChunkRefSize := s.getChunkRefSizeFn
+	s.getChunkRefSizeFn = func(ctx context.Context, hash string) (int64, error) {
+		if hash == "orphan-size-fail" {
+			return 0, errors.New("size lookup failed")
+		}
+		return originalGetChunkRefSize(ctx, hash)
+	}
+
+	called := make(map[string]int)
+	s.deleteObjectFn = func(ctx context.Context, hash string) error {
+		called[hash]++
+		return nil
+	}
+
+	deleted, freed, err := s.RunGC(ctx, 10)
+	if err == nil {
+		t.Fatal("expected RunGC() to return chunk ref size lookup error")
+	}
+	if !strings.Contains(err.Error(), "orphan-size-fail") {
+		t.Fatalf("expected error to mention failed hash, got %v", err)
+	}
+	if called["orphan-size-fail"] != 0 {
+		t.Fatalf("expected failing orphan to skip object delete, got %+v", called)
+	}
+	if called["orphan-ok"] != 1 {
+		t.Fatalf("expected healthy orphan to be deleted once, got %+v", called)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected one successful deletion, got %d", deleted)
+	}
+	if freed != 20 {
+		t.Fatalf("expected freed bytes 20, got %d", freed)
+	}
+
+	remaining, getErr := s.GetOrphanedChunks(ctx, 10)
+	if getErr != nil {
+		t.Fatalf("GetOrphanedChunks() error: %v", getErr)
+	}
+	if len(remaining) != 1 || remaining[0] != "orphan-size-fail" {
+		t.Fatalf("expected size lookup failure candidate to remain for retry, got %v", remaining)
+	}
+}
+
 func TestStore_RunGC_ReturnsChunkRefDeleteErrors(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

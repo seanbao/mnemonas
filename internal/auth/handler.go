@@ -294,7 +294,7 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, err := h.tokenManager.ValidateRefreshToken(req.RefreshToken)
+	claims, err := h.tokenManager.validateRefreshTokenClaims(req.RefreshToken)
 	if err != nil {
 		switch err {
 		case ErrTokenExpired:
@@ -306,6 +306,7 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	userID := claims.Subject
 
 	user, err := h.userStore.GetByID(userID)
 	if err != nil {
@@ -323,6 +324,9 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
 		return
 	}
+
+	// Rotate refresh tokens: once a refresh token is used successfully, it must not be reusable.
+	h.tokenManager.RevokeToken(claims.ID)
 
 	resp := LoginResponse{
 		AccessToken:  tokenPair.AccessToken,

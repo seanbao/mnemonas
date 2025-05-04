@@ -50,6 +50,7 @@ var SizeDimensions = map[Size]int{
 const (
 	maxThumbnailSourceDimension = 10000
 	maxThumbnailSourcePixels    = int64(50000000)
+	failedCacheReuseTTL         = 30 * time.Second
 )
 
 // SupportedExtensions lists image extensions that can be thumbnailed
@@ -69,8 +70,9 @@ type Service struct {
 	cacheDir string
 	mu       sync.RWMutex
 	// In-progress generation to prevent duplicate work
-	inProgress map[string]*thumbnailGenerationResult
-	ipMu       sync.Mutex
+	inProgress          map[string]*thumbnailGenerationResult
+	ipMu                sync.Mutex
+	failedCacheReuseTTL time.Duration
 }
 
 type thumbnailGenerationResult struct {
@@ -105,8 +107,9 @@ func NewService(cacheDir string) (*Service, error) {
 	}
 
 	return &Service{
-		cacheDir:   cacheDir,
-		inProgress: make(map[string]*thumbnailGenerationResult),
+		cacheDir:            cacheDir,
+		inProgress:          make(map[string]*thumbnailGenerationResult),
+		failedCacheReuseTTL: failedCacheReuseTTL,
 	}, nil
 }
 
@@ -182,13 +185,18 @@ func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, 
 
 	// Keep the completed result available to concurrent callers until cache persistence finishes.
 	go func() {
+		removeDelay := time.Duration(0)
 		defer func() {
+			if removeDelay > 0 {
+				time.Sleep(removeDelay)
+			}
 			s.ipMu.Lock()
 			delete(s.inProgress, cacheKey)
 			s.ipMu.Unlock()
 		}()
 		if err := s.saveToCache(cachePath, data); err != nil {
 			log.Printf("thumbnail: failed to save cache for %s: %v", filePath, err)
+			removeDelay = s.failedCacheReuseTTL
 		}
 	}()
 
