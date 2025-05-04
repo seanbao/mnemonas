@@ -611,6 +611,13 @@ func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
 
 // RemoveFavoritesUnderPath removes favorites that reference a deleted path.
 func (s *Store) RemoveFavoritesUnderPath(targetPath string) error {
+	_, err := s.RemoveFavoritesUnderPathWithRestore(targetPath)
+	return err
+}
+
+// RemoveFavoritesUnderPathWithRestore removes favorites under a deleted path and
+// returns the removed favorites for rollback if a later step fails.
+func (s *Store) RemoveFavoritesUnderPathWithRestore(targetPath string) ([]*Favorite, error) {
 	targetPath = path.Clean(targetPath)
 
 	s.writeMu.Lock()
@@ -619,19 +626,60 @@ func (s *Store) RemoveFavoritesUnderPath(targetPath string) error {
 	for {
 		snapshot := s.snapshotState()
 		changed := false
+		var removed []*Favorite
 
 		for userID, userFavs := range snapshot.data {
-			for currentPath := range userFavs {
+			for currentPath, fav := range userFavs {
 				if !favoritePathMatchesOrDescendant(targetPath, currentPath) {
 					continue
 				}
 
+				removed = append(removed, copyFavorite(fav))
 				delete(snapshot.data[userID], currentPath)
 				changed = true
 			}
 			if len(snapshot.data[userID]) == 0 {
 				delete(snapshot.data, userID)
 			}
+		}
+
+		if !changed {
+			return nil, nil
+		}
+		if err := saveFavoritesState(snapshot.filePath, snapshot.data); err != nil {
+			return nil, err
+		}
+		if s.commitSnapshot(snapshot) {
+			return removed, nil
+		}
+	}
+}
+
+// RestoreFavorites restores favorites that were removed by a failed operation.
+func (s *Store) RestoreFavorites(favorites []*Favorite) error {
+	if len(favorites) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for {
+		snapshot := s.snapshotState()
+		changed := false
+
+		for _, favorite := range favorites {
+			if snapshot.data[favorite.UserID] == nil {
+				snapshot.data[favorite.UserID] = make(map[string]*Favorite)
+			}
+
+			current, ok := snapshot.data[favorite.UserID][favorite.Path]
+			if ok && current.Note == favorite.Note && current.CreatedAt.Equal(favorite.CreatedAt) {
+				continue
+			}
+
+			snapshot.data[favorite.UserID][favorite.Path] = copyFavorite(favorite)
+			changed = true
 		}
 
 		if !changed {

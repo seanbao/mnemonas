@@ -166,17 +166,51 @@ func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) e
 	return nil
 }
 
-func (s *Server) handlePathDeleted(_ context.Context, targetPath string) {
+func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (func() error, error) {
+	var disabledShares []*share.Share
 	if s.shareStore != nil {
-		if err := s.shareStore.DisableSharesUnderPath(targetPath); err != nil {
-			s.logger.Error().Err(err).Str("path", targetPath).Msg("failed to disable shares after delete")
+		var err error
+		disabledShares, err = s.shareStore.DisableSharesUnderPathWithRestore(targetPath)
+		if err != nil {
+			return nil, fmt.Errorf("disable shares after delete: %w", err)
 		}
 	}
+
+	var removedFavorites []*favorites.Favorite
 	if s.favoritesStore != nil {
-		if err := s.favoritesStore.RemoveFavoritesUnderPath(targetPath); err != nil {
-			s.logger.Error().Err(err).Str("path", targetPath).Msg("failed to remove favorites after delete")
+		var err error
+		removedFavorites, err = s.favoritesStore.RemoveFavoritesUnderPathWithRestore(targetPath)
+		if err != nil {
+			if s.shareStore != nil {
+				if rollbackErr := s.shareStore.RestoreShares(disabledShares); rollbackErr != nil {
+					return nil, errors.Join(
+						fmt.Errorf("remove favorites after delete: %w", err),
+						fmt.Errorf("rollback shares after delete: %w", rollbackErr),
+					)
+				}
+			}
+			return nil, fmt.Errorf("remove favorites after delete: %w", err)
 		}
 	}
+
+	if len(disabledShares) == 0 && len(removedFavorites) == 0 {
+		return nil, nil
+	}
+
+	return func() error {
+		var rollbackErr error
+		if len(removedFavorites) > 0 {
+			if err := s.favoritesStore.RestoreFavorites(removedFavorites); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore favorites after delete rollback: %w", err))
+			}
+		}
+		if len(disabledShares) > 0 {
+			if err := s.shareStore.RestoreShares(disabledShares); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore shares after delete rollback: %w", err))
+			}
+		}
+		return rollbackErr
+	}, nil
 }
 
 type AlertMonitor interface {
@@ -2982,6 +3016,19 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Open original file
+	info, err := s.fs.Stat(r.Context(), filePath)
+	if err != nil {
+		s.respondReadableOpenFileError(w, "thumbnail stat file", err, "path is a directory")
+		return
+	}
+	thumbnailETag := fmt.Sprintf(`"thumb-%s-%s"`, info.ContentHash, size)
+	w.Header().Set("ETag", thumbnailETag)
+	w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if apiETagMatch(r.Header.Get("If-None-Match"), thumbnailETag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	reader, err := s.fs.OpenFile(r.Context(), filePath)
 	if err != nil {
 		s.respondReadableOpenFileError(w, "thumbnail open file", err, "path is a directory")
@@ -2990,7 +3037,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	defer reader.Close()
 
 	// Generate or retrieve cached thumbnail
-	data, err := s.thumbnail.GetThumbnail(r.Context(), filePath, size, reader)
+	data, err := s.thumbnail.GetThumbnailVersioned(r.Context(), filePath, info.ContentHash, size, reader)
 	if err != nil {
 		if errors.Is(err, thumbnail.ErrThumbnailSourceTooLarge) {
 			BadRequest(w, "source image too large to thumbnail")
@@ -3003,9 +3050,18 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	// Set appropriate headers
 	w.Header().Set("Content-Type", http.DetectContentType(data))
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 24 hours
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
+}
+
+func apiETagMatch(headerValue, currentETag string) bool {
+	for _, candidate := range strings.Split(headerValue, ",") {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "*" || trimmed == currentETag {
+			return true
+		}
+	}
+	return false
 }
 
 // handleListActivity returns recent activity log entries

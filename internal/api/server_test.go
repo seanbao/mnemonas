@@ -1247,6 +1247,161 @@ func TestServer_DeleteFile_RemovesFavoritesForDeletedPath(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteFile_RollsBackWhenFavoriteCleanupFails(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+		t.Fatalf("WriteFile(/docs/a.txt) error: %v", err)
+	}
+
+	shareDir := filepath.Join(tmpDir, "delete-hook-share")
+	if err := os.MkdirAll(shareDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(shareDir) error: %v", err)
+	}
+	shareStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	fileShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs/a.txt", Type: share.ShareTypeFile, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	favoritesDir := filepath.Join(tmpDir, "delete-hook-favorites")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs/a.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := os.Chmod(favoritesDir, 0o500); err != nil {
+		t.Fatalf("Chmod(favoritesDir) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(favoritesDir, 0o755)
+	}()
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete with favorites cleanup failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/docs/a.txt"); err != nil {
+		t.Fatalf("expected original file path to remain after delete rollback, got %v", err)
+	}
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected trash to remain empty after delete rollback, got %d items", len(items))
+	}
+
+	loadedShare, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(file share) error: %v", err)
+	}
+	if !loadedShare.Enabled {
+		t.Fatal("expected share to remain enabled after delete rollback")
+	}
+	if !server.favoritesStore.IsFavorite("tester", "/docs/a.txt") {
+		t.Fatal("expected favorite to remain after delete rollback")
+	}
+}
+
+func TestServer_DeleteFile_RollsBackWhenFavoriteCleanupFailsWithTrashDisabled(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+	fs.UpdateTrashSettings(false, 30, 1<<20)
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/a.txt", bytes.NewReader([]byte("keep me"))); err != nil {
+		t.Fatalf("WriteFile(/docs/a.txt) error: %v", err)
+	}
+
+	shareDir := filepath.Join(tmpDir, "delete-permanent-share")
+	if err := os.MkdirAll(shareDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(shareDir) error: %v", err)
+	}
+	shareStore, err := share.NewShareStore(filepath.Join(shareDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	fileShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs/a.txt", Type: share.ShareTypeFile, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(file share) error: %v", err)
+	}
+
+	favoritesDir := filepath.Join(tmpDir, "delete-permanent-favorites")
+	if err := os.MkdirAll(favoritesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(favoritesDir) error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(favoritesDir, "favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs/a.txt", "file"); err != nil {
+		t.Fatalf("Add(/docs/a.txt) error: %v", err)
+	}
+
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := os.Chmod(favoritesDir, 0o500); err != nil {
+		t.Fatalf("Chmod(favoritesDir) error: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(favoritesDir, 0o755)
+	}()
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/docs/a.txt", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete with favorites cleanup failure and trash disabled status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/docs/a.txt"); err != nil {
+		t.Fatalf("expected original file path to remain after permanent delete rollback, got %v", err)
+	}
+	items, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() error: %v", listErr)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected permanent delete rollback to leave trash empty, got %d items", len(items))
+	}
+
+	loadedShare, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(file share) error: %v", err)
+	}
+	if !loadedShare.Enabled {
+		t.Fatal("expected share to remain enabled after permanent delete rollback")
+	}
+	if !server.favoritesStore.IsFavorite("tester", "/docs/a.txt") {
+		t.Fatal("expected favorite to remain after permanent delete rollback")
+	}
+}
+
 func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -4808,6 +4963,95 @@ func TestServer_Thumbnail_PreservesPNGContentTypeForAlphaSource(t *testing.T) {
 	}
 	if len(w.Body.Bytes()) == 0 {
 		t.Fatal("expected non-empty alpha PNG thumbnail response body")
+	}
+}
+
+func TestServer_Thumbnail_RefreshesAfterFileContentChanges(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/changing.png", bytes.NewReader(createGIFThumbnailSource(24, 24))); err != nil {
+		t.Fatalf("WriteFile(initial changing.png) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/changing.png", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("initial thumbnail status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("initial thumbnail Content-Type = %q, want %q", w.Header().Get("Content-Type"), "image/jpeg")
+	}
+
+	if err := fs.WriteFile(ctx, "/changing.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
+		t.Fatalf("WriteFile(updated changing.png) error: %v", err)
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/thumbnails/changing.png", nil)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("updated thumbnail status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("updated thumbnail Content-Type = %q, want %q", w.Header().Get("Content-Type"), "image/png")
+	}
+	if len(w.Body.Bytes()) == 0 {
+		t.Fatal("expected non-empty updated thumbnail response body")
+	}
+}
+
+func TestServer_Thumbnail_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	if err := fs.WriteFile(ctx, "/etag.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
+		t.Fatalf("WriteFile(etag.png) error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/etag.png", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("initial thumbnail status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if cacheControl := w.Header().Get("Cache-Control"); cacheControl != "private, no-cache" {
+		t.Fatalf("thumbnail Cache-Control = %q, want %q", cacheControl, "private, no-cache")
+	}
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected thumbnail response to include ETag")
+	}
+	if lastModified := w.Header().Get("Last-Modified"); lastModified == "" {
+		t.Fatal("expected thumbnail response to include Last-Modified")
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/thumbnails/etag.png", nil)
+	req.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotModified {
+		t.Fatalf("thumbnail If-None-Match status = %d, want %d", w.Code, http.StatusNotModified)
+	}
+	if len(w.Body.Bytes()) != 0 {
+		t.Fatalf("expected 304 thumbnail response body to be empty, got %d bytes", len(w.Body.Bytes()))
 	}
 }
 
