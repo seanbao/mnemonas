@@ -263,6 +263,25 @@ func TestNewStore_RejectsSymlinkRoot(t *testing.T) {
 	}
 }
 
+func TestNewStore_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nested", "cas")
+
+	originalSyncDir := syncDir
+	syncDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncDir = originalSyncDir
+	}()
+
+	if _, err := NewStore(root, nil); err == nil {
+		t.Fatal("expected NewStore() to fail when directory tree sync fails")
+	} else if !strings.Contains(err.Error(), "failed to sync directory tree") {
+		t.Fatalf("expected directory tree sync error, got %v", err)
+	}
+}
+
 func TestStore_PutRejectsSymlinkObjectPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir, nil)
@@ -297,7 +316,7 @@ func TestStore_PutRejectsSymlinkObjectPath(t *testing.T) {
 	}
 }
 
-func TestStore_PutReturnsDirectorySyncError(t *testing.T) {
+func TestStore_PutReturnsDirectoryTreeSyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir, nil)
 	if err != nil {
@@ -312,7 +331,41 @@ func TestStore_PutReturnsDirectorySyncError(t *testing.T) {
 		syncDir = originalSyncDir
 	}()
 
+	hash := "abcdef1234567890abcdef1234567890"
+	err = store.Put(hash, []byte("payload"))
+	if err == nil {
+		t.Fatal("expected Put() to fail when shard directory tree sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync directory tree") {
+		t.Fatalf("expected directory tree sync error, got %v", err)
+	}
+
+	objectPath := store.layout.FullPath(store.root, hash)
+	if _, statErr := os.Stat(objectPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no object to be created after directory tree sync failure, got %v", statErr)
+	}
+}
+
+func TestStore_PutReturnsDirectorySyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
 	hash := "fedcba0987654321fedcba0987654321"
+	objectPath := store.layout.FullPath(store.root, hash)
+	if err := os.MkdirAll(filepath.Dir(objectPath), 0755); err != nil {
+		t.Fatalf("MkdirAll(object dir) error: %v", err)
+	}
+
+	originalSyncDir := syncDir
+	syncDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncDir = originalSyncDir
+	}()
+
 	err = store.Put(hash, []byte("payload"))
 	if err == nil {
 		t.Fatal("expected Put() to fail when directory sync fails")
@@ -321,7 +374,6 @@ func TestStore_PutReturnsDirectorySyncError(t *testing.T) {
 		t.Fatalf("expected directory sync error, got %v", err)
 	}
 
-	objectPath := store.layout.FullPath(store.root, hash)
 	data, readErr := os.ReadFile(objectPath)
 	if readErr != nil {
 		t.Fatalf("expected renamed object to remain readable after sync failure, got %v", readErr)

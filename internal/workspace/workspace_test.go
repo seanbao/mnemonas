@@ -134,6 +134,25 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNew_ReturnsDirectorySyncErrorWhenCreatingRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nested", "workspace")
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncWorkspaceDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	}()
+
+	if _, err := New(root); err == nil {
+		t.Fatal("expected New() to fail when workspace root directory tree sync fails")
+	} else if !strings.Contains(err.Error(), "failed to sync directory") {
+		t.Fatalf("expected directory sync failure, got %v", err)
+	}
+}
+
 func TestNew_RejectsSymlinkRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	realRoot := filepath.Join(tmpDir, "real-root")
@@ -262,6 +281,43 @@ func TestWorkspace_Mkdir(t *testing.T) {
 
 	if !info.IsDir {
 		t.Error("IsDir should be true for directory")
+	}
+}
+
+func TestWorkspace_Mkdir_ReturnsDirectorySyncErrorAfterNestedCreate(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncCalls := 0
+	syncWorkspaceDir = func(dir string) error {
+		syncCalls++
+		if syncCalls == 2 {
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	})
+
+	err := w.Mkdir(ctx, "/nested/a/b")
+	if err == nil {
+		t.Fatal("expected Mkdir() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync directory") {
+		t.Fatalf("expected directory sync failure in error, got %v", err)
+	}
+	if syncCalls < 2 {
+		t.Fatalf("expected nested mkdir to sync more than one parent directory, got %d calls", syncCalls)
+	}
+
+	info, statErr := w.Stat(ctx, "/nested/a/b")
+	if statErr != nil {
+		t.Fatalf("Stat(/nested/a/b) after sync failure error: %v", statErr)
+	}
+	if !info.IsDir {
+		t.Fatal("expected nested directory to remain present after sync failure")
 	}
 }
 
@@ -413,6 +469,34 @@ func TestWorkspace_Delete(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Delete_ReturnsDirectorySyncErrorAfterRemove(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+	if err := w.WriteFile(ctx, "/delete-sync.txt", []byte("delete me")); err != nil {
+		t.Fatalf("WriteFile(delete-sync.txt) error: %v", err)
+	}
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncWorkspaceDir = func(dir string) error {
+		return errors.New("sync dir failed")
+	}
+	t.Cleanup(func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	})
+
+	err := w.Delete(ctx, "/delete-sync.txt")
+	if err == nil {
+		t.Fatal("expected Delete() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync directory") {
+		t.Fatalf("expected directory sync failure in error, got %v", err)
+	}
+
+	if _, statErr := w.Stat(ctx, "/delete-sync.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected file to remain deleted after sync failure, got %v", statErr)
+	}
+}
+
 func TestWorkspace_Delete_NotFound(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -454,6 +538,37 @@ func TestWorkspace_DeleteAll(t *testing.T) {
 	_, err = w.Stat(ctx, "/parentdir")
 	if err != ErrNotFound {
 		t.Error("Directory should not exist after DeleteAll")
+	}
+}
+
+func TestWorkspace_DeleteAll_ReturnsDirectorySyncErrorAfterRemove(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+	if err := w.Mkdir(ctx, "/deleteall-sync"); err != nil {
+		t.Fatalf("Mkdir(deleteall-sync) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/deleteall-sync/file.txt", []byte("x")); err != nil {
+		t.Fatalf("WriteFile(deleteall-sync/file.txt) error: %v", err)
+	}
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	syncWorkspaceDir = func(dir string) error {
+		return errors.New("sync dir failed")
+	}
+	t.Cleanup(func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	})
+
+	err := w.DeleteAll(ctx, "/deleteall-sync")
+	if err == nil {
+		t.Fatal("expected DeleteAll() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync directory") {
+		t.Fatalf("expected directory sync failure in error, got %v", err)
+	}
+
+	if _, statErr := w.Stat(ctx, "/deleteall-sync"); statErr != ErrNotFound {
+		t.Fatalf("expected path to remain deleted after sync failure, got %v", statErr)
 	}
 }
 
@@ -820,11 +935,13 @@ func TestWorkspace_CleanupStaging(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
 
-	// Create some .tmp files
-	tmpFile1 := filepath.Join(w.Root(), "test1.tmp")
-	tmpFile2 := filepath.Join(w.Root(), "test2.tmp")
+	// Create workspace staging files plus a user tmp file that must be preserved.
+	tmpFile1 := filepath.Join(w.Root(), ".workspace-test1.tmp")
+	tmpFile2 := filepath.Join(w.Root(), ".workspace-test2.tmp")
+	keepFile := filepath.Join(w.Root(), "keep.tmp")
 	os.WriteFile(tmpFile1, []byte("temp1"), 0644)
 	os.WriteFile(tmpFile2, []byte("temp22"), 0644)
+	os.WriteFile(keepFile, []byte("keep"), 0644)
 
 	files, bytes, err := w.CleanupStaging(ctx)
 	if err != nil {
@@ -836,6 +953,9 @@ func TestWorkspace_CleanupStaging(t *testing.T) {
 	}
 	if bytes != 11 {
 		t.Errorf("CleanupStaging() bytes = %d, want 11", bytes)
+	}
+	if _, err := os.Stat(keepFile); err != nil {
+		t.Fatalf("expected user tmp file to remain, got %v", err)
 	}
 }
 
@@ -865,8 +985,8 @@ func TestWorkspace_CleanupStaging_PropagatesWalkError(t *testing.T) {
 	if err := os.Mkdir(blockedDir, 0755); err != nil {
 		t.Fatalf("Mkdir(blocked) error: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(blockedDir, "stuck.tmp"), []byte("temp"), 0644); err != nil {
-		t.Fatalf("WriteFile(stuck.tmp) error: %v", err)
+	if err := os.WriteFile(filepath.Join(blockedDir, ".workspace-stuck.tmp"), []byte("temp"), 0644); err != nil {
+		t.Fatalf("WriteFile(.workspace-stuck.tmp) error: %v", err)
 	}
 	if err := os.Chmod(blockedDir, 0000); err != nil {
 		t.Fatalf("Chmod(blocked) error: %v", err)

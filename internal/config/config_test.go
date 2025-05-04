@@ -373,6 +373,30 @@ func TestConfig_Save_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
+func TestConfig_Save_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "nested", "config", "config.toml")
+
+	originalSyncManagedDir := syncManagedDir
+	syncManagedDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncManagedDir = originalSyncManagedDir
+	}()
+
+	cfg := Default()
+	if err := cfg.Save(configPath); err == nil {
+		t.Fatal("expected Save() to fail when directory tree sync fails")
+	} else if !strings.Contains(err.Error(), "failed to sync managed directory tree") {
+		t.Fatalf("expected managed directory tree sync error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no config file to be created, got %v", statErr)
+	}
+}
+
 func TestLoad_NonExistentFile(t *testing.T) {
 	cfg, err := Load("/nonexistent/path/config.toml")
 	if err != nil {

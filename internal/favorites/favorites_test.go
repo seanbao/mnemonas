@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -43,6 +44,114 @@ func TestWriteFavoritesStoreFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("expected favorites file permissions 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteFavoritesStoreFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "nested", "state", "favorites.json")
+
+	originalSyncFavoritesStoreDir := syncFavoritesStoreDir
+	syncFavoritesStoreDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncFavoritesStoreDir = originalSyncFavoritesStoreDir
+	}()
+
+	err := writeFavoritesStoreFile(storePath, []byte("[]"))
+	if err == nil {
+		t.Fatal("expected writeFavoritesStoreFile() to fail when directory tree sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync favorites directory tree") {
+		t.Fatalf("expected directory tree sync error, got %v", err)
+	}
+	if _, statErr := os.Stat(storePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no favorites file to be created, got %v", statErr)
+	}
+}
+
+func TestNewStore_RecoversFromCorruptFavoritesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	if err := os.WriteFile(storePath, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(favorites.json) error: %v", err)
+	}
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if count := store.Count("user1"); count != 0 {
+		t.Fatalf("expected recovered store to start empty, got %d favorites", count)
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "favorites.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt favorites backup to be created")
+	}
+
+	if _, err := store.Add("user1", "/docs/file.txt", "restored"); err != nil {
+		t.Fatalf("Add() after recovery error: %v", err)
+	}
+
+	reloaded, reloadErr := NewStore(storePath)
+	if reloadErr != nil {
+		t.Fatalf("NewStore() reload error: %v", reloadErr)
+	}
+	if count := reloaded.Count("user1"); count != 1 {
+		t.Fatalf("expected recovered store to persist new favorites, got %d", count)
+	}
+}
+
+func TestNewStore_ReturnsErrorWhenCorruptFavoritesBackupSyncFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	if err := os.WriteFile(storePath, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(favorites.json) error: %v", err)
+	}
+
+	originalSyncFavoritesStoreDir := syncFavoritesStoreDir
+	syncFailed := false
+	syncFavoritesStoreDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("directory fsync failed")
+		}
+		return nil
+	}
+	defer func() {
+		syncFavoritesStoreDir = originalSyncFavoritesStoreDir
+	}()
+
+	if _, err := NewStore(storePath); err == nil {
+		t.Fatal("expected NewStore() to fail when corrupt favorites backup sync fails")
+	} else if !strings.Contains(err.Error(), "sync corrupt favorites directory") {
+		t.Fatalf("expected corrupt favorites sync failure in error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(storePath); statErr != nil {
+		t.Fatalf("expected original corrupt favorites file to remain after rollback, got %v", statErr)
+	}
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "favorites.json.corrupt.") {
+			t.Fatalf("expected no corrupt backup after rollback, found %s", entry.Name())
+		}
 	}
 }
 
@@ -428,5 +537,108 @@ func TestStore_ListDoesNotBlockWhileAddPersists(t *testing.T) {
 	}
 	if listed[0].Path != "/docs/slow.txt" {
 		t.Fatalf("expected /docs/slow.txt after save, got %s", listed[0].Path)
+	}
+}
+
+func TestStore_ConcurrentWritesSerializePersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	originalWriter := favoritesStoreWriter
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var startFirstOnce sync.Once
+	var releaseFirstOnce sync.Once
+	var startSecondOnce sync.Once
+	var callCount int32
+	favoritesStoreWriter = func(path string, data []byte) error {
+		call := atomic.AddInt32(&callCount, 1)
+		switch call {
+		case 1:
+			startFirstOnce.Do(func() {
+				close(firstStarted)
+			})
+			<-firstRelease
+		case 2:
+			startSecondOnce.Do(func() {
+				close(secondStarted)
+			})
+		}
+		return originalWriter(path, data)
+	}
+	t.Cleanup(func() {
+		favoritesStoreWriter = originalWriter
+		startFirstOnce.Do(func() {
+			close(firstStarted)
+		})
+		startSecondOnce.Do(func() {
+			close(secondStarted)
+		})
+		releaseFirstOnce.Do(func() {
+			close(firstRelease)
+		})
+	})
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, addErr := store.Add("user1", "/docs/first.txt", "first")
+		firstDone <- addErr
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first favorites persist to start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, addErr := store.Add("user1", "/docs/second.txt", "second")
+		secondDone <- addErr
+	}()
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second favorites persist started before first persist completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirstOnce.Do(func() {
+		close(firstRelease)
+	})
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first Add() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first Add() did not finish after releasing writer")
+	}
+
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second favorites persist to start")
+	}
+
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second Add() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second Add() did not finish")
+	}
+
+	listed := store.List("user1")
+	if len(listed) != 2 {
+		t.Fatalf("expected 2 favorites after serialized persists, got %d", len(listed))
 	}
 }

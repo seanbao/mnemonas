@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -44,6 +45,113 @@ func TestWriteShareStoreFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("expected shares file permissions 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteShareStoreFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "nested", "state", "shares.json")
+
+	originalSyncShareStoreDir := syncShareStoreDir
+	syncShareStoreDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncShareStoreDir = originalSyncShareStoreDir
+	}()
+
+	err := writeShareStoreFile(storePath, []byte("[]"))
+	if err == nil {
+		t.Fatal("expected writeShareStoreFile() to fail when directory tree sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync shares directory tree") {
+		t.Fatalf("expected directory tree sync error, got %v", err)
+	}
+	if _, statErr := os.Stat(storePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no shares file to be created, got %v", statErr)
+	}
+}
+
+func TestNewShareStore_RecoversFromCorruptSharesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+	if err := os.WriteFile(storePath, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(shares.json) error: %v", err)
+	}
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	if len(store.ListAll()) != 0 {
+		t.Fatalf("expected recovered share store to start empty, got %d shares", len(store.ListAll()))
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "shares.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt shares backup to be created")
+	}
+
+	share, createErr := store.Create(CreateShareOptions{Path: "/docs/file.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if createErr != nil {
+		t.Fatalf("Create() after recovery error: %v", createErr)
+	}
+	reloaded, reloadErr := NewShareStore(storePath)
+	if reloadErr != nil {
+		t.Fatalf("NewShareStore() reload error: %v", reloadErr)
+	}
+	if _, getErr := reloaded.Get(share.ID); getErr != nil {
+		t.Fatalf("expected recovered share store to persist new shares, got %v", getErr)
+	}
+}
+
+func TestNewShareStore_ReturnsErrorWhenCorruptSharesBackupSyncFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+	if err := os.WriteFile(storePath, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(shares.json) error: %v", err)
+	}
+
+	originalSyncShareStoreDir := syncShareStoreDir
+	syncFailed := false
+	syncShareStoreDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("directory fsync failed")
+		}
+		return nil
+	}
+	defer func() {
+		syncShareStoreDir = originalSyncShareStoreDir
+	}()
+
+	if _, err := NewShareStore(storePath); err == nil {
+		t.Fatal("expected NewShareStore() to fail when corrupt shares backup sync fails")
+	} else if !strings.Contains(err.Error(), "sync corrupt shares directory") {
+		t.Fatalf("expected corrupt shares sync failure in error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(storePath); statErr != nil {
+		t.Fatalf("expected original corrupt shares file to remain after rollback, got %v", statErr)
+	}
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "shares.json.corrupt.") {
+			t.Fatalf("expected no corrupt backup after rollback, found %s", entry.Name())
+		}
 	}
 }
 
@@ -646,6 +754,135 @@ func TestShareStore_UpdatePathMaintainsIndex(t *testing.T) {
 	}
 }
 
+func TestShareStore_UpdatePathReferences_RenamesDescendantShares(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	folderShare, err := store.Create(CreateShareOptions{Path: "/docs", Type: ShareTypeFolder, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create folder share: %v", err)
+	}
+	fileShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+	otherShare, err := store.Create(CreateShareOptions{Path: "/other.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create unrelated share: %v", err)
+	}
+
+	if err := store.UpdatePathReferences("/docs", "/archive/docs"); err != nil {
+		t.Fatalf("UpdatePathReferences() error: %v", err)
+	}
+
+	if shares := store.GetByPath("/docs"); len(shares) != 0 {
+		t.Fatalf("expected old folder path index to be empty, got %d shares", len(shares))
+	}
+	if shares := store.GetByPath("/docs/a.txt"); len(shares) != 0 {
+		t.Fatalf("expected old file path index to be empty, got %d shares", len(shares))
+	}
+
+	renamedFolder, err := store.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(folderShare) error: %v", err)
+	}
+	if renamedFolder.Path != "/archive/docs" {
+		t.Fatalf("expected folder share path to be rewritten, got %q", renamedFolder.Path)
+	}
+	renamedFile, err := store.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(fileShare) error: %v", err)
+	}
+	if renamedFile.Path != "/archive/docs/a.txt" {
+		t.Fatalf("expected file share path to be rewritten, got %q", renamedFile.Path)
+	}
+	unaffected, err := store.Get(otherShare.ID)
+	if err != nil {
+		t.Fatalf("Get(otherShare) error: %v", err)
+	}
+	if unaffected.Path != "/other.txt" {
+		t.Fatalf("expected unrelated share path to remain unchanged, got %q", unaffected.Path)
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedFile, err := reloaded.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloaded fileShare) error: %v", err)
+	}
+	if reloadedFile.Path != "/archive/docs/a.txt" {
+		t.Fatalf("expected rewritten path to persist, got %q", reloadedFile.Path)
+	}
+}
+
+func TestShareStore_DisableSharesUnderPath_DisablesExactAndDescendantShares(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	folderShare, err := store.Create(CreateShareOptions{Path: "/docs", Type: ShareTypeFolder, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create folder share: %v", err)
+	}
+	fileShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+	otherShare, err := store.Create(CreateShareOptions{Path: "/other.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create unrelated share: %v", err)
+	}
+
+	if err := store.DisableSharesUnderPath("/docs"); err != nil {
+		t.Fatalf("DisableSharesUnderPath() error: %v", err)
+	}
+
+	disabledFolder, err := store.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(folderShare) error: %v", err)
+	}
+	if disabledFolder.Enabled {
+		t.Fatal("expected folder share to be disabled")
+	}
+	disabledFile, err := store.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(fileShare) error: %v", err)
+	}
+	if disabledFile.Enabled {
+		t.Fatal("expected descendant file share to be disabled")
+	}
+	unaffected, err := store.Get(otherShare.ID)
+	if err != nil {
+		t.Fatalf("Get(otherShare) error: %v", err)
+	}
+	if !unaffected.Enabled {
+		t.Fatal("expected unrelated share to remain enabled")
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedFolder, err := reloaded.Get(folderShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloaded folderShare) error: %v", err)
+	}
+	if reloadedFolder.Enabled {
+		t.Fatal("expected disabled state to persist for folder share")
+	}
+}
+
 func TestShareStore_CreateRollbackOnSaveFailure(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1023,5 +1260,108 @@ func TestShareStore_GetDoesNotBlockWhileAuthorizedAccessPersists(t *testing.T) {
 	}
 	if loaded.AccessCount != 1 {
 		t.Fatalf("expected committed access_count 1 after save, got %d", loaded.AccessCount)
+	}
+}
+
+func TestShareStore_ConcurrentWritesSerializePersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create share store: %v", err)
+	}
+
+	originalWriter := shareStoreWriter
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var startFirstOnce sync.Once
+	var releaseFirstOnce sync.Once
+	var startSecondOnce sync.Once
+	var callCount int32
+	shareStoreWriter = func(path string, data []byte) error {
+		call := atomic.AddInt32(&callCount, 1)
+		switch call {
+		case 1:
+			startFirstOnce.Do(func() {
+				close(firstStarted)
+			})
+			<-firstRelease
+		case 2:
+			startSecondOnce.Do(func() {
+				close(secondStarted)
+			})
+		}
+		return originalWriter(path, data)
+	}
+	t.Cleanup(func() {
+		shareStoreWriter = originalWriter
+		startFirstOnce.Do(func() {
+			close(firstStarted)
+		})
+		startSecondOnce.Do(func() {
+			close(secondStarted)
+		})
+		releaseFirstOnce.Do(func() {
+			close(firstRelease)
+		})
+	})
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, createErr := store.Create(CreateShareOptions{Path: "/docs/first.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+		firstDone <- createErr
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first share persist to start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, createErr := store.Create(CreateShareOptions{Path: "/docs/second.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+		secondDone <- createErr
+	}()
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second share persist started before first persist completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirstOnce.Do(func() {
+		close(firstRelease)
+	})
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first Create() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first Create() did not finish after releasing writer")
+	}
+
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second share persist to start")
+	}
+
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second Create() error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second Create() did not finish")
+	}
+
+	shares := store.ListByUser("user1")
+	if len(shares) != 2 {
+		t.Fatalf("expected 2 shares after serialized persists, got %d", len(shares))
 	}
 }

@@ -2059,6 +2059,64 @@ func TestFileSystem_DeleteFromTrash_KeepsContentWhenMetadataDeleteFails(t *testi
 	}
 }
 
+func TestFileSystem_DeleteFromTrash_ReturnsDirectorySyncErrorAfterContentDelete(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-sync-fail.txt", bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-sync-fail.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+	if err := os.MkdirAll(filepath.Join(fs.trashRoot, ".deleting"), 0700); err != nil {
+		t.Fatalf("MkdirAll(.deleting) error: %v", err)
+	}
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncCalls := 0
+	syncStoragePathDir = func(dir string) error {
+		syncCalls++
+		if syncCalls == 3 {
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err = fs.DeleteFromTrash(ctx, items[0].ID)
+	if err == nil {
+		t.Fatal("Expected DeleteFromTrash() to fail when trash delete directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync deleted trash content") {
+		t.Fatalf("expected deleted trash sync failure in error, got %v", err)
+	}
+	if syncCalls < 3 {
+		t.Fatalf("expected post-delete sync to be attempted, got %d sync calls", syncCalls)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed delete error: %v", listErr)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("Expected trash metadata to be removed after visible delete, got %d items", len(remaining))
+	}
+	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Expected trash content to remain deleted after sync failure, got %v", statErr)
+	}
+}
+
 func TestFileSystem_EmptyTrash_KeepsMetadataWhenContentDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2169,7 +2227,6 @@ func TestFileSystem_CleanupExpiredTrash_KeepsMetadataWhenContentDeleteFails(t *t
 	if len(items) != 1 {
 		t.Fatalf("Expected 1 trash item, got %d", len(items))
 	}
-
 	original := items[0]
 	if err := fs.versions.RemoveFromTrash(ctx, original.ID); err != nil {
 		t.Fatalf("RemoveFromTrash() error: %v", err)
@@ -2204,6 +2261,53 @@ func TestFileSystem_CleanupExpiredTrash_KeepsMetadataWhenContentDeleteFails(t *t
 	}
 	if len(remaining) != 1 {
 		t.Fatalf("Expected expired trash metadata to remain after failed cleanup, got %d items", len(remaining))
+	}
+}
+
+func TestFileSystem_EmptyTrash_CountsDeletedItemWhenDirectorySyncFailsAfterContentDelete(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/empty-sync-fail.txt", bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/empty-sync-fail.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(fs.trashRoot, ".deleting"), 0700); err != nil {
+		t.Fatalf("MkdirAll(.deleting) error: %v", err)
+	}
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncCalls := 0
+	syncStoragePathDir = func(dir string) error {
+		syncCalls++
+		if syncCalls == 3 {
+			return errors.New("sync dir failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	deleted, err := fs.EmptyTrash(ctx)
+	if err == nil {
+		t.Fatal("Expected EmptyTrash() to fail when trash delete directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "failed to sync deleted trash content") {
+		t.Fatalf("expected deleted trash sync failure in error, got %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("Expected visible deletion to be counted before sync failure, got %d", deleted)
+	}
+
+	remaining, listErr := fs.ListTrash(ctx)
+	if listErr != nil {
+		t.Fatalf("ListTrash() after failed empty error: %v", listErr)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("Expected trash metadata to be removed after visible delete, got %d items", len(remaining))
 	}
 }
 
@@ -3392,6 +3496,40 @@ func TestCopyFile_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected destination to be removed after rollback, got %v", statErr)
+	}
+}
+
+func TestCopyDir_ReturnsErrorWhenDirectorySyncFails(t *testing.T) {
+	tempDir := t.TempDir()
+	src := filepath.Join(tempDir, "src")
+	dst := filepath.Join(tempDir, "dst")
+	if err := os.MkdirAll(filepath.Join(src, "nested"), 0755); err != nil {
+		t.Fatalf("MkdirAll(src) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "nested", "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src/nested/file.txt) error: %v", err)
+	}
+
+	originalSyncStoragePathDir := syncStoragePathDir
+	syncStoragePathDir = func(dir string) error {
+		return errors.New("sync dir failed")
+	}
+	t.Cleanup(func() {
+		syncStoragePathDir = originalSyncStoragePathDir
+	})
+
+	err := copyDir(src, dst)
+	if err == nil {
+		t.Fatal("expected copyDir() to fail when directory sync fails")
+	}
+	if !strings.Contains(err.Error(), "sync dir failed") {
+		t.Fatalf("expected sync failure in error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dst, "nested", "file.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected copied tree to remain absent after failure, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(src, "nested", "file.txt")); statErr != nil {
+		t.Fatalf("expected source tree to remain intact, got %v", statErr)
 	}
 }
 

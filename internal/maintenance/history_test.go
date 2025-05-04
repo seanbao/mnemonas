@@ -85,6 +85,29 @@ func TestNewHistoryStore_CreateDir(t *testing.T) {
 	}
 }
 
+func TestNewHistoryStore_ReturnsErrorWhenDirectoryTreeSyncFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	nestedDir := filepath.Join(tmpDir, "nested", "dir")
+
+	originalSyncHistoryFileDir := syncHistoryFileDir
+	syncHistoryFileDir = func(dir string) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncHistoryFileDir = originalSyncHistoryFileDir
+	}()
+
+	if _, err := NewHistoryStore(nestedDir); err == nil {
+		t.Fatal("expected NewHistoryStore() to fail when directory tree sync fails")
+	} else if !strings.Contains(err.Error(), "failed to sync maintenance history directory tree") {
+		t.Fatalf("expected maintenance history directory tree sync failure, got %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(nestedDir, "last_scrub.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no history file to be created, got %v", statErr)
+	}
+}
+
 func TestHistoryStore_ScrubOperations(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewHistoryStore(tmpDir)
@@ -208,6 +231,91 @@ func TestHistoryStore_PersistAndLoad(t *testing.T) {
 	}
 	if loaded.Errors[0].Hash != "abc123" {
 		t.Errorf("expected error hash=abc123, got %s", loaded.Errors[0].Hash)
+	}
+}
+
+func TestNewHistoryStore_RecoversFromCorruptLastScrubFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+	if err := os.WriteFile(historyPath, []byte("{invalid json"), 0644); err != nil {
+		t.Fatalf("WriteFile(last_scrub.json) error: %v", err)
+	}
+
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+	if store.GetLastScrubResult() != nil {
+		t.Fatal("expected recovered history store to start empty")
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "last_scrub.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt history backup to be created")
+	}
+
+	result := &ScrubResult{ID: "after-recovery", Status: "completed", StartTime: time.Now(), EndTime: time.Now()}
+	if err := store.SaveScrubResult(result); err != nil {
+		t.Fatalf("SaveScrubResult() after recovery error: %v", err)
+	}
+
+	reloaded, reloadErr := NewHistoryStore(tmpDir)
+	if reloadErr != nil {
+		t.Fatalf("NewHistoryStore() reload error: %v", reloadErr)
+	}
+	loaded := reloaded.GetLastScrubResult()
+	if loaded == nil || loaded.ID != "after-recovery" {
+		t.Fatalf("expected recovered history to persist new result, got %+v", loaded)
+	}
+}
+
+func TestNewHistoryStore_ReturnsErrorWhenCorruptBackupDirectorySyncFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+	if err := os.WriteFile(historyPath, []byte("{invalid json"), 0644); err != nil {
+		t.Fatalf("WriteFile(last_scrub.json) error: %v", err)
+	}
+
+	originalSyncHistoryFileDir := syncHistoryFileDir
+	syncFailed := false
+	syncHistoryFileDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("directory fsync failed")
+		}
+		return nil
+	}
+	defer func() {
+		syncHistoryFileDir = originalSyncHistoryFileDir
+	}()
+
+	if _, err := NewHistoryStore(tmpDir); err == nil {
+		t.Fatal("expected NewHistoryStore() to fail when corrupt backup sync fails")
+	} else if !strings.Contains(err.Error(), "sync corrupt scrub history directory") {
+		t.Fatalf("expected scrub history sync failure in error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(historyPath); statErr != nil {
+		t.Fatalf("expected original corrupt history file to remain after rollback, got %v", statErr)
+	}
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "last_scrub.json.corrupt.") {
+			t.Fatalf("expected no corrupt backup after rollback, found %s", entry.Name())
+		}
 	}
 }
 

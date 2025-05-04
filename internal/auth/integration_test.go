@@ -256,6 +256,88 @@ func TestReloadPreservesNoPasswordFile(t *testing.T) {
 	}
 }
 
+func TestNewUserStore_RecoversFromCorruptUsersFile(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+	if err := os.WriteFile(usersFile, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(users.json) error: %v", err)
+	}
+
+	store, password, err := NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	if password == "" {
+		t.Fatal("expected recovered user store to bootstrap a new admin password")
+	}
+	if _, err := store.Authenticate("admin", password); err != nil {
+		t.Fatalf("Authenticate(admin) after recovery error: %v", err)
+	}
+	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
+		t.Fatal("password file should be deleted after successful login")
+	}
+
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "users.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt users backup to be created")
+	}
+}
+
+func TestNewUserStore_ReturnsErrorWhenCorruptUsersBackupSyncFails(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+	if err := os.WriteFile(usersFile, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(users.json) error: %v", err)
+	}
+
+	originalSyncAuthFileDir := syncAuthFileDir
+	syncFailed := false
+	syncAuthFileDir = func(dir string) error {
+		if !syncFailed {
+			syncFailed = true
+			return errors.New("directory fsync failed")
+		}
+		return nil
+	}
+	defer func() {
+		syncAuthFileDir = originalSyncAuthFileDir
+	}()
+
+	if _, _, err := NewUserStore(usersFile); err == nil {
+		t.Fatal("expected NewUserStore() to fail when corrupt users backup sync fails")
+	} else if !strings.Contains(err.Error(), "sync corrupt users directory") {
+		t.Fatalf("expected corrupt users sync failure in error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(usersFile); statErr != nil {
+		t.Fatalf("expected original corrupt users file to remain after rollback, got %v", statErr)
+	}
+	if _, statErr := os.Stat(passwordFile); !os.IsNotExist(statErr) {
+		t.Fatal("expected no password file when corrupt users recovery fails")
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "users.json.corrupt.") {
+			t.Fatalf("expected no corrupt backup after rollback, found %s", entry.Name())
+		}
+	}
+}
+
 func TestNewUserStore_RejectsSymlinkUsersFile(t *testing.T) {
 	dir := t.TempDir()
 	targetFile := filepath.Join(dir, "real-users.json")

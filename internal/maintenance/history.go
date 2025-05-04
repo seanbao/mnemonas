@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,7 @@ func cloneScrubResult(result *ScrubResult) *ScrubResult {
 
 // NewHistoryStore creates a new history store
 func NewHistoryStore(dataDir string) (*HistoryStore, error) {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := ensureHistoryDir(dataDir, 0755); err != nil {
 		return nil, err
 	}
 	store := &HistoryStore{
@@ -73,7 +74,12 @@ func NewHistoryStore(dataDir string) (*HistoryStore, error) {
 	}
 	// Load last scrub result if exists
 	if err := store.loadLastScrubResult(); err != nil && !os.IsNotExist(err) {
-		return nil, err
+		if recoverErr := store.recoverCorruptLastScrubResult(err); recoverErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("load last scrub result: %w", err),
+				fmt.Errorf("recover corrupt scrub history: %w", recoverErr),
+			)
+		}
 	}
 	return store, nil
 }
@@ -158,6 +164,51 @@ func (s *HistoryStore) loadLastScrubResult() error {
 	recoverInterruptedScrubResult(&result, time.Now())
 	s.scrubResult = cloneScrubResult(&result)
 	return nil
+}
+
+func (s *HistoryStore) recoverCorruptLastScrubResult(loadErr error) error {
+	if !isRecoverableHistoryLoadError(loadErr) {
+		return loadErr
+	}
+
+	path := s.lastScrubPath()
+	dir := filepath.Dir(path)
+	corruptPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+	if err := os.Rename(path, corruptPath); err != nil {
+		return fmt.Errorf("backup corrupt scrub history: %w", err)
+	}
+	if err := syncHistoryFileDir(dir); err != nil {
+		if rollbackErr := os.Rename(corruptPath, path); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt scrub history directory: %w", err),
+				fmt.Errorf("rollback corrupt scrub history backup: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncHistoryFileDir(dir); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync corrupt scrub history directory: %w", err),
+				fmt.Errorf("sync corrupt scrub history rollback: %w", rollbackSyncErr),
+			)
+		}
+		return fmt.Errorf("sync corrupt scrub history directory: %w", err)
+	}
+
+	s.scrubResult = nil
+	return nil
+}
+
+func isRecoverableHistoryLoadError(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
 }
 
 func recoverInterruptedScrubResult(result *ScrubResult, now time.Time) {
@@ -245,7 +296,7 @@ func writeHistoryFile(path string, data []byte) error {
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := ensureHistoryDir(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create maintenance history directory: %w", err)
 	}
 
@@ -284,6 +335,47 @@ func writeHistoryFile(path string, data []byte) error {
 		return fmt.Errorf("failed to sync maintenance history directory: %w", err)
 	}
 	return nil
+}
+
+func collectMissingHistoryDirs(dir string) ([]string, error) {
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedHistoryDirs(createdDirs []string) error {
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := syncHistoryFileDir(filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync maintenance history directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureHistoryDir(dir string, perm os.FileMode) error {
+	createdDirs, err := collectMissingHistoryDirs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedHistoryDirs(createdDirs)
 }
 
 func syncHistoryDir(dir string) error {
