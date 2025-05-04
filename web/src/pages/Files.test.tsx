@@ -152,6 +152,13 @@ async function openContextMenuFor(name: string, coordinates = { clientX: 120, cl
   })
 }
 
+async function getFileActionArea(name: string) {
+  const trigger = await screen.findByLabelText(`${name} 操作菜单`)
+  const area = trigger.closest('.group')
+  expect(area).toBeTruthy()
+  return area as HTMLElement
+}
+
 describe('FilesPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -216,6 +223,28 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(screen.getByText('根目录')).toBeTruthy()
       })
+    })
+
+    it('navigates from breadcrumb root and parent segments without route feedback loops', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.currentPath = '/alpha/beta'
+      mockLocationPathname = '/files/alpha/beta'
+      mockListFiles.mockResolvedValue({ files: [], path: '/alpha/beta' })
+      mockCheckFavorites.mockResolvedValue({})
+
+      render(<FilesPage />)
+
+      await screen.findByRole('button', { name: 'beta' })
+      mockFilesStoreState.setCurrentPath.mockClear()
+      mockNavigate.mockClear()
+
+      await user.click(screen.getByRole('button', { name: 'alpha' }))
+      expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/alpha')
+      expect(mockNavigate).toHaveBeenCalledWith('/files/alpha', { replace: false })
+
+      await user.click(screen.getByRole('button', { name: '根目录' }))
+      expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/')
+      expect(mockNavigate).toHaveBeenCalledWith('/files', { replace: false })
     })
 
     it('shows empty state when no files', async () => {
@@ -697,6 +726,68 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/documents')
     })
 
+    it('keeps grid control shell pointer events from activating the card', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      const checkbox = await screen.findByRole('checkbox', { name: '选择 photo.jpg' })
+      const checkboxShell = checkbox.closest('.absolute')
+      expect(checkboxShell).toBeTruthy()
+
+      mockFilesStoreState.setSelection.mockClear()
+      mockFilesStoreState.toggleFileSelection.mockClear()
+
+      fireEvent.click(checkboxShell as HTMLElement)
+      fireEvent.doubleClick(checkboxShell as HTMLElement)
+      fireEvent.contextMenu(checkboxShell as HTMLElement)
+
+      const actionButton = screen.getByLabelText('photo.jpg 操作菜单')
+      const actionShell = actionButton.closest('.absolute')
+      expect(actionShell).toBeTruthy()
+
+      fireEvent.click(actionShell as HTMLElement)
+      fireEvent.doubleClick(actionShell as HTMLElement)
+      fireEvent.contextMenu(actionShell as HTMLElement)
+
+      expect(mockFilesStoreState.setSelection).not.toHaveBeenCalledWith(['/photo.jpg'])
+      expect(mockFilesStoreState.toggleFileSelection).not.toHaveBeenCalled()
+    })
+
+    it('clears grid selection from an empty grid-space click', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      render(<FilesPage />)
+
+      const gridContainer = (await screen.findAllByText('photo.jpg'))[0].closest('.custom-scrollbar')
+      expect(gridContainer).toBeTruthy()
+
+      vi.useFakeTimers()
+      fireEvent.click(gridContainer as HTMLElement)
+      expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
+
+      act(() => {
+        vi.advanceTimersByTime(1500)
+      })
+      vi.useRealTimers()
+    })
+
+    it('clears a pending grid multi-select hint timer on unmount', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      const { unmount } = render(<FilesPage />)
+
+      const gridContainer = (await screen.findAllByText('photo.jpg'))[0].closest('.custom-scrollbar')
+      expect(gridContainer).toBeTruthy()
+
+      vi.useFakeTimers()
+      fireEvent.click(gridContainer as HTMLElement)
+      fireEvent.click(gridContainer as HTMLElement)
+      unmount()
+      vi.useRealTimers()
+
+      expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
+    })
+
     it('opens a folder by syncing the file path state and route together', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.viewMode = 'grid'
@@ -769,6 +860,85 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.toggleFileSelection).toHaveBeenCalledWith('/photo.jpg')
     })
 
+    it('supports keyboard range selection with Shift+Arrow keys', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+      mockFilesStoreState.setSelection.mockClear()
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      })
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true }))
+      })
+
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents', '/photo.jpg'])
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', shiftKey: true, bubbles: true }))
+      })
+
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents'])
+    })
+
+    it('runs clipboard and clear keyboard shortcuts for selected files', async () => {
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      render(<FilesPage />)
+
+      await screen.findByText('批量下载（仅文件）')
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }))
+      })
+      expect(mockClipboardState.copy).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'], '/')
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已复制 2 个项目', color: 'success' })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', ctrlKey: true, bubbles: true }))
+      })
+      expect(mockClipboardState.cut).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'], '/')
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已剪切 2 个项目', color: 'success' })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      })
+      expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
+    })
+
+    it('opens delete and preview actions from keyboard state', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      const firstRender = render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      })
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      })
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }))
+      })
+
+      expect(await screen.findByRole('heading', { name: '确认删除' })).toBeTruthy()
+
+      firstRender.unmount()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
+      })
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      })
+
+      expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(1)
+    })
+
     it('renames the active row without requiring selection', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.viewMode = 'grid'
@@ -792,6 +962,52 @@ describe('FilesPage', () => {
         expect(screen.getByText('已选')).toBeTruthy()
         expect(screen.getByText('选择工具')).toBeTruthy()
       })
+    })
+
+    it('opens batch move and copy dialogs from the selection toolbar', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      render(<FilesPage />)
+
+      await user.click(await screen.findByText('批量移动'))
+      expect(await screen.findByText('移动到')).toBeTruthy()
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+      await user.click(screen.getByText('批量复制'))
+      expect(await screen.findByText('复制到')).toBeTruthy()
+    })
+
+    it('runs selection helper commands from the selection toolbar', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      render(<FilesPage />)
+
+      await user.click(await screen.findByText('反选'))
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents', '/video.mp4'])
+
+      await user.click(screen.getByText('仅文件'))
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/photo.jpg', '/video.mp4'])
+
+      await user.click(screen.getByText('仅文件夹'))
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents'])
+    })
+
+    it('forwards upload toolbar buttons to their hidden file inputs', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<FilesPage />)
+
+      await screen.findByText('上传文件')
+      const inputs = document.querySelectorAll('input[type="file"]')
+      expect(inputs).toHaveLength(2)
+
+      const fileInputClick = vi.spyOn(inputs[0] as HTMLInputElement, 'click').mockImplementation(() => undefined)
+      const folderInputClick = vi.spyOn(inputs[1] as HTMLInputElement, 'click').mockImplementation(() => undefined)
+
+      await user.click(screen.getByRole('button', { name: '上传文件' }))
+      expect(fileInputClick).toHaveBeenCalled()
+
+      await user.click(screen.getByRole('button', { name: '上传文件夹' }))
+      expect(folderInputClick).toHaveBeenCalled()
     })
 
     it('clears selection when path changes', async () => {
@@ -886,6 +1102,44 @@ describe('FilesPage', () => {
 	  })
 
   describe('context menu', () => {
+    it('runs copy actions from the grid card menu', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      mockFilesStoreState.viewMode = 'grid'
+
+      render(<FilesPage />)
+
+      const actionArea = await getFileActionArea('photo.jpg')
+      await user.click(within(actionArea).getByText('复制路径'))
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith('/photo.jpg')
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '路径已复制', color: 'success' })
+      })
+    })
+
+    it('shows a danger toast when copying from the grid card menu fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+      })
+      mockFilesStoreState.viewMode = 'grid'
+
+      render(<FilesPage />)
+
+      const actionArea = await getFileActionArea('photo.jpg')
+      await user.click(within(actionArea).getByText('复制路径'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '复制失败', color: 'danger' })
+      })
+    })
+
     it('executes file actions from the custom context menu', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const writeText = vi.fn().mockResolvedValue(undefined)
@@ -982,6 +1236,37 @@ describe('FilesPage', () => {
       menu = await openContextMenuFor('photo.jpg', { clientX: 190, clientY: 130 })
       await user.click(within(menu).getByRole('button', { name: '批量删除（进回收站）' }))
       expect(screen.getByRole('heading', { name: '批量删除' })).toBeTruthy()
+    })
+
+    it('shows failure toasts from custom context menu download and copy actions', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockDownloadFile.mockRejectedValueOnce(new Error('download failed'))
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+      })
+
+      render(<FilesPage />)
+
+      await screen.findByText('photo.jpg')
+
+      let menu = await openContextMenuFor('photo.jpg')
+      await user.click(within(menu).getByRole('button', { name: '下载' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '下载失败',
+          color: 'danger',
+        }))
+      })
+
+      menu = await openContextMenuFor('photo.jpg', { clientX: 150, clientY: 95 })
+      await user.click(within(menu).getByRole('button', { name: '复制路径' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '复制失败', color: 'danger' })
+      })
     })
   })
 
@@ -1811,11 +2096,23 @@ describe('FilesPage', () => {
 
       await screen.findByRole('button', { name: '排序：名称' })
 
+      await user.click(screen.getByRole('button', { name: '按名称' }))
+      expect(mockFilesStoreState.setSortBy).toHaveBeenCalledWith('name')
+
       await user.click(screen.getByRole('button', { name: '按大小' }))
       expect(mockFilesStoreState.setSortBy).toHaveBeenCalledWith('size')
 
+      await user.click(screen.getByRole('button', { name: '按修改时间' }))
+      expect(mockFilesStoreState.setSortBy).toHaveBeenCalledWith('modTime')
+
       await user.click(screen.getByRole('button', { name: '切换为降序' }))
       expect(mockFilesStoreState.toggleSortOrder).toHaveBeenCalled()
+
+      await user.click(screen.getByRole('button', { name: '网格视图' }))
+      expect(mockFilesStoreState.setViewMode).toHaveBeenCalledWith('grid')
+
+      await user.click(screen.getByRole('button', { name: '列表视图' }))
+      expect(mockFilesStoreState.setViewMode).toHaveBeenCalledWith('list')
     })
   })
 
@@ -1963,6 +2260,27 @@ describe('FilesPage', () => {
       })
     })
 
+    it('shows danger toast when favorites status reload fails with a generic error', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCheckFavorites
+        .mockRejectedValueOnce(new Error('favorites unavailable'))
+        .mockRejectedValueOnce(new Error('still down'))
+
+      render(<FilesPage />)
+
+      await screen.findByRole('button', { name: '重新加载收藏状态' })
+
+      await user.click(screen.getByRole('button', { name: '重新加载收藏状态' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '刷新失败',
+          description: 'still down',
+          color: 'danger',
+        })
+      })
+    })
+
     it('shows an unavailable state when the current directory returns service unavailable', async () => {
       mockListFiles.mockRejectedValueOnce(new ApiError('filesystem not initialized', 503, 'SERVICE_UNAVAILABLE'))
 
@@ -2001,6 +2319,117 @@ describe('FilesPage', () => {
       expect(screen.getByText('收藏功能暂不可用')).toBeTruthy()
       expect(screen.getByText('收藏存储未成功初始化，请检查系统健康状态或稍后重试。')).toBeTruthy()
       expect(screen.queryByText('收藏状态不可用')).toBeNull()
+    })
+  })
+
+  it('shows a success toast after adding a favorite', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockToggleFavorite.mockResolvedValueOnce(true)
+
+    render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(within(actionArea).getByText('添加收藏'))
+
+    await waitFor(() => {
+      expect(mockToggleFavorite).toHaveBeenCalledWith('/photo.jpg', false)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已添加收藏',
+        color: 'success',
+      })
+    })
+  })
+
+  it('shows a success toast after removing a favorite', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockCheckFavorites.mockResolvedValueOnce({
+      '/documents': false,
+      '/photo.jpg': true,
+      '/video.mp4': false,
+    })
+    mockToggleFavorite.mockResolvedValueOnce(false)
+
+    render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(await within(actionArea).findByText('取消收藏'))
+
+    await waitFor(() => {
+      expect(mockToggleFavorite).toHaveBeenCalledWith('/photo.jpg', true)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已取消收藏',
+        color: 'success',
+      })
+    })
+  })
+
+  it('shows the feature-disabled toast when adding a favorite is blocked by configuration', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockToggleFavorite.mockRejectedValueOnce(Object.assign(new Error('favorites feature disabled'), {
+      status: 503,
+      code: 'FAVORITES_FEATURE_DISABLED',
+    }))
+
+    render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(within(actionArea).getByText('添加收藏'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能已关闭',
+        description: '当前服务已关闭收藏功能。启用后重新加载即可恢复收藏状态与相关操作。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows the unavailable toast when favorites storage rejects an action', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockToggleFavorite.mockRejectedValueOnce(Object.assign(new Error('favorites unavailable'), {
+      status: 503,
+      code: 'FAVORITES_UNAVAILABLE',
+    }))
+
+    render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(within(actionArea).getByText('添加收藏'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏功能暂不可用',
+        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows a generic danger toast when adding a favorite fails unexpectedly', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockToggleFavorite.mockRejectedValueOnce(new Error('database timeout'))
+
+    render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(within(actionArea).getByText('添加收藏'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '操作失败',
+        description: 'database timeout',
+        color: 'danger',
+      })
     })
   })
 
