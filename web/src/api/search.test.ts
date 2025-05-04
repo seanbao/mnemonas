@@ -51,6 +51,24 @@ describe('Search API', () => {
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/search?q=report')
   })
 
+  it('sends a non-default search limit when provided', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          query: 'report',
+          count: 0,
+          results: [],
+        },
+      }),
+    })
+
+    await searchFiles('report', 25)
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/search?q=report&limit=25')
+  })
+
   it('rejects blank search queries without calling the API', async () => {
     await expect(searchFiles('   ')).rejects.toThrow('Search query is required')
     expect(mockAuthFetch).not.toHaveBeenCalled()
@@ -127,6 +145,15 @@ describe('Search API', () => {
     })
 
     await expect(searchFiles('report')).rejects.toThrow('Search failed')
+  })
+
+  it('rejects invalid JSON in successful search responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
   })
 
   it('rejects malformed successful wrapped search responses', async () => {

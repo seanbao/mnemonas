@@ -424,6 +424,39 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('allows editing WebDAV service fields and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('WebDAV 认证方式')).toBeTruthy()
+      })
+
+      const switches = screen.getAllByRole('switch')
+      await user.click(switches[0])
+      await user.click(switches[0])
+      fireEvent.change(screen.getByDisplayValue('/dav'), { target: { value: 'remote' } })
+      await user.click(switches[1])
+      fireEvent.change(screen.getByDisplayValue('admin'), { target: { value: 'webdav-admin' } })
+      fireEvent.change(screen.getByPlaceholderText('••••••••'), { target: { value: 'new-secret' } })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          webdav: expect.objectContaining({
+            enabled: true,
+            prefix: '/remote',
+            read_only: true,
+            username: 'webdav-admin',
+            password: 'new-secret',
+          }),
+        }))
+      })
+    })
+
     it('warns before saving WebDAV without authentication on a non-loopback listener', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -527,6 +560,8 @@ describe('SettingsPage', () => {
 
       const switches = screen.getAllByRole('switch')
       await user.click(switches[0])
+      await user.click(switches[1])
+      await user.click(switches[1])
 
       const certInput = screen.getByPlaceholderText('/path/to/server.crt')
       fireEvent.change(certInput, { target: { value: '/etc/mnemonas/tls/server.crt' } })
@@ -713,6 +748,33 @@ describe('SettingsPage', () => {
       }),
       }))
     })
+    })
+
+    it('allows editing version retention thresholds and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await waitFor(() => {
+        expect(screen.getByText('版本策略')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByDisplayValue('8760h'), { target: { value: '720h' } })
+      fireEvent.change(screen.getAllByDisplayValue('10 GB')[1], { target: { value: '5GB' } })
+      fireEvent.change(screen.getByDisplayValue('24h'), { target: { value: '12h' } })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          retention: expect.objectContaining({
+            max_age: '720h',
+            min_free_space: 5368709120,
+            gc_interval: '12h',
+          }),
+        }))
+      })
     })
   })
 
@@ -1270,6 +1332,75 @@ describe('SettingsPage', () => {
       expect(screen.getByText('隐藏 WebDAV 密码')).toBeTruthy()
     })
 
+    it('copies WebDAV credential values and clears the copied indicator', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
+      })
+
+      vi.useFakeTimers()
+      try {
+        await act(async () => {
+          fireEvent.click(screen.getByText('复制 WebDAV 地址').closest('button') as HTMLButtonElement)
+          await Promise.resolve()
+        })
+
+        expect(writeText).toHaveBeenCalledWith(expect.stringContaining('/dav/'))
+
+        await act(async () => {
+          fireEvent.click(screen.getByText('复制 WebDAV 用户名').closest('button') as HTMLButtonElement)
+          await Promise.resolve()
+        })
+
+        expect(writeText).toHaveBeenCalledWith('admin')
+
+        await act(async () => {
+          fireEvent.click(screen.getByText('复制 WebDAV 密码').closest('button') as HTMLButtonElement)
+          await Promise.resolve()
+        })
+
+        expect(writeText).toHaveBeenCalledWith('secret')
+
+        act(() => {
+          vi.runOnlyPendingTimers()
+        })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('shows a toast when copying WebDAV credentials fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockRejectedValue(new Error('blocked')) },
+      })
+
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV 访问凭据')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('复制 WebDAV 用户名').closest('button') as HTMLButtonElement)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '复制失败', color: 'danger' })
+      })
+    })
+
     it('shows a retryable warning when WebDAV credentials fail to load', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetWebDAVCredentials
@@ -1380,6 +1511,33 @@ describe('SettingsPage', () => {
         expect(screen.getByDisplayValue('3')).toBeTruthy()
       })
     })
+
+    it('allows editing CDC chunk sizes and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('CDC 分块参数')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByDisplayValue('256 KB'), { target: { value: '512KB' } })
+      fireEvent.change(screen.getByDisplayValue('1 MB'), { target: { value: '2MB' } })
+      fireEvent.change(screen.getByDisplayValue('4 MB'), { target: { value: '8MB' } })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          cdc: expect.objectContaining({
+            min_chunk_size: 524288,
+            avg_chunk_size: 2097152,
+            max_chunk_size: 8388608,
+          }),
+        }))
+      })
+    })
   })
 
   describe('actions', () => {
@@ -1449,6 +1607,303 @@ describe('SettingsPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: 'CDC 分块参数无效',
         description: '请保持最小块大小 < 平均块大小 < 最大块大小',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for invalid byte sizes', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '版本保留')
+
+    await waitFor(() => {
+      expect(screen.getAllByDisplayValue('10 GB').length).toBeGreaterThan(1)
+    })
+
+    fireEvent.change(screen.getAllByDisplayValue('10 GB')[1], { target: { value: 'not-a-size' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '大小格式无效',
+        color: 'danger',
+      }))
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for non-positive CDC chunk sizes', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('256 KB')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('256 KB'), { target: { value: '0' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'CDC 分块参数无效',
+        description: '最小、平均和最大块大小都必须大于 0',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for blank server read timeout', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('30s')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('30s'), { target: { value: '' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '读取超时格式无效',
+        description: '读取超时不能为空',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for blank server write timeout', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('60s')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('60s'), { target: { value: '' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '写入超时格式无效',
+        description: '写入超时不能为空',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for blank server idle timeout', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('120s')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('120s'), { target: { value: '' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '空闲超时格式无效',
+        description: '空闲超时不能为空',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for invalid dataplane retries', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('3')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('3'), { target: { value: '-1' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '最大重试次数格式无效',
+        description: '最大重试次数必须是 0 或正整数',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for blank dataplane timeout', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('30s')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('30s'), { target: { value: '' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '数据面超时格式无效',
+        description: '连接超时不能为空',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for out-of-range alert threshold', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '120' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '告警阈值格式无效',
+        description: '告警阈值必须在 0 到 100 之间',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for blank alert check interval', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    fireEvent.change(screen.getByDisplayValue('1h'), { target: { value: '' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '告警检查间隔格式无效',
+        description: '检查间隔不能为空',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for blank alert cooldown', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    fireEvent.change(screen.getByDisplayValue('4h'), { target: { value: '' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '告警冷却时间格式无效',
+        description: '冷却时间不能为空',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for out-of-range critical alert threshold', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    fireEvent.change(screen.getByDisplayValue('95'), { target: { value: '120' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '严重告警阈值格式无效',
+        description: '严重告警阈值必须在 0 到 100 之间',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save when critical alert threshold is lower than warning threshold', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '96' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '告警阈值关系无效',
+        description: '严重告警阈值不能小于普通告警阈值',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for invalid trash retention days', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '版本保留')
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('回收站保留天数')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByLabelText('回收站保留天数'), { target: { value: '-1' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '回收站保留天数格式无效',
+        description: '回收站保留天数必须是 0 或正整数',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for malformed alert webhook headers', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    fireEvent.change(screen.getByLabelText('Webhook 自定义 Header'), { target: { value: 'BrokenHeader' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'Webhook Header 格式无效',
+        description: '每行必须使用 Key:Value 格式',
         color: 'danger',
       })
     })

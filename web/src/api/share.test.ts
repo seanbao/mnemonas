@@ -887,6 +887,7 @@ describe('Share API', () => {
       expect(formatDuration('d')).toBe('d')
       expect(formatDuration('h')).toBe('h')
       expect(formatDuration('custom')).toBe('custom')
+      expect(formatDuration('forever')).toBe('forever')
     })
   })
 })

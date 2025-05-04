@@ -52,6 +52,24 @@ describe('Setup API', () => {
     await expect(getSetupStatus()).rejects.toThrow('setup status unavailable')
   })
 
+  it('reads legacy string error for setup status', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.resolve({ success: false, error: 'setup status failed' }),
+    } as Response)
+
+    await expect(getSetupStatus()).rejects.toThrow('setup status failed')
+  })
+
+  it('uses fallback setup status error when the payload has no message', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.resolve({ error: {} }),
+    } as Response)
+
+    await expect(getSetupStatus()).rejects.toThrow('Failed to get setup status')
+  })
+
   it('uses fallback setup status error when the error payload is unreadable', async () => {
     vi.mocked(global.fetch).mockResolvedValueOnce({
       ok: false,
@@ -104,6 +122,15 @@ describe('Setup API', () => {
     } as Response)
 
     await expect(acknowledgeSetup()).rejects.toThrow('failed to acknowledge setup')
+  })
+
+  it('uses fallback acknowledge setup error when the payload has no message', async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce({
+      ok: false,
+      json: () => Promise.resolve({ error: {} }),
+    } as Response)
+
+    await expect(acknowledgeSetup()).rejects.toThrow('Failed to acknowledge setup')
   })
 
   it('uses fallback acknowledge setup error when the error payload is unreadable', async () => {
