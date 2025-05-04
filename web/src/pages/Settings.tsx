@@ -1005,6 +1005,7 @@ export function SettingsPage() {
                     <Input
                       value={settings.maxAge}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxAge: v }))}
+                      placeholder="8760h"
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -1033,6 +1034,7 @@ export function SettingsPage() {
                     <Input
                       value={settings.gcInterval}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, gcInterval: v }))}
+                      placeholder="24h"
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -1452,6 +1454,7 @@ export function SettingsPage() {
                     <Input
                       value={settings.dataplaneTimeout}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneTimeout: v }))}
+                      placeholder="30s"
                       className="w-32"
                       classNames={{
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -1508,6 +1511,7 @@ export function SettingsPage() {
                     <Input
                       value={settings.alertsCheckInterval}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCheckInterval: v }))}
+                      placeholder="1h"
                       className="w-32"
                       isDisabled={!settings.alertsEnabled}
                       classNames={{
@@ -1567,6 +1571,7 @@ export function SettingsPage() {
                     <Input
                       value={settings.alertsCooldownPeriod}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCooldownPeriod: v }))}
+                      placeholder="4h"
                       className="w-32"
                       isDisabled={!settings.alertsEnabled}
                       classNames={{

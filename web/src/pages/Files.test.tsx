@@ -37,6 +37,14 @@ vi.mock('@/api/favorites', () => ({
   toggleFavorite: vi.fn(),
 }))
 
+vi.mock('@/api/share', async () => {
+  const actual = await vi.importActual<typeof import('@/api/share')>('@/api/share')
+  return {
+    ...actual,
+    listShares: vi.fn().mockResolvedValue([]),
+  }
+})
+
 // Mock navigation
 const mockNavigate = vi.fn()
 let mockLocationPathname = '/files'
@@ -99,6 +107,7 @@ vi.mock('@/components/share', () => ({
 }))
 
 import { ApiError, listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
+import { listShares } from '@/api/share'
 import { downloadFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 
@@ -110,6 +119,7 @@ const mockCopyFile = vi.mocked(copyFile)
 const mockDownloadFile = vi.mocked(downloadFile)
 const mockCheckFavorites = vi.mocked(checkFavorites)
 const mockToggleFavorite = vi.mocked(toggleFavorite)
+const mockListShares = vi.mocked(listShares)
 
 describe('FilesPage', () => {
   beforeEach(() => {
@@ -120,6 +130,7 @@ describe('FilesPage', () => {
     mockUser.role = 'admin'
     mockUser.email = 'admin@local'
     mockUser.homeDir = '/'
+    mockListShares.mockResolvedValue([])
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockFilesStoreState.selectedFiles = new Set<string>()
     mockFilesStoreState.currentPath = '/'

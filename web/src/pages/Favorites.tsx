@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -38,8 +38,9 @@ import { useCanWrite } from '@/stores/auth'
 
 // Get filename from path
 function getFileName(path: string): string {
-  const parts = path.split('/')
-  return parts[parts.length - 1] || path
+  const normalizedPath = path.endsWith('/') && path !== '/' ? path.slice(0, -1) : path
+  const parts = normalizedPath.split('/')
+  return parts[parts.length - 1] || normalizedPath
 }
 
 function getFavoritesFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
@@ -275,10 +276,74 @@ export function FavoritesPage() {
   const favoriteItems = useMemo(() => favorites ?? [], [favorites])
   const featureState = getFavoritesFeatureState(error)
 
+  const removeSelectedPaths = useCallback((paths: string[]) => {
+    if (paths.length === 0) {
+      return
+    }
+
+    const removedPaths = new Set(paths)
+    setSelectedItems((prev) => {
+      if (prev.size === 0) {
+        return prev
+      }
+
+      let changed = false
+      const next = new Set<string>()
+      for (const path of prev) {
+        if (removedPaths.has(path)) {
+          changed = true
+          continue
+        }
+        next.add(path)
+      }
+
+      return changed ? next : prev
+    })
+  }, [])
+
+  const removeFavoritesFromCache = useCallback((paths: string[]) => {
+    if (paths.length === 0) {
+      return
+    }
+
+    const removedPaths = new Set(paths)
+    queryClient.setQueryData<Favorite[]>(['favorites'], (current) => {
+      if (!current) {
+        return current
+      }
+
+      const next = current.filter((item) => !removedPaths.has(item.path))
+      return next.length === current.length ? current : next
+    })
+  }, [queryClient])
+
+  useEffect(() => {
+    const validPaths = new Set(favoriteItems.map((item) => item.path))
+    setSelectedItems((prev) => {
+      if (prev.size === 0) {
+        return prev
+      }
+
+      let changed = false
+      const next = new Set<string>()
+      for (const path of prev) {
+        if (validPaths.has(path)) {
+          next.add(path)
+          continue
+        }
+        changed = true
+      }
+
+      return changed ? next : prev
+    })
+  }, [favoriteItems])
+
   // Remove mutation
   const removeMutation = useMutation({
     mutationFn: (path: string) => removeFavorite(path),
-    onSuccess: () => {
+    onSuccess: (_, path) => {
+      removeFavoritesFromCache([path])
+      removeSelectedPaths([path])
       queryClient.invalidateQueries({ queryKey: ['favorites'] })
       addToast({ title: '已取消收藏', color: 'success' })
     },
@@ -321,7 +386,9 @@ export function FavoritesPage() {
     },
     getToast: getFavoritesBatchActionToast,
     onComplete: (result) => {
+      const succeededPaths = result.succeededItems.filter((item): item is string => typeof item === 'string')
       const failedPaths = result.failedItems.filter((item): item is string => typeof item === 'string')
+      removeFavoritesFromCache(succeededPaths)
       setSelectedItems(new Set(failedPaths))
       queryClient.invalidateQueries({ queryKey: ['favorites'] })
     },

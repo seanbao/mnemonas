@@ -60,6 +60,8 @@ const mockDeleteFromTrash = vi.mocked(deleteFromTrash)
 const mockEmptyTrash = vi.mocked(emptyTrash)
 
 describe('TrashPage', () => {
+  const pendingTrashRefetch = () => new Promise<Awaited<ReturnType<typeof listTrash>>>(() => {})
+
   beforeEach(() => {
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
@@ -358,6 +360,63 @@ describe('TrashPage', () => {
           description: '文件系统当前不可用，请稍后重试',
           color: 'warning',
         })
+      })
+    })
+
+    it('optimistically removes a restored selected item before trash refetch completes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockResolvedValue(undefined)
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 0,
+          },
+        ],
+        count: 2,
+        totalSize: 1024,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1')
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('deleted-file.txt')).toBeNull()
+        expect(screen.queryByText('/deleted-file.txt')).toBeNull()
+        expect(screen.queryByText(/已选择.*项/)).toBeNull()
+        expect(screen.getByText('deleted-folder')).toBeTruthy()
       })
     })
   })
@@ -706,6 +765,76 @@ describe('TrashPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+    })
+
+    it('optimistically removes batch-deleted items before trash refetch completes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockBatchResult = {
+        succeeded: 2,
+        failed: 0,
+        total: 2,
+        succeededItems: ['item1', 'item2'],
+        failedItems: [],
+      }
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 0,
+          },
+        ],
+        count: 2,
+        totalSize: 1024,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('永久删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('确认批量永久删除')).toBeTruthy()
+      })
+
+      const confirmButtons = screen.getAllByRole('button', { name: '永久删除' })
+      await user.click(confirmButtons[confirmButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockBatchExecute).toHaveBeenCalledWith(['item1', 'item2'])
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('deleted-file.txt')).toBeNull()
+        expect(screen.queryByText('deleted-folder')).toBeNull()
+        expect(screen.queryByText(/已选择.*项/)).toBeNull()
+        expect(screen.getByText('回收站是空的')).toBeTruthy()
       })
     })
   })

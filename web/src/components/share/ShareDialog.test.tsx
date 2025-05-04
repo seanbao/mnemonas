@@ -13,15 +13,58 @@ vi.mock('@heroui/react', () => ({
   ModalHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ModalBody: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ModalFooter: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Button: ({ children, onPress }: { children: React.ReactNode; onPress?: () => void }) => (
-    <button onClick={onPress}>{children}</button>
+  Button: ({
+    children,
+    onPress,
+    isDisabled,
+  }: {
+    children: React.ReactNode
+    onPress?: () => void
+    isDisabled?: boolean
+  }) => (
+    <button onClick={onPress} disabled={isDisabled}>{children}</button>
   ),
-  Input: ({ label, placeholder }: { label?: string; placeholder?: string }) => (
-    <input aria-label={label} placeholder={placeholder} />
+  Input: ({
+    label,
+    placeholder,
+    value,
+    onValueChange,
+    type,
+    errorMessage,
+  }: {
+    label?: string
+    placeholder?: string
+    value?: string
+    onValueChange?: (value: string) => void
+    type?: string
+    errorMessage?: string
+  }) => (
+    <div>
+      <input
+        aria-label={label ?? placeholder}
+        placeholder={placeholder}
+        type={type}
+        value={value ?? ''}
+        onChange={(event) => onValueChange?.(event.target.value)}
+      />
+      {errorMessage ? <span>{errorMessage}</span> : null}
+    </div>
   ),
   Select: ({ children }: { children: React.ReactNode }) => <select>{children}</select>,
   SelectItem: ({ children }: { children: React.ReactNode }) => <option>{children}</option>,
-  Switch: () => <input type="checkbox" />,
+  Switch: ({
+    isSelected,
+    onValueChange,
+  }: {
+    isSelected?: boolean
+    onValueChange?: (value: boolean) => void
+  }) => (
+    <input
+      type="checkbox"
+      checked={isSelected ?? false}
+      onChange={(event) => onValueChange?.(event.target.checked)}
+    />
+  ),
   Snippet: ({ children }: { children: React.ReactNode }) => <code>{children}</code>,
   addToast: (...args: unknown[]) => mockAddToast(...args),
 }))
@@ -169,5 +212,69 @@ describe('ShareDialog', () => {
       description: '分享服务当前不可用，请检查系统健康状态或稍后重试。',
       color: 'warning',
     })
+  })
+
+  it('blocks creating a protected share when password is empty', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByRole('checkbox'))
+
+    const createButton = screen.getByText('创建分享链接')
+    expect(createButton).toBeDisabled()
+    expect(screen.getByText('启用密码保护后必须输入密码')).toBeInTheDocument()
+
+    await user.click(createButton)
+
+    expect(createShare).not.toHaveBeenCalled()
+  })
+
+  it('allows creating a protected share after entering a password', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: true,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      max_access: 0,
+      description: '',
+      url: '/s/share-1',
+    } as never)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByRole('checkbox'))
+    await user.type(screen.getByPlaceholderText('设置访问密码'), 'secret-123')
+
+    const createButton = screen.getByText('创建分享链接')
+    expect(createButton).not.toBeDisabled()
+
+    await user.click(createButton)
+
+    expect(createShare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/test/file.txt',
+        type: 'file',
+        password: 'secret-123',
+      })
+    )
   })
 })

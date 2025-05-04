@@ -79,6 +79,24 @@ type thumbnailGenerationResult struct {
 	err  error
 }
 
+func (s *Service) waitForInProgressThumbnail(ctx context.Context, cachePath string, result *thumbnailGenerationResult) ([]byte, error) {
+	select {
+	case <-result.done:
+		if result.err != nil {
+			return nil, result.err
+		}
+		if len(result.data) > 0 {
+			return append([]byte(nil), result.data...), nil
+		}
+		if data, err := s.loadFromCache(cachePath); err == nil {
+			return data, nil
+		}
+		return nil, fmt.Errorf("thumbnail generation failed")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // NewService creates a new thumbnail service
 func NewService(cacheDir string) (*Service, error) {
 	// Create cache directory if it doesn't exist
@@ -113,32 +131,24 @@ func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, 
 	cacheKey := s.cacheKey(filePath, size)
 	cachePath := s.cachePath(cacheKey)
 
-	// Check cache first
-	if data, err := s.loadFromCache(cachePath); err == nil {
-		return data, nil
-	}
-
 	// Check if generation is already in progress
 	s.ipMu.Lock()
 	if result, ok := s.inProgress[cacheKey]; ok {
 		s.ipMu.Unlock()
-		// Wait for in-progress generation
-		select {
-		case <-result.done:
-			if result.err != nil {
-				return nil, result.err
-			}
-			if len(result.data) > 0 {
-				return append([]byte(nil), result.data...), nil
-			}
-			// Fallback for older or incomplete in-progress state.
-			if data, err := s.loadFromCache(cachePath); err == nil {
-				return data, nil
-			}
-			return nil, fmt.Errorf("thumbnail generation failed")
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+		return s.waitForInProgressThumbnail(ctx, cachePath, result)
+	}
+	s.ipMu.Unlock()
+
+	// Check cache before scheduling new generation.
+	if data, err := s.loadFromCache(cachePath); err == nil {
+		return data, nil
+	}
+
+	// Another request may have started generating while the cache lookup was in progress.
+	s.ipMu.Lock()
+	if result, ok := s.inProgress[cacheKey]; ok {
+		s.ipMu.Unlock()
+		return s.waitForInProgressThumbnail(ctx, cachePath, result)
 	}
 
 	// Mark generation as in-progress
@@ -146,7 +156,11 @@ func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, 
 	s.inProgress[cacheKey] = result
 	s.ipMu.Unlock()
 
+	cleanupInProgress := true
 	defer func() {
+		if !cleanupInProgress {
+			return
+		}
 		s.ipMu.Lock()
 		delete(s.inProgress, cacheKey)
 		close(result.done)
@@ -161,8 +175,18 @@ func (s *Service) GetThumbnail(ctx context.Context, filePath string, size Size, 
 	}
 	result.data = append([]byte(nil), data...)
 
-	// Save to cache (async, don't block return)
+	s.ipMu.Lock()
+	close(result.done)
+	s.ipMu.Unlock()
+	cleanupInProgress = false
+
+	// Keep the completed result available to concurrent callers until cache persistence finishes.
 	go func() {
+		defer func() {
+			s.ipMu.Lock()
+			delete(s.inProgress, cacheKey)
+			s.ipMu.Unlock()
+		}()
 		if err := s.saveToCache(cachePath, data); err != nil {
 			log.Printf("thumbnail: failed to save cache for %s: %v", filePath, err)
 		}

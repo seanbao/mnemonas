@@ -114,6 +114,17 @@ vi.mock('@/api/favorites', () => ({
   toggleFavorite: vi.fn(),
 }))
 
+vi.mock('@/api/share', async () => {
+  const actual = await vi.importActual<typeof import('@/api/share')>('@/api/share')
+  return {
+    ...actual,
+    listShares: vi.fn().mockResolvedValue([]),
+  }
+})
+import { listShares } from '@/api/share'
+
+const mockListShares = vi.mocked(listShares)
+
 vi.mock('@/stores/files', () => ({
   useFilesStore: () => ({
     currentPath: '/',
@@ -150,6 +161,7 @@ describe('FilesPage upload queue', () => {
     vi.useFakeTimers()
     vi.clearAllMocks()
     useCanWriteMock.mockReturnValue(true)
+    mockListShares.mockResolvedValue([])
     mockListFiles.mockResolvedValue({
       files: [],
       path: '/',
