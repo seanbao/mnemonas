@@ -57,9 +57,14 @@ vi.mock('@heroui/react', async () => {
 })
 
 vi.mock('@/components/share', () => ({
-  ShareDialog: ({ isOpen, isFolder, onFeatureDisabled }: { isOpen: boolean; isFolder?: boolean; onFeatureDisabled?: () => void }) => (
+  ShareDialog: ({ isOpen, isFolder, onClose, onFeatureDisabled }: { isOpen: boolean; isFolder?: boolean; onClose?: () => void; onFeatureDisabled?: () => void }) => (
     <div data-testid="share-dialog" data-open={isOpen ? 'true' : 'false'} data-folder={isFolder ? 'true' : 'false'}>
-      {isOpen && <button onClick={onFeatureDisabled}>disable share feature</button>}
+      {isOpen && (
+        <>
+          <button onClick={onClose}>close share dialog</button>
+          <button onClick={onFeatureDisabled}>disable share feature</button>
+        </>
+      )}
     </div>
   ),
 }))
@@ -187,6 +192,28 @@ describe('FilesPage sharing behavior', () => {
 
     const dialog = await screen.findByTestId('share-dialog')
     expect(dialog.getAttribute('data-open')).toBe('true')
+    expect(dialog.getAttribute('data-folder')).toBe('false')
+  })
+
+  it('closes the share dialog and clears the selected share file', async () => {
+    const user = userEvent.setup()
+
+    await act(async () => {
+      render(<FilesPage />)
+      await Promise.resolve()
+    })
+
+    const shareButtons = await screen.findAllByText('创建分享链接')
+    await user.click(shareButtons[1])
+
+    let dialog = await screen.findByTestId('share-dialog')
+    expect(dialog.getAttribute('data-open')).toBe('true')
+    expect(dialog.getAttribute('data-folder')).toBe('false')
+
+    await user.click(screen.getByText('close share dialog'))
+
+    dialog = await screen.findByTestId('share-dialog')
+    expect(dialog.getAttribute('data-open')).toBe('false')
     expect(dialog.getAttribute('data-folder')).toBe('false')
   })
 

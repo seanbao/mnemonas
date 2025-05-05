@@ -457,6 +457,63 @@ describe('FilesPage upload queue', () => {
     expect(screen.getByText('权限不足')).toBeTruthy()
   })
 
+  it('shows a success summary for a clean folder upload', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['ok'], 'only.txt', { type: 'text/plain' })
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/only.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
+    expect(mockUploadFile).toHaveBeenCalledWith('/folder', file, expect.any(Function))
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传完成',
+      description: '成功上传 1 个文件',
+      color: 'success',
+    })
+  })
+
+  it('continues folder upload when the parent directory already exists and avoids duplicate directory creation', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockCreateDirectory.mockRejectedValueOnce(new ApiError('already exists', 409, 'Conflict'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const firstFile = new File(['one'], 'one.txt', { type: 'text/plain' })
+    const secondFile = new File(['two'], 'two.txt', { type: 'text/plain' })
+    Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/one.txt' })
+    Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/two.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
+
+    await flushUi()
+
+    expect(mockCreateDirectory).toHaveBeenCalledTimes(1)
+    expect(mockUploadFile).toHaveBeenCalledWith('/folder', firstFile, expect.any(Function))
+    expect(mockUploadFile).toHaveBeenCalledWith('/folder', secondFile, expect.any(Function))
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传完成',
+      description: '成功上传 2 个文件',
+      color: 'success',
+    })
+  })
+
   it('rejects oversized files before starting the upload request', async () => {
     render(<FilesPage />)
 
