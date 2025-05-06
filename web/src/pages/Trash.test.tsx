@@ -550,6 +550,32 @@ describe('TrashPage', () => {
       expect(screen.queryByText('自动清理未启用')).toBeNull()
     })
 
+    it('treats negative retention windows as immediately expired', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: -1,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/立即过期，等待清理/)).toBeTruthy()
+        expect(screen.getByText('已过期，等待清理')).toBeTruthy()
+      })
+    })
+
     it('shows disabled retention copy without row countdown badges', async () => {
       mockListTrash.mockResolvedValue({
         items: [
@@ -1444,6 +1470,128 @@ describe('TrashPage', () => {
       await user.click(screen.getByRole('button', { name: '取消选择' }))
 
       expect(screen.queryByText(/已选择.*项/)).toBeNull()
+    })
+
+    it('toggles an individual row selection back off', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const firstCheckboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (firstCheckboxes.length > 1) {
+        await user.click(firstCheckboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      const secondCheckboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (secondCheckboxes.length > 1) {
+        await user.click(secondCheckboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.queryByText(/已选择.*项/)).toBeNull()
+      })
+    })
+
+    it('keeps still-present selected items selected after restoring one selected row', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockRestoreFromTrash.mockResolvedValue({ warning: false })
+      mockListTrash.mockReset()
+      mockListTrash.mockResolvedValueOnce({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+          {
+            id: 'item2',
+            originalPath: '/deleted-folder',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+            name: 'deleted-folder',
+            isDir: true,
+            size: 0,
+          },
+        ],
+        count: 2,
+        totalSize: 1024,
+      })
+      mockListTrash.mockImplementation(() => pendingTrashRefetch())
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 0) {
+        await user.click(checkboxes[0] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 2 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+      await waitFor(() => {
+        expect(mockRestoreFromTrash).toHaveBeenCalledWith('item1')
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByText('deleted-file.txt')).toBeNull()
+        expect(screen.getByText('deleted-folder')).toBeTruthy()
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+    })
+
+    it('uses a fallback batch warning title when warning details are omitted', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockBatchResult = {
+        succeeded: 1,
+        failed: 0,
+        total: 1,
+        succeededItems: ['item1'],
+        failedItems: [],
+        failedErrors: [],
+        warningCount: 1,
+        warningMessages: [],
+      }
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+      })
+
+      const checkboxes = document.querySelectorAll('[class*="Checkbox"], input[type="checkbox"]')
+      if (checkboxes.length > 1) {
+        await user.click(checkboxes[1] as Element)
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/已选择 1 项/)).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已恢复 1 项，但存在警告',
+          color: 'warning',
+        })
+      })
     })
 
     it('shows warning toast for successful batch restore with warnings', async () => {

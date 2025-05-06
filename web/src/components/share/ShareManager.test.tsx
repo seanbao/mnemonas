@@ -112,6 +112,18 @@ describe('ShareManager', () => {
     expect(mockAddToast).not.toHaveBeenCalled()
   })
 
+  it('shows a generic error state for ShareError failures unrelated to feature state', async () => {
+    vi.mocked(shareApi.listShares).mockRejectedValue(new ShareError('bad request', 400))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('加载分享列表失败')).toBeInTheDocument()
+      expect(screen.getByText('bad request')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+  })
+
   it('retries loading from the unavailable empty state', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.listShares)
@@ -163,6 +175,24 @@ describe('ShareManager', () => {
       expect(screen.getAllByText('已过期')).toHaveLength(2)
       expect(screen.getByText('密码保护')).toBeInTheDocument()
       expect(screen.getByText('5 次访问 / 10')).toBeInTheDocument()
+    })
+  })
+
+  it('uses the full path as the visible name for a root share', async () => {
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-root',
+        path: '/',
+        type: 'folder',
+      },
+    ])
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
+      expect(screen.getAllByText('/').length).toBeGreaterThanOrEqual(2)
     })
   })
 
