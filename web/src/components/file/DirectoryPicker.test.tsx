@@ -142,6 +142,43 @@ describe('DirectoryPicker', () => {
     })
   })
 
+  it('collapses and re-expands an already loaded directory without refetching it', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockListFiles
+      .mockResolvedValueOnce({
+        path: '/',
+        files: [{ name: 'docs', path: '/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      })
+      .mockResolvedValueOnce({
+        path: '/docs',
+        files: [{ name: 'reports', path: '/docs/reports', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' }],
+      })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    const docsToggle = screen.getByText('docs').closest('div')?.querySelector('button')
+    expect(docsToggle).toBeTruthy()
+    await user.click(docsToggle as HTMLButtonElement)
+
+    await waitFor(() => {
+      expect(screen.getByText('reports')).toBeTruthy()
+    })
+
+    await user.click(docsToggle as HTMLButtonElement)
+    expect(screen.queryByText('reports')).toBeNull()
+
+    await user.click(docsToggle as HTMLButtonElement)
+
+    await waitFor(() => {
+      expect(screen.getByText('reports')).toBeTruthy()
+      expect(mockListFiles.mock.calls.filter(([path]) => path === '/docs')).toHaveLength(1)
+    })
+  })
+
   it('selects a folder and confirms the selected path', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
@@ -383,6 +420,29 @@ describe('DirectoryPicker', () => {
     })
 
     expect(screen.getByDisplayValue('docs')).toBeTruthy()
+  })
+
+  it('shows a localized warning when the create parent stops being a directory', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockCreateDirectory.mockRejectedValueOnce(new ApiError('parent path is not a directory', 409, 'Conflict'))
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'child')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '目标位置不可用',
+        description: '当前目录状态已变更，请刷新列表后重试。',
+        color: 'warning',
+      })
+    })
   })
 
   it('shows an unavailable toast when expanding a directory hits filesystem unavailability', async () => {
@@ -628,6 +688,27 @@ describe('DirectoryPicker', () => {
 
     expect(screen.getByDisplayValue('old')).toBeTruthy()
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('supports keyboard shortcuts in the create folder input', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.keyboard('{Enter}')
+    expect(mockCreateDirectory).not.toHaveBeenCalled()
+
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'draft')
+    await user.keyboard('{Escape}')
+
+    expect(screen.queryByPlaceholderText('新文件夹名称')).toBeNull()
+    expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    expect(mockCreateDirectory).not.toHaveBeenCalled()
   })
 
   it('reloads a directory after reopen instead of using a stale older expansion result', async () => {

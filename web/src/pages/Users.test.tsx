@@ -222,6 +222,36 @@ describe('UsersPage', () => {
         expect(adminBadges.length).toBeGreaterThan(0)
       })
     })
+
+    it('renders unknown roles with their backend label and omits missing optional fields', async () => {
+      vi.mocked(usersApi.listUsers).mockResolvedValue({
+        success: true,
+        users: [
+          {
+            id: 'user-4',
+            username: 'auditor',
+            email: '',
+            role: 'manager' as unknown as 'user',
+            disabled: false,
+            home_dir: '/home/auditor',
+            created_at: '2024-01-20T00:00:00Z',
+            updated_at: '2024-01-20T00:00:00Z',
+            quota_bytes: 0,
+            used_bytes: 0,
+          },
+        ],
+        total: 1,
+      })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('auditor')).toBeInTheDocument()
+        expect(screen.getByText('manager')).toBeInTheDocument()
+      })
+      expect(screen.queryByText(/最后登录/)).not.toBeInTheDocument()
+      expect(screen.getByText('已用 0 B')).toBeInTheDocument()
+    })
   })
 
   describe('stats', () => {
@@ -436,6 +466,43 @@ describe('UsersPage', () => {
       expect(screen.getByLabelText(/用户名/i)).toHaveValue('alice')
     })
 
+    it('keeps newer create form edits when an older create request resolves', async () => {
+      const user = userEvent.setup()
+      const pendingCreate = createDeferred<{ success: boolean }>()
+      vi.mocked(usersApi.createUser).mockImplementationOnce(() => pendingCreate.promise)
+
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'alice' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'password123' } })
+      fireEvent.change(screen.getByLabelText(/邮箱/i), { target: { value: 'alice@example.com' } })
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(vi.mocked(usersApi.createUser).mock.calls[0]?.[0]).toMatchObject({
+          username: 'alice',
+          password: 'password123',
+          email: 'alice@example.com',
+        })
+      })
+
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'bob' } })
+      fireEvent.change(screen.getByLabelText(/邮箱/i), { target: { value: 'bob@example.com' } })
+
+      await act(async () => {
+        pendingCreate.resolve({ success: true })
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户创建成功', color: 'success' })
+      })
+
+      expect(screen.getByRole('heading', { name: '添加用户' })).toBeInTheDocument()
+      expect(screen.getByLabelText(/用户名/i)).toHaveValue('bob')
+      expect(screen.getByLabelText(/邮箱/i)).toHaveValue('bob@example.com')
+    })
+
     it('shows a specific warning when the username already exists', async () => {
       const user = userEvent.setup()
       vi.mocked(usersApi.createUser).mockRejectedValueOnce(new UsersError('user already exists', 409, 'USER_EXISTS'))
@@ -533,18 +600,24 @@ describe('UsersPage', () => {
       })
     })
 
-    it('calls delete API on confirm', async () => {
+    it('deletes a user after confirmation', async () => {
       vi.mocked(usersApi.deleteUser).mockResolvedValue({ success: true })
-      
+      const user = userEvent.setup()
+
       renderUsersPage()
-      
+
       await waitFor(() => {
         expect(screen.getByText('testuser')).toBeInTheDocument()
       })
 
-      // This test would require more complex setup to properly test the dropdown menu
-      // For now, we just verify the delete function exists
-      expect(usersApi.deleteUser).toBeDefined()
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+      await user.click(screen.getByRole('button', { name: '删除' }))
+
+      await waitFor(() => {
+        expect(vi.mocked(usersApi.deleteUser).mock.calls[0]?.[0]).toBe('user-2')
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已删除', color: 'success' })
+      })
     })
 
     it('calls toggle status API when disabling a user', async () => {
@@ -566,6 +639,29 @@ describe('UsersPage', () => {
 
       await waitFor(() => {
         expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-2', true)
+      })
+    })
+
+    it('enables a disabled user and shows success feedback', async () => {
+      vi.mocked(usersApi.toggleUserStatus).mockResolvedValue({ success: true })
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'guest 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('启用用户')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('启用用户'))
+
+      await waitFor(() => {
+        expect(usersApi.toggleUserStatus).toHaveBeenCalledWith('user-3', false)
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已启用', color: 'success' })
       })
     })
 
@@ -768,8 +864,26 @@ describe('UsersPage', () => {
       })
     })
 
-    it('resetUserPassword API function is defined', () => {
-      expect(usersApi.resetUserPassword).toBeDefined()
+    it('resets a password successfully', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.resetUserPassword).mockResolvedValueOnce({ success: true })
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+
+      await user.type(screen.getByLabelText('新密码'), 'password123')
+      await user.click(screen.getByRole('button', { name: '确认重置' }))
+
+      await waitFor(() => {
+        expect(usersApi.resetUserPassword).toHaveBeenCalledWith('user-2', { new_password: 'password123' })
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '密码已重置', color: 'success' })
+      })
     })
 
     it('keeps the reset password modal open when a pending reset later fails', async () => {
@@ -971,6 +1085,29 @@ describe('UsersPage', () => {
         title: '用户管理暂不可用',
         description: '用户配置当前不可用，请检查系统配置状态或稍后重试。',
         color: 'warning',
+      })
+    })
+    })
+
+    it('shows generic failure toast when reloading users fails without an Error object', async () => {
+    const user = userEvent.setup()
+    vi.mocked(usersApi.listUsers)
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockRejectedValueOnce('still broken')
+
+    renderUsersPage()
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '刷新失败',
+        description: '请稍后重试',
+        color: 'danger',
       })
     })
     })
