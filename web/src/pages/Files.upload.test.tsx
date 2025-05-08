@@ -630,6 +630,32 @@ describe('FilesPage upload queue', () => {
     })
   })
 
+  it('uses a fallback warning summary when a folder upload warning has no message', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile.mockResolvedValueOnce({ warning: true, message: undefined })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['ok'], 'first.txt', { type: 'text/plain' })
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '文件夹上传完成，但存在警告',
+      description: '成功上传 1 个文件',
+      color: 'warning',
+    })
+  })
+
   it('shows warning summary for file uploads when upload succeeds with warnings', async () => {
     render(<FilesPage />)
 
@@ -650,6 +676,31 @@ describe('FilesPage upload queue', () => {
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: 'file uploaded with persistence warning',
+      description: '成功上传 1 个文件',
+      color: 'warning',
+    })
+  })
+
+  it('uses a fallback warning summary when a file upload warning has no message', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile.mockResolvedValueOnce({ warning: true, message: undefined })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['ok'], 'warn.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '上传完成，但存在警告',
       description: '成功上传 1 个文件',
       color: 'warning',
     })
@@ -710,5 +761,27 @@ describe('FilesPage upload queue', () => {
       color: 'warning',
     })
     expect(screen.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+  })
+
+  it('shows a generic failed upload row for unknown upload errors', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile.mockRejectedValueOnce('upload stopped')
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['bad'], 'unknown.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(screen.getByText('unknown.txt')).toBeTruthy()
+    expect(screen.getByText('上传失败')).toBeTruthy()
   })
 })
