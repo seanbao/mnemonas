@@ -374,6 +374,24 @@ describe('FilesPage', () => {
 
       expect(mockListFiles).not.toHaveBeenCalled()
     })
+
+    it('normalizes stale file state when a non-admin user has no valid home directory', async () => {
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = ''
+      mockFilesStoreState.currentPath = '/stale'
+      mockLocationPathname = '/files/stale'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/')
+        expect(mockNavigate).toHaveBeenCalledWith('/files', { replace: true })
+      })
+
+      expect(mockListFiles).not.toHaveBeenCalled()
+    })
   })
 
   describe('toolbar', () => {
@@ -873,6 +891,21 @@ describe('FilesPage', () => {
       await act(async () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
       })
+      mockFilesStoreState.toggleFileSelection.mockClear()
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }))
+      })
+
+      expect(mockFilesStoreState.toggleFileSelection).toHaveBeenCalledWith('/photo.jpg')
+    })
+
+    it('uses the only selected file as the keyboard target when no row is focused', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      render(<FilesPage />)
+
+      await screen.findByText('批量下载（仅文件）')
       mockFilesStoreState.toggleFileSelection.mockClear()
 
       await act(async () => {
@@ -1576,6 +1609,51 @@ describe('FilesPage', () => {
           title: '批量下载暂不可用',
           description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
           color: 'warning',
+        })
+      })
+    })
+
+    it('warns when batch download is requested with only folders selected', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/documents'])
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+        expect(screen.getByText('当前选择不含可下载文件')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载（仅文件）'))
+
+      expect(mockDownloadFile).not.toHaveBeenCalled()
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '未选择可下载的文件',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('downloads only files and skips folders when mixed items are selected', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/documents', '/photo.jpg'])
+      mockDownloadFile.mockResolvedValue(undefined)
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('将跳过文件夹，仅下载文件')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载（仅文件）'))
+
+      await waitFor(() => {
+        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+        expect(mockDownloadFile).not.toHaveBeenCalledWith('/documents', expect.anything())
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '已开始下载 1 个文件',
+          color: 'success',
         })
       })
     })
@@ -2611,6 +2689,30 @@ describe('FilesPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '收藏功能暂不可用',
           description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows warning toast when favorites status reload finds the feature disabled', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCheckFavorites
+        .mockRejectedValueOnce(new Error('favorites unavailable'))
+        .mockRejectedValueOnce(Object.assign(new Error('favorites feature disabled'), {
+          status: 503,
+          code: 'FAVORITES_FEATURE_DISABLED',
+        }))
+
+      render(<FilesPage />)
+
+      await screen.findByRole('button', { name: '重新加载收藏状态' })
+
+      await user.click(screen.getByRole('button', { name: '重新加载收藏状态' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '收藏功能已关闭',
+          description: '当前服务已关闭收藏功能。启用后重新加载即可恢复收藏状态与相关操作。',
           color: 'warning',
         })
       })
