@@ -89,6 +89,28 @@ test.describe('文件浏览页面', () => {
     expect(hasEmpty || hasFiles).toBe(true)
   })
 
+  test('目录加载失败应显示人类可识别的错误和重试入口', async ({ page }) => {
+    await page.route(/\/api\/v1\/files(\/|\?|$)/, async (route) => {
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: false,
+          error: {
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'filesystem not initialized',
+          },
+        }),
+      })
+    })
+
+    await page.reload({ waitUntil: 'domcontentloaded' })
+
+    await expect(page.getByText('当前目录暂不可用')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeVisible()
+    await expect(page.getByRole('button', { name: '重新加载' })).toBeVisible()
+  })
+
   test('双击文件夹后路径和面包屑应保持稳定', async ({ page }, testInfo) => {
     const folderName = `e2e-nav-${testInfo.workerIndex}-${Date.now()}`
 
