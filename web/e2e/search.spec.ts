@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { uploadTextFileThroughPicker } from './helpers/files'
 
 /**
  * 搜索页面 E2E 测试
@@ -61,14 +62,24 @@ test.describe('搜索页面', () => {
 })
 
 test.describe('搜索结果交互', () => {
-  test('搜索结果应可点击', async ({ page }) => {
-    await ensureAuthenticatedAt(page, '/search?q=')
+  test('搜索结果应可点击并跳转到文件所在目录', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
 
-    // 如果有搜索结果，验证可以点击
-    const resultItem = page.locator('[class*="result"], [class*="item"]').first()
-  const hasResultItem = await resultItem.isVisible({ timeout: 2000 }).catch(() => false)
-  test.skip(!hasResultItem, '当前测试数据未产生搜索结果')
-  await expect(resultItem).toBeVisible()
+    const suffix = `${testInfo.workerIndex}-${Date.now()}`
+    const fileName = `e2e-search-${suffix}.txt`
+
+    await ensureAuthenticatedAt(page, '/files')
+    await uploadTextFileThroughPicker(page, fileName, `searchable playwright fixture ${suffix}`)
+
+    await ensureAuthenticatedAt(page, `/search?q=${encodeURIComponent(fileName)}`)
+    const resultItem = page.getByRole('button', { name: `打开文件 /${fileName}` })
+    await expect(resultItem).toBeVisible({ timeout: 10_000 })
+
+    await resultItem.click()
+
+    await expect(page).toHaveURL(/\/files\/?$/)
+    await expect(page.getByText(fileName, { exact: true }).first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByLabel(`${fileName} 操作菜单`).first()).toBeVisible({ timeout: 10_000 })
   })
 })
 

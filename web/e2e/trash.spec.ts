@@ -97,6 +97,58 @@ test.describe('回收站单项操作', () => {
     expect(hasRestore || hasDelete).toBe(true)
   })
 
+  test('点击恢复应将回收站文件还原到原目录', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
+    const suffix = `${testInfo.workerIndex}-${Date.now()}`
+    const fileName = `e2e-restore-${suffix}.txt`
+    const fileUrl = `/api/v1/files/${fileName}`
+
+    await page.goto('/files')
+    await page.evaluate(async ({ fileUrl, fileName }) => {
+      const token = localStorage.getItem('mnemonas_token')
+      if (!token) {
+        throw new Error('missing auth token in localStorage')
+      }
+
+      const createHeaders = () => new Headers({
+        Authorization: `Bearer ${token}`,
+      })
+
+      const requireOk = async (response: Response, action: string) => {
+        if (!response.ok) {
+          throw new Error(`${action} failed: ${response.status} ${await response.text()}`)
+        }
+      }
+
+      await requireOk(await fetch(fileUrl, {
+        method: 'POST',
+        body: new File(['restore workflow'], fileName, { type: 'text/plain' }),
+        headers: createHeaders(),
+      }), 'create restore fixture')
+      await requireOk(await fetch(fileUrl, { method: 'DELETE', headers: createHeaders() }), 'delete restore fixture')
+    }, { fileUrl, fileName })
+
+    await ensureAuthenticatedAt(page, '/trash')
+    await expect(page.getByText(fileName, { exact: true }).filter({ visible: true })).toBeVisible({ timeout: 10_000 })
+
+    const restoreResponsePromise = page.waitForResponse((response) => {
+      const { pathname } = new URL(response.url())
+      return response.request().method() === 'POST'
+        && pathname.startsWith('/api/v1/trash/')
+        && pathname.endsWith('/restore')
+    })
+
+    await page.getByRole('button', { name: `恢复 ${fileName}` }).click()
+
+    const restoreResponse = await restoreResponsePromise
+    expect(restoreResponse.ok()).toBe(true)
+    await expect(page.getByText('恢复成功')).toBeVisible({ timeout: 10_000 })
+
+    await ensureAuthenticatedAt(page, '/files')
+    await expect(page.getByText(fileName, { exact: true }).first()).toBeVisible({ timeout: 10_000 })
+  })
+
   test('删除非空目录后应只显示目录回收站项', async ({ page }) => {
     const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     const dirName = `e2e-trash-dir-${suffix}`
