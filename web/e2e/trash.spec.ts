@@ -24,7 +24,7 @@ test.describe('回收站页面', () => {
 
   test('应显示回收站统计信息', async ({ page }) => {
     // 检查统计信息（项数、大小、自动清理时间）
-    const statsText = page.getByText(/项|天后自动清理/i)
+    const statsText = page.getByText(/项\s*·.*天后自动清理/i)
     await expect(statsText).toBeVisible({ timeout: 5000 })
   })
 

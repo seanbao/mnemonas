@@ -186,9 +186,13 @@ function TrashRow({
   const sizeLabel = item.isDir ? '-' : formatBytes(item.size)
   const selectionControl = canWrite ? (
     <Checkbox
+      aria-label={`选择 ${item.name}`}
       isSelected={isSelected}
       onValueChange={onSelect}
-    />
+      classNames={{ label: "sr-only" }}
+    >
+      选择 {item.name}
+    </Checkbox>
   ) : (
     <div className="w-6 shrink-0" />
   )
@@ -703,13 +707,17 @@ export function TrashPage() {
         <div className="hidden items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-lg border border-divider text-sm font-medium text-default-400 sm:flex">
           {canWrite ? (
             <Checkbox
+              aria-label={visibleSelectedItems.size === items.length && items.length > 0 ? '取消全选回收站项目' : '全选回收站项目'}
               isSelected={visibleSelectedItems.size === items.length && items.length > 0}
               isIndeterminate={visibleSelectedItems.size > 0 && visibleSelectedItems.size < items.length}
               onValueChange={handleSelectAll}
               classNames={{
+                label: "sr-only",
                 wrapper: "before:border-divider",
               }}
-            />
+            >
+              {visibleSelectedItems.size === items.length && items.length > 0 ? '取消全选回收站项目' : '全选回收站项目'}
+            </Checkbox>
           ) : (
             <div className="w-6 shrink-0" />
           )}

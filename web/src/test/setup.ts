@@ -71,8 +71,8 @@ vi.mock('@heroui/react', async () => {
     return React.createElement('label', null, label, input)
   }
 
-  const Switch = ({ isSelected, onValueChange, onChange, isDisabled, ...props }: { isSelected?: boolean; onValueChange?: (value: boolean) => void; onChange?: React.ChangeEventHandler<HTMLInputElement>; isDisabled?: boolean }) =>
-    React.createElement('input', {
+  const Switch = ({ isSelected, onValueChange, onChange, isDisabled, children, ...props }: { isSelected?: boolean; onValueChange?: (value: boolean) => void; onChange?: React.ChangeEventHandler<HTMLInputElement>; isDisabled?: boolean; children?: React.ReactNode }) => {
+    const input = React.createElement('input', {
       type: 'checkbox',
       checked: !!isSelected,
       disabled: !!isDisabled,
@@ -83,8 +83,11 @@ vi.mock('@heroui/react', async () => {
       ...omitKeys(props, ['classNames', 'color', 'size']),
     })
 
-  const Checkbox = ({ isSelected, isIndeterminate, onValueChange, onChange, isDisabled, ...props }: { isSelected?: boolean; isIndeterminate?: boolean; onValueChange?: (value: boolean) => void; onChange?: React.ChangeEventHandler<HTMLInputElement>; isDisabled?: boolean }) =>
-    React.createElement('input', {
+    return children ? React.createElement('label', null, input, children) : input
+  }
+
+  const Checkbox = ({ isSelected, isIndeterminate, onValueChange, onChange, isDisabled, children, ...props }: { isSelected?: boolean; isIndeterminate?: boolean; onValueChange?: (value: boolean) => void; onChange?: React.ChangeEventHandler<HTMLInputElement>; isDisabled?: boolean; children?: React.ReactNode }) => {
+    const input = React.createElement('input', {
       type: 'checkbox',
       checked: !!isSelected,
       'data-indeterminate': !!isIndeterminate,
@@ -95,6 +98,9 @@ vi.mock('@heroui/react', async () => {
       },
       ...omitKeys(props, ['classNames', 'color', 'size']),
     })
+
+    return children ? React.createElement('label', null, input, children) : input
+  }
 
   const Select = ({ children, selectedKeys, onSelectionChange, placeholder, startContent, ...props }: { children?: React.ReactNode; selectedKeys?: Iterable<string>; onSelectionChange?: (keys: Set<string>) => void; placeholder?: string; startContent?: React.ReactNode }) => {
     const selected = selectedKeys ? Array.from(selectedKeys)[0] ?? '' : ''
@@ -259,4 +265,3 @@ global.URL.revokeObjectURL = vi.fn()
 global.fetch = vi.fn(async (input: RequestInfo | URL) => {
   throw new Error(`Unexpected fetch in test setup: ${String(input)}`)
 }) as typeof fetch
-

@@ -1039,6 +1039,7 @@ export function SettingsPage() {
           description="启用后服务将使用 TLS 证书提供 HTTPS"
           >
           <Switch
+            aria-label="启用 HTTPS"
             isSelected={settings.tlsEnabled}
             onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsEnabled: v }))}
             classNames={{
@@ -1046,8 +1047,11 @@ export function SettingsPage() {
               "group-data-[selected=true]:bg-accent-primary",
               "bg-content2"
             ),
+            label: "sr-only",
             }}
-          />
+          >
+            启用 HTTPS
+          </Switch>
           </SettingRow>
           <Divider className="bg-divider" />
           <SettingRow
@@ -1055,6 +1059,7 @@ export function SettingsPage() {
           description="证书缺失时自动生成自签名证书"
           >
           <Switch
+            aria-label="自动生成证书"
             isSelected={settings.tlsAutoGenerate}
             onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsAutoGenerate: v }))}
             isDisabled={!settings.tlsEnabled}
@@ -1063,8 +1068,11 @@ export function SettingsPage() {
               "group-data-[selected=true]:bg-accent-primary",
               "bg-content2"
             ),
+            label: "sr-only",
             }}
-          />
+          >
+            自动生成证书
+          </Switch>
           </SettingRow>
           <Divider className="bg-divider" />
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -1146,8 +1154,11 @@ export function SettingsPage() {
                           "group-data-[selected=true]:bg-accent-primary",
                           "bg-content2"
                         ),
+                        label: "sr-only",
                       }}
-                    />
+                    >
+                      启用回收站
+                    </Switch>
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
@@ -1468,6 +1479,7 @@ export function SettingsPage() {
                     description="允许通过 WebDAV 协议访问文件"
                   >
                     <Switch
+                      aria-label="启用 WebDAV"
                       isSelected={settings.webdavEnabled}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavEnabled: v }))}
                       classNames={{
@@ -1475,8 +1487,11 @@ export function SettingsPage() {
                           "group-data-[selected=true]:bg-accent-primary",
                           "bg-content2"
                         ),
+                        label: "sr-only",
                       }}
-                    />
+                    >
+                      启用 WebDAV
+                    </Switch>
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
@@ -1499,6 +1514,7 @@ export function SettingsPage() {
                     description="启用后仅允许读取操作"
                   >
                     <Switch
+                      aria-label="WebDAV 只读模式"
                       isSelected={settings.webdavReadOnly}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavReadOnly: v }))}
                       isDisabled={!settings.webdavEnabled}
@@ -1507,8 +1523,11 @@ export function SettingsPage() {
                           "group-data-[selected=true]:bg-accent-primary",
                           "bg-content2"
                         ),
+                        label: "sr-only",
                       }}
-                    />
+                    >
+                      WebDAV 只读模式
+                    </Switch>
                   </SettingRow>
                 </div>
               </SettingsSection>
@@ -1744,8 +1763,11 @@ export function SettingsPage() {
                           "group-data-[selected=true]:bg-accent-primary",
                           "bg-content2"
                         ),
+                        label: "sr-only",
                       }}
-                    />
+                    >
+                      启用告警
+                    </Switch>
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
@@ -1906,8 +1928,11 @@ export function SettingsPage() {
                           "group-data-[selected=true]:bg-accent-primary",
                           "bg-content2"
                         ),
+                        label: "sr-only",
                       }}
-                    />
+                    >
+                      启用收藏功能
+                    </Switch>
                   </SettingRow>
                 </div>
               </SettingsSection>
@@ -1927,6 +1952,7 @@ export function SettingsPage() {
                     description="允许创建和访问公开分享链接"
                   >
                     <Switch
+                      aria-label="启用分享功能"
                       isSelected={settings.shareEnabled}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareEnabled: v }))}
                       classNames={{
@@ -1934,8 +1960,11 @@ export function SettingsPage() {
                           "group-data-[selected=true]:bg-accent-primary",
                           "bg-content2"
                         ),
+                        label: "sr-only",
                       }}
-                    />
+                    >
+                      启用分享功能
+                    </Switch>
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
