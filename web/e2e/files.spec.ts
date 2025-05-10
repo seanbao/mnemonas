@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
+import { uploadTextFileThroughPicker } from './helpers/files'
 
 /**
  * 文件浏览页面 E2E 测试
@@ -157,6 +158,40 @@ test.describe('文件浏览页面', () => {
     await page.getByRole('button', { name: /根目录/ }).click()
     await expect(page).toHaveURL(/\/files$/)
     await expect(page.getByText(rootFolderName, { exact: true }).first()).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('应通过真实 UI 完成建目录、上传文件、删除到回收站', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
+    const suffix = `${testInfo.workerIndex}-${Date.now()}`
+    const folderName = `e2e-human-${suffix}`
+    const fileName = `note-${suffix}.txt`
+
+    await createFolder(page, folderName)
+    await openFolder(page, folderName)
+    await expectFolderView(page, `/files/${folderName}`, folderName)
+
+    await uploadTextFileThroughPicker(page, fileName, `human playwright workflow ${suffix}`)
+    await expect(page.getByText('上传完成')).toBeVisible({ timeout: 10_000 })
+
+    const deleteResponsePromise = page.waitForResponse((response) => {
+      const { pathname } = new URL(response.url())
+      return response.request().method() === 'DELETE'
+        && pathname === `/api/v1/files/${folderName}/${fileName}`
+    })
+
+    await page.getByLabel(`${fileName} 操作菜单`).first().click()
+    await page.getByRole('menuitem', { name: /^删除$/ }).click()
+    await expect(page.getByRole('heading', { name: '确认删除' })).toBeVisible()
+    await page.getByRole('button', { name: '删除' }).click()
+
+    const deleteResponse = await deleteResponsePromise
+    expect(deleteResponse.ok()).toBe(true)
+    await expect(page.getByText('删除成功')).toBeVisible({ timeout: 10_000 })
+
+    await ensureAuthenticatedAt(page, '/trash')
+    await expect(page.getByText(fileName, { exact: true }).first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(`/${folderName}/${fileName}`, { exact: true }).first()).toBeVisible({ timeout: 10_000 })
   })
 })
 
