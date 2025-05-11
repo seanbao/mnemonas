@@ -203,6 +203,43 @@ func TestWriteTLSFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
+func TestWriteTLSFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "server.key")
+	if err := os.WriteFile(filePath, []byte("old-key"), 0644); err != nil {
+		t.Fatalf("WriteFile(existing key) error: %v", err)
+	}
+
+	if err := writeTLSFileAtomically(filePath, []byte("new-key"), 0600, errKeyFileSymlink, ".tls-key-*.tmp", "private key file"); err != nil {
+		t.Fatalf("writeTLSFileAtomically() error: %v", err)
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile(key) error: %v", err)
+	}
+	if string(data) != "new-key" {
+		t.Fatalf("key content = %q, want new-key", string(data))
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Stat(key) error: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("key permissions = %o, want 0600", info.Mode().Perm())
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(tmpDir) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".tls-key-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("temporary TLS key file was not cleaned up: %s", entry.Name())
+		}
+	}
+}
+
 func TestWriteTLSFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "nested", "tls", "server.crt")

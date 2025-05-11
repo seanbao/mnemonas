@@ -277,6 +277,7 @@ func TestNormalizeWebDAVPrefix(t *testing.T) {
 		{name: "empty defaults to root", input: "", expected: "/"},
 		{name: "root stays root", input: "/", expected: "/"},
 		{name: "trims whitespace", input: " /dav ", expected: "/dav"},
+		{name: "collapses repeated slashes", input: "//dav//files///", expected: "/dav/files"},
 	}
 
 	for _, tt := range tests {
@@ -969,6 +970,31 @@ func TestConfig_Address(t *testing.T) {
 	addr := cfg.Address()
 	if addr != "192.168.1.1:3000" {
 		t.Errorf("Address() = %s, want 192.168.1.1:3000", addr)
+	}
+}
+
+func TestConfig_DerivedStoragePaths(t *testing.T) {
+	cfg := Default()
+	cfg.Storage.Root = filepath.Join(t.TempDir(), "storage")
+
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "files", got: cfg.FilesDir(), want: filepath.Join(cfg.Storage.Root, "files")},
+		{name: "internal", got: cfg.InternalDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas")},
+		{name: "index", got: cfg.IndexDBPath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "index.db")},
+		{name: "objects", got: cfg.ObjectsDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "objects")},
+		{name: "trash", got: cfg.TrashDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "trash")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("path = %q, want %q", tt.got, tt.want)
+			}
+		})
 	}
 }
 
