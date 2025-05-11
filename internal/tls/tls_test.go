@@ -12,6 +12,31 @@ import (
 	"testing"
 )
 
+func TestCleanupTLSTempPath_ReturnsOperationError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	operationErr := errors.New("write failed")
+	if got := cleanupTLSTempPath(root, "busy", operationErr); got != operationErr {
+		t.Fatalf("cleanupTLSTempPath() = %v, want original operation error", got)
+	}
+	if _, err := os.Stat(busyDir); err != nil {
+		t.Fatalf("expected busy temp path to remain after ignored cleanup error: %v", err)
+	}
+}
+
 func loadTestCertificateDER(t *testing.T, path string) []byte {
 	t.Helper()
 

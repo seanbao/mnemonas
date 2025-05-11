@@ -24,6 +24,54 @@ func writeFavoritesFixture(t *testing.T, path string, favorites []Favorite) {
 	}
 }
 
+func TestPersistenceWarningWrapperPreservesErrorSemantics(t *testing.T) {
+	baseErr := errors.New("directory sync failed")
+
+	if got := WrapPersistenceWarning(nil); got != nil {
+		t.Fatalf("WrapPersistenceWarning(nil) = %v, want nil", got)
+	}
+	warningErr := WrapPersistenceWarning(baseErr)
+	if !IsPersistenceWarning(warningErr) {
+		t.Fatalf("expected persistence warning, got %T", warningErr)
+	}
+	if !errors.Is(warningErr, baseErr) {
+		t.Fatalf("expected persistence warning to unwrap %v", baseErr)
+	}
+	if warningErr.Error() != baseErr.Error() {
+		t.Fatalf("Error() = %q, want %q", warningErr.Error(), baseErr.Error())
+	}
+	if got := WrapPersistenceWarning(warningErr); got != warningErr {
+		t.Fatal("expected existing persistence warning to be reused")
+	}
+}
+
+func TestWriteFavoritesStoreFileAtomically_ReplacesExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	if err := os.WriteFile(storePath, []byte("old"), 0600); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+
+	if err := writeFavoritesStoreFileAtomically(storePath, []byte("[]")); err != nil {
+		t.Fatalf("writeFavoritesStoreFileAtomically() error: %v", err)
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(store) error: %v", err)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("store contents = %q, want []", string(data))
+	}
+	matches, err := filepath.Glob(filepath.Join(tmpDir, ".favorites-*.tmp"))
+	if err != nil {
+		t.Fatalf("Glob(temp) error: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected no temp favorites files after atomic write, got %v", matches)
+	}
+}
+
 func TestWriteFavoritesStoreFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")

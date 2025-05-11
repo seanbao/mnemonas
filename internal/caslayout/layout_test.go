@@ -9,6 +9,28 @@ import (
 	"testing"
 )
 
+func TestCleanupCASTempPath_IgnoresRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	cleanupCASTempPath(root, "busy")
+	if _, err := os.Stat(busyDir); err != nil {
+		t.Fatalf("expected busy temp path to remain after ignored cleanup error: %v", err)
+	}
+}
+
 func TestShardedLayout_HashToPath(t *testing.T) {
 	tests := []struct {
 		name      string

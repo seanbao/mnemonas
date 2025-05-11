@@ -233,6 +233,173 @@ func decodeEnvelopeData(t *testing.T, recorder *httptest.ResponseRecorder) map[s
 	return payload.Data
 }
 
+func TestRoutes_DispatchesAuthenticatedShareEndpoints(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	handler.SetBaseURL("https://files.example.test/public/")
+	router := chi.NewRouter()
+	handler.Routes(router)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/"+share.ID, nil)
+	getReq = getReq.WithContext(auth.WithClaimsContext(getReq.Context(), &auth.TokenClaims{UserID: "user1"}))
+	getRecorder := httptest.NewRecorder()
+	router.ServeHTTP(getRecorder, getReq)
+
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("GET route status = %d, want %d: %s", getRecorder.Code, http.StatusOK, getRecorder.Body.String())
+	}
+	getData := decodeEnvelopeData(t, getRecorder)
+	if getData["id"] != share.ID {
+		t.Fatalf("expected share id %q, got %+v", share.ID, getData)
+	}
+	if getData["url"] != "https://files.example.test/public/s/"+share.ID {
+		t.Fatalf("unexpected share url %q", getData["url"])
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/"+share.ID, nil)
+	deleteReq = deleteReq.WithContext(auth.WithClaimsContext(deleteReq.Context(), &auth.TokenClaims{UserID: "user1"}))
+	deleteRecorder := httptest.NewRecorder()
+	router.ServeHTTP(deleteRecorder, deleteReq)
+
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("DELETE route status = %d, want %d: %s", deleteRecorder.Code, http.StatusOK, deleteRecorder.Body.String())
+	}
+	deletePayload := decodeResponseBody(t, deleteRecorder)
+	if deletePayload["success"] != true || deletePayload["message"] != "share deleted successfully" {
+		t.Fatalf("unexpected delete response: %+v", deletePayload)
+	}
+	if _, err := store.Get(share.ID); !errors.Is(err, ErrShareNotFound) {
+		t.Fatalf("expected share to be deleted, got err=%v", err)
+	}
+}
+
+func TestPublicRoutes_DispatchesPublicShareAccess(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:        "/docs/report.pdf",
+		Type:        ShareTypeFile,
+		CreatedBy:   "user1",
+		Description: "Quarterly report",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		statInfo: &storage.FileInfo{
+			Path:    "/docs/report.pdf",
+			Name:    "report.pdf",
+			IsDir:   false,
+			Size:    42,
+			ModTime: time.Unix(100, 0),
+		},
+	})
+	router := chi.NewRouter()
+	handler.PublicRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/"+share.ID, nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("public GET route status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var info PublicShareInfo
+	if err := json.Unmarshal(recorder.Body.Bytes(), &info); err != nil {
+		t.Fatalf("failed to decode public share info: %v", err)
+	}
+	if info.ID != share.ID || info.FileName != "report.pdf" || info.FileSize != 42 || info.Description != "Quarterly report" {
+		t.Fatalf("unexpected public share info: %+v", info)
+	}
+}
+
+func TestStreamResponseErrorWrapsAndTracksStartedState(t *testing.T) {
+	baseErr := errors.New("client disconnected")
+	streamErr := &streamResponseError{err: baseErr, responseStarted: true}
+
+	if streamErr.Error() != baseErr.Error() {
+		t.Fatalf("Error() = %q, want %q", streamErr.Error(), baseErr.Error())
+	}
+	if !errors.Is(streamErr, baseErr) {
+		t.Fatalf("expected stream error to unwrap %v", baseErr)
+	}
+	if !streamResponseStarted(streamErr) {
+		t.Fatal("expected started stream response to be detected")
+	}
+	if streamResponseStarted(&streamResponseError{err: baseErr}) {
+		t.Fatal("unexpected started response for stream error before write")
+	}
+	if streamResponseStarted(baseErr) {
+		t.Fatal("unexpected started response for unrelated error")
+	}
+
+	headerRecorder := httptest.NewRecorder()
+	headerTracker := &responseStartTrackingWriter{ResponseWriter: headerRecorder}
+	headerTracker.WriteHeader(http.StatusAccepted)
+	if !headerTracker.started {
+		t.Fatal("expected WriteHeader to mark response started")
+	}
+
+	failedWriter := &failFirstWriteResponseWriter{writeErr: baseErr}
+	failedTracker := &responseStartTrackingWriter{ResponseWriter: failedWriter}
+	if _, err := failedTracker.Write([]byte("hello")); !errors.Is(err, baseErr) {
+		t.Fatalf("Write() error = %v, want %v", err, baseErr)
+	}
+	if failedTracker.started {
+		t.Fatal("zero-byte failed write should not mark response started")
+	}
+
+	partialWriter := &failPartialWriteResponseWriter{limit: 2, writeErr: baseErr}
+	partialTracker := &responseStartTrackingWriter{ResponseWriter: partialWriter}
+	if n, err := partialTracker.Write([]byte("hello")); n != 2 || !errors.Is(err, baseErr) {
+		t.Fatalf("partial Write() = (%d, %v), want (2, %v)", n, err, baseErr)
+	}
+	if !partialTracker.started {
+		t.Fatal("partial write should mark response started")
+	}
+}
+
+func TestHashPassword_GeneratesVerifiableHash(t *testing.T) {
+	hash, err := hashPassword("secret")
+	if err != nil {
+		t.Fatalf("hashPassword() error: %v", err)
+	}
+	if hash == "" || hash == "secret" {
+		t.Fatalf("unexpected password hash %q", hash)
+	}
+
+	share := &Share{PasswordHash: hash}
+	if !share.CheckPassword("secret") {
+		t.Fatal("expected generated hash to verify original password")
+	}
+	if share.CheckPassword("wrong") {
+		t.Fatal("expected generated hash to reject wrong password")
+	}
+}
+
 func TestCreateShare_UsesBaseURL(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

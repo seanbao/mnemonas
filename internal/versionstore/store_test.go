@@ -43,6 +43,70 @@ func setupDataplaneClient(t *testing.T) *dataplane.Client {
 	return client
 }
 
+func TestRollbackRenamedVersionStoreFiles_RestoresInReverseOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "mnemonas.db.corrupt"), []byte("db"), 0600); err != nil {
+		t.Fatalf("WriteFile(db backup) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "mnemonas.db.corrupt-wal"), []byte("wal"), 0600); err != nil {
+		t.Fatalf("WriteFile(wal backup) error: %v", err)
+	}
+
+	err = rollbackRenamedVersionStoreFiles(root, [][2]string{
+		{"mnemonas.db", "mnemonas.db.corrupt"},
+		{"mnemonas.db-wal", "mnemonas.db.corrupt-wal"},
+	})
+	if err != nil {
+		t.Fatalf("rollbackRenamedVersionStoreFiles() error: %v", err)
+	}
+
+	for name, want := range map[string]string{
+		"mnemonas.db":     "db",
+		"mnemonas.db-wal": "wal",
+	} {
+		data, err := os.ReadFile(filepath.Join(tmpDir, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error: %v", name, err)
+		}
+		if string(data) != want {
+			t.Fatalf("%s contents = %q, want %q", name, string(data), want)
+		}
+	}
+}
+
+func TestRollbackRenamedVersionStoreFiles_ReturnsRenameErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	err = rollbackRenamedVersionStoreFiles(root, [][2]string{
+		{"mnemonas.db", "missing-backup"},
+	})
+	if err == nil {
+		t.Fatal("expected rollback error")
+	}
+	if !strings.Contains(err.Error(), "missing-backup") {
+		t.Fatalf("expected missing backup path in rollback error, got %v", err)
+	}
+}
+
+func TestRecoverCorruptVersionStoreDatabase_ReturnsUnrecoverableInitError(t *testing.T) {
+	initErr := errors.New("permission denied")
+	err := recoverCorruptVersionStoreDatabase(filepath.Join(t.TempDir(), "mnemonas.db"), initErr)
+	if err != initErr {
+		t.Fatalf("recoverCorruptVersionStoreDatabase() = %v, want original error", err)
+	}
+}
+
 func setupStore(t *testing.T) *Store {
 	client := setupDataplaneClient(t)
 	if client == nil {

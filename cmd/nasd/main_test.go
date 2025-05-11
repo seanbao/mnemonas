@@ -546,6 +546,17 @@ func restoreGlobalLoggerState(t *testing.T) {
 	})
 }
 
+func TestInitLogger_ConfiguresInfoConsoleLogger(t *testing.T) {
+	restoreGlobalLoggerState(t)
+
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	initLogger()
+
+	if got := zerolog.GlobalLevel(); got != zerolog.InfoLevel {
+		t.Fatalf("global log level = %s, want %s", got, zerolog.InfoLevel)
+	}
+}
+
 func TestApplyLoggerConfig_WritesJSONLogsToConfiguredFile(t *testing.T) {
 	restoreGlobalLoggerState(t)
 
@@ -687,6 +698,67 @@ func TestResolveLogOutput_CreatesParentDirectoriesAndAppends(t *testing.T) {
 	}
 	if string(data) != "first\nsecond\n" {
 		t.Fatalf("log file content = %q, want appended writes", string(data))
+	}
+}
+
+func TestNormalizeLogOutputPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	absPath := filepath.Join(tmpDir, "mnemonas.log")
+
+	got, err := normalizeLogOutputPath(" " + absPath + " ")
+	if err != nil {
+		t.Fatalf("normalizeLogOutputPath(abs) error: %v", err)
+	}
+	if got != absPath {
+		t.Fatalf("normalizeLogOutputPath(abs) = %q, want %q", got, absPath)
+	}
+
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Chdir(tmpDir) error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(previousDir)
+	})
+
+	got, err = normalizeLogOutputPath(" logs/mnemonas.log ")
+	if err != nil {
+		t.Fatalf("normalizeLogOutputPath(rel) error: %v", err)
+	}
+	want := filepath.Join(tmpDir, "logs", "mnemonas.log")
+	if got != want {
+		t.Fatalf("normalizeLogOutputPath(rel) = %q, want %q", got, want)
+	}
+}
+
+func TestValidateLogOutputPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	regularPath := filepath.Join(tmpDir, "mnemonas.log")
+	if err := os.WriteFile(regularPath, []byte("log"), 0o600); err != nil {
+		t.Fatalf("WriteFile(regular) error: %v", err)
+	}
+	if err := validateLogOutputPath(regularPath); err != nil {
+		t.Fatalf("validateLogOutputPath(regular) error: %v", err)
+	}
+
+	missingPath := filepath.Join(tmpDir, "missing", "mnemonas.log")
+	if err := validateLogOutputPath(missingPath); err != nil {
+		t.Fatalf("validateLogOutputPath(missing) error: %v", err)
+	}
+
+	targetPath := filepath.Join(tmpDir, "target.log")
+	if err := os.WriteFile(targetPath, []byte("target"), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	symlinkPath := filepath.Join(tmpDir, "linked.log")
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Fatalf("Symlink(log) error: %v", err)
+	}
+	if err := validateLogOutputPath(symlinkPath); !errors.Is(err, errLogOutputSymlink) {
+		t.Fatalf("validateLogOutputPath(symlink) error = %v, want %v", err, errLogOutputSymlink)
 	}
 }
 
