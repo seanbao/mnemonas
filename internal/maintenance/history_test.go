@@ -50,6 +50,86 @@ func TestWriteHistoryFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
+func TestHistoryPersistenceWarningWrapsAndUnwraps(t *testing.T) {
+	operationErr := errors.New("directory fsync failed")
+	wrapped := wrapHistoryPersistenceWarning(operationErr)
+
+	if !isHistoryPersistenceWarning(wrapped) {
+		t.Fatalf("expected wrapped error to be recognized as persistence warning: %v", wrapped)
+	}
+	if !errors.Is(wrapped, operationErr) {
+		t.Fatalf("expected wrapped error to unwrap operation error, got %v", wrapped)
+	}
+	if again := wrapHistoryPersistenceWarning(wrapped); again != wrapped {
+		t.Fatal("expected wrapping an existing persistence warning to preserve identity")
+	}
+	if wrapHistoryPersistenceWarning(nil) != nil {
+		t.Fatal("expected nil error to remain nil")
+	}
+}
+
+func TestCleanupHistoryTempPathJoinsRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("OpenRoot(tmpDir) error: %v", err)
+	}
+	defer root.Close()
+
+	if err := os.Mkdir(filepath.Join(tmpDir, ".last-scrub-stuck.tmp"), 0755); err != nil {
+		t.Fatalf("Mkdir(temp dir) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".last-scrub-stuck.tmp", "child"), []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	operationErr := errors.New("write failed")
+	err = cleanupHistoryTempPath(root, ".last-scrub-stuck.tmp", operationErr)
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("cleanupHistoryTempPath() error = %v, want wrapped operation error", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup temp maintenance history file") {
+		t.Fatalf("cleanupHistoryTempPath() error = %v, want cleanup context", err)
+	}
+}
+
+func TestWriteHistoryFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+	tmpDir := t.TempDir()
+	historyPath := filepath.Join(tmpDir, "last_scrub.json")
+	if err := os.WriteFile(historyPath, []byte(`{"status":"old"}`), 0600); err != nil {
+		t.Fatalf("WriteFile(existing history) error: %v", err)
+	}
+
+	if err := writeHistoryFileAtomically(historyPath, []byte(`{"status":"new"}`)); err != nil {
+		t.Fatalf("writeHistoryFileAtomically() error: %v", err)
+	}
+
+	data, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatalf("ReadFile(history) error: %v", err)
+	}
+	if string(data) != `{"status":"new"}` {
+		t.Fatalf("history content = %q, want new content", string(data))
+	}
+	info, err := os.Stat(historyPath)
+	if err != nil {
+		t.Fatalf("Stat(history) error: %v", err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("history permissions = %o, want 0644", info.Mode().Perm())
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(tmpDir) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".last-scrub-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("temporary history file was not cleaned up: %s", entry.Name())
+		}
+	}
+}
+
 func TestNewHistoryStore(t *testing.T) {
 	tmpDir := t.TempDir()
 

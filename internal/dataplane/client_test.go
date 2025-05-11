@@ -49,10 +49,16 @@ func startTestDataPlaneServer(t *testing.T) (string, func()) {
 }
 
 type fakeDataPlaneClient struct {
-	putFileStream grpc.ClientStreamingClient[pb.PutFileRequest, pb.PutFileResponse]
-	putFileErr    error
-	getFileStream grpc.ServerStreamingClient[pb.GetFileResponse]
-	getFileErr    error
+	putFileStream   grpc.ClientStreamingClient[pb.PutFileRequest, pb.PutFileResponse]
+	putFileErr      error
+	getFileStream   grpc.ServerStreamingClient[pb.GetFileResponse]
+	getFileErr      error
+	scrubReq        *pb.ScrubRequest
+	scrubResp       *pb.ScrubResponse
+	scrubErr        error
+	listObjectsReq  *pb.ListObjectsRequest
+	listObjectsResp *pb.ListObjectsResponse
+	listObjectsErr  error
 }
 
 func (f *fakeDataPlaneClient) PutChunk(context.Context, *pb.PutChunkRequest, ...grpc.CallOption) (*pb.PutChunkResponse, error) {
@@ -87,11 +93,25 @@ func (f *fakeDataPlaneClient) Stats(context.Context, *pb.StatsRequest, ...grpc.C
 	return nil, errors.New("not implemented")
 }
 
-func (f *fakeDataPlaneClient) Scrub(context.Context, *pb.ScrubRequest, ...grpc.CallOption) (*pb.ScrubResponse, error) {
+func (f *fakeDataPlaneClient) Scrub(_ context.Context, req *pb.ScrubRequest, _ ...grpc.CallOption) (*pb.ScrubResponse, error) {
+	f.scrubReq = req
+	if f.scrubErr != nil {
+		return nil, f.scrubErr
+	}
+	if f.scrubResp != nil {
+		return f.scrubResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
-func (f *fakeDataPlaneClient) ListObjects(context.Context, *pb.ListObjectsRequest, ...grpc.CallOption) (*pb.ListObjectsResponse, error) {
+func (f *fakeDataPlaneClient) ListObjects(_ context.Context, req *pb.ListObjectsRequest, _ ...grpc.CallOption) (*pb.ListObjectsResponse, error) {
+	f.listObjectsReq = req
+	if f.listObjectsErr != nil {
+		return nil, f.listObjectsErr
+	}
+	if f.listObjectsResp != nil {
+		return f.listObjectsResp, nil
+	}
 	return nil, errors.New("not implemented")
 }
 
@@ -177,6 +197,14 @@ func TestNewClient(t *testing.T) {
 	}
 	if client.client != nil {
 		t.Error("Expected client to be nil initially")
+	}
+}
+
+func TestAddr(t *testing.T) {
+	client := NewClient("localhost:9090")
+
+	if got := client.Addr(); got != "localhost:9090" {
+		t.Fatalf("Addr() = %q, want localhost:9090", got)
 	}
 }
 
@@ -357,6 +385,99 @@ func TestListObjectsNotConnected(t *testing.T) {
 	}
 	if err.Error() != "not connected" {
 		t.Errorf("Expected 'not connected' error, got: %v", err)
+	}
+}
+
+func TestScrubMapsResponseAndRequestHashes(t *testing.T) {
+	fake := &fakeDataPlaneClient{
+		scrubResp: &pb.ScrubResponse{
+			TotalObjects:     4,
+			ValidObjects:     2,
+			CorruptedObjects: 1,
+			MissingObjects:   1,
+			TotalSize:        4096,
+			DurationMs:       25,
+			Errors: []*pb.ScrubError{
+				{Hash: "hash-1", ErrorType: "missing", Message: "object missing"},
+			},
+		},
+	}
+	client := NewClient("localhost:9090")
+	client.client = fake
+
+	result, err := client.Scrub(context.Background(), []string{"hash-1", "hash-2"})
+	if err != nil {
+		t.Fatalf("Scrub() error: %v", err)
+	}
+	if fake.scrubReq == nil || len(fake.scrubReq.Hashes) != 2 || fake.scrubReq.Hashes[0] != "hash-1" || fake.scrubReq.Hashes[1] != "hash-2" {
+		t.Fatalf("scrub request hashes = %#v", fake.scrubReq)
+	}
+	if result.TotalObjects != 4 || result.ValidObjects != 2 || result.CorruptedObjects != 1 || result.MissingObjects != 1 {
+		t.Fatalf("unexpected scrub counters: %#v", result)
+	}
+	if result.TotalSize != 4096 || result.DurationMs != 25 {
+		t.Fatalf("unexpected scrub size/duration: %#v", result)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Hash != "hash-1" || result.Errors[0].ErrorType != "missing" || result.Errors[0].Message != "object missing" {
+		t.Fatalf("unexpected scrub errors: %#v", result.Errors)
+	}
+}
+
+func TestListObjectsBuildsRequestAndMapsOptionalFields(t *testing.T) {
+	nextCursor := "next-page"
+	createdAt := int64(1_700_000_000)
+	fake := &fakeDataPlaneClient{
+		listObjectsResp: &pb.ListObjectsResponse{
+			NextCursor: &nextCursor,
+			Objects: []*pb.ObjectInfo{
+				{Hash: "hash-1", Size: 100, CreatedAtUnix: &createdAt},
+				{Hash: "hash-2", Size: 200},
+			},
+		},
+	}
+	client := NewClient("localhost:9090")
+	client.client = fake
+
+	result, err := client.ListObjects(context.Background(), "cursor-1", 50)
+	if err != nil {
+		t.Fatalf("ListObjects() error: %v", err)
+	}
+	if fake.listObjectsReq == nil || fake.listObjectsReq.Cursor == nil || *fake.listObjectsReq.Cursor != "cursor-1" {
+		t.Fatalf("list objects cursor request = %#v", fake.listObjectsReq)
+	}
+	if fake.listObjectsReq.Limit == nil || *fake.listObjectsReq.Limit != 50 {
+		t.Fatalf("list objects limit request = %#v", fake.listObjectsReq)
+	}
+	if result.NextCursor != nextCursor {
+		t.Fatalf("NextCursor = %q, want %q", result.NextCursor, nextCursor)
+	}
+	if len(result.Objects) != 2 {
+		t.Fatalf("objects length = %d, want 2", len(result.Objects))
+	}
+	if result.Objects[0].Hash != "hash-1" || result.Objects[0].Size != 100 || !result.Objects[0].CreatedAt.Equal(time.Unix(createdAt, 0)) {
+		t.Fatalf("first object = %#v", result.Objects[0])
+	}
+	if result.Objects[1].Hash != "hash-2" || result.Objects[1].Size != 200 || !result.Objects[1].CreatedAt.IsZero() {
+		t.Fatalf("second object = %#v", result.Objects[1])
+	}
+}
+
+func TestListObjectsOmitsEmptyPaginationFields(t *testing.T) {
+	fake := &fakeDataPlaneClient{listObjectsResp: &pb.ListObjectsResponse{}}
+	client := NewClient("localhost:9090")
+	client.client = fake
+
+	if _, err := client.ListObjects(context.Background(), "", 0); err != nil {
+		t.Fatalf("ListObjects() error: %v", err)
+	}
+	if fake.listObjectsReq == nil {
+		t.Fatal("expected ListObjects request")
+	}
+	if fake.listObjectsReq.Cursor != nil {
+		t.Fatalf("Cursor = %q, want nil", *fake.listObjectsReq.Cursor)
+	}
+	if fake.listObjectsReq.Limit != nil {
+		t.Fatalf("Limit = %d, want nil", *fake.listObjectsReq.Limit)
 	}
 }
 

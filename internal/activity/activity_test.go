@@ -61,6 +61,43 @@ func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
+func TestWriteActivityLogFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "activity.json")
+	if err := os.WriteFile(logPath, []byte(`[{"id":"old"}]`), 0600); err != nil {
+		t.Fatalf("WriteFile(existing activity log) error: %v", err)
+	}
+
+	if err := writeActivityLogFileAtomically(logPath, []byte(`[{"id":"new"}]`)); err != nil {
+		t.Fatalf("writeActivityLogFileAtomically() error: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(activity log) error: %v", err)
+	}
+	if string(data) != `[{"id":"new"}]` {
+		t.Fatalf("activity log content = %q, want new content", string(data))
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("Stat(activity log) error: %v", err)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Fatalf("activity log permissions = %o, want 0640", info.Mode().Perm())
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(tmpDir) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".activity-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("temporary activity log file was not cleaned up: %s", entry.Name())
+		}
+	}
+}
+
 func TestNewStore(t *testing.T) {
 	tmpDir := t.TempDir()
 
