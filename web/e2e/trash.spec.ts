@@ -18,7 +18,7 @@ test.describe('回收站页面', () => {
   })
 
   test('应显示回收站标题', async ({ page }) => {
-    const title = page.getByText('回收站').first()
+    const title = page.getByRole('heading', { name: '回收站' })
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 
@@ -33,7 +33,7 @@ test.describe('回收站页面', () => {
 
     // 检查是否有文件项或空状态
     const emptyState = page.getByText(/回收站是空的|暂无|empty/i)
-    const itemList = page.locator('[class*="trash"], [class*="item"]').first()
+    const itemList = page.getByRole('checkbox', { name: /^选择 / }).first()
     
     const hasEmpty = await emptyState.isVisible({ timeout: 1000 }).catch(() => false)
     const hasItems = await itemList.isVisible({ timeout: 1000 }).catch(() => false)
@@ -228,7 +228,7 @@ test.describe('回收站页面响应式', () => {
     const body = page.locator('body')
     await expect(body).toBeVisible()
 
-    const title = page.getByText('回收站').first()
+    const title = page.getByRole('heading', { name: '回收站' })
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 
@@ -236,7 +236,7 @@ test.describe('回收站页面响应式', () => {
     await page.setViewportSize({ width: 768, height: 1024 })
     await ensureAuthenticatedAt(page, '/trash')
 
-    const title = page.getByText('回收站').first()
+    const title = page.getByRole('heading', { name: '回收站' })
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 })

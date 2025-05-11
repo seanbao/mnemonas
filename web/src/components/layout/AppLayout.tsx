@@ -56,11 +56,13 @@ export function AppLayout() {
       )}
       
       {/* Sidebar */}
-      <div className={`
-        fixed inset-y-0 left-0 z-50 lg:static lg:z-auto
-        transform transition-transform duration-300 ease-in-out
-        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
-      `}
+      <div
+        className={cn(
+          'fixed inset-y-0 left-0 z-50 transform transition-transform duration-300 ease-in-out lg:static lg:z-auto',
+          sidebarOpen
+            ? 'visible translate-x-0 pointer-events-auto'
+            : 'invisible -translate-x-full pointer-events-none lg:visible lg:translate-x-0 lg:pointer-events-auto'
+        )}
         data-testid="app-sidebar-shell"
       >
         <Sidebar onClose={() => setSidebarOpen(false)} />
@@ -70,7 +72,7 @@ export function AppLayout() {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header onMenuClick={() => setSidebarOpen(true)} />
         
-        <main className="min-w-0 flex-1 overflow-auto pb-20 lg:pb-0">
+        <main className="min-w-0 flex-1 overflow-auto pb-20 scroll-pb-28 scroll-pt-4 lg:pb-0 lg:scroll-pb-0">
           <div className="mx-auto h-full min-h-full w-full max-w-7xl">
             <Outlet />
           </div>

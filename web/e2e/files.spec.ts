@@ -82,7 +82,7 @@ test.describe('文件浏览页面', () => {
 
     // 检查是否有空状态提示或文件列表
     const emptyState = page.getByText(/空空如也|暂无文件|no files/i)
-    const fileList = page.locator('[class*="file"], table tbody tr').first()
+    const fileList = page.getByRole('checkbox', { name: /^选择 / }).first()
     
     const hasEmpty = await emptyState.isVisible({ timeout: 1000 }).catch(() => false)
     const hasFiles = await fileList.isVisible({ timeout: 1000 }).catch(() => false)
