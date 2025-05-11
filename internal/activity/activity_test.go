@@ -25,6 +25,35 @@ func writeActivityFixture(t *testing.T, path string, entries []Entry) {
 	}
 }
 
+func TestCleanupActivityTempPath_JoinsRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	operationErr := errors.New("append failed")
+	err = cleanupActivityTempPath(root, "busy", operationErr)
+	if err == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("expected joined error to include operation error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup temp activity file busy") {
+		t.Fatalf("expected cleanup context in error, got %v", err)
+	}
+}
+
 func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "activity.json")

@@ -31,6 +31,142 @@ type partialErrorReader struct {
 	sent bool
 }
 
+func TestWarningWrappersPreserveErrorSemantics(t *testing.T) {
+	baseErr := errors.New("durability failed")
+
+	if got := wrapVisibleMutationWarning(nil); got != nil {
+		t.Fatalf("wrapVisibleMutationWarning(nil) = %v, want nil", got)
+	}
+	visibleErr := wrapVisibleMutationWarning(baseErr)
+	if !isVisibleMutationWarning(visibleErr) {
+		t.Fatalf("expected visible mutation warning, got %T", visibleErr)
+	}
+	if !errors.Is(visibleErr, baseErr) {
+		t.Fatalf("expected visible mutation warning to unwrap %v", baseErr)
+	}
+	if visibleErr.Error() != baseErr.Error() {
+		t.Fatalf("visible warning Error() = %q, want %q", visibleErr.Error(), baseErr.Error())
+	}
+	if got := wrapVisibleMutationWarning(visibleErr); got != visibleErr {
+		t.Fatal("expected existing visible mutation warning to be reused")
+	}
+
+	if got := wrapTrashDeleteWarningWithPartial(nil, true); got != nil {
+		t.Fatalf("wrapTrashDeleteWarningWithPartial(nil) = %v, want nil", got)
+	}
+	trashErr := wrapTrashDeleteWarning(baseErr)
+	var trashWarning *TrashDeleteWarningError
+	if !errors.As(trashErr, &trashWarning) {
+		t.Fatalf("expected trash warning, got %T", trashErr)
+	}
+	if trashWarning.Partial() {
+		t.Fatal("expected regular trash warning to be non-partial")
+	}
+	if !errors.Is(trashErr, baseErr) {
+		t.Fatalf("expected trash warning to unwrap %v", baseErr)
+	}
+	if trashErr.Error() != baseErr.Error() {
+		t.Fatalf("trash warning Error() = %q, want %q", trashErr.Error(), baseErr.Error())
+	}
+	promotedTrashErr := wrapTrashDeletePartialWarning(trashErr)
+	var promotedTrashWarning *TrashDeleteWarningError
+	if !errors.As(promotedTrashErr, &promotedTrashWarning) {
+		t.Fatalf("expected promoted trash warning, got %T", promotedTrashErr)
+	}
+	if !promotedTrashWarning.Partial() {
+		t.Fatal("expected promoted trash warning to be partial")
+	}
+	if !errors.Is(promotedTrashErr, baseErr) {
+		t.Fatalf("expected promoted trash warning to unwrap %v", baseErr)
+	}
+
+	if got := wrapDeleteCleanupWarning(nil); got != nil {
+		t.Fatalf("wrapDeleteCleanupWarning(nil) = %v, want nil", got)
+	}
+	deleteCleanupErr := wrapDeleteCleanupWarning(baseErr)
+	var cleanupWarning *DeleteCleanupWarningError
+	if !errors.As(deleteCleanupErr, &cleanupWarning) {
+		t.Fatalf("expected delete cleanup warning, got %T", deleteCleanupErr)
+	}
+	if !errors.Is(deleteCleanupErr, baseErr) {
+		t.Fatalf("expected delete cleanup warning to unwrap %v", baseErr)
+	}
+	if deleteCleanupErr.Error() != baseErr.Error() {
+		t.Fatalf("delete cleanup warning Error() = %q, want %q", deleteCleanupErr.Error(), baseErr.Error())
+	}
+	if got := wrapDeleteCleanupWarning(deleteCleanupErr); got != deleteCleanupErr {
+		t.Fatal("expected existing delete cleanup warning to be reused")
+	}
+}
+
+func TestCleanupStorageTempPath_JoinsRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	operationErr := errors.New("copy failed")
+	err = cleanupStorageTempPath(root, "busy", operationErr)
+	if err == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("expected joined error to include operation error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup temp file busy") {
+		t.Fatalf("expected cleanup context in error, got %v", err)
+	}
+}
+
+func TestFileSystem_UpdateTrashSettings(t *testing.T) {
+	empty := &FileSystem{}
+	empty.UpdateTrashSettings(true, 7, 1024)
+
+	fs := &FileSystem{config: &Config{}}
+	fs.UpdateTrashSettings(true, 14, 4096)
+
+	if fs.config.TrashEnabled == nil || !*fs.config.TrashEnabled {
+		t.Fatalf("TrashEnabled = %v, want true", fs.config.TrashEnabled)
+	}
+	if fs.config.TrashRetentionDays != 14 {
+		t.Fatalf("TrashRetentionDays = %d, want 14", fs.config.TrashRetentionDays)
+	}
+	if fs.config.MaxTrashSize != 4096 {
+		t.Fatalf("MaxTrashSize = %d, want 4096", fs.config.MaxTrashSize)
+	}
+
+	fs.UpdateTrashSettings(false, 3, 128)
+	if fs.config.TrashEnabled == nil || *fs.config.TrashEnabled {
+		t.Fatalf("TrashEnabled = %v, want false", fs.config.TrashEnabled)
+	}
+	if fs.config.TrashRetentionDays != 3 || fs.config.MaxTrashSize != 128 {
+		t.Fatalf("unexpected updated trash settings: %+v", fs.config)
+	}
+}
+
+func TestFileSystem_SetDataplaneClient(t *testing.T) {
+	empty := &FileSystem{}
+	empty.SetDataplaneClient(nil)
+
+	client := dataplane.NewClient("127.0.0.1:1")
+	fs := &FileSystem{config: &Config{}}
+	fs.SetDataplaneClient(client)
+
+	if fs.config.Dataplane != client {
+		t.Fatalf("Dataplane = %#v, want %#v", fs.config.Dataplane, client)
+	}
+}
+
 func (r *blockingOnceReader) Read(p []byte) (int, error) {
 	if r.sent {
 		return 0, io.EOF
@@ -6546,10 +6682,18 @@ func TestFilesystemTypeFromMagicFallback(t *testing.T) {
 		wantType   string
 		wantNative bool
 	}{
-		"ext":   {magic: 0xEF53, wantType: "ext"},
-		"zfs":   {magic: 0x2FC12FC1, wantType: "zfs", wantNative: true},
-		"btrfs": {magic: 0x9123683E, wantType: "btrfs", wantNative: true},
-		"xfs":   {magic: 0x58465342, wantType: "xfs"},
+		"btrfs":   {magic: 0x9123683E, wantType: "btrfs", wantNative: true},
+		"cifs":    {magic: 0xFF534D42, wantType: "cifs"},
+		"exfat":   {magic: 0x2011BAB0, wantType: "exfat"},
+		"ext":     {magic: 0xEF53, wantType: "ext"},
+		"fuse":    {magic: 0x65735546, wantType: "fuse"},
+		"nfs":     {magic: 0x6969, wantType: "nfs"},
+		"smb":     {magic: 0x517B, wantType: "smb"},
+		"smb2":    {magic: 0xFE534D42, wantType: "smb2"},
+		"tmpfs":   {magic: 0x01021994, wantType: "tmpfs"},
+		"unknown": {magic: 0xDEADBEEF, wantType: "unknown"},
+		"xfs":     {magic: 0x58465342, wantType: "xfs"},
+		"zfs":     {magic: 0x2FC12FC1, wantType: "zfs", wantNative: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fsType := filesystemTypeFromMagic(tt.magic)

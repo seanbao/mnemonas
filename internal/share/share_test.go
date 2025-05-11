@@ -87,6 +87,95 @@ func TestWriteShareStoreFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestWriteShareStoreFileAtomicallyWithRoot_ReplacesExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+	if err := os.WriteFile(storePath, []byte("old"), 0600); err != nil {
+		t.Fatalf("failed to write existing store file: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	if err := writeShareStoreFileAtomicallyWithRoot(root, storePath, []byte("[]")); err != nil {
+		t.Fatalf("writeShareStoreFileAtomicallyWithRoot() error: %v", err)
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("failed to read replaced store file: %v", err)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("store file contents = %q, want []", string(data))
+	}
+	matches, err := filepath.Glob(filepath.Join(tmpDir, ".shares-*.tmp"))
+	if err != nil {
+		t.Fatalf("failed to scan temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected no temp shares files after atomic replacement, got %v", matches)
+	}
+}
+
+func TestWriteShareStoreFileAtomically_ReplacesExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "shares.json")
+	if err := os.WriteFile(storePath, []byte("old"), 0600); err != nil {
+		t.Fatalf("failed to write existing store file: %v", err)
+	}
+
+	if err := writeShareStoreFileAtomically(storePath, []byte("[]")); err != nil {
+		t.Fatalf("writeShareStoreFileAtomically() error: %v", err)
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("failed to read replaced store file: %v", err)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("store file contents = %q, want []", string(data))
+	}
+	matches, err := filepath.Glob(filepath.Join(tmpDir, ".shares-*.tmp"))
+	if err != nil {
+		t.Fatalf("failed to scan temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected no temp shares files after atomic replacement, got %v", matches)
+	}
+}
+
+func TestCleanupShareTempPath_JoinsRemoveError(t *testing.T) {
+	tmpDir := t.TempDir()
+	busyDir := filepath.Join(tmpDir, "busy")
+	if err := os.Mkdir(busyDir, 0700); err != nil {
+		t.Fatalf("failed to create busy temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(busyDir, "child"), []byte("data"), 0600); err != nil {
+		t.Fatalf("failed to create busy temp child: %v", err)
+	}
+
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	defer root.Close()
+
+	operationErr := errors.New("operation failed")
+	err = cleanupShareTempPath(root, "busy", operationErr)
+	if err == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("expected joined error to include operation error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "cleanup temp shares file busy") {
+		t.Fatalf("expected cleanup context in error, got %v", err)
+	}
+}
+
 func TestWriteShareStoreFile_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "nested", "state", "shares.json")
@@ -1261,6 +1350,47 @@ func TestShareStore_Access(t *testing.T) {
 	}
 }
 
+func TestShareStore_RecordAccess(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/test/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	if err := store.RecordAccess(share.ID); err != nil {
+		t.Fatalf("RecordAccess() error: %v", err)
+	}
+	loaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("Get() after RecordAccess() error: %v", err)
+	}
+	if loaded.AccessCount != 1 {
+		t.Fatalf("AccessCount = %d, want 1", loaded.AccessCount)
+	}
+	if loaded.LastAccess == nil {
+		t.Fatal("expected LastAccess to be recorded")
+	}
+
+	if err := store.RecordAccess(share.ID); err != ErrShareAccessLimit {
+		t.Fatalf("second RecordAccess() error = %v, want %v", err, ErrShareAccessLimit)
+	}
+	if err := store.RecordAccess("missing"); err != ErrShareNotFound {
+		t.Fatalf("missing RecordAccess() error = %v, want %v", err, ErrShareNotFound)
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -2372,6 +2502,69 @@ func TestShareStore_RestoreMovedSharesPreservingCurrent_CommitsOnPersistenceWarn
 	}
 	if reloadedShare.Path != "/docs/a.txt" {
 		t.Fatalf("expected persisted share path restored after warning, got %q", reloadedShare.Path)
+	}
+}
+
+func TestShareStore_RestoreSharesPreservingCurrent_PreservesMutableMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	current, err := store.Create(CreateShareOptions{
+		Path:        "/current/path.txt",
+		Type:        ShareTypeFile,
+		CreatedBy:   "user1",
+		Description: "current description",
+	})
+	if err != nil {
+		t.Fatalf("Create(current) error: %v", err)
+	}
+	restoreState := copyShare(current)
+	restoreState.Path = "/restored/path.txt"
+	restoreState.Enabled = false
+	restoreState.Description = "old description"
+
+	missing, err := store.Create(CreateShareOptions{
+		Path:      "/missing/path.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("Create(missing) error: %v", err)
+	}
+	if err := store.Delete(missing.ID); err != nil {
+		t.Fatalf("Delete(missing) error: %v", err)
+	}
+
+	if err := store.RestoreSharesPreservingCurrent([]*Share{restoreState, missing}); err != nil {
+		t.Fatalf("RestoreSharesPreservingCurrent() error: %v", err)
+	}
+
+	loaded, err := store.Get(current.ID)
+	if err != nil {
+		t.Fatalf("Get(current) error: %v", err)
+	}
+	if loaded.Path != "/restored/path.txt" {
+		t.Fatalf("Path = %q, want restored path", loaded.Path)
+	}
+	if loaded.Enabled {
+		t.Fatal("expected enabled state to be restored to false")
+	}
+	if loaded.Description != "current description" {
+		t.Fatalf("Description = %q, want current metadata preserved", loaded.Description)
+	}
+	if shares := store.GetByPath("/current/path.txt"); len(shares) != 0 {
+		t.Fatalf("old path index still contains share: %+v", shares)
+	}
+	if shares := store.GetByPath("/restored/path.txt"); len(shares) != 1 || shares[0].ID != current.ID {
+		t.Fatalf("restored path index = %+v", shares)
+	}
+	if _, err := store.Get(missing.ID); err != nil {
+		t.Fatalf("missing restore state should be recreated: %v", err)
 	}
 }
 

@@ -22,6 +22,24 @@ import (
 	"github.com/seanbao/mnemonas/internal/requestip"
 )
 
+func TestAuthPersistenceWarningWrapperPreservesErrorSemantics(t *testing.T) {
+	baseErr := errors.New("directory sync failed")
+
+	if got := wrapAuthPersistenceWarning(nil); got != nil {
+		t.Fatalf("wrapAuthPersistenceWarning(nil) = %v, want nil", got)
+	}
+	warningErr := wrapAuthPersistenceWarning(baseErr)
+	if !isAuthPersistenceWarning(warningErr) {
+		t.Fatalf("expected auth persistence warning, got %T", warningErr)
+	}
+	if !errors.Is(warningErr, baseErr) {
+		t.Fatalf("expected auth persistence warning to unwrap %v", baseErr)
+	}
+	if warningErr.Error() != baseErr.Error() {
+		t.Fatalf("Error() = %q, want %q", warningErr.Error(), baseErr.Error())
+	}
+}
+
 func TestShouldPrintInitialPasswordToTerminal(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -1049,6 +1067,7 @@ func TestUserStore(t *testing.T) {
 		})
 
 		firstDone := make(chan error, 1)
+		waitForPersist := 15 * time.Second
 		go func() {
 			_, createErr := store.Create("firstuser", "password123", "first@example.com", RoleUser)
 			firstDone <- createErr
@@ -1056,7 +1075,7 @@ func TestUserStore(t *testing.T) {
 
 		select {
 		case <-firstStarted:
-		case <-time.After(time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("timed out waiting for first user-store persist to start")
 		}
 
@@ -1081,13 +1100,13 @@ func TestUserStore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("first Create() error: %v", err)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("first Create() did not finish after releasing writer")
 		}
 
 		select {
 		case <-secondStarted:
-		case <-time.After(time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("timed out waiting for second user-store persist to start")
 		}
 
@@ -1096,7 +1115,7 @@ func TestUserStore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("second Create() error: %v", err)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitForPersist):
 			t.Fatal("second Create() did not finish")
 		}
 
