@@ -21,9 +21,13 @@ test.describe('主页（认证禁用时）', () => {
     const isLoginPage = page.url().includes('/login')
     
     if (!isLoginPage) {
-      // 认证禁用，检查侧边栏
-      const nav = page.locator('nav, aside, [class*="sidebar"]').first()
-      await expect(nav).toBeVisible({ timeout: 5000 })
+      const menuButton = page.getByRole('button', { name: '打开导航菜单' })
+      if (await menuButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await expect(page.getByRole('navigation', { name: '移动端主导航' })).toBeVisible({ timeout: 5000 })
+      } else {
+        const nav = page.locator('aside, nav, [class*="sidebar"]').first()
+        await expect(nav).toBeVisible({ timeout: 5000 })
+      }
     } else {
       // 认证启用，检查登录表单
       await expect(page.getByRole('button', { name: /登录/i })).toBeVisible()

@@ -207,6 +207,13 @@ textarea {
   font: inherit;
 }
 
+@media (max-width: 1023px) {
+  main :where(a[href], button, input, select, textarea, [role="button"], [role="checkbox"], [role="switch"], [role="tab"], [tabindex]:not([tabindex="-1"])) {
+    scroll-margin-top: 1rem;
+    scroll-margin-bottom: calc(7rem + env(safe-area-inset-bottom));
+  }
+}
+
 img,
 video,
 canvas,

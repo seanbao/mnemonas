@@ -6,7 +6,7 @@ BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 GO_PACKAGES ?=
 GO_PACKAGE_PATTERN ?= ./...
-GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/
+GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/|/proto$$
 GO_LINT_PACKAGES ?= ./...
 GOVULNCHECK_VERSION ?= v1.3.0
 CARGO_AUDIT_VERSION ?= 0.22.1
@@ -26,7 +26,7 @@ define RESOLVE_GO_PACKAGES
 packages="$(GO_PACKAGES)"; \
 go_list_env="$${GO_LIST_ENV:-}"; \
 if [ -z "$$packages" ]; then \
-	packages="$$(env $$go_list_env go list $(GO_PACKAGE_PATTERN) | grep -v '$(GO_PACKAGE_EXCLUDE_PATTERN)')"; \
+	packages="$$(env $$go_list_env go list $(GO_PACKAGE_PATTERN) | grep -Ev '$(GO_PACKAGE_EXCLUDE_PATTERN)')"; \
 fi; \
 if [ -z "$$packages" ]; then \
 	echo "❌ no Go packages resolved" >&2; \
