@@ -1,4 +1,4 @@
-.PHONY: all build web-build test clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check security-check install-audit-tools docker e2e bench coverage check help
+.PHONY: all build web-build test test-torture fault-injection clean deps dev proto proto-go proto-rust go-packages fmt lint workflows-check scripts-check security-check install-audit-tools docker e2e bench coverage check help
 
 # 版本信息
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -18,8 +18,12 @@ GO_COVERAGE_ENV ?= GOSUMDB=sum.golang.org GOTOOLCHAIN=auto
 GO_COVERAGE_MIN ?= 75
 RUST_COVERAGE_MIN ?= 70
 NPM_AUDIT ?= 0
+GO_FUZZTIME ?= 10s
+GO_FUZZ_TARGETS ?= ./internal/api:FuzzValidatePath ./internal/api:FuzzPathWithinBase ./internal/config:FuzzNormalizeWebDAVPrefix
+GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./internal/storage ./internal/versionstore ./internal/dataplane ./internal/workspace
+WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
 DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
-ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh
+ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
 
 define RESOLVE_GO_PACKAGES
@@ -47,6 +51,7 @@ help:
 	@echo "  build      - Build Web UI and binaries (proto → Web → Go → Rust)"
 	@echo "  dev        - Quick development build (debug mode)"
 	@echo "  test       - Run all tests"
+	@echo "  test-torture - Run race/fuzz/property/browser torture tests"
 	@echo "  coverage   - Run tests with coverage report"
 	@echo "  lint       - Run linters (Go + Rust)"
 	@echo "  scripts-check - Validate deployment shell scripts"
@@ -56,6 +61,7 @@ help:
 	@echo "  fmt        - Format code (Go + Rust)"
 	@echo "  workflows-check - Validate GitHub Actions workflows"
 	@echo "  e2e        - Run E2E acceptance tests"
+	@echo "  fault-injection - Run live destructive fault-injection tests"
 	@echo "  bench      - Run performance benchmarks"
 	@echo "  proto      - Generate protobuf code"
 	@echo "  go-packages - Print resolved Go package list"
@@ -123,6 +129,17 @@ test:
 	@echo "🌐 Running frontend tests..."
 	cd web && npm run test:run
 
+# 测死矩阵：race、fuzz、property、浏览器运行时完整性扫描。
+# Live fault injection 默认跳过，避免误杀本机服务；显式传 RUN_LIVE_FAULTS=1 才执行。
+test-torture:
+	@echo "🔥 Running torture test matrix..."
+	@chmod +x scripts/torture-test.sh
+	GO_FUZZTIME="$(GO_FUZZTIME)" \
+	GO_FUZZ_TARGETS="$(GO_FUZZ_TARGETS)" \
+	GO_TORTURE_PACKAGES="$(GO_TORTURE_PACKAGES)" \
+	WEB_TORTURE_SPECS="$(WEB_TORTURE_SPECS)" \
+	./scripts/torture-test.sh
+
 # 测试覆盖率
 coverage:
 	@echo "📊 Generating coverage reports..."
@@ -155,6 +172,11 @@ e2e:
 	@echo "🔗 Running E2E tests..."
 	@chmod +x scripts/e2e-test.sh
 	./scripts/e2e-test.sh
+
+fault-injection:
+	@echo "💥 Running live fault-injection tests..."
+	@chmod +x scripts/fault-injection-test.sh
+	./scripts/fault-injection-test.sh
 
 # 性能基准测试
 bench:
