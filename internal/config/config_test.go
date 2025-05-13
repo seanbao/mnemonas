@@ -302,6 +302,9 @@ func TestNormalizeWebDAVPrefix(t *testing.T) {
 		{name: "empty defaults to root", input: "", expected: "/"},
 		{name: "root stays root", input: "/", expected: "/"},
 		{name: "trims whitespace", input: " /dav ", expected: "/dav"},
+		{name: "trims whitespace after clean", input: "./0/0//0 /", expected: "/0/0/0"},
+		{name: "cleans after trimming path segment whitespace", input: "00/ /", expected: "/00"},
+		{name: "iterates until stable after clean", input: "0 / /", expected: "/0"},
 		{name: "collapses repeated slashes", input: "//dav//files///", expected: "/dav/files"},
 	}
 
