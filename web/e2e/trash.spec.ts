@@ -57,13 +57,13 @@ test.describe('回收站批量操作', () => {
 
   test('选中项后应显示批量操作栏', async ({ page }) => {
     // 如果有项目，尝试选中
-    const checkbox = page.locator('input[type="checkbox"]').first()
+    const checkbox = page.getByRole('checkbox').nth(1)
     if (await checkbox.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await checkbox.click()
+      await checkbox.click({ force: true })
       
       // 检查批量操作按钮
-      const batchRestore = page.getByRole('button', { name: /恢复/i })
-      const batchDelete = page.getByRole('button', { name: /永久删除/i })
+      const batchRestore = page.getByRole('button', { name: /^恢复$/ })
+      const batchDelete = page.getByRole('button', { name: /^永久删除$/ })
       
       const hasRestore = await batchRestore.isVisible({ timeout: 2000 }).catch(() => false)
       const hasDelete = await batchDelete.isVisible({ timeout: 1000 }).catch(() => false)
@@ -88,8 +88,8 @@ test.describe('回收站单项操作', () => {
     const isEmpty = await emptyState.isVisible({ timeout: 1000 }).catch(() => false)
     test.skip(isEmpty, '当前测试数据中没有回收站条目')
 
-    const restoreBtn = page.getByRole('button', { name: /恢复/i }).first()
-    const deleteBtn = page.getByRole('button', { name: /永久删除|删除/i }).first()
+    const restoreBtn = page.getByRole('button', { name: /^恢复\s.+$/ }).first()
+    const deleteBtn = page.getByRole('button', { name: /^永久删除\s.+$/ }).first()
 
     const hasRestore = await restoreBtn.isVisible({ timeout: 1000 }).catch(() => false)
     const hasDelete = await deleteBtn.isVisible({ timeout: 1000 }).catch(() => false)
@@ -107,8 +107,8 @@ test.describe('回收站确认对话框', () => {
       await emptyTrashBtn.click()
       
       // 检查确认对话框
-      const confirmDialog = page.getByText(/确定要清空|无法撤销/i)
-      await expect(confirmDialog).toBeVisible({ timeout: 5000 })
+      await expect(page.getByText('确定要清空回收站吗？')).toBeVisible({ timeout: 5000 })
+      await expect(page.getByText(/此操作无法撤销/i)).toBeVisible({ timeout: 5000 })
     }
   })
 })

@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
 
+function getVersionPathInput(page: import('@playwright/test').Page) {
+  return page.getByRole('textbox', { name: /输入文件路径|文件路径/i })
+}
+
 /**
  * 版本历史页面 E2E 测试
  * 认证状态由 auth.setup.ts 通过 storageState 自动注入
@@ -23,7 +27,7 @@ test.describe('版本历史页面', () => {
   })
 
   test('应显示文件路径输入框', async ({ page }) => {
-    const pathInput = page.getByPlaceholder(/文件路径|输入文件/i)
+    const pathInput = getVersionPathInput(page)
     await expect(pathInput).toBeVisible({ timeout: 5000 })
   })
 
@@ -44,7 +48,7 @@ test.describe('版本历史查询', () => {
   })
 
   test('输入路径后应能查询', async ({ page }) => {
-    const pathInput = page.getByPlaceholder(/文件路径|输入文件/i)
+    const pathInput = getVersionPathInput(page)
     await expect(pathInput).toBeVisible({ timeout: 2000 })
     await pathInput.fill('/test/file.txt')
 
@@ -60,7 +64,7 @@ test.describe('版本历史查询', () => {
   })
 
   test('查询不存在的文件应显示提示', async ({ page }) => {
-    const pathInput = page.getByPlaceholder(/文件路径|输入文件/i)
+    const pathInput = getVersionPathInput(page)
     await expect(pathInput).toBeVisible({ timeout: 2000 })
     await pathInput.fill('/nonexistent/path/xyz123.txt')
 
