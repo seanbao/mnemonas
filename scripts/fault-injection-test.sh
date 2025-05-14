@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # MnemoNAS Fault Injection Tests
 # 故障注入回归测试 - 验证数据安全性
 #
@@ -8,7 +8,10 @@
 # 3. 元数据文件损坏
 # 4. 磁盘空间不足
 
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Colors
 RED='\033[0;31m'
@@ -18,6 +21,9 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Configuration
+BASE_URL_EXPLICIT="${BASE_URL+x}"
+STORAGE_ROOT_EXPLICIT="${STORAGE_ROOT+x}"
+NASD_BIN_EXPLICIT="${NASD_BIN+x}"
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 WEBDAV_URL="${BASE_URL}/dav"
 STORAGE_ROOT="${STORAGE_ROOT:-$HOME/.mnemonas}"
@@ -29,6 +35,13 @@ OBJECTS_DIR="${OBJECTS_DIR:-$INTERNAL_DIR/objects}"
 INDEX_DB="${INDEX_DB:-$INTERNAL_DIR/index.db}"
 NASD_BIN="${NASD_BIN:-./bin/nasd}"
 TEST_DIR="/tmp/mnemonas-fault-$$"
+MNEMONAS_LIVE_FAULTS="${MNEMONAS_LIVE_FAULTS:-0}"
+FAULT_INJECTION_ASSUME_YES="${FAULT_INJECTION_ASSUME_YES:-0}"
+ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
+RUN_CORRUPTION_TESTS="${RUN_CORRUPTION_TESTS:-prompt}"
+NASD_PID="${NASD_PID:-}"
+FAULT_KILL_PATTERN="${FAULT_KILL_PATTERN:-}"
+SERVICE_WAS_KILLED=0
 
 # Counters
 PASSED=0
@@ -42,6 +55,92 @@ log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED++)); }
 log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED++)); }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED++)); }
+die()       { echo -e "${RED}ERROR:${NC} $1" >&2; exit 1; }
+
+require_live_fault_target() {
+    if [[ "$MNEMONAS_LIVE_FAULTS" != "1" ]]; then
+        die "live fault injection is disabled. Set MNEMONAS_LIVE_FAULTS=1 and use an isolated target."
+    fi
+
+    local missing=()
+    [[ -n "$BASE_URL_EXPLICIT" ]] || missing+=("BASE_URL")
+    [[ -n "$STORAGE_ROOT_EXPLICIT" ]] || missing+=("STORAGE_ROOT")
+    [[ -n "$NASD_BIN_EXPLICIT" ]] || missing+=("NASD_BIN")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "explicit ${missing[*]} required for live fault injection"
+    fi
+
+    if [[ "$ALLOW_REAL_STORAGE" != "1" ]]; then
+        case "$STORAGE_ROOT" in
+            /tmp/*|"$ROOT_DIR"/*)
+                ;;
+            *)
+                die "STORAGE_ROOT must be under /tmp or this checkout unless ALLOW_REAL_STORAGE=1 is set: $STORAGE_ROOT"
+                ;;
+        esac
+    fi
+
+    if [[ "$STORAGE_ROOT" == "$HOME/.mnemonas" && "$ALLOW_REAL_STORAGE" != "1" ]]; then
+        die "refusing to run against default personal storage root without ALLOW_REAL_STORAGE=1"
+    fi
+    if [[ ! -x "$NASD_BIN" ]]; then
+        die "NASD_BIN is not executable: $NASD_BIN"
+    fi
+}
+
+confirm_live_fault_target() {
+    echo -e "${YELLOW}WARNING: These tests will corrupt test data and kill/restart the target nasd process.${NC}"
+    echo -e "${YELLOW}Target:${NC} BASE_URL=$BASE_URL STORAGE_ROOT=$STORAGE_ROOT NASD_BIN=$NASD_BIN"
+    if [[ "$FAULT_INJECTION_ASSUME_YES" == "1" ]]; then
+        return
+    fi
+    if [[ ! -t 0 ]]; then
+        die "non-interactive live fault injection requires FAULT_INJECTION_ASSUME_YES=1"
+    fi
+
+    local confirmation
+    read -r -p "Type MNEMONAS-FAULT to continue: " confirmation
+    if [[ "$confirmation" != "MNEMONAS-FAULT" ]]; then
+        die "confirmation did not match"
+    fi
+}
+
+resolve_nasd_pids() {
+    if [[ -n "$NASD_PID" ]]; then
+        printf '%s\n' "$NASD_PID"
+        return
+    fi
+    if [[ -n "$FAULT_KILL_PATTERN" ]]; then
+        pgrep -f -- "$FAULT_KILL_PATTERN" || true
+        return
+    fi
+
+    pgrep -f -- "$NASD_BIN" || true
+}
+
+kill_target_nasd() {
+    local pids=()
+    mapfile -t pids < <(resolve_nasd_pids)
+    if [[ ${#pids[@]} -ne 1 ]]; then
+        die "expected exactly one target nasd PID, got ${#pids[@]}. Set NASD_PID or FAULT_KILL_PATTERN."
+    fi
+
+    log_warn "Killing nasd PID ${pids[0]}"
+    kill -9 "${pids[0]}" || true
+    SERVICE_WAS_KILLED=1
+}
+
+restart_target_nasd() {
+    log_info "Restarting service..."
+    if [[ -f "$CONFIG_FILE" ]]; then
+        "$NASD_BIN" --config "$CONFIG_FILE" &
+    else
+        "$NASD_BIN" &
+    fi
+    NASD_PID=$!
+    sleep 2
+    SERVICE_WAS_KILLED=0
+}
 
 read_config_value() {
     local section=$1
@@ -185,23 +284,23 @@ curl() {
 cleanup() {
     log_info "Cleaning up..."
     rm -rf "$TEST_DIR"
-    # Restart service if it was killed
-    if ! curl -sf "$BASE_URL/health" > /dev/null 2>&1; then
+    # Restart only after this script killed the explicitly confirmed target.
+    if [[ "$SERVICE_WAS_KILLED" == "1" ]] && ! curl -sf "$BASE_URL/health" > /dev/null 2>&1; then
         log_warn "Service not running, attempting restart..."
-        $NASD_BIN &
-        sleep 2
+        restart_target_nasd
     fi
 }
 trap cleanup EXIT
 
 setup() {
     log_info "Setting up test environment..."
+    require_live_fault_target
+    confirm_live_fault_target
     mkdir -p "$TEST_DIR"
     
     # Ensure service is running
     if ! curl -sf "$BASE_URL/health" > /dev/null 2>&1; then
-        echo -e "${RED}ERROR: MnemoNAS service not running${NC}"
-        exit 1
+        die "MnemoNAS service not running at $BASE_URL"
     fi
 
     configure_webdav_auth
@@ -227,7 +326,7 @@ test_crash_during_write() {
     
     # Wait a moment then kill the service
     sleep 0.5
-    pkill -9 -f nasd || true
+    kill_target_nasd
     
     # Wait for upload process to fail
     wait $upload_pid 2>/dev/null || true
@@ -238,9 +337,7 @@ test_crash_during_write() {
     local tmp_files=$(find "$OBJECTS_DIR" -name "*.tmp" 2>/dev/null | wc -l)
     
     # Restart service
-    log_info "Restarting service..."
-    $NASD_BIN &
-    sleep 2
+    restart_target_nasd
     
     # Wait for service to be healthy
     local retries=10
@@ -457,12 +554,6 @@ main() {
     echo " 故障注入回归测试"
     echo "=============================================="
     echo ""
-    echo -e "${YELLOW}WARNING: These tests will kill and restart the service!${NC}"
-    echo -e "${YELLOW}Make sure no important operations are in progress.${NC}"
-    echo ""
-    read -r -p "Press Enter to continue or Ctrl+C to abort..."
-    echo ""
-
     setup
 
     # Run tests
@@ -477,14 +568,29 @@ main() {
     
     # These tests modify data files - run with caution
     echo -e "${YELLOW}The following tests will modify data files.${NC}"
-    read -p "Run corruption tests? [y/N] " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    local run_corruption="$RUN_CORRUPTION_TESTS"
+    if [[ "$run_corruption" == "prompt" ]]; then
+        if [[ -t 0 ]]; then
+            read -r -p "Run corruption tests? [y/N] " reply
+            echo ""
+            if [[ "$reply" =~ ^[Yy]$ ]]; then
+                run_corruption="1"
+            else
+                run_corruption="0"
+            fi
+        else
+            run_corruption="0"
+        fi
+    fi
+
+    if [[ "$run_corruption" == "1" ]]; then
         test_object_corruption
         echo ""
         
         test_metadata_corruption
         echo ""
+    else
+        log_skip "Corruption tests disabled; set RUN_CORRUPTION_TESTS=1 to enable"
     fi
 
     # Summary
