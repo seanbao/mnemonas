@@ -444,6 +444,15 @@ format = "console"
 ```bash
 # 运行全部测试（Go + Rust + 前端单测）
 make test
+
+# 深度测试矩阵（Go race/fuzz + 前端 property + Playwright 交互完整性）
+make test-torture
+```
+
+`make test-torture` 默认只运行非破坏性测试。它会覆盖控制面竞态、Go fuzz 种子、前端属性测试，以及真实浏览器里的人类交互路径和运行时完整性扫描；耗时比 `make test` 更长，适合发布前、重构后或排查隐性问题时使用。需要缩短本地验证时可临时覆盖：
+
+```bash
+GO_FUZZTIME=2s RUN_GO_RACE=0 RUN_E2E_TORTURE=0 make test-torture
 ```
 
 ### Go 测试
@@ -563,6 +572,22 @@ curl http://localhost:9091/stats            # dataplane 统计
 - 维护操作：Scrub/Metrics/Diagnostics
 - 安全测试：路径穿越防护
 - 认证测试：登录/继续/令牌刷新
+
+### 故障注入测试
+
+`scripts/fault-injection-test.sh` 会杀死并重启 `nasd`、写入测试文件，并可直接损坏对象和元数据文件。它默认关闭，不能直接对个人数据目录运行；必须显式指定隔离测试实例：
+
+```bash
+MNEMONAS_LIVE_FAULTS=1 \
+BASE_URL=http://127.0.0.1:18080 \
+STORAGE_ROOT=/tmp/mnemonas-fault-target \
+NASD_BIN="$PWD/bin/nasd" \
+FAULT_INJECTION_ASSUME_YES=1 \
+RUN_CORRUPTION_TESTS=0 \
+./scripts/fault-injection-test.sh
+```
+
+安全门禁由 `scripts/test-fault-injection-safety.sh` 覆盖，并纳入 `make scripts-check`。脚本要求 `BASE_URL`、`STORAGE_ROOT`、`NASD_BIN` 都来自显式环境变量；默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`，需要真实存储路径时必须额外设置 `ALLOW_REAL_STORAGE=1`。
 
 ### 性能基准测试
 
