@@ -373,6 +373,21 @@ func (s *Store) DeleteVersion(ctx context.Context, path, hash string) error {
 
 // DeleteOldVersions deletes versions older than maxAge or exceeding maxCount
 func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int, maxAge time.Duration) ([]string, error) {
+	versions, err := s.DeleteOldVersionsDetailed(ctx, path, maxCount, maxAge)
+	if err != nil {
+		return nil, err
+	}
+
+	hashes := make([]string, 0, len(versions))
+	for _, version := range versions {
+		hashes = append(hashes, version.Hash)
+	}
+	return hashes, nil
+}
+
+// DeleteOldVersionsDetailed deletes versions older than maxAge or exceeding maxCount
+// and returns the full deleted version records for callers that may need rollback.
+func (s *Store) DeleteOldVersionsDetailed(ctx context.Context, path string, maxCount int, maxAge time.Duration) ([]Version, error) {
 	path, err := normalizeVersionStorePath(path)
 	if err != nil {
 		return nil, err
@@ -394,21 +409,23 @@ func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int
 
 	whereClause := strings.Join(conditions, " OR ")
 
-	// Get hashes to delete
-	selectQuery := fmt.Sprintf(`SELECT hash FROM versions WHERE path = ? AND (%s)`, whereClause)
+	// Get version rows to delete so callers can restore metadata if a later cleanup step fails.
+	selectQuery := fmt.Sprintf(`SELECT id, path, hash, size, created_at, COALESCE(comment, '') FROM versions WHERE path = ? AND (%s)`, whereClause)
 	rows, err := s.db.QueryContext(ctx, selectQuery, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var hashes []string
+	var versions []Version
 	for rows.Next() {
-		var hash string
-		if err := rows.Scan(&hash); err != nil {
+		var version Version
+		var createdAt int64
+		if err := rows.Scan(&version.ID, &version.Path, &version.Hash, &version.Size, &createdAt, &version.Comment); err != nil {
 			return nil, err
 		}
-		hashes = append(hashes, hash)
+		version.CreatedAt = time.Unix(createdAt, 0)
+		versions = append(versions, version)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -419,7 +436,47 @@ func (s *Store) DeleteOldVersions(ctx context.Context, path string, maxCount int
 	deleteQuery := fmt.Sprintf(`DELETE FROM versions WHERE path = ? AND (%s)`, whereClause)
 	_, err = s.db.ExecContext(ctx, deleteQuery, args...)
 
-	return hashes, err
+	return versions, err
+}
+
+// RestoreVersions restores previously deleted version metadata rows.
+func (s *Store) RestoreVersions(ctx context.Context, versions []Version) error {
+	if len(versions) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO versions (id, path, hash, size, created_at, comment) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, version := range versions {
+		cleanPath, err := normalizeVersionStorePath(version.Path)
+		if err != nil {
+			return err
+		}
+		if _, err := stmt.ExecContext(ctx, version.ID, cleanPath, version.Hash, version.Size, version.CreatedAt.Unix(), version.Comment); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // GetAllVersionHashes returns all version hashes in the database

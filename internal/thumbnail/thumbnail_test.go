@@ -394,6 +394,27 @@ func TestGetThumbnail_Caching(t *testing.T) {
 	}
 }
 
+func TestGetThumbnailVersioned_BypassesStaleCacheForNewVersion(t *testing.T) {
+	tmpDir, cleanup := createTempDir(t)
+	defer cleanup()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := svc.GetThumbnailVersioned(ctx, "/test/versioned.png", "v1", SizeSmall, bytes.NewReader(createTestImage(64, 64))); err != nil {
+		t.Fatalf("GetThumbnailVersioned(v1) failed: %v", err)
+	}
+
+	// Wait for async cache persistence so a stale cache entry exists for v1.
+	time.Sleep(100 * time.Millisecond)
+
+	if _, err := svc.GetThumbnailVersioned(ctx, "/test/versioned.png", "v2", SizeSmall, bytes.NewReader([]byte("not-an-image"))); err == nil {
+		t.Fatal("expected new thumbnail version to bypass old cache entry and regenerate")
+	}
+}
+
 func TestGetThumbnail_ReturnsInProgressGeneratedBytesBeforeCacheSaveCompletes(t *testing.T) {
 	tmpDir, cleanup := createTempDir(t)
 	defer cleanup()
