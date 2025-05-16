@@ -137,15 +137,30 @@ export function ShareDialog({
   }, [isLoading, onClose, resetForm])
 
   useEffect(() => {
+    const wasOpen = currentOpenRef.current
+    const previousFilePath = currentFilePathRef.current
+
     currentOpenRef.current = isOpen
     if (!isOpen) {
       return
     }
 
-    createSessionRef.current += 1
     currentFilePathRef.current = filePath
-    resetForm()
-    setIsLoading(false)
+    if (wasOpen && previousFilePath === filePath) {
+      return
+    }
+
+    createSessionRef.current += 1
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      resetForm()
+      setIsLoading(false)
+    })
+
+    return () => {
+      cancelled = true
+    }
   }, [filePath, isOpen, resetForm])
 
   const handleCreate = async () => {

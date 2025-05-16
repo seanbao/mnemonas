@@ -264,6 +264,10 @@ export function DirectoryPicker({
   const currentSelectedPathRef = useRef(normalizeInitialPath(initialPath))
   const currentNewFolderNameRef = useRef('')
   const currentOpenRef = useRef(isOpen)
+  const lastResetTargetRef = useRef({
+    rootPath: effectiveRootPath,
+    selectedPath: normalizeInitialPath(initialPath),
+  })
 
   useEffect(() => {
     currentSelectedPathRef.current = selectedPath
@@ -274,15 +278,38 @@ export function DirectoryPicker({
   }, [newFolderName])
 
   useEffect(() => {
+    const wasOpen = currentOpenRef.current
     currentOpenRef.current = isOpen
     if (!isOpen) return
+    const nextSelectedPath = normalizeInitialPath(initialPath)
+    const lastResetTarget = lastResetTargetRef.current
+    if (
+      wasOpen
+      && lastResetTarget.rootPath === effectiveRootPath
+      && lastResetTarget.selectedPath === nextSelectedPath
+    ) {
+      return
+    }
+
+    lastResetTargetRef.current = {
+      rootPath: effectiveRootPath,
+      selectedPath: nextSelectedPath,
+    }
     pickerSessionRef.current += 1
-    setSelectedPath(normalizeInitialPath(initialPath))
-    setExpandedPaths(new Set([effectiveRootPath]))
-    setLoadedPaths(new Set())
-    setFolderContents(new Map())
-    setIsCreatingFolder(false)
-    setNewFolderName('')
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      setSelectedPath(nextSelectedPath)
+      setExpandedPaths(new Set([effectiveRootPath]))
+      setLoadedPaths(new Set())
+      setFolderContents(new Map())
+      setIsCreatingFolder(false)
+      setNewFolderName('')
+    })
+
+    return () => {
+      cancelled = true
+    }
   }, [isOpen, initialPath, normalizeInitialPath, effectiveRootPath])
 
   
@@ -298,12 +325,20 @@ export function DirectoryPicker({
       return
     }
 
-    setFolderContents((prev) => {
-      const next = new Map(prev)
-      next.set(effectiveRootPath, rootData.files)
-      return next
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      setFolderContents((prev) => {
+        const next = new Map(prev)
+        next.set(effectiveRootPath, rootData.files)
+        return next
+      })
+      setLoadedPaths((prev) => new Set(prev).add(effectiveRootPath))
     })
-    setLoadedPaths((prev) => new Set(prev).add(effectiveRootPath))
+
+    return () => {
+      cancelled = true
+    }
   }, [isOpen, rootData, effectiveRootPath])
 
   const handleRetryRoot = useCallback(async () => {
@@ -354,25 +389,26 @@ export function DirectoryPicker({
   }, [expandedPaths, loadDirectory])
 
   // Build tree structure
-  const buildTree = useCallback((files: FileItem[]): TreeNodeData[] => {
-    const folders = files.filter(f => f.isDir)
-    return folders.map(folder => {
-      const childFiles = folderContents.get(folder.path) || []
-      return {
-        path: folder.path,
-        name: folder.name,
-        isExpanded: expandedPaths.has(folder.path),
-        children: expandedPaths.has(folder.path) ? buildTree(childFiles) : [],
-        isLoaded: loadedPaths.has(folder.path),
-      }
-    })
-  }, [expandedPaths, folderContents, loadedPaths])
-
   const rootFolders = useMemo(() => {
     const rootFiles = folderContents.get(effectiveRootPath)
     if (!rootFiles) return []
+
+    function buildTree(files: FileItem[]): TreeNodeData[] {
+      const folders = files.filter(f => f.isDir)
+      return folders.map(folder => {
+        const childFiles = folderContents.get(folder.path) || []
+        return {
+          path: folder.path,
+          name: folder.name,
+          isExpanded: expandedPaths.has(folder.path),
+          children: expandedPaths.has(folder.path) ? buildTree(childFiles) : [],
+          isLoaded: loadedPaths.has(folder.path),
+        }
+      })
+    }
+
     return buildTree(rootFiles)
-  }, [buildTree, folderContents, effectiveRootPath])
+  }, [expandedPaths, folderContents, loadedPaths, effectiveRootPath])
 
   const handleCreateFolder = useCallback(async () => {
     const trimmedFolderName = newFolderName.trim()

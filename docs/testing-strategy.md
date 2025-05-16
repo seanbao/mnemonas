@@ -152,7 +152,15 @@ func TestCASIntegration_WriteReadVerify(t *testing.T) {
 
 ### 3.1 用户场景测试
 
-位于 `scripts/e2e-test.sh`，测试真实用户场景：
+默认入口是 `make e2e`，它通过 `scripts/run-e2e-isolated.sh` 启动临时后端、临时存储和非默认端口，再调用 `scripts/e2e-test.sh` 测试真实用户场景。需要跳过耗时测试时：
+
+```bash
+./scripts/run-e2e-isolated.sh --quick
+```
+
+`scripts/e2e-test.sh` 可以手动打一个已启动的服务；此时需要显式提供 `BASE_URL` 和对应的临时存储、配置、密钥、初始密码文件路径。
+
+示例场景：
 
 ```bash
 # 场景：首次启动（认证启用）

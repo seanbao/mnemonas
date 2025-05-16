@@ -50,10 +50,10 @@ WEBDAV_AUTH_ARGS=()
 
 # Utility functions
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED++)); }
-log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED++)); }
+log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED+=1)); }
+log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED+=1)); }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED++)); }
+log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED+=1)); }
 
 read_config_value() {
     local section=$1
@@ -637,8 +637,11 @@ test_path_traversal() {
 test_localhost_binding() {
     log_info "Checking server binding configuration..."
     # This is a documentation/config check, not runtime test
-    if grep -q 'host.*=.*"0.0.0.0"\|host.*=.*"127.0.0.1"' ~/.mnemonas/config.toml 2>/dev/null; then
-        log_ok "Host binding configured in config file"
+    local host
+    host=$(read_config_value server host)
+
+    if [[ -n "$host" ]]; then
+        log_ok "Host binding configured in config file ($host)"
     else
         log_skip "No config file found to check binding"
     fi
