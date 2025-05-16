@@ -550,15 +550,17 @@ curl http://localhost:9091/stats            # dataplane 统计
 
 ### E2E 验收测试
 
-使用 `scripts/e2e-test.sh` 运行完整的端到端测试：
+默认使用隔离后端运行完整的端到端测试，避免误写本机正在运行的 MnemoNAS 服务：
 
 ```bash
 # 完整测试（包含大文件和崩溃恢复测试）
-./scripts/e2e-test.sh
+make e2e
 
 # 快速测试（跳过耗时测试）
-./scripts/e2e-test.sh --quick
+./scripts/run-e2e-isolated.sh --quick
 ```
+
+`scripts/e2e-test.sh` 仍可用于手动验证一个已启动的服务；这种模式必须显式传入 `BASE_URL`、`STORAGE_ROOT`、`CONFIG_FILE`、`SECRETS_FILE` 和 `INITIAL_PASSWORD_FILE`，防止测试数据写入真实存储。
 
 脚本会在认证测试阶段自动尝试使用 bootstrap admin 凭据登录；启用认证但当前环境没有可用 bootstrap 凭据时，依赖管理员权限的 maintenance / diagnostics 检查会标记为 `skip`，避免把权限前置条件误报成产品故障。
 

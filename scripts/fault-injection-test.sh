@@ -39,6 +39,8 @@ MNEMONAS_LIVE_FAULTS="${MNEMONAS_LIVE_FAULTS:-0}"
 FAULT_INJECTION_ASSUME_YES="${FAULT_INJECTION_ASSUME_YES:-0}"
 ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
 RUN_CORRUPTION_TESTS="${RUN_CORRUPTION_TESTS:-prompt}"
+FAULT_UPLOAD_SIZE_MB="${FAULT_UPLOAD_SIZE_MB:-50}"
+FAULT_UPLOAD_LIMIT_RATE="${FAULT_UPLOAD_LIMIT_RATE:-512k}"
 NASD_PID="${NASD_PID:-}"
 FAULT_KILL_PATTERN="${FAULT_KILL_PATTERN:-}"
 SERVICE_WAS_KILLED=0
@@ -51,10 +53,10 @@ ADMIN_ACCESS_TOKEN=""
 WEBDAV_AUTH_ARGS=()
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED++)); }
-log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED++)); }
+log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED+=1)); }
+log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED+=1)); }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED++)); }
+log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED+=1)); }
 die()       { echo -e "${RED}ERROR:${NC} $1" >&2; exit 1; }
 
 require_live_fault_target() {
@@ -318,10 +320,10 @@ test_crash_during_write() {
     log_info "Test 1: Crash during write operation..."
     
     # Create a large file that takes time to upload
-    dd if=/dev/urandom of="$TEST_DIR/large.bin" bs=1M count=50 2>/dev/null
+    dd if=/dev/urandom of="$TEST_DIR/large.bin" bs=1M count="$FAULT_UPLOAD_SIZE_MB" 2>/dev/null
     
     # Start upload in background
-    (curl -sf -X PUT "$WEBDAV_URL/fault-test/large.bin" -T "$TEST_DIR/large.bin" > /dev/null 2>&1) &
+    (curl --limit-rate "$FAULT_UPLOAD_LIMIT_RATE" -sf -X PUT "$WEBDAV_URL/fault-test/large.bin" -T "$TEST_DIR/large.bin" > /dev/null 2>&1) &
     local upload_pid=$!
     
     # Wait a moment then kill the service

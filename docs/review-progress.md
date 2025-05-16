@@ -1,6 +1,6 @@
 # MnemoNAS review progress
 
-Last updated: 2026-04-30
+Last updated: 2026-05-06
 
 This file records verified review progress so future work can continue from the remaining risks instead of repeating completed checks.
 
@@ -28,6 +28,11 @@ This file records verified review progress so future work can continue from the 
 - Dependabot covers the main dataplane Cargo project and the `tools/proto-gen` Cargo project separately.
 - Browser security headers include CSP, `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, and `Permissions-Policy`.
 - Go protobuf files were regenerated with the CI-pinned generator versions: `protoc-gen-go v1.36.11` and `protoc-gen-go-grpc v1.6.1`.
+- Compatible dependency refresh completed across Go, Rust, and web lockfiles. Current security scans are clean.
+- React 19 lint compatibility is verified for file browsing, directory picking, preview reset, share dialogs, share management, and public share access flows.
+- `make e2e` now uses an isolated temporary backend and storage root through `scripts/run-e2e-isolated.sh` instead of defaulting to a possibly real `localhost:8080` service.
+- Fault-injection and E2E shell counters no longer trip `set -e` on successful increments. Crash-during-write live fault coverage now throttles the upload so incomplete upload handling is exercised reliably.
+- Docker npm install cache is serialized with `sharing=locked`, avoiding esbuild postinstall `ETXTBSY` races during BuildKit builds.
 
 ## Recent Validation
 
@@ -71,8 +76,26 @@ This file records verified review progress so future work can continue from the 
 - `npm --prefix web outdated --json --registry=https://registry.npmmirror.com`
 - `npm --prefix web audit --json`
 - `git diff --check`
+- `make scripts-check`
+- `make workflows-check`
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make lint`
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto /tmp/mnemonas-go-tools/golangci-lint-2.11.4-linux-amd64/golangci-lint run ./...`
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make test`
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make coverage`
+- `GOPROXY=https://proxy.golang.org,direct GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make security-check NPM_AUDIT=1`
+- `npm --prefix web run build`
+- `npm --prefix web run test:e2e`
+- Isolated `scripts/e2e-test.sh --full` against `http://127.0.0.1:18180`: 30 passed, 0 failed, 2 manual skips.
+- `GOPROXY=https://proxy.golang.org,direct GOSUMDB=sum.golang.org GOTOOLCHAIN=auto RUN_LIVE_FAULTS=0 GO_FUZZTIME=30s make test-torture`
+- `MNEMONAS_LIVE_FAULTS=1 FAULT_INJECTION_ASSUME_YES=1 RUN_CORRUPTION_TESTS=1 FAULT_UPLOAD_LIMIT_RATE=64k BASE_URL=http://127.0.0.1:18280 ... bash ./scripts/fault-injection-test.sh`: 8 passed, 0 failed, 0 skipped.
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make e2e`
+- `ENV_PATH=$PWD/.env.example HOST_PORT=18083 DATA_DIR=/tmp/mnemonas-docker-preflight-data ./scripts/mnemonas-docker-preflight.sh`
+- `MNEMONAS_HTTP_PORT=18083 MNEMONAS_DATA_DIR=/tmp/mnemonas-docker-preflight-data docker compose -f docker-compose.yml --env-file .env.example config --quiet`
+- `DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg VERSION=codex-check -t mnemonas:codex-check .`
+- `docker run -d --name mnemonas-smoke -p 127.0.0.1:18084:8080 mnemonas:codex-check` followed by `/health` and Web root smoke checks.
 
 ## Remaining Risks
 
-- Default npm registry access is slow in this environment and `npm outdated` timed out after 180 seconds. A one-off query through `registry.npmmirror.com` succeeded and showed patch/minor updates plus optional major upgrades; `npm audit` is clean, so dependency refresh is a maintenance batch rather than a security blocker.
+- Major dependency upgrades are intentionally deferred until a compatibility batch: npm major versions, Rust `prost`/`tonic`/`matchit`/`fastcdc`, and any Go major-line changes. Current compatible updates and security scans are clean.
 - This machine has `GOSUMDB=off` in the ambient shell, which blocks Go's toolchain download verification. Use `GOSUMDB=sum.golang.org` for release/security scans, or unset the local override.
+- Raw `scripts/e2e-test.sh` still targets an already running service; use `make e2e` or `scripts/run-e2e-isolated.sh` for the default isolated path.
