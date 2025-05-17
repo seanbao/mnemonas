@@ -4,7 +4,13 @@
 
 set -euo pipefail
 
-BASE_URL="${1:-http://localhost:8080}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+BASE_URL_ARG="${1:-}"
+BASE_URL_EXPLICIT="${BASE_URL+x}"
+STORAGE_ROOT_EXPLICIT="${MNEMONAS_STORAGE_ROOT+x}"
+BASE_URL="${BASE_URL_ARG:-${BASE_URL:-http://localhost:8080}}"
 DAV_URL="$BASE_URL/dav"
 STORAGE_ROOT="${MNEMONAS_STORAGE_ROOT:-$HOME/.mnemonas}"
 TEST_DIR="$STORAGE_ROOT/files/benchmark-test"
@@ -14,6 +20,46 @@ INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
 INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
 WEBDAV_AUTH_ARGS=()
 ADMIN_ACCESS_TOKEN="${MNEMONAS_ACCESS_TOKEN:-}"
+ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
+CLEANUP_ENABLED=0
+
+require_explicit_benchmark_target() {
+    if [[ -z "$BASE_URL_ARG" && -z "$BASE_URL_EXPLICIT" ]]; then
+        echo "ERROR: explicit base URL is required for scripts/benchmark.sh" >&2
+        echo "Use 'make bench' or './scripts/run-benchmark-isolated.sh' for the default isolated target." >&2
+        exit 1
+    fi
+    if [[ -z "$BASE_URL" ]]; then
+        echo "ERROR: base URL must not be empty" >&2
+        exit 1
+    fi
+
+    if [[ -z "$STORAGE_ROOT_EXPLICIT" ]]; then
+        echo "ERROR: explicit MNEMONAS_STORAGE_ROOT is required for scripts/benchmark.sh" >&2
+        echo "The benchmark creates and deletes files under MNEMONAS_STORAGE_ROOT/files/benchmark-test." >&2
+        exit 1
+    fi
+    if [[ -z "$STORAGE_ROOT" ]]; then
+        echo "ERROR: MNEMONAS_STORAGE_ROOT must not be empty" >&2
+        exit 1
+    fi
+
+    if [[ "$ALLOW_REAL_STORAGE" != "1" ]]; then
+        case "$STORAGE_ROOT" in
+            /tmp/*|"$PROJECT_ROOT"/*) ;;
+            *)
+                echo "ERROR: MNEMONAS_STORAGE_ROOT must be under /tmp or this checkout unless ALLOW_REAL_STORAGE=1 is set: $STORAGE_ROOT" >&2
+                exit 1
+                ;;
+        esac
+    fi
+
+    if [[ -n "${HOME:-}" && "$STORAGE_ROOT" == "$HOME/.mnemonas" && "$ALLOW_REAL_STORAGE" != "1" ]]; then
+        echo "ERROR: refusing to benchmark against default personal storage root: $STORAGE_ROOT" >&2
+        echo "Use 'make bench' or set ALLOW_REAL_STORAGE=1 only for an intentionally disposable target." >&2
+        exit 1
+    fi
+}
 
 read_config_value() {
     local section=$1
@@ -125,6 +171,9 @@ metrics_curl() {
 }
 
 cleanup() {
+    if [[ "$CLEANUP_ENABLED" != "1" ]]; then
+        return
+    fi
     rm -rf "$TEST_DIR"
 }
 
@@ -150,6 +199,8 @@ echo "Base URL: $BASE_URL"
 echo "Storage Root: $STORAGE_ROOT"
 echo ""
 
+require_explicit_benchmark_target
+CLEANUP_ENABLED=1
 configure_webdav_auth
 configure_admin_auth
 

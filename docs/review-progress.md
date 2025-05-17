@@ -31,6 +31,7 @@ This file records verified review progress so future work can continue from the 
 - Compatible dependency refresh completed across Go, Rust, and web lockfiles. Current security scans are clean.
 - React 19 lint compatibility is verified for file browsing, directory picking, preview reset, share dialogs, share management, and public share access flows.
 - `make e2e` now uses an isolated temporary backend and storage root through `scripts/run-e2e-isolated.sh`; raw `scripts/e2e-test.sh` now refuses to run unless the target URL and storage/config/password paths are explicit.
+- `make bench` now uses an isolated temporary backend and storage root through `scripts/run-benchmark-isolated.sh`; raw `scripts/benchmark.sh` now refuses implicit base URLs and personal storage roots.
 - Fault-injection and E2E shell counters no longer trip `set -e` on successful increments. Crash-during-write live fault coverage now throttles the upload so incomplete upload handling is exercised reliably.
 - Docker npm install cache is serialized with `sharing=locked`, avoiding esbuild postinstall `ETXTBSY` races during BuildKit builds.
 
@@ -77,6 +78,7 @@ This file records verified review progress so future work can continue from the 
 - `npm --prefix web audit --json`
 - `git diff --check`
 - `make scripts-check`
+- `./scripts/test-benchmark-safety.sh`
 - `./scripts/test-e2e-safety.sh`
 - `make workflows-check`
 - `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make lint`
@@ -91,6 +93,7 @@ This file records verified review progress so future work can continue from the 
 - `GOPROXY=https://proxy.golang.org,direct GOSUMDB=sum.golang.org GOTOOLCHAIN=auto RUN_LIVE_FAULTS=0 GO_FUZZTIME=30s make test-torture`
 - `MNEMONAS_LIVE_FAULTS=1 FAULT_INJECTION_ASSUME_YES=1 RUN_CORRUPTION_TESTS=1 FAULT_UPLOAD_LIMIT_RATE=64k BASE_URL=http://127.0.0.1:18280 ... bash ./scripts/fault-injection-test.sh`: 8 passed, 0 failed, 0 skipped.
 - `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make e2e`
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make bench`
 - `ENV_PATH=$PWD/.env.example HOST_PORT=18083 DATA_DIR=/tmp/mnemonas-docker-preflight-data ./scripts/mnemonas-docker-preflight.sh`
 - `MNEMONAS_HTTP_PORT=18083 MNEMONAS_DATA_DIR=/tmp/mnemonas-docker-preflight-data docker compose -f docker-compose.yml --env-file .env.example config --quiet`
 - `DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg VERSION=codex-check -t mnemonas:codex-check .`
@@ -100,4 +103,4 @@ This file records verified review progress so future work can continue from the 
 
 - Major dependency upgrades are intentionally deferred until a compatibility batch: npm major versions, Rust `prost`/`tonic`/`matchit`/`fastcdc`, and any Go major-line changes. Current compatible updates and security scans are clean.
 - This machine has `GOSUMDB=off` in the ambient shell, which blocks Go's toolchain download verification. Use `GOSUMDB=sum.golang.org` for release/security scans, or unset the local override.
-- Raw `scripts/e2e-test.sh` still targets an already running service, but now requires explicit environment variables and refuses non-isolated storage unless `ALLOW_REAL_STORAGE=1` is set.
+- Raw `scripts/e2e-test.sh` and `scripts/benchmark.sh` still target already running services, but now require explicit environment variables and refuse non-isolated storage unless `ALLOW_REAL_STORAGE=1` is set.
