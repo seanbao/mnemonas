@@ -642,8 +642,11 @@ internal/
 │   └── matrix_test.go         # 配置矩阵测试
 scripts/
 ├── e2e-test.sh                # E2E 测试
+├── run-e2e-isolated.sh        # 隔离 E2E 包装入口
 ├── torture-test.sh            # 非破坏性测死矩阵
 ├── fault-injection-test.sh    # 显式隔离目标上的破坏性故障注入
+├── run-benchmark-isolated.sh  # 隔离 benchmark 包装入口
+├── test-benchmark-safety.sh   # benchmark 门禁回归测试
 ├── test-fault-injection-safety.sh # 故障注入门禁回归测试
 └── benchmark.sh               # 性能测试
 .github/workflows/

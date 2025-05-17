@@ -289,7 +289,7 @@ make e2e                         # 隔离完整测试
 ./scripts/run-e2e-isolated.sh --quick
 
 # 性能基准测试
-./scripts/benchmark.sh
+make bench
 
 # 手动测试 WebDAV
 curl -X PROPFIND http://localhost:8080/dav/ -H "Depth: 1"

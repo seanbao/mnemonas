@@ -295,7 +295,8 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [scripts/run-e2e-isolated.sh](scripts/run-e2e-isolated.sh) | 启动隔离后端并运行 E2E 验收测试，`make e2e` 默认使用它 |
 | [scripts/e2e-test.sh](scripts/e2e-test.sh) | 对显式指定的已运行服务执行 E2E 验收测试 |
 | [scripts/torture-test.sh](scripts/torture-test.sh) | 非破坏性深度测试矩阵：race、fuzz、property、浏览器交互完整性 |
-| [scripts/benchmark.sh](scripts/benchmark.sh) | 性能基准测试 |
+| [scripts/run-benchmark-isolated.sh](scripts/run-benchmark-isolated.sh) | 启动隔离后端并运行性能基准测试，`make bench` 默认使用它 |
+| [scripts/benchmark.sh](scripts/benchmark.sh) | 对显式指定的本地服务和存储根执行性能基准测试 |
 | [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | 破坏性故障注入测试；默认关闭，必须显式指定隔离目标 |
 | [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | 反向代理配置 |
 
