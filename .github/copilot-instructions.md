@@ -285,8 +285,8 @@ CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v $packages
 cd dataplane && cargo test
 
 # E2E 验收测试
-./scripts/e2e-test.sh           # 完整测试
-./scripts/e2e-test.sh --quick   # 快速测试
+make e2e                         # 隔离完整测试
+./scripts/run-e2e-isolated.sh --quick
 
 # 性能基准测试
 ./scripts/benchmark.sh
