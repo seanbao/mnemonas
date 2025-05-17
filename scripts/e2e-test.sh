@@ -2,7 +2,8 @@
 # MnemoNAS End-to-End Acceptance Tests
 # Week 8: Comprehensive validation for MVP release
 #
-# Usage: ./scripts/e2e-test.sh [--quick|--full]
+# Usage: BASE_URL=... STORAGE_ROOT=... CONFIG_FILE=... SECRETS_FILE=... \
+#   INITIAL_PASSWORD_FILE=... ./scripts/e2e-test.sh [--quick|--full]
 #   --quick: Skip slow tests (crash injection, large files)
 #   --full:  Run all tests including stress tests (default)
 
@@ -16,7 +17,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Configuration
+BASE_URL_EXPLICIT="${BASE_URL+x}"
+STORAGE_ROOT_EXPLICIT="${STORAGE_ROOT+x}"
+CONFIG_FILE_EXPLICIT="${CONFIG_FILE+x}"
+SECRETS_FILE_EXPLICIT="${SECRETS_FILE+x}"
+INITIAL_PASSWORD_FILE_EXPLICIT="${INITIAL_PASSWORD_FILE+x}"
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 WEBDAV_URL="${BASE_URL}/dav"
 API_URL="${BASE_URL}/api/v1"
@@ -26,8 +35,10 @@ CONFIG_FILE="${CONFIG_FILE:-$STORAGE_ROOT/config.toml}"
 SECRETS_FILE="${SECRETS_FILE:-$STORAGE_ROOT/secrets.json}"
 INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
 USERS_FILE="${USERS_FILE:-$INTERNAL_DIR/users.json}"
+ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
 TEST_DIR="/tmp/mnemonas-e2e-$$"
 QUICK_MODE=false
+CLEANUP_REMOTE_ENABLED=0
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -54,6 +65,38 @@ log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED+=1)); }
 log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED+=1)); }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED+=1)); }
+
+require_explicit_e2e_target() {
+    local missing=()
+
+    [[ -n "$BASE_URL_EXPLICIT" ]] || missing+=("BASE_URL")
+    [[ -n "$STORAGE_ROOT_EXPLICIT" ]] || missing+=("STORAGE_ROOT")
+    [[ -n "$CONFIG_FILE_EXPLICIT" ]] || missing+=("CONFIG_FILE")
+    [[ -n "$SECRETS_FILE_EXPLICIT" ]] || missing+=("SECRETS_FILE")
+    [[ -n "$INITIAL_PASSWORD_FILE_EXPLICIT" ]] || missing+=("INITIAL_PASSWORD_FILE")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${RED}ERROR:${NC} explicit ${missing[*]} required for scripts/e2e-test.sh" >&2
+        echo "Use 'make e2e' or './scripts/run-e2e-isolated.sh' for the default isolated target." >&2
+        exit 1
+    fi
+
+    if [[ "$ALLOW_REAL_STORAGE" != "1" ]]; then
+        case "$STORAGE_ROOT" in
+            /tmp/*|"$PROJECT_ROOT"/*) ;;
+            *)
+                echo -e "${RED}ERROR:${NC} STORAGE_ROOT must be under /tmp or this checkout unless ALLOW_REAL_STORAGE=1 is set: $STORAGE_ROOT" >&2
+                exit 1
+                ;;
+        esac
+    fi
+
+    if [[ -n "${HOME:-}" && "$STORAGE_ROOT" == "$HOME/.mnemonas" && "$ALLOW_REAL_STORAGE" != "1" ]]; then
+        echo -e "${RED}ERROR:${NC} refusing to run E2E tests against default personal storage root: $STORAGE_ROOT" >&2
+        echo "Use 'make e2e' or set ALLOW_REAL_STORAGE=1 only for an intentionally disposable target." >&2
+        exit 1
+    fi
+}
 
 read_config_value() {
     local section=$1
@@ -173,6 +216,9 @@ curl() {
 cleanup() {
     log_info "Cleaning up test directory..."
     rm -rf "$TEST_DIR"
+    if [[ "$CLEANUP_REMOTE_ENABLED" != "1" ]]; then
+        return
+    fi
     # Clean up test files in WebDAV (ignore errors)
     curl -s -X DELETE "$WEBDAV_URL/e2e-test/" > /dev/null 2>&1 || true
 }
@@ -182,6 +228,7 @@ trap 'cleanup' EXIT
 
 setup() {
     log_info "Setting up test environment..."
+    require_explicit_e2e_target
     mkdir -p "$TEST_DIR"
     configure_webdav_auth
     
@@ -192,6 +239,7 @@ setup() {
         exit 1
     fi
     log_info "Service is healthy"
+    CLEANUP_REMOTE_ENABLED=1
 }
 
 admin_api_request() {
