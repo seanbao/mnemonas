@@ -156,6 +156,11 @@ root = "$data_dir"
 
 [dataplane]
 grpc_address = "0.0.0.0:19090"
+
+[ dataplane . cdc ]
+min_chunk_size = 65_536
+avg_chunk_size = 1_048_576
+max_chunk_size = 4_194_304
 EOF
 
 	CAPTURE_DIR="$capture_dir" \
@@ -169,6 +174,9 @@ EOF
 	assert_file_contains "$case_dir/start.log" "dataplane HTTP address is 0.0.0.0:19091"
 	assert_file_contains "$capture_dir/dataplane.args" "--grpc 0.0.0.0:19090"
 	assert_file_contains "$capture_dir/dataplane.args" "--listen 0.0.0.0:19091"
+	assert_file_contains "$capture_dir/dataplane.args" "--min-chunk-size 65536"
+	assert_file_contains "$capture_dir/dataplane.args" "--avg-chunk-size 1048576"
+	assert_file_contains "$capture_dir/dataplane.args" "--max-chunk-size 4194304"
 }
 
 run_default_config_test
