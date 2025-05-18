@@ -117,7 +117,7 @@ run_existing_config_test() {
   local fake_path="$case_dir/fake-bin"
   local release_dir="$case_dir/release"
   local install_dir="$case_dir/install"
-  local storage_dir="$case_dir/custom-storage"
+  local storage_dir="$case_dir/custom#storage"
   mkdir -p "$install_dir/etc/mnemonas" "$storage_dir"
   make_fake_admin_path "$fake_path"
   make_release_tree "$release_dir"
@@ -128,7 +128,7 @@ host = "127.0.0.1"
 port = 18080
 
 [ storage ] # storage root may have comments in hand-edited TOML
-root = "$storage_dir"
+root = "$storage_dir" # keep hashes inside quoted values
 
 [ dataplane ] # dataplane endpoint
 grpc_address = '127.0.0.1:19090'

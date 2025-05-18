@@ -80,7 +80,7 @@ run_prepare_test() {
 run_existing_env_test() {
 	local case_dir="$TMP_ROOT/existing-env"
 	local repo_dir="$case_dir/repo"
-	local data_dir="$case_dir/data"
+	local data_dir="$case_dir/data#existing"
 	local capture_dir="$case_dir/capture"
 	local quickstart="$REPO_ROOT/scripts/docker-quickstart.sh"
 	mkdir -p "$capture_dir"
@@ -89,7 +89,7 @@ run_existing_env_test() {
 MNEMONAS_UID=999
 MNEMONAS_GID=999
 MNEMONAS_HTTP_PORT=19080
-MNEMONAS_DATA_DIR=$data_dir
+MNEMONAS_DATA_DIR="$data_dir" # keep hashes inside quoted values
 EXTRA_VALUE=keep-me
 EOF
 
@@ -104,7 +104,7 @@ EOF
 	assert_file_contains "$repo_dir/.env" "MNEMONAS_UID=$(id -u)"
 	assert_file_contains "$repo_dir/.env" "MNEMONAS_GID=$(id -g)"
 	assert_file_contains "$repo_dir/.env" "MNEMONAS_HTTP_PORT=19080"
-	assert_file_contains "$repo_dir/.env" "MNEMONAS_DATA_DIR=$data_dir"
+	assert_file_contains "$repo_dir/.env" "MNEMONAS_DATA_DIR=\"$data_dir\""
 	assert_file_contains "$repo_dir/.env" "EXTRA_VALUE=keep-me"
 	assert_file_contains "$capture_dir/preflight.log" "data=$data_dir port=19080"
 	assert_file_contains "$case_dir/out.log" "Web UI:              http://localhost:19080"

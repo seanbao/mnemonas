@@ -78,6 +78,7 @@ run_mismatched_storage_root_warning_test() {
 	local case_dir="$TMP_ROOT/mismatched-root"
 	local app_dir="$case_dir/app"
 	local data_dir="$case_dir/data"
+	local configured_dir="$data_dir/nested#quoted"
 	local capture_dir="$case_dir/capture"
 	mkdir -p "$data_dir" "$capture_dir"
 	make_fake_app "$app_dir"
@@ -87,7 +88,7 @@ host = "0.0.0.0"
 port = 8080
 
 [ storage ] # storage root may have comments in hand-edited TOML
-root = '$data_dir/nested'
+root = '$configured_dir' # keep hashes inside quoted values
 
 [ dataplane ] # dataplane endpoint
 grpc_address = '127.0.0.1:9090'
@@ -99,13 +100,13 @@ EOF
 		CONFIG_PATH="$data_dir/config.toml" \
 		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/start.log" 2>&1
 
-	assert_file_contains "$case_dir/start.log" "[WARN] Configured [storage].root is $data_dir/nested, but Docker STORAGE_ROOT is $data_dir"
-	assert_file_contains "$capture_dir/dataplane.args" "--data-dir $data_dir/nested/.mnemonas/objects"
+	assert_file_contains "$case_dir/start.log" "[WARN] Configured [storage].root is $configured_dir, but Docker STORAGE_ROOT is $data_dir"
+	assert_file_contains "$capture_dir/dataplane.args" "--data-dir $configured_dir/.mnemonas/objects"
 	assert_file_contains "$capture_dir/nasd.args" "--config $data_dir/config.toml"
-	assert_mode "$data_dir/nested" "750"
-	assert_mode "$data_dir/nested/files" "750"
-	assert_mode "$data_dir/nested/.mnemonas" "700"
-	assert_mode "$data_dir/nested/.mnemonas/objects" "700"
+	assert_mode "$configured_dir" "750"
+	assert_mode "$configured_dir/files" "750"
+	assert_mode "$configured_dir/.mnemonas" "700"
+	assert_mode "$configured_dir/.mnemonas/objects" "700"
 }
 
 run_missing_storage_root_test() {

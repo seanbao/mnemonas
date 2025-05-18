@@ -99,7 +99,37 @@ EOF
 	assert_not_exists "$capture_path"
 }
 
+run_quoted_hash_storage_root_test() {
+	local case_dir="$TMP_ROOT/hash-root"
+	local config_path="$case_dir/config.toml"
+	local storage_dir="$case_dir/storage#with-hash"
+	local capture_path="$case_dir/dataplane.args"
+	local dataplane_bin="$case_dir/capture-dataplane"
+	mkdir -p "$case_dir"
+
+	cat > "$config_path" <<EOF
+[ storage ]
+root = "$storage_dir" # inline comments should not truncate quoted values
+
+[ dataplane ]
+grpc_address = "127.0.0.1:19091" # regular inline comment
+EOF
+
+	write_executable "$dataplane_bin" \
+		'#!/usr/bin/env bash' \
+		'printf "%s\n" "$*" > "$CAPTURE_PATH"'
+
+	CAPTURE_PATH="$capture_path" \
+		CONFIG_PATH="$config_path" \
+		DATAPLANE_BIN="$dataplane_bin" \
+		bash "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh"
+
+	assert_file_contains "$capture_path" "--grpc 127.0.0.1:19091"
+	assert_file_contains "$capture_path" "--data-dir $storage_dir/.mnemonas/objects"
+}
+
 run_underscore_chunk_values_test
 run_invalid_chunk_value_test
+run_quoted_hash_storage_root_test
 
 printf '[dataplane-start-test] all checks passed\n'
