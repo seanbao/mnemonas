@@ -32,7 +32,7 @@
 | 工具 | 用途 |
 | ---- | ---- |
 | Docker Engine + Compose v2 插件 | 容器化部署，需支持 `docker compose` 命令 |
-| golangci-lint | Go 代码静态检查 |
+| golangci-lint | Go 代码静态检查；`make lint` / `make check` 默认要求安装 |
 | cargo-watch | Rust 热重载 |
 | nvm | Node.js 版本管理 |
 
@@ -64,7 +64,7 @@ brew install protobuf
 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 
-# 可选: 代码检查工具
+# 代码检查工具（make lint / make check 需要）
 brew install golangci-lint
 cargo install cargo-watch --version 8.5.3
 ```
