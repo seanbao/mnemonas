@@ -228,7 +228,7 @@ run_custom_storage_root_warning_test() {
 	make_fake_bin "$fake_bin"
 	cat > "$case_dir/home/.mnemonas/config.toml" <<'TOML'
 [storage]
-root = "/data-root"
+root = "/data#root" # keep hashes inside quoted values
 TOML
 
 	PATH="$fake_bin:$PATH" \
@@ -236,7 +236,7 @@ TOML
 		HOME="$case_dir/home" \
 		bash "$PROJECT_ROOT/scripts/mnemonas-docker-preflight.sh" > "$out"
 
-	assert_file_contains "$out" "[storage].root = /data-root"
+	assert_file_contains "$out" "[storage].root = /data#root"
 	assert_file_contains "$out" "Summary: 0 failure(s), 1 warning(s)"
 }
 
