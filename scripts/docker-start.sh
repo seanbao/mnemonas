@@ -162,16 +162,18 @@ append_configured_uint_arg() {
 	local section=$3
 	local key=$4
 	local value
+	local normalized_value
 
 	value="$(read_config_value "$section" "$key")"
 	if [[ -z "$value" ]]; then
 		return 0
 	fi
-	if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+	if [[ ! "$value" =~ ^[0-9](_?[0-9])*$ ]]; then
 		echo "[ERROR] $CONFIG_PATH has invalid [$section].$key value: $value" >&2
 		return 1
 	fi
-	target_args+=("$flag" "$value")
+	normalized_value="${value//_/}"
+	target_args+=("$flag" "$normalized_value")
 }
 
 ensure_config
