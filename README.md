@@ -240,6 +240,12 @@ make bench
 # 代码检查
 make lint
 
+# golangci-lint 不在 PATH 时可显式指定位置
+GOLANGCI_LINT=/path/to/golangci-lint make lint
+
+# 仅限本地临时排障，提交前不要跳过 Go 静态检查
+SKIP_GOLANGCI_LINT=1 make lint
+
 # 代码格式化
 make fmt
 
