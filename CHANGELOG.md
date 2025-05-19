@@ -147,6 +147,8 @@
 - 安全策略文档补充 `make security-check NPM_AUDIT=1` 用法，避免误解前端审计默认行为
 - CI 和 release 工作流增加最小权限、job 级权限收缩、并发控制和 job 超时，减少权限面、重复运行和挂起风险
 - Release archive 随包附带 `SUPPORT.md`
+- CI push/pull_request 触发分支覆盖 `main` 和 `master`，避免当前仓库默认分支未切换时漏跑检查
+- pre-commit 的 `golangci-lint` 版本对齐 CI/Makefile 使用的 v2.11.4
 - 安全文档区分 Web UI 初始管理员密码与 WebDAV Basic Auth 自动密码
 - 安全文档和 doctor 明确提示 dataplane `9090/9091` 不应被防火墙放行到不可信网络
 - 备份文档补充运行中数据的一致性窗口和快照建议

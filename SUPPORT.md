@@ -6,8 +6,8 @@
 
 | 场景 | 推荐渠道 | 说明 |
 | --- | --- | --- |
-| 可复现 Bug | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 请使用 Bug Report 模板并附诊断信息 |
-| 新功能或产品建议 | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 请使用 Feature Request 模板，说明使用场景 |
+| 可复现 Bug | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 请附复现步骤和诊断信息 |
+| 新功能或产品建议 | [GitHub Issues](https://github.com/seanbao/mnemonas/issues) | 请说明使用场景和预期收益 |
 | 安全漏洞 | GitHub Private Vulnerability Reporting | 不要公开提交漏洞细节，详见 [SECURITY.md](SECURITY.md) |
 
 使用问题也可以先通过 Issues 记录，但请在标题和内容中说明这是使用问题而不是已确认 Bug。

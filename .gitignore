@@ -32,6 +32,8 @@ web/coverage/
 # IDE
 .idea/
 .vscode/
+.codex
+.agents/
 *.swp
 *.swo
 *~

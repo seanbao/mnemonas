@@ -37,6 +37,7 @@ This file records verified review progress so future work can continue from the 
 - Docker and systemd dataplane launch helpers accept TOML-style underscored integer chunk-size settings and normalize them before passing CLI flags to the dataplane binary.
 - Shell TOML and `.env` readers preserve `#` inside quoted values across Docker, systemd, doctor, development, E2E, benchmark, and fault-injection helpers; Docker quickstart quotes generated `.env` values when needed.
 - `make lint` / `make check` no longer silently skip Go static analysis when `golangci-lint` is missing; developers must install it, set `GOLANGCI_LINT=/path/to/golangci-lint`, or explicitly opt out with `SKIP_GOLANGCI_LINT=1`.
+- Public GitHub readiness now includes release packages that carry support/security docs and CI triggers for both `main` and the current `master` branch.
 
 ## Recent Validation
 
@@ -106,6 +107,7 @@ This file records verified review progress so future work can continue from the 
 - `make scripts-check`
 - `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto GOLANGCI_LINT=/tmp/mnemonas-go-tools/golangci-lint-2.11.4-linux-amd64/golangci-lint make lint`
 - `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto GOLANGCI_LINT=/tmp/mnemonas-go-tools/golangci-lint-2.11.4-linux-amd64/golangci-lint make check`
+- `GOSUMDB=sum.golang.org GOTOOLCHAIN=auto make workflows-check`
 
 ## Remaining Risks
 
