@@ -57,12 +57,17 @@ type errorDetail struct {
 type Handler struct {
 	store                 *ShareStore
 	fs                    FileOpener
+	userStore             shareOwnerStore
 	baseURL               string
 	passwordAttempts      *passwordAttemptTracker
 	passwordFailureLimit  int
 	passwordFailureWindow time.Duration
 	passwordFailureDelay  time.Duration
 	passwordLockDuration  time.Duration
+}
+
+type shareOwnerStore interface {
+	GetByID(id string) (*auth.User, error)
 }
 
 type passwordAttemptTracker struct {
@@ -85,6 +90,7 @@ const (
 	defaultPasswordLockDuration  = 5 * time.Minute
 	defaultRateLimitErrorMessage = "too many attempts, try later"
 	defaultJSONRequestBodyLimit  = 1 * 1024 * 1024
+	maxDurationDays              = int64((1<<63 - 1) / int64(24*time.Hour))
 )
 
 var errInvalidSharePermission = errors.New("invalid permission")
@@ -171,6 +177,10 @@ func NewHandler(store *ShareStore, fs FileOpener) *Handler {
 func (h *Handler) SetBaseURL(baseURL string) {
 	baseURL = strings.TrimSpace(baseURL)
 	h.baseURL = strings.TrimRight(baseURL, "/")
+}
+
+func (h *Handler) SetUserStore(store shareOwnerStore) {
+	h.userStore = store
 }
 
 // Routes registers share routes (requires auth)
@@ -617,6 +627,10 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 			writePublicShareAccessError(w, err)
 			return
 		}
+		if err := h.ensureShareOwnerActive(share); err != nil {
+			writePublicShareAccessError(w, err)
+			return
+		}
 
 		if h.hasShareAccess(r, share) {
 			info := &PublicShareInfo{
@@ -653,6 +667,10 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := share.CanAccess(); err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+	if err := h.ensureShareOwnerActive(share); err != nil {
 		writePublicShareAccessError(w, err)
 		return
 	}
@@ -697,6 +715,10 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := share.CanAccess(); err != nil {
+		writePublicShareAccessError(w, err)
+		return
+	}
+	if err := h.ensureShareOwnerActive(share); err != nil {
 		writePublicShareAccessError(w, err)
 		return
 	}
@@ -1147,12 +1169,33 @@ func (h *Handler) authorizeShare(r *http.Request, id string) (*Share, error) {
 	if err := share.CanAccess(); err != nil {
 		return nil, err
 	}
+	if err := h.ensureShareOwnerActive(share); err != nil {
+		return nil, err
+	}
 
 	if share.HasPassword() && !h.hasShareAccess(r, share) {
 		return nil, ErrInvalidPassword
 	}
 
 	return share, nil
+}
+
+func (h *Handler) ensureShareOwnerActive(share *Share) error {
+	if h.userStore == nil || share == nil || share.CreatedBy == "" {
+		return nil
+	}
+
+	owner, err := h.userStore.GetByID(share.CreatedBy)
+	if err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			return ErrShareDisabled
+		}
+		return err
+	}
+	if owner.Disabled {
+		return ErrShareDisabled
+	}
+	return nil
 }
 
 func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {
@@ -1333,9 +1376,12 @@ func parseDuration(s string) (time.Duration, error) {
 	}
 
 	if strings.HasSuffix(s, "d") {
-		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		days, err := strconv.ParseInt(strings.TrimSuffix(s, "d"), 10, 64)
 		if err != nil {
 			return 0, err
+		}
+		if days > maxDurationDays {
+			return 0, errors.New("duration too large")
 		}
 		return validatePositiveDuration(time.Duration(days) * 24 * time.Hour)
 	}
