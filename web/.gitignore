@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.vite/
+.vitest/
 *.local
 
 # Editor directories and files
@@ -27,6 +29,8 @@ dist-ssr
 coverage/
 test-results/
 playwright-report/
+report.html
+__screenshots__/*.png
 __screenshots__/diff/
 
 # Storybook

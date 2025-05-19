@@ -1,6 +1,13 @@
 import { Page, expect, test } from '@playwright/test'
 import { resolveE2ECredentials } from './credentials'
 
+async function waitForAppReady(page: Page): Promise<void> {
+  // Vite HMR and app-level polling keep background requests alive, so networkidle is not a stable readiness signal.
+  await page.waitForLoadState('domcontentloaded')
+  await page.locator('body').waitFor({ state: 'visible' })
+  await page.waitForTimeout(300)
+}
+
 /**
  * 检查页面是否被重定向到登录页
  * 返回 true 表示需要认证（已重定向到登录页）
@@ -20,7 +27,7 @@ export async function isRedirectedToLogin(page: Page): Promise<boolean> {
  */
 export async function skipIfAuthRequired(page: Page, targetPath?: string): Promise<void> {
   if (!page.url().includes('/login')) {
-    // ProtectedRoute may redirect after initial render, slightly later than networkidle.
+    // ProtectedRoute may redirect slightly after the initial document load.
     await page.waitForTimeout(300)
     if (!page.url().includes('/login')) {
       return
@@ -65,8 +72,8 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
     
     // 登录成功后，如果指定了目标路径且当前不在该路径，则重新导航
     if (targetPath && !page.url().includes(targetPath)) {
-      await page.goto(targetPath)
-      await page.waitForLoadState('networkidle')
+      await page.goto(targetPath, { waitUntil: 'domcontentloaded' })
+      await waitForAppReady(page)
     }
   } catch {
     // 登录失败
@@ -79,9 +86,8 @@ export async function skipIfAuthRequired(page: Page, targetPath?: string): Promi
  * 结合导航和认证检查为一个函数
  */
 export async function ensureAuthenticatedAt(page: Page, path: string): Promise<void> {
-  await page.goto(path)
-  await page.waitForLoadState('networkidle')
-  await page.waitForTimeout(300)
+  await page.goto(path, { waitUntil: 'domcontentloaded' })
+  await waitForAppReady(page)
   await skipIfAuthRequired(page, path)
 }
 
