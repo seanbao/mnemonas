@@ -125,6 +125,22 @@ describe('Search API', () => {
     await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
   })
 
+  it('rejects successful search responses with malformed result items', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          query: 'report',
+          count: 1,
+          results: [{ name: 'report.pdf', path: '/docs/report.pdf', size: 100, modTime: '2026-03-14T00:00:00Z' }],
+        },
+      }),
+    })
+
+    await expect(searchFiles('report')).rejects.toThrow('服务器返回了无效的数据')
+  })
+
   it('rejects wrapped search responses when success is false', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,

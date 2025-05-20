@@ -69,6 +69,10 @@ async function handleResponse<T>(response: Response, errorMessage: string, inval
   return body as T
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
 // Activity action types
 export type ActionType =
   | 'upload'
@@ -86,6 +90,43 @@ export type ActionType =
   | 'trash_restore'
   | 'trash_delete'
   | 'trash_empty'
+
+function isActionType(value: unknown): value is ActionType {
+  return value === 'upload'
+    || value === 'download'
+    || value === 'delete'
+    || value === 'rename'
+    || value === 'move'
+    || value === 'copy'
+    || value === 'create'
+    || value === 'restore'
+    || value === 'share'
+    || value === 'unshare'
+    || value === 'login'
+    || value === 'logout'
+    || value === 'trash_restore'
+    || value === 'trash_delete'
+    || value === 'trash_empty'
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string')
+}
+
+function isNumberRecord(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'number')
+}
+
+function isValidActivityEntry(value: unknown): value is ActivityEntry {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.timestamp === 'string'
+    && isActionType(value.action)
+    && (value.path === undefined || typeof value.path === 'string')
+    && (value.user === undefined || typeof value.user === 'string')
+    && (value.ip === undefined || typeof value.ip === 'string')
+    && (value.details === undefined || isStringRecord(value.details))
+}
 
 // Activity entry
 export interface ActivityEntry {
@@ -138,6 +179,15 @@ export async function listActivity(options?: {
     offset?: number
   }>>(response, '获取活动日志失败')
 
+  if (
+    (result.data.items !== undefined && (!Array.isArray(result.data.items) || result.data.items.some((item) => !isValidActivityEntry(item))))
+    || (result.data.total !== undefined && typeof result.data.total !== 'number')
+    || (result.data.limit !== undefined && typeof result.data.limit !== 'number')
+    || (result.data.offset !== undefined && typeof result.data.offset !== 'number')
+  ) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
   const items = Array.isArray(result.data.items) ? result.data.items : []
   const limit = result.data.limit ?? options?.limit ?? items.length
   const offset = result.data.offset ?? options?.offset ?? 0
@@ -158,12 +208,8 @@ export async function getActivityStats(): Promise<ActivityStats> {
   if (
     typeof result.data.total !== 'number' ||
     typeof result.data.today !== 'number' ||
-    !result.data.by_action ||
-    typeof result.data.by_action !== 'object' ||
-    Array.isArray(result.data.by_action) ||
-    !result.data.by_user ||
-    typeof result.data.by_user !== 'object' ||
-    Array.isArray(result.data.by_user)
+    !isNumberRecord(result.data.by_action) ||
+    !isNumberRecord(result.data.by_user)
   ) {
     throw new Error('服务器返回了无效的数据')
   }

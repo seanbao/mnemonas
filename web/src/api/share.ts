@@ -146,6 +146,39 @@ function isValidShare(value: unknown): value is Share {
   )
 }
 
+function isValidPublicShareInfo(value: unknown): value is PublicShareInfo {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const share = value as Partial<PublicShareInfo>
+  return (
+    typeof share.id === 'string' &&
+    isShareType(share.type) &&
+    typeof share.has_password === 'boolean' &&
+    isPermission(share.permission) &&
+    (share.description === undefined || typeof share.description === 'string') &&
+    (share.file_name === undefined || typeof share.file_name === 'string') &&
+    (share.file_size === undefined || typeof share.file_size === 'number') &&
+    (share.folder_items === undefined || typeof share.folder_items === 'number')
+  )
+}
+
+function isValidPublicShareItem(value: unknown): value is PublicShareItem {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const item = value as Partial<PublicShareItem>
+  return (
+    typeof item.name === 'string' &&
+    typeof item.path === 'string' &&
+    typeof item.is_dir === 'boolean' &&
+    typeof item.size === 'number' &&
+    typeof item.mod_time === 'string'
+  )
+}
+
 function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
   if (!contentDisposition) {
     return fallback
@@ -337,6 +370,8 @@ export async function deleteShare(id: string): Promise<void> {
   if (!response.ok) {
     throw await readShareApiError(response, '删除分享失败')
   }
+
+  await parseWrappedShareSuccess<ShareApiResponse<null>>(response, '删除分享响应无效')
 }
 
 // === Public Share APIs ===
@@ -361,7 +396,11 @@ export async function getPublicShare(id: string): Promise<PublicShareInfo> {
     throw new ShareError(message, response.status, code)
   }
   
-  return parsePublicShareSuccess<PublicShareInfo>(response, '分享信息无效')
+  const body = await parsePublicShareSuccess<unknown>(response, '分享信息无效')
+  if (!isValidPublicShareInfo(body)) {
+    throw new ShareError('分享信息无效', response.status)
+  }
+  return body
 }
 
 /**
@@ -398,7 +437,7 @@ export async function getPublicShareItems(
   }
 
   const body = await parsePublicShareSuccess<PublicShareItemsResponse>(response, '分享文件夹响应无效')
-  if (!Array.isArray(body.items)) {
+  if (typeof body.path !== 'string' || !Array.isArray(body.items) || !body.items.every(isValidPublicShareItem)) {
     throw new ShareError('分享文件夹响应无效', response.status)
   }
   return body
@@ -433,7 +472,11 @@ export async function accessShareWithPassword(id: string, password: string): Pro
     throw new ShareError(message, response.status, code)
   }
   
-  return parsePublicShareSuccess<PublicShareInfo>(response, '分享信息无效')
+  const body = await parsePublicShareSuccess<unknown>(response, '分享信息无效')
+  if (!isValidPublicShareInfo(body)) {
+    throw new ShareError('分享信息无效', response.status)
+  }
+  return body
 }
 
 /**

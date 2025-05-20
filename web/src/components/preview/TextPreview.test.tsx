@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { authFetch } from '@/api/auth'
 import { TextPreview } from './TextPreview'
 
@@ -16,6 +16,14 @@ vi.mock('@heroui/react', () => ({
 
 describe('TextPreview', () => {
   const mockAuthFetch = vi.mocked(authFetch)
+
+  function createDeferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((res) => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -147,6 +155,37 @@ describe('TextPreview', () => {
     await waitFor(() => {
       expect(screen.getByText('加载失败: Unauthorized')).toBeInTheDocument()
     })
+  })
+
+  it('ignores stale content when the preview path changes during loading', async () => {
+    const firstLoad = createDeferred<string>()
+
+    mockAuthFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        text: () => firstLoad.promise,
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        text: () => Promise.resolve('second content'),
+      } as Response)
+
+    const { rerender } = render(<TextPreview path="/first.txt" filename="first.txt" />)
+    rerender(<TextPreview path="/second.txt" filename="second.txt" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('second content')).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      firstLoad.resolve('first content')
+      await firstLoad.promise
+    })
+
+    expect(screen.getByText('second content')).toBeInTheDocument()
+    expect(screen.queryByText('first content')).not.toBeInTheDocument()
   })
 
 })

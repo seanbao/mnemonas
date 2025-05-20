@@ -62,6 +62,23 @@ describe('Activity API', () => {
     await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
   })
 
+  it('rejects malformed successful activity list entries', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{ timestamp: '2026-03-14T00:00:00Z', action: 'login', user: 'admin' }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    await expect(listActivity()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
   it('unwraps valid activity stats responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -91,6 +108,23 @@ describe('Activity API', () => {
         data: {
           total: 12,
           by_action: [],
+        },
+      }),
+    })
+
+    await expect(getActivityStats()).rejects.toThrow('服务器返回了无效的数据')
+  })
+
+  it('rejects activity stats responses with non-numeric map values', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          total: 12,
+          today: 3,
+          by_action: { login: '3' },
+          by_user: { admin: 8 },
         },
       }),
     })

@@ -69,9 +69,12 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
   const language = getLanguageFromExtension(filename)
 
   useEffect(() => {
+    let cancelled = false
+
     async function loadContent() {
       setIsLoading(true)
       setError(null)
+      setContent(null)
       
       try {
         const url = buildPreviewUrl(path, { includeAuth: false })
@@ -88,15 +91,25 @@ export function TextPreview({ path, filename, className }: TextPreviewProps) {
         }
         
         const text = await response.text()
-        setContent(text)
+        if (!cancelled) {
+          setContent(text)
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : '加载失败')
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : '加载失败')
+        }
       } finally {
-        setIsLoading(false)
+        if (!cancelled) {
+          setIsLoading(false)
+        }
       }
     }
     
     loadContent()
+
+    return () => {
+      cancelled = true
+    }
   }, [path])
 
   if (isLoading) {

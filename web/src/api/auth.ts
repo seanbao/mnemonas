@@ -133,6 +133,27 @@ function isUserRole(role: unknown): role is User['role'] {
   return role === 'admin' || role === 'user' || role === 'guest'
 }
 
+function isValidAdminListUser(value: unknown): value is UserListResponse['users'][number] {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const user = value as Partial<UserListResponse['users'][number]>
+  return (
+    typeof user.id === 'string' &&
+    typeof user.username === 'string' &&
+    isUserRole(user.role) &&
+    typeof user.disabled === 'boolean' &&
+    typeof user.home_dir === 'string' &&
+    typeof user.created_at === 'string' &&
+    typeof user.updated_at === 'string' &&
+    typeof user.quota_bytes === 'number' &&
+    typeof user.used_bytes === 'number' &&
+    (user.email === undefined || typeof user.email === 'string') &&
+    (user.last_login_at === undefined || typeof user.last_login_at === 'string')
+  )
+}
+
 function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined): AuthSessionData {
   if (!data || typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string') {
     throw new Error('invalid auth session data')
@@ -479,6 +500,13 @@ export async function changePassword(oldPassword: string, newPassword: string): 
     } catch { /* ignore */ }
     throw new AuthError(message, response.status)
   }
+
+  try {
+    const body: AuthApiResponse<null> = await response.json()
+    readAuthSuccessData(body)
+  } catch {
+    throw new AuthError('修改密码响应无效', response.status)
+  }
 }
 
 // === Admin APIs ===
@@ -503,6 +531,11 @@ export async function listUsers(): Promise<UserListResponse['users']> {
   } catch {
     throw new AuthError('获取用户列表响应无效', response.status)
   }
+
+  if (!Array.isArray(data.users) || data.users.some((user) => !isValidAdminListUser(user))) {
+    throw new AuthError('获取用户列表响应无效', response.status)
+  }
+
   return data.users
 }
 
