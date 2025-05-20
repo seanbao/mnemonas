@@ -17,10 +17,10 @@
 | `GET` | ✅ 完整 | 支持 Range 请求、ETag、条件请求 |
 | `HEAD` | ✅ 完整 | 返回文件元信息 |
 | `PUT` | ✅ 完整 | 支持 If-Match 条件写入 |
-| `DELETE` | ✅ 完整 | 删除进入回收站（软删除） |
+| `DELETE` | ✅ 完整 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
 | `MKCOL` | ✅ 完整 | 创建目录 |
-| `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F` |
-| `COPY` | ✅ 完整 | 复制文件/目录，支持 `Overwrite: T/F` |
+| `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
+| `COPY` | ✅ 完整 | 复制文件/目录，支持 `Overwrite: T/F`；集合资源支持 `Depth: 0` 和 `Depth: infinity` |
 | `PROPPATCH` | ⚠️ 简化 | 接受请求但不实际修改属性 |
 | `LOCK` | ⚠️ 简化 | 返回虚拟锁 token，默认 1 小时过期 |
 | `UNLOCK` | ⚠️ 简化 | 需要匹配 `Lock-Token`，过期锁会自动清理 |

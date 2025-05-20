@@ -1380,6 +1380,9 @@ func parseDuration(s string) (time.Duration, error) {
 		if err != nil {
 			return 0, err
 		}
+		if days <= 0 {
+			return 0, errors.New("duration must be greater than zero")
+		}
 		if days > maxDurationDays {
 			return 0, errors.New("duration too large")
 		}

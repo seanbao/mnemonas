@@ -3,6 +3,7 @@
 package webdav
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -450,6 +451,12 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 		h.handleError(w, err)
 		return
 	}
+	if info.IsDir {
+		if err := h.validateInfinityOnlyDepth(r.Header.Get("Depth")); err != nil {
+			writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
+			return
+		}
+	}
 
 	etag := fmt.Sprintf(`"%s"`, info.ContentHash)
 	if im := r.Header.Get("If-Match"); im != "" {
@@ -533,9 +540,20 @@ func requestHasBody(r *http.Request) bool {
 	var probe [1]byte
 	n, err := r.Body.Read(probe[:])
 	if n > 0 {
+		r.Body = prependReadCloser(bytes.NewReader(probe[:n]), r.Body)
 		return true
 	}
 	return err != io.EOF
+}
+
+func prependReadCloser(prefix io.Reader, body io.ReadCloser) io.ReadCloser {
+	return struct {
+		io.Reader
+		io.Closer
+	}{
+		Reader: io.MultiReader(prefix, body),
+		Closer: body,
+	}
 }
 
 func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http.Request, srcPath string) {
@@ -557,6 +575,21 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 
 	if !h.authorizeWriteLock(w, r, dst) {
 		return
+	}
+
+	srcInfo, err := h.fs.Stat(ctx, srcPath)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	copyDepth := "infinity"
+	if srcInfo.IsDir {
+		copyDepth, err = h.parseCopyDepth(r.Header.Get("Depth"))
+		if err != nil {
+			writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
+			return
+		}
 	}
 
 	dstExists := h.destinationExists(ctx, dst)
@@ -593,7 +626,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
-	if err := h.copyResource(ctx, srcPath, dst); err != nil {
+	if err := h.copyResource(ctx, srcPath, dst, copyDepth); err != nil {
 		if h.writeParentNotDirectoryConflict(w, err) {
 			return
 		}
@@ -612,7 +645,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath string) error {
+func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth string) error {
 	info, err := h.fs.Stat(ctx, srcPath)
 	if err != nil {
 		return err
@@ -622,6 +655,9 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath string) err
 		if err := h.fs.Mkdir(ctx, dstPath); err != nil {
 			return err
 		}
+		if depth == "0" {
+			return nil
+		}
 
 		children, err := h.fs.ReadDir(ctx, srcPath)
 		if err != nil {
@@ -630,7 +666,7 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath string) err
 
 		for _, child := range children {
 			childName := path.Base(child.Path)
-			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName)); err != nil {
+			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName), "infinity"); err != nil {
 				return h.rollbackCopiedDirectory(dstPath, err)
 			}
 		}
@@ -693,6 +729,18 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 
 	if !h.authorizeWriteLockWithDescendants(w, r, []string{srcPath, dst}, srcPath, dst) {
 		return
+	}
+
+	srcInfo, err := h.fs.Stat(ctx, srcPath)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+	if srcInfo.IsDir {
+		if err := h.validateInfinityOnlyDepth(r.Header.Get("Depth")); err != nil {
+			writeKnownWebDAVError(w, errInvalidDepthHeader, http.StatusBadRequest)
+			return
+		}
 	}
 
 	dstExists := h.destinationExists(ctx, dst)
@@ -804,6 +852,26 @@ func (h *Handler) checkOverwriteHeader(ctx context.Context, r *http.Request, dst
 	}
 
 	return nil
+}
+
+func (h *Handler) parseCopyDepth(depth string) (string, error) {
+	if depth == "" {
+		return "infinity", nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(depth)) {
+	case "0", "infinity":
+		return strings.ToLower(strings.TrimSpace(depth)), nil
+	default:
+		return "", errInvalidDepthHeader
+	}
+}
+
+func (h *Handler) validateInfinityOnlyDepth(depth string) error {
+	if depth == "" || strings.EqualFold(strings.TrimSpace(depth), "infinity") {
+		return nil
+	}
+	return errInvalidDepthHeader
 }
 
 func (h *Handler) rejectDirectoryDescendantDestination(ctx context.Context, srcPath, dstPath string) error {

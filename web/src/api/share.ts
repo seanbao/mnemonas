@@ -2,6 +2,7 @@ import { authFetch } from './auth'
 import { copyTextToClipboard, encodePathForUrl, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
+const PUBLIC_SHARE_API_BASE = `${API_BASE}/public/shares`
 
 // Share types
 export type ShareType = 'file' | 'folder'
@@ -344,7 +345,7 @@ export async function deleteShare(id: string): Promise<void> {
  * Get public share info (no auth required)
  */
 export async function getPublicShare(id: string): Promise<PublicShareInfo> {
-  const response = await fetch(`/s/${id}`)
+  const response = await fetch(`${PUBLIC_SHARE_API_BASE}/${id}`)
   
   if (!response.ok) {
     let message = '分享不存在或已失效'
@@ -375,7 +376,7 @@ export async function getPublicShareItems(
     params.set('path', options.path)
   }
   const query = params.toString()
-  const url = query ? `/s/${id}/items?${query}` : `/s/${id}/items`
+  const url = query ? `${PUBLIC_SHARE_API_BASE}/${id}/items?${query}` : `${PUBLIC_SHARE_API_BASE}/${id}/items`
   const response = await fetch(url)
 
   if (!response.ok) {
@@ -407,7 +408,7 @@ export async function getPublicShareItems(
  * Access password-protected share
  */
 export async function accessShareWithPassword(id: string, password: string): Promise<PublicShareInfo> {
-  const response = await fetch(`/s/${id}`, {
+  const response = await fetch(`${PUBLIC_SHARE_API_BASE}/${id}/access`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password }),
@@ -439,7 +440,7 @@ export async function accessShareWithPassword(id: string, password: string): Pro
  * Get download URL for shared file
  */
 export function getShareDownloadUrl(id: string): string {
-  return `/s/${id}/download`
+  return `${PUBLIC_SHARE_API_BASE}/${id}/download`
 }
 
 /**
@@ -449,7 +450,7 @@ export function getShareFileDownloadUrl(id: string, filePath: string): string {
   const normalizedPath = normalizePath(filePath)
   const encodedPath = encodePathForUrl(normalizedPath)
   const trimmedPath = encodedPath.startsWith('/') ? encodedPath.slice(1) : encodedPath
-  return `/s/${id}/download/${trimmedPath}`
+  return `${PUBLIC_SHARE_API_BASE}/${id}/download/${trimmedPath}`
 }
 
 export async function downloadShare(id: string, options?: { filePath?: string; filename?: string }): Promise<void> {

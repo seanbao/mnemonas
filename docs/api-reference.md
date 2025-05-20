@@ -61,7 +61,7 @@ Authorization: Bearer <access_token>
 
 ### 分享/收藏端点响应
 
-认证后的分享管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 `/s/*` 的成功响应保持原始 JSON 对象或数组，错误响应使用 `success: false` 和结构化 `error` 对象。
+认证后的分享管理端点 `/api/v1/shares` 使用 `success + data (+ message)` 包装；公开分享 API 推荐使用 `/api/v1/public/shares/*`，其成功响应保持原始 JSON 对象或数组，错误响应使用 `success: false` 和结构化 `error` 对象。兼容路径 `/s/*` 继续返回相同的公开分享 JSON / 下载响应，适用于不经过 SPA 的直接调用。
 
 ```json
 {
@@ -688,7 +688,8 @@ GET /api/v1/thumbnails/{path}
 **需要认证**: 是
 
 **查询参数**:
-- `size`: 缩略图尺寸，可选值: `small` (150px), `medium` (300px), `large` (600px)
+- `size`: 缩略图尺寸，可选值: `small` / `s` (150px), `medium` / `m` (300px), `large` / `l` (600px)
+- 传入未列出的 `size` 值时返回 `400 Bad Request`
 
 **鉴权说明**:
 - API 客户端可使用现有认证会话或 `Authorization` 请求头
@@ -1031,14 +1032,16 @@ DELETE /api/v1/shares/{id}
 
 ### 访问分享链接（公开）
 
+前端 SPA 页面入口保持为 `/s/{share_id}`；公开分享数据 API 推荐使用 `/api/v1/public/shares/*`，避免与前端路由冲突。
+
 ```
-GET /s/{share_id}
+GET /api/v1/public/shares/{share_id}
 ```
 
 如果分享有密码保护，需要 POST 并提供密码：
 
 ```
-POST /s/{share_id}
+POST /api/v1/public/shares/{share_id}/access
 ```
 
 请求体：
@@ -1065,15 +1068,16 @@ POST /s/{share_id}
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
 - 口令失败限流默认按 share ID 与直连客户端地址组合统计；只有当请求直接来自 loopback 或私有网段代理时，才采信 `X-Forwarded-For` / `X-Real-IP`
+- 兼容路径 `/s/{share_id}` 与 `POST /s/{share_id}` 保持相同 JSON 行为，适用于非 SPA 或直接脚本调用
 
 **下载文件**:
 ```
-GET /s/{share_id}/download
+GET /api/v1/public/shares/{share_id}/download
 ```
 
 **列出分享文件夹内容**:
 ```
-GET /s/{share_id}/items?path=subdir
+GET /api/v1/public/shares/{share_id}/items?path=subdir
 ```
 
 **响应示例**:
@@ -1094,12 +1098,13 @@ GET /s/{share_id}/items?path=subdir
 
 **下载分享文件夹内文件**:
 ```
-GET /s/{share_id}/download/{path}
+GET /api/v1/public/shares/{share_id}/download/{path}
 ```
 
 **说明**:
 - `{path}` 需要按路径段进行 URL 编码（保留 `/` 分隔）
-- 分享启用密码时，需先通过 `POST /s/{share_id}` 完成密码验证，再使用返回的 cookie 访问下载和文件夹列表接口
+- 分享启用密码时，需先通过 `POST /api/v1/public/shares/{share_id}/access` 完成密码验证，再使用返回的 cookie 访问下载和文件夹列表接口
+- 兼容路径 `/s/{share_id}/items`、`/s/{share_id}/download`、`/s/{share_id}/download/{path}` 保持相同行为，适用于非 SPA 直接访问
 
 ---
 
