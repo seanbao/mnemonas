@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Card,
@@ -134,8 +134,15 @@ export function ShareAccessPage() {
   const [folderPath, setFolderPath] = useState('')
   const [isListing, setIsListing] = useState(false)
   const [listError, setListError] = useState<unknown | null>(null)
+  const shareInfoRequestRef = useRef(0)
+  const folderListRequestRef = useRef(0)
   const errorPresentation = getShareAccessErrorPresentation(error)
   const listErrorPresentation = getShareListErrorPresentation(listError)
+
+  useEffect(() => () => {
+    shareInfoRequestRef.current += 1
+    folderListRequestRef.current += 1
+  }, [])
 
   const loadShareInfo = useCallback(async (options?: { notify?: boolean }) => {
     if (!id) {
@@ -147,6 +154,8 @@ export function ShareAccessPage() {
       return
     }
 
+  const requestId = shareInfoRequestRef.current + 1
+  shareInfoRequestRef.current = requestId
     setIsLoading(true)
     setError(null)
     setNeedsPassword(false)
@@ -155,6 +164,9 @@ export function ShareAccessPage() {
     
     try {
       const info = await getPublicShare(id)
+      if (requestId !== shareInfoRequestRef.current) {
+        return
+      }
       setShareInfo(info)
       setFolderItems([])
       setListError(null)
@@ -171,6 +183,9 @@ export function ShareAccessPage() {
         addToast({ title: '分享信息已刷新', color: 'success' })
       }
     } catch (err) {
+      if (requestId !== shareInfoRequestRef.current) {
+        return
+      }
       if (err instanceof ShareError) {
         setError(err)
       } else {
@@ -183,7 +198,9 @@ export function ShareAccessPage() {
         }))
       }
     } finally {
-      setIsLoading(false)
+      if (requestId === shareInfoRequestRef.current) {
+        setIsLoading(false)
+      }
     }
   }, [id])
 
@@ -279,6 +296,8 @@ export function ShareAccessPage() {
   const loadFolderItems = useCallback(async () => {
     if (!id || !shareInfo || shareInfo.type !== 'folder' || !isAuthenticated) return
 
+    const requestId = folderListRequestRef.current + 1
+    folderListRequestRef.current = requestId
     setIsListing(true)
     setListError(null)
     setFolderItems([])
@@ -286,8 +305,14 @@ export function ShareAccessPage() {
       const data = await getPublicShareItems(id, {
         path: folderPath || undefined,
       })
+      if (requestId !== folderListRequestRef.current) {
+        return
+      }
       setFolderItems(data.items)
     } catch (err) {
+      if (requestId !== folderListRequestRef.current) {
+        return
+      }
       if (err instanceof ShareError && err.isUnauthorized) {
         setIsAuthenticated(false)
         setNeedsPassword(true)
@@ -297,7 +322,9 @@ export function ShareAccessPage() {
         setListError(err)
       }
     } finally {
-      setIsListing(false)
+      if (requestId === folderListRequestRef.current) {
+        setIsListing(false)
+      }
     }
   }, [id, shareInfo, isAuthenticated, folderPath])
 

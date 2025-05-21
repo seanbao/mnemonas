@@ -276,6 +276,19 @@ function ImagePreview({
     })
   }, [currentImage])
 
+  useEffect(() => {
+    if (!isOpen || !currentImage?.path) {
+      return
+    }
+
+    setZoom(1)
+    setRotation(0)
+    setLoading(true)
+    setLoadError(false)
+    setHasRetried(false)
+    setImageUrl(getDownloadUrl(currentImage.path))
+  }, [currentImage?.path, isOpen])
+
   // Preload adjacent images
   useEffect(() => {
     if (!isOpen || images.length === 0) return

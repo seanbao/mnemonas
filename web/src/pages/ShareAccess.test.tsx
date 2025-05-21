@@ -74,6 +74,16 @@ const renderWithRouter = (shareId: string) => {
   )
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 const NavigatingWrapper = ({ nextId }: { nextId: string }) => {
   const navigate = useNavigate()
   return (
@@ -318,6 +328,70 @@ describe('ShareAccessPage', () => {
       expect(screen.getByText('docs')).toBeInTheDocument()
       expect(screen.getByText('note.txt')).toBeInTheDocument()
     })
+  })
+
+  it('ignores stale folder listing responses after navigating back to a parent folder', async () => {
+    const user = userEvent.setup()
+    const nestedListing = createDeferred<{
+      path: string
+      items: Array<{ name: string; path: string; is_dir: boolean; size: number; mod_time: string }>
+    }>()
+
+    mockGetPublicShare.mockResolvedValue({
+      id: 'abc123',
+      type: 'folder',
+      has_password: false,
+      permission: 'read',
+      folder_items: 2,
+    })
+    mockGetPublicShareItems
+      .mockResolvedValueOnce({
+        path: '',
+        items: [
+          { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        ],
+      })
+      .mockReturnValueOnce(nestedListing.promise)
+      .mockResolvedValueOnce({
+        path: '',
+        items: [
+          { name: 'docs', path: 'docs', is_dir: true, size: 0, mod_time: '2024-01-01T00:00:00Z' },
+        ],
+      })
+
+    renderWithRouter('abc123')
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeInTheDocument()
+      expect(screen.getByText('根目录')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: /docs/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('/docs')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '返回上级' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '返回上级' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('根目录')).toBeInTheDocument()
+    })
+
+    nestedListing.resolve({
+      path: 'docs',
+      items: [
+        { name: 'nested.txt', path: 'docs/nested.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('nested.txt')).not.toBeInTheDocument()
+    expect(screen.getByText('根目录')).toBeInTheDocument()
   })
 
   it('retries loading folder items after a listing failure', async () => {

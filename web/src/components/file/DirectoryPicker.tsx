@@ -213,6 +213,19 @@ export function DirectoryPicker({
     enabled: isOpen,
   })
 
+  useEffect(() => {
+    if (!rootData?.files) {
+      return
+    }
+
+    setFolderContents((prev) => {
+      const next = new Map(prev)
+      next.set(rootPath, rootData.files)
+      return next
+    })
+    setLoadedPaths((prev) => new Set(prev).add(rootPath))
+  }, [rootData, rootPath])
+
   const handleRetryRoot = useCallback(async () => {
   const result = await refetchRoot()
   if (result.error) {
@@ -272,9 +285,10 @@ export function DirectoryPicker({
   }, [expandedPaths, folderContents, loadedPaths])
 
   const rootFolders = useMemo(() => {
-    if (!rootData?.files) return []
-    return buildTree(rootData.files)
-  }, [rootData, buildTree])
+    const rootFiles = folderContents.get(rootPath)
+    if (!rootFiles) return []
+    return buildTree(rootFiles)
+  }, [buildTree, folderContents, rootPath])
 
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return

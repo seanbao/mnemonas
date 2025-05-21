@@ -134,18 +134,31 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   const [deleteTarget, setDeleteTarget] = useState<Share | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const sharesRef = useRef<Share[]>([])
+  const loadRequestRef = useRef(0)
+
+  useEffect(() => () => {
+    loadRequestRef.current += 1
+  }, [])
 
   useEffect(() => {
     sharesRef.current = shares
   }, [shares])
 
   const loadShares = useCallback(async () => {
+    const requestId = loadRequestRef.current + 1
+    loadRequestRef.current = requestId
     setIsLoading(true)
     setLoadError(null)
     try {
       const data = await listShares(showAllShares)
+      if (requestId !== loadRequestRef.current) {
+        return
+      }
       setShares(data)
     } catch (err) {
+      if (requestId !== loadRequestRef.current) {
+        return
+      }
       const featureState = getShareFeatureState(err)
       setLoadError(err)
       if (featureState !== null) {
@@ -157,18 +170,21 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         addToast(getShareLoadErrorToast(err))
       }
     } finally {
-      setIsLoading(false)
+      if (requestId === loadRequestRef.current) {
+        setIsLoading(false)
+      }
     }
   }, [showAllShares])
 
   useEffect(() => {
-  if (!featureEnabled) {
-    setIsLoading(false)
-    setLoadError(null)
-    setShares([])
-    sharesRef.current = []
-    return
-  }
+    if (!featureEnabled) {
+      loadRequestRef.current += 1
+      setIsLoading(false)
+      setLoadError(null)
+      setShares([])
+      sharesRef.current = []
+      return
+    }
     loadShares()
   }, [featureEnabled, loadShares])
 
