@@ -1,5 +1,7 @@
 # 安全加固指南
 
+[English](security.en.md) | 简体中文
+
 本文档介绍 MnemoNAS 的安全配置最佳实践，适用于局域网和公网部署场景。
 
 ## 🔐 认证配置
@@ -102,7 +104,7 @@ port = 8080
 
 [webdav]
 auth_type = "basic"  # 必须启用认证
-username = "family"
+username = "webdav"
 password = "your-password"
 ```
 
@@ -127,7 +129,7 @@ sudo firewall-cmd --reload
 
 ## 🔒 HTTPS 配置
 
-MnemoNAS 支持内置 TLS 配置，但家庭和公网部署更推荐使用 Caddy/Nginx/Traefik 等反向代理统一处理 HTTPS、证书续期和上传限制。
+MnemoNAS 支持内置 TLS 配置，但公网或长期部署更推荐使用 Caddy/Nginx/Traefik 等反向代理统一处理 HTTPS、证书续期和上传限制。
 
 ### 方案一：Nginx + Let's Encrypt
 
@@ -181,7 +183,7 @@ Caddy 自动获取和续期 Let's Encrypt 证书。
 
 ### 方案三：Cloudflare Tunnel（零公网 IP）
 
-适合家庭网络没有公网 IP 的场景：
+适合没有公网 IP、但需要通过隧道访问的部署：
 
 ```bash
 # 安装 cloudflared
@@ -304,7 +306,7 @@ location /api/ {
 
 | 状态 | 安全特性 |
 | ---- | -------- |
-| 已支持 | Web UI 登录、多用户与角色、用户 home 目录隔离、WebDAV Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
+| 已支持 | Web UI 登录、多用户与角色、用户根目录隔离、WebDAV Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
 | 建议通过反向代理补充 | HTTPS 证书自动续期、按 IP/用户限速、公网访问控制 |
 | 计划中 | OAuth/OIDC 集成、更细粒度的应用层访问策略 |
 

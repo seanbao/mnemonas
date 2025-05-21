@@ -1,5 +1,7 @@
 # Security Policy
 
+English | [简体中文](SECURITY.zh-CN.md)
+
 ## Supported Versions
 
 | Version | Supported          |
@@ -66,7 +68,7 @@ When deploying MnemoNAS:
 
 ### Data Protection
 
-1. **Backup**: Maintain regular backups (see [backup guide](docs/backup-guide.md))
+1. **Backup**: Maintain regular backups (see [backup guide](docs/backup-guide.en.md))
 2. **Encryption**: Consider encrypting data at rest
 3. **Access Control**: Minimize access permissions
 
@@ -94,7 +96,7 @@ By default, `make security-check` covers Go with `govulncheck` and Rust with `ca
 
 ### Current Limitations
 
-1. **No Fine-Grained ACL**: Users, roles, and home directories are supported, but per-file ACLs are not
+1. **No Fine-Grained ACL**: Users, roles, and per-user root directories are supported, but per-file ACLs are not
 2. **HTTP by Default**: Built-in TLS exists, but production HTTPS is best handled by a reverse proxy
 3. **Local Network Focus**: MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer
 

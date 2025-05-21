@@ -1,11 +1,13 @@
-# Ubuntu 笔记本部署指南
+# Linux/systemd 部署指南
 
-本文面向一台长期放在家里运行的闲置 Ubuntu 笔记本、小主机或旧工作站。目标是：安装步骤少、开机自启、日志可查、数据目录固定、出问题时能快速诊断。
+[English](linux-systemd-deployment.en.md) | 简体中文
+
+本文面向需要长期运行的 Linux 服务器部署。目标是：安装步骤少、开机自启、日志可查、数据目录固定、出问题时能快速诊断。
 
 ## 适用场景
 
-- Ubuntu 22.04/24.04 LTS 或相近版本
-- 单机家庭 NAS、照片/文档归档、局域网 WebDAV
+- Ubuntu 22.04/24.04 LTS、Debian 或相近的 systemd Linux 发行版
+- 单机文件服务、文档/媒体归档、局域网或反向代理后的 WebDAV
 - 使用系统文件系统承载物理可靠性，MnemoNAS 负责 Web UI、WebDAV、版本、回收站、校验和 scrub
 
 MnemoNAS 不自己实现 RAID。多盘可靠性建议交给 ZFS mirror、Btrfs RAID1 或 mdadm，再把挂载后的目录交给 MnemoNAS 使用。
@@ -23,7 +25,7 @@ MnemoNAS 不自己实现 RAID。多盘可靠性建议交给 ZFS mirror、Btrfs R
 
 ## 存储准备
 
-最推荐的家庭方案是两块 SSD 做 ZFS mirror，另配一块 HDD 或外接盘做离线/定期备份：
+推荐的高可靠性方案是两块 SSD 做 ZFS mirror，另配独立磁盘或远端存储做定期备份：
 
 以下命令会清空被选中的磁盘。先用 `ls -l /dev/disk/by-id/` 核对设备型号和序列号，确认不是系统盘后再执行。
 
@@ -43,9 +45,9 @@ sudo zfs create -o mountpoint=/srv/mnemonas -o recordsize=1M mnemonas/data
 sudo mkdir -p /srv/mnemonas
 ```
 
-如果暂时只有单盘，也可以先使用 ext4/XFS/Btrfs，但要明确它不能抵御硬盘损坏。至少准备一个外接盘或另一台机器做备份。
+如果暂时只有单盘，也可以先使用 ext4/XFS/Btrfs，但要明确它不能抵御硬盘损坏。至少准备一份独立备份。
 
-如果这台笔记本还会跑 Docker、下载器、转码、模型缓存或其他服务，不要把这些数据放进 `/srv/mnemonas`。建议单独准备 `/srv/fast-scratch` 一类可丢弃工作区，必要时把 Docker `data-root` 挪过去，避免系统根分区或 MnemoNAS 生产数据目录被缓存挤满。
+如果同一台服务器还会运行 Docker、下载器、转码、模型缓存或其他服务，不要把这些数据放进 `/srv/mnemonas`。建议单独准备 `/srv/fast-scratch` 一类可丢弃工作区，必要时把 Docker `data-root` 挪过去，避免系统根分区或 MnemoNAS 生产数据目录被缓存挤满。
 
 ## 安装 MnemoNAS
 
@@ -109,7 +111,7 @@ sudo cat /srv/mnemonas/.mnemonas/initial-password.txt
 打开浏览器访问：
 
 ```text
-http://<ubuntu-laptop-ip>:8080
+http://<server-ip>:8080
 ```
 
 登录后请立即修改管理员密码；初始密码文件如果仍存在，`mnemonas-doctor` 会提示。
@@ -140,13 +142,13 @@ sudo systemctl restart mnemonas-dataplane
 sudo systemctl restart mnemonas
 ```
 
-`--check-config` 会同时输出安全警告。配置语法合法但风险较高时，例如关闭登录认证后仍监听非 loopback 地址、WebDAV 选择无认证、或 dataplane gRPC 监听到外部网络，命令仍会通过但会打印 `warning:`。生产或长期家庭部署不要忽略这些警告。
+`--check-config` 会同时输出安全警告。配置语法合法但风险较高时，例如关闭登录认证后仍监听非 loopback 地址、WebDAV 选择无认证、或 dataplane gRPC 监听到外部网络，命令仍会通过但会打印 `warning:`。生产或长期部署不要忽略这些警告。
 
 `[dataplane.cdc]` 和 `dataplane.grpc_address` 会在 `mnemonas-dataplane` 每次启动时从配置文件读取；修改这些项后需要重启 `mnemonas-dataplane`，再重启 `mnemonas`。
 
 ## 网络建议
 
-家庭 NAS 的默认原则是先只服务内网。
+长期部署的默认原则是先限制到可信网络。
 
 - 管理入口优先走局域网或 Tailscale/Headscale 这类私有网络
 - 不建议把 SSH 直接暴露到公网
@@ -157,7 +159,7 @@ sudo systemctl restart mnemonas
 
 | 链路 | 用途 | 建议 |
 | --- | --- | --- |
-| 局域网 / Tailscale / Headscale | 管理、SSH、家庭成员访问 | 只允许可信网段访问 `8080`；SSH 仅走私有网络 |
+| 局域网 / Tailscale / Headscale | 管理、SSH、授权用户访问 | 只允许可信网段访问 `8080`；SSH 仅走私有网络 |
 | HTTPS 反向代理 / FRP / 隧道 | 给外部用户打开分享链接 | 公网只开放 `80/443`，代理到 MnemoNAS 的 Web 入口 |
 | dataplane `9090/9091` | `nasd` 与 Rust 数据面内部通信 | 只绑定 loopback，不做端口映射，不走公网代理 |
 
@@ -184,7 +186,7 @@ sudo ufw status numbered
 WebDAV 地址：
 
 ```text
-http://<ubuntu-laptop-ip>:8080/dav
+http://<server-ip>:8080/dav
 ```
 
 ## 备份策略

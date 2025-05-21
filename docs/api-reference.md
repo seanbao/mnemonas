@@ -2,6 +2,8 @@
 
 # MnemoNAS API 参考文档
 
+[English](api-reference.en.md) | 简体中文
+
 本文档描述 MnemoNAS REST API 的所有端点、请求/响应格式和错误处理。
 
 ## 基础信息

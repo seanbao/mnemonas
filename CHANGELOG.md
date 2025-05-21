@@ -128,10 +128,11 @@
 - .gitignore 完善
 
 #### 文档完善
-- Ubuntu 笔记本部署指南，覆盖 ZFS/Btrfs/mdadm 分层、systemd 安装、网络、备份、升级和故障排查
+- Linux/systemd 部署指南，覆盖 ZFS/Btrfs/mdadm 分层、systemd 安装、网络、备份、升级和故障排查
 - 备份指南（3-2-1 策略、rclone/restic 配置、恢复流程）
 - API 参考文档
 - README 徽章和快速开始指南
+- README、文档索引、主要专题文档、支持说明和安全策略提供中英文版本
 - Docker 部署指南补充 Compose v2 安装、非 root UID/GID、可配置 `MNEMONAS_HTTP_PORT`、弱网构建策略和 dataplane 端口边界
 
 ### Changed
@@ -149,6 +150,7 @@
 - Release archive 随包附带 `SUPPORT.md`
 - CI push/pull_request 触发分支覆盖 `main` 和 `master`，避免当前仓库默认分支未切换时漏跑检查
 - pre-commit 的 `golangci-lint` 版本对齐 CI/Makefile 使用的 v2.11.4
+- Release archive 随包附带 README、支持说明和安全策略的中英文版本
 - 安全文档区分 Web UI 初始管理员密码与 WebDAV Basic Auth 自动密码
 - 安全文档和 doctor 明确提示 dataplane `9090/9091` 不应被防火墙放行到不可信网络
 - 备份文档补充运行中数据的一致性窗口和快照建议

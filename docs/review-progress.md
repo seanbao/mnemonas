@@ -15,7 +15,7 @@ This file records verified review progress so future work can continue from the 
 - `make proto` regenerates both Go protobuf files and checked-in Rust protobuf code through `tools/proto-gen`.
 - CI and Makefile checks include the Rust proto generator, and dataplane clippy runs all targets with locked dependencies.
 - CI pins `protoc 3.20.1` and fails if `make proto` changes checked-in Go/Rust protobuf generated files.
-- Docker and Ubuntu deployment docs cover Compose v2 plugin installation, non-root UID/GID, internal dataplane ports, weak-network Docker build behavior, and Ubuntu laptop storage/network guidance.
+- Docker and Linux/systemd deployment docs cover Compose v2 plugin installation, non-root UID/GID, internal dataplane ports, weak-network Docker build behavior, and systemd storage/network guidance.
 - Docker deployment docs now include Buildx package-name differences and an apt foreign-architecture workaround for Ubuntu systems that fail on unsupported `binary-armhf` indexes.
 - Docker Compose now has a preflight script that checks Docker daemon access, Compose v2, Buildx, configured host port availability, data-directory permissions, disk space, and existing Docker storage configuration before users run `docker compose up`.
 - systemd deployments now install a tested `mnemonas-uninstall-systemd` helper that removes services and binaries while preserving config/data by default, with explicit confirmation required before deleting storage.
@@ -31,13 +31,14 @@ This file records verified review progress so future work can continue from the 
 - Compatible dependency refresh completed across Go, Rust, and web lockfiles. Current security scans are clean.
 - React 19 lint compatibility is verified for file browsing, directory picking, preview reset, share dialogs, share management, and public share access flows.
 - `make e2e` now uses an isolated temporary backend and storage root through `scripts/run-e2e-isolated.sh`; raw `scripts/e2e-test.sh` now refuses to run unless the target URL and storage/config/password paths are explicit.
-- `make bench` now uses an isolated temporary backend and storage root through `scripts/run-benchmark-isolated.sh`; raw `scripts/benchmark.sh` now refuses implicit base URLs and personal storage roots.
+- `make bench` now uses an isolated temporary backend and storage root through `scripts/run-benchmark-isolated.sh`; raw `scripts/benchmark.sh` now refuses implicit base URLs and non-isolated storage roots.
 - Fault-injection and E2E shell counters no longer trip `set -e` on successful increments. Crash-during-write live fault coverage now throttles the upload so incomplete upload handling is exercised reliably.
 - Docker npm install cache is serialized with `sharing=locked`, avoiding esbuild postinstall `ETXTBSY` races during BuildKit builds.
 - Docker and systemd dataplane launch helpers accept TOML-style underscored integer chunk-size settings and normalize them before passing CLI flags to the dataplane binary.
 - Shell TOML and `.env` readers preserve `#` inside quoted values across Docker, systemd, doctor, development, E2E, benchmark, and fault-injection helpers; Docker quickstart quotes generated `.env` values when needed.
 - `make lint` / `make check` no longer silently skip Go static analysis when `golangci-lint` is missing; developers must install it, set `GOLANGCI_LINT=/path/to/golangci-lint`, or explicitly opt out with `SKIP_GOLANGCI_LINT=1`.
 - Public GitHub readiness now includes release packages that carry support/security docs and CI triggers for both `main` and the current `master` branch.
+- Public documentation now has Chinese and English versions for README, the documentation index, major topic guides, support, and security policy.
 
 ## Recent Validation
 

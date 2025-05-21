@@ -1,5 +1,7 @@
 # WebDAV 挂载指南
 
+[English](mounting-guide.en.md) | 简体中文
+
 MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平台挂载 WebDAV 共享。
 
 ## 📍 连接信息

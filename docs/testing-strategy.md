@@ -1,5 +1,7 @@
 # MnemoNAS 测试策略
 
+[English](testing-strategy.en.md) | 简体中文
+
 本文档定义 MnemoNAS 项目的多层测试策略，确保功能正确性、配置行为一致性和系统可靠性。
 
 ## 测试金字塔
