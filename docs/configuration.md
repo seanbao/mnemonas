@@ -1,5 +1,7 @@
 # MnemoNAS 配置参考
 
+[English](configuration.en.md) | 简体中文
+
 本文档详细说明 MnemoNAS 的所有配置选项。配置文件使用 TOML 格式。
 
 ## 配置文件位置

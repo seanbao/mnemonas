@@ -1,5 +1,7 @@
 # MnemoNAS 开发指南
 
+[English](development.en.md) | 简体中文
+
 本文档详细介绍如何搭建 MnemoNAS 的开发环境，包括各组件的构建、运行和调试方法。
 
 ## 目录
@@ -577,7 +579,7 @@ make e2e
 
 ### 故障注入测试
 
-`scripts/fault-injection-test.sh` 会杀死并重启 `nasd`、写入测试文件，并可直接损坏对象和元数据文件。它默认关闭，不能直接对个人数据目录运行；必须显式指定隔离测试实例：
+`scripts/fault-injection-test.sh` 会杀死并重启 `nasd`、写入测试文件，并可直接损坏对象和元数据文件。它默认关闭，不能直接对真实数据目录运行；必须显式指定隔离测试实例：
 
 ```bash
 MNEMONAS_LIVE_FAULTS=1 \
@@ -614,7 +616,7 @@ MNEMONAS_STORAGE_ROOT=/data/mnemonas \
 ./scripts/benchmark.sh http://192.168.1.100:8080
 
 # 若未使用默认 WebDAV 凭据或需要显式抓取受保护的 metrics
-MNEMONAS_WEBDAV_USERNAME="family" \
+MNEMONAS_WEBDAV_USERNAME="webdav" \
 MNEMONAS_WEBDAV_PASSWORD="secret" \
 MNEMONAS_ACCESS_TOKEN="<access-token>" \
 MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
