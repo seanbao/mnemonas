@@ -2,7 +2,7 @@
 
 English | [简体中文](design-decisions.md)
 
-This document records the main design choices behind MnemoNAS and the practical goals used to judge whether the project is ready for a strong open-source release.
+This document records the main design choices behind MnemoNAS and the practical goals used to judge whether the project is ready for a public open-source release.
 
 ## Positioning
 

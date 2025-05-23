@@ -5,11 +5,10 @@ English | [简体中文](README.md)
 [![CI](https://github.com/seanbao/mnemonas/actions/workflows/ci.yml/badge.svg)](https://github.com/seanbao/mnemonas/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/seanbao/mnemonas)](https://goreportcard.com/report/github.com/seanbao/mnemonas)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Container](https://img.shields.io/badge/container-ghcr.io%2Fseanbao%2Fmnemonas-blue)](https://github.com/seanbao/mnemonas/pkgs/container/mnemonas)
 
 > Your files. Your control. A self-hosted private cloud storage system.
 
-MnemoNAS is a simple, reliable, and approachable open-source NAS system. It keeps data under your control and focuses on everyday file management in self-hosted environments.
+MnemoNAS is an open-source self-hosted NAS system with a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles for daily file management. Data stays in your own storage root, and moving that full root is enough to migrate the service.
 
 The name comes from Mnemosyne, the Greek goddess of memory and mother of the nine Muses.
 
@@ -20,7 +19,7 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 - **Data ownership**: your data stays on your own disks; moving the full storage root is enough to migrate the service.
 - **Usable Web UI**: desktop and mobile views are designed for clear daily use instead of dense admin-only panels.
 - **Fast deployment**: Docker Compose and Linux/systemd deployment paths are provided.
-- **Reliability tools**: health checks, scrub, GC, and diagnostic bundles help discover and investigate data issues.
+- **Maintenance and diagnostics**: health checks, scrub, GC, and diagnostic bundles help discover and investigate data issues.
 - **Web and WebDAV**: browser-based management and common WebDAV clients are both supported.
 
 ### Feature Matrix
@@ -37,7 +36,7 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 | Activity log | Operation audit, filters, statistics |
 | Settings | Server, storage, retention, and WebDAV configuration |
 | Maintenance | Scrub, GC, object browsing, diagnostic bundle, system metrics |
-| WebDAV | Core RFC 4918 read/write methods with Basic Auth and client compatibility testing |
+| WebDAV | Core RFC 4918 read/write methods with Basic Auth and a maintained compatibility matrix |
 
 ## Architecture
 
@@ -114,7 +113,7 @@ If port 8080 is already used:
 ./scripts/docker-quickstart.sh --port 8888 --start
 ```
 
-On first startup, MnemoNAS creates persistent config in the data directory. The Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`. After public release images are available, you can also switch to `ghcr.io/seanbao/mnemonas:latest`.
+On first startup, MnemoNAS creates persistent config in the data directory. The Web login initial password is stored at `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`. Release image usage is documented in the [Docker deployment guide](docs/docker-deployment.en.md) after public images are available.
 
 ### Manual Binary Run
 

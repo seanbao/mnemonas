@@ -69,3 +69,6 @@ coverage.txt
 *.tmp
 *.temp
 .cache/
+
+# Local review notes
+docs/review-progress.md

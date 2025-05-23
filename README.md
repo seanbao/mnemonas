@@ -5,11 +5,10 @@
 [![CI](https://github.com/seanbao/mnemonas/actions/workflows/ci.yml/badge.svg)](https://github.com/seanbao/mnemonas/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/seanbao/mnemonas)](https://goreportcard.com/report/github.com/seanbao/mnemonas)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Container](https://img.shields.io/badge/container-ghcr.io%2Fseanbao%2Fmnemonas-blue)](https://github.com/seanbao/mnemonas/pkgs/container/mnemonas)
 
 > 🧠 **Your files. Your control.** — 自托管私有云存储
 
-MnemoNAS 是一个简单可靠、好看好用的开源 NAS 系统。数据在自己手里，专注于自托管环境中的日常文件管理。
+MnemoNAS 是一个开源的自托管 NAS 系统，提供 Web UI、WebDAV、版本历史、回收站、Scrub 和诊断包等日常文件管理能力。数据保存在自有存储目录中，迁移完整存储目录即可换机运行。
 
 **命名来源**：Mnemosyne（摩涅莫辛涅），希腊神话中的记忆女神，九位缪斯之母，象征着知识、艺术与文明的传承。
 
@@ -20,7 +19,7 @@ MnemoNAS 是一个简单可靠、好看好用的开源 NAS 系统。数据在自
 - 🔐 **数据自主权**：数据在自己手里，容量由本机磁盘决定，迁移完整存储目录即可换机运行
 - 🎨 **易用界面**：桌面端和移动端均可使用，界面克制清晰，避免传统运维后台式堆砌
 - 🚀 **快速部署**：提供 Docker Compose 和 Linux/systemd 部署路径
-- 🛡️ **可靠不折腾**：健康检查、Scrub 和诊断包帮助发现并定位数据问题
+- 🛡️ **维护与诊断**：健康检查、Scrub、GC 和诊断包帮助发现并定位数据问题
 - 🌐 **Web 与 WebDAV 覆盖**：浏览器管理界面和常见 WebDAV 客户端均可访问，不只是文件浏览器
 
 ### 功能列表
@@ -37,7 +36,7 @@ MnemoNAS 是一个简单可靠、好看好用的开源 NAS 系统。数据在自
 | **活动日志** | 全操作审计、按时间/类型筛选、统计报表 |
 | **系统设置** | 服务器配置、存储路径、版本保留策略、WebDAV 配置 |
 | **数据维护** | Scrub 完整性校验、GC 垃圾回收、诊断包导出、系统指标 |
-| **WebDAV** | 覆盖 RFC 4918 核心读写方法，持续验证常见客户端，Basic Auth 认证 |
+| **WebDAV** | 覆盖 RFC 4918 核心读写方法，兼容性矩阵持续补充，Basic Auth 认证 |
 
 ## 🏗️ 架构
 
@@ -108,7 +107,7 @@ cd mnemonas
 # http://localhost:8080
 ```
 
-仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时执行 `docker compose up -d --build`。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。正式 release 镜像发布并公开后，也可以改用 `ghcr.io/seanbao/mnemonas:latest`。
+仓库自带的 `docker-compose.yml` 默认从当前源码构建 `mnemonas:local` 镜像，不要求宿主机安装 Go/Rust/Node.js，但需要能拉取 Docker 基础镜像。Dockerfile 使用 BuildKit 缓存和较小的 Alpine Go builder，弱网环境下重试构建不会从零下载所有依赖。`docker-quickstart.sh` 会创建或更新 `.env`，把 `MNEMONAS_UID`/`MNEMONAS_GID` 设置为当前宿主机用户，创建 `MNEMONAS_DATA_DIR`，运行 Docker 预检，并在 `--start` 时执行 `docker compose up -d --build`。如果 8080 已被占用，可运行 `./scripts/docker-quickstart.sh --port 8888 --start`。首次启动会在数据目录中自动生成持久化配置；Web 登录初始密码在 `<MNEMONAS_DATA_DIR>/.mnemonas/initial-password.txt`。发布镜像公开后的使用方式见 [Docker 部署指南](docs/docker-deployment.md)。
 
 ### 二进制安装
 
@@ -176,7 +175,7 @@ mnemonas/
 - Docker Engine + Compose v2 插件（支持 `docker compose`）
 - protoc 3.20+（`make proto` / `make build` 或修改 proto 时需要；Docker 镜像构建不需要）
 
-### 开发环境一键启动
+### 开发环境脚本启动
 
 推荐使用 `scripts/dev.sh` 脚本快速启动开发环境：
 
@@ -190,7 +189,7 @@ nvm use
 `scripts/dev.sh` 在启动前端前会强制校验该版本；未安装或未加载 `nvm` 时会直接失败，不再静默使用错误版本继续启动。
 
 ```bash
-# 一键启动完整环境（后端 + 前端）
+# 启动完整环境（后端 + 前端）
 ./scripts/dev.sh
 
 # 或使用选项
@@ -282,7 +281,7 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [开发指南](docs/development.md) | 本地开发环境搭建与调试 |
 | [English documentation index](docs/README.en.md) | English entry point with English links for the main docs |
 | [Linux/systemd 部署](docs/linux-systemd-deployment.md) | Linux 服务器的 systemd 长期运行指南 |
-| [Docker 部署](docs/docker-deployment.md) | 生产环境部署指南 |
+| [Docker 部署](docs/docker-deployment.md) | Docker 部署指南 |
 | [挂载指南](docs/mounting-guide.md) | 各平台 WebDAV 连接教程 |
 | [WebDAV 兼容性](docs/webdav-compatibility.md) | 客户端兼容性与协议支持范围 |
 | [反向代理配置](docs/reverse-proxy-setup.md) | HTTPS 与公网入口配置 |

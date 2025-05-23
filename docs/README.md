@@ -35,7 +35,7 @@
 | [开发指南](development.md) | [Development guide](development.en.md) | 本地开发环境搭建 |
 | [测试策略](testing-strategy.md) | [Testing strategy](testing-strategy.en.md) | 多层测试方案：单元/集成/E2E/测死矩阵 |
 | [API 参考](api-reference.md) | [API reference](api-reference.en.md) | REST API 端点与请求/响应格式 |
-| [扩展点设计](extension-points.md) | [Extension points](extension-points.en.md) | 阶段 2 接口草案（S3/插件/Runner） |
+| [扩展点设计](extension-points.md) | [Extension points](extension-points.en.md) | 未来接口草案（S3/插件/Runner） |
 
 ### 支持与安全
 
@@ -50,7 +50,7 @@
 |------|---------|------|
 | [配置参考](configuration.md) | [Configuration reference](configuration.en.md) | 完整配置选项说明 |
 | [mnemonas.example.toml](../mnemonas.example.toml) | [mnemonas.example.toml](../mnemonas.example.toml) | 配置文件示例 |
-| [CHANGELOG](../CHANGELOG.md) | [CHANGELOG](../CHANGELOG.md) | 版本更新记录 |
+| [CHANGELOG](../CHANGELOG.md) | [CHANGELOG](../CHANGELOG.en.md) | 版本更新记录 |
 
 ## 🔗 相关链接
 

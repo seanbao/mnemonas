@@ -1,4 +1,6 @@
-# Changelog
+# 变更记录
+
+[English](CHANGELOG.en.md) | 简体中文
 
 所有重要变更都会记录在此文件中。
 
@@ -32,7 +34,7 @@
 - **Versions 版本历史**
   - 查看文件所有历史版本
   - 版本时间、大小对比
-  - 一键恢复到指定版本
+  - 恢复到指定版本
 
 - **Trash 回收站**
   - 已删除文件列表
@@ -137,7 +139,7 @@
 
 ### Changed
 - Release archive 改为包含顶层目录，并随包附带 Web UI、安装/卸载脚本、诊断脚本和完整 docs 文档
-- 默认 `docker-compose.yml` 从源码构建 `mnemonas:local`，公开 release 镜像可按文档改用 `ghcr.io/seanbao/mnemonas:latest`
+- 默认 `docker-compose.yml` 从源码构建 `mnemonas:local`，公开 release 镜像可按文档改用明确版本标签
 - Docker Compose 宿主机 HTTP 端口改为通过 `.env` 中的 `MNEMONAS_HTTP_PORT` 配置
 - CI 固定 protobuf 生成器和 `protoc 3.20.1`，并检查 `make proto` 后生成文件无漂移
 - Rust CI/Makefile 检查覆盖 dataplane all-targets 和 `tools/proto-gen`
@@ -181,14 +183,14 @@
 #### 核心功能
 - **CAS 存储引擎**：基于 BLAKE3 哈希的内容寻址存储
 - **CDC 分块**：使用 FastCDC 算法实现智能分块（256KB-4MB）
-- **版本管理**：按策略自动保留适合版本化的文件历史，支持一键恢复
+- **版本管理**：按策略自动保留适合版本化的文件历史，支持恢复
 - **软删除**：删除操作仅移除引用，数据由 GC 异步清理
 
 #### WebDAV 协议
 - 覆盖 RFC 4918 核心读写方法（PROPFIND, GET, PUT, DELETE, MKCOL, COPY, MOVE）
 - 虚拟锁实现（LOCK/UNLOCK）
 - Basic Auth 认证
-- 持续验证常见客户端（macOS Finder, Windows Explorer, Transmit, rclone 等）
+- 记录常见客户端兼容性矩阵，并在发布前后补充真实客户端回归
 
 #### 性能优化
 - PROPFIND 响应缓存（30 秒 TTL）
@@ -231,7 +233,7 @@
 - [ ] 部署脚本检查通过：`make scripts-check`
 - [ ] 全量测试通过：`make test`
 - [ ] 依赖安全检查通过：`make security-check`
-- [ ] 更新 CHANGELOG.md
+- [ ] 更新 CHANGELOG.md 和 CHANGELOG.en.md
 - [ ] 更新 README.md 中的版本号（如有）
 - [ ] 创建 Git tag：`git tag -a v0.1.0 -m "Release v0.1.0"`
 - [ ] 推送 tag：`git push origin v0.1.0`

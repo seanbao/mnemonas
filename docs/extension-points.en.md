@@ -1,10 +1,10 @@
-# Stage 2 Extension Point Design
+# Future Extension Point Draft
 
 English | [简体中文](extension-points.md)
 
-This document sketches future extension interfaces for MnemoNAS while keeping the MVP codebase simple.
+This document sketches future extension interfaces for MnemoNAS. It is a design draft, not a release commitment for the current version.
 
-Principle: the MVP does not implement these features, but current code should leave enough structure to avoid major rewrites later.
+Principle: the current main branch does not implement these features, but code boundaries should stay clear enough to avoid major rewrites later.
 
 ## S3-Compatible Storage Backend
 
@@ -108,7 +108,7 @@ Loading options:
 
 | Option | Decision |
 | --- | --- |
-| Compile-time registration | Preferred first step after MVP |
+| Compile-time registration | Preferred first step for later evaluation |
 | Go runtime plugin | Not preferred because version compatibility is fragile |
 | Subprocess + gRPC | Useful for untrusted third-party plugins, but higher operational cost |
 
@@ -128,7 +128,7 @@ events = ["file.created", "file.deleted"]
 secret = "..."
 ```
 
-MVP reservation:
+Reserved boundary:
 
 ```go
 func (fs *FileSystem) WriteFile(ctx context.Context, name string, data []byte) error {
@@ -213,7 +213,7 @@ type TaskQueue interface {
 
 ## Extension Checklist
 
-Current MVP should preserve:
+Current main branch should preserve:
 
 - CAS/object-store interface boundaries.
 - File-operation lifecycle hook positions.

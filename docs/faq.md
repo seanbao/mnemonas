@@ -10,11 +10,11 @@
 
 | 平台 | 支持状态 |
 | ---- | -------- |
-| Linux (x86_64) | ✅ 完全支持 |
-| Linux (ARM64) | ✅ 完全支持 |
-| macOS (Apple Silicon) | ✅ 完全支持 |
-| macOS (Intel) | ✅ 完全支持 |
-| Windows | 🔄 通过 WSL2 支持 |
+| Linux (x86_64) | 长期运行主路径 |
+| Linux (ARM64) | 长期运行主路径 |
+| macOS (Apple Silicon) | 支持开发、本地运行和手动二进制 |
+| macOS (Intel) | 支持开发、本地运行和手动二进制 |
+| Windows | 通过 WSL2 支持 |
 
 ### Q: Ubuntu/systemd、Docker 和手动二进制部署有什么区别？
 
@@ -151,7 +151,7 @@ server {
 
 ### Q: 误删了文件怎么办？
 
-**A:** MnemoNAS 支持文件版本历史，可以轻松恢复删除或修改的文件！
+**A:** MnemoNAS 支持回收站和文件版本历史，可恢复删除或修改的文件。
 
 1. 打开 Web UI：`http://localhost:8080`
 2. 导航到文件所在目录
@@ -225,7 +225,7 @@ curl -X POST \
 
 ```bash
 curl http://localhost:8080/health
-# {"status":"healthy","version":"v0.2.0",...}
+# {"status":"healthy","version":"<version>",...}
 ```
 
 性能指标：

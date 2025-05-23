@@ -122,7 +122,7 @@ jobs:
           cp -R web/dist/. "dist/$package_name/web/"
           install -m 755 scripts/*.sh "dist/$package_name/scripts/"
           cp -R docs/. "dist/$package_name/docs/"
-          install -m 644 mnemonas.example.toml README.md README.en.md CHANGELOG.md SECURITY.md SECURITY.zh-CN.md SUPPORT.md SUPPORT.en.md LICENSE "dist/$package_name/"
+          install -m 644 mnemonas.example.toml README.md README.en.md CHANGELOG.md CHANGELOG.en.md SECURITY.md SECURITY.zh-CN.md SUPPORT.md SUPPORT.en.md LICENSE "dist/$package_name/"
           tar -czvf dist/mnemonas-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz \
             -C dist \
             "$package_name"
