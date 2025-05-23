@@ -1,10 +1,10 @@
-# 阶段 2 扩展点设计
+# 未来扩展点设计草案
 
 [English](extension-points.en.md) | 简体中文
 
-本文档定义 MnemoNAS v0.2.0+ 的扩展接口，用于指导后续开发，同时确保 MVP 阶段的代码保持简洁。
+本文档记录 MnemoNAS 的未来扩展接口方向，用于指导后续设计讨论，不代表当前版本承诺。
 
-> **原则**：MVP 不实现这些功能，但代码结构应预留扩展空间，避免后续大规模重构。
+> **原则**：当前主线不实现这些功能，但代码结构应保留清晰边界，避免后续大规模重构。
 
 ---
 
@@ -44,12 +44,12 @@ type Backend interface {
     Stats(ctx context.Context) (*StorageStats, error)
 }
 
-// LocalBackend implements Backend for local filesystem (MVP)
+// LocalBackend implements Backend for local filesystem.
 type LocalBackend struct {
     root string
 }
 
-// S3Backend implements Backend for S3-compatible storage (v0.2.0+)
+// S3Backend implements Backend for S3-compatible storage.
 type S3Backend struct {
     client *s3.Client
     bucket string
@@ -81,7 +81,7 @@ cold_backend = "s3"
 tier_policy = "age:30d"  # 30 天后迁移到冷存储
 ```
 
-### S3 MVP 预留
+### S3 预留边界
 
 当前 `internal/caslayout` 的 `Store` 接口已可扩展：
 
@@ -95,7 +95,7 @@ type Store interface {
 }
 ```
 
-v0.2.0 需要：
+后续实现需要：
 
 1. 添加 `context.Context` 参数
 2. 改用 `io.Reader/io.ReadCloser` 支持流式传输
@@ -163,7 +163,7 @@ type AuthProvider interface {
 ### 插件加载方式
 
 ```go
-// 方案 A：编译时链接（推荐 MVP 后首选）
+// 方案 A：编译时链接（后续优先评估）
 import (
     _ "github.com/seanbao/mnemonas-plugin-thumbnail"
     _ "github.com/seanbao/mnemonas-plugin-webhook"
@@ -192,7 +192,7 @@ events = ["file.created", "file.deleted"]
 secret = "..."
 ```
 
-### 插件 MVP 预留
+### 插件预留边界
 
 在文件操作处添加钩子点：
 
@@ -201,7 +201,7 @@ secret = "..."
 func (fs *FileSystem) WriteFile(ctx context.Context, name string, data []byte) error {
     // ... 原生文件写入与版本归档逻辑 ...
 
-    // 预留钩子点（MVP 可为空实现）
+    // 预留钩子点（当前可为空实现）
     // triggerFileCreated(ctx, name)
 }
 ```
@@ -270,7 +270,7 @@ message TaskResult {
 
 ```toml
 [runner]
-enabled = false  # MVP 关闭
+enabled = false  # 当前关闭
 
 [runner.queue]
 type = "memory"  # "memory" | "redis" | "nats"
@@ -281,7 +281,7 @@ thumbnail = { runners = 2, timeout = "30s" }
 transcode = { runners = 1, timeout = "5m", gpu = true }
 ```
 
-### Runner MVP 预留
+### Runner 预留边界
 
 任务系统骨架：
 
@@ -313,9 +313,9 @@ type TaskQueue interface {
     Fail(ctx context.Context, taskID string, err error) error
 }
 
-// InMemoryQueue implements TaskQueue for MVP (同步处理)
+// InMemoryQueue implements TaskQueue for the current synchronous path.
 type InMemoryQueue struct {
-    // MVP：直接同步执行，不入队
+    // 当前：直接同步执行，不入队
 }
 ```
 
@@ -323,20 +323,20 @@ type InMemoryQueue struct {
 
 ## 📋 扩展点检查清单
 
-### v0.1.0 MVP 需要确保
+### 当前主线需要确保
 
 - [x] `caslayout.Store` 接口可扩展（已完成）
 - [x] WebDAV 处理器有生命周期钩子（onFileCreated/onFileDeleted）
 - [x] 配置系统支持嵌套结构（TOML）
 - [x] gRPC proto 文件结构清晰，易于添加新服务
 
-### v0.2.0 实现目标
+### 后续实现目标
 
 - [ ] S3Backend 实现
 - [ ] 插件加载框架
 - [ ] 基础任务队列
 
-### v0.3.0 实现目标
+### 长期实现目标
 
 - [ ] 分布式 Runner
 - [ ] 冷热分层存储

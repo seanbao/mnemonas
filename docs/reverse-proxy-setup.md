@@ -201,7 +201,7 @@ sudo certbot renew --dry-run
 
 如果 MnemoNAS 和反向代理都用 Docker，可以用 Traefik。
 
-示例使用已公开的 release 镜像。若当前只有源码 checkout，请参考 [Docker 部署指南](docker-deployment.md) 先构建 `mnemonas:local`，再把下面的 `image` 改为 `mnemonas:local`。
+示例中的 MnemoNAS 镜像默认使用源码构建的 `mnemonas:local`。发布镜像公开后，可在 `.env` 中设置 `MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>`。
 
 ### docker-compose.yml
 
@@ -227,7 +227,7 @@ services:
     restart: unless-stopped
 
   mnemonas:
-    image: ghcr.io/seanbao/mnemonas:latest
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     volumes:
       - ${HOME}/.mnemonas:/data

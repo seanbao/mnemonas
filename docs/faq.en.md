@@ -8,8 +8,8 @@ English | [简体中文](faq.md)
 
 | Platform | Status |
 | --- | --- |
-| Linux x86_64 | Fully supported |
-| Linux ARM64 | Fully supported |
+| Linux x86_64 | Primary path for long-running deployments |
+| Linux ARM64 | Primary path for long-running deployments |
 | macOS Apple Silicon | Fully supported for development and local runs |
 | macOS Intel | Fully supported for development and local runs |
 | Windows | Supported through WSL2 |

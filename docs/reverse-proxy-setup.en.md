@@ -147,7 +147,7 @@ Set `trusted_proxy_hops = 1` in MnemoNAS for a single Nginx proxy.
 
 ## Option 3: Docker Compose with Traefik
 
-When MnemoNAS and the reverse proxy both run under Docker:
+When MnemoNAS and the reverse proxy both run under Docker, the example defaults to the source-built `mnemonas:local` image. After public release images are available, set `MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>` in `.env`.
 
 ```yaml
 services:
@@ -171,7 +171,7 @@ services:
     restart: unless-stopped
 
   mnemonas:
-    image: ghcr.io/seanbao/mnemonas:latest
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     volumes:
       - ${HOME}/.mnemonas:/data

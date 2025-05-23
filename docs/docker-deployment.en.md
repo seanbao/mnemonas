@@ -54,7 +54,7 @@ git clone https://github.com/seanbao/mnemonas.git
 cd mnemonas
 ```
 
-The bundled `docker-compose.yml` builds `mnemonas:local` from the current source checkout. The host does not need Go, Rust, or Node.js, but Docker must be able to pull Rust, Node, Go, and Debian base images.
+The bundled `docker-compose.yml` builds `mnemonas:local` from the current source checkout. The host does not need Go, Rust, or Node.js, but Docker must be able to pull Rust, Node, Go, and Debian base images. After public release images are available, switch to GHCR as described in the release image section.
 
 Prepare and start:
 
@@ -163,12 +163,24 @@ docker build -t mnemonas:local \
   .
 ```
 
+## Release Images
+
+After public release images are available, set the image tag in `.env`:
+
+```bash
+MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>
+```
+
+Prefer an explicit version tag. Use `latest` only for temporary evaluation or environments that intentionally accept automatic upgrades.
+
+The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
+
 ## Media Archive Example
 
 ```yaml
 services:
   mnemonas:
-    image: ghcr.io/seanbao/mnemonas:latest
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     container_name: mnemonas
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     ports:
@@ -217,7 +229,7 @@ Bind the host port to loopback:
 ```yaml
 services:
   mnemonas:
-    image: ghcr.io/seanbao/mnemonas:latest
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     container_name: mnemonas-dev
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     ports:
@@ -236,7 +248,7 @@ Admins can create users in the Web UI and set `home_dir`. Non-admin users are sc
 ```yaml
 services:
   mnemonas:
-    image: ghcr.io/seanbao/mnemonas:latest
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     container_name: shared-nas
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     ports:
@@ -259,7 +271,7 @@ services:
 ```yaml
 services:
   mnemonas:
-    image: ghcr.io/seanbao/mnemonas:latest
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     container_name: mnemonas
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     expose:
@@ -308,7 +320,7 @@ Set `server.trusted_proxy_hops = 1` in MnemoNAS config when Nginx is the only tr
 ```yaml
 services:
   mnemonas:
-    image: ghcr.io/seanbao/mnemonas:latest
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     user: "${MNEMONAS_UID:-1000}:${MNEMONAS_GID:-1000}"
     labels:
       - "traefik.enable=true"

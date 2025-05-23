@@ -288,9 +288,9 @@ cd web && npm run build                           # 前端
 
 ## 本地开发
 
-### 一键启动（推荐）
+### 脚本启动（推荐）
 
-使用 `scripts/dev.sh` 脚本可以一键启动完整的开发环境：
+使用 `scripts/dev.sh` 脚本可以启动完整的开发环境：
 
 ```bash
 source ~/.nvm/nvm.sh

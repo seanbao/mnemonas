@@ -4,10 +4,11 @@ English | [简体中文](SECURITY.zh-CN.md)
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1   | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| `main` / unreleased | Best-effort fixes before the first public release |
+| Published releases | Latest supported minor after releases are cut |
+| Older releases | Not supported unless noted in release notes |
 
 ## Reporting a Vulnerability
 

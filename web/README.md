@@ -1,5 +1,7 @@
 # MnemoNAS Web Frontend
 
+[English](README.en.md) | 简体中文
+
 MnemoNAS 前端应用，基于 React 19 + TypeScript + Vite 构建。
 
 ## 技术栈

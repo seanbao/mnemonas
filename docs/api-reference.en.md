@@ -357,9 +357,4 @@ Use the HTTP status code for broad control flow and the JSON error code for user
 
 ## Version Notes
 
-| Version | Notes |
-| --- | --- |
-| `v0.4.0` | Multi-user, sharing, favorites, activity, settings, diagnostics, stronger auth flows |
-| `v0.3.0` | WebDAV compatibility improvements and maintenance APIs |
-| `v0.2.0` | Version history, trash, storage stats |
-| `v0.1.0` | Initial file and health APIs |
+This document describes the current main-branch REST API. Released versions, compatibility notes, and change history are tracked by Git tags and [CHANGELOG](../CHANGELOG.en.md).

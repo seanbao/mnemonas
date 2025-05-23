@@ -36,7 +36,7 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 | [Development guide](development.en.md) | Local development setup |
 | [Testing strategy](testing-strategy.en.md) | Unit, integration, E2E, and torture test strategy |
 | [API reference](api-reference.en.md) | REST API endpoints and request/response formats |
-| [Extension points](extension-points.en.md) | Stage-2 interface draft for S3, plugins, and runners |
+| [Extension points](extension-points.en.md) | Future interface draft for S3, plugins, and runners |
 
 ### Support and Security
 
@@ -53,7 +53,7 @@ Welcome to the MnemoNAS documentation. This directory contains usage guides, dep
 | --- | --- |
 | [Configuration reference](configuration.en.md) | Complete config options |
 | [mnemonas.example.toml](../mnemonas.example.toml) | Example config file |
-| [CHANGELOG](../CHANGELOG.md) | Change history |
+| [CHANGELOG](../CHANGELOG.en.md) | Change history |
 
 ## Links
 

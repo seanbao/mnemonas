@@ -6,7 +6,7 @@ This document describes the MnemoNAS system architecture, major design decisions
 
 ## Design Position
 
-MnemoNAS is a simple, reliable, and usable private NAS for self-hosted deployments. It keeps the current file tree readable, adds version history and trash on top, and exposes both a Web UI and WebDAV.
+MnemoNAS is a self-hosted private cloud storage system for daily file management. It keeps the current file tree readable, adds version history and trash on top, and exposes both a Web UI and WebDAV.
 
 Core principles:
 
