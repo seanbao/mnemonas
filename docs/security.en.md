@@ -258,7 +258,9 @@ The `Secure` cookie flag is enabled when the request is actually HTTPS, or when 
 
 ### Web UI Session Tokens
 
-The Web UI stores access and refresh tokens in browser `localStorage` for REST API and upload requests. The server adds security headers, CSP, and `Permissions-Policy`, and preview/download flows use short-lived `HttpOnly` cookies, but same-origin XSS could still read localStorage.
+The Web UI stores the primary access and refresh session in `HttpOnly`, `SameSite=Lax` cookies. It no longer writes bearer access or refresh tokens to `localStorage`; REST API calls, uploads, refresh, and logout use same-origin cookies sent by the browser. Legacy tokens left by older versions are cleared during initialization, refresh, logout, and related auth paths.
+
+API clients can still use `Authorization: Bearer <access-token>` and JSON refresh tokens for scripts and automation. The server adds security headers, CSP, and `Permissions-Policy`, but public deployments still need careful origin hygiene.
 
 For public deployments:
 
@@ -267,7 +269,7 @@ For public deployments:
 - Avoid injecting third-party scripts under the same origin.
 - Sign out on shared computers.
 
-Changing a user's password, deleting the user, or disabling the user revokes that user's refresh tokens.
+Signing out, changing a user's password, deleting the user, or disabling the user revokes or clears the relevant sessions.
 
 ### Public Share Passwords
 

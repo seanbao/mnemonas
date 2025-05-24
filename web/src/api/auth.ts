@@ -25,18 +25,18 @@ export interface LoginRequest {
 }
 
 export interface LoginResponse {
-  access_token: string
-  refresh_token: string
-  expires_at: string
-  token_type: string
+  access_token?: string
+  refresh_token?: string
+  expires_at?: string
+  token_type?: string
   user: ApiUser
 }
 
 export interface RefreshResponse {
-  access_token: string
-  refresh_token: string
-  expires_at: string
-  token_type: string
+  access_token?: string
+  refresh_token?: string
+  expires_at?: string
+  token_type?: string
   user: ApiUser
 }
 
@@ -53,8 +53,6 @@ interface AuthApiResponse<T> {
 }
 
 interface AuthSessionData {
-  accessToken: string
-  refreshToken: string
   user: User
 }
 
@@ -92,10 +90,14 @@ export class AuthError extends Error {
   }
 }
 
-// Token storage
+// Browser sessions use HttpOnly cookies. These legacy keys are only kept so
+// upgrades can remove old bearer tokens from localStorage.
 const TOKEN_KEY = 'mnemonas_token'
 const REFRESH_TOKEN_KEY = 'mnemonas_refresh_token'
 const USER_KEY = 'mnemonas_user'
+const SESSION_MARKER_KEY = 'mnemonas_session'
+const COOKIE_SESSION_HEADER = 'X-MnemoNAS-Session-Mode'
+const COOKIE_SESSION_VALUE = 'cookie'
 export const AUTH_CLEARED_EVENT = 'mnemonas:auth-cleared'
 let refreshPromise: Promise<boolean> | null = null
 let isDownloadSessionReady = true
@@ -109,7 +111,12 @@ function getMissingUserMessage(responseMessage?: string): string {
 }
 
 function hasStoredAuthState(): boolean {
-  return Boolean(getStoredToken() || getStoredRefreshToken() || localStorage.getItem(USER_KEY))
+  return Boolean(
+    localStorage.getItem(SESSION_MARKER_KEY) ||
+    localStorage.getItem(USER_KEY) ||
+    localStorage.getItem(TOKEN_KEY) ||
+    localStorage.getItem(REFRESH_TOKEN_KEY)
+  )
 }
 
 function isUserRole(role: unknown): role is User['role'] {
@@ -117,13 +124,11 @@ function isUserRole(role: unknown): role is User['role'] {
 }
 
 function parseAuthSessionData(data: LoginResponse | RefreshResponse | undefined): AuthSessionData {
-  if (!data || typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string') {
+  if (!data || data.user == null) {
     throw new Error('invalid auth session data')
   }
 
   return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
     user: normalizeUser(data.user),
   }
 }
@@ -189,11 +194,13 @@ async function handleForbiddenSessionResponse(response: Response): Promise<void>
 }
 
 export function getStoredToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+  clearLegacyTokenStorage()
+  return null
 }
 
 export function getStoredRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY)
+  clearLegacyTokenStorage()
+  return null
 }
 
 export function getStoredUser(): User | null {
@@ -233,15 +240,26 @@ function normalizeUser(user: ApiUser): User {
 }
 
 export function storeTokens(accessToken: string, refreshToken: string, user: User): void {
-  localStorage.setItem(TOKEN_KEY, accessToken)
-  localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken)
+  void accessToken
+  void refreshToken
+  storeSessionUser(user)
+}
+
+function clearLegacyTokenStorage(): void {
+  localStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+function storeSessionUser(user: User): void {
+  clearLegacyTokenStorage()
+  localStorage.setItem(SESSION_MARKER_KEY, '1')
   localStorage.setItem(USER_KEY, JSON.stringify(user))
 }
 
 export function clearTokens(detail?: AuthClearedDetail): void {
-  localStorage.removeItem(TOKEN_KEY)
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
+  clearLegacyTokenStorage()
   localStorage.removeItem(USER_KEY)
+  localStorage.removeItem(SESSION_MARKER_KEY)
   isDownloadSessionReady = true
 
   if (typeof window !== 'undefined') {
@@ -259,18 +277,17 @@ interface DownloadSessionResult {
 }
 
 async function syncDownloadSession(): Promise<DownloadSessionResult> {
-  const token = getStoredToken()
-  if (!token) {
-    isDownloadSessionReady = false
-    return { ok: false }
+  const hadAuthState = hasStoredAuthState()
+  clearLegacyTokenStorage()
+  if (!hadAuthState) {
+    isDownloadSessionReady = true
+    return { ok: true }
   }
 
   try {
     const response = await fetch(`${API_BASE}/auth/download-session`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      credentials: 'same-origin',
     })
 
     if (!response.ok) {
@@ -296,7 +313,7 @@ async function syncDownloadSession(): Promise<DownloadSessionResult> {
 }
 
 export async function ensureDownloadSession(): Promise<DownloadSessionResult> {
-  if (!getStoredToken()) {
+  if (!hasStoredAuthState()) {
     return { ok: true }
   }
 
@@ -305,20 +322,13 @@ export async function ensureDownloadSession(): Promise<DownloadSessionResult> {
 
 // Auth header helper
 export function getAuthHeaders(): HeadersInit {
-  const token = getStoredToken()
-  if (!token) return {}
-  return {
-    'Authorization': `Bearer ${token}`,
-  }
+  clearLegacyTokenStorage()
+  return {}
 }
 
 function mergeAuthHeaders(headers?: HeadersInit): Headers {
-  const merged = new Headers(headers)
-  const token = getStoredToken()
-  if (token && !merged.has('Authorization')) {
-    merged.set('Authorization', `Bearer ${token}`)
-  }
-  return merged
+  clearLegacyTokenStorage()
+  return new Headers(headers)
 }
 
 function getRequestPath(url: string): string {
@@ -342,7 +352,11 @@ function shouldRefreshToken(url: string, retryCount: number): boolean {
 export async function authFetch(url: string, options: RequestInit = {}, retryCount = 0): Promise<Response> {
   const headers = mergeAuthHeaders(options.headers)
   
-  const response = await fetch(url, { ...options, headers })
+  const response = await fetch(url, {
+    ...options,
+    headers,
+    credentials: options.credentials ?? 'same-origin',
+  })
   
   // If unauthorized, try to refresh token
   if (response.status === 401 && shouldRefreshToken(url, retryCount)) {
@@ -370,15 +384,12 @@ async function tryRefreshToken(): Promise<boolean> {
     return refreshPromise
   }
 
-  const refreshToken = getStoredRefreshToken()
-  if (!refreshToken) return false
-
   refreshPromise = (async () => {
     try {
       const response = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        headers: { [COOKIE_SESSION_HEADER]: COOKIE_SESSION_VALUE },
+        credentials: 'same-origin',
       })
 
       if (!response.ok) {
@@ -388,7 +399,7 @@ async function tryRefreshToken(): Promise<boolean> {
 
       const body: AuthApiResponse<RefreshResponse> = await response.json()
       const data = parseAuthSessionData(readAuthSuccessData(body))
-      storeTokens(data.accessToken, data.refreshToken, data.user)
+      storeSessionUser(data.user)
       await syncDownloadSession()
       return true
     } catch {
@@ -406,7 +417,11 @@ async function tryRefreshToken(): Promise<boolean> {
 export async function login(username: string, password: string): Promise<LoginActionResult> {
   const response = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      [COOKIE_SESSION_HEADER]: COOKIE_SESSION_VALUE,
+    },
+    credentials: 'same-origin',
     body: JSON.stringify({ username, password }),
   })
   
@@ -430,7 +445,7 @@ export async function login(username: string, password: string): Promise<LoginAc
     throw new AuthError('登录响应无效', response.status)
   }
 
-  storeTokens(data.accessToken, data.refreshToken, data.user)
+  storeSessionUser(data.user)
   const downloadSession = await syncDownloadSession()
   const action = getAuthActionResult(response, body)
 
@@ -443,17 +458,13 @@ export async function login(username: string, password: string): Promise<LoginAc
 
 // Logout
 export async function logout(): Promise<AuthActionResult> {
-  const token = getStoredToken()
-  if (!token) {
-    clearTokens()
-    return { warning: false, message: undefined }
-  }
+  clearLegacyTokenStorage()
 
   let response: Response
   try {
     response = await fetch(`${API_BASE}/auth/logout`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      credentials: 'same-origin',
     })
   } catch {
     throw new AuthError('退出登录失败', 0)
@@ -486,9 +497,6 @@ export async function logout(): Promise<AuthActionResult> {
 
 // Get current user
 export async function getCurrentUser(): Promise<User | null> {
-  const token = getStoredToken()
-  if (!token) return null
-  
   const response = await authFetch(`${API_BASE}/auth/me`)
   
   if (!response.ok) {
@@ -537,6 +545,7 @@ export async function getCurrentUser(): Promise<User | null> {
     return null
   }
 
+  storeSessionUser(user)
   await syncDownloadSession()
   return user
 }

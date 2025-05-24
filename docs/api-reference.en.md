@@ -16,11 +16,13 @@ JSON request bodies are parsed strictly. Write endpoints reject unknown fields a
 
 ## Authentication
 
-When Web UI/API authentication is enabled, include:
+When Web UI/API authentication is enabled, the Web UI uses same-origin `HttpOnly` cookies for its primary session. API clients can still include:
 
 ```http
 Authorization: Bearer <access_token>
 ```
+
+Login and refresh set `mnemonas_access` and `mnemonas_refresh` cookies. Browser clients can send `X-MnemoNAS-Session-Mode: cookie`; in that mode the JSON response omits bearer tokens and returns only user/session metadata.
 
 WebDAV Basic Auth is separate from the Web UI/API JWT flow.
 
@@ -114,7 +116,7 @@ Login request:
 }
 ```
 
-Login response:
+Login response for API clients:
 
 ```json
 {
@@ -133,6 +135,12 @@ Login response:
   }
 }
 ```
+
+Cookie-session login also sets `mnemonas_access` and `mnemonas_refresh`. With `X-MnemoNAS-Session-Mode: cookie`, the `data` object omits `access_token` and `refresh_token`.
+
+Refresh accepts either a JSON refresh token body for API clients or the `mnemonas_refresh` cookie for the Web UI. Refresh rotates the refresh token and sets new access/refresh cookies. Responses using the refresh cookie, or `X-MnemoNAS-Session-Mode: cookie`, omit bearer tokens from JSON.
+
+Logout revokes the current access token when a valid bearer token or session cookie is present and clears `mnemonas_access`, `mnemonas_refresh`, and the short-lived `mnemonas_download_access` cookie. It still attempts cookie cleanup when the access cookie is expired.
 
 Failed login attempts are rate-limited by username and client address. Client address uses the direct peer unless `server.trusted_proxy_hops` is configured and the request comes from a trusted private/loopback proxy.
 
@@ -203,7 +211,7 @@ Some file mutations may return success with a `Warning` header if the file opera
 | --- | --- | --- |
 | `GET` | `/api/v1/thumbnails/{path}` | Get generated thumbnail for an image or supported preview |
 
-Download-session cookies are used for preview and thumbnail flows where browser media elements cannot attach Authorization headers.
+Download-session cookies are used for preview and thumbnail flows where browser media elements cannot attach Authorization headers. `POST /api/v1/auth/download-session` can be authenticated by the Web UI session cookie or by `Authorization: Bearer <access-token>` and sets `mnemonas_download_access` scoped to `/api/v1`.
 
 ## Version History
 

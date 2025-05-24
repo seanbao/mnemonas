@@ -42,6 +42,10 @@ const (
 	defaultLoginRateLimitMessage = "too many login attempts, try later"
 	defaultJSONRequestBodyLimit  = 1 * 1024 * 1024
 	authPersistenceWarningHeader = `199 MnemoNAS "auth state persistence incomplete"`
+	sessionModeHeader            = "X-MnemoNAS-Session-Mode"
+	sessionModeCookie            = "cookie"
+	sessionCookiePath            = "/api/v1"
+	refreshSessionCookiePath     = "/api/v1/auth/refresh"
 )
 
 func newLoginAttemptTracker() *loginAttemptTracker {
@@ -164,8 +168,8 @@ type LoginRequest struct {
 
 // LoginResponse is the login response body
 type LoginResponse struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
+	AccessToken  string    `json:"access_token,omitempty"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	TokenType    string    `json:"token_type"`
 	User         UserInfo  `json:"user"`
@@ -214,6 +218,97 @@ func fullUserResponse(user *User) map[string]interface{} {
 		info["last_login_at"] = user.LastLoginAt
 	}
 	return info
+}
+
+func requestWantsCookieSession(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get(sessionModeHeader)), sessionModeCookie)
+}
+
+func loginResponseFromTokenPair(tokenPair *TokenPair, user *User, includeTokens bool) LoginResponse {
+	resp := LoginResponse{
+		ExpiresAt: tokenPair.ExpiresAt,
+		TokenType: tokenPair.TokenType,
+		User: UserInfo{
+			ID:       user.ID,
+			Username: user.Username,
+			Email:    user.Email,
+			Role:     user.Role,
+			HomeDir:  user.HomeDir,
+		},
+	}
+	if includeTokens {
+		resp.AccessToken = tokenPair.AccessToken
+		resp.RefreshToken = tokenPair.RefreshToken
+	}
+	return resp
+}
+
+func setSessionCookies(w http.ResponseWriter, r *http.Request, tokenPair *TokenPair) {
+	setAuthCookie(w, r, AccessSessionCookieName, tokenPair.AccessToken, sessionCookiePath, tokenPair.ExpiresAt)
+	setAuthCookie(w, r, RefreshSessionCookieName, tokenPair.RefreshToken, refreshSessionCookiePath, tokenPair.RefreshExpiresAt)
+}
+
+func setAuthCookie(w http.ResponseWriter, r *http.Request, name, value, path string, expires time.Time) {
+	maxAge := int(time.Until(expires).Seconds())
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     path,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsHTTPS(r),
+		Expires:  expires.UTC(),
+		MaxAge:   maxAge,
+	})
+}
+
+func clearSessionCookies(w http.ResponseWriter, r *http.Request) {
+	clearAuthCookie(w, r, AccessSessionCookieName, sessionCookiePath)
+	clearAuthCookie(w, r, RefreshSessionCookieName, refreshSessionCookiePath)
+}
+
+func clearAuthCookie(w http.ResponseWriter, r *http.Request, name, path string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     path,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsHTTPS(r),
+		Expires:  time.Unix(0, 0).UTC(),
+		MaxAge:   -1,
+	})
+}
+
+func decodeOptionalRefreshRequest(r *http.Request, req *RefreshRequest) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, defaultJSONRequestBodyLimit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > defaultJSONRequestBodyLimit {
+		return &http.MaxBytesError{Limit: defaultJSONRequestBodyLimit}
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return nil
+	}
+
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(req); err != nil {
+		return err
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing data")
+		}
+		return err
+	}
+	return nil
 }
 
 // HandleLogin handles POST /api/v1/auth/login
@@ -281,19 +376,8 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := LoginResponse{
-		AccessToken:  tokenPair.AccessToken,
-		RefreshToken: tokenPair.RefreshToken,
-		ExpiresAt:    tokenPair.ExpiresAt,
-		TokenType:    tokenPair.TokenType,
-		User: UserInfo{
-			ID:       user.ID,
-			Username: user.Username,
-			Email:    user.Email,
-			Role:     user.Role,
-			HomeDir:  user.HomeDir,
-		},
-	}
+	setSessionCookies(w, r, tokenPair)
+	resp := loginResponseFromTokenPair(tokenPair, user, !requestWantsCookieSession(r))
 
 	message := ""
 	if loginWarning {
@@ -314,18 +398,31 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RefreshRequest
-	if err := decodeJSONBodyStrict(r, &req); err != nil {
+	if err := decodeOptionalRefreshRequest(r, &req); err != nil {
 		writeJSONBodyError(w, err)
 		return
 	}
 
-	if req.RefreshToken == "" {
+	refreshToken := strings.TrimSpace(req.RefreshToken)
+	refreshFromCookie := false
+	if refreshToken == "" {
+		if cookie, err := r.Cookie(RefreshSessionCookieName); err == nil {
+			refreshToken = strings.TrimSpace(cookie.Value)
+			refreshFromCookie = true
+		}
+	}
+
+	if refreshToken == "" {
 		writeError(w, http.StatusBadRequest, "refresh token required", "MISSING_TOKEN")
 		return
 	}
 
-	claims, err := h.tokenManager.validateRefreshTokenClaims(req.RefreshToken)
+	claims, err := h.tokenManager.validateRefreshTokenClaims(refreshToken)
 	if err != nil {
+		if refreshFromCookie {
+			clearSessionCookies(w, r)
+			clearDownloadSessionCookie(w, r)
+		}
 		switch err {
 		case ErrTokenExpired:
 			writeError(w, http.StatusUnauthorized, "refresh token expired", "TOKEN_EXPIRED")
@@ -340,11 +437,19 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.userStore.GetByID(userID)
 	if err != nil {
+		if refreshFromCookie {
+			clearSessionCookies(w, r)
+			clearDownloadSessionCookie(w, r)
+		}
 		writeError(w, http.StatusUnauthorized, "user not found", "USER_NOT_FOUND")
 		return
 	}
 
 	if user.Disabled {
+		if refreshFromCookie {
+			clearSessionCookies(w, r)
+			clearDownloadSessionCookie(w, r)
+		}
 		writeError(w, http.StatusForbidden, "user account is disabled", "USER_DISABLED")
 		return
 	}
@@ -367,19 +472,8 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := LoginResponse{
-		AccessToken:  tokenPair.AccessToken,
-		RefreshToken: tokenPair.RefreshToken,
-		ExpiresAt:    tokenPair.ExpiresAt,
-		TokenType:    tokenPair.TokenType,
-		User: UserInfo{
-			ID:       user.ID,
-			Username: user.Username,
-			Email:    user.Email,
-			Role:     user.Role,
-			HomeDir:  user.HomeDir,
-		},
-	}
+	setSessionCookies(w, r, tokenPair)
+	resp := loginResponseFromTokenPair(tokenPair, user, !refreshFromCookie && !requestWantsCookieSession(r))
 
 	message := ""
 	if revocationWarning {
@@ -398,6 +492,7 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	claims := GetClaimsFromContext(r.Context())
 	if claims != nil {
 		if err := h.tokenManager.RevokeToken(claims.TokenID); err != nil {
+			clearSessionCookies(w, r)
 			clearDownloadSessionCookie(w, r)
 			if isAuthPersistenceWarning(err) {
 				markAuthPersistenceWarningHeaders(w)
@@ -408,6 +503,7 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	clearSessionCookies(w, r)
 	clearDownloadSessionCookie(w, r)
 
 	writeSuccess(w, http.StatusOK, nil, "logged out successfully")
@@ -420,15 +516,13 @@ func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	authHeader := r.Header.Get("Authorization")
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
-		writeError(w, http.StatusUnauthorized, "missing authorization header", "MISSING_AUTH")
-		return
-	}
-
 	claims := GetClaimsFromContext(r.Context())
 	if claims == nil || claims.ExpiresAt == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
+		return
+	}
+	accessToken := GetAccessTokenFromContext(r.Context())
+	if strings.TrimSpace(accessToken) == "" {
 		writeError(w, http.StatusUnauthorized, "not authenticated", "NOT_AUTHENTICATED")
 		return
 	}
@@ -440,7 +534,7 @@ func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Req
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     string(DownloadSessionCookieName),
-		Value:    parts[1],
+		Value:    accessToken,
 		Path:     "/api/v1",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -541,6 +635,8 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			markAuthPersistenceWarningHeaders(w)
+			clearSessionCookies(w, r)
+			clearDownloadSessionCookie(w, r)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
 			return
 		}
@@ -559,6 +655,8 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if err := h.tokenManager.RevokeByUser(user.ID); err != nil {
 		if isAuthPersistenceWarning(err) {
 			markAuthPersistenceWarningHeaders(w)
+			clearSessionCookies(w, r)
+			clearDownloadSessionCookie(w, r)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
 			return
 		}
@@ -566,6 +664,8 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clearSessionCookies(w, r)
+	clearDownloadSessionCookie(w, r)
 	writeSuccess(w, http.StatusOK, nil, "password changed successfully")
 }
 

@@ -15,7 +15,6 @@ const loginMock = vi.fn()
 const logoutMock = vi.fn()
 const getCurrentUserMock = vi.fn()
 const getStoredUserMock = vi.fn()
-const getStoredTokenMock = vi.fn()
 const acknowledgeSetupMock = vi.fn()
 const getSetupStatusMock = vi.fn()
 const clearQueryClientMock = vi.fn()
@@ -26,7 +25,6 @@ vi.mock('@/api/auth', () => ({
   logout: (...args: unknown[]) => logoutMock(...args),
   getCurrentUser: (...args: unknown[]) => getCurrentUserMock(...args),
   getStoredUser: (...args: unknown[]) => getStoredUserMock(...args),
-  getStoredToken: (...args: unknown[]) => getStoredTokenMock(...args),
 }))
 
 vi.mock('@/api/setup', () => ({
@@ -54,7 +52,6 @@ describe('authStore', () => {
     logoutMock.mockResolvedValue({ warning: false, message: undefined })
     getCurrentUserMock.mockResolvedValue(null)
     getStoredUserMock.mockReturnValue(null)
-    getStoredTokenMock.mockReturnValue(null)
     acknowledgeSetupMock.mockResolvedValue({ success: true, message: 'ok' })
     getSetupStatusMock.mockResolvedValue({
       success: true,
@@ -212,7 +209,6 @@ describe('authStore', () => {
   })
 
   it('preserves cached auth state when current user validation is temporarily unavailable', async () => {
-    getStoredTokenMock.mockReturnValue('access-1')
     getStoredUserMock.mockReturnValue({
       id: 'cached-1',
       username: 'cached-admin',
@@ -251,7 +247,6 @@ describe('authStore', () => {
       authEnabled: false,
     })
 
-    getStoredTokenMock.mockReturnValue(null)
     getSetupStatusMock.mockResolvedValue({
       success: true,
       is_first_run: false,
@@ -284,7 +279,6 @@ describe('authStore', () => {
       authEnabled: false,
     })
 
-    getStoredTokenMock.mockReturnValue(null)
     getSetupStatusMock.mockRejectedValue(new Error('setup unavailable'))
 
     await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
@@ -306,7 +300,6 @@ describe('authStore', () => {
     }) => void) | null = null
     let resolveCurrentUser: ((value: null) => void) | null = null
 
-    getStoredTokenMock.mockReturnValue('stale-token')
     getSetupStatusMock.mockImplementation(() => new Promise((resolve) => {
       resolveSetupStatus = resolve
     }))
@@ -369,10 +362,9 @@ describe('authStore', () => {
       email: '',
       homeDir: '/',
     })
-    expect(getStoredTokenMock).not.toHaveBeenCalled()
   })
 
-  it('initializes an authenticated session when the stored token validates', async () => {
+  it('initializes an authenticated session when the cookie session validates', async () => {
     const user = {
       id: 'admin-1',
       username: 'admin',
@@ -380,7 +372,6 @@ describe('authStore', () => {
       email: '',
       homeDir: '/',
     }
-    getStoredTokenMock.mockReturnValue('access-1')
     getStoredUserMock.mockReturnValue(user)
     getCurrentUserMock.mockResolvedValue(user)
 
@@ -392,8 +383,7 @@ describe('authStore', () => {
     expect(state.isLoading).toBe(false)
   })
 
-  it('clears auth state when the stored token is invalid', async () => {
-    getStoredTokenMock.mockReturnValue('access-1')
+  it('clears auth state when the cookie session is invalid', async () => {
     getStoredUserMock.mockReturnValue({
       id: 'cached-1',
       username: 'cached-admin',
@@ -412,7 +402,6 @@ describe('authStore', () => {
   })
 
   it('clears auth state when current user validation fails without a cached session', async () => {
-    getStoredTokenMock.mockReturnValue('access-1')
     getStoredUserMock.mockReturnValue(null)
     getCurrentUserMock.mockRejectedValue(new Error('network down'))
 
