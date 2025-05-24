@@ -17,11 +17,12 @@ const fetchMock = vi.fn()
 describe('auth API', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    fetchMock.mockReset()
     localStorage.clear()
     global.fetch = fetchMock as typeof fetch
   })
 
-  it('treats download session as ready when no auth token is stored', async () => {
+  it('treats download session as ready when no auth state is stored', async () => {
     await expect(ensureDownloadSession()).resolves.toEqual({ ok: true })
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -32,12 +33,28 @@ describe('auth API', () => {
   })
 
   it('returns empty auth state when nothing is stored', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        json: () => Promise.reject(new Error('invalid json')),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: () => Promise.resolve({ success: false }),
+      })
+
     expect(getStoredUser()).toBeNull()
     expect(getAuthHeaders()).toEqual({})
     await expect(getCurrentUser()).resolves.toBeNull()
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/auth/me', expect.objectContaining({
+      credentials: 'same-origin',
+    }))
   })
 
-  it('clears tokens without calling logout when no token is stored', async () => {
+  it('logs out with the HttpOnly cookie session and clears local auth state', async () => {
     localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
     localStorage.setItem('mnemonas_user', JSON.stringify({
       id: 'u1',
@@ -45,22 +62,31 @@ describe('auth API', () => {
       role: 'admin',
       home_dir: '/',
     }))
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({ success: true, data: null }),
+    })
 
     await expect(logout()).resolves.toEqual({ warning: false, message: undefined })
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/logout', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+    }))
     expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
-  it('syncs download session directly when an auth token is stored', async () => {
+  it('syncs download session directly when auth state is stored', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
     fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true }) })
 
     await expect(ensureDownloadSession()).resolves.toEqual({ ok: true })
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/download-session', expect.objectContaining({
       method: 'POST',
-      headers: { Authorization: 'Bearer access-1' },
+      credentials: 'same-origin',
     }))
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
   })
 
   it('syncs download session after login', async () => {
@@ -90,7 +116,7 @@ describe('auth API', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
       method: 'POST',
-      headers: { Authorization: 'Bearer access-1' },
+      credentials: 'same-origin',
     }))
   })
 
@@ -184,8 +210,9 @@ describe('auth API', () => {
       warning: true,
       message: 'download session unavailable',
     })
-    expect(localStorage.getItem('mnemonas_token')).toBe('access-1')
-    expect(localStorage.getItem('mnemonas_refresh_token')).toBe('refresh-1')
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).not.toBeNull()
   })
 
   it('returns a warning when download session sync throws after login', async () => {
@@ -240,7 +267,7 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects successful login responses that omit required tokens', async () => {
+  it('accepts successful cookie-session login responses that omit bearer tokens', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -254,13 +281,15 @@ describe('auth API', () => {
         },
       }),
     })
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) })
 
-    await expect(login('admin', 'password')).rejects.toMatchObject({
-      message: '登录响应无效',
-      status: 200,
+    await expect(login('admin', 'password')).resolves.toMatchObject({
+      user: { username: 'admin', homeDir: '/' },
+      warning: false,
     })
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('rejects successful login responses with an invalid home directory', async () => {
@@ -332,8 +361,9 @@ describe('auth API', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/download-session', expect.objectContaining({
       method: 'POST',
-      headers: { Authorization: 'Bearer access-1' },
+      credentials: 'same-origin',
     }))
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
   })
 
   it('clears local auth state when current user payload is malformed', async () => {
@@ -425,7 +455,7 @@ describe('auth API', () => {
       message: '退出登录失败',
       status: 0,
     })
-    expect(localStorage.getItem('mnemonas_token')).toBe('access-1')
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
   })
 
   it('preserves local auth state when logout fails', async () => {
@@ -455,8 +485,8 @@ describe('auth API', () => {
       status: 500,
       code: 'LOGOUT_FAILED',
     })
-    expect(localStorage.getItem('mnemonas_token')).toBe('access-1')
-    expect(localStorage.getItem('mnemonas_refresh_token')).toBe('refresh-1')
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(JSON.parse(localStorage.getItem('mnemonas_user') ?? '{}')).toMatchObject({ username: 'admin' })
   })
 
@@ -487,8 +517,8 @@ describe('auth API', () => {
       status: 503,
       code: 'SERVICE_UNAVAILABLE',
     })
-    expect(localStorage.getItem('mnemonas_token')).toBe('access-1')
-    expect(localStorage.getItem('mnemonas_refresh_token')).toBe('refresh-1')
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
     expect(localStorage.getItem('mnemonas_user')).not.toBeNull()
   })
 
@@ -524,19 +554,24 @@ describe('auth API', () => {
     expect(response.ok).toBe(true)
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/files', expect.objectContaining({
       headers: expect.any(Headers),
+      credentials: 'same-origin',
     }))
-    expect((fetchMock.mock.calls[0]?.[1]?.headers as Headers).get('Authorization')).toBe('Bearer access-1')
+    expect((fetchMock.mock.calls[0]?.[1]?.headers as Headers).get('Authorization')).toBeNull()
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/refresh', expect.objectContaining({
       method: 'POST',
+      credentials: 'same-origin',
     }))
     expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/v1/auth/download-session', expect.objectContaining({
       method: 'POST',
-      headers: { Authorization: 'Bearer access-2' },
+      credentials: 'same-origin',
     }))
     expect(fetchMock).toHaveBeenNthCalledWith(4, '/api/v1/files', expect.objectContaining({
       headers: expect.any(Headers),
+      credentials: 'same-origin',
     }))
-    expect((fetchMock.mock.calls[3]?.[1]?.headers as Headers).get('Authorization')).toBe('Bearer access-2')
+    expect((fetchMock.mock.calls[3]?.[1]?.headers as Headers).get('Authorization')).toBeNull()
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
   })
 
   it('reports refreshAuthSession failure when download session sync does not complete', async () => {
@@ -567,8 +602,9 @@ describe('auth API', () => {
       })
 
     await expect(refreshAuthSession()).resolves.toBe(false)
-    expect(localStorage.getItem('mnemonas_token')).toBe('access-2')
-    expect(localStorage.getItem('mnemonas_refresh_token')).toBe('refresh-2')
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).not.toBeNull()
   })
 
   it('does not retry refresh endpoint after 401', async () => {
@@ -587,20 +623,26 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('does not retry unauthorized requests when no refresh token exists', async () => {
+  it('attempts cookie refresh for unauthorized requests without readable refresh tokens', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
 
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      statusText: 'Unauthorized',
-      json: () => Promise.reject(new Error('invalid json')),
-    })
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        json: () => Promise.reject(new Error('invalid json')),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: () => Promise.resolve({ success: false }),
+      })
 
     const response = await authFetch('/api/v1/files')
 
     expect(response.status).toBe(401)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(localStorage.getItem('mnemonas_token')).toBeNull()
   })
 
@@ -814,12 +856,12 @@ describe('auth API', () => {
     const retriedRequestHeaders = fetchMock.mock.calls[3]?.[1]?.headers as Headers
 
     expect(firstRequestHeaders).toBeInstanceOf(Headers)
-    expect(firstRequestHeaders.get('Authorization')).toBe('Bearer access-1')
+    expect(firstRequestHeaders.get('Authorization')).toBeNull()
     expect(firstRequestHeaders.get('Content-Type')).toBe('application/json')
     expect(firstRequestHeaders.get('X-Trace-Id')).toBe('trace-1')
 
     expect(retriedRequestHeaders).toBeInstanceOf(Headers)
-    expect(retriedRequestHeaders.get('Authorization')).toBe('Bearer access-2')
+    expect(retriedRequestHeaders.get('Authorization')).toBeNull()
     expect(retriedRequestHeaders.get('Content-Type')).toBe('application/json')
     expect(retriedRequestHeaders.get('X-Trace-Id')).toBe('trace-1')
   })
@@ -838,8 +880,8 @@ describe('auth API', () => {
           return { ok: false, status: 401, statusText: 'Unauthorized' } as Response
         }
 
-        const authHeader = (init?.headers as Headers).get('Authorization')
-        expect(authHeader).toBe('Bearer access-2')
+        expect((init?.headers as Headers).get('Authorization')).toBeNull()
+        expect(init?.credentials).toBe('same-origin')
         return { ok: true, status: 200, json: () => Promise.resolve({ success: true }) } as Response
       }
 

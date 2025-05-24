@@ -10,11 +10,16 @@ import (
 type contextKey string
 
 const (
-	ContextKeyUser   contextKey = "user"
-	ContextKeyClaims contextKey = "claims"
+	ContextKeyUser        contextKey = "user"
+	ContextKeyClaims      contextKey = "claims"
+	ContextKeyAccessToken contextKey = "access_token"
 )
 
-const DownloadSessionCookieName = "mnemonas_download_access"
+const (
+	AccessSessionCookieName   = "mnemonas_access"
+	RefreshSessionCookieName  = "mnemonas_refresh"
+	DownloadSessionCookieName = "mnemonas_download_access"
+)
 
 // Middleware provides authentication middleware
 type Middleware struct {
@@ -62,20 +67,10 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			}
 		}
 
-		// Get token from header or download-session cookie.
-		tokenString := ""
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "" {
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-				writeError(w, http.StatusUnauthorized, "invalid authorization header format", "INVALID_AUTH_HEADER")
-				return
-			}
-			tokenString = parts[1]
-		} else if allowDownloadSessionCookie(r) {
-			if cookie, err := r.Cookie(DownloadSessionCookieName); err == nil {
-				tokenString = cookie.Value
-			}
+		tokenString, invalidAuthHeader := tokenFromRequest(r, true)
+		if invalidAuthHeader {
+			writeError(w, http.StatusUnauthorized, "invalid authorization header format", "INVALID_AUTH_HEADER")
+			return
 		}
 		if tokenString == "" {
 			writeError(w, http.StatusUnauthorized, "missing authorization header", "MISSING_AUTH_HEADER")
@@ -111,10 +106,32 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 		// Add user and claims to context
 		ctx := context.WithValue(r.Context(), ContextKeyUser, user)
 		ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+		ctx = context.WithValue(ctx, ContextKeyAccessToken, tokenString)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
+
+func tokenFromRequest(r *http.Request, allowScopedDownloadCookie bool) (string, bool) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+			return "", true
+		}
+		return parts[1], false
+	}
+	if cookie, err := r.Cookie(AccessSessionCookieName); err == nil {
+		return cookie.Value, false
+	}
+	if allowScopedDownloadCookie && allowDownloadSessionCookie(r) {
+		if cookie, err := r.Cookie(DownloadSessionCookieName); err == nil {
+			return cookie.Value, false
+		}
+	}
+	return "", false
+}
+
 func allowDownloadSessionCookie(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
@@ -168,19 +185,13 @@ func (m *Middleware) RequireRole(roles ...Role) func(http.Handler) http.Handler 
 // OptionalAuth middleware that adds user to context if token is present
 func (m *Middleware) OptionalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
+		tokenString, invalidAuthHeader := tokenFromRequest(r, false)
+		if invalidAuthHeader || tokenString == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		claims, err := m.tokenManager.ValidateAccessToken(parts[1])
+		claims, err := m.tokenManager.ValidateAccessToken(tokenString)
 		if err != nil {
 			next.ServeHTTP(w, r)
 			return
@@ -194,6 +205,7 @@ func (m *Middleware) OptionalAuth(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), ContextKeyUser, user)
 		ctx = context.WithValue(ctx, ContextKeyClaims, claims)
+		ctx = context.WithValue(ctx, ContextKeyAccessToken, tokenString)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -208,6 +220,12 @@ func GetUserFromContext(ctx context.Context) *User {
 func GetClaimsFromContext(ctx context.Context) *TokenClaims {
 	claims, _ := ctx.Value(ContextKeyClaims).(*TokenClaims)
 	return claims
+}
+
+// GetAccessTokenFromContext retrieves the bearer token used for request authentication.
+func GetAccessTokenFromContext(ctx context.Context) string {
+	token, _ := ctx.Value(ContextKeyAccessToken).(string)
+	return token
 }
 
 // WithClaimsContext adds claims to the context for testing or internal use.

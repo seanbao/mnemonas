@@ -287,11 +287,11 @@ location /api/ {
 
 #### Web UI 会话令牌
 
-- 当前 Web UI 的访问令牌和刷新令牌保存在浏览器 `localStorage` 中，用于 REST API 与上传请求的 `Authorization` 头
-- 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`，并且下载/预览链路使用短期 `HttpOnly` cookie，降低令牌出现在 URL 或日志里的风险
-- `localStorage` 仍然会被同源 XSS 读取；公网部署必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
-- 共用电脑上使用后应主动退出登录；管理员修改密码、删除或禁用用户会撤销该用户的刷新令牌
-- 长期方向是把主 Web 会话也迁移到 `HttpOnly` cookie 或同等风险更低的会话机制
+- Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` cookie 保存访问令牌和刷新令牌，不再把 bearer token 写入 `localStorage`
+- REST API、上传请求、刷新令牌与退出登录请求由浏览器自动携带同源 cookie；旧版本残留在 `localStorage` 的令牌会在初始化、刷新、登出等路径中清理
+- API 客户端仍可使用 `Authorization: Bearer <access-token>` 与 JSON refresh token，兼容脚本和自动化调用
+- 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
+- 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除或禁用用户会撤销或清理对应会话
 
 #### 公开分享密码验证
 

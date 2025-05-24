@@ -1889,6 +1889,33 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("require auth - access session cookie", func(t *testing.T) {
+		called := false
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			if got := GetAccessTokenFromContext(r.Context()); got != userToken.AccessToken {
+				t.Fatalf("access token from context = %q, want access cookie token", got)
+			}
+			ctxUser := GetUserFromContext(r.Context())
+			if ctxUser == nil || ctxUser.Username != "middlewareuser" {
+				t.Fatalf("expected middlewareuser in context, got %#v", ctxUser)
+			}
+		}))
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.AddCookie(&http.Cookie{Name: AccessSessionCookieName, Value: userToken.AccessToken})
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler was not called")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+	})
+
 	t.Run("require auth - no token", func(t *testing.T) {
 		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Error("handler should not be called")
@@ -2115,6 +2142,28 @@ func TestMiddleware(t *testing.T) {
 
 		req := httptest.NewRequest("GET", "/optional", nil)
 		req.Header.Set("Authorization", "Bearer "+userToken.AccessToken)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler should be called")
+		}
+	})
+
+	t.Run("optional auth - with access session cookie", func(t *testing.T) {
+		called := false
+		handler := mw.OptionalAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			if GetUserFromContext(r.Context()) == nil {
+				t.Fatal("expected user in context")
+			}
+			if got := GetAccessTokenFromContext(r.Context()); got != userToken.AccessToken {
+				t.Fatalf("access token from context = %q, want cookie token", got)
+			}
+		}))
+
+		req := httptest.NewRequest("GET", "/optional", nil)
+		req.AddCookie(&http.Cookie{Name: AccessSessionCookieName, Value: userToken.AccessToken})
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 
@@ -2735,6 +2784,120 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("cookie session login omits bearer tokens and sets HttpOnly cookies", func(t *testing.T) {
+		body := `{"username":"handleruser","password":"password123"}`
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		req.Header.Set(sessionModeHeader, sessionModeCookie)
+		rec := httptest.NewRecorder()
+		h.HandleLogin(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal login envelope error: %v", err)
+		}
+		var resp LoginResponse
+		if err := json.Unmarshal(envelope.Data, &resp); err != nil {
+			t.Fatalf("unmarshal login payload error: %v", err)
+		}
+		if resp.AccessToken != "" || resp.RefreshToken != "" {
+			t.Fatalf("cookie-session login leaked bearer tokens: %+v", resp)
+		}
+
+		cookies := rec.Result().Cookies()
+		if len(cookies) != 2 {
+			t.Fatalf("expected access and refresh cookies, got %+v", cookies)
+		}
+		wantPaths := map[string]string{
+			AccessSessionCookieName:  sessionCookiePath,
+			RefreshSessionCookieName: refreshSessionCookiePath,
+		}
+		for _, cookie := range cookies {
+			wantPath, ok := wantPaths[cookie.Name]
+			if !ok {
+				t.Fatalf("unexpected cookie %q", cookie.Name)
+			}
+			if !cookie.HttpOnly {
+				t.Fatalf("cookie %s is not HttpOnly", cookie.Name)
+			}
+			if cookie.Path != wantPath {
+				t.Fatalf("cookie %s Path = %q, want %q", cookie.Name, cookie.Path, wantPath)
+			}
+			if cookie.Value == "" {
+				t.Fatalf("cookie %s has empty value", cookie.Name)
+			}
+			delete(wantPaths, cookie.Name)
+		}
+		if len(wantPaths) != 0 {
+			t.Fatalf("missing cookies: %+v", wantPaths)
+		}
+	})
+
+	t.Run("cookie session refresh uses refresh cookie and omits bearer tokens", func(t *testing.T) {
+		body := `{"username":"handleruser","password":"password123"}`
+		loginReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		loginReq.Header.Set(sessionModeHeader, sessionModeCookie)
+		loginRec := httptest.NewRecorder()
+		h.HandleLogin(loginRec, loginReq)
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d: %s", loginRec.Code, loginRec.Body.String())
+		}
+
+		var refreshCookie *http.Cookie
+		for _, cookie := range loginRec.Result().Cookies() {
+			if cookie.Name == RefreshSessionCookieName {
+				refreshCookie = cookie
+				break
+			}
+		}
+		if refreshCookie == nil {
+			t.Fatal("login did not set refresh cookie")
+		}
+
+		refreshReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+		refreshReq.AddCookie(refreshCookie)
+		refreshRec := httptest.NewRecorder()
+		h.HandleRefresh(refreshRec, refreshReq)
+
+		if refreshRec.Code != http.StatusOK {
+			t.Fatalf("refresh status = %d: %s", refreshRec.Code, refreshRec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(refreshRec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal refresh envelope error: %v", err)
+		}
+		var resp LoginResponse
+		if err := json.Unmarshal(envelope.Data, &resp); err != nil {
+			t.Fatalf("unmarshal refresh payload error: %v", err)
+		}
+		if resp.AccessToken != "" || resp.RefreshToken != "" {
+			t.Fatalf("cookie-session refresh leaked bearer tokens: %+v", resp)
+		}
+
+		setCookies := map[string]*http.Cookie{}
+		for _, cookie := range refreshRec.Result().Cookies() {
+			setCookies[cookie.Name] = cookie
+		}
+		for _, name := range []string{AccessSessionCookieName, RefreshSessionCookieName} {
+			cookie := setCookies[name]
+			if cookie == nil {
+				t.Fatalf("refresh did not set cookie %s", name)
+			}
+			if !cookie.HttpOnly {
+				t.Fatalf("cookie %s is not HttpOnly", name)
+			}
+			if cookie.Value == "" {
+				t.Fatalf("cookie %s has empty value", name)
+			}
+		}
+		if setCookies[RefreshSessionCookieName].Value == refreshCookie.Value {
+			t.Fatal("expected refresh cookie to rotate")
+		}
+	})
+
 	t.Run("refresh token returns warning when revocation persistence fsync fails", func(t *testing.T) {
 		originalPersistTokenRevocations := persistTokenRevocations
 		persistTokenRevocations = func(tm *TokenManager) error {
@@ -2823,6 +2986,7 @@ func TestAuthHandler(t *testing.T) {
 			Username:         user.Username,
 			Role:             user.Role,
 		})
+		ctx = context.WithValue(ctx, ContextKeyAccessToken, pair.AccessToken)
 		req = req.WithContext(ctx)
 		rec := httptest.NewRecorder()
 
@@ -2859,6 +3023,7 @@ func TestAuthHandler(t *testing.T) {
 			Username:         user.Username,
 			Role:             user.Role,
 		})
+		ctx = context.WithValue(ctx, ContextKeyAccessToken, pair.AccessToken)
 		req = req.WithContext(ctx)
 		rec := httptest.NewRecorder()
 
@@ -2892,6 +3057,7 @@ func TestAuthHandler(t *testing.T) {
 			Username:         user.Username,
 			Role:             user.Role,
 		})
+		ctx = context.WithValue(ctx, ContextKeyAccessToken, pair.AccessToken)
 		req = req.WithContext(ctx)
 		rec := httptest.NewRecorder()
 
@@ -2929,17 +3095,29 @@ func TestAuthHandler(t *testing.T) {
 		}
 
 		cookies := rec.Result().Cookies()
-		if len(cookies) != 1 {
-			t.Fatalf("expected one cookie clearing header, got %d", len(cookies))
+		if len(cookies) != 3 {
+			t.Fatalf("expected three cookie clearing headers, got %d", len(cookies))
 		}
-		if cookies[0].Name != DownloadSessionCookieName {
-			t.Fatalf("cookie name = %q, want %q", cookies[0].Name, DownloadSessionCookieName)
+		wantPaths := map[string]string{
+			AccessSessionCookieName:   sessionCookiePath,
+			RefreshSessionCookieName:  refreshSessionCookiePath,
+			DownloadSessionCookieName: "/api/v1",
 		}
-		if cookies[0].MaxAge != -1 {
-			t.Fatalf("cookie MaxAge = %d, want -1", cookies[0].MaxAge)
+		for _, cookie := range cookies {
+			wantPath, ok := wantPaths[cookie.Name]
+			if !ok {
+				t.Fatalf("unexpected clearing cookie %q", cookie.Name)
+			}
+			if cookie.MaxAge != -1 {
+				t.Fatalf("cookie %s MaxAge = %d, want -1", cookie.Name, cookie.MaxAge)
+			}
+			if cookie.Path != wantPath {
+				t.Fatalf("cookie %s Path = %q, want %q", cookie.Name, cookie.Path, wantPath)
+			}
+			delete(wantPaths, cookie.Name)
 		}
-		if cookies[0].Path != "/api/v1" {
-			t.Fatalf("cookie Path = %q, want /api/v1", cookies[0].Path)
+		if len(wantPaths) != 0 {
+			t.Fatalf("missing clearing cookies: %+v", wantPaths)
 		}
 	})
 
@@ -2954,8 +3132,20 @@ func TestAuthHandler(t *testing.T) {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		cookies := rec.Result().Cookies()
-		if len(cookies) != 1 || cookies[0].Name != DownloadSessionCookieName || cookies[0].MaxAge != -1 {
-			t.Fatalf("expected download session cookie to be cleared, got %+v", cookies)
+		if len(cookies) != 3 {
+			t.Fatalf("expected all session cookies to be cleared, got %+v", cookies)
+		}
+		cleared := map[string]bool{}
+		for _, cookie := range cookies {
+			if cookie.MaxAge != -1 {
+				t.Fatalf("cookie %s MaxAge = %d, want -1", cookie.Name, cookie.MaxAge)
+			}
+			cleared[cookie.Name] = true
+		}
+		for _, name := range []string{AccessSessionCookieName, RefreshSessionCookieName, DownloadSessionCookieName} {
+			if !cleared[name] {
+				t.Fatalf("expected cookie %s to be cleared, got %+v", name, cookies)
+			}
 		}
 	})
 
