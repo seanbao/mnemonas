@@ -188,6 +188,42 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Auth disabled beyond loopback requires explicit unsafe override",
+			modify: func(c *Config) {
+				c.Server.Host = "0.0.0.0"
+				c.Auth.Enabled = false
+			},
+			wantErr: true,
+		},
+		{
+			name: "Auth disabled on loopback is valid for local development",
+			modify: func(c *Config) {
+				c.Server.Host = "127.0.0.1"
+				c.Auth.Enabled = false
+			},
+			wantErr: false,
+		},
+		{
+			name: "WebDAV without auth beyond loopback requires explicit unsafe override",
+			modify: func(c *Config) {
+				c.Server.Host = "0.0.0.0"
+				c.WebDAV.Enabled = true
+				c.WebDAV.AuthType = "none"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Unsafe no-auth override allows explicit public unauthenticated bind",
+			modify: func(c *Config) {
+				c.Server.Host = "0.0.0.0"
+				c.Auth.Enabled = false
+				c.WebDAV.Enabled = true
+				c.WebDAV.AuthType = "none"
+				c.Security.AllowUnsafeNoAuth = true
+			},
+			wantErr: false,
+		},
+		{
 			name: "Invalid versioning extension entry",
 			modify: func(c *Config) {
 				c.Storage.Versioning.AutoVersionedExtensions = []string{"txt"}

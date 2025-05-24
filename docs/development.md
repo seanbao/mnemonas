@@ -475,6 +475,8 @@ bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PAC
 go tool cover -html=coverage.out
 ```
 
+不要在安装前端依赖后直接用 `go test ./...` 或 `go list ./...` 作为全仓库包集合；Go 会进入 `web/node_modules` 中第三方包。仓库级 Go 检查应先用 `make --no-print-directory go-packages` 解析包列表。
+
 ### Rust 测试
 
 ```bash

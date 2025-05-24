@@ -74,7 +74,7 @@ auth_type = "none"
 host = "127.0.0.1"
 ```
 
-`auth.enabled = false` disables Web UI/API login. `webdav.auth_type = "none"` disables WebDAV Basic Auth. If either is disabled, bind only to loopback.
+`auth.enabled = false` disables Web UI/API login. `webdav.auth_type = "none"` disables WebDAV Basic Auth. If either is disabled, bind only to loopback. If a non-loopback bind is intentionally protected by an outer firewall, container port binding, or reverse proxy, set `security.allow_unsafe_no_auth = true` explicitly to pass configuration validation.
 
 ## Network Binding
 

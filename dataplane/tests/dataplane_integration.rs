@@ -126,7 +126,7 @@ async fn test_put_chunk_hash_mismatch() {
     let err = client
         .put_chunk(PutChunkRequest {
             data,
-            expected_hash: Some("bad-hash".to_string()),
+            expected_hash: Some("0".repeat(64)),
         })
         .await
         .expect_err("hash mismatch should fail");
@@ -142,7 +142,7 @@ async fn test_get_chunk_not_found() {
 
     let err = client
         .get_chunk(GetChunkRequest {
-            hash: "missing".to_string(),
+            hash: "f".repeat(64),
         })
         .await
         .expect_err("missing chunk");
