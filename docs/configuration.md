@@ -21,7 +21,7 @@
 nasd --check-config --config /etc/mnemonas/config.toml
 ```
 
-该命令会校验 TOML、端口、时长、路径等硬性错误，也会输出可部署但风险较高的安全警告。典型警告包括：关闭 `auth.enabled` 后仍监听非 loopback 地址、WebDAV 使用 `auth_type = "none"` 且外部网络可访问、dataplane gRPC 监听到外部网络。长期运行时应把这些 `warning:` 当作上线前检查项处理。
+该命令会校验 TOML、端口、时长、路径等硬性错误，也会输出可部署但风险较高的安全警告。关闭 `auth.enabled` 或 WebDAV 使用 `auth_type = "none"` 时，如果 HTTP 服务监听非 loopback 地址，默认会被视为配置错误；只有显式设置 `security.allow_unsafe_no_auth = true` 才允许继续启动。dataplane gRPC 监听到外部网络仍会输出警告，长期运行时应把这些 `warning:` 当作上线前检查项处理。
 
 ## 完整配置示例
 
@@ -104,6 +104,9 @@ min_free_bytes = 10737418240
 cooldown_period = "4h"
 webhook_url = ""
 webhook_method = "POST"
+
+[security]
+allow_unsafe_no_auth = false
 
 [log]
 level = "info"
@@ -436,6 +439,16 @@ base_url = "https://nas.example.com"
 ```
 
 `base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；配置错误时，分享记录仍然有效，但返回的公开链接会指向错误地址。
+
+---
+
+### [security] — 安全覆盖开关
+
+| 选项 | 类型 | 默认值 | 说明 |
+| ---- | ---- | ------ | ---- |
+| `allow_unsafe_no_auth` | bool | `false` | 允许在非 loopback 监听地址上关闭 Web UI/API 认证或 WebDAV Basic Auth |
+
+默认情况下，`server.host` 监听非 loopback 地址时，`auth.enabled = false` 或启用 WebDAV 且 `webdav.auth_type = "none"` 会导致配置校验失败。只有在外层网络边界能确认限制访问范围时，才应把该值显式设为 `true`；设置后仍会输出安全警告。
 
 ---
 

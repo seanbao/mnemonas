@@ -23,7 +23,7 @@ After editing config:
 nasd --check-config --config /etc/mnemonas/config.toml
 ```
 
-This validates TOML, ports, durations, paths, and other hard errors. It also prints deployable but risky security warnings, such as disabling auth while listening on non-loopback, unauthenticated WebDAV reachable from the network, or dataplane gRPC bound externally.
+This validates TOML, ports, durations, paths, and other hard errors. Disabling `auth.enabled` or using `webdav.auth_type = "none"` while the HTTP server listens beyond loopback is rejected by default; set `security.allow_unsafe_no_auth = true` only when an outer network boundary deliberately restricts access. Dataplane gRPC bound externally still prints a deployable but risky warning.
 
 Treat `warning:` lines as pre-deployment checks for long-running systems.
 
@@ -106,6 +106,9 @@ min_free_bytes = 10737418240
 cooldown_period = "4h"
 webhook_url = ""
 webhook_method = "POST"
+
+[security]
+allow_unsafe_no_auth = false
 
 [log]
 level = "info"
@@ -298,6 +301,14 @@ The file is removed after first successful login for that administrator.
 | `base_url` | string | `""` | Base URL used when returning share URLs |
 
 `base_url` affects the URL returned by the API. It does not change the share ID itself.
+
+## `[security]`
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `allow_unsafe_no_auth` | bool | `false` | Allow Web UI/API auth or WebDAV Basic Auth to be disabled while HTTP listens beyond loopback |
+
+By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "none"` fails validation when `server.host` listens beyond loopback. Set this to `true` only when a firewall, container port binding, or reverse proxy deliberately limits access; MnemoNAS will still print a security warning.
 
 ## `[favorites]`
 

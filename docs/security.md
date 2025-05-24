@@ -79,7 +79,7 @@ auth_type = "none"
 host = "127.0.0.1"  # 仅本地访问
 ```
 
-⚠️ **警告**：`auth.enabled = false` 会关闭 Web UI/API 登录；`webdav.auth_type = "none"` 会关闭 WebDAV Basic Auth。禁用任一认证时必须将 `host` 设为 `127.0.0.1`，否则任何人都能访问。
+⚠️ **警告**：`auth.enabled = false` 会关闭 Web UI/API 登录；`webdav.auth_type = "none"` 会关闭 WebDAV Basic Auth。禁用任一认证时必须将 `host` 设为 `127.0.0.1`。如果非 loopback 监听确实由外层防火墙、容器端口绑定或反向代理限制访问范围，必须显式设置 `security.allow_unsafe_no_auth = true` 才能通过配置校验。
 
 ---
 
