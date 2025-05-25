@@ -20,6 +20,9 @@ pub mod proto {
 use proto::data_plane_server::{DataPlane, DataPlaneServer};
 use proto::*;
 
+const DEFAULT_LIST_OBJECTS_LIMIT: u32 = 1000;
+const MAX_LIST_OBJECTS_LIMIT: u32 = 1000;
+
 fn invalid_hash_status(err: crate::cas::CasError) -> Status {
     Status::invalid_argument(err.to_string())
 }
@@ -587,7 +590,14 @@ impl DataPlane for DataPlaneService {
         request: Request<ListObjectsRequest>,
     ) -> Result<Response<ListObjectsResponse>, Status> {
         let req = request.into_inner();
-        let limit = req.limit.unwrap_or(1000) as usize;
+        let requested_limit = req.limit.unwrap_or(DEFAULT_LIST_OBJECTS_LIMIT);
+        if requested_limit == 0 || requested_limit > MAX_LIST_OBJECTS_LIMIT {
+            return Err(Status::invalid_argument(format!(
+                "limit must be between 1 and {}",
+                MAX_LIST_OBJECTS_LIMIT
+            )));
+        }
+        let limit = requested_limit as usize;
         let cursor = req.cursor.as_deref();
         if let Some(cursor) = cursor {
             validate_request_hash(cursor)?;
@@ -716,6 +726,43 @@ mod tests {
             .await
             .expect_err("list_objects should reject invalid cursors");
         assert_eq!(err.code(), Code::InvalidArgument);
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_list_objects_rejects_invalid_limits() {
+        let temp = tempdir().expect("tempdir");
+        let cas = Arc::new(
+            CasStore::new(CasConfig {
+                root: temp.path().join("cas"),
+                compression_enabled: false,
+                ..Default::default()
+            })
+            .await
+            .expect("cas init"),
+        );
+        let service = DataPlaneService::with_cas(cas, ChunkerConfig::default());
+        let (mut client, shutdown_tx) = setup_test_client(service).await;
+
+        for limit in [0, MAX_LIST_OBJECTS_LIMIT + 1] {
+            let err = client
+                .list_objects(ListObjectsRequest {
+                    cursor: None,
+                    limit: Some(limit),
+                })
+                .await
+                .expect_err("list_objects should reject invalid limits");
+            assert_eq!(err.code(), Code::InvalidArgument);
+        }
+
+        client
+            .list_objects(ListObjectsRequest {
+                cursor: None,
+                limit: None,
+            })
+            .await
+            .expect("list_objects should accept the default limit");
 
         let _ = shutdown_tx.send(());
     }

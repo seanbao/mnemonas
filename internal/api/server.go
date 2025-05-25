@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -1007,7 +1009,72 @@ func throttleExceptPaths(limit int, bypassPaths ...string) func(http.Handler) ht
 	}
 }
 
+func rejectCrossOriginUnsafeRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isUnsafeHTTPMethod(r.Method) &&
+			strings.TrimSpace(r.Header.Get("Authorization")) == "" &&
+			!sameOriginBrowserMetadata(r) {
+			Forbidden(w, "cross-origin request rejected")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isUnsafeHTTPMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func sameOriginBrowserMetadata(r *http.Request) bool {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		return requestMetadataHostMatches(r, origin)
+	}
+	if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
+		return requestMetadataHostMatches(r, referer)
+	}
+	return true
+}
+
+func requestMetadataHostMatches(r *http.Request, rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+
+	requestHost := normalizeHTTPHost(r.Host)
+	sourceHost := normalizeHTTPHost(parsed.Host)
+	return requestHost != "" && sourceHost != "" && requestHost == sourceHost
+}
+
+func normalizeHTTPHost(rawHost string) string {
+	host := strings.ToLower(strings.TrimSpace(rawHost))
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return ""
+	}
+
+	if splitHost, port, err := net.SplitHostPort(host); err == nil {
+		splitHost = strings.Trim(strings.TrimSuffix(strings.ToLower(splitHost), "."), "[]")
+		if port == "80" || port == "443" {
+			return splitHost
+		}
+		return net.JoinHostPort(splitHost, port)
+	}
+
+	return strings.Trim(host, "[]")
+}
+
 func (s *Server) setupRoutes() {
+	if s.authEnabled {
+		s.router.Use(rejectCrossOriginUnsafeRequests)
+	}
+
 	// Public endpoints (no auth required)
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/api/v1/version", s.handleVersion)
