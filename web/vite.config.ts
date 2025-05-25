@@ -50,15 +50,15 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: apiProxyTarget,
-        changeOrigin: true,
+        changeOrigin: false,
       },
       '/dav': {
         target: apiProxyTarget,
-        changeOrigin: true,
+        changeOrigin: false,
       },
       '/health': {
         target: apiProxyTarget,
-        changeOrigin: true,
+        changeOrigin: false,
       },
     },
   },

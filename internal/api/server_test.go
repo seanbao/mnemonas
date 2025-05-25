@@ -2767,6 +2767,81 @@ func TestServer_DownloadSession_UsesRouteAuthContract(t *testing.T) {
 	})
 }
 
+func TestServer_Logout_ClearsCookiesWithoutValidAuth(t *testing.T) {
+	server, _, _, _, _ := setupAuthServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: auth.AccessSessionCookieName, Value: "stale"})
+	req.AddCookie(&http.Cookie{Name: auth.RefreshSessionCookieName, Value: "stale"})
+	req.AddCookie(&http.Cookie{Name: auth.DownloadSessionCookieName, Value: "stale"})
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cleared := map[string]bool{}
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.MaxAge != -1 {
+			t.Fatalf("cookie %s MaxAge = %d, want -1", cookie.Name, cookie.MaxAge)
+		}
+		cleared[cookie.Name] = true
+	}
+	for _, name := range []string{
+		string(auth.AccessSessionCookieName),
+		string(auth.RefreshSessionCookieName),
+		string(auth.DownloadSessionCookieName),
+	} {
+		if !cleared[name] {
+			t.Fatalf("expected logout to clear cookie %s, got %+v", name, rec.Result().Cookies())
+		}
+	}
+}
+
+func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+
+	crossOriginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	crossOriginReq.Host = "nas.example.test"
+	crossOriginReq.Header.Set("Content-Type", "application/json")
+	crossOriginReq.Header.Set("Origin", "https://evil.example.test")
+	crossOriginRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(crossOriginRec, crossOriginReq)
+
+	if crossOriginRec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin login status = %d, want %d; body=%s", crossOriginRec.Code, http.StatusForbidden, crossOriginRec.Body.String())
+	}
+
+	sameOriginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	sameOriginReq.Host = "nas.example.test:443"
+	sameOriginReq.Header.Set("Content-Type", "application/json")
+	sameOriginReq.Header.Set("Origin", "https://nas.example.test")
+	sameOriginRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(sameOriginRec, sameOriginReq)
+
+	if sameOriginRec.Code != http.StatusOK {
+		t.Fatalf("same-origin login status = %d, want %d; body=%s", sameOriginRec.Code, http.StatusOK, sameOriginRec.Body.String())
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	apiClientReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+	apiClientReq.Host = "nas.example.test"
+	apiClientReq.Header.Set("Authorization", "Bearer "+token)
+	apiClientReq.Header.Set("Origin", "https://evil.example.test")
+	apiClientRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(apiClientRec, apiClientReq)
+
+	if apiClientRec.Code != http.StatusOK {
+		t.Fatalf("authorization client status = %d, want %d; body=%s", apiClientRec.Code, http.StatusOK, apiClientRec.Body.String())
+	}
+}
+
 func TestServer_Login_LogsActivityWithUsername(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 	if server.activity == nil {
@@ -9214,6 +9289,68 @@ func TestServer_ListTrash_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 	if strings.Contains(body, "/other/secret.txt") {
 		t.Fatalf("expected outside-home trash item to be filtered, got %s", body)
+	}
+}
+
+func TestServer_EmptyTrash_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/deleted.txt", bytes.NewReader([]byte("deleted"))); err != nil {
+		t.Fatalf("WriteFile(/tester/deleted.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/tester/deleted.txt"); err != nil {
+		t.Fatalf("Delete(/tester/deleted.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/other/secret.txt"); err != nil {
+		t.Fatalf("Delete(/other/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("empty trash status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var payload struct {
+		Data struct {
+			DeletedCount int  `json:"deleted_count"`
+			Partial      bool `json:"partial"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Data.DeletedCount != 1 {
+		t.Fatalf("deleted_count = %d, want 1; body=%s", payload.Data.DeletedCount, w.Body.String())
+	}
+	if payload.Data.Partial {
+		t.Fatalf("partial = true, want false; body=%s", w.Body.String())
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one outside-home trash item to remain, got %d", len(items))
+	}
+	if items[0].OriginalPath != "/other/secret.txt" {
+		t.Fatalf("remaining trash item = %q, want %q", items[0].OriginalPath, "/other/secret.txt")
 	}
 }
 
