@@ -289,7 +289,7 @@ location /api/ {
 
 - Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` cookie 保存访问令牌和刷新令牌，不再把 bearer token 写入 `localStorage`
 - REST API、上传请求、刷新令牌与退出登录请求由浏览器自动携带同源 cookie；旧版本残留在 `localStorage` 的令牌会在初始化、刷新、登出等路径中清理
-- 对带浏览器 `Origin` / `Referer` 元数据的 `POST`、`PUT`、`PATCH`、`DELETE` 请求，服务端会拒绝来源主机与当前请求主机不一致的请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
+- 对带浏览器 `Origin` / `Referer` 元数据的 `POST`、`PUT`、`PATCH`、`DELETE` 请求，服务端会拒绝来源 scheme、主机或端口与当前请求不一致的请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
 - API 客户端仍可使用 `Authorization: Bearer <access-token>` 与 JSON refresh token，兼容脚本和自动化调用
 - 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
 - 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除或禁用用户会撤销或清理对应会话

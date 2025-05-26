@@ -42,6 +42,8 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
 import { SettingsError, getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
 
+const MAX_CDC_CHUNK_SIZE_BYTES = 64 * 1024 * 1024
+
 // Settings section component
 function SettingsSection({ 
   title, 
@@ -602,6 +604,15 @@ export function SettingsPage() {
       addToast({
         title: 'CDC 分块参数无效',
         description: '请保持最小块大小 < 平均块大小 < 最大块大小',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (maxChunkBytes > MAX_CDC_CHUNK_SIZE_BYTES) {
+      addToast({
+        title: 'CDC 分块参数无效',
+        description: '最大块大小不能超过 64 MB',
         color: 'danger',
       })
       return

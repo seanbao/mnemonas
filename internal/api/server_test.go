@@ -2804,8 +2804,7 @@ func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
 	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
 
-	crossOriginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
-	crossOriginReq.Host = "nas.example.test"
+	crossOriginReq := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
 	crossOriginReq.Header.Set("Content-Type", "application/json")
 	crossOriginReq.Header.Set("Origin", "https://evil.example.test")
 	crossOriginRec := httptest.NewRecorder()
@@ -2816,7 +2815,29 @@ func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 		t.Fatalf("cross-origin login status = %d, want %d; body=%s", crossOriginRec.Code, http.StatusForbidden, crossOriginRec.Body.String())
 	}
 
-	sameOriginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	crossSchemeReq := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
+	crossSchemeReq.Header.Set("Content-Type", "application/json")
+	crossSchemeReq.Header.Set("Origin", "http://nas.example.test")
+	crossSchemeRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(crossSchemeRec, crossSchemeReq)
+
+	if crossSchemeRec.Code != http.StatusForbidden {
+		t.Fatalf("cross-scheme login status = %d, want %d; body=%s", crossSchemeRec.Code, http.StatusForbidden, crossSchemeRec.Body.String())
+	}
+
+	wrongPortReq := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
+	wrongPortReq.Header.Set("Content-Type", "application/json")
+	wrongPortReq.Header.Set("Origin", "https://nas.example.test:80")
+	wrongPortRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(wrongPortRec, wrongPortReq)
+
+	if wrongPortRec.Code != http.StatusForbidden {
+		t.Fatalf("wrong-port login status = %d, want %d; body=%s", wrongPortRec.Code, http.StatusForbidden, wrongPortRec.Body.String())
+	}
+
+	sameOriginReq := httptest.NewRequest(http.MethodPost, "https://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
 	sameOriginReq.Host = "nas.example.test:443"
 	sameOriginReq.Header.Set("Content-Type", "application/json")
 	sameOriginReq.Header.Set("Origin", "https://nas.example.test")
@@ -2826,6 +2847,23 @@ func TestServer_RejectsCrossOriginUnsafeBrowserRequests(t *testing.T) {
 
 	if sameOriginRec.Code != http.StatusOK {
 		t.Fatalf("same-origin login status = %d, want %d; body=%s", sameOriginRec.Code, http.StatusOK, sameOriginRec.Body.String())
+	}
+
+	originalHops := requestip.TrustedProxyHops()
+	requestip.SetTrustedProxyHops(1)
+	defer requestip.SetTrustedProxyHops(originalHops)
+
+	proxyReq := httptest.NewRequest(http.MethodPost, "http://nas.example.test/api/v1/auth/login", strings.NewReader(loginBody))
+	proxyReq.RemoteAddr = "127.0.0.1:1234"
+	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyReq.Header.Set("Origin", "https://nas.example.test")
+	proxyReq.Header.Set("X-Forwarded-Proto", "https")
+	proxyRec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(proxyRec, proxyReq)
+
+	if proxyRec.Code != http.StatusOK {
+		t.Fatalf("trusted proxy same-origin login status = %d, want %d; body=%s", proxyRec.Code, http.StatusOK, proxyRec.Body.String())
 	}
 
 	token := loginAndGetAccessToken(t, server, username, password)
