@@ -206,6 +206,10 @@ describe('buildPreviewUrl', () => {
     expect(buildPreviewUrl('file.txt')).toBe('/api/v1/download/file.txt')
   })
 
+  it('rejects traversal paths before building the URL', () => {
+    expect(() => buildPreviewUrl('/documents/../secret.txt')).toThrow('非法路径')
+  })
+
   it('does not append auth query when token exists', () => {
     localStorage.setItem('mnemonas_token', 'test-token')
     expect(buildPreviewUrl('/documents/file.txt')).toBe(

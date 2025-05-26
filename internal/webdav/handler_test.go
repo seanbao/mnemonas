@@ -3225,6 +3225,27 @@ func TestHandler_PROPPATCH_InvalidXMLReturnsBadRequest(t *testing.T) {
 	}
 }
 
+func TestHandler_PROPPATCH_OversizedBodyReturnsRequestEntityTooLarge(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/prop-patch-large.xml", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(/prop-patch-large.xml) error: %v", err)
+	}
+
+	body := `<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:mnemonas:test"><D:set><D:prop><Z:custom>` +
+		strings.Repeat("x", maxWebDAVXMLRequestBody+1) +
+		`</Z:custom></D:prop></D:set></D:propertyupdate>`
+	req := httptest.NewRequest("PROPPATCH", "/dav/prop-patch-large.xml", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestHandler_LOCK_UNLOCK(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()

@@ -1695,6 +1695,29 @@ describe('SettingsPage', () => {
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
+  it('shows danger toast and skips save for CDC max chunk above safety cap', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('4 MB')).toBeTruthy()
+    })
+
+    fireEvent.change(screen.getByDisplayValue('4 MB'), { target: { value: '65 MB' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'CDC 分块参数无效',
+        description: '最大块大小不能超过 64 MB',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
   it('shows danger toast and skips save for blank server read timeout', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)

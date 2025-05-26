@@ -18,6 +18,8 @@ use tracing_subscriber::FmtSubscriber;
 
 use dataplane::{CasConfig, CasStore, ChunkerConfig, DataPlaneService};
 
+const MAX_CDC_CHUNK_SIZE: u32 = 64 * 1024 * 1024;
+
 /// MnemoNAS DataPlane - High-performance Rust data plane
 #[derive(Parser, Debug)]
 #[command(name = "dataplane", version, about)]
@@ -95,6 +97,9 @@ fn chunker_config_from_args(args: &Args) -> Result<ChunkerConfig> {
     }
     if avg_size >= max_size {
         bail!("avg chunk size must be less than max chunk size");
+    }
+    if max_size > MAX_CDC_CHUNK_SIZE {
+        bail!("max chunk size must be less than or equal to {MAX_CDC_CHUNK_SIZE} bytes");
     }
 
     Ok(ChunkerConfig {
@@ -297,5 +302,15 @@ mod tests {
         let err = chunker_config_from_args(&args).expect_err("invalid chunker config");
 
         assert!(err.to_string().contains("min chunk size"));
+    }
+
+    #[test]
+    fn chunker_config_rejects_oversized_max_chunk() {
+        let args =
+            args_with_chunk_sizes(16 * 1024 * 1024, 32 * 1024 * 1024, MAX_CDC_CHUNK_SIZE + 1);
+
+        let err = chunker_config_from_args(&args).expect_err("oversized chunker config");
+
+        assert!(err.to_string().contains("max chunk size"));
     }
 }

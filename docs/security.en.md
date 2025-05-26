@@ -260,7 +260,7 @@ The `Secure` cookie flag is enabled when the request is actually HTTPS, or when 
 
 The Web UI stores the primary access and refresh session in `HttpOnly`, `SameSite=Lax` cookies. It no longer writes bearer access or refresh tokens to `localStorage`; REST API calls, uploads, refresh, and logout use same-origin cookies sent by the browser. Legacy tokens left by older versions are cleared during initialization, refresh, logout, and related auth paths.
 
-For `POST`, `PUT`, `PATCH`, and `DELETE` requests that carry browser `Origin` or `Referer` metadata, the server rejects requests whose source host does not match the current request host. Script clients without browser origin metadata and explicit `Authorization` API clients continue to work.
+For `POST`, `PUT`, `PATCH`, and `DELETE` requests that carry browser `Origin` or `Referer` metadata, the server rejects requests whose source scheme, host, or port does not match the current request. Script clients without browser origin metadata and explicit `Authorization` API clients continue to work.
 
 API clients can still use `Authorization: Bearer <access-token>` and JSON refresh tokens for scripts and automation. The server adds security headers, CSP, and `Permissions-Policy`, but public deployments still need careful origin hygiene.
 

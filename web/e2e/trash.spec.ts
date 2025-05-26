@@ -106,15 +106,6 @@ test.describe('回收站单项操作', () => {
 
     await page.goto('/files')
     await page.evaluate(async ({ fileUrl, fileName }) => {
-      const token = localStorage.getItem('mnemonas_token')
-      if (!token) {
-        throw new Error('missing auth token in localStorage')
-      }
-
-      const createHeaders = () => new Headers({
-        Authorization: `Bearer ${token}`,
-      })
-
       const requireOk = async (response: Response, action: string) => {
         if (!response.ok) {
           throw new Error(`${action} failed: ${response.status} ${await response.text()}`)
@@ -124,9 +115,8 @@ test.describe('回收站单项操作', () => {
       await requireOk(await fetch(fileUrl, {
         method: 'POST',
         body: new File(['restore workflow'], fileName, { type: 'text/plain' }),
-        headers: createHeaders(),
       }), 'create restore fixture')
-      await requireOk(await fetch(fileUrl, { method: 'DELETE', headers: createHeaders() }), 'delete restore fixture')
+      await requireOk(await fetch(fileUrl, { method: 'DELETE' }), 'delete restore fixture')
     }, { fileUrl, fileName })
 
     await ensureAuthenticatedAt(page, '/trash')
@@ -161,29 +151,20 @@ test.describe('回收站单项操作', () => {
     await page.goto('/files')
 
     await page.evaluate(async ({ rootDirUrl, nestedDirUrl, nestedFileUrl, deleteDirUrl, nestedFileName }) => {
-      const token = localStorage.getItem('mnemonas_token')
-      if (!token) {
-        throw new Error('missing auth token in localStorage')
-      }
-
-      const createHeaders = () => new Headers({
-        Authorization: `Bearer ${token}`,
-      })
-
       const requireOk = async (response: Response, action: string) => {
         if (!response.ok) {
           throw new Error(`${action} failed: ${response.status} ${await response.text()}`)
         }
       }
 
-      await requireOk(await fetch(rootDirUrl, { method: 'POST', headers: createHeaders() }), 'create root directory')
-      await requireOk(await fetch(nestedDirUrl, { method: 'POST', headers: createHeaders() }), 'create nested directory')
+      await requireOk(await fetch(rootDirUrl, { method: 'POST' }), 'create root directory')
+      await requireOk(await fetch(nestedDirUrl, { method: 'POST' }), 'create nested directory')
 
       const formData = new FormData()
       formData.append('file', new File(['nested content'], nestedFileName, { type: 'text/plain' }))
-      await requireOk(await fetch(nestedFileUrl, { method: 'POST', body: formData, headers: createHeaders() }), 'upload nested file')
+      await requireOk(await fetch(nestedFileUrl, { method: 'POST', body: formData }), 'upload nested file')
 
-      await requireOk(await fetch(deleteDirUrl, { method: 'DELETE', headers: createHeaders() }), 'delete non-empty directory')
+      await requireOk(await fetch(deleteDirUrl, { method: 'DELETE' }), 'delete non-empty directory')
     }, { rootDirUrl, nestedDirUrl, nestedFileUrl, deleteDirUrl, nestedFileName })
 
     await ensureAuthenticatedAt(page, '/trash')
