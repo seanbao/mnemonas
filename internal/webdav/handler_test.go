@@ -35,6 +35,17 @@ func setStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName strin
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fn))
 }
 
+func getStorageHook[T any](t *testing.T, fs *storage.FileSystem, fieldName string) T {
+	t.Helper()
+	field := reflect.ValueOf(fs).Elem().FieldByName(fieldName)
+	value := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Interface()
+	hook, ok := value.(T)
+	if !ok {
+		t.Fatalf("storage hook %s has unexpected type %T", fieldName, value)
+	}
+	return hook
+}
+
 // testDataplaneAddr is the address of the test dataplane server
 func testDataplaneAddr() string {
 	if addr := os.Getenv("MNEMONAS_TEST_DATAPLANE_ADDR"); addr != "" {
@@ -2385,6 +2396,88 @@ func TestHandler_PROPFIND_InvalidatesAncestorCacheAfterNestedWrite(t *testing.T)
 	}
 	if !strings.Contains(secondW.Body.String(), "new.txt") {
 		t.Fatalf("expected nested write to invalidate ancestor PROPFIND cache, got %q", secondW.Body.String())
+	}
+}
+
+func TestHandler_PROPFIND_DoesNotServeStaleCacheWhilePutIsInFlight(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/cache-race"); err != nil {
+		t.Fatalf("Mkdir(/cache-race) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/cache-race/existing.txt", bytes.NewReader([]byte("existing"))); err != nil {
+		t.Fatalf("WriteFile(/cache-race/existing.txt) error: %v", err)
+	}
+
+	initialReq := httptest.NewRequest("PROPFIND", "/dav/cache-race", nil)
+	initialReq.Header.Set("Depth", "1")
+	initialW := httptest.NewRecorder()
+	handler.ServeHTTP(initialW, initialReq)
+
+	if initialW.Code != http.StatusMultiStatus {
+		t.Fatalf("initial PROPFIND status = %d, want %d", initialW.Code, http.StatusMultiStatus)
+	}
+	if !strings.Contains(initialW.Body.String(), "existing.txt") {
+		t.Fatalf("expected initial PROPFIND to include existing file, got %q", initialW.Body.String())
+	}
+	if strings.Contains(initialW.Body.String(), "new.txt") {
+		t.Fatalf("initial PROPFIND unexpectedly contains new file, got %q", initialW.Body.String())
+	}
+
+	originalUpdateFileIndex := getStorageHook[func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error](t, fs, "updateFileIndex")
+	updateStarted := make(chan struct{})
+	continueUpdate := make(chan struct{})
+	setStorageHook(t, fs, "updateFileIndex", func(ctx context.Context, name string, size int64, modTime time.Time, hash string) error {
+		if name == "/cache-race/new.txt" {
+			select {
+			case <-updateStarted:
+			default:
+				close(updateStarted)
+			}
+			<-continueUpdate
+		}
+		return originalUpdateFileIndex(ctx, name, size, modTime, hash)
+	})
+	t.Cleanup(func() {
+		setStorageHook(t, fs, "updateFileIndex", originalUpdateFileIndex)
+	})
+
+	putReq := httptest.NewRequest("PUT", "/dav/cache-race/new.txt", strings.NewReader("new content"))
+	putW := httptest.NewRecorder()
+	putDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(putW, putReq)
+		close(putDone)
+	}()
+
+	select {
+	case <-updateStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for PUT to reach updateFileIndex hook")
+	}
+
+	concurrentReq := httptest.NewRequest("PROPFIND", "/dav/cache-race", nil)
+	concurrentReq.Header.Set("Depth", "1")
+	concurrentW := httptest.NewRecorder()
+	handler.ServeHTTP(concurrentW, concurrentReq)
+
+	if concurrentW.Code != http.StatusMultiStatus {
+		t.Fatalf("concurrent PROPFIND status = %d, want %d", concurrentW.Code, http.StatusMultiStatus)
+	}
+	if !strings.Contains(concurrentW.Body.String(), "new.txt") {
+		t.Fatalf("expected concurrent PROPFIND to avoid stale cache after PUT content is written, got %q", concurrentW.Body.String())
+	}
+
+	close(continueUpdate)
+	select {
+	case <-putDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for PUT to complete")
+	}
+
+	if putW.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want %d", putW.Code, http.StatusCreated)
 	}
 }
 
