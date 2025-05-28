@@ -237,6 +237,8 @@ POST /api/v1/admin/users
 DELETE /api/v1/admin/users/{id}
 ```
 
+- 删除用户后，该用户创建的公开分享链接会立即失效；后续访问返回 `410 Gone` 和错误码 `SHARE_DISABLED`
+
 **重置用户密码**:
 ```
 POST /api/v1/admin/users/{id}/reset-password
@@ -1058,6 +1060,7 @@ POST /s/{share_id}
 **说明**:
 - 当分享不需要密码，或已通过密码验证后，会返回 `file_name` / `file_size` / `folder_items`
 - 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`
+- 当创建该分享的用户被禁用或删除后，公开访问、下载和文件夹列表都会返回 `410 Gone`，错误码为 `SHARE_DISABLED`
 - `access_count` 在下载与文件夹列表请求时递增；`POST /s/{share_id}` 验证密码不会计数
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
