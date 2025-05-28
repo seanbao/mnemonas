@@ -15,6 +15,8 @@ If no file is found, defaults are used.
 
 The Ubuntu/systemd installer writes `/etc/mnemonas/config.toml` and points the systemd unit to it with `--config`.
 
+Config files can contain sensitive values such as `auth.jwt_secret`, WebDAV passwords, and alert webhook headers. MnemoNAS saves config files with `0600` permissions and tightens existing config files when they are loaded.
+
 ## Validate Configuration
 
 After editing config:
@@ -298,9 +300,9 @@ The file is removed after first successful login for that administrator.
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Enable share links |
 | `store_file` | string | under `storage.root/.mnemonas` | Share metadata file |
-| `base_url` | string | `""` | Base URL used when returning share URLs |
+| `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs |
 
-`base_url` affects the URL returned by the API. It does not change the share ID itself.
+`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs.
 
 ## `[security]`
 
@@ -327,7 +329,7 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `critical_pct` | float | `95.0` | Critical threshold |
 | `min_free_bytes` | uint64 | `10737418240` | Minimum free bytes |
 | `cooldown_period` | duration | `"4h"` | Alert cooldown |
-| `webhook_url` | string | `""` | Alert webhook URL |
+| `webhook_url` | string | `""` | Alert webhook URL; non-empty values must be absolute `http` or `https` URLs |
 | `webhook_method` | string | `"POST"` | `POST` sends JSON; `GET` encodes fields into query |
 | `webhook_headers` | string[] | `[]` | Additional headers, `"Key:Value"` |
 

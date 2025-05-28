@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	neturl "net/url"
 	"os"
 	urlpath "path"
 	"path/filepath"
@@ -26,7 +27,10 @@ var afterValidateManagedFilePath = func() {}
 var managedDirRootsMu sync.RWMutex
 var managedDirRoots = map[string]*os.Root{}
 
-const managedRootEscapeError = "path escapes from parent"
+const (
+	configFileMode         os.FileMode = 0600
+	managedRootEscapeError             = "path escapes from parent"
+)
 
 var durationFieldPaths = [][]string{
 	{"server", "read_timeout"},
@@ -408,6 +412,9 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	if err := ensureConfigFilePermissions(normalizedPath); err != nil {
+		return nil, err
+	}
 
 	normalizedData, err := normalizeDurationFields(data)
 	if err != nil {
@@ -420,6 +427,9 @@ func Load(path string) (*Config, error) {
 
 	applyStorageRootDefaults(cfg, getDefaultStorageRoot())
 	cfg.WebDAV.Prefix = NormalizeWebDAVPrefix(cfg.WebDAV.Prefix)
+	cfg.Share.BaseURL = strings.TrimSpace(cfg.Share.BaseURL)
+	cfg.Alerts.WebhookURL = strings.TrimSpace(cfg.Alerts.WebhookURL)
+	cfg.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
@@ -835,7 +845,7 @@ func writeManagedFileAtomicallyWithRoot(root *os.Root, path string, data []byte,
 }
 
 func chmodManagedFileWithRoot(root *os.Root, path string, mode os.FileMode, symlinkErr error) error {
-	file, err := root.OpenFile(filepath.Base(path), os.O_RDWR, 0)
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY, 0)
 	if err != nil {
 		return mapManagedRootPathError(err, symlinkErr)
 	}
@@ -899,7 +909,14 @@ func isManagedRootEscapeError(err error) bool {
 }
 
 func writeConfigFile(path string, data []byte) error {
-	return writeRegisteredManagedFileAtomically(path, data, errConfigFileSymlink, ".config-*.tmp", "config", 0644)
+	return writeRegisteredManagedFileAtomically(path, data, errConfigFileSymlink, ".config-*.tmp", "config", configFileMode)
+}
+
+func ensureConfigFilePermissions(configPath string) error {
+	if err := chmodRegisteredManagedFile(configPath, configFileMode, errConfigFileSymlink, "config file"); err != nil {
+		return fmt.Errorf("failed to secure config file permissions: %w", err)
+	}
+	return nil
 }
 
 // Validate validates configuration
@@ -973,6 +990,9 @@ func (c *Config) Validate() error {
 	if !c.Security.AllowUnsafeNoAuth && serverBeyondLoopback && c.WebDAV.Enabled && webdavAuthType == "none" {
 		errs = append(errs, errors.New("webdav.auth_type=none requires server.host to be loopback or security.allow_unsafe_no_auth=true"))
 	}
+	if err := validateOptionalHTTPURL(c.Share.BaseURL, "share.base_url"); err != nil {
+		errs = append(errs, err)
+	}
 
 	if c.DataPlane.GRPCAddress == "" {
 		errs = append(errs, errors.New("dataplane.grpc_address cannot be empty"))
@@ -1023,6 +1043,9 @@ func (c *Config) Validate() error {
 	if c.Alerts.WebhookMethod != "" && c.Alerts.WebhookMethod != "GET" && c.Alerts.WebhookMethod != "POST" {
 		errs = append(errs, errors.New("alerts.webhook_method must be GET or POST"))
 	}
+	if err := validateOptionalHTTPURL(c.Alerts.WebhookURL, "alerts.webhook_url"); err != nil {
+		errs = append(errs, err)
+	}
 	for _, header := range c.Alerts.WebhookHeaders {
 		trimmed := strings.TrimSpace(header)
 		if trimmed == "" {
@@ -1046,6 +1069,25 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func validateOptionalHTTPURL(rawURL, field string) error {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil
+	}
+
+	parsed, err := neturl.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("%s must be an absolute http or https URL", field)
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return nil
+	default:
+		return fmt.Errorf("%s must use http or https", field)
+	}
 }
 
 func listensBeyondLoopback(host string) bool {

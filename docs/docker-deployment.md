@@ -458,7 +458,9 @@ docker compose start
 docker compose down
 
 # 恢复目录
-rm -rf ~/.mnemonas
+DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
+test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+rm -rf -- "$DATA_DIR"
 tar xzf mnemonas-backup-YYYYMMDD.tar.gz -C ~
 
 # 启动服务

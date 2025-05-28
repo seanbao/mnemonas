@@ -1077,7 +1077,7 @@ POST /api/v1/shares
 - `type`: `file` | `folder`
 - `permission`: `read`
 - 响应中的 `url` 为动态生成字段：当 `share.base_url` 已配置时返回 `<base_url>/s/{id}`；未配置时返回相对路径 `/s/{id}`
-- `share.base_url` 配置错误不会破坏分享记录本身，但会让返回给前端/调用方的公开链接不可直接访问
+- `share.base_url` 为空时返回相对路径；非空时必须是完整的 `http` 或 `https` URL
 
 **响应示例**:
 ```json
@@ -1687,7 +1687,7 @@ PUT /api/v1/settings
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
 - `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
-- `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接
+- `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
 - `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`；保存后会立即更新运行中的告警监控
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
@@ -1698,6 +1698,7 @@ PUT /api/v1/settings
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
+- 请求中的 `alerts.webhook_url` 为空时禁用 Webhook 发送，非空时必须是完整的 `http` 或 `https` URL
 - 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `Key:Value` 格式
 - 请求中的 `dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
 - 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
