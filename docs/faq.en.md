@@ -316,8 +316,9 @@ This is destructive:
 
 ```bash
 docker compose down
-rm -rf ~/.mnemonas/files/*
-rm -rf ~/.mnemonas/.mnemonas/*
+DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
+test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+rm -rf -- "$DATA_DIR/files" "$DATA_DIR/.mnemonas"
 docker compose up -d
 ```
 

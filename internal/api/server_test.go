@@ -10929,6 +10929,30 @@ func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_RejectsInvalidShareBaseURL(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Share.BaseURL = "https://old.example.com"
+	server.storeConfig(server.config)
+
+	body := `{"share":{"base_url":"javascript:alert(1)"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid share base URL status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if server.config.Share.BaseURL != "https://old.example.com" {
+		t.Fatalf("expected invalid share base URL update to leave config unchanged, got %q", server.config.Share.BaseURL)
+	}
+}
+
 func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -11492,6 +11516,35 @@ func TestServer_UpdateSettings_InvalidAlertsWebhookMethodDoesNotUpdateAlertMonit
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("update settings invalid alerts webhook method status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if monitor.updateCount != 0 {
+		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidAlertsWebhookURLDoesNotUpdateAlertMonitor(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Alerts.WebhookURL = "https://hooks.example.com/old"
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"alerts":{"webhook_url":"ftp://hooks.example.com/storage"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid alerts webhook URL status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if server.config.Alerts.WebhookURL != "https://hooks.example.com/old" {
+		t.Fatalf("expected invalid webhook URL update to leave config unchanged, got %q", server.config.Alerts.WebhookURL)
 	}
 	if monitor.updateCount != 0 {
 		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)

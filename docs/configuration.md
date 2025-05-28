@@ -13,6 +13,8 @@
 
 如果未找到配置文件，系统使用默认配置。Ubuntu/systemd 安装脚本默认生成 `/etc/mnemonas/config.toml`，并在 systemd unit 中用 `--config` 指向该文件。
 
+配置文件可能包含 `auth.jwt_secret`、WebDAV 密码和告警 Webhook Header 等敏感值。MnemoNAS 保存或读取已有配置文件时会把文件权限收紧为 `0600`。
+
 ## 配置检查
 
 修改配置后先运行：
@@ -439,7 +441,7 @@ enabled = true
 base_url = "https://nas.example.com"
 ```
 
-`base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；配置错误时，分享记录仍然有效，但返回的公开链接会指向错误地址。
+`base_url` 只影响接口返回给调用方的分享链接展示值，不改变分享 `id` 本身。配置为空时，后端返回相对路径 `/s/{id}`；非空时必须是完整的 `http` 或 `https` URL。
 
 ---
 
@@ -472,7 +474,7 @@ base_url = "https://nas.example.com"
 | `critical_pct` | float | `95` | 严重告警阈值（百分比） |
 | `min_free_bytes` | uint64 | `10737418240` | 最小可用空间（字节） |
 | `cooldown_period` | duration | `4h` | 告警冷却时间 |
-| `webhook_url` | string | `""` | Webhook URL |
+| `webhook_url` | string | `""` | Webhook URL；非空时必须是完整的 `http` 或 `https` URL |
 | `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query |
 | `webhook_headers` | string[] | `[]` | 自定义 Header（"Key:Value"） |
 
