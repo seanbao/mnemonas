@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -556,7 +557,7 @@ func readAuthFileWithRoot(root *os.Root, path string, symlinkErr error) ([]byte,
 	}
 	afterValidateAuthFilePath()
 
-	file, err := root.Open(filepath.Base(path))
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, mapAuthRootPathError(err, symlinkErr)
 	}
@@ -679,7 +680,7 @@ func mapAuthRootPathError(err error, symlinkErr error) error {
 	if err == nil {
 		return nil
 	}
-	if isAuthRootEscapeError(err) {
+	if errors.Is(err, syscall.ELOOP) || isAuthRootEscapeError(err) {
 		return symlinkErr
 	}
 	return err

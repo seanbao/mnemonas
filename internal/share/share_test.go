@@ -1069,6 +1069,60 @@ func TestShareStore_RejectsSymlinkParentDirectoryOnLoad(t *testing.T) {
 	}
 }
 
+func TestNewShareStore_LoadRejectsStoreSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	sharesDir := filepath.Join(baseDir, "shares")
+	if err := os.MkdirAll(sharesDir, 0755); err != nil {
+		t.Fatalf("failed to create shares dir: %v", err)
+	}
+	storePath := filepath.Join(sharesDir, "shares.json")
+	writeShareFixture(t, storePath, []*Share{{
+		ID:         "original",
+		Path:       "/docs/original.txt",
+		Type:       ShareTypeFile,
+		CreatedBy:  "user1",
+		CreatedAt:  time.Now(),
+		Permission: PermissionRead,
+		Enabled:    true,
+	}})
+	linkedTarget := filepath.Join(sharesDir, "linked.json")
+	writeShareFixture(t, linkedTarget, []*Share{{
+		ID:         "linked",
+		Path:       "/docs/linked.txt",
+		Type:       ShareTypeFile,
+		CreatedBy:  "user2",
+		CreatedAt:  time.Now(),
+		Permission: PermissionRead,
+		Enabled:    true,
+	}})
+
+	originalHook := afterValidateShareStorePath
+	var hookErr error
+	swapped := false
+	afterValidateShareStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(storePath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(linkedTarget, storePath)
+	}
+	defer func() {
+		afterValidateShareStorePath = originalHook
+	}()
+
+	_, err := NewShareStore(storePath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateShareStorePath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errShareStoreSymlink) {
+		t.Fatalf("expected share store symlink rejection, got %v", err)
+	}
+}
+
 func TestNewShareStore_Load_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	baseDir := t.TempDir()
 	sharesDir := filepath.Join(baseDir, "shares")

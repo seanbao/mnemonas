@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 var errCASPathSymlink = errors.New("CAS storage path must not traverse a symlink")
@@ -386,7 +387,7 @@ func syncCASRootDirectory(root *os.Root, dir string) error {
 }
 
 func readCASFileWithRoot(root *os.Root, path string) ([]byte, error) {
-	file, err := root.Open(path)
+	file, err := root.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +451,7 @@ func (s *Store) Get(hash string) ([]byte, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
-		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isCASRootEscapeError(err) {
 			return nil, errCASPathSymlink
 		}
 		return nil, fmt.Errorf("failed to read file: %w", err)
@@ -466,8 +467,8 @@ func (s *Store) Has(hash string) bool {
 		return false
 	}
 	afterValidateCASPath()
-	_, err := s.rootHandle.Stat(relPath)
-	return err == nil
+	info, err := s.rootHandle.Lstat(relPath)
+	return err == nil && info.Mode()&os.ModeSymlink == 0
 }
 
 // Delete removes data
@@ -502,15 +503,18 @@ func (s *Store) Size(hash string) (int64, error) {
 		return 0, err
 	}
 	afterValidateCASPath()
-	info, err := s.rootHandle.Stat(relPath)
+	info, err := s.rootHandle.Lstat(relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, ErrNotFound
 		}
-		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isCASRootEscapeError(err) {
 			return 0, errCASPathSymlink
 		}
 		return 0, fmt.Errorf("failed to get file info: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return 0, errCASPathSymlink
 	}
 	return info.Size(), nil
 }
@@ -529,12 +533,12 @@ func (s *Store) Reader(hash string) (ReadSeekCloser, error) {
 		return nil, err
 	}
 	afterValidateCASPath()
-	f, err := s.rootHandle.Open(relPath)
+	f, err := s.rootHandle.OpenFile(relPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
-		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isCASRootEscapeError(err) {
 			return nil, errCASPathSymlink
 		}
 		return nil, fmt.Errorf("failed to open file: %w", err)

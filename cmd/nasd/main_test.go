@@ -704,6 +704,110 @@ func TestResolveLogOutput_CreatesParentDirectoriesAndAppends(t *testing.T) {
 	}
 }
 
+func TestResolveLogOutput_RejectsSymlinkInsertedAfterParentOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	logDir := filepath.Join(tmpDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(logs) error: %v", err)
+	}
+	outsidePath := filepath.Join(tmpDir, "outside.log")
+	if err := os.WriteFile(outsidePath, []byte("outside\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(outside) error: %v", err)
+	}
+	logPath := filepath.Join(logDir, "mnemonas.log")
+
+	var hookErr error
+	originalHook := afterOpenLogOutputParent
+	afterOpenLogOutputParent = func() {
+		if hookErr != nil {
+			return
+		}
+		hookErr = os.Symlink(outsidePath, logPath)
+	}
+	t.Cleanup(func() {
+		afterOpenLogOutputParent = originalHook
+	})
+
+	_, closer, _, err := resolveLogOutput(logPath)
+	if closer != nil {
+		_ = closer.Close()
+	}
+	if hookErr != nil {
+		t.Fatalf("hook symlink error: %v", hookErr)
+	}
+	if !errors.Is(err, errLogOutputSymlink) {
+		t.Fatalf("expected symlink inserted after parent open to be rejected, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(outsidePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(outside) error: %v", readErr)
+	}
+	if string(data) != "outside\n" {
+		t.Fatalf("outside log content = %q, want unchanged", string(data))
+	}
+}
+
+func TestResolveLogOutput_DoesNotFollowParentSymlinkInsertedAfterParentOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	logDir := filepath.Join(tmpDir, "logs")
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(logs) error: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+	logPath := filepath.Join(logDir, "mnemonas.log")
+	renamedLogDir := filepath.Join(tmpDir, "logs-renamed")
+	outsideLogPath := filepath.Join(outsideDir, "mnemonas.log")
+
+	var hookErr error
+	originalHook := afterOpenLogOutputParent
+	afterOpenLogOutputParent = func() {
+		if hookErr != nil {
+			return
+		}
+		if err := os.Rename(logDir, renamedLogDir); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(outsideDir, logDir)
+	}
+	t.Cleanup(func() {
+		afterOpenLogOutputParent = originalHook
+	})
+
+	writer, closer, _, err := resolveLogOutput(logPath)
+	if err != nil {
+		t.Fatalf("resolveLogOutput(file) error: %v", err)
+	}
+	if hookErr != nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		t.Fatalf("hook replace parent error: %v", hookErr)
+	}
+	if _, err := writer.Write([]byte("inside\n")); err != nil {
+		_ = closer.Close()
+		t.Fatalf("Write(log) error: %v", err)
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close(log) error: %v", err)
+	}
+
+	if _, err := os.Stat(outsideLogPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside log was created through replaced parent, stat error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(renamedLogDir, "mnemonas.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(renamed log) error: %v", err)
+	}
+	if string(data) != "inside\n" {
+		t.Fatalf("renamed log content = %q, want write through anchored parent", string(data))
+	}
+}
+
 func TestNormalizeLogOutputPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	absPath := filepath.Join(tmpDir, "mnemonas.log")
