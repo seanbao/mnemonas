@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -638,7 +639,7 @@ func syncRegisteredShareStoreDir(path string) error {
 func readShareStoreFileWithRoot(root *os.Root, path string) ([]byte, error) {
 	afterValidateShareStorePath()
 
-	file, err := root.Open(filepath.Base(path))
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, mapShareRootPathError(err)
 	}
@@ -753,7 +754,7 @@ func mapShareRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrPermission) || isShareRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isShareRootEscapeError(err) {
 		return errShareStoreSymlink
 	}
 	return err

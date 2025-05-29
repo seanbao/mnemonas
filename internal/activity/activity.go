@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -472,7 +473,7 @@ func syncRegisteredActivityLogDir(path string) error {
 func openActivityLogFileWithRoot(root *os.Root, path string) (*os.File, error) {
 	afterValidateActivityLogPath()
 
-	file, err := root.Open(filepath.Base(path))
+	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, mapActivityRootPathError(err)
 	}
@@ -574,7 +575,7 @@ func mapActivityRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrPermission) || isActivityRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isActivityRootEscapeError(err) {
 		return errActivityLogSymlink
 	}
 	return err

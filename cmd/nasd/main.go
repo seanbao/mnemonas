@@ -47,6 +47,7 @@ var startupDataplaneContext = dataplane.WithTimeout
 var startupDataplaneConnect = func(client *dataplane.Client, ctx context.Context) error {
 	return client.Connect(ctx)
 }
+var afterOpenLogOutputParent = func() {}
 
 type switchableWebDAVHandler struct {
 	mu      sync.RWMutex
@@ -746,13 +747,7 @@ func resolveLogOutput(output string) (io.Writer, io.Closer, bool, error) {
 		if err := validateLogOutputPath(cleanPath); err != nil {
 			return nil, nil, true, err
 		}
-		if err := os.MkdirAll(filepath.Dir(cleanPath), 0o755); err != nil {
-			return nil, nil, true, err
-		}
-		if err := validateLogOutputPath(cleanPath); err != nil {
-			return nil, nil, true, err
-		}
-		file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		file, err := openLogOutputFile(cleanPath)
 		if err != nil {
 			return nil, nil, true, err
 		}

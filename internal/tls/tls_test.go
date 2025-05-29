@@ -501,6 +501,47 @@ func TestGetCertificateInfo_RejectsSymlinkPath(t *testing.T) {
 	}
 }
 
+func TestReadTLSFileRejectsSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	certPath := filepath.Join(tmpDir, "server.crt")
+	if err := os.WriteFile(certPath, []byte("certificate"), 0644); err != nil {
+		t.Fatalf("WriteFile(cert) error: %v", err)
+	}
+	linkedTarget := filepath.Join(tmpDir, "linked.crt")
+	if err := os.WriteFile(linkedTarget, []byte("linked"), 0644); err != nil {
+		t.Fatalf("WriteFile(linked) error: %v", err)
+	}
+	if _, err := ensureTLSDirRoot(certPath, errCertFileSymlink, "certificate file", false); err != nil {
+		t.Fatalf("ensureTLSDirRoot() error: %v", err)
+	}
+
+	originalHook := afterValidateTLSFilePath
+	var hookErr error
+	swapped := false
+	afterValidateTLSFilePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(certPath); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(linkedTarget, certPath)
+	}
+	defer func() {
+		afterValidateTLSFilePath = originalHook
+	}()
+
+	_, err := readRegisteredTLSFile(certPath, errCertFileSymlink, "certificate file")
+	if hookErr != nil {
+		t.Fatalf("afterValidateTLSFilePath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errCertFileSymlink) {
+		t.Fatalf("expected certificate symlink rejection, got %v", err)
+	}
+}
+
 func TestGetTLSConfig_AutoGenerateRejectsSymlinkTargets(t *testing.T) {
 	tempDir := t.TempDir()
 	certTarget := filepath.Join(tempDir, "real-server.crt")
