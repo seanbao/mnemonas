@@ -84,8 +84,8 @@ describe('VersionsPage', () => {
   describe('rendering', () => {
     it('renders page header', () => {
       render(<VersionsPage />)
-      expect(screen.getByText('版本历史')).toBeTruthy()
-      expect(screen.getByText('查看和恢复文件历史版本')).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '版本历史' })).toBeTruthy()
+      expect(screen.getByText('查看、下载或恢复文件版本')).toBeTruthy()
     })
 
     it('renders search input', () => {
@@ -95,7 +95,7 @@ describe('VersionsPage', () => {
 
     it('renders search button', () => {
       render(<VersionsPage />)
-      expect(screen.getByText('查询版本')).toBeTruthy()
+      expect(screen.getByText('查询')).toBeTruthy()
     })
 
     it('shows empty state before search', () => {
@@ -109,8 +109,8 @@ describe('VersionsPage', () => {
 
       render(<VersionsPage />)
 
-      expect(screen.getByText('查看文件历史版本')).toBeTruthy()
-      expect(screen.getByText('MnemoNAS 自动保留主目录内文件的历史版本。输入文件路径即可查看历史版本，支持预览和下载。')).toBeTruthy()
+      expect(screen.getByText('查看和下载文件版本')).toBeTruthy()
+      expect(screen.getByText('输入主目录内文件路径后可查看版本记录，支持预览和下载。')).toBeTruthy()
     })
   })
 
@@ -122,7 +122,7 @@ describe('VersionsPage', () => {
       const input = screen.getByPlaceholderText(/输入文件路径/)
       await user.type(input, '/test.txt')
 
-      const searchBtn = screen.getByText('查询版本')
+      const searchBtn = screen.getByText('查询')
       await user.click(searchBtn)
 
       await waitFor(() => {
@@ -178,13 +178,28 @@ describe('VersionsPage', () => {
       })
 
       await user.clear(screen.getByPlaceholderText(/输入文件路径/))
-      await user.click(screen.getByText('查询版本'))
+      await user.click(screen.getByText('查询'))
 
       await waitFor(() => {
         expect(screen.queryByText('/test.txt')).toBeNull()
         expect(screen.getByText('查看文件版本历史')).toBeTruthy()
       })
       expect(window.location.search).toBe('')
+    })
+
+    it('renders an explicit empty state from an encoded deep link with no history', async () => {
+      window.history.pushState({}, '', '/versions?path=%2FT145iNXfXqXXb1upjX.avif')
+      mockGetVersions.mockResolvedValueOnce([])
+
+      render(<VersionsPage />)
+
+      await waitFor(() => {
+        expect(mockGetVersions).toHaveBeenCalledWith('/T145iNXfXqXXb1upjX.avif')
+      })
+
+      expect(screen.getByPlaceholderText(/输入文件路径/)).toHaveValue('/T145iNXfXqXXb1upjX.avif')
+      expect(screen.getByText('/T145iNXfXqXXb1upjX.avif')).toBeTruthy()
+      expect(await screen.findByText('未找到版本记录')).toBeTruthy()
     })
 
     it('blocks non-admin searches outside the assigned home directory', async () => {
@@ -219,7 +234,7 @@ describe('VersionsPage', () => {
       })
 
       expect(mockGetVersions).not.toHaveBeenCalled()
-      expect(screen.queryByText('查询版本')).toBeNull()
+      expect(screen.queryByText('查询')).toBeNull()
     })
 
     it('syncs the selected path when the URL query changes after mount', async () => {
@@ -274,13 +289,11 @@ describe('VersionsPage', () => {
         expect(mockGetVersions).toHaveBeenCalledWith('/tester/report.txt')
       })
 
-      expect(screen.queryByRole('table', { name: '版本历史' })).toBeNull()
+      expect(screen.queryByRole('list', { name: '版本历史' })).toBeNull()
       expect(screen.queryByText(/secretsecret/)).toBeNull()
     })
   })
 
-  // Note: HeroUI Table component has compatibility issues with jsdom environment
-  // The following tests verify API integration rather than Table rendering
   describe('version list', () => {
     it('calls API and processes versions', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
@@ -322,7 +335,7 @@ describe('VersionsPage', () => {
       await user.type(input, '/test.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.getByRole('table', { name: '版本历史' })).toBeTruthy()
+        expect(screen.getByRole('list', { name: '版本历史' })).toBeTruthy()
       })
     })
 
@@ -794,7 +807,7 @@ describe('VersionsPage', () => {
       await user.click(screen.getByRole('button', { name: '重新加载' }))
 
       await waitFor(() => {
-        expect(screen.getByRole('table', { name: '版本历史' })).toBeTruthy()
+        expect(screen.getByRole('list', { name: '版本历史' })).toBeTruthy()
         expect(mockAddToast).toHaveBeenCalledWith({ title: '版本历史已刷新', color: 'success' })
       })
     })
@@ -835,7 +848,7 @@ describe('VersionsPage', () => {
       await user.type(input, '/new-file.txt{enter}')
 
       await waitFor(() => {
-        expect(screen.getByText('暂无版本历史')).toBeTruthy()
+        expect(screen.getByText('未找到版本记录')).toBeTruthy()
       })
     })
   })

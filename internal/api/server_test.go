@@ -17,6 +17,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -2517,6 +2518,29 @@ func TestServer_DownloadFile_ContentDispositionEscapesFilename(t *testing.T) {
 	}
 }
 
+func TestServer_DownloadFile_DecodesLiteralPercentFilename(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	filename := "report%20%E4%B8%89.txt"
+	if err := fs.WriteFile(ctx, "/"+filename, bytes.NewReader([]byte("literal percent content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	encodedPath := (&url.URL{Path: "/" + filename}).EscapedPath()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download"+encodedPath, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("download literal percent filename status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if w.Body.String() != "literal percent content" {
+		t.Fatalf("download body = %q, want literal percent content", w.Body.String())
+	}
+}
+
 func TestServer_DownloadFile_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -2768,6 +2792,74 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	}
 	if !strings.Contains(downloadRec.Body.String(), "secure") {
 		t.Error("downloaded content mismatch")
+	}
+}
+
+func TestServer_CookieSessionLoginCreatesDownloadSession(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.Header.Set("X-MnemoNAS-Session-Mode", "cookie")
+	loginRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d; body=%s", loginRec.Code, http.StatusOK, loginRec.Body.String())
+	}
+
+	var loginPayload struct {
+		Data auth.LoginResponse `json:"data"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatalf("failed to parse login response: %v", err)
+	}
+	if loginPayload.Data.AccessToken != "" || loginPayload.Data.RefreshToken != "" {
+		t.Fatalf("cookie-session login leaked bearer tokens: %+v", loginPayload.Data)
+	}
+
+	var accessCookie *http.Cookie
+	for _, cookie := range loginRec.Result().Cookies() {
+		if cookie.Name == auth.AccessSessionCookieName {
+			accessCookie = cookie
+			break
+		}
+	}
+	if accessCookie == nil {
+		t.Fatalf("login did not set %s cookie; cookies=%+v", auth.AccessSessionCookieName, loginRec.Result().Cookies())
+	}
+	if !accessCookie.HttpOnly {
+		t.Fatal("access cookie is not HttpOnly")
+	}
+	if accessCookie.Path != "/api/v1" {
+		t.Fatalf("access cookie Path = %q, want %q", accessCookie.Path, "/api/v1")
+	}
+
+	downloadSessionReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/download-session", nil)
+	downloadSessionReq.AddCookie(accessCookie)
+	downloadSessionRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(downloadSessionRec, downloadSessionReq)
+
+	if downloadSessionRec.Code != http.StatusOK {
+		t.Fatalf("download session status = %d, want %d; body=%s", downloadSessionRec.Code, http.StatusOK, downloadSessionRec.Body.String())
+	}
+
+	var downloadCookie *http.Cookie
+	for _, cookie := range downloadSessionRec.Result().Cookies() {
+		if cookie.Name == auth.DownloadSessionCookieName {
+			downloadCookie = cookie
+			break
+		}
+	}
+	if downloadCookie == nil {
+		t.Fatalf("download session did not set %s cookie; cookies=%+v", auth.DownloadSessionCookieName, downloadSessionRec.Result().Cookies())
+	}
+	if !downloadCookie.HttpOnly {
+		t.Fatal("download session cookie is not HttpOnly")
+	}
+	if downloadCookie.Path != "/api/v1" {
+		t.Fatalf("download session cookie Path = %q, want %q", downloadCookie.Path, "/api/v1")
 	}
 }
 
@@ -3197,6 +3289,28 @@ func TestServer_PublicShareListItems(t *testing.T) {
 	}
 	if isDir, ok := paths["sub"]; !ok || !isDir {
 		t.Fatalf("expected sub directory in share items")
+	}
+}
+
+func TestServer_PublicShareDownloadFile_DecodesLiteralPercentFilename(t *testing.T) {
+	server, shareID := setupShareServer(t)
+
+	filename := "share%20%E4%B8%89.txt"
+	if err := server.fs.WriteFile(context.Background(), "/docs/"+filename, bytes.NewReader([]byte("shared literal percent content"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	encodedPath := (&url.URL{Path: "/" + filename}).EscapedPath()
+	req := httptest.NewRequest(http.MethodGet, "/s/"+shareID+"/download"+encodedPath, nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("share download literal percent filename status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if w.Body.String() != "shared literal percent content" {
+		t.Fatalf("share download body = %q, want shared literal percent content", w.Body.String())
 	}
 }
 
@@ -5364,7 +5478,7 @@ func TestServer_PathTraversal(t *testing.T) {
 		wantStatus int
 	}{
 		{"DotDot", "/api/v1/files/../../../etc/passwd", 0},
-		{"EncodedDotDot", "/api/v1/files/..%2F..%2Fetc/passwd", http.StatusNotFound},
+		{"EncodedDotDot", "/api/v1/files/..%2F..%2Fetc/passwd", http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -12526,6 +12640,7 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 
 	server.config.Storage.Root = tmpDir
+	server.config.Share.Enabled = true
 	server.config.WebDAV.AuthType = "basic"
 	server.config.WebDAV.Password = "custom-pass"
 
@@ -12553,6 +12668,9 @@ func TestServer_SetupStatus_DoesNotExposeCredentials(t *testing.T) {
 	}
 	if _, ok := payload["webdav_username"]; ok {
 		t.Fatalf("expected webdav_username to be omitted from setup status")
+	}
+	if payload["share_enabled"] != true {
+		t.Fatalf("expected share_enabled to reflect runtime config, got %v", payload["share_enabled"])
 	}
 }
 

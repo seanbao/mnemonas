@@ -1,5 +1,5 @@
-import { Suspense, lazy, useEffect } from 'react'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { Component, Suspense, lazy, useEffect, type ErrorInfo, type ReactNode } from 'react'
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { AppLayout } from '@/components/layout'
 import { ProtectedRoute } from '@/components/auth'
 import { useAuthStore } from '@/stores/auth'
@@ -29,16 +29,64 @@ function RouteFallback() {
   )
 }
 
-function App() {
-  const initialize = useAuthStore((state) => state.initialize)
+function RouteErrorFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-content1 px-6">
+      <div className="max-w-sm rounded-lg border border-divider bg-content2/70 p-5 text-center shadow-[var(--shadow-soft)]">
+        <h1 className="text-lg font-semibold text-foreground">页面加载失败</h1>
+        <p className="mt-2 text-sm text-default-600">当前页面渲染时发生异常，请刷新后重试。</p>
+        <button
+          type="button"
+          className="mt-4 rounded-lg bg-accent-primary px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-primary/90"
+          onClick={() => window.location.reload()}
+        >
+          重新加载
+        </button>
+      </div>
+    </div>
+  )
+}
 
-  // Initialize auth state on app mount
-  useEffect(() => {
-    initialize()
-  }, [initialize])
+interface RouteErrorBoundaryProps {
+  children: ReactNode
+  resetKey: string
+}
+
+interface RouteErrorBoundaryState {
+  hasError: boolean
+}
+
+class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBoundaryState> {
+  state: RouteErrorBoundaryState = { hasError: false }
+
+  static getDerivedStateFromError(): RouteErrorBoundaryState {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
+    console.error('Route render failed', error, errorInfo.componentStack)
+  }
+
+  componentDidUpdate(prevProps: RouteErrorBoundaryProps) {
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false })
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return <RouteErrorFallback />
+    }
+
+    return this.props.children
+  }
+}
+
+function AppRoutes() {
+  const location = useLocation()
 
   return (
-    <BrowserRouter>
+    <RouteErrorBoundary resetKey={`${location.pathname}${location.search}`}>
       <Suspense fallback={<RouteFallback />}>
         <Routes>
           {/* Public routes */}
@@ -106,6 +154,21 @@ function App() {
           </Route>
         </Routes>
       </Suspense>
+    </RouteErrorBoundary>
+  )
+}
+
+function App() {
+  const initialize = useAuthStore((state) => state.initialize)
+
+  // Initialize auth state on app mount
+  useEffect(() => {
+    initialize()
+  }, [initialize])
+
+  return (
+    <BrowserRouter>
+      <AppRoutes />
     </BrowserRouter>
   )
 }

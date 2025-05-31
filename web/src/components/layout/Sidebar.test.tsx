@@ -62,7 +62,7 @@ describe('Sidebar', () => {
     it('renders logo', () => {
       render(<Sidebar />)
       expect(screen.getAllByText('MnemoNAS').length).toBeGreaterThan(0)
-      expect(screen.getByText('Memory Palace')).toBeTruthy()
+      expect(screen.getByText('Private Storage')).toBeTruthy()
     })
 
     it('renders the backend version when available', async () => {
@@ -94,10 +94,9 @@ describe('Sidebar', () => {
       expect(screen.getByText('搜索')).toBeTruthy()
     })
 
-    it('renders versions link with badge', () => {
+    it('renders versions link', () => {
       render(<Sidebar />)
-      expect(screen.getByText('时光回溯')).toBeTruthy()
-      expect(screen.getByText('核心')).toBeTruthy()
+      expect(screen.getByText('版本历史')).toBeTruthy()
     })
 
     it('renders trash link', () => {
@@ -147,7 +146,7 @@ describe('Sidebar', () => {
 
     it('has correct href for versions', () => {
       render(<Sidebar />)
-      const link = screen.getByText('时光回溯').closest('a')
+      const link = screen.getByText('版本历史').closest('a')
       expect(link).toHaveAttribute('href', '/versions')
     })
 
@@ -274,8 +273,8 @@ describe('Sidebar', () => {
   describe('collapsed mode', () => {
     it('hides text when collapsed', () => {
       render(<Sidebar collapsed={true} />)
-      // Text like "Memory Palace" should not be visible
-      expect(screen.queryByText('Memory Palace')).toBeFalsy()
+      // Text like "Private Storage" should not be visible
+      expect(screen.queryByText('Private Storage')).toBeFalsy()
     })
 
     it('hides section titles when collapsed', () => {

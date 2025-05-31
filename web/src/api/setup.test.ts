@@ -16,13 +16,23 @@ describe('Setup API', () => {
   it('returns setup status payload', async () => {
     vi.mocked(global.fetch).mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ success: true, is_first_run: true, auth_enabled: true, webdav_enabled: true, webdav_auth_type: 'basic' }),
+      json: () => Promise.resolve({ success: true, is_first_run: true, auth_enabled: true, share_enabled: false, webdav_enabled: true, webdav_auth_type: 'basic' }),
     } as Response)
 
     const result = await getSetupStatus()
 
     expect(result.is_first_run).toBe(true)
+    expect(result.share_enabled).toBe(false)
     expect(result.webdav_auth_type).toBe('basic')
+  })
+
+  it('rejects invalid share status values', async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, is_first_run: true, auth_enabled: true, share_enabled: 'no', webdav_enabled: true, webdav_auth_type: 'basic' }),
+    } as Response)
+
+    await expect(getSetupStatus()).rejects.toThrow('Invalid setup status response')
   })
 
   it('rejects malformed successful setup status responses', async () => {
