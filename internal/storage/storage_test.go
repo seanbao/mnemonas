@@ -1765,6 +1765,80 @@ func TestFileSystem_Rename_ReturnsErrNotDirWhenDestinationParentIsFile(t *testin
 	}
 }
 
+func TestFileSystem_Copy_ReturnsErrAlreadyExistsWhenDestinationExists(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/copy-dest.txt", bytes.NewReader([]byte("dest"))); err != nil {
+		t.Fatalf("WriteFile(dest) error: %v", err)
+	}
+
+	err := fs.Copy(ctx, "/copy-source.txt", "/copy-dest.txt")
+	if err != ErrAlreadyExists {
+		t.Fatalf("Copy() error = %v, want ErrAlreadyExists", err)
+	}
+
+	reader, readErr := fs.OpenFile(ctx, "/copy-dest.txt")
+	if readErr != nil {
+		t.Fatalf("OpenFile(dest) error: %v", readErr)
+	}
+	defer reader.Close()
+	data, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatalf("ReadAll(dest) error: %v", readErr)
+	}
+	if string(data) != "dest" {
+		t.Fatalf("destination content = %q, want %q", string(data), "dest")
+	}
+	if _, statErr := fs.Stat(ctx, "/copy-source.txt"); statErr != nil {
+		t.Fatalf("expected source to remain after conflict, got %v", statErr)
+	}
+}
+
+func TestFileSystem_Copy_RollsBackDestinationWhenIndexUpdateFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/copy-source.txt", bytes.NewReader([]byte("source"))); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+
+	originalUpdateFileIndex := fs.updateFileIndex
+	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
+		return errors.New("index update failed")
+	}
+	t.Cleanup(func() {
+		fs.updateFileIndex = originalUpdateFileIndex
+	})
+
+	err := fs.Copy(ctx, "/copy-source.txt", "/copy-dest.txt")
+	if err == nil {
+		t.Fatal("expected Copy() to fail when file index update fails")
+	}
+	if !strings.Contains(err.Error(), "failed to update file index") {
+		t.Fatalf("expected file index failure in error, got %v", err)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/copy-dest.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected copied destination to be removed after rollback, got %v", statErr)
+	}
+	reader, readErr := fs.OpenFile(ctx, "/copy-source.txt")
+	if readErr != nil {
+		t.Fatalf("OpenFile(source) error: %v", readErr)
+	}
+	defer reader.Close()
+	data, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatalf("ReadAll(source) error: %v", readErr)
+	}
+	if string(data) != "source" {
+		t.Fatalf("source content = %q, want %q", string(data), "source")
+	}
+}
+
 func TestFileSystem_Rename_PreservesVersions(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

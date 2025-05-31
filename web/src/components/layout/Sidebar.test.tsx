@@ -162,6 +162,17 @@ describe('Sidebar', () => {
       const link = screen.getByText('设置').closest('a')
       expect(link).toHaveAttribute('href', '/settings')
     })
+
+    it('invokes onClose when a navigation link is clicked', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const onClose = vi.fn()
+
+      render(<Sidebar onClose={onClose} />)
+
+      await user.click(screen.getByRole('link', { name: '搜索' }))
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
   })
 
   describe('storage status', () => {

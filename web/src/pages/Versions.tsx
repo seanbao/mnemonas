@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, type SetURLSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Button, 
@@ -43,6 +43,34 @@ function pathWithinBase(basePath: string, targetPath: string): boolean {
     return targetPath.startsWith('/')
   }
   return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
+}
+
+function getVersionQueryState(path: string, scopedHomeDir: string): {
+  searchPath: string
+  selectedPath: string | null
+  isBlocked: boolean
+} {
+  if (!path) {
+    return {
+      searchPath: '',
+      selectedPath: null,
+      isBlocked: false,
+    }
+  }
+
+  if (scopedHomeDir && !pathWithinBase(scopedHomeDir, path)) {
+    return {
+      searchPath: scopedHomeDir,
+      selectedPath: null,
+      isBlocked: true,
+    }
+  }
+
+  return {
+    searchPath: path,
+    selectedPath: path,
+    isBlocked: false,
+  }
 }
 
 function getVersionsErrorPresentation(error: unknown): { title: string; description: string } {
@@ -174,13 +202,46 @@ export function VersionsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const initialPath = (searchParams.get('path') || '').trim()
   const normalizedInitialPath = initialPath ? (initialPath.startsWith('/') ? initialPath : `/${initialPath}`) : ''
-  const [searchPath, setSearchPath] = useState(normalizedInitialPath)
-  const [selectedPath, setSelectedPath] = useState<string | null>(normalizedInitialPath || null)
+  const scopedHomeDir = !isAdmin && user?.homeDir && user.homeDir !== '/' ? normalizePath(user.homeDir) : ''
+
+  return (
+    <VersionsPageContent
+      key={`${scopedHomeDir}:${normalizedInitialPath || '__empty__'}`}
+      initialPath={normalizedInitialPath}
+      isAdmin={isAdmin}
+      scopedHomeDir={scopedHomeDir}
+      setSearchParams={setSearchParams}
+    />
+  )
+}
+
+interface VersionsPageContentProps {
+  initialPath: string
+  isAdmin: boolean
+  scopedHomeDir: string
+  setSearchParams: SetURLSearchParams
+}
+
+function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchParams }: VersionsPageContentProps) {
+  const initialState = getVersionQueryState(initialPath, scopedHomeDir)
+  const [searchPath, setSearchPath] = useState(initialState.searchPath)
+  const [selectedPath, setSelectedPath] = useState<string | null>(initialState.selectedPath)
   const [selectedVersion, setSelectedVersion] = useState<VersionInfo | null>(null)
   const { isOpen, onOpen, onClose } = useDisclosure()
   const queryClient = useQueryClient()
-  const scopedHomeDir = !isAdmin && user?.homeDir && user.homeDir !== '/' ? normalizePath(user.homeDir) : ''
   const selectedPathAllowed = !selectedPath || !scopedHomeDir || pathWithinBase(scopedHomeDir, selectedPath)
+
+  useEffect(() => {
+    if (!initialState.isBlocked) {
+      return
+    }
+
+    addToast({
+      title: '仅可查看主目录内文件的版本历史',
+      color: 'warning',
+    })
+    setSearchParams({})
+  }, [initialState.isBlocked, setSearchParams])
 
   const { data: versions, isLoading, error, refetch } = useQuery({
     queryKey: ['versions', selectedPath],
@@ -200,20 +261,6 @@ export function VersionsPage() {
   }
   addToast({ title: '版本历史已刷新', color: 'success' })
   }
-
-  useEffect(() => {
-    if (!selectedPath || !scopedHomeDir || selectedPathAllowed) {
-      return
-    }
-
-    addToast({
-      title: '仅可查看主目录内文件的版本历史',
-      color: 'warning',
-    })
-    setSelectedPath(null)
-    setSearchPath(scopedHomeDir)
-    setSearchParams({})
-  }, [scopedHomeDir, selectedPath, selectedPathAllowed, setSearchParams])
 
   const restoreMutation = useMutation({
     mutationFn: async ({ path, hash }: { path: string; hash: string }) => {
@@ -251,9 +298,11 @@ export function VersionsPage() {
         setSearchPath(scopedHomeDir)
         return
       }
+      setSearchPath(normalizedPath)
       setSelectedPath(normalizedPath)
       setSearchParams({ path: normalizedPath })
     } else {
+      setSearchPath('')
       setSelectedPath(null)
       setSearchParams({})
     }

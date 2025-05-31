@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -274,6 +274,25 @@ export function FavoritesPage() {
   })
 
   const favoriteItems = useMemo(() => favorites ?? [], [favorites])
+  const visibleSelectedItems = useMemo(() => {
+    if (selectedItems.size === 0) {
+      return selectedItems
+    }
+
+    const validPaths = new Set(favoriteItems.map((item) => item.path))
+    let changed = false
+    const next = new Set<string>()
+
+    for (const path of selectedItems) {
+      if (validPaths.has(path)) {
+        next.add(path)
+        continue
+      }
+      changed = true
+    }
+
+    return changed ? next : selectedItems
+  }, [favoriteItems, selectedItems])
   const featureState = getFavoritesFeatureState(error)
 
   const removeSelectedPaths = useCallback((paths: string[]) => {
@@ -317,27 +336,6 @@ export function FavoritesPage() {
     })
   }, [queryClient])
 
-  useEffect(() => {
-    const validPaths = new Set(favoriteItems.map((item) => item.path))
-    setSelectedItems((prev) => {
-      if (prev.size === 0) {
-        return prev
-      }
-
-      let changed = false
-      const next = new Set<string>()
-      for (const path of prev) {
-        if (validPaths.has(path)) {
-          next.add(path)
-          continue
-        }
-        changed = true
-      }
-
-      return changed ? next : prev
-    })
-  }, [favoriteItems])
-
   // Remove mutation
   const removeMutation = useMutation({
     mutationFn: (path: string) => removeFavorite(path),
@@ -369,12 +367,12 @@ export function FavoritesPage() {
 
   const handleSelectAll = useCallback(() => {
     if (!canWrite) return
-    if (selectedItems.size === favoriteItems.length) {
+    if (visibleSelectedItems.size === favoriteItems.length) {
       setSelectedItems(new Set())
     } else {
       setSelectedItems(new Set(favoriteItems.map(item => item.path)))
     }
-  }, [canWrite, favoriteItems, selectedItems.size])
+  }, [canWrite, favoriteItems, visibleSelectedItems.size])
 
   // Batch remove using custom hook
   const { execute: executeBatchRemove, isLoading: isBatchRemoving } = useBatchOperation({
@@ -396,10 +394,10 @@ export function FavoritesPage() {
 
   const handleBatchRemove = useCallback(async () => {
     if (!canWrite) return
-    const paths = Array.from(selectedItems)
+    const paths = Array.from(visibleSelectedItems)
     if (paths.length === 0) return
     await executeBatchRemove(paths)
-  }, [canWrite, selectedItems, executeBatchRemove])
+  }, [canWrite, visibleSelectedItems, executeBatchRemove])
 
   const handleNavigate = useCallback((path: string) => {
     // Navigate to the file location in Files page
@@ -525,12 +523,12 @@ export function FavoritesPage() {
       />
 
       {/* Selection bar */}
-      {canWrite && selectedItems.size > 0 && (
+      {canWrite && visibleSelectedItems.size > 0 && (
         <div className="flex items-center gap-4 px-4 py-2.5 bg-accent-primary/10 backdrop-blur-sm rounded-xl border border-divider shadow-[var(--shadow-soft)]">
           <div className="w-8 h-8 rounded-full bg-accent-primary/15 flex items-center justify-center">
-            <span className="text-sm font-bold text-accent-primary">{selectedItems.size}</span>
+            <span className="text-sm font-bold text-accent-primary">{visibleSelectedItems.size}</span>
           </div>
-          <span className="text-sm font-medium">已选择 {selectedItems.size} 项</span>
+          <span className="text-sm font-medium">已选择 {visibleSelectedItems.size} 项</span>
           <div className="flex-1" />
           <Button size="sm" variant="flat" onPress={() => setSelectedItems(new Set())} className="rounded-xl">
             取消选择
@@ -554,8 +552,8 @@ export function FavoritesPage() {
         <div className="flex items-center gap-4 px-4 py-2.5 bg-content2/50 backdrop-blur-sm rounded-xl border border-divider text-sm font-medium text-default-400">
           {canWrite ? (
             <Checkbox
-              isSelected={selectedItems.size === favoriteItems.length && favoriteItems.length > 0}
-              isIndeterminate={selectedItems.size > 0 && selectedItems.size < favoriteItems.length}
+              isSelected={visibleSelectedItems.size === favoriteItems.length && favoriteItems.length > 0}
+              isIndeterminate={visibleSelectedItems.size > 0 && visibleSelectedItems.size < favoriteItems.length}
               onValueChange={handleSelectAll}
               classNames={{
                 wrapper: "before:border-divider",
@@ -579,11 +577,11 @@ export function FavoritesPage() {
             <FavoriteRow
               key={item.path}
               item={item}
-              isSelected={selectedItems.has(item.path)}
+              isSelected={visibleSelectedItems.has(item.path)}
               canWrite={canWrite}
               onSelect={() => {
                 if (!canWrite) return
-                const newSet = new Set(selectedItems)
+                const newSet = new Set(visibleSelectedItems)
                 if (newSet.has(item.path)) {
                   newSet.delete(item.path)
                 } else {

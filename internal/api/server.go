@@ -1511,6 +1511,24 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		info, err := s.fs.Stat(r.Context(), filePath)
+		if err != nil {
+			if isStorageNotFound(err) {
+				s.respondNotFound(w, "stat file", err)
+				return
+			}
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
+			s.respondInternalError(w, "stat file", err)
+			return
+		}
+		if info.IsDir {
+			BadRequest(w, "cannot download directory")
+			return
+		}
+
 		reader, err := s.fs.GetVersion(r.Context(), filePath, versionHash)
 		if err != nil {
 			if errors.Is(err, versionstore.ErrUnavailable) {
@@ -1545,19 +1563,17 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		if forceDownload {
 			w.Header().Set("Content-Disposition", formatAttachmentHeader(path.Base(filePath)))
 		}
-		contentType := mime.TypeByExtension(strings.ToLower(path.Ext(filePath)))
-		if contentType == "" {
-			contentType = "application/octet-stream"
+
+		versionModTime := time.Time{}
+		if info.ContentHash == versionHash {
+			versionModTime = info.ModTime
 		}
-		w.Header().Set("Content-Type", contentType)
-		if err := streamAPIResponse(w, reader); err != nil {
-			if apiStreamResponseStarted(err) {
-				return
-			}
-			s.respondInternalError(w, "download file version", err)
-			return
+
+		trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
+		http.ServeContent(trackingWriter, r, path.Base(filePath), versionModTime, reader)
+		if trackingWriter.writeErr == nil && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
+			s.LogActivity(r, activity.ActionDownload, filePath, map[string]string{"hash": versionHash})
 		}
-		s.LogActivity(r, activity.ActionDownload, filePath, map[string]string{"hash": versionHash})
 		return
 	}
 
@@ -1836,13 +1852,7 @@ func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) erro
 		return nil
 	}
 
-	reader, err := s.fs.OpenFile(ctx, srcPath)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-
-	return s.fs.WriteFile(ctx, dstPath, reader)
+	return s.fs.Copy(ctx, srcPath, dstPath)
 }
 
 func (s *Server) rollbackCopiedDirectory(dstPath string, copyErr error) error {

@@ -183,8 +183,8 @@ export function StoragePage() {
 
         <EmptyState
           icon={AlertCircle}
-          title={storageErrorPresentation?.title}
-          description={storageErrorPresentation?.description}
+          title={storageErrorPresentation!.title}
+          description={storageErrorPresentation!.description}
           action={
             <Button variant="bordered" className="rounded-xl" onPress={handleRefresh}>
               重新加载

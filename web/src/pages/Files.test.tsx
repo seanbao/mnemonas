@@ -3,7 +3,6 @@ import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { FilesPage } from './Files'
 import * as HeroUI from '@heroui/react'
-import * as favoritesApi from '@/api/favorites'
 
 const mockAddToast = vi.fn()
 const useCanWriteMock = vi.fn(() => true)
