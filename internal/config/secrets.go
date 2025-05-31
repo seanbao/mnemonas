@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -113,7 +114,7 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 			}
 			err = os.ErrNotExist
 		} else {
-			if err := scrubLegacyWebPassword(normalizedPath, data, &secrets); err != nil {
+			if err := repairLoadedGeneratedSecrets(normalizedPath, data, &secrets); err != nil {
 				return nil, false, err
 			}
 			return &secrets, false, nil
@@ -155,12 +156,49 @@ func scrubLegacyWebPassword(secretsPath string, data []byte, secrets *Secrets) e
 	if !hasLegacyWebPassword(data) {
 		return nil
 	}
+	return writeScrubbedSecretsFile(secretsPath, secrets)
+}
+
+func repairLoadedGeneratedSecrets(secretsPath string, data []byte, secrets *Secrets) error {
+	changed := hasLegacyWebPassword(data)
+	repaired, err := repairRequiredGeneratedSecrets(secrets)
+	if err != nil {
+		return err
+	}
+	if !changed && !repaired {
+		return nil
+	}
+	return writeScrubbedSecretsFile(secretsPath, secrets)
+}
+
+func repairRequiredGeneratedSecrets(secrets *Secrets) (bool, error) {
+	changed := false
+	if strings.TrimSpace(secrets.JWTSecret) == "" {
+		jwtSecret, err := generateSecureKey(32)
+		if err != nil {
+			return false, err
+		}
+		secrets.JWTSecret = jwtSecret
+		changed = true
+	}
+	if strings.TrimSpace(secrets.WebDAVPassword) == "" {
+		webdavPassword, err := generateReadablePassword(16)
+		if err != nil {
+			return false, err
+		}
+		secrets.WebDAVPassword = webdavPassword
+		changed = true
+	}
+	return changed, nil
+}
+
+func writeScrubbedSecretsFile(secretsPath string, secrets *Secrets) error {
 	cleanData, err := json.MarshalIndent(secrets, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize scrubbed secrets: %w", err)
 	}
 	if err := writeSecretsFile(secretsPath, cleanData); err != nil {
-		return fmt.Errorf("failed to remove legacy web password from secrets file: %w", err)
+		return fmt.Errorf("failed to repair secrets file: %w", err)
 	}
 	return nil
 }
@@ -228,12 +266,6 @@ func renameRegisteredSecretsFile(oldPath, newPath string) error {
 	if filepath.Dir(normalizedOldPath) != filepath.Dir(normalizedNewPath) {
 		return fmt.Errorf("secrets rename requires same parent directory")
 	}
-	if err := validateManagedFilePath(normalizedOldPath, errSecretsFileSymlink, "secrets file"); err != nil {
-		return err
-	}
-	if err := validateManagedFilePath(normalizedNewPath, errSecretsFileSymlink, "secrets file"); err != nil {
-		return err
-	}
 	if ok {
 		afterValidateManagedFilePath()
 		if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
@@ -241,7 +273,28 @@ func renameRegisteredSecretsFile(oldPath, newPath string) error {
 		}
 		return nil
 	}
-	return os.Rename(normalizedOldPath, normalizedNewPath)
+	if err := validateManagedFilePath(normalizedOldPath, errSecretsFileSymlink, "secrets file"); err != nil {
+		return err
+	}
+	if err := validateManagedFilePath(normalizedNewPath, errSecretsFileSymlink, "secrets file"); err != nil {
+		return err
+	}
+	normalizedOldPath, _, _, err = ensureManagedDirRootWithState(normalizedOldPath, errSecretsFileSymlink, "secrets file", false)
+	if err != nil {
+		return err
+	}
+	root, normalizedOldPath, ok, err = registeredManagedDirRoot(normalizedOldPath, "secrets file")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &os.PathError{Op: "rename", Path: normalizedOldPath, Err: os.ErrNotExist}
+	}
+	afterValidateManagedFilePath()
+	if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+		return mapManagedRootPathError(err, errSecretsFileSymlink)
+	}
+	return nil
 }
 
 func writeSecretsFile(secretsPath string, data []byte) error {

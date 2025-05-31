@@ -10,12 +10,14 @@ import (
 	"os"
 	urlpath "path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 var errConfigFileSymlink = errors.New("config file path must not be a symlink")
@@ -144,7 +146,10 @@ type CDCConfig struct {
 	MaxChunkSize uint32 `toml:"max_chunk_size"` // max chunk size (default 4MB)
 }
 
-const MaxCDCChunkSize uint32 = 64 * 1024 * 1024
+const (
+	MinCDCChunkSize uint32 = 64 * 1024
+	MaxCDCChunkSize uint32 = 64 * 1024 * 1024
+)
 
 // WebDAVConfig holds WebDAV service configuration
 type WebDAVConfig struct {
@@ -391,6 +396,22 @@ func isFilesystemRoot(path string) bool {
 	return cleaned == string(os.PathSeparator)
 }
 
+func isProtectedStorageRoot(path string) bool {
+	if isFilesystemRoot(path) {
+		return true
+	}
+
+	cleaned := filepath.ToSlash(filepath.Clean(path))
+	switch cleaned {
+	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt",
+		"/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr",
+		"/usr/local", "/usr/local/bin", "/usr/local/share", "/var":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeStringSlice(values []string) []string {
 	if values == nil {
 		return []string{}
@@ -569,17 +590,17 @@ func validateManagedFilePath(path string, symlinkErr error, label string) error 
 }
 
 func ensureManagedDirRoot(path string, symlinkErr error, label string, create bool) (string, error) {
-	normalizedPath, _, err := ensureManagedDirRootWithState(path, symlinkErr, label, create)
+	normalizedPath, _, _, err := ensureManagedDirRootWithState(path, symlinkErr, label, create)
 	return normalizedPath, err
 }
 
-func ensureManagedDirRootWithState(path string, symlinkErr error, label string, create bool) (string, *os.Root, error) {
+func ensureManagedDirRootWithState(path string, symlinkErr error, label string, create bool) (string, *os.Root, []string, error) {
 	normalizedPath, err := normalizeManagedFilePath(path, label)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	dir := filepath.Dir(normalizedPath)
@@ -587,35 +608,38 @@ func ensureManagedDirRootWithState(path string, symlinkErr error, label string, 
 	root := managedDirRoots[dir]
 	managedDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, nil, nil
 	}
 
+	createdDirs := []string(nil)
 	if create {
-		if err := ensureManagedDir(dir, 0755); err != nil {
-			return "", nil, fmt.Errorf("failed to create %s directory: %w", label, err)
+		var err error
+		createdDirs, err = ensureManagedDir(dir, 0755, symlinkErr)
+		if err != nil {
+			return "", nil, createdDirs, fmt.Errorf("failed to create %s directory: %w", label, err)
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil, nil
+			return normalizedPath, nil, nil, nil
 		}
-		return "", nil, fmt.Errorf("failed to stat %s directory: %w", label, err)
+		return "", nil, nil, fmt.Errorf("failed to stat %s directory: %w", label, err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to open %s directory root: %w", label, err)
+		return "", nil, createdDirs, fmt.Errorf("failed to open %s directory root: %w", label, err)
 	}
 
 	managedDirRootsMu.Lock()
 	if existing := managedDirRoots[dir]; existing != nil {
 		managedDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil, nil
+		return normalizedPath, nil, createdDirs, nil
 	}
 	managedDirRoots[dir] = root
 	managedDirRootsMu.Unlock()
 
-	return normalizedPath, root, nil
+	return normalizedPath, root, createdDirs, nil
 }
 
 func releaseRegisteredManagedDirRoot(dir string, root *os.Root) {
@@ -648,10 +672,17 @@ func readRegisteredManagedFile(path string, symlinkErr error, label string) ([]b
 		return nil, err
 	}
 	if !ok {
-		if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
+		normalizedPath, _, _, err = ensureManagedDirRootWithState(normalizedPath, symlinkErr, label, false)
+		if err != nil {
 			return nil, err
 		}
-		return os.ReadFile(normalizedPath)
+		root, normalizedPath, ok, err = registeredManagedDirRoot(normalizedPath, label)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &os.PathError{Op: "open", Path: normalizedPath, Err: os.ErrNotExist}
+		}
 	}
 	return readManagedFileWithRoot(root, normalizedPath, symlinkErr, label)
 }
@@ -667,19 +698,32 @@ func writeRegisteredManagedFileAtomically(path string, data []byte, symlinkErr e
 	if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
 		return err
 	}
-	createdDirs, err := collectMissingManagedDirs(filepath.Dir(normalizedPath))
-	if err != nil {
-		return err
-	}
 	registeredRoot := (*os.Root)(nil)
-	normalizedPath, registeredRoot, err = ensureManagedDirRootWithState(normalizedPath, symlinkErr, label, true)
+	releaseRootOnError := false
+	createdDirs := []string(nil)
+	normalizedPath, registeredRoot, createdDirs, err = ensureManagedDirRootWithState(normalizedPath, symlinkErr, label, true)
 	if err != nil {
 		releaseRegisteredManagedDirRoot(filepath.Dir(normalizedPath), registeredRoot)
 		return cleanupCreatedManagedDirs(createdDirs, label, err)
+	}
+	if registeredRoot != nil {
+		releaseRootOnError = true
+	} else {
+		root, normalizedPath, ok, err = registeredManagedDirRoot(normalizedPath, label)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return &os.PathError{Op: "open", Path: filepath.Dir(normalizedPath), Err: os.ErrNotExist}
+		}
+		registeredRoot = root
 	}
 	if err := writeManagedFileAtomicallyWithRoot(registeredRoot, normalizedPath, data, symlinkErr, pattern, label, perm); err != nil {
-		releaseRegisteredManagedDirRoot(filepath.Dir(normalizedPath), registeredRoot)
-		return cleanupCreatedManagedDirs(createdDirs, label, err)
+		if releaseRootOnError {
+			releaseRegisteredManagedDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+			return cleanupCreatedManagedDirs(createdDirs, label, err)
+		}
+		return err
 	}
 	return nil
 }
@@ -690,11 +734,17 @@ func chmodRegisteredManagedFile(path string, mode os.FileMode, symlinkErr error,
 		return err
 	}
 	if !ok {
-		if err := validateManagedFilePath(normalizedPath, symlinkErr, label); err != nil {
+		normalizedPath, _, _, err = ensureManagedDirRootWithState(normalizedPath, symlinkErr, label, false)
+		if err != nil {
 			return err
 		}
-		afterValidateManagedFilePath()
-		return os.Chmod(normalizedPath, mode)
+		root, normalizedPath, ok, err = registeredManagedDirRoot(normalizedPath, label)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return &os.PathError{Op: "chmod", Path: normalizedPath, Err: os.ErrNotExist}
+		}
 	}
 	return chmodManagedFileWithRoot(root, normalizedPath, mode, symlinkErr)
 }
@@ -711,7 +761,7 @@ func syncRegisteredManagedDir(path, label string) error {
 }
 
 func syncManagedDirectory(dir string) error {
-	parentDir, err := os.Open(dir)
+	parentDir, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return fmt.Errorf("open directory %s: %w", dir, err)
 	}
@@ -744,27 +794,6 @@ func syncManagedRootDirectory(root *os.Root) error {
 	return nil
 }
 
-func collectMissingManagedDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
-}
-
 func syncCreatedManagedDirs(createdDirs []string) error {
 	for i := 0; i < len(createdDirs); i++ {
 		if err := syncManagedDir(filepath.Dir(createdDirs[i])); err != nil {
@@ -774,18 +803,26 @@ func syncCreatedManagedDirs(createdDirs []string) error {
 	return nil
 }
 
-func ensureManagedDir(dir string, perm os.FileMode) error {
-	createdDirs, err := collectMissingManagedDirs(dir)
+func ensureManagedDir(dir string, perm os.FileMode, symlinkErr error) ([]string, error) {
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
+		if rootio.IsSymlinkError(err) {
+			return createdDirs, symlinkErr
+		}
+		return createdDirs, err
 	}
-	if err := os.MkdirAll(dir, perm); err != nil {
-		return err
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
+	if err != nil {
+		if rootio.IsSymlinkError(err) {
+			return createdDirs, symlinkErr
+		}
+		return createdDirs, err
 	}
-	if err := os.Chmod(dir, perm); err != nil {
-		return err
+	defer dirHandle.Close()
+	if err := dirHandle.Chmod(perm); err != nil {
+		return createdDirs, err
 	}
-	return syncCreatedManagedDirs(createdDirs)
+	return createdDirs, syncCreatedManagedDirs(createdDirs)
 }
 
 func readManagedFileWithRoot(root *os.Root, path string, symlinkErr error, label string) ([]byte, error) {
@@ -794,7 +831,7 @@ func readManagedFileWithRoot(root *os.Root, path string, symlinkErr error, label
 	}
 	afterValidateManagedFilePath()
 
-	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := rootio.OpenFileNoFollow(root, filepath.Base(path), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, mapManagedRootPathError(err, symlinkErr)
 	}
@@ -846,7 +883,7 @@ func writeManagedFileAtomicallyWithRoot(root *os.Root, path string, data []byte,
 }
 
 func chmodManagedFileWithRoot(root *os.Root, path string, mode os.FileMode, symlinkErr error) error {
-	file, err := root.OpenFile(filepath.Base(path), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := rootio.OpenFileNoFollow(root, filepath.Base(path), os.O_RDONLY, 0)
 	if err != nil {
 		return mapManagedRootPathError(err, symlinkErr)
 	}
@@ -863,7 +900,7 @@ func createManagedTempFile(root *os.Root, pattern string, symlinkErr error) (*os
 	if err != nil {
 		return nil, "", err
 	}
-	tmpFile, err := root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, "", mapManagedRootPathError(err, symlinkErr)
 	}
@@ -899,7 +936,7 @@ func cleanupCreatedManagedDirs(createdDirs []string, label string, operationErr 
 }
 
 func mapManagedRootPathError(err error, symlinkErr error) error {
-	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isManagedRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isManagedRootEscapeError(err) {
 		return symlinkErr
 	}
 	return err
@@ -927,6 +964,9 @@ func (c *Config) Validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		errs = append(errs, fmt.Errorf("invalid port: %d", c.Server.Port))
 	}
+	if err := validateListenHost(c.Server.Host); err != nil {
+		errs = append(errs, err)
+	}
 	if c.Server.ReadTimeout <= 0 {
 		errs = append(errs, errors.New("server.read_timeout must be positive"))
 	}
@@ -944,6 +984,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("storage.root cannot be empty"))
 	} else if isFilesystemRoot(c.Storage.Root) {
 		errs = append(errs, errors.New("storage.root cannot be filesystem root"))
+	} else if isProtectedStorageRoot(c.Storage.Root) {
+		errs = append(errs, errors.New("storage.root cannot be a protected system directory"))
 	}
 	if c.Storage.Trash.RetentionDays < 0 {
 		errs = append(errs, errors.New("storage.trash.retention_days cannot be negative"))
@@ -967,11 +1009,20 @@ func (c *Config) Validate() error {
 	if webdavAuthType != "" && webdavAuthType != "none" && webdavAuthType != "basic" {
 		errs = append(errs, fmt.Errorf("invalid webdav.auth_type: %q", c.WebDAV.AuthType))
 	}
+	if err := validateWebDAVPrefix(c.WebDAV.Prefix); err != nil {
+		errs = append(errs, err)
+	}
+	if c.WebDAV.Enabled && webDAVPrefixOverlapsReservedRoute(c.WebDAV.Prefix) {
+		errs = append(errs, errors.New("webdav.prefix overlaps a reserved HTTP route namespace"))
+	}
 	if c.Auth.AccessTokenTTL <= 0 {
 		errs = append(errs, errors.New("auth.access_token_ttl must be positive"))
 	}
 	if c.Auth.RefreshTokenTTL <= 0 {
 		errs = append(errs, errors.New("auth.refresh_token_ttl must be positive"))
+	}
+	if strings.TrimSpace(c.Auth.JWTSecret) != "" && len([]byte(c.Auth.JWTSecret)) < 32 {
+		errs = append(errs, errors.New("auth.jwt_secret must be empty for generated secrets or at least 32 bytes"))
 	}
 	for _, ext := range c.Storage.Versioning.AutoVersionedExtensions {
 		trimmed := strings.TrimSpace(ext)
@@ -995,8 +1046,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 
-	if c.DataPlane.GRPCAddress == "" {
-		errs = append(errs, errors.New("dataplane.grpc_address cannot be empty"))
+	if err := validateTCPAddress(c.DataPlane.GRPCAddress, "dataplane.grpc_address"); err != nil {
+		errs = append(errs, err)
 	}
 	if c.DataPlane.Timeout <= 0 {
 		errs = append(errs, errors.New("dataplane.timeout must be positive"))
@@ -1009,6 +1060,9 @@ func (c *Config) Validate() error {
 	cdc := c.DataPlane.CDC
 	if cdc.MinChunkSize == 0 {
 		errs = append(errs, errors.New("min_chunk_size must be positive"))
+	}
+	if cdc.MinChunkSize > 0 && cdc.MinChunkSize < MinCDCChunkSize {
+		errs = append(errs, fmt.Errorf("min_chunk_size must be greater than or equal to %d", MinCDCChunkSize))
 	}
 	if cdc.AvgChunkSize == 0 {
 		errs = append(errs, errors.New("avg_chunk_size must be positive"))
@@ -1048,13 +1102,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	for _, header := range c.Alerts.WebhookHeaders {
-		trimmed := strings.TrimSpace(header)
-		if trimmed == "" {
-			continue
-		}
-		key, value, ok := strings.Cut(trimmed, ":")
-		if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
-			errs = append(errs, fmt.Errorf("invalid alerts.webhook_headers entry: %q", header))
+		if err := validateWebhookHeader(header); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	logLevel := strings.ToLower(strings.TrimSpace(c.Log.Level))
@@ -1072,10 +1121,75 @@ func (c *Config) Validate() error {
 	return errors.Join(errs...)
 }
 
+func validateWebhookHeader(header string) error {
+	trimmed := strings.TrimSpace(header)
+	if trimmed == "" {
+		return nil
+	}
+
+	key, value, ok := strings.Cut(trimmed, ":")
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if !ok || key == "" || value == "" {
+		return fmt.Errorf("invalid alerts.webhook_headers entry: %q", header)
+	}
+	if !isValidHTTPHeaderToken(key) {
+		return fmt.Errorf("invalid alerts.webhook_headers header name: %q", key)
+	}
+	if hasInvalidHTTPHeaderValueControl(value) {
+		return fmt.Errorf("invalid alerts.webhook_headers header value for %q", key)
+	}
+	return nil
+}
+
+func isValidHTTPHeaderToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if !isHTTPTokenChar(value[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHTTPTokenChar(b byte) bool {
+	if b >= 'a' && b <= 'z' {
+		return true
+	}
+	if b >= 'A' && b <= 'Z' {
+		return true
+	}
+	if b >= '0' && b <= '9' {
+		return true
+	}
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
+}
+
+func hasInvalidHTTPHeaderValueControl(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == 0x7f || (value[i] < 0x20 && value[i] != '\t') {
+			return true
+		}
+	}
+	return false
+}
+
 func validateOptionalHTTPURL(rawURL, field string) error {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return nil
+	}
+	if trimmed != rawURL || strings.IndexFunc(trimmed, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f
+	}) >= 0 {
+		return fmt.Errorf("%s must not contain whitespace or control characters", field)
 	}
 
 	parsed, err := neturl.Parse(trimmed)
@@ -1091,8 +1205,94 @@ func validateOptionalHTTPURL(rawURL, field string) error {
 	}
 }
 
+func validateTCPAddress(address, field string) error {
+	trimmed := strings.TrimSpace(address)
+	if trimmed == "" {
+		return fmt.Errorf("%s cannot be empty", field)
+	}
+	if trimmed != address || strings.ContainsAny(trimmed, "\r\n\t ") {
+		return fmt.Errorf("%s must not contain whitespace", field)
+	}
+	if strings.IndexFunc(trimmed, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return fmt.Errorf("%s must not contain control characters", field)
+	}
+
+	host, port, err := net.SplitHostPort(trimmed)
+	if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+		return fmt.Errorf("%s must be a host:port address", field)
+	}
+	if !isValidTCPHost(host) {
+		return fmt.Errorf("%s host is invalid", field)
+	}
+
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber <= 0 || portNumber > 65535 {
+		return fmt.Errorf("%s port must be between 1 and 65535", field)
+	}
+	return nil
+}
+
+func isValidTCPHost(host string) bool {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" || strings.ContainsAny(host, "[]") {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if len(host) > 253 {
+		return false
+	}
+
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			b := label[i]
+			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeListenHost(host string) string {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "*" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") &&
+		strings.Count(trimmed, "[") == 1 && strings.Count(trimmed, "]") == 1 {
+		return strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")
+	}
+	return trimmed
+}
+
+func validateListenHost(host string) error {
+	if strings.TrimSpace(host) != host || strings.IndexFunc(host, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f
+	}) >= 0 {
+		return errors.New("server.host must not contain whitespace or control characters")
+	}
+
+	normalized := normalizeListenHost(host)
+	if normalized == "" {
+		return nil
+	}
+	if !isValidTCPHost(normalized) {
+		return fmt.Errorf("server.host is invalid: %q", host)
+	}
+	return nil
+}
+
 func listensBeyondLoopback(host string) bool {
-	normalized := strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	normalized := strings.ToLower(normalizeListenHost(host))
 	switch normalized {
 	case "", "*":
 		return true
@@ -1130,6 +1330,33 @@ func NormalizeWebDAVPrefix(prefix string) string {
 	}
 }
 
+func webDAVPrefixOverlapsReservedRoute(prefix string) bool {
+	normalized := NormalizeWebDAVPrefix(prefix)
+	if normalized == "/" {
+		return true
+	}
+
+	for _, reserved := range []string{"/api", "/s", "/health"} {
+		if normalized == reserved || strings.HasPrefix(normalized, reserved+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateWebDAVPrefix(prefix string) error {
+	normalized := NormalizeWebDAVPrefix(prefix)
+	for _, r := range normalized {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("webdav.prefix cannot contain control characters")
+		}
+	}
+	if strings.ContainsAny(normalized, "\\?#") {
+		return errors.New("webdav.prefix must be a URL path prefix without backslash, query, or fragment characters")
+	}
+	return nil
+}
+
 // EnsureDirs ensures all required directories exist
 func (c *Config) EnsureDirs() error {
 	// New directory structure
@@ -1139,6 +1366,9 @@ func (c *Config) EnsureDirs() error {
 	}
 	if isFilesystemRoot(root) {
 		return errors.New("storage.root cannot be filesystem root")
+	}
+	if isProtectedStorageRoot(root) {
+		return errors.New("storage.root cannot be a protected system directory")
 	}
 
 	dirs := []struct {
@@ -1163,7 +1393,7 @@ func (c *Config) EnsureDirs() error {
 	}
 
 	for _, dir := range dirs {
-		if err := ensureManagedDir(dir.path, dir.perm); err != nil {
+		if _, err := ensureManagedDir(dir.path, dir.perm, errManagedDirectorySymlink); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir.path, err)
 		}
 	}
@@ -1198,5 +1428,5 @@ func (c *Config) TrashDir() string {
 
 // Address returns the server listen address
 func (c *Config) Address() string {
-	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+	return net.JoinHostPort(normalizeListenHost(c.Server.Host), strconv.Itoa(c.Server.Port))
 }

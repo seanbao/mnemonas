@@ -47,6 +47,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag
+        run: |
+          case "$GITHUB_REF_NAME" in
+            ""|*[!A-Za-z0-9._-]*)
+              echo "Release tag contains unsupported characters: $GITHUB_REF_NAME" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -98,9 +109,11 @@ jobs:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
+          VERSION: ${{ github.ref_name }}
+          BUILD_TIME: ${{ steps.build_meta.outputs.build_time }}
         run: |
           mkdir -p dist
-          go build -ldflags="-s -w -X main.version=${{ github.ref_name }} -X main.buildTime=${{ steps.build_meta.outputs.build_time }}" \
+          go build -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" \
             -o dist/nasd-${{ matrix.os }}-${{ matrix.arch }} ./cmd/nasd
 
       - name: Build Rust binary
@@ -113,8 +126,10 @@ jobs:
             ../dist/dataplane-${{ matrix.os }}-${{ matrix.arch }}
 
       - name: Create archive
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          package_name=mnemonas-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}
+          package_name="mnemonas-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
           rm -rf dist/package "dist/$package_name"
           mkdir -p "dist/$package_name/web" "dist/$package_name/scripts" "dist/$package_name/docs"
           install -m 755 dist/nasd-${{ matrix.os }}-${{ matrix.arch }} "dist/$package_name/nasd"
@@ -123,7 +138,7 @@ jobs:
           install -m 755 scripts/*.sh "dist/$package_name/scripts/"
           cp -R docs/. "dist/$package_name/docs/"
           install -m 644 mnemonas.example.toml README.md README.en.md CHANGELOG.md CHANGELOG.en.md SECURITY.md SECURITY.zh-CN.md SUPPORT.md SUPPORT.en.md LICENSE "dist/$package_name/"
-          tar -czvf dist/mnemonas-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz \
+          tar -czvf "dist/mnemonas-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
             -C dist \
             "$package_name"
 
@@ -143,6 +158,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -195,6 +212,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download artifacts
         uses: actions/download-artifact@v4

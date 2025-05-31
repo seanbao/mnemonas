@@ -15,6 +15,8 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
 use tonic::Code;
 
+const TEST_MAX_GRPC_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
+
 async fn setup_client() -> (DataPlaneClient<Channel>, oneshot::Sender<()>) {
     let temp = tempdir().expect("tempdir");
     let cas_config = CasConfig {
@@ -50,7 +52,9 @@ async fn setup_client() -> (DataPlaneClient<Channel>, oneshot::Sender<()>) {
     let endpoint = format!("http://{}", addr);
     let client = DataPlaneClient::connect(endpoint)
         .await
-        .expect("connect client");
+        .expect("connect client")
+        .max_decoding_message_size(TEST_MAX_GRPC_MESSAGE_SIZE)
+        .max_encoding_message_size(TEST_MAX_GRPC_MESSAGE_SIZE);
 
     (client, shutdown_tx)
 }
@@ -148,6 +152,36 @@ async fn test_get_chunk_not_found() {
         .expect_err("missing chunk");
 
     assert_eq!(err.code(), Code::NotFound);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_put_get_large_chunk_above_default_tonic_limit() {
+    let (mut client, shutdown_tx) = setup_client().await;
+
+    let data = vec![0x5a; 5 * 1024 * 1024 + 17];
+    let expected_hash = compute_hash(&data);
+
+    let put = client
+        .put_chunk(PutChunkRequest {
+            data: data.clone(),
+            expected_hash: Some(expected_hash.clone()),
+        })
+        .await
+        .expect("put large chunk")
+        .into_inner();
+
+    assert_eq!(put.hash, expected_hash);
+    assert_eq!(put.size, data.len() as u64);
+
+    let got = client
+        .get_chunk(GetChunkRequest { hash: put.hash })
+        .await
+        .expect("get large chunk")
+        .into_inner();
+
+    assert_eq!(got.data, data);
 
     let _ = shutdown_tx.send(());
 }
@@ -310,6 +344,95 @@ async fn test_get_file_reports_missing_chunk() {
         .message()
         .await
         .expect_err("missing chunk should surface as stream error");
+
+    assert_eq!(err.code(), Code::DataLoss);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_get_file_rejects_invalid_manifest_shape() {
+    let (mut client, shutdown_tx) = setup_client().await;
+
+    let manifest = serde_json::json!({
+        "size": 10,
+        "chunks": [
+            {
+                "hash": "0".repeat(64),
+                "size": 10,
+                "offset": 1
+            }
+        ],
+        "created_at": 0
+    });
+    let manifest_data = serde_json::to_vec(&manifest).expect("manifest json");
+    let manifest_chunk = client
+        .put_chunk(PutChunkRequest {
+            data: manifest_data,
+            expected_hash: None,
+        })
+        .await
+        .expect("put manifest object")
+        .into_inner();
+
+    let err = client
+        .get_file(GetFileRequest {
+            manifest_hash: manifest_chunk.hash,
+        })
+        .await
+        .expect_err("invalid manifest should fail before streaming");
+
+    assert_eq!(err.code(), Code::DataLoss);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_get_file_reports_manifest_chunk_size_mismatch() {
+    let (mut client, shutdown_tx) = setup_client().await;
+
+    let data = b"manifest size mismatch".to_vec();
+    let chunk = client
+        .put_chunk(PutChunkRequest {
+            data: data.clone(),
+            expected_hash: None,
+        })
+        .await
+        .expect("put data chunk")
+        .into_inner();
+    let manifest = serde_json::json!({
+        "size": data.len() as u64 + 1,
+        "chunks": [
+            {
+                "hash": chunk.hash,
+                "size": data.len() as u32 + 1,
+                "offset": 0
+            }
+        ],
+        "created_at": 0
+    });
+    let manifest_data = serde_json::to_vec(&manifest).expect("manifest json");
+    let manifest_chunk = client
+        .put_chunk(PutChunkRequest {
+            data: manifest_data,
+            expected_hash: None,
+        })
+        .await
+        .expect("put manifest object")
+        .into_inner();
+
+    let mut stream = client
+        .get_file(GetFileRequest {
+            manifest_hash: manifest_chunk.hash,
+        })
+        .await
+        .expect("get file stream")
+        .into_inner();
+
+    let err = stream
+        .message()
+        .await
+        .expect_err("size mismatch should surface as stream error");
 
     assert_eq!(err.code(), Code::DataLoss);
 

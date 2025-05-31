@@ -44,8 +44,13 @@ import (
 const maxObjectsCursorLength = 256
 const maxListObjectsLimit = 1000
 const maxGCGracePeriodHours = int64((1<<63 - 1) / int64(time.Hour))
+const defaultMaxThumbnailSourceBytes int64 = 100 * 1024 * 1024
 
 const scrubFailurePublicMessage = "scrub failed; check server logs for details"
+const scrubObjectCorruptedPublicMessage = "object failed integrity verification"
+const scrubObjectMissingPublicMessage = "object is missing"
+const scrubObjectReadPublicMessage = "object could not be read"
+const scrubObjectUnknownPublicMessage = "object verification failed"
 const untrustedDownloadContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
 
 var startScrub = func(store *maintenance.HistoryStore) (*maintenance.ScrubResult, error) {
@@ -77,6 +82,7 @@ var serverConnectDataplaneClient = func(s *Server, parent context.Context, clien
 }
 
 var apiTimeNow = time.Now
+var maxThumbnailSourceBytes = defaultMaxThumbnailSourceBytes
 
 type prependReadCloser struct {
 	io.Reader
@@ -667,6 +673,17 @@ func requestHasBody(r *http.Request) (bool, error) {
 
 	var firstByte [1]byte
 	n, err := r.Body.Read(firstByte[:])
+	if n > 0 {
+		originalBody := r.Body
+		r.Body = &prependReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(firstByte[:n]), originalBody),
+			Closer: originalBody,
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return true, err
+		}
+		return true, nil
+	}
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return false, nil
@@ -1009,10 +1026,10 @@ func throttleExceptPaths(limit int, bypassPaths ...string) func(http.Handler) ht
 	}
 }
 
-func rejectCrossOriginUnsafeRequests(next http.Handler) http.Handler {
+func RejectCrossOriginUnsafeRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isUnsafeHTTPMethod(r.Method) &&
-			strings.TrimSpace(r.Header.Get("Authorization")) == "" &&
+			!hasBearerAuthorization(r) &&
 			!sameOriginBrowserMetadata(r) {
 			Forbidden(w, "cross-origin request rejected")
 			return
@@ -1022,9 +1039,15 @@ func rejectCrossOriginUnsafeRequests(next http.Handler) http.Handler {
 	})
 }
 
+func hasBearerAuthorization(r *http.Request) bool {
+	fields := strings.Fields(r.Header.Get("Authorization"))
+	return len(fields) >= 2 && strings.EqualFold(fields[0], "Bearer")
+}
+
 func isUnsafeHTTPMethod(method string) bool {
 	switch method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete,
+		"MKCOL", "COPY", "MOVE", "PROPPATCH", "LOCK", "UNLOCK":
 		return true
 	default:
 		return false
@@ -1032,6 +1055,14 @@ func isUnsafeHTTPMethod(method string) bool {
 }
 
 func sameOriginBrowserMetadata(r *http.Request) bool {
+	if fetchSite := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); fetchSite != "" {
+		switch fetchSite {
+		case "same-origin", "none":
+		default:
+			return false
+		}
+	}
+
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		return requestMetadataOriginMatches(r, origin)
 	}
@@ -1098,9 +1129,7 @@ func isDefaultPortForScheme(scheme, port string) bool {
 }
 
 func (s *Server) setupRoutes() {
-	if s.authEnabled {
-		s.router.Use(rejectCrossOriginUnsafeRequests)
-	}
+	s.router.Use(RejectCrossOriginUnsafeRequests)
 
 	// Public endpoints (no auth required)
 	s.router.Get("/health", s.handleHealth)
@@ -1566,6 +1595,13 @@ func validateHash(hash string) error {
 		}
 	}
 	return nil
+}
+
+func normalizeHash(hash string) (string, error) {
+	if err := validateHash(hash); err != nil {
+		return "", err
+	}
+	return strings.ToLower(hash), nil
 }
 
 func badRequestInvalidPath(w http.ResponseWriter) {
@@ -2081,10 +2117,12 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	forceDownload := r.URL.Query().Get("download") == "true"
 
 	if versionHash != "" {
-		if err := validateHash(versionHash); err != nil {
+		normalizedHash, err := normalizeHash(versionHash)
+		if err != nil {
 			badRequestInvalidHash(w)
 			return
 		}
+		versionHash = normalizedHash
 
 		info, err := s.fs.Stat(r.Context(), filePath)
 		if err != nil {
@@ -2575,10 +2613,12 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 
 	// Validate hash format (BLAKE3 = 64 hex chars)
-	if err := validateHash(hash); err != nil {
+	normalizedHash, err := normalizeHash(hash)
+	if err != nil {
 		badRequestInvalidHash(w)
 		return
 	}
+	hash = normalizedHash
 
 	// Get path from query parameter
 	filePath := r.URL.Query().Get("path")
@@ -2588,7 +2628,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// REM-5 fix: Validate path
-	filePath, err := validatePath(filePath)
+	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -2931,6 +2971,14 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	for i, hash := range req.Hashes {
+		normalizedHash, err := normalizeHash(hash)
+		if err != nil {
+			badRequestInvalidHash(w)
+			return
+		}
+		req.Hashes[i] = normalizedHash
+	}
 
 	if !s.ensureDataplaneConnected(r.Context()) {
 		ServiceUnavailable(w, "dataplane not connected")
@@ -2985,15 +3033,23 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 	errors := make([]map[string]any, 0, len(result.Errors))
 	maintErrors := make([]maintenance.ScrubError, 0, len(result.Errors))
 	for _, e := range result.Errors {
+		if e.Message != "" {
+			s.logger.Warn().
+				Str("hash", e.Hash).
+				Str("error_type", e.ErrorType).
+				Str("scrub_error", e.Message).
+				Msg("scrub reported object error")
+		}
+		message := publicScrubObjectErrorMessage(e.ErrorType)
 		errors = append(errors, map[string]any{
 			"hash":       e.Hash,
 			"error_type": e.ErrorType,
-			"message":    e.Message,
+			"message":    message,
 		})
 		maintErrors = append(maintErrors, maintenance.ScrubError{
 			Hash:      e.Hash,
 			ErrorType: e.ErrorType,
-			Message:   e.Message,
+			Message:   message,
 		})
 	}
 
@@ -3040,6 +3096,14 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	if len(cursor) > maxObjectsCursorLength {
 		BadRequest(w, fmt.Sprintf("cursor exceeds maximum length (%d bytes)", maxObjectsCursorLength))
 		return
+	}
+	if cursor != "" {
+		normalizedCursor, err := normalizeHash(cursor)
+		if err != nil {
+			BadRequest(w, "cursor must be a 64-character hex object hash")
+			return
+		}
+		cursor = normalizedCursor
 	}
 	limitStr := r.URL.Query().Get("limit")
 	var limit uint32 = maxListObjectsLimit
@@ -3098,6 +3162,17 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		gracePeriod = time.Duration(hours) * time.Hour
+	}
+
+	// Delete unreferenced objects only when dry_run is explicitly false.
+	dryRun := true
+	if rawDryRun := r.URL.Query().Get("dry_run"); rawDryRun != "" {
+		parsedDryRun, err := strconv.ParseBool(rawDryRun)
+		if err != nil {
+			BadRequest(w, "dry_run parameter must be a boolean")
+			return
+		}
+		dryRun = parsedDryRun
 	}
 
 	if !s.ensureDataplaneConnected(r.Context()) {
@@ -3170,16 +3245,6 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 4: Delete unreferenced objects (dry-run by default)
-	dryRun := true
-	if rawDryRun := r.URL.Query().Get("dry_run"); rawDryRun != "" {
-		parsedDryRun, err := strconv.ParseBool(rawDryRun)
-		if err != nil {
-			BadRequest(w, "dry_run parameter must be a boolean")
-			return
-		}
-		dryRun = parsedDryRun
-	}
-
 	var deletedCount int
 	deleteFailures := make([]map[string]any, 0)
 	if !dryRun {
@@ -3238,7 +3303,7 @@ func (s *Server) handleGetScrubResult(w http.ResponseWriter, r *http.Request) {
 		errors = append(errors, map[string]any{
 			"hash":       e.Hash,
 			"error_type": e.ErrorType,
-			"message":    e.Message,
+			"message":    publicScrubObjectErrorMessage(e.ErrorType),
 		})
 	}
 
@@ -3354,7 +3419,7 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 
 	// Set filename for download
 	filename := fmt.Sprintf("mnemonas-diagnostics-%s.json", time.Now().Format("20060102-150405"))
-	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+	w.Header().Set("Content-Disposition", formatAttachmentHeader(filename))
 	s.json(w, http.StatusOK, export)
 }
 
@@ -3363,6 +3428,19 @@ func sanitizeScrubErrorMessage(message string) string {
 		return ""
 	}
 	return scrubFailurePublicMessage
+}
+
+func publicScrubObjectErrorMessage(errorType string) string {
+	switch strings.ToLower(strings.TrimSpace(errorType)) {
+	case "corrupted":
+		return scrubObjectCorruptedPublicMessage
+	case "missing":
+		return scrubObjectMissingPublicMessage
+	case "io_error":
+		return scrubObjectReadPublicMessage
+	default:
+		return scrubObjectUnknownPublicMessage
+	}
 }
 
 func formatAttachmentHeader(filename string) string {
@@ -3931,16 +4009,20 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
+	info, err := reader.Stat()
+	if err != nil {
+		s.respondInternalError(w, "thumbnail stat open file", err)
+		return
+	}
+	if maxThumbnailSourceBytes > 0 && info.Size() > maxThumbnailSourceBytes {
+		BadRequest(w, "source image too large to thumbnail")
+		return
+	}
 	if s.beforeThumbnailRead != nil {
 		if err := s.beforeThumbnailRead(filePath); err != nil {
 			s.respondInternalError(w, "prepare thumbnail read", err)
 			return
 		}
-	}
-	info, err := reader.Stat()
-	if err != nil {
-		s.respondInternalError(w, "thumbnail stat open file", err)
-		return
 	}
 	contentHash, err := hashReadSeeker(reader)
 	if err != nil {
@@ -3948,6 +4030,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	thumbnailETag := fmt.Sprintf(`"thumb-%s-%s"`, contentHash, size)
+	setUntrustedDownloadHeaders(w)
 	w.Header().Set("ETag", thumbnailETag)
 	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
 	w.Header().Set("Cache-Control", "private, no-cache")

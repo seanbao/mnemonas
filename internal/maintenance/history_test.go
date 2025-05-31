@@ -93,15 +93,15 @@ func TestCleanupHistoryTempPathJoinsRemoveError(t *testing.T) {
 	}
 }
 
-func TestWriteHistoryFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+func TestWriteHistoryFile_ReplacesExistingFileAndCleansTemp(t *testing.T) {
 	tmpDir := t.TempDir()
 	historyPath := filepath.Join(tmpDir, "last_scrub.json")
 	if err := os.WriteFile(historyPath, []byte(`{"status":"old"}`), 0600); err != nil {
 		t.Fatalf("WriteFile(existing history) error: %v", err)
 	}
 
-	if err := writeHistoryFileAtomically(historyPath, []byte(`{"status":"new"}`)); err != nil {
-		t.Fatalf("writeHistoryFileAtomically() error: %v", err)
+	if err := writeHistoryFile(historyPath, []byte(`{"status":"new"}`)); err != nil {
+		t.Fatalf("writeHistoryFile() error: %v", err)
 	}
 
 	data, err := os.ReadFile(historyPath)

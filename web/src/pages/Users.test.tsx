@@ -1131,6 +1131,23 @@ describe('UsersPage', () => {
       expect(usersApi.createUser).not.toHaveBeenCalled()
     })
 
+    it('disables create when password exceeds bcrypt byte limit', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+
+      await waitFor(() => {
+        expect(screen.getByLabelText(/用户名/i)).toBeInTheDocument()
+      })
+
+      fireEvent.change(screen.getByLabelText(/用户名/i), { target: { value: 'newuser' } })
+      fireEvent.change(screen.getByLabelText(/密码/i), { target: { value: 'a'.repeat(73) } })
+
+      expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+      expect(usersApi.createUser).not.toHaveBeenCalled()
+    })
+
     it('shows unavailable toast when creating a user is temporarily unavailable', async () => {
       const user = userEvent.setup()
       vi.mocked(usersApi.createUser).mockRejectedValue(new UsersError('configuration not available', 503))

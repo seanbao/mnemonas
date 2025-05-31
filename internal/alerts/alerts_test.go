@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -525,9 +526,15 @@ func TestSendWebhook_TrimsConfiguredHeaders(t *testing.T) {
 
 	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
 	err := monitor.sendWebhook(context.Background(), AlertPayload{Type: "storage_alert"}, Config{
-		WebhookURL:     server.URL,
-		WebhookMethod:  http.MethodPost,
-		WebhookHeaders: []string{"Authorization: Bearer token", " X-MnemoNAS : alerts ", "InvalidHeader"},
+		WebhookURL:    server.URL,
+		WebhookMethod: http.MethodPost,
+		WebhookHeaders: []string{
+			"Authorization: Bearer token",
+			" X-MnemoNAS : alerts ",
+			"InvalidHeader",
+			"Bad Header: skipped",
+			"X-Injected: ok\r\nX-Evil: injected",
+		},
 	})
 	if err != nil {
 		t.Fatalf("sendWebhook() error: %v", err)
@@ -543,6 +550,15 @@ func TestSendWebhook_TrimsConfiguredHeaders(t *testing.T) {
 		}
 		if got := req.Header.Get("InvalidHeader"); got != "" {
 			t.Fatalf("InvalidHeader = %q, want empty", got)
+		}
+		if got := req.Header.Get("Bad Header"); got != "" {
+			t.Fatalf("Bad Header = %q, want empty", got)
+		}
+		if got := req.Header.Get("X-Injected"); got != "" {
+			t.Fatalf("X-Injected = %q, want empty", got)
+		}
+		if got := req.Header.Get("X-Evil"); got != "" {
+			t.Fatalf("X-Evil = %q, want empty", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for webhook request")
@@ -632,5 +648,56 @@ func TestSendWebhook_GETEncodesPayloadInQueryWithoutBody(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for GET webhook request")
+	}
+}
+
+func TestRedactWebhookURLForLogDropsCredentialsPathAndQuery(t *testing.T) {
+	got := redactWebhookURLForLog("https://user:pass@hooks.example.com/services/token/secret?key=value")
+	if got != "https://hooks.example.com" {
+		t.Fatalf("redactWebhookURLForLog() = %q, want %q", got, "https://hooks.example.com")
+	}
+
+	if got := redactWebhookURLForLog("not a url"); got != "configured" {
+		t.Fatalf("redactWebhookURLForLog(invalid) = %q, want configured", got)
+	}
+}
+
+func TestSendWebhookErrorDoesNotExposeConfiguredURLSecrets(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	monitor := NewMonitor(Config{}, t.TempDir(), zerolog.Nop())
+	err := monitor.sendWebhook(ctx, AlertPayload{
+		Type:      "storage_alert",
+		Level:     AlertLevelCritical,
+		Message:   "disk full",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+		Stats: StorageStats{
+			Path:      "/srv/mnemonas/private-project",
+			UsedPct:   99,
+			CheckedAt: time.Unix(1710000001, 0).UTC(),
+		},
+	}, Config{
+		WebhookURL:    "https://user:pass@hooks.example.com/services/token/secret?key=value",
+		WebhookMethod: http.MethodGet,
+	})
+	if err == nil {
+		t.Fatal("expected sendWebhook() to return the canceled request error")
+	}
+
+	text := err.Error()
+	for _, leaked := range []string{
+		"user:pass",
+		"/services/token/secret",
+		"key=value",
+		"private-project",
+	} {
+		if strings.Contains(text, leaked) {
+			t.Fatalf("sendWebhook() error leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, "https://hooks.example.com") {
+		t.Fatalf("sendWebhook() error should retain sanitized target host, got %s", text)
 	}
 }

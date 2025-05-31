@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/disintegration/imaging"
+	"github.com/seanbao/mnemonas/internal/rootio"
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
@@ -386,7 +387,7 @@ func (s *Service) loadFromCache(cachePath string) ([]byte, error) {
 			return nil, err
 		}
 
-		cacheFile, err := s.cacheRoot.OpenFile(relPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		cacheFile, err := rootio.OpenFileNoFollow(s.cacheRoot, relPath, os.O_RDONLY, 0)
 		if err != nil {
 			return nil, mapThumbnailRootPathError(err)
 		}
@@ -399,9 +400,9 @@ func (s *Service) loadFromCache(cachePath string) ([]byte, error) {
 		return data, nil
 	}
 
-	cacheFile, err := os.OpenFile(cachePath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	cacheFile, err := rootio.OpenFilePathNoFollow(cachePath, os.O_RDONLY, 0)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
+		if rootio.IsSymlinkError(err) {
 			return nil, errThumbnailCacheSymlink
 		}
 		return nil, err
@@ -431,11 +432,8 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 			return err
 		}
 		relDir := filepath.Dir(relPath)
-		createdDirs, err := collectMissingThumbnailDirsWithRoot(s.cacheRoot, relDir)
+		createdDirs, err := ensureThumbnailDirWithRoot(s.cacheRoot, relDir, 0755)
 		if err != nil {
-			return err
-		}
-		if err := ensureThumbnailDirWithRoot(s.cacheRoot, relDir, 0755); err != nil {
 			return err
 		}
 
@@ -539,27 +537,6 @@ func (s *Service) cacheRelativePath(cachePath string) (string, error) {
 	return filepath.Clean(relPath), nil
 }
 
-func collectMissingThumbnailDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
-}
-
 func syncCreatedThumbnailDirs(createdDirs []string) error {
 	for i := 0; i < len(createdDirs); i++ {
 		if err := syncThumbnailCacheDir(filepath.Dir(createdDirs[i])); err != nil {
@@ -570,39 +547,14 @@ func syncCreatedThumbnailDirs(createdDirs []string) error {
 }
 
 func ensureThumbnailDir(dir string, perm os.FileMode) error {
-	createdDirs, err := collectMissingThumbnailDirs(dir)
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, perm); err != nil {
+		if rootio.IsSymlinkError(err) {
+			return errThumbnailCacheSymlink
+		}
 		return err
 	}
 	return syncCreatedThumbnailDirs(createdDirs)
-}
-
-func collectMissingThumbnailDirsWithRoot(root *os.Root, dir string) ([]string, error) {
-	if dir == "." || dir == "" {
-		return nil, nil
-	}
-
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := root.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, mapThumbnailRootPathError(err)
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current || parent == "." {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
 }
 
 func syncCreatedThumbnailDirsWithRoot(root *os.Root, createdDirs []string) error {
@@ -614,23 +566,20 @@ func syncCreatedThumbnailDirsWithRoot(root *os.Root, createdDirs []string) error
 	return nil
 }
 
-func ensureThumbnailDirWithRoot(root *os.Root, dir string, perm os.FileMode) error {
+func ensureThumbnailDirWithRoot(root *os.Root, dir string, perm os.FileMode) ([]string, error) {
 	if dir == "." || dir == "" {
-		return nil
+		return nil, nil
 	}
 
-	createdDirs, err := collectMissingThumbnailDirsWithRoot(root, dir)
+	createdDirs, err := rootio.MkdirAllNoFollowTracked(root, dir, perm)
 	if err != nil {
-		return err
+		return createdDirs, mapThumbnailRootPathError(err)
 	}
-	if err := root.MkdirAll(dir, perm); err != nil {
-		return mapThumbnailRootPathError(err)
-	}
-	return syncCreatedThumbnailDirsWithRoot(root, createdDirs)
+	return createdDirs, syncCreatedThumbnailDirsWithRoot(root, createdDirs)
 }
 
 func syncThumbnailDir(dir string) error {
-	dirHandle, err := os.Open(dir)
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}
@@ -643,7 +592,7 @@ func syncThumbnailRootDir(root *os.Root, dir string) error {
 	if dir == "" {
 		dir = "."
 	}
-	dirHandle, err := root.Open(dir)
+	dirHandle, err := rootio.OpenDirNoFollow(root, dir)
 	if err != nil {
 		return mapThumbnailRootPathError(err)
 	}
@@ -659,7 +608,7 @@ func createThumbnailTempFile(root *os.Root, dir string) (*os.File, string, error
 			return nil, "", err
 		}
 		tmpPath := filepath.Join(dir, tmpName)
-		tmpFile, err := root.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		tmpFile, err := rootio.OpenFileNoFollow(root, tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 		if err == nil {
 			return tmpFile, tmpPath, nil
 		}
@@ -720,7 +669,7 @@ func walkThumbnailCacheEntryWithRoot(root *os.Root, relPath string, info os.File
 		return nil
 	}
 
-	dirHandle, err := root.Open(relPath)
+	dirHandle, err := rootio.OpenDirNoFollow(root, relPath)
 	if err != nil {
 		return mapThumbnailRootPathError(err)
 	}
@@ -752,7 +701,7 @@ func mapThumbnailRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isThumbnailRootEscapeError(err) {
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isThumbnailRootEscapeError(err) {
 		return errThumbnailCacheSymlink
 	}
 	return err

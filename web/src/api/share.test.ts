@@ -58,6 +58,7 @@ describe('Share API', () => {
       expect(formatShareUrl('javascript:alert(1)', 'https://local.example'))
         .toBe('https://local.example/javascript:alert(1)')
     })
+  })
 
   describe('downloadShare', () => {
     it('downloads the root shared file as a blob', async () => {
@@ -115,6 +116,24 @@ describe('Share API', () => {
 
       const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
       expect(clickedLink.download).toBe('report final.txt')
+    })
+
+    it('sanitizes filenames from content disposition before triggering download', async () => {
+      const blob = new Blob(['share-content'], { type: 'text/plain' })
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:safe-share')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ 'Content-Disposition': 'attachment; filename="folder/secret.txt"' }),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1')
+
+      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
+      expect(clickedLink.download).toBe('folder_secret.txt')
     })
 
     it('falls back to the raw UTF-8 filename token when decoding fails', async () => {
@@ -179,7 +198,6 @@ describe('Share API', () => {
   it('builds shared root download URL without password query', () => {
     expect(getShareDownloadUrl('abc123')).toBe('/api/v1/public/shares/abc123/download')
   })
-  })
 
   describe('getPublicShareItems', () => {
     it('requests items with path only', async () => {
@@ -190,7 +208,7 @@ describe('Share API', () => {
 
       await getPublicShareItems('share-1', { path: 'docs' })
 
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs')
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs', { credentials: 'same-origin' })
     })
 
     it('throws ShareError on failure', async () => {
@@ -304,7 +322,7 @@ describe('Share API', () => {
 
       await getPublicShare('share-1')
 
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1')
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1', { credentials: 'same-origin' })
     })
 
     it('reads wrapped public share errors', async () => {

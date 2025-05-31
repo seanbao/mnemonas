@@ -37,7 +37,8 @@ describe('PdfPreview', () => {
     vi.clearAllMocks()
     mockAuthFetch.mockResolvedValue({
       ok: true,
-      blob: () => Promise.resolve(new Blob(['fake'], { type: 'application/pdf' })),
+      headers: new Headers({ 'Content-Type': 'application/pdf; charset=binary' }),
+      arrayBuffer: () => Promise.resolve(new TextEncoder().encode('%PDF fake').buffer),
     } as Response)
   })
 
@@ -49,6 +50,33 @@ describe('PdfPreview', () => {
     })
 
     expect(await screen.findByTitle('file.pdf')).toBeInTheDocument()
+  })
+
+  it('forces the preview blob to application/pdf', async () => {
+    render(<PdfPreview path="/docs/file.pdf" filename="file.pdf" />)
+
+    await screen.findByTitle('file.pdf')
+
+    const createObjectURL = vi.mocked(URL.createObjectURL)
+    const blob = createObjectURL.mock.calls[0]?.[0] as Blob | undefined
+    expect(blob).toBeInstanceOf(Blob)
+    expect(blob?.type).toBe('application/pdf')
+    await expect(blob?.text()).resolves.toBe('%PDF fake')
+  })
+
+  it('rejects non-pdf preview responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ 'Content-Type': 'text/html; charset=utf-8' }),
+      arrayBuffer: () => Promise.resolve(new TextEncoder().encode('<script>alert(1)</script>').buffer),
+    } as Response)
+
+    render(<PdfPreview path="/docs/file.pdf" filename="file.pdf" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('无法加载 PDF')).toBeInTheDocument()
+    })
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
   })
 
   it('shows an error when the authenticated preview request fails', async () => {

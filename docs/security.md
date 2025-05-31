@@ -280,7 +280,7 @@ location /api/ {
 
 #### 浏览器预览鉴权参数
 
-- 文件下载、版本预览、音视频预览与外部打开使用短期 `HttpOnly` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
+- 文件下载、版本预览、音视频预览、缩略图与外部打开使用短期 `HttpOnly` download-session cookie，不再通过 URL 查询参数传递长期访问令牌
 - 该 cookie 由已认证会话在登录、初始化或刷新令牌后同步到 `/api/v1` 路径，并覆盖下载与缩略图请求
 - 内部文件预览与缩略图链路不再依赖 `auth` 查询参数
 - `Secure` 标记只会在实际 HTTPS，或显式启用 `trusted_proxy_hops > 0` 且请求直接来自 loopback / 私有网段代理并携带 `X-Forwarded-Proto=https` 时启用，避免公网请求伪造 HTTPS 语义
@@ -289,14 +289,14 @@ location /api/ {
 
 - Web UI 主会话使用 `HttpOnly`、`SameSite=Lax` cookie 保存访问令牌和刷新令牌，不再把 bearer token 写入 `localStorage`
 - REST API、上传请求、刷新令牌与退出登录请求由浏览器自动携带同源 cookie；旧版本残留在 `localStorage` 的令牌会在初始化、刷新、登出等路径中清理
-- 对带浏览器 `Origin` / `Referer` 元数据的 `POST`、`PUT`、`PATCH`、`DELETE` 请求，服务端会拒绝来源 scheme、主机或端口与当前请求不一致的请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
+- 对带浏览器 `Origin` / `Referer` / `Sec-Fetch-Site` 元数据的 REST 写请求和 WebDAV 写方法（`POST`、`PUT`、`PATCH`、`DELETE`、`MKCOL`、`COPY`、`MOVE`、`PROPPATCH`、`LOCK`、`UNLOCK`），服务端会拒绝来源 scheme、主机或端口与当前请求不一致的请求，并拒绝浏览器明确标记为 `cross-site` 或 `same-site` 的无 `Authorization` 写请求；无浏览器来源头的脚本客户端以及显式 `Authorization` API 客户端继续可用
 - API 客户端仍可使用 `Authorization: Bearer <access-token>` 与 JSON refresh token，兼容脚本和自动化调用
-- 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
+- 服务端已设置基础安全响应头、CSP 与 `Permissions-Policy`；文件下载、版本预览、缩略图、WebDAV 文件与 WebDAV 目录列表响应额外带 `X-Content-Type-Options: nosniff` 和 sandbox CSP，降低同源打开用户文件时的脚本执行面。公网部署仍必须使用受信任的静态资源、HTTPS 反向代理和较新的浏览器，不要在同一域名下注入第三方脚本
 - 共用电脑上使用后应主动退出登录；修改密码、退出登录、删除或禁用用户会撤销或清理对应会话
 
 #### 公开分享密码验证
 
-- 受密码保护的公开分享在浏览器完成一次密码验证后，会下发同路径 `HttpOnly` cookie
+- 受密码保护的公开分享在浏览器完成一次密码验证后，会下发 `HttpOnly` cookie；cookie 只作用于对应的 `/s/<id>` 与 `/api/v1/public/shares/<id>` 路径
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码
 - 同一 share 与客户端地址组合连续 5 次口令失败后，会锁定 5 分钟并返回 `429 Too Many Requests`

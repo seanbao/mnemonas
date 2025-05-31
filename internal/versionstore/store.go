@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 // Common errors
@@ -25,6 +26,7 @@ var (
 	ErrLockExpired         = errors.New("lock has expired")
 	ErrUnavailable         = errors.New("version object store unavailable")
 	errInvalidStorePath    = errors.New("invalid path")
+	errInvalidStoreID      = errors.New("invalid ID")
 	errVersionStoreSymlink = errors.New("version store path must not traverse a symlink")
 )
 
@@ -323,7 +325,28 @@ func prepareAnchoredVersionStorePath(dbPath string) (string, *os.File, error) {
 	}
 
 	afterValidateVersionStorePath()
+	if err := rejectAnchoredVersionStoreFileSymlink(root, filepath.Base(dbPath)); err != nil {
+		_ = dirHandle.Close()
+		return "", nil, err
+	}
 	return anchoredFDPath(dirHandle.Fd(), filepath.Base(dbPath)), dirHandle, nil
+}
+
+func rejectAnchoredVersionStoreFileSymlink(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat anchored version store path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errVersionStoreSymlink
+	}
+	if info.IsDir() {
+		return errInvalidStorePath
+	}
+	return nil
 }
 
 func versionStoreSQLiteDSN(path string) string {
@@ -338,27 +361,6 @@ func anchoredFDPath(fd uintptr, name string) string {
 	return fmt.Sprintf("%s/%d/%s", fdRoot, fd, name)
 }
 
-func collectMissingVersionStoreDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
-}
-
 func syncCreatedVersionStoreDirs(createdDirs []string) error {
 	for i := 0; i < len(createdDirs); i++ {
 		if err := syncVersionStoreDir(filepath.Dir(createdDirs[i])); err != nil {
@@ -369,18 +371,26 @@ func syncCreatedVersionStoreDirs(createdDirs []string) error {
 }
 
 func ensureVersionStoreDir(dir string, perm os.FileMode) error {
-	createdDirs, err := collectMissingVersionStoreDirs(dir)
+	createdDirs, err := mkdirAllVersionStoreDirNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, perm); err != nil {
 		return err
 	}
 	return syncCreatedVersionStoreDirs(createdDirs)
 }
 
+func mkdirAllVersionStoreDirNoFollowTracked(dir string, perm os.FileMode) ([]string, error) {
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
+	if err != nil {
+		if rootio.IsSymlinkError(err) {
+			return createdDirs, errVersionStoreSymlink
+		}
+		return createdDirs, err
+	}
+	return createdDirs, nil
+}
+
 func syncVersionStoreDirectory(dir string) error {
-	dirHandle, err := os.Open(dir)
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}
@@ -391,6 +401,9 @@ func syncVersionStoreDirectory(dir string) error {
 
 func normalizeVersionStorePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errInvalidStorePath
+	}
 	if normalized == "" {
 		return "", errInvalidStorePath
 	}
@@ -400,6 +413,33 @@ func normalizeVersionStorePath(rawPath string) (string, error) {
 		}
 	}
 	return path.Clean("/" + normalized), nil
+}
+
+func isValidStoreID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		b := id[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func normalizeTrashItemFromDB(item *TrashItem) error {
+	if item == nil || !isValidStoreID(item.ID) {
+		return errInvalidStoreID
+	}
+	cleanOriginalPath, err := normalizeVersionStorePath(item.OriginalPath)
+	if err != nil {
+		return err
+	}
+	item.OriginalPath = cleanOriginalPath
+	item.RestoreData = normalizeTrashRestoreData(item.RestoreData)
+	return nil
 }
 
 // SetDataplaneClient swaps the dataplane client used by the backing object store.
@@ -1047,6 +1087,9 @@ func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error {
 	if err != nil {
 		return err
 	}
+	if !isValidStoreID(item.ID) {
+		return errInvalidStoreID
+	}
 	item.OriginalPath = cleanOriginalPath
 	item.RestoreData = normalizeTrashRestoreData(item.RestoreData)
 	_, err = s.db.ExecContext(ctx,
@@ -1058,6 +1101,9 @@ func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error {
 }
 
 func (s *Store) UpdateTrashRestoreData(ctx context.Context, id string, restoreData []byte) error {
+	if !isValidStoreID(id) {
+		return ErrNotFound
+	}
 	restoreData = normalizeTrashRestoreData(restoreData)
 	result, err := s.db.ExecContext(ctx, `UPDATE trash SET restore_data = ? WHERE id = ?`, restoreData, id)
 	if err != nil {
@@ -1072,6 +1118,10 @@ func (s *Store) UpdateTrashRestoreData(ctx context.Context, id string, restoreDa
 
 // GetTrashItem returns a trash item by ID
 func (s *Store) GetTrashItem(ctx context.Context, id string) (*TrashItem, error) {
+	if !isValidStoreID(id) {
+		return nil, ErrNotFound
+	}
+
 	var item TrashItem
 	var deletedAt, expiresAt int64
 
@@ -1089,7 +1139,9 @@ func (s *Store) GetTrashItem(ctx context.Context, id string) (*TrashItem, error)
 
 	item.DeletedAt = time.Unix(deletedAt, 0)
 	item.ExpiresAt = time.Unix(expiresAt, 0)
-	item.RestoreData = normalizeTrashRestoreData(item.RestoreData)
+	if err := normalizeTrashItemFromDB(&item); err != nil {
+		return nil, ErrNotFound
+	}
 	return &item, nil
 }
 
@@ -1113,7 +1165,9 @@ func (s *Store) ListTrash(ctx context.Context) ([]TrashItem, error) {
 		}
 		item.DeletedAt = time.Unix(deletedAt, 0)
 		item.ExpiresAt = time.Unix(expiresAt, 0)
-		item.RestoreData = normalizeTrashRestoreData(item.RestoreData)
+		if err := normalizeTrashItemFromDB(&item); err != nil {
+			continue
+		}
 		items = append(items, item)
 	}
 
@@ -1129,6 +1183,9 @@ func normalizeTrashRestoreData(data []byte) []byte {
 
 // RemoveFromTrash removes a trash item
 func (s *Store) RemoveFromTrash(ctx context.Context, id string) error {
+	if !isValidStoreID(id) {
+		return ErrNotFound
+	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM trash WHERE id = ?`, id)
 	if err != nil {
 		return err

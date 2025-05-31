@@ -257,9 +257,11 @@ Go 控制面通过 gRPC 调用 Rust 数据面处理 **CAS/CDC/对象 I/O**，原
 | 功能 | 说明 |
 |------|------|
 | **CAS 存储** | BLAKE3 哈希、内存索引（DashMap）、分片目录 |
-| **CDC 分块** | FastCDC 智能分块，大文件去重 |
+| **CDC 分块** | dataplane 的 `PutFile` / `GetFile` 文件 RPC 使用 FastCDC；当前 Go 版本历史路径仍以 whole-object CAS 快照存储 |
 | **Scrub** | 数据完整性校验 |
 | **对象列表** | 列出对象供 Go 进行引用计数删除 |
+
+当前版本历史写入路径保存的是 BLAKE3 whole-object CAS 对象，具备整对象去重与校验能力；chunk 级版本引用追踪尚未接入控制面 GC，因此不能把运行态版本历史描述为已按 CDC 块级去重。
 
 ### 核心模块
 
@@ -331,7 +333,7 @@ service DataPlane {
 
 ### 认证
 
-- **Web UI/API 认证**：默认启用 JWT 登录，多用户按角色和 `home_dir` 控制访问范围
+- **Web UI/API 认证**：默认启用基于 JWT 的登录；浏览器主会话通过同源 `HttpOnly` cookie 保存 access/refresh token，多用户按角色和 `home_dir` 控制访问范围
 - **WebDAV 认证**：默认启用全局 Basic Auth 凭据，适配 Finder、Windows 文件资源管理器、rclone 等客户端
 - **公开分享认证**：每个 Share 使用独立标识，密码保护分享会使用短期 `HttpOnly` 访问 cookie
 - **网络暴露**：默认配置监听 `0.0.0.0:8080` 以便局域网访问；长期部署应配合防火墙、Tailscale/Headscale 或 HTTPS 反向代理限制访问面

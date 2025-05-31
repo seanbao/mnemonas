@@ -26,6 +26,11 @@ fail() {
   printf '[FAIL] %s\n' "$*"
 }
 
+die() {
+  printf '[FAIL] %s\n' "$*" >&2
+  exit 1
+}
+
 have() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -159,6 +164,72 @@ check_loopback_only_port() {
   fi
 }
 
+is_valid_tcp_host() {
+  local host="$1"
+  local label
+  local -a labels
+
+  host="${host%.}"
+  [[ -n "$host" ]] || return 1
+  [[ "$host" != *"["* && "$host" != *"]"* ]] || return 1
+
+  if [[ "$host" == *:* ]]; then
+    [[ "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
+    return
+  fi
+
+  [[ "${#host}" -le 253 ]] || return 1
+  IFS='.' read -r -a labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [[ -n "$label" && "${#label}" -le 63 ]] || return 1
+    [[ "$label" != -* && "$label" != *- ]] || return 1
+    [[ "$label" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+  done
+  return 0
+}
+
+require_safe_tcp_port() {
+  local value="$1"
+  local label="$2"
+
+  [[ -n "$value" ]] || die "$label cannot be empty"
+  [[ "$value" != *[[:space:]]* ]] || die "$label cannot contain whitespace: $value"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "$label must be numeric: $value"
+  (( 10#$value >= 1 && 10#$value <= 65535 )) || die "$label must be between 1 and 65535: $value"
+}
+
+require_safe_tcp_addr() {
+  local value="$1"
+  local label="$2"
+  local host=""
+  local port=""
+
+  [[ -n "$value" ]] || die "$label cannot be empty"
+  [[ "$value" != *[[:space:]]* ]] || die "$label cannot contain whitespace: $value"
+
+  if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  else
+    die "$label must be a host:port address: $value"
+  fi
+
+  is_valid_tcp_host "$host" || die "$label host is invalid: $value"
+  require_safe_tcp_port "$port" "$label port"
+}
+
+require_safe_http_url() {
+  local value="$1"
+  local label="$2"
+
+  [[ -n "$value" ]] || die "$label cannot be empty"
+  [[ "$value" != *[[:space:]]* ]] || die "$label cannot contain whitespace: $value"
+  [[ "$value" =~ ^https?://[^[:space:]]+$ ]] || die "$label must be an http(s) URL: $value"
+}
+
 configured_storage_root=""
 configured_server_port=""
 configured_grpc_address=""
@@ -175,6 +246,13 @@ DATAPLANE_GRPC_PORT="${DATAPLANE_GRPC_PORT:-${DATAPLANE_GRPC_ADDR##*:}}"
 DATAPLANE_HTTP_PORT="${DATAPLANE_HTTP_PORT:-9091}"
 SERVER_URL="${SERVER_URL:-http://127.0.0.1:$SERVER_PORT}"
 DATAPLANE_URL="${DATAPLANE_URL:-http://127.0.0.1:$DATAPLANE_HTTP_PORT}"
+
+require_safe_tcp_port "$SERVER_PORT" "SERVER_PORT"
+require_safe_tcp_addr "$DATAPLANE_GRPC_ADDR" "DATAPLANE_GRPC_ADDR"
+require_safe_tcp_port "$DATAPLANE_GRPC_PORT" "DATAPLANE_GRPC_PORT"
+require_safe_tcp_port "$DATAPLANE_HTTP_PORT" "DATAPLANE_HTTP_PORT"
+require_safe_http_url "$SERVER_URL" "SERVER_URL"
+require_safe_http_url "$DATAPLANE_URL" "DATAPLANE_URL"
 
 check_file() {
   local path="$1"
@@ -390,7 +468,7 @@ if [[ -x "$BIN_DIR/nasd" && -f "$CONFIG_PATH" ]]; then
     fail "config validation failed"
     cat "$config_check_out"
   fi
-  rm -f "$config_check_out"
+  rm -f -- "$config_check_out"
 fi
 
 if id -u "$SERVICE_USER" >/dev/null 2>&1; then
@@ -470,7 +548,7 @@ if have zpool; then
     warn "zpool status reported issues"
     tail -n 30 "$zpool_out"
   fi
-  rm -f "$zpool_out"
+  rm -f -- "$zpool_out"
 fi
 
 if have tailscale; then

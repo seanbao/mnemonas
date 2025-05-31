@@ -47,7 +47,7 @@ max_chunk_size = 4194304     # 4MB
 
 [webdav]
 enabled = true
-prefix = "/dav"
+prefix = "/dav"              # 不能使用 /、/api、/s、/health 或这些保留路由的子路径
 read_only = false
 auth_type = "basic"          # none, basic
 username = "admin"           # Basic Auth 用户名（默认 admin）
@@ -78,7 +78,7 @@ min_free_bytes = 10737418240 # 剩余空间低于此值时告警（10GB）
 cooldown_period = "4h"       # 同级别告警冷却时间
 webhook_url = ""             # Webhook URL（如企业微信机器人、Slack 等）
 webhook_method = "POST"      # HTTP 方法；GET 时将告警字段编码到 URL query
-# webhook_headers = ["Authorization:Bearer xxx"]  # 自定义请求头
+# webhook_headers = ["Authorization: Bearer xxx"] # 自定义请求头；名称必须是合法 HTTP header token，值不能包含换行或控制字符
 
 [security]
 allow_unsafe_no_auth = false  # 仅在明确接受非 loopback 无认证暴露风险时才设为 true

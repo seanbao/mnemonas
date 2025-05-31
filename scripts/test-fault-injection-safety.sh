@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 fail() {
 	printf '[fault-injection-safety-test] ERROR: %s\n' "$*" >&2
@@ -99,6 +99,66 @@ run_refuse_unisolated_storage_test() {
 	assert_not_exists "$invoked_log"
 }
 
+run_refuse_invalid_base_url_test() {
+	local case_dir="$TMP_ROOT/refuse-invalid-base-url"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	mkdir -p "$case_dir/storage"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		BASE_URL="file:///etc/passwd" \
+		STORAGE_ROOT="$case_dir/storage" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "BASE_URL must be an http(s) URL"
+	assert_not_exists "$invoked_log"
+}
+
+run_refuse_invalid_nasd_pid_test() {
+	local case_dir="$TMP_ROOT/refuse-invalid-nasd-pid"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	mkdir -p "$case_dir/storage"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="$case_dir/storage" \
+		NASD_BIN="$fake_nasd" \
+		NASD_PID="abc" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "NASD_PID must be a numeric PID"
+	assert_not_exists "$invoked_log"
+}
+
+run_refuse_traversal_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-traversal-storage"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	mkdir -p "$case_dir"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="/tmp/../var/lib/mnemonas-fault-test" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT must not contain '..' path segments"
+	assert_not_exists "$invoked_log"
+}
+
 run_refuse_default_personal_storage_test() {
 	local case_dir="$TMP_ROOT/refuse-default-storage"
 	local fake_home="$case_dir/home"
@@ -162,6 +222,9 @@ run_health_failure_does_not_restart_test() {
 run_default_disabled_test
 run_missing_explicit_target_test
 run_refuse_unisolated_storage_test
+run_refuse_invalid_base_url_test
+run_refuse_invalid_nasd_pid_test
+run_refuse_traversal_storage_test
 run_refuse_default_personal_storage_test
 run_noninteractive_confirmation_test
 run_health_failure_does_not_restart_test

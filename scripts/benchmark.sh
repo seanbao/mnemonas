@@ -23,6 +23,24 @@ ADMIN_ACCESS_TOKEN="${MNEMONAS_ACCESS_TOKEN:-}"
 ALLOW_REAL_STORAGE="${ALLOW_REAL_STORAGE:-0}"
 CLEANUP_ENABLED=0
 
+require_safe_http_url() {
+    local value="$1"
+    local label="$2"
+
+    if [[ -z "$value" ]]; then
+        echo "ERROR: $label must not be empty" >&2
+        exit 1
+    fi
+    if [[ "$value" == *[[:space:]]* ]]; then
+        echo "ERROR: $label must not contain whitespace: $value" >&2
+        exit 1
+    fi
+    if [[ ! "$value" =~ ^https?://[^[:space:]]+$ ]]; then
+        echo "ERROR: $label must be an http(s) URL: $value" >&2
+        exit 1
+    fi
+}
+
 require_explicit_benchmark_target() {
     if [[ -z "$BASE_URL_ARG" && -z "$BASE_URL_EXPLICIT" ]]; then
         echo "ERROR: explicit base URL is required for scripts/benchmark.sh" >&2
@@ -33,6 +51,7 @@ require_explicit_benchmark_target() {
         echo "ERROR: base URL must not be empty" >&2
         exit 1
     fi
+    require_safe_http_url "$BASE_URL" "base URL"
 
     if [[ -z "$STORAGE_ROOT_EXPLICIT" ]]; then
         echo "ERROR: explicit MNEMONAS_STORAGE_ROOT is required for scripts/benchmark.sh" >&2
@@ -41,6 +60,11 @@ require_explicit_benchmark_target() {
     fi
     if [[ -z "$STORAGE_ROOT" ]]; then
         echo "ERROR: MNEMONAS_STORAGE_ROOT must not be empty" >&2
+        exit 1
+    fi
+
+    if path_has_parent_segment "$STORAGE_ROOT"; then
+        echo "ERROR: MNEMONAS_STORAGE_ROOT must not contain '..' path segments: $STORAGE_ROOT" >&2
         exit 1
     fi
 
@@ -59,6 +83,19 @@ require_explicit_benchmark_target() {
         echo "Use 'make bench' or set ALLOW_REAL_STORAGE=1 only for an intentionally disposable target." >&2
         exit 1
     fi
+}
+
+path_has_parent_segment() {
+    local candidate="$1"
+    local segment
+    local -a segments
+    IFS='/' read -r -a segments <<< "$candidate"
+    for segment in "${segments[@]}"; do
+        if [[ "$segment" == ".." ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 read_config_value() {
@@ -213,7 +250,7 @@ cleanup() {
     if [[ "$CLEANUP_ENABLED" != "1" ]]; then
         return
     fi
-    rm -rf "$TEST_DIR"
+    rm -rf -- "$TEST_DIR"
 }
 
 trap cleanup EXIT

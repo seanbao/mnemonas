@@ -151,7 +151,7 @@ curl -X POST \
 | Current files | Native files | Native files | CAS objects |
 | Version storage | CAS objects | Filesystem snapshots | CAS objects |
 | Current-file readability | Directly readable | Directly readable | Needs special software |
-| Deduplication | BLAKE3/CDC versions | Filesystem dependent | Core feature |
+| Deduplication | BLAKE3 whole-object versions; CDC file APIs available in dataplane | Filesystem dependent | Core feature |
 | Metadata | SQLite | Filesystem and app metadata | JSON/DB |
 | Complexity | Medium | Low for simple file sharing | High |
 

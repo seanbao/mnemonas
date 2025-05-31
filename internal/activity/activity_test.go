@@ -90,15 +90,15 @@ func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
-func TestWriteActivityLogFileAtomically_ReplacesExistingFileAndCleansTemp(t *testing.T) {
+func TestWriteActivityLogFile_ReplacesExistingFileAndCleansTemp(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "activity.json")
 	if err := os.WriteFile(logPath, []byte(`[{"id":"old"}]`), 0600); err != nil {
 		t.Fatalf("WriteFile(existing activity log) error: %v", err)
 	}
 
-	if err := writeActivityLogFileAtomically(logPath, []byte(`[{"id":"new"}]`)); err != nil {
-		t.Fatalf("writeActivityLogFileAtomically() error: %v", err)
+	if err := writeActivityLogFile(logPath, []byte(`[{"id":"new"}]`)); err != nil {
+		t.Fatalf("writeActivityLogFile() error: %v", err)
 	}
 
 	data, err := os.ReadFile(logPath)
@@ -500,7 +500,7 @@ func TestNewStore_LoadRejectsLogSymlinkInsertedAfterValidation(t *testing.T) {
 			hookErr = err
 			return
 		}
-		hookErr = os.Symlink(linkedTarget, logPath)
+		hookErr = os.Symlink(filepath.Base(linkedTarget), logPath)
 	}
 	defer func() {
 		afterValidateActivityLogPath = originalHook

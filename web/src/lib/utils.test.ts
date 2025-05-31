@@ -11,7 +11,10 @@ import {
   sanitizeFilename,
   normalizePath,
   normalizeWebDAVPrefix,
+  isValidWebDAVPrefix,
+  webDAVPrefixOverlapsReservedRoute,
   formatWebDAVUrl,
+  getFilenameFromContentDisposition,
   encodePathForUrl,
   decodePathFromUrl,
   isImageFile,
@@ -96,6 +99,16 @@ describe('openUrlInNewTab', () => {
         value: originalOpen,
       })
     }
+  })
+
+  it('refuses script and local-file URLs', () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue({ opener: window } as unknown as Window)
+
+    expect(openUrlInNewTab('javascript:alert(1)')).toBe(false)
+    expect(openUrlInNewTab('file:///etc/passwd')).toBe(false)
+    expect(openSpy).not.toHaveBeenCalled()
+
+    openSpy.mockRestore()
   })
 })
 
@@ -210,6 +223,34 @@ describe('sanitizeFilename', () => {
     expect(sanitizeFilename('valid-file.txt')).toBe('valid-file.txt')
     expect(sanitizeFilename('document.pdf')).toBe('document.pdf')
   })
+
+  it('prefixes reserved Windows device filenames', () => {
+    expect(sanitizeFilename('CON')).toBe('_CON')
+    expect(sanitizeFilename('nul.txt')).toBe('_nul.txt')
+    expect(sanitizeFilename('COM1.log')).toBe('_COM1.log')
+    expect(sanitizeFilename('LPT9')).toBe('_LPT9')
+  })
+})
+
+describe('getFilenameFromContentDisposition', () => {
+  it('uses decoded UTF-8 extended filenames first', () => {
+    expect(getFilenameFromContentDisposition(
+      'attachment; filename="fallback.txt"; filename*=UTF-8\'\'report%20final.txt',
+      'download'
+    )).toBe('report final.txt')
+  })
+
+  it('unescapes quoted filenames with quotes and semicolons', () => {
+    expect(getFilenameFromContentDisposition(
+      'attachment; filename="report\\"2026;final.pdf"',
+      'download'
+    )).toBe('report"2026;final.pdf')
+  })
+
+  it('falls back for invalid or missing filename parameters', () => {
+    expect(getFilenameFromContentDisposition('attachment', 'download')).toBe('download')
+    expect(getFilenameFromContentDisposition(null, 'download')).toBe('download')
+  })
 })
 
 describe('normalizePath', () => {
@@ -233,6 +274,10 @@ describe('normalizePath', () => {
   it('throws on path traversal attempts', () => {
     expect(() => normalizePath('/../etc/passwd')).toThrow('非法路径')
   })
+
+  it('throws on null byte paths instead of silently rewriting them', () => {
+    expect(() => normalizePath('/docs/report\0.pdf')).toThrow('非法路径')
+  })
 })
 
 describe('normalizeWebDAVPrefix', () => {
@@ -244,10 +289,35 @@ describe('normalizeWebDAVPrefix', () => {
     expect(normalizeWebDAVPrefix('/dav/')).toBe('/dav')
   })
 
+  it('cleans repeated slashes, dot segments, and padded path segments', () => {
+    expect(normalizeWebDAVPrefix('//dav//files///')).toBe('/dav/files')
+    expect(normalizeWebDAVPrefix('./0/0//0 /')).toBe('/0/0/0')
+    expect(normalizeWebDAVPrefix('00/ /')).toBe('/00')
+    expect(normalizeWebDAVPrefix('safe/../api')).toBe('/api')
+  })
+
   it('returns / for empty or root input', () => {
     expect(normalizeWebDAVPrefix('')).toBe('/')
     expect(normalizeWebDAVPrefix(' / ')).toBe('/')
     expect(normalizeWebDAVPrefix('/')).toBe('/')
+  })
+
+  it('rejects characters that cannot be used in an HTTP path prefix', () => {
+    expect(isValidWebDAVPrefix('/dav')).toBe(true)
+    expect(isValidWebDAVPrefix('/dav\\files')).toBe(false)
+    expect(isValidWebDAVPrefix('/dav?files')).toBe(false)
+    expect(isValidWebDAVPrefix('/dav#files')).toBe(false)
+    expect(isValidWebDAVPrefix('/dav\nfiles')).toBe(false)
+  })
+
+  it('detects prefixes that overlap reserved application routes', () => {
+    expect(webDAVPrefixOverlapsReservedRoute('/')).toBe(true)
+    expect(webDAVPrefixOverlapsReservedRoute('/api')).toBe(true)
+    expect(webDAVPrefixOverlapsReservedRoute('api/v1')).toBe(true)
+    expect(webDAVPrefixOverlapsReservedRoute('/s/shared')).toBe(true)
+    expect(webDAVPrefixOverlapsReservedRoute('/health')).toBe(true)
+    expect(webDAVPrefixOverlapsReservedRoute('/dav')).toBe(false)
+    expect(webDAVPrefixOverlapsReservedRoute('/api-files')).toBe(false)
   })
 })
 

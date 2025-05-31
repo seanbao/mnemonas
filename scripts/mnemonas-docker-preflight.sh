@@ -195,6 +195,35 @@ existing_path_for_df() {
 	fi
 }
 
+check_no_symlink_components() {
+	local value="$1"
+	local label="$2"
+	local trimmed="$value"
+	local current="."
+	local -a segments
+
+	if [[ "$value" == /* ]]; then
+		trimmed="${value#/}"
+		current="/"
+	fi
+	trimmed="${trimmed%/}"
+
+	IFS='/' read -r -a segments <<< "$trimmed"
+	for segment in "${segments[@]}"; do
+		[[ -n "$segment" && "$segment" != "." ]] || continue
+		if [[ "$current" == "/" ]]; then
+			current="/$segment"
+		else
+			current="$current/$segment"
+		fi
+		if [[ -L "$current" ]]; then
+			fail "$label must not contain symlink path components: $current"
+			return 1
+		fi
+		[[ -e "$current" ]] || break
+	done
+}
+
 human_bytes() {
 	local bytes="$1"
 	awk -v bytes="$bytes" '
@@ -280,7 +309,7 @@ check_env() {
 	if [[ -z "$HOST_PORT" ]]; then
 		HOST_PORT="${MNEMONAS_HTTP_PORT_VALUE:-8080}"
 	fi
-	if [[ "$HOST_PORT" =~ ^[0-9]+$ ]] && (( 10#$HOST_PORT >= 1 && 10#$HOST_PORT <= 65535 )); then
+	if [[ "$HOST_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$HOST_PORT >= 1 && 10#$HOST_PORT <= 65535 )); then
 		HOST_PORT_VALID=1
 		ok "Host HTTP port configured: $HOST_PORT"
 	else
@@ -302,6 +331,13 @@ check_env() {
 		ok "Container UID/GID match current user: $MNEMONAS_UID_VALUE:$MNEMONAS_GID_VALUE"
 	else
 		warn "Container UID/GID are $MNEMONAS_UID_VALUE:$MNEMONAS_GID_VALUE, current user is $current_uid:$current_gid. Make sure $DATA_DIR is writable by the configured numeric user."
+	fi
+}
+
+check_numeric_config() {
+	if [[ ! "$MIN_FREE_BYTES" =~ ^[0-9]+$ ]] || (( 10#$MIN_FREE_BYTES <= 0 )); then
+		fail "MIN_FREE_BYTES must be a positive integer, got: ${MIN_FREE_BYTES:-<empty>}"
+		MIN_FREE_BYTES=10737418240
 	fi
 }
 
@@ -351,6 +387,10 @@ check_data_dir_writable_by_configured_user() {
 
 check_data_dir() {
 	local df_target available_kb available_bytes config_path configured_root
+
+	if ! check_no_symlink_components "$DATA_DIR" "Data directory"; then
+		return
+	fi
 
 	if [[ -d "$DATA_DIR" ]]; then
 		ok "Data directory exists: $DATA_DIR"
@@ -432,7 +472,7 @@ check_compose_config() {
 			fail "Docker Compose config failed: $(tr '\n' ' ' < "$config_out")"
 		fi
 	fi
-	rm -f "$config_out"
+	rm -f -- "$config_out"
 }
 
 apply_env_file_defaults() {
@@ -455,6 +495,7 @@ printf 'Repository: %s\n' "$REPO_ROOT"
 printf 'Data dir:   %s\n' "$DATA_DIR"
 printf '\n'
 
+check_numeric_config
 check_file "$COMPOSE_FILE" "Compose file"
 check_docker
 check_env

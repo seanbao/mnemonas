@@ -30,6 +30,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/api"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/rootio"
 	"github.com/seanbao/mnemonas/internal/storage"
 	mnemonasTLS "github.com/seanbao/mnemonas/internal/tls"
 	"github.com/seanbao/mnemonas/internal/webdav"
@@ -95,8 +96,7 @@ func handlersEqual(a, b http.Handler) bool {
 }
 
 type frontendHandler struct {
-	root       string
-	fileServer http.Handler
+	root string
 }
 
 const appContentSecurityPolicy = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:"
@@ -119,10 +119,7 @@ func setHeaderIfAbsent(headers http.Header, key, value string) {
 }
 
 func newFrontendHandler(root string) http.Handler {
-	return &frontendHandler{
-		root:       root,
-		fileServer: http.FileServer(http.Dir(root)),
-	}
+	return &frontendHandler{root: root}
 }
 
 func (h *frontendHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -135,9 +132,7 @@ func (h *frontendHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if cleanPath != "/" {
 		localPath, err := filepath.Localize(strings.TrimPrefix(cleanPath, "/"))
 		if err == nil {
-			target := filepath.Join(h.root, localPath)
-			if info, statErr := os.Stat(target); statErr == nil && !info.IsDir() {
-				h.fileServer.ServeHTTP(w, r)
+			if h.serveLocalFileNoFollow(w, r, localPath) {
 				return
 			}
 		}
@@ -148,7 +143,31 @@ func (h *frontendHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.ServeFile(w, r, filepath.Join(h.root, "index.html"))
+	if !h.serveLocalFileNoFollow(w, r, "index.html") {
+		http.NotFound(w, r)
+	}
+}
+
+func (h *frontendHandler) serveLocalFileNoFollow(w http.ResponseWriter, r *http.Request, localPath string) bool {
+	root, err := os.OpenRoot(h.root)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+
+	file, err := rootio.OpenFileNoFollow(root, localPath, os.O_RDONLY, 0)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		return false
+	}
+
+	http.ServeContent(w, r, path.Base(localPath), info.ModTime(), file)
+	return true
 }
 
 func discoverFrontendAssets() string {
@@ -178,12 +197,23 @@ func discoverFrontendAssets() string {
 }
 
 func hasFrontendIndex(dir string) bool {
-	indexPath := filepath.Join(dir, "index.html")
-	info, err := os.Stat(indexPath)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+
+	file, err := rootio.OpenFileNoFollow(root, "index.html", os.O_RDONLY, 0)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
 	if err != nil || info.IsDir() {
 		return false
 	}
-	data, err := os.ReadFile(indexPath)
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return false
 	}
@@ -266,14 +296,29 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 		return "", nil
 	}
 
-	return cfg.Prefix, webdav.NewHandler(webdav.Config{
+	prefix := config.NormalizeWebDAVPrefix(cfg.Prefix)
+	return prefix, webdav.NewHandler(webdav.Config{
 		FileSystem: fs,
-		Prefix:     cfg.Prefix,
+		Prefix:     prefix,
 		ReadOnly:   cfg.ReadOnly,
 		AuthType:   cfg.AuthType,
 		Username:   cfg.Username,
 		Password:   cfg.Password,
 	})
+}
+
+func buildApplicationHandler(runtimeWebDAV *switchableWebDAVHandler, frontend http.Handler, router http.Handler) http.Handler {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if runtimeWebDAV != nil && runtimeWebDAV.ServeIfMatches(w, r) {
+			return
+		}
+		if frontend != nil && shouldServeFrontend(r) {
+			frontend.ServeHTTP(w, r)
+			return
+		}
+		router.ServeHTTP(w, r)
+	})
+	return withSecurityHeaders(api.RejectCrossOriginUnsafeRequests(handler))
 }
 
 func connectStartupDataplane(addr string, timeout time.Duration) (*dataplane.Client, error) {
@@ -522,19 +567,10 @@ func main() {
 		log.Info().Msg("frontend assets not found; serving API and WebDAV only")
 	}
 
-	// Create final handler - WebDAV needs to be handled before chi router
-	// because chi doesn't support WebDAV methods (PROPFIND, MKCOL, etc.)
-	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if runtimeWebDAV.ServeIfMatches(w, r) {
-			return
-		}
-		if frontend != nil && shouldServeFrontend(r) {
-			frontend.ServeHTTP(w, r)
-			return
-		}
-		router.ServeHTTP(w, r)
-	})
-	handler = withSecurityHeaders(handler)
+	// WebDAV is matched before chi because chi does not route methods such as
+	// PROPFIND and MKCOL. Cross-origin unsafe request checks are applied around
+	// the combined handler so WebDAV and API mutations share the same guard.
+	handler := buildApplicationHandler(runtimeWebDAV, frontend, router)
 	if activeWebDAV.Enabled {
 		log.Info().Str("prefix", cfg.WebDAV.Prefix).Str("auth", cfg.WebDAV.AuthType).Msg("WebDAV enabled")
 	}

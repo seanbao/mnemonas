@@ -45,15 +45,15 @@ func TestPersistenceWarningWrapperPreservesErrorSemantics(t *testing.T) {
 	}
 }
 
-func TestWriteFavoritesStoreFileAtomically_ReplacesExistingFile(t *testing.T) {
+func TestWriteFavoritesStoreFile_ReplacesExistingFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")
 	if err := os.WriteFile(storePath, []byte("old"), 0600); err != nil {
 		t.Fatalf("WriteFile(existing) error: %v", err)
 	}
 
-	if err := writeFavoritesStoreFileAtomically(storePath, []byte("[]")); err != nil {
-		t.Fatalf("writeFavoritesStoreFileAtomically() error: %v", err)
+	if err := writeFavoritesStoreFile(storePath, []byte("[]")); err != nil {
+		t.Fatalf("writeFavoritesStoreFile() error: %v", err)
 	}
 
 	data, err := os.ReadFile(storePath)
@@ -239,6 +239,7 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	legacy := []Favorite{
 		{Path: `docs\\report.pdf`, UserID: "user1", CreatedAt: time.Now(), Note: "normalized"},
 		{Path: "../escape.txt", UserID: "user1", CreatedAt: time.Now(), Note: "invalid"},
+		{Path: "/docs/report\x00.pdf", UserID: "user1", CreatedAt: time.Now(), Note: "invalid-nul"},
 		{Path: "   ", UserID: "user1", CreatedAt: time.Now(), Note: "blank"},
 	}
 	data, err := json.Marshal(legacy)
@@ -259,6 +260,9 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	}
 	if store.IsFavorite("user1", "/escape.txt") {
 		t.Fatal("expected invalid traversal favorite to be dropped on load")
+	}
+	if store.IsFavorite("user1", "/docs/report\x00.pdf") {
+		t.Fatal("expected invalid NUL favorite to be dropped on load")
 	}
 	if count := store.Count("user1"); count != 1 {
 		t.Fatalf("expected only normalized valid favorite to remain, got %d", count)
@@ -801,7 +805,7 @@ func TestNewStore_LoadRejectsStoreSymlinkInsertedAfterValidation(t *testing.T) {
 			hookErr = err
 			return
 		}
-		hookErr = os.Symlink(linkedTarget, storePath)
+		hookErr = os.Symlink(filepath.Base(linkedTarget), storePath)
 	}
 	defer func() {
 		afterValidateFavoritesStorePath = originalHook

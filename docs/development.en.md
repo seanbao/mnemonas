@@ -174,13 +174,15 @@ nvm use
 
 ./scripts/dev.sh
 ./scripts/dev.sh --backend
-./scripts/dev.sh --creds
+./scripts/dev.sh --creds # hides the WebDAV plaintext password by default
 ./scripts/dev.sh --frontend
 ./scripts/dev.sh --status
 ./scripts/dev.sh --kill
 ```
 
 The script:
+
+- `--creds` shows the initial password file and WebDAV credential location without printing the WebDAV plaintext password. Use `MNEMONAS_DEV_SHOW_SECRETS=1 ./scripts/dev.sh --creds` only when you intentionally want to reveal it in the local terminal.
 
 - Builds Go and Rust components.
 - Starts dataplane, `nasd`, and optionally Vite.
@@ -450,8 +452,10 @@ sudo sysctl -p
 ### Reset Development Data
 
 ```bash
-DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
-test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+DEFAULT_DATA_DIR="$HOME/.mnemonas"
+DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
+[ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
+[ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR"
 ```
 

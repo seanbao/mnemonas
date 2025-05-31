@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -293,27 +293,6 @@ func (m *Monitor) check(ctx context.Context) {
 	m.mu.Unlock()
 }
 
-func (m *Monitor) getStats() (*StorageStats, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(m.dataDir, &stat); err != nil {
-		return nil, fmt.Errorf("statfs failed: %w", err)
-	}
-
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	freeBytes := stat.Bavail * uint64(stat.Bsize)
-	usedBytes := totalBytes - freeBytes
-	usedPct := float64(usedBytes) / float64(totalBytes) * 100
-
-	return &StorageStats{
-		Path:       m.dataDir,
-		TotalBytes: totalBytes,
-		FreeBytes:  freeBytes,
-		UsedBytes:  usedBytes,
-		UsedPct:    usedPct,
-		CheckedAt:  time.Now(),
-	}, nil
-}
-
 func (m *Monitor) determineLevel(stats *StorageStats, cfg Config) AlertLevel {
 	// Check percentage thresholds
 	if stats.UsedPct >= cfg.CriticalPct {
@@ -400,7 +379,7 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Con
 	if method == http.MethodGet {
 		parsedURL, err := url.Parse(cfg.WebhookURL)
 		if err != nil {
-			return fmt.Errorf("parse webhook url: %w", err)
+			return sanitizedWebhookRequestError("parse URL", cfg.WebhookURL, err)
 		}
 		query := parsedURL.Query()
 		query.Set("type", payload.Type)
@@ -426,7 +405,7 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Con
 
 	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return sanitizedWebhookRequestError("create request", cfg.WebhookURL, err)
 	}
 
 	if body != nil {
@@ -436,34 +415,143 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Con
 
 	// Add custom headers
 	for _, h := range cfg.WebhookHeaders {
-		key, value, ok := strings.Cut(h, ":")
+		key, value, ok := parseWebhookHeader(h)
 		if !ok {
 			continue
 		}
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		req.Header.Set(key, strings.TrimSpace(value))
+		req.Header.Set(key, value)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send request: %w", err)
+		return sanitizedWebhookRequestError("send request", cfg.WebhookURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("webhook returned status %d", resp.StatusCode)
+		return fmt.Errorf("webhook request to %s returned status %d", redactWebhookURLForLog(cfg.WebhookURL), resp.StatusCode)
 	}
 
 	m.logger.Info().
-		Str("url", cfg.WebhookURL).
+		Str("url", redactWebhookURLForLog(cfg.WebhookURL)).
 		Int("status", resp.StatusCode).
 		Msg("Webhook sent successfully")
 
 	return nil
+}
+
+func sanitizedWebhookRequestError(action, rawURL string, err error) error {
+	target := redactWebhookURLForLog(rawURL)
+	if err == nil {
+		return fmt.Errorf("webhook %s failed for %s", action, target)
+	}
+	if detail := sanitizedWebhookErrorDetail(err); detail != "" {
+		return fmt.Errorf("webhook %s failed for %s: %s", action, target, detail)
+	}
+	return fmt.Errorf("webhook %s failed for %s", action, target)
+}
+
+func sanitizedWebhookErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context deadline exceeded"
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		op := strings.TrimSpace(urlErr.Op)
+		if strings.EqualFold(op, "parse") {
+			return "invalid URL"
+		}
+		detail := sanitizedWebhookErrorDetail(urlErr.Err)
+		if op != "" && detail != "" {
+			return op + ": " + detail
+		}
+		if op != "" {
+			return op
+		}
+		return detail
+	}
+
+	type timeout interface {
+		Timeout() bool
+	}
+	if timeoutErr, ok := err.(timeout); ok && timeoutErr.Timeout() {
+		return "timeout"
+	}
+
+	return "transport error"
+}
+
+func redactWebhookURLForLog(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "configured"
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func parseWebhookHeader(header string) (string, string, bool) {
+	trimmed := strings.TrimSpace(header)
+	if trimmed == "" {
+		return "", "", false
+	}
+
+	key, value, ok := strings.Cut(trimmed, ":")
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if !ok || key == "" || value == "" {
+		return "", "", false
+	}
+	if !isValidHTTPHeaderToken(key) || hasInvalidHTTPHeaderValueControl(value) {
+		return "", "", false
+	}
+	return key, value, true
+}
+
+func isValidHTTPHeaderToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if !isHTTPTokenChar(value[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHTTPTokenChar(b byte) bool {
+	if b >= 'a' && b <= 'z' {
+		return true
+	}
+	if b >= 'A' && b <= 'Z' {
+		return true
+	}
+	if b >= '0' && b <= '9' {
+		return true
+	}
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
+}
+
+func hasInvalidHTTPHeaderValueControl(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] == 0x7f || (value[i] < 0x20 && value[i] != '\t') {
+			return true
+		}
+	}
+	return false
 }
 
 func formatBytes(bytes uint64) string {

@@ -113,6 +113,8 @@ root = "/data"
 
 Do not set `root = "/"`. If you set another container path such as `/data-root`, mount that path explicitly in Compose or the data will land in the container's writable layer.
 
+Docker quickstart, the container start entrypoint, and the preflight script reject symlink components in the data directory path so config and object data cannot be written through a replaced directory. Container `CONFIG_PATH` must be absolute and stay under `STORAGE_ROOT`; the default is `/data/config.toml`. When customizing host storage, mount a real directory rather than a symlink.
+
 If your host user is not UID/GID `1000`, use the quickstart script or pass the IDs directly:
 
 ```bash
@@ -385,8 +387,10 @@ Restore:
 
 ```bash
 docker compose down
-DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
-test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+DEFAULT_DATA_DIR="$HOME/.mnemonas"
+DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
+[ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
+[ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR"
 tar xzf mnemonas-backup-YYYYMMDD.tar.gz -C ~
 docker compose up -d

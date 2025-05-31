@@ -332,6 +332,21 @@ func TestHasFrontendIndex_AcceptsBuiltIndex(t *testing.T) {
 	}
 }
 
+func TestHasFrontendIndex_RejectsSymlinkedIndex(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "index.html")
+	if err := os.WriteFile(outside, []byte(`<script type="module" src="/assets/index.js"></script>`), 0o644); err != nil {
+		t.Fatalf("WriteFile(outside index.html) error: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "index.html")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if hasFrontendIndex(dir) {
+		t.Fatal("expected symlinked frontend index to be rejected")
+	}
+}
+
 func TestDiscoverFrontendAssets_PrefersExplicitBuiltDirectory(t *testing.T) {
 	envDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(envDir, "index.html"), []byte(`<script type="module" src="/assets/index.js"></script>`), 0o644); err != nil {
@@ -410,6 +425,20 @@ func TestBuildWebDAVHandler(t *testing.T) {
 	}
 	if handler == nil {
 		t.Fatal("expected enabled WebDAV handler")
+	}
+	if closer, ok := handler.(io.Closer); ok {
+		_ = closer.Close()
+	}
+
+	prefix, handler = buildWebDAVHandler(nil, api.WebDAVRuntimeConfig{
+		Enabled: true,
+		Prefix:  "dav/",
+	})
+	if prefix != "/dav" {
+		t.Fatalf("normalized prefix = %q, want /dav", prefix)
+	}
+	if handler == nil {
+		t.Fatal("expected handler for normalized prefix")
 	}
 	if closer, ok := handler.(io.Closer); ok {
 		_ = closer.Close()
@@ -505,6 +534,63 @@ func TestFrontendHandlerServesAssetsAndSPAFallback(t *testing.T) {
 				t.Fatalf("body = %q, want to contain %q", rec.Body.String(), tt.wantBody)
 			}
 		})
+	}
+}
+
+func TestFrontendHandlerRejectsSymlinkedWebFiles(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside secret"), 0o600); err != nil {
+		t.Fatalf("WriteFile(outside) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<div id=\"root\"></div>"), 0o600); err != nil {
+		t.Fatalf("WriteFile(index.html) error: %v", err)
+	}
+	assetsDir := filepath.Join(root, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(assets) error: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(assetsDir, "linked.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	handler := newFrontendHandler(root)
+	req := httptest.NewRequest(http.MethodGet, "/assets/linked.txt", nil)
+	req.Header.Set("Accept", "*/*")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "outside secret") {
+		t.Fatal("symlink target content was served")
+	}
+}
+
+func TestFrontendHandlerRejectsSymlinkedIndexFallback(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside-index.html")
+	if err := os.WriteFile(outside, []byte("<div id=\"root\">outside</div>"), 0o600); err != nil {
+		t.Fatalf("WriteFile(outside-index) error: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "index.html")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	handler := newFrontendHandler(root)
+	req := httptest.NewRequest(http.MethodGet, "/files/photos", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "outside") {
+		t.Fatal("symlinked index content was served")
 	}
 }
 
@@ -995,6 +1081,56 @@ func TestSwitchableWebDAVHandler_ServeIfMatchesUsesLatestPrefixAndHandler(t *tes
 	disabledRec := httptest.NewRecorder()
 	if switcher.ServeIfMatches(disabledRec, disabledReq) {
 		t.Fatalf("expected disabled WebDAV handler to stop matching requests")
+	}
+}
+
+func TestApplicationHandlerRejectsCrossOriginWebDAVMutationBeforeDispatch(t *testing.T) {
+	webdavCalls := 0
+	routerCalls := 0
+	switcher := newSwitchableWebDAVHandler("/dav", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webdavCalls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	handler := buildApplicationHandler(switcher, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routerCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("MKCOL", "https://nas.example.test/dav/files", nil)
+	req.Header.Set("Origin", "https://evil.example.test")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin WebDAV mutation status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if webdavCalls != 0 || routerCalls != 0 {
+		t.Fatalf("cross-origin WebDAV mutation reached handlers: webdav=%d router=%d", webdavCalls, routerCalls)
+	}
+
+	basicAuthReq := httptest.NewRequest("MKCOL", "https://nas.example.test/dav/files", nil)
+	basicAuthReq.SetBasicAuth("user", "pass")
+	basicAuthReq.Header.Set("Origin", "https://evil.example.test")
+	basicAuthRec := httptest.NewRecorder()
+	handler.ServeHTTP(basicAuthRec, basicAuthReq)
+
+	if basicAuthRec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin WebDAV mutation with Basic auth status = %d, want %d; body=%s", basicAuthRec.Code, http.StatusForbidden, basicAuthRec.Body.String())
+	}
+	if webdavCalls != 0 || routerCalls != 0 {
+		t.Fatalf("cross-origin Basic-auth WebDAV mutation reached handlers: webdav=%d router=%d", webdavCalls, routerCalls)
+	}
+
+	sameOriginReq := httptest.NewRequest("MKCOL", "https://nas.example.test/dav/files", nil)
+	sameOriginReq.Header.Set("Origin", "https://nas.example.test")
+	sameOriginRec := httptest.NewRecorder()
+	handler.ServeHTTP(sameOriginRec, sameOriginReq)
+
+	if sameOriginRec.Code != http.StatusNoContent {
+		t.Fatalf("same-origin WebDAV mutation status = %d, want %d", sameOriginRec.Code, http.StatusNoContent)
+	}
+	if webdavCalls != 1 || routerCalls != 0 {
+		t.Fatalf("same-origin WebDAV mutation dispatch mismatch: webdav=%d router=%d", webdavCalls, routerCalls)
 	}
 }
 
