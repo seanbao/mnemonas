@@ -289,6 +289,7 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [备份指南](docs/backup-guide.md) | 3-2-1 备份策略与恢复 |
 | [FAQ](docs/faq.md) | 常见问题解答 |
 | [架构设计](docs/architecture.md) | 系统架构与技术选型 |
+| [路线图](docs/roadmap.md) | 从私有文件云盘到家庭/小团队 NAS 的功能优先级 |
 | [安全指南](docs/security.md) | 认证与网络安全配置 |
 | [支持说明](SUPPORT.md) | 支持渠道、问题分流和维护边界 |
 
