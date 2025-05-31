@@ -7,6 +7,8 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 GO_PACKAGES ?=
 GO_PACKAGE_PATTERN ?= ./...
 GO_PACKAGE_EXCLUDE_PATTERN ?= /web/node_modules/|/proto$$
+GO_CMD_ENV ?= GOTOOLCHAIN=local
+GO_LIST_ENV ?= $(GO_CMD_ENV)
 GO_LINT_PACKAGES ?= ./...
 GOLANGCI_LINT ?= golangci-lint
 SKIP_GOLANGCI_LINT ?= 0
@@ -24,13 +26,18 @@ GO_FUZZTIME ?= 10s
 GO_FUZZ_TARGETS ?= ./internal/api:FuzzValidatePath ./internal/api:FuzzPathWithinBase ./internal/config:FuzzNormalizeWebDAVPrefix
 GO_TORTURE_PACKAGES ?= ./internal/api ./internal/auth ./internal/share ./internal/storage ./internal/versionstore ./internal/dataplane ./internal/workspace
 WEB_TORTURE_SPECS ?= files.spec.ts interaction-integrity.spec.ts layout-integrity.spec.ts runtime-integrity.spec.ts
-DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/test-dataplane-start.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
-ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh
+DEPLOYMENT_SCRIPTS := scripts/install-systemd.sh scripts/uninstall-systemd.sh scripts/mnemonas-doctor.sh scripts/mnemonas-docker-preflight.sh scripts/docker-quickstart.sh scripts/mnemonas-dataplane-start.sh scripts/test-systemd-install.sh scripts/test-systemd-uninstall.sh scripts/test-docker-start.sh scripts/test-docker-preflight.sh scripts/test-docker-quickstart.sh scripts/test-fault-injection-safety.sh scripts/test-e2e-safety.sh scripts/test-benchmark-safety.sh scripts/test-dataplane-start.sh scripts/test-dev-safety.sh scripts/test-reverse-proxy-safety.sh scripts/test-with-test-dataplane-safety.sh scripts/docker-start.sh scripts/setup-reverse-proxy.sh scripts/dev.sh scripts/benchmark.sh
+ACCEPTANCE_SCRIPTS := scripts/e2e-test.sh scripts/fault-injection-test.sh scripts/torture-test.sh scripts/run-e2e-isolated.sh scripts/run-benchmark-isolated.sh scripts/with-test-dataplane.sh
 WEB_SCRIPTS := web/scripts/start-e2e-backend.sh
+
+export GO_FUZZTIME
+export GO_FUZZ_TARGETS
+export GO_TORTURE_PACKAGES
+export WEB_TORTURE_SPECS
 
 define RESOLVE_GO_PACKAGES
 packages="$(GO_PACKAGES)"; \
-go_list_env="$${GO_LIST_ENV:-}"; \
+go_list_env="$${GO_LIST_ENV:-$(GO_LIST_ENV)}"; \
 if [ -z "$$packages" ]; then \
 	packages="$$(env $$go_list_env go list $(GO_PACKAGE_PATTERN) | grep -Ev '$(GO_PACKAGE_EXCLUDE_PATTERN)')"; \
 fi; \
@@ -77,7 +84,7 @@ deps:
 	@echo "📦 Installing dependencies..."
 	cd dataplane && cargo fetch --locked
 	cargo fetch --manifest-path tools/proto-gen/Cargo.toml --locked
-	go mod download
+	$(GO_CMD_ENV) go mod download
 	cd web && npm ci
 
 # 生成 protobuf 代码。Rust 生成代码会提交到仓库，避免普通 dataplane/Docker 构建依赖 protoc。
@@ -101,7 +108,7 @@ go-packages:
 build: proto web-build
 	@echo "🏗️  Building Go control plane..."
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/nasd ./cmd/nasd
+	$(GO_CMD_ENV) CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/nasd ./cmd/nasd
 	@echo "🦀 Building Rust data plane..."
 	cd dataplane && cargo build --release --locked
 	cp dataplane/target/release/dataplane bin/dataplane
@@ -115,7 +122,7 @@ web-build:
 dev:
 	@echo "🔨 Development build..."
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd
+	$(GO_CMD_ENV) CGO_ENABLED=0 go build -o bin/nasd ./cmd/nasd
 	cd dataplane && cargo build
 	cp dataplane/target/debug/dataplane bin/dataplane-debug
 	@echo "✅ Dev build complete"
@@ -124,7 +131,7 @@ dev:
 test:
 	@echo "🧪 Running Go tests..."
 	@$(RESOLVE_GO_PACKAGES); \
-	CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $$packages
+	$(GO_CMD_ENV) CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race $$packages
 	@echo "🦀 Running Rust tests..."
 	cd dataplane && cargo test --locked
 	cargo test --manifest-path tools/proto-gen/Cargo.toml --locked
@@ -136,10 +143,6 @@ test:
 test-torture:
 	@echo "🔥 Running torture test matrix..."
 	@chmod +x scripts/torture-test.sh
-	GO_FUZZTIME="$(GO_FUZZTIME)" \
-	GO_FUZZ_TARGETS="$(GO_FUZZ_TARGETS)" \
-	GO_TORTURE_PACKAGES="$(GO_TORTURE_PACKAGES)" \
-	WEB_TORTURE_SPECS="$(WEB_TORTURE_SPECS)" \
 	./scripts/torture-test.sh
 
 # 测试覆盖率
@@ -196,14 +199,14 @@ clean:
 	rm -rf bin/ coverage/
 	cd dataplane && cargo clean
 	cd web && rm -rf dist coverage
-	go clean
+	$(GO_CMD_ENV) go clean
 	@echo "✅ Clean complete"
 
 # 格式化代码
 fmt:
 	@echo "✨ Formatting code..."
 	@$(RESOLVE_GO_PACKAGES); \
-	go fmt $$packages
+	$(GO_CMD_ENV) go fmt $$packages
 	cd dataplane && cargo fmt
 	cargo fmt --manifest-path tools/proto-gen/Cargo.toml
 	cd web && npm run lint -- --fix 2>/dev/null || true
@@ -251,6 +254,9 @@ scripts-check:
 	./scripts/test-docker-quickstart.sh
 	./scripts/test-benchmark-safety.sh
 	./scripts/test-dataplane-start.sh
+	./scripts/test-dev-safety.sh
+	./scripts/test-reverse-proxy-safety.sh
+	./scripts/test-with-test-dataplane-safety.sh
 	./scripts/test-e2e-safety.sh
 	./scripts/test-fault-injection-safety.sh
 
@@ -281,7 +287,7 @@ security-check:
 
 install-audit-tools:
 	@echo "🔧 Installing pinned security scan tools..."
-	go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	$(GO_SECURITY_ENV) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo install cargo-audit --version $(CARGO_AUDIT_VERSION) --locked
 
 # Docker构建
@@ -298,8 +304,8 @@ check: workflows-check scripts-check lint test
 quick-check:
 	@echo "🚀 Quick check..."
 	@$(RESOLVE_GO_PACKAGES); \
-	CGO_ENABLED=0 go build $$packages; \
-	CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -short $$packages
+	$(GO_CMD_ENV) CGO_ENABLED=0 go build $$packages; \
+	$(GO_CMD_ENV) CGO_ENABLED=0 bash ./scripts/with-test-dataplane.sh go test -short $$packages
 	cd dataplane && cargo check --locked
 	cargo check --manifest-path tools/proto-gen/Cargo.toml --locked
 	@echo "✅ Quick check passed"

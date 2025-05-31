@@ -95,6 +95,7 @@ const (
 	defaultRateLimitErrorMessage  = "too many attempts, try later"
 	defaultJSONRequestBodyLimit   = 1 * 1024 * 1024
 	maxDurationDays               = int64((1<<63 - 1) / int64(24*time.Hour))
+	untrustedDownloadCSP          = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
 )
 
 var errInvalidSharePermission = errors.New("invalid permission")
@@ -218,6 +219,9 @@ type CreateShareRequest struct {
 
 func normalizeShareAbsolutePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errors.New("invalid path")
+	}
 	if strings.TrimSpace(normalized) == "" {
 		return "", errors.New("invalid path")
 	}
@@ -238,6 +242,9 @@ func hasShareTraversalSegment(filePath string) bool {
 
 func normalizeShareRelativePath(rawPath string) (string, error) {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return "", errors.New("invalid path")
+	}
 	normalized = strings.TrimPrefix(normalized, "/")
 	cleaned := path.Clean(normalized)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
@@ -378,6 +385,10 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 
 	share, err := h.store.Create(opts)
 	if err != nil {
+		if errors.Is(err, errSharePasswordLong) {
+			writeShareError(w, http.StatusBadRequest, "share password must be at most 72 bytes", "PASSWORD_TOO_LONG")
+			return
+		}
 		if IsPersistenceWarning(err) {
 			shareInfo := share.ToInfo()
 			shareInfo.URL = h.buildShareURL(share.ID)
@@ -541,6 +552,10 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, errInvalidSharePermission) {
 			writeShareError(w, http.StatusBadRequest, "invalid permission", "INVALID_PERMISSION")
+			return
+		}
+		if errors.Is(err, errSharePasswordLong) {
+			writeShareError(w, http.StatusBadRequest, "share password must be at most 72 bytes", "PASSWORD_TOO_LONG")
 			return
 		}
 		if errors.Is(err, ErrShareNotFound) {
@@ -894,6 +909,7 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filename := path.Base(share.Path)
+	setUntrustedDownloadHeaders(w)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", shareDownloadContentType(share.Path))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
@@ -996,6 +1012,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filename := path.Base(fullPath)
+	setUntrustedDownloadHeaders(w)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", shareDownloadContentType(fullPath))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
@@ -1023,11 +1040,21 @@ func contentDispositionAttachment(filename string) string {
 	return value
 }
 
+func setUntrustedDownloadHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", untrustedDownloadCSP)
+}
+
 func prefetchDownloadChunk(reader io.Reader) ([]byte, bool, error) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, false, err
+			}
 			return buf[:n], errors.Is(err, io.EOF), nil
 		}
 		if err != nil {
@@ -1316,13 +1343,17 @@ func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {
 		return true
 	}
 
-	cookie, err := r.Cookie(shareAccessCookieName(share.ID))
-	if err != nil {
-		return false
-	}
-
+	cookieName := shareAccessCookieName(share.ID)
 	expected := h.shareAccessToken(share)
-	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expected)) == 1
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != cookieName {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expected)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) setShareAccessCookie(w http.ResponseWriter, r *http.Request, share *Share) {
@@ -1330,31 +1361,37 @@ func (h *Handler) setShareAccessCookie(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	cookie := &http.Cookie{
-		Name:     shareAccessCookieName(share.ID),
-		Value:    h.shareAccessToken(share),
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsHTTPS(r),
-	}
-
-	if share.ExpiresAt != nil {
-		cookie.Expires = share.ExpiresAt.UTC()
-		cookie.MaxAge = int(time.Until(*share.ExpiresAt).Seconds())
-		if cookie.MaxAge < 0 {
-			cookie.MaxAge = 0
+	for _, cookiePath := range shareAccessCookiePaths(share.ID) {
+		cookie := &http.Cookie{
+			Name:     shareAccessCookieName(share.ID),
+			Value:    h.shareAccessToken(share),
+			Path:     cookiePath,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   requestIsHTTPS(r),
 		}
-	} else {
-		cookie.MaxAge = int((24 * time.Hour).Seconds())
-	}
 
-	http.SetCookie(w, cookie)
+		if share.ExpiresAt != nil {
+			cookie.Expires = share.ExpiresAt.UTC()
+			cookie.MaxAge = int(time.Until(*share.ExpiresAt).Seconds())
+			if cookie.MaxAge < 0 {
+				cookie.MaxAge = 0
+			}
+		} else {
+			cookie.MaxAge = int((24 * time.Hour).Seconds())
+		}
+
+		http.SetCookie(w, cookie)
+	}
 }
 
 func (h *Handler) shareAccessToken(share *Share) string {
 	sum := sha256.Sum256([]byte(share.ID + ":" + share.PasswordHash))
 	return hex.EncodeToString(sum[:])
+}
+
+func shareAccessCookiePaths(id string) []string {
+	return []string{"/s/" + id, "/api/v1/public/shares/" + id}
 }
 
 func shareAccessCookieName(id string) string {
@@ -1554,6 +1591,9 @@ func getIsAdminFromContext(ctx context.Context) bool {
 }
 
 func hashPassword(password string) (string, error) {
+	if err := validateSharePassword(password); err != nil {
+		return "", err
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return "", err

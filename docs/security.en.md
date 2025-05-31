@@ -252,7 +252,7 @@ location /api/ {
 
 ### Preview and Download Auth
 
-File downloads, version previews, media previews, and external-open flows use a short-lived `HttpOnly` download-session cookie. Long-lived access tokens are not passed through URL query parameters.
+File downloads, version previews, media previews, thumbnails, and external-open flows use a short-lived `HttpOnly` download-session cookie. Long-lived access tokens are not passed through URL query parameters.
 
 The `Secure` cookie flag is enabled when the request is actually HTTPS, or when `trusted_proxy_hops > 0` and a trusted private/loopback proxy forwards `X-Forwarded-Proto=https`.
 
@@ -260,9 +260,9 @@ The `Secure` cookie flag is enabled when the request is actually HTTPS, or when 
 
 The Web UI stores the primary access and refresh session in `HttpOnly`, `SameSite=Lax` cookies. It no longer writes bearer access or refresh tokens to `localStorage`; REST API calls, uploads, refresh, and logout use same-origin cookies sent by the browser. Legacy tokens left by older versions are cleared during initialization, refresh, logout, and related auth paths.
 
-For `POST`, `PUT`, `PATCH`, and `DELETE` requests that carry browser `Origin` or `Referer` metadata, the server rejects requests whose source scheme, host, or port does not match the current request. Script clients without browser origin metadata and explicit `Authorization` API clients continue to work.
+For REST mutations and WebDAV write methods (`POST`, `PUT`, `PATCH`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `LOCK`, `UNLOCK`) that carry browser `Origin`, `Referer`, or `Sec-Fetch-Site` metadata, the server rejects requests whose source scheme, host, or port does not match the current request. It also rejects browser requests explicitly marked `cross-site` or `same-site` when they do not use an `Authorization` header. Script clients without browser origin metadata and explicit `Authorization` API clients continue to work.
 
-API clients can still use `Authorization: Bearer <access-token>` and JSON refresh tokens for scripts and automation. The server adds security headers, CSP, and `Permissions-Policy`, but public deployments still need careful origin hygiene.
+API clients can still use `Authorization: Bearer <access-token>` and JSON refresh tokens for scripts and automation. The server adds security headers, CSP, and `Permissions-Policy`; file download, version preview, thumbnail, WebDAV file, and WebDAV directory-listing responses also include `X-Content-Type-Options: nosniff` and a sandbox CSP to reduce script execution when user files are opened in the browser. Public deployments still need careful origin hygiene.
 
 For public deployments:
 
@@ -275,7 +275,7 @@ Signing out, changing a user's password, deleting the user, or disabling the use
 
 ### Public Share Passwords
 
-Password-protected public shares issue an `HttpOnly` cookie after successful password validation. Folder browsing and downloads use that cookie instead of passing passwords in URLs.
+Password-protected public shares issue an `HttpOnly` cookie after successful password validation. The cookie is scoped to the matching `/s/<id>` and `/api/v1/public/shares/<id>` paths. Folder browsing and downloads use that cookie instead of passing passwords in URLs.
 
 After clearing site data, switching browser, or changing the share password, the password must be entered again.
 

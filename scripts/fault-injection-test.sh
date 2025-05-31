@@ -59,6 +59,24 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED+=1)); }
 die()       { echo -e "${RED}ERROR:${NC} $1" >&2; exit 1; }
 
+require_safe_http_url() {
+    local value="$1"
+    local label="$2"
+
+    [[ -n "$value" ]] || die "$label must not be empty"
+    [[ "$value" != *[[:space:]]* ]] || die "$label must not contain whitespace: $value"
+    [[ "$value" =~ ^https?://[^[:space:]]+$ ]] || die "$label must be an http(s) URL: $value"
+}
+
+require_safe_pid() {
+    local value="$1"
+    local label="$2"
+
+    [[ -n "$value" ]] || return 0
+    [[ "$value" =~ ^[0-9]+$ ]] || die "$label must be a numeric PID: $value"
+    (( 10#$value > 0 )) || die "$label must be a positive PID: $value"
+}
+
 require_live_fault_target() {
     if [[ "$MNEMONAS_LIVE_FAULTS" != "1" ]]; then
         die "live fault injection is disabled. Set MNEMONAS_LIVE_FAULTS=1 and use an isolated target."
@@ -70,6 +88,13 @@ require_live_fault_target() {
     [[ -n "$NASD_BIN_EXPLICIT" ]] || missing+=("NASD_BIN")
     if [[ ${#missing[@]} -gt 0 ]]; then
         die "explicit ${missing[*]} required for live fault injection"
+    fi
+
+    require_safe_http_url "$BASE_URL" "BASE_URL"
+    require_safe_pid "$NASD_PID" "NASD_PID"
+
+    if path_has_parent_segment "$STORAGE_ROOT"; then
+        die "STORAGE_ROOT must not contain '..' path segments: $STORAGE_ROOT"
     fi
 
     if [[ "$ALLOW_REAL_STORAGE" != "1" ]]; then
@@ -88,6 +113,19 @@ require_live_fault_target() {
     if [[ ! -x "$NASD_BIN" ]]; then
         die "NASD_BIN is not executable: $NASD_BIN"
     fi
+}
+
+path_has_parent_segment() {
+    local candidate="$1"
+    local segment
+    local -a segments
+    IFS='/' read -r -a segments <<< "$candidate"
+    for segment in "${segments[@]}"; do
+        if [[ "$segment" == ".." ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 confirm_live_fault_target() {
@@ -324,7 +362,7 @@ curl() {
 
 cleanup() {
     log_info "Cleaning up..."
-    rm -rf "$TEST_DIR"
+    rm -rf -- "$TEST_DIR"
     # Restart only after this script killed the explicitly confirmed target.
     if [[ "$SERVICE_WAS_KILLED" == "1" ]] && ! curl -sf "$BASE_URL/health" > /dev/null 2>&1; then
         log_warn "Service not running, attempting restart..."

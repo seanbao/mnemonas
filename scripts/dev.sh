@@ -5,7 +5,7 @@
 #   -b, --backend: 仅启动后端 (nasd + dataplane)
 #   -f, --frontend: 仅启动前端
 #   -k, --kill: 停止所有组件
-#   -c, --creds: 显示 Web UI 初始密码文件和 WebDAV 登录凭据
+#   -c, --creds: 显示 Web UI 初始密码文件和 WebDAV 登录凭据状态
 
 set -eo pipefail
 
@@ -19,14 +19,16 @@ NC='\033[0m' # No Color
 # 项目根目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT_REAL="$(cd "$PROJECT_ROOT" && pwd -P)"
+WEB_ROOT_REAL="$PROJECT_ROOT_REAL/web"
 FRONTEND_NODE_VERSION_FILE="$PROJECT_ROOT/.nvmrc"
 
 # 日志目录
-LOG_DIR="$PROJECT_ROOT/logs"
+LOG_DIR="${MNEMONAS_DEV_LOG_DIR:-$PROJECT_ROOT/logs}"
 mkdir -p "$LOG_DIR"
 
 # PID 文件目录
-PID_DIR="$PROJECT_ROOT/.pids"
+PID_DIR="${MNEMONAS_DEV_PID_DIR:-$PROJECT_ROOT/.pids}"
 mkdir -p "$PID_DIR"
 
 log_info() {
@@ -43,6 +45,17 @@ log_error() {
 
 log_section() {
     echo -e "\n${BLUE}━━━ $1 ━━━${NC}"
+}
+
+dev_show_secrets() {
+    case "${MNEMONAS_DEV_SHOW_SECRETS:-0}" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 require_frontend_node() {
@@ -117,42 +130,113 @@ wait_for_service() {
     return 1
 }
 
+is_positive_pid() {
+    local pid=$1
+    [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 0 ]
+}
+
+process_cwd_matches() {
+    local pid=$1
+    local expected=$2
+    local cwd
+
+    if [ ! -e "/proc/$pid/cwd" ] || ! command -v readlink >/dev/null 2>&1; then
+        return 0
+    fi
+
+    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$expected" ]
+}
+
+process_args() {
+    local pid=$1
+    ps -p "$pid" -o args= 2>/dev/null || true
+}
+
+process_args_matches_kind() {
+    local kind=$1
+    local args=$2
+
+    case "$kind" in
+        nasd)
+            [[ "$args" == *"/nasd"* || "$args" == *"bin/nasd"* || "$args" == "./bin/nasd"* ]]
+            ;;
+        dataplane)
+            [[ "$args" == *"/dataplane"* || "$args" == *"bin/dataplane"* || "$args" == "./bin/dataplane"* ]]
+            ;;
+        frontend)
+            [[ "$args" == *"npm run dev"* || "$args" == *"vite"* || "$args" == *"node "* ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+process_belongs_to_dev_component() {
+    local pid=$1
+    local label=$2
+    local expected_cwd=$3
+    local kind=$4
+    local args
+
+    if ! process_cwd_matches "$pid" "$expected_cwd"; then
+        log_warn "$label PID 文件指向的进程不在预期目录，跳过: PID $pid"
+        return 1
+    fi
+
+    args="$(process_args "$pid")"
+    if [ -z "$args" ] || ! process_args_matches_kind "$kind" "$args"; then
+        log_warn "$label PID 文件指向的进程命令不匹配，跳过: PID $pid"
+        return 1
+    fi
+
+    return 0
+}
+
+stop_pid_file() {
+    local label=$1
+    local pid_file=$2
+    local expected_cwd=$3
+    local kind=$4
+    local pid=""
+
+    if [ ! -f "$pid_file" ]; then
+        return 0
+    fi
+
+    IFS= read -r pid < "$pid_file" || pid=""
+    if ! is_positive_pid "$pid"; then
+        log_warn "$label PID 文件内容无效，已忽略: $pid_file"
+        rm -f -- "$pid_file"
+        return 0
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        rm -f -- "$pid_file"
+        return 0
+    fi
+
+    if process_belongs_to_dev_component "$pid" "$label" "$expected_cwd" "$kind"; then
+        kill "$pid" 2>/dev/null || true
+        log_info "已停止 $label (PID: $pid)"
+    fi
+
+    rm -f -- "$pid_file"
+}
+
 # 停止所有组件
 kill_all() {
     log_section "停止所有组件"
     
     # 停止 nasd
-    if [ -f "$PID_DIR/nasd.pid" ]; then
-        local pid
-        pid=$(cat "$PID_DIR/nasd.pid")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            log_info "已停止 nasd (PID: $pid)"
-        fi
-        rm -f "$PID_DIR/nasd.pid"
-    fi
+    stop_pid_file "nasd" "$PID_DIR/nasd.pid" "$PROJECT_ROOT_REAL" "nasd"
     
     # 停止 dataplane
-    if [ -f "$PID_DIR/dataplane.pid" ]; then
-        local pid
-        pid=$(cat "$PID_DIR/dataplane.pid")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            log_info "已停止 dataplane (PID: $pid)"
-        fi
-        rm -f "$PID_DIR/dataplane.pid"
-    fi
+    stop_pid_file "dataplane" "$PID_DIR/dataplane.pid" "$PROJECT_ROOT_REAL" "dataplane"
     
     # 停止前端开发服务器
-    if [ -f "$PID_DIR/frontend.pid" ]; then
-        local pid
-        pid=$(cat "$PID_DIR/frontend.pid")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            log_info "已停止前端开发服务器 (PID: $pid)"
-        fi
-        rm -f "$PID_DIR/frontend.pid"
-    fi
+    stop_pid_file "前端开发服务器" "$PID_DIR/frontend.pid" "$WEB_ROOT_REAL" "frontend"
     
     if [ "${MNEMONAS_DEV_KILL_PORTS:-0}" = "1" ]; then
         # 兜底: 按端口杀进程 (9090=gRPC, 9091=HTTP)。默认关闭，避免误杀用户自己的服务。
@@ -422,7 +506,7 @@ storage_root_from_config() {
     echo "$storage_root"
 }
 
-# 显示 Web UI 初始密码文件和 WebDAV 凭据
+# 显示 Web UI 初始密码文件和 WebDAV 凭据状态
 show_credentials() {
     local config_file="$HOME/.mnemonas/config.toml"
     local storage_root
@@ -446,6 +530,7 @@ show_credentials() {
 
     local username="admin"
     local configured_password=""
+    local password_source=""
     if [ -f "$config_file" ]; then
         local configured_username
         configured_username=$(read_config_value "$config_file" webdav username)
@@ -454,12 +539,18 @@ show_credentials() {
         fi
 
         configured_password=$(read_config_value "$config_file" webdav password)
+        if [ -n "$configured_password" ]; then
+            password_source="$config_file"
+        fi
     fi
 
     local password="$configured_password"
     if [ -z "$password" ]; then
         if [ -f "$secrets_file" ]; then
             password=$(grep -o '"webdav_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$secrets_file" | sed 's/.*: *"//' | sed 's/"$//' || true)
+            if [ -n "$password" ]; then
+                password_source="$secrets_file"
+            fi
         fi
     fi
 
@@ -473,8 +564,12 @@ show_credentials() {
     fi
 
     echo -e "   用户名: ${GREEN}${username}${NC}"
-    echo -e "   密码:   ${GREEN}${password}${NC}"
-    echo -e "   存储于: $secrets_file"
+    if dev_show_secrets; then
+        echo -e "   密码:   ${GREEN}${password}${NC}"
+    else
+        echo "   密码:   已隐藏；如确需在本机终端显示，设置 MNEMONAS_DEV_SHOW_SECRETS=1 后重新运行 ./scripts/dev.sh --creds"
+    fi
+    echo -e "   存储于: ${password_source:-$secrets_file}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -555,7 +650,7 @@ main() {
             echo "选项:"
             echo "  (无)        启动所有组件 (默认)"
             echo "  -b, --backend   仅启动后端 (nasd + dataplane)"
-            echo "  -c, --creds     显示 Web UI 初始密码文件和 WebDAV 登录凭据"
+            echo "  -c, --creds     显示 Web UI 初始密码文件和 WebDAV 登录凭据状态"
             echo "  -f, --frontend  仅启动前端开发服务器"
             echo "  -s, --status    查看服务状态"
             echo "  -k, --kill      停止所有组件"
@@ -563,6 +658,7 @@ main() {
             echo ""
             echo "环境变量:"
             echo "  MNEMONAS_DEV_KILL_PORTS=1  允许 --kill 额外按端口清理占用 8080/9090/9091/5173 的进程"
+            echo "  MNEMONAS_DEV_SHOW_SECRETS=1  允许 --creds 在本机终端显示 WebDAV 明文密码"
             ;;
         *)
             log_error "未知选项: $1"

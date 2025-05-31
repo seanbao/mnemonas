@@ -492,6 +492,57 @@ func TestStore_PutDoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
 	}
 }
 
+func TestStore_PutRejectsShardSymlinkInsertedAfterValidationInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewStore(root, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	hash := "bbcdef1234567890abcdef1234567890"
+	objectPath := store.layout.FullPath(store.root, hash)
+	shardDir := filepath.Dir(objectPath)
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(shardDir) error: %v", err)
+	}
+	realDir := filepath.Join(filepath.Dir(shardDir), "real-shard")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(realDir) error: %v", err)
+	}
+	backupDir := shardDir + "-backup"
+
+	originalHook := afterValidateCASPath
+	var hookErr error
+	swapped := false
+	afterValidateCASPath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(shardDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(filepath.Base(realDir), shardDir)
+	}
+	defer func() {
+		afterValidateCASPath = originalHook
+	}()
+
+	err = store.Put(hash, []byte("payload"))
+	if hookErr != nil {
+		t.Fatalf("afterValidateCASPath hook error: %v", hookErr)
+	}
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("Put() error = %v, want errCASPathSymlink", err)
+	}
+	if entries, readErr := os.ReadDir(realDir); readErr != nil {
+		t.Fatalf("ReadDir(realDir) error: %v", readErr)
+	} else if len(entries) != 0 {
+		t.Fatalf("expected no temp/object files in symlink target, got %v", entries)
+	}
+}
+
 func TestStore_PutReturnsDirectoryTreeSyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir, nil)
@@ -838,7 +889,7 @@ func TestStore_ReadOperationsRejectObjectSymlinkInsertedAfterValidation(t *testi
 					hookErr = err
 					return
 				}
-				hookErr = os.Symlink(linkedTarget, objectPath)
+				hookErr = os.Symlink(filepath.Base(linkedTarget), objectPath)
 			}
 			defer func() {
 				afterValidateCASPath = originalHook

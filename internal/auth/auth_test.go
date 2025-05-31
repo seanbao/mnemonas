@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,21 +65,21 @@ func TestShouldPrintInitialPasswordToTerminal(t *testing.T) {
 	}
 }
 
-func TestWriteAuthFileAtomically_ReturnsDirectorySyncError(t *testing.T) {
+func TestWriteRegisteredAuthFileAtomically_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	usersPath := filepath.Join(tmpDir, "users.json")
 
-	originalSyncAuthFileDir := syncAuthFileDir
-	syncAuthFileDir = func(dir string) error {
+	originalSyncAuthRootDir := syncAuthRootDir
+	syncAuthRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncAuthFileDir = originalSyncAuthFileDir
+		syncAuthRootDir = originalSyncAuthRootDir
 	}()
 
-	err := writeAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users")
+	err := writeRegisteredAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users")
 	if err == nil {
-		t.Fatal("expected writeAuthFileAtomically() to fail when directory sync fails")
+		t.Fatal("expected writeRegisteredAuthFileAtomically() to fail when directory sync fails")
 	}
 	if !strings.Contains(err.Error(), "failed to sync users directory") {
 		t.Fatalf("expected directory sync error, got %v", err)
@@ -100,7 +101,7 @@ func TestWriteAuthFileAtomically_ReturnsDirectorySyncError(t *testing.T) {
 	}
 }
 
-func TestWriteAuthFileAtomically_ReturnsDirectoryTreeSyncError(t *testing.T) {
+func TestWriteRegisteredAuthFileAtomically_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	usersPath := filepath.Join(tmpDir, "nested", "state", "users.json")
 
@@ -112,9 +113,9 @@ func TestWriteAuthFileAtomically_ReturnsDirectoryTreeSyncError(t *testing.T) {
 		syncAuthFileDir = originalSyncAuthFileDir
 	}()
 
-	err := writeAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users")
+	err := writeRegisteredAuthFileAtomically(usersPath, []byte("[]"), errUserStoreSymlink, ".users-*.tmp", "users")
 	if err == nil {
-		t.Fatal("expected writeAuthFileAtomically() to fail when directory tree sync fails")
+		t.Fatal("expected writeRegisteredAuthFileAtomically() to fail when directory tree sync fails")
 	}
 	if !strings.Contains(err.Error(), "failed to sync users directory tree") {
 		t.Fatalf("expected directory tree sync error, got %v", err)
@@ -309,7 +310,7 @@ func TestNewUserStore_LoadRejectsUsersSymlinkInsertedAfterValidation(t *testing.
 			hookErr = err
 			return
 		}
-		hookErr = os.Symlink(linkedTarget, usersPath)
+		hookErr = os.Symlink(filepath.Base(linkedTarget), usersPath)
 	}
 	t.Cleanup(func() {
 		afterValidateAuthFilePath = originalHook
@@ -436,14 +437,36 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("long password", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users3-long-password.json"))
+		_, err := store.Create("longpass", strings.Repeat("a", 73), "", RoleUser)
+		if err != ErrPasswordTooLong {
+			t.Errorf("expected ErrPasswordTooLong, got %v", err)
+		}
+	})
+
 	t.Run("invalid username", func(t *testing.T) {
 		store, _, _ := NewUserStore(filepath.Join(dir, "users3-invalid-username.json"))
 		_, err := store.Create("../escape", "password123", "", RoleUser)
 		if err != ErrInvalidUsername {
 			t.Fatalf("expected ErrInvalidUsername, got %v", err)
 		}
+		_, err = store.Create(strings.Repeat("a", 256), "password123", "", RoleUser)
+		if err != ErrInvalidUsername {
+			t.Fatalf("expected ErrInvalidUsername for overlong username, got %v", err)
+		}
 		if _, lookupErr := store.GetByUsername("../escape"); lookupErr != ErrUserNotFound {
 			t.Fatalf("expected invalid username create to leave no persisted user, got %v", lookupErr)
+		}
+	})
+
+	t.Run("invalid role", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users3-invalid-role.json"))
+		if _, err := store.Create("badrole", "password123", "", Role("owner")); !errors.Is(err, ErrInvalidRole) {
+			t.Fatalf("expected ErrInvalidRole from create, got %v", err)
+		}
+		if _, lookupErr := store.GetByUsername("badrole"); !errors.Is(lookupErr, ErrUserNotFound) {
+			t.Fatalf("expected invalid role create to leave no persisted user, got %v", lookupErr)
 		}
 	})
 
@@ -532,6 +555,28 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid stored role", func(t *testing.T) {
+		usersPath := filepath.Join(dir, "users-invalid-role.json")
+		content := `[
+		  {
+		    "id": "u-invalid-role",
+		    "username": "broken-role",
+		    "password_hash": "$2a$10$dummy",
+		    "role": "owner",
+		    "created_at": "2024-01-01T00:00:00Z",
+		    "updated_at": "2024-01-01T00:00:00Z",
+		    "home_dir": "/broken-role"
+		  }
+		]`
+		if err := os.WriteFile(usersPath, []byte(content), 0600); err != nil {
+			t.Fatalf("WriteFile(users-invalid-role) error: %v", err)
+		}
+
+		if _, _, err := NewUserStore(usersPath); !errors.Is(err, ErrInvalidRole) {
+			t.Fatalf("expected ErrInvalidRole from load, got %v", err)
+		}
+	})
+
 	t.Run("change password", func(t *testing.T) {
 		store, _, _ := NewUserStore(filepath.Join(dir, "users4.json"))
 		user, _ := store.Create("changepw", "oldpassword123", "", RoleUser)
@@ -587,12 +632,60 @@ func TestUserStore(t *testing.T) {
 			t.Fatalf("expected invalid home_dir error, got %v", err)
 		}
 
+		user.HomeDir = "/homefix/docs\x00secret"
+		if err := store.Update(user); !errors.Is(err, errInvalidUserHomeDir) {
+			t.Fatalf("expected invalid NUL home_dir error, got %v", err)
+		}
+
 		fresh, err = store.GetByID(user.ID)
 		if err != nil {
 			t.Fatalf("failed to reload user after rejected update: %v", err)
 		}
 		if fresh.HomeDir != "/homefix/docs" {
 			t.Fatalf("expected stored home_dir to remain /homefix/docs, got %s", fresh.HomeDir)
+		}
+	})
+
+	t.Run("update validates username and preserves unique index", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users5-username.json"))
+		user, _ := store.Create("namefix", "password123", "", RoleUser)
+		other, _ := store.Create("othername", "password123", "", RoleUser)
+
+		user.Username = "renamed"
+		if err := store.Update(user); err != nil {
+			t.Fatalf("expected username update to succeed, got %v", err)
+		}
+		if _, err := store.GetByUsername("renamed"); err != nil {
+			t.Fatalf("expected renamed username lookup to succeed: %v", err)
+		}
+		if _, err := store.GetByUsername("namefix"); !errors.Is(err, ErrUserNotFound) {
+			t.Fatalf("expected old username lookup to fail, got %v", err)
+		}
+
+		user.Username = "bad/name"
+		if err := store.Update(user); !errors.Is(err, ErrInvalidUsername) {
+			t.Fatalf("expected invalid username error, got %v", err)
+		}
+
+		user.Username = other.Username
+		if err := store.Update(user); !errors.Is(err, ErrUserExists) {
+			t.Fatalf("expected duplicate username error, got %v", err)
+		}
+		user.Username = "renamed"
+		user.Role = Role("owner")
+		if err := store.Update(user); !errors.Is(err, ErrInvalidRole) {
+			t.Fatalf("expected invalid role error, got %v", err)
+		}
+
+		fresh, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("failed to reload user after rejected username updates: %v", err)
+		}
+		if fresh.Username != "renamed" {
+			t.Fatalf("expected stored username to remain renamed, got %s", fresh.Username)
+		}
+		if fresh.Role != RoleUser {
+			t.Fatalf("expected stored role to remain user, got %s", fresh.Role)
 		}
 	})
 
@@ -1955,6 +2048,29 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("require auth - access session cookie accepts valid duplicate after stale value", func(t *testing.T) {
+		called := false
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			if got := GetAccessTokenFromContext(r.Context()); got != userToken.AccessToken {
+				t.Fatalf("access token from context = %q, want valid duplicate cookie token", got)
+			}
+		}))
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("Cookie", AccessSessionCookieName+"=stale; "+AccessSessionCookieName+"="+userToken.AccessToken)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler was not called")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("require auth - no token", func(t *testing.T) {
 		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.Error("handler should not be called")
@@ -2067,6 +2183,29 @@ func TestMiddleware(t *testing.T) {
 
 		req := httptest.NewRequest("GET", "/api/v1/download/test.txt", nil)
 		req.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: userToken.AccessToken})
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler was not called")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("require auth - download session cookie accepts valid duplicate after stale value", func(t *testing.T) {
+		called := false
+		handler := mw.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			if got := GetAccessTokenFromContext(r.Context()); got != userToken.AccessToken {
+				t.Fatalf("access token from context = %q, want valid duplicate download cookie token", got)
+			}
+		}))
+
+		req := httptest.NewRequest("GET", "/api/v1/download/test.txt", nil)
+		req.Header.Set("Cookie", DownloadSessionCookieName+"=stale; "+DownloadSessionCookieName+"="+userToken.AccessToken)
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)
@@ -2937,6 +3076,78 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("cookie session refresh accepts valid duplicate after stale refresh cookie", func(t *testing.T) {
+		body := `{"username":"handleruser","password":"password123"}`
+		loginReq := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+		loginReq.Header.Set(sessionModeHeader, sessionModeCookie)
+		loginRec := httptest.NewRecorder()
+		h.HandleLogin(loginRec, loginReq)
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login status = %d: %s", loginRec.Code, loginRec.Body.String())
+		}
+
+		var refreshCookie *http.Cookie
+		for _, cookie := range loginRec.Result().Cookies() {
+			if cookie.Name == RefreshSessionCookieName {
+				refreshCookie = cookie
+				break
+			}
+		}
+		if refreshCookie == nil {
+			t.Fatal("login did not set refresh cookie")
+		}
+
+		refreshReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+		refreshReq.Header.Set("Cookie", RefreshSessionCookieName+"=stale; "+RefreshSessionCookieName+"="+refreshCookie.Value)
+		refreshRec := httptest.NewRecorder()
+		h.HandleRefresh(refreshRec, refreshReq)
+
+		if refreshRec.Code != http.StatusOK {
+			t.Fatalf("refresh status = %d: %s", refreshRec.Code, refreshRec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(refreshRec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal refresh envelope error: %v", err)
+		}
+		if !envelope.Success {
+			t.Fatalf("expected success response, got %s", refreshRec.Body.String())
+		}
+	})
+
+	t.Run("refresh without token clears stale session cookies", func(t *testing.T) {
+		refreshReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+		refreshReq.AddCookie(&http.Cookie{Name: AccessSessionCookieName, Value: "stale-access"})
+		refreshReq.AddCookie(&http.Cookie{Name: DownloadSessionCookieName, Value: "stale-download"})
+		refreshRec := httptest.NewRecorder()
+		h.HandleRefresh(refreshRec, refreshReq)
+
+		if refreshRec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", refreshRec.Code, refreshRec.Body.String())
+		}
+
+		wantPaths := map[string]string{
+			AccessSessionCookieName:   sessionCookiePath,
+			RefreshSessionCookieName:  refreshSessionCookiePath,
+			DownloadSessionCookieName: "/api/v1",
+		}
+		for _, cookie := range refreshRec.Result().Cookies() {
+			wantPath, ok := wantPaths[cookie.Name]
+			if !ok {
+				t.Fatalf("unexpected clearing cookie %q", cookie.Name)
+			}
+			if cookie.MaxAge != -1 {
+				t.Fatalf("cookie %s MaxAge = %d, want -1", cookie.Name, cookie.MaxAge)
+			}
+			if cookie.Path != wantPath {
+				t.Fatalf("cookie %s Path = %q, want %q", cookie.Name, cookie.Path, wantPath)
+			}
+			delete(wantPaths, cookie.Name)
+		}
+		if len(wantPaths) != 0 {
+			t.Fatalf("missing clearing cookies: %+v", wantPaths)
+		}
+	})
+
 	t.Run("refresh token returns warning when revocation persistence fsync fails", func(t *testing.T) {
 		originalPersistTokenRevocations := persistTokenRevocations
 		persistTokenRevocations = func(tm *TokenManager) error {
@@ -3316,6 +3527,31 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if _, err := store.GetByUsername("../escape"); err == nil {
 			t.Fatal("expected invalid username create to be rejected before persistence")
+		}
+	})
+
+	t.Run("admin create user rejects password above bcrypt limit", func(t *testing.T) {
+		body := fmt.Sprintf(`{"username":"toolongpass","password":%q,"email":"new@test.com","role":"user"}`, strings.Repeat("a", 73))
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		ctx := context.WithValue(req.Context(), ContextKeyUser, admin)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create user envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "PASSWORD_TOO_LONG" {
+			t.Fatalf("expected PASSWORD_TOO_LONG error, got %+v", envelope.Error)
+		}
+		if _, err := store.GetByUsername("toolongpass"); err == nil {
+			t.Fatal("expected long password create to be rejected before persistence")
 		}
 	})
 

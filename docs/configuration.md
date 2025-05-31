@@ -124,7 +124,7 @@ time_format = "RFC3339"
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
 | `enabled` | bool | `true` | 是否启用 WebDAV 服务 |
-| `prefix` | string | `"/dav"` | WebDAV 挂载前缀 |
+| `prefix` | string | `"/dav"` | WebDAV 挂载前缀；会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符；启用时不能使用 `/`、`/api`、`/s`、`/health` 或这些保留路由的子路径 |
 | `read_only` | bool | `false` | 是否禁止写入类 WebDAV 方法 |
 | `auth_type` | string | `"basic"` | 认证方式，支持 `basic` 和 `none` |
 | `username` | string | `""` | `basic` 认证用户名，留空时运行态默认使用 `admin` |
@@ -135,6 +135,7 @@ time_format = "RFC3339"
 - 通过设置 API 更新 `webdav` 配置后，运行中的 WebDAV handler 会立即切换到新前缀、读写模式和认证配置
 - `password = ""` 且 `auth_type = "basic"` 时，运行态继续使用已有自动生成密码，不要求重启
 - 认证启用时，`username` 不应复用现有普通用户或 guest 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
+- WebDAV 在主 HTTP handler 中优先于 API/前端路由匹配，因此启用时前缀不能覆盖应用保留路由
 
 **示例：**
 
@@ -158,7 +159,7 @@ password = ""
 
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
-| `host` | string | `"0.0.0.0"` | 监听地址（`0.0.0.0` 监听所有网络接口，`127.0.0.1` 仅本地） |
+| `host` | string | `"0.0.0.0"` | 监听地址；必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符（`0.0.0.0` 监听所有网络接口，`127.0.0.1` 或 `::1` 仅本地） |
 | `port` | int | `8080` | HTTP 端口（1-65535） |
 | `read_timeout` | duration | `"30s"` | 读取请求的超时时间 |
 | `write_timeout` | duration | `"60s"` | 写入响应的超时时间 |
@@ -177,6 +178,8 @@ trusted_proxy_hops = 2 # app 前面有两层反向代理时显式设置
 ```
 
 默认 `trusted_proxy_hops = 0`，直接暴露服务时不会采信客户端可伪造的 `X-Forwarded-*` 头。若 MnemoNAS 位于受信反向代理后方，一层代理设置为 `1`；多层代理必须设置为代理总层数，才能从 `X-Forwarded-For` 中选到真实客户端地址。
+
+`server.host` 只配置监听主机，不包含端口；端口必须写在 `server.port`。IPv6 可写作 `::1` 或 `[::1]`，启动监听时会自动转换为 `net.JoinHostPort` 需要的括号形式。`*` 与空字符串等同于通配监听。
 
 ---
 
@@ -305,7 +308,7 @@ max_versioned_size = 104857600
 
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
-| `grpc_address` | string | `"127.0.0.1:9090"` | Rust 数据面 gRPC 地址 |
+| `grpc_address` | string | `"127.0.0.1:9090"` | Rust 数据面 gRPC 地址；必须是 `host:port`，端口 1-65535，不能包含空白或控制字符 |
 | `timeout` | duration | `"30s"` | 数据面连接与重连的总超时预算 |
 | `max_retries` | int | `3` | 数据面连接建立/重连时的最大重试次数 |
 
@@ -313,7 +316,7 @@ max_versioned_size = 104857600
 
 ```toml
 [dataplane]
-grpc_address = "localhost:9090"
+grpc_address = "127.0.0.1:9090"
 timeout = "60s"       # 大文件操作可能需要更长超时
 max_retries = 5
 ```
@@ -326,7 +329,7 @@ max_retries = 5
 
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
-| `min_chunk_size` | uint32 | `262144` (256KB) | 最小块大小（字节） |
+| `min_chunk_size` | uint32 | `262144` (256KB) | 最小块大小（字节），下限 `65536` (64KB) |
 | `avg_chunk_size` | uint32 | `1048576` (1MB) | 平均块大小（字节） |
 | `max_chunk_size` | uint32 | `4194304` (4MB) | 最大块大小（字节），上限 `67108864` (64MB) |
 
@@ -340,7 +343,7 @@ max_retries = 5
 
 **约束条件：**
 
-- `min_chunk_size < avg_chunk_size < max_chunk_size`
+- `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size`
 - `max_chunk_size <= 67108864` (64MB)，避免 dataplane 为流式分块预留过大的内存缓冲
 - 建议：`min = avg / 4`，`max = avg * 4`
 
@@ -364,7 +367,7 @@ max_chunk_size = 1048576  # 1MB
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
 | `enabled` | bool | `true` | 是否启用 WebDAV 服务 |
-| `prefix` | string | `"/dav"` | WebDAV URL 前缀 |
+| `prefix` | string | `"/dav"` | WebDAV URL 前缀；会归一化为以 `/` 开头的路径，不能包含反斜杠、`?`、`#` 或控制字符；启用时不能覆盖 `/`、`/api`、`/s`、`/health` |
 | `read_only` | bool | `false` | 是否为只读模式 |
 | `auth_type` | string | `"basic"` | 认证类型：`none`（无认证）、`basic`（Basic Auth） |
 | `username` | string | `""` | Basic Auth 用户名 |
@@ -407,7 +410,7 @@ password = "very-strong-password-here"
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
 | `enabled` | bool | `true` | 是否启用 JWT 认证 |
-| `jwt_secret` | string | 自动生成 | JWT 签名密钥 |
+| `jwt_secret` | string | 自动生成 | JWT 签名密钥；留空时使用 `secrets.json` 中的持久化自动生成密钥，显式设置时至少 32 字节 |
 | `access_token_ttl` | duration | `15m` | Access Token 有效期 |
 | `refresh_token_ttl` | duration | `168h` | Refresh Token 有效期 |
 | `users_file` | string | `~/.mnemonas/.mnemonas/users.json` | 用户数据文件路径 |
@@ -476,9 +479,9 @@ base_url = "https://nas.example.com"
 | `cooldown_period` | duration | `4h` | 告警冷却时间 |
 | `webhook_url` | string | `""` | Webhook URL；非空时必须是完整的 `http` 或 `https` URL |
 | `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query |
-| `webhook_headers` | string[] | `[]` | 自定义 Header（"Key:Value"） |
+| `webhook_headers` | string[] | `[]` | 自定义 Header（`"Key: Value"`）；Header 名称必须是合法 HTTP token，值不能包含换行或控制字符 |
 
-健康页和诊断导出会显示告警是否启用、运行态是否可用、最近一次检查级别和是否配置了 Webhook；不会暴露 `webhook_url` 或 `webhook_headers`。
+健康页和诊断导出会显示告警是否启用、运行态是否可用、最近一次检查级别和是否配置了 Webhook；不会暴露 `webhook_url` 或 `webhook_headers`。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload。
 
 **示例：**
 
@@ -562,8 +565,8 @@ MNEMONAS_WEBDAV_ENABLED=false
 
 - `port` 必须在 1-65535 范围内
 - `storage.root` 不能为空，且不能是文件系统根目录 `/`
-- `grpc_address` 不能为空
-- CDC 参数必须满足 `min < avg < max`
+- `grpc_address` 必须是合法 `host:port` 地址，端口范围 1-65535，且不能包含空白或控制字符
+- CDC 参数必须满足 `65536 <= min < avg < max <= 67108864`
 
 验证失败时会输出详细错误信息并拒绝启动。
 

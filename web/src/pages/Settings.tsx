@@ -35,13 +35,14 @@ import {
   AlertCircle,
   Star,
 } from 'lucide-react'
-import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, formatWebDAVUrl, formatBytes } from '@/lib/utils'
+import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useUser } from '@/stores/auth'
 import { SettingsError, getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
 
+const MIN_CDC_CHUNK_SIZE_BYTES = 64 * 1024
 const MAX_CDC_CHUNK_SIZE_BYTES = 64 * 1024 * 1024
 
 // Settings section component
@@ -200,8 +201,46 @@ function normalizeSettingsTab(value: string | null): SettingsTabKey {
   return 'general'
 }
 
+function hasControlChar(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function hasInvalidHTTPHeaderValueChar(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code === 0x7f || (code <= 0x1f && code !== 0x09)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function normalizeListenHost(host: string): string {
+  const trimmed = host.trim()
+  if (trimmed === '*') {
+    return ''
+  }
+  if (
+    trimmed.startsWith('[')
+    && trimmed.endsWith(']')
+    && trimmed.indexOf('[') === 0
+    && trimmed.lastIndexOf(']') === trimmed.length - 1
+  ) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed
+}
+
 function listensBeyondLoopback(host: string): boolean {
-  const normalized = host.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+  const normalized = normalizeListenHost(host).toLowerCase()
   if (normalized === '' || normalized === '*' || normalized === '0.0.0.0' || normalized === '::') {
     return true
   }
@@ -216,6 +255,9 @@ function isValidOptionalHTTPURL(value: string): boolean {
   if (!trimmed) {
     return true
   }
+  if (/\s/.test(trimmed) || hasControlChar(trimmed)) {
+    return false
+  }
 
   try {
     const parsed = new URL(trimmed)
@@ -223,6 +265,68 @@ function isValidOptionalHTTPURL(value: string): boolean {
   } catch {
     return false
   }
+}
+
+function isValidTCPHost(host: string): boolean {
+  const normalized = host.trim().replace(/\.$/, '')
+  if (!normalized || /[[\]\s]/.test(normalized) || hasControlChar(normalized) || normalized.length > 253) {
+    return false
+  }
+  if (normalized.includes(':')) {
+    try {
+      new URL(`http://[${normalized}]/`)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  return normalized.split('.').every((label) => (
+    label.length > 0
+    && label.length <= 63
+    && !label.startsWith('-')
+    && !label.endsWith('-')
+    && /^[A-Za-z0-9-]+$/.test(label)
+  ))
+}
+
+function isValidListenHost(host: string): boolean {
+  const trimmed = host.trim()
+  if (/\s/.test(trimmed) || hasControlChar(trimmed)) {
+    return false
+  }
+  const normalized = normalizeListenHost(trimmed)
+  return normalized === '' || isValidTCPHost(normalized)
+}
+
+function isValidTCPAddress(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed || /\s/.test(trimmed) || hasControlChar(trimmed)) {
+    return false
+  }
+
+  const ipv6Match = trimmed.match(/^\[([^\]]+)\]:(\d+)$/)
+  const hostPortMatch = ipv6Match ?? trimmed.match(/^([^:]+):(\d+)$/)
+  if (!hostPortMatch) {
+    return false
+  }
+
+  const host = hostPortMatch[1]
+  const port = Number(hostPortMatch[2])
+  return isValidTCPHost(host) && Number.isInteger(port) && port >= 1 && port <= 65535
+}
+
+const httpHeaderNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+function isValidWebhookHeaderLine(header: string): boolean {
+  const separator = header.indexOf(':')
+  if (separator <= 0 || separator === header.length - 1) {
+    return false
+  }
+
+  const name = header.slice(0, separator).trim()
+  const value = header.slice(separator + 1).trim()
+  return httpHeaderNamePattern.test(name) && value.length > 0 && !hasInvalidHTTPHeaderValueChar(value)
 }
 
 // Setting row component
@@ -466,6 +570,14 @@ export function SettingsPage() {
   }, [draftSettings, isDirty, mapServerSettings, savedSettingsOverride, settingsData])
   const webdavNoAuthSelected = settings.webdavEnabled && settings.webdavAuthType === 'none'
   const serverBeyondLoopback = listensBeyondLoopback(settings.serverHost)
+  const normalizedWebDAVPrefixDraft = normalizeWebDAVPrefix(settings.webdavPrefix)
+  const webDAVPrefixHasInvalidCharacters = !isValidWebDAVPrefix(normalizedWebDAVPrefixDraft)
+  const webDAVPrefixUsesReservedRoute = settings.webdavEnabled && webDAVPrefixOverlapsReservedRoute(normalizedWebDAVPrefixDraft)
+  const webDAVPrefixErrorMessage = webDAVPrefixHasInvalidCharacters
+    ? '前缀只能是 URL 路径，不能包含反斜杠、?、# 或控制字符'
+    : webDAVPrefixUsesReservedRoute
+      ? '前缀不能是 /、/api、/s、/health 或它们的子路径'
+      : undefined
 
   const updateDirtySettings = (updater: (prev: typeof draftSettings) => typeof draftSettings) => {
     setIsDirty(true)
@@ -556,6 +668,7 @@ export function SettingsPage() {
     let maxChunkBytes: number
     const trimmedPort = settings.serverPort.trim()
     const parsedPort = Number(trimmedPort)
+    const trimmedServerHost = settings.serverHost.trim()
     const trimmedReadTimeout = settings.serverReadTimeout.trim()
     const trimmedWriteTimeout = settings.serverWriteTimeout.trim()
     const trimmedIdleTimeout = settings.serverIdleTimeout.trim()
@@ -565,6 +678,7 @@ export function SettingsPage() {
     const parsedMaxVersions = Number(trimmedMaxVersions)
     const trimmedTrashRetentionDays = settings.trashRetentionDays.trim()
     const parsedTrashRetentionDays = Number(trimmedTrashRetentionDays)
+    const trimmedDataplaneGrpcAddress = settings.dataplaneGrpcAddress.trim()
     const trimmedDataplaneTimeout = settings.dataplaneTimeout.trim()
     const trimmedMaxRetries = settings.dataplaneMaxRetries.trim()
     const parsedMaxRetries = Number(trimmedMaxRetries)
@@ -616,6 +730,15 @@ export function SettingsPage() {
       return
     }
 
+    if (minChunkBytes < MIN_CDC_CHUNK_SIZE_BYTES) {
+      addToast({
+        title: 'CDC 分块参数无效',
+        description: '最小块大小不能小于 64 KB',
+        color: 'danger',
+      })
+      return
+    }
+
     if (minChunkBytes >= avgChunkBytes || avgChunkBytes >= maxChunkBytes) {
       addToast({
         title: 'CDC 分块参数无效',
@@ -638,6 +761,15 @@ export function SettingsPage() {
       addToast({
         title: '端口格式无效',
         description: '端口必须是 1 到 65535 之间的整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isValidListenHost(trimmedServerHost)) {
+      addToast({
+        title: '监听地址格式无效',
+        description: '监听地址必须为空、*、合法主机名、IPv4 或 IPv6，且不能包含端口、空白或控制字符',
         color: 'danger',
       })
       return
@@ -692,6 +824,15 @@ export function SettingsPage() {
       addToast({
         title: '数据面超时格式无效',
         description: '连接超时不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isValidTCPAddress(trimmedDataplaneGrpcAddress)) {
+      addToast({
+        title: '数据面地址格式无效',
+        description: 'gRPC 地址必须是合法的 host:port，端口为 1 到 65535，且不能包含空白或控制字符',
         color: 'danger',
       })
       return
@@ -787,21 +928,38 @@ export function SettingsPage() {
     return
   }
 
-	for (const header of alertsWebhookHeaders) {
-		const separator = header.indexOf(':')
-		if (separator <= 0 || separator === header.length - 1) {
-			addToast({
-				title: 'Webhook Header 格式无效',
-				description: '每行必须使用 Key:Value 格式',
-				color: 'danger',
-			})
-			return
-		}
-	}
+    for (const header of alertsWebhookHeaders) {
+      if (!isValidWebhookHeaderLine(header)) {
+        addToast({
+          title: 'Webhook Header 格式无效',
+          description: '每行必须使用合法的 HTTP Header 名称和值',
+          color: 'danger',
+        })
+        return
+      }
+    }
+
+    const normalizedWebDAVPrefix = normalizeWebDAVPrefix(settings.webdavPrefix)
+    if (!isValidWebDAVPrefix(normalizedWebDAVPrefix)) {
+      addToast({
+        title: 'WebDAV 前缀格式无效',
+        description: 'WebDAV 前缀只能是 URL 路径，不能包含反斜杠、?、# 或控制字符',
+        color: 'danger',
+      })
+      return
+    }
+    if (settings.webdavEnabled && webDAVPrefixOverlapsReservedRoute(normalizedWebDAVPrefix)) {
+      addToast({
+        title: 'WebDAV 前缀不可用',
+        description: 'WebDAV 前缀不能是 /、/api、/s、/health 或它们的子路径',
+        color: 'danger',
+      })
+      return
+    }
 
     const req: UpdateSettingsRequest = {
       server: {
-        host: settings.serverHost,
+        host: trimmedServerHost,
         port: parsedPort,
         read_timeout: trimmedReadTimeout,
         write_timeout: trimmedWriteTimeout,
@@ -832,7 +990,7 @@ export function SettingsPage() {
         max_size: trashMaxSizeBytes,
       },
       dataplane: {
-        grpc_address: settings.dataplaneGrpcAddress,
+        grpc_address: trimmedDataplaneGrpcAddress,
         timeout: trimmedDataplaneTimeout,
         max_retries: parsedMaxRetries,
       },
@@ -861,7 +1019,7 @@ export function SettingsPage() {
       },
       webdav: {
         enabled: settings.webdavEnabled,
-        prefix: normalizeWebDAVPrefix(settings.webdavPrefix),
+        prefix: normalizedWebDAVPrefix,
         read_only: settings.webdavReadOnly,
         auth_type: settings.webdavAuthType,
         username: settings.webdavUsername,
@@ -1547,6 +1705,8 @@ export function SettingsPage() {
                       value={settings.webdavPrefix}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPrefix: v }))}
                       className="w-32"
+                      isInvalid={settings.webdavEnabled && Boolean(webDAVPrefixErrorMessage)}
+                      errorMessage={settings.webdavEnabled ? webDAVPrefixErrorMessage : undefined}
                       isDisabled={!settings.webdavEnabled}
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -1671,7 +1831,7 @@ export function SettingsPage() {
             <div className="space-y-6 mt-6">
               <SettingsSection
                 title="CDC 分块参数"
-                description="配置内容定义分块算法；保存后需重启数据面服务，且仅影响后续新写入数据"
+                description="配置 dataplane 文件分块 API；保存后需重启数据面服务"
                 icon={Zap}
               >
                 <div className="space-y-4">
@@ -1683,9 +1843,8 @@ export function SettingsPage() {
                       <div>
                         <div className="text-sm font-medium text-foreground">关于 CDC 分块</div>
                         <div className="text-xs text-default-500 mt-1 leading-relaxed">
-                          内容定义分块（CDC）将文件按内容边界切分，实现高效去重。
-                          较小的块大小可提高去重率，但会增加元数据开销；
-                          较大的块大小则相反。建议保持默认值。
+                          dataplane 文件 API 会按内容边界切分文件。
+                          当前版本历史路径仍使用整对象 CAS；这些参数会影响接入该 API 的新写入。
                         </div>
                       </div>
                     </div>

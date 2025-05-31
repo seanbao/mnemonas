@@ -4,10 +4,11 @@ import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { LoginPage } from './Login'
 
-const { mockAddToast, mockGetHealth, mockGetSetupStatus } = vi.hoisted(() => ({
+const { mockAddToast, mockGetHealth, mockGetSetupStatus, mockLocationState } = vi.hoisted(() => ({
   mockAddToast: vi.fn(),
   mockGetHealth: vi.fn(),
   mockGetSetupStatus: vi.fn(),
+  mockLocationState: { current: null as unknown },
 }))
 
 // Mock the auth store
@@ -39,7 +40,7 @@ vi.mock('react-router-dom', async () => {
   return {
     ...actual,
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ state: null, pathname: '/login' }),
+    useLocation: () => ({ state: mockLocationState.current, pathname: '/login' }),
   }
 })
 
@@ -55,6 +56,7 @@ vi.mock('@heroui/react', async () => {
 describe('LoginPage', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
+    mockLocationState.current = null
     mockGetSetupStatus.mockResolvedValue({
       success: true,
       is_first_run: false,
@@ -167,6 +169,19 @@ describe('LoginPage', () => {
       await waitFor(() => {
         expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
       })
+    })
+
+    it('does not redirect an already authenticated user to an external location state target', async () => {
+      mockLocationState.current = { from: '//evil.example/login' }
+      const { useIsAuthenticated } = await import('@/stores/auth')
+      vi.mocked(useIsAuthenticated).mockReturnValue(true)
+
+      renderLogin()
+
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      })
+      expect(mockNavigate).not.toHaveBeenCalledWith('//evil.example/login', expect.anything())
     })
 
     it('shows a persistent inline error when auth store reports a login error', async () => {
@@ -307,6 +322,33 @@ describe('LoginPage', () => {
       
       expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '登录成功', color: 'success' }))
+    })
+
+    it('navigates to the protected route after successful login when the redirect target is local', async () => {
+      mockLocationState.current = { from: '/files/report?view=grid#preview' }
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/files/report?view=grid#preview', { replace: true })
+    })
+
+    it('falls back to home after successful login when the redirect target is external', async () => {
+      mockLocationState.current = { from: 'https://evil.example/login' }
+      mockLogin.mockResolvedValue({ warning: false, message: undefined })
+      const user = userEvent.setup()
+      renderLogin()
+
+      await user.type(screen.getByLabelText(/用户名/i, { selector: 'input' }), 'admin')
+      await user.type(screen.getByLabelText(/密码/i, { selector: 'input' }), 'password')
+      await user.click(screen.getByRole('button', { name: /登录/i }))
+
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
+      expect(mockNavigate).not.toHaveBeenCalledWith('https://evil.example/login', expect.anything())
     })
 
     it('shows a warning toast when login succeeds with backend warning metadata', async () => {

@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 var errCASPathSymlink = errors.New("CAS storage path must not traverse a symlink")
@@ -133,12 +135,8 @@ func (s *Store) Put(hash string, data []byte) error {
 	if err := validateCASPath(s.root, path); err != nil {
 		return err
 	}
-	createdDirs, err := collectMissingCASDirsWithRoot(s.rootHandle, relDir)
+	createdDirs, err := ensureCASDirWithRoot(s.rootHandle, relDir, 0755)
 	if err != nil {
-		return err
-	}
-
-	if err := ensureCASDirWithRoot(s.rootHandle, relDir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 	if err := validateCASPath(s.root, filepath.Join(s.root, relDir)); err != nil {
@@ -151,7 +149,7 @@ func (s *Store) Put(hash string, data []byte) error {
 	f, tmpPath, err := createCASTempFile(s.rootHandle, relDir)
 	if err != nil {
 		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)
-		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+		if errors.Is(err, os.ErrPermission) || rootio.IsSymlinkError(err) || isCASRootEscapeError(err) {
 			return errCASPathSymlink
 		}
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -193,27 +191,6 @@ func (s *Store) Put(hash string, data []byte) error {
 	}
 
 	return nil
-}
-
-func collectMissingCASDirs(dir string) ([]string, error) {
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
 }
 
 func syncCreatedCASDirs(createdDirs []string) error {
@@ -274,11 +251,11 @@ func validateCASRootPath(root string) error {
 }
 
 func ensureCASDir(dir string, perm os.FileMode) error {
-	createdDirs, err := collectMissingCASDirs(dir)
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(dir, perm)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, perm); err != nil {
+		if rootio.IsSymlinkError(err) {
+			return errCASPathSymlink
+		}
 		return err
 	}
 	return syncCreatedCASDirs(createdDirs)
@@ -306,34 +283,6 @@ func ensureCASRoot(root string) (string, *os.Root, error) {
 	return normalizedRoot, rootHandle, nil
 }
 
-func collectMissingCASDirsWithRoot(root *os.Root, dir string) ([]string, error) {
-	if dir == "." {
-		return nil, nil
-	}
-
-	missing := make([]string, 0)
-	current := filepath.Clean(dir)
-	for {
-		if _, err := root.Stat(current); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current || parent == "." {
-			if parent == "." {
-				missing = append(missing, parent)
-			}
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
-}
-
 func syncCreatedCASDirsWithRoot(root *os.Root, createdDirs []string) error {
 	for i := 0; i < len(createdDirs); i++ {
 		if err := syncRootDir(root, filepath.Dir(createdDirs[i])); err != nil {
@@ -343,23 +292,23 @@ func syncCreatedCASDirsWithRoot(root *os.Root, createdDirs []string) error {
 	return nil
 }
 
-func ensureCASDirWithRoot(root *os.Root, dir string, perm os.FileMode) error {
+func ensureCASDirWithRoot(root *os.Root, dir string, perm os.FileMode) ([]string, error) {
 	if dir == "." {
-		return nil
+		return nil, nil
 	}
 
-	createdDirs, err := collectMissingCASDirsWithRoot(root, dir)
+	createdDirs, err := rootio.MkdirAllNoFollowTracked(root, dir, perm)
 	if err != nil {
-		return err
+		if rootio.IsSymlinkError(err) {
+			return createdDirs, errCASPathSymlink
+		}
+		return createdDirs, err
 	}
-	if err := root.MkdirAll(dir, perm); err != nil {
-		return err
-	}
-	return syncCreatedCASDirsWithRoot(root, createdDirs)
+	return createdDirs, syncCreatedCASDirsWithRoot(root, createdDirs)
 }
 
 func syncCASDirectory(dir string) error {
-	parentDir, err := os.Open(dir)
+	parentDir, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}
@@ -373,7 +322,7 @@ func syncCASDirectory(dir string) error {
 }
 
 func syncCASRootDirectory(root *os.Root, dir string) error {
-	parentDir, err := root.Open(dir)
+	parentDir, err := rootio.OpenDirNoFollow(root, dir)
 	if err != nil {
 		return err
 	}
@@ -387,7 +336,7 @@ func syncCASRootDirectory(root *os.Root, dir string) error {
 }
 
 func readCASFileWithRoot(root *os.Root, path string) ([]byte, error) {
-	file, err := root.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := rootio.OpenFileNoFollow(root, path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +352,7 @@ func createCASTempFile(root *os.Root, dir string) (*os.File, string, error) {
 	}
 
 	tmpPath := filepath.Join(dir, tmpName)
-	file, err := root.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	file, err := rootio.OpenFileNoFollow(root, tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, "", err
 	}
@@ -451,7 +400,7 @@ func (s *Store) Get(hash string) ([]byte, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
-		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isCASRootEscapeError(err) {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isCASRootEscapeError(err) {
 			return nil, errCASPathSymlink
 		}
 		return nil, fmt.Errorf("failed to read file: %w", err)
@@ -508,7 +457,7 @@ func (s *Store) Size(hash string) (int64, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, ErrNotFound
 		}
-		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isCASRootEscapeError(err) {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isCASRootEscapeError(err) {
 			return 0, errCASPathSymlink
 		}
 		return 0, fmt.Errorf("failed to get file info: %w", err)
@@ -533,12 +482,12 @@ func (s *Store) Reader(hash string) (ReadSeekCloser, error) {
 		return nil, err
 	}
 	afterValidateCASPath()
-	f, err := s.rootHandle.OpenFile(relPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := rootio.OpenFileNoFollow(s.rootHandle, relPath, os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
-		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isCASRootEscapeError(err) {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || rootio.IsSymlinkError(err) || isCASRootEscapeError(err) {
 			return nil, errCASPathSymlink
 		}
 		return nil, fmt.Errorf("failed to open file: %w", err)
@@ -621,7 +570,7 @@ func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) 
 		return nil
 	}
 
-	dirHandle, err := s.rootHandle.Open(relPath)
+	dirHandle, err := rootio.OpenDirNoFollow(s.rootHandle, relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
 			return errCASPathSymlink
@@ -645,7 +594,7 @@ func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) 
 		childRelPath := casChildRelativePath(relPath, entry.Name())
 		childInfo, err := s.rootHandle.Lstat(childRelPath)
 		if err != nil {
-			if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			if errors.Is(err, os.ErrPermission) || rootio.IsSymlinkError(err) || isCASRootEscapeError(err) {
 				return errCASPathSymlink
 			}
 			return err

@@ -23,6 +23,17 @@ export function sanitizeFilename(filename: string): string {
   
   // Trim leading/trailing dots and spaces (Windows compatibility)
   sanitized = sanitized.replace(/^[\s.]+|[\s.]+$/g, '')
+
+  // Avoid Windows device names, including names with extensions such as CON.txt.
+  const baseName = sanitized.split('.')[0]?.toUpperCase()
+  const reservedWindowsNames = new Set([
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+  ])
+  if (baseName && reservedWindowsNames.has(baseName)) {
+    sanitized = `_${sanitized}`
+  }
   
   // Ensure we have a valid filename
   if (!sanitized || sanitized === '.' || sanitized === '..') {
@@ -32,13 +43,124 @@ export function sanitizeFilename(filename: string): string {
   return sanitized
 }
 
+function splitContentDispositionParts(header: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  let quoted = false
+  let escaped = false
+
+  for (const char of header) {
+    if (escaped) {
+      current += char
+      escaped = false
+      continue
+    }
+    if (quoted && char === '\\') {
+      current += char
+      escaped = true
+      continue
+    }
+    if (char === '"') {
+      quoted = !quoted
+      current += char
+      continue
+    }
+    if (char === ';' && !quoted) {
+      parts.push(current.trim())
+      current = ''
+      continue
+    }
+    current += char
+  }
+
+  if (current.trim()) {
+    parts.push(current.trim())
+  }
+
+  return parts
+}
+
+function unquoteContentDispositionValue(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length < 2 || !trimmed.startsWith('"') || !trimmed.endsWith('"')) {
+    return trimmed
+  }
+
+  let unquoted = ''
+  for (let i = 1; i < trimmed.length - 1; i += 1) {
+    const char = trimmed[i]
+    if (char === '\\' && i + 1 < trimmed.length - 1) {
+      i += 1
+      unquoted += trimmed[i]
+      continue
+    }
+    unquoted += char
+  }
+  return unquoted
+}
+
+function decodeExtendedFilename(value: string): string {
+  const unquoted = unquoteContentDispositionValue(value)
+  const match = unquoted.match(/^([^']*)'[^']*'(.*)$/)
+  const charset = (match?.[1] ?? '').toLowerCase()
+  const encoded = match?.[2] ?? unquoted
+
+  if (charset && charset !== 'utf-8') {
+    return encoded
+  }
+
+  try {
+    return decodeURIComponent(encoded)
+  } catch {
+    return encoded
+  }
+}
+
+export function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
+  if (!contentDisposition) {
+    return fallback
+  }
+
+  const params = new Map<string, string>()
+  for (const part of splitContentDispositionParts(contentDisposition).slice(1)) {
+    const equalsIndex = part.indexOf('=')
+    if (equalsIndex <= 0) {
+      continue
+    }
+    const key = part.slice(0, equalsIndex).trim().toLowerCase()
+    const value = part.slice(equalsIndex + 1)
+    params.set(key, value)
+  }
+
+  const extendedFilename = params.get('filename*')
+  if (extendedFilename) {
+    const decoded = decodeExtendedFilename(extendedFilename)
+    if (decoded) {
+      return decoded
+    }
+  }
+
+  const filename = params.get('filename')
+  if (filename) {
+    const unquoted = unquoteContentDispositionValue(filename)
+    if (unquoted) {
+      return unquoted
+    }
+  }
+
+  return fallback
+}
+
 /**
  * Validate and normalize a path for API requests.
  * Ensures the path starts with / and doesn't contain dangerous sequences.
  */
 export function normalizePath(path: string): string {
-  // Remove null bytes
-  let normalized = path.replace(/\0/g, '')
+  if (path.includes('\0')) {
+    throw new Error('非法路径')
+  }
+
+  let normalized = path
   
   // Ensure path starts with /
   if (!normalized.startsWith('/')) {
@@ -89,8 +211,56 @@ export function normalizeWebDAVPrefix(prefix: string): string {
   if (!trimmed || trimmed === '/') {
     return '/'
   }
-  const withSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
-  return withSlash.endsWith('/') ? withSlash.slice(0, -1) : withSlash
+
+  let current = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  for (;;) {
+    const next = cleanURLPathPrefix(current.trim())
+    if (next === current) {
+      return next
+    }
+    current = next
+  }
+}
+
+function cleanURLPathPrefix(prefix: string): string {
+  const parts: string[] = []
+  for (const rawSegment of prefix.split('/')) {
+    const segment = rawSegment.trim()
+    if (!segment || segment === '.') {
+      continue
+    }
+    if (segment === '..') {
+      parts.pop()
+      continue
+    }
+    parts.push(segment)
+  }
+
+  return parts.length === 0 ? '/' : `/${parts.join('/')}`
+}
+
+export function isValidWebDAVPrefix(prefix: string): boolean {
+  const normalized = normalizeWebDAVPrefix(prefix)
+  if (/[\\?#]/.test(normalized)) {
+    return false
+  }
+  for (let index = 0; index < normalized.length; index += 1) {
+    const code = normalized.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) {
+      return false
+    }
+  }
+  return true
+}
+
+export function webDAVPrefixOverlapsReservedRoute(prefix: string): boolean {
+  const normalized = normalizeWebDAVPrefix(prefix)
+  if (normalized === '/') {
+    return true
+  }
+  return ['/api', '/s', '/health'].some((reserved) => (
+    normalized === reserved || normalized.startsWith(`${reserved}/`)
+  ))
 }
 
 /**
@@ -148,6 +318,9 @@ export function openUrlInNewTab(url: string): boolean {
   if (typeof window === 'undefined' || typeof window.open !== 'function') {
     return false
   }
+  if (!isSafeNewTabUrl(url)) {
+    return false
+  }
 
   const newWindow = window.open(url, '_blank', 'noopener,noreferrer')
   if (newWindow) {
@@ -156,6 +329,15 @@ export function openUrlInNewTab(url: string): boolean {
   }
 
   return false
+}
+
+function isSafeNewTabUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url, window.location.origin)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'blob:'
+  } catch {
+    return false
+  }
 }
 
 /**

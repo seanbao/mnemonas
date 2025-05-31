@@ -1,5 +1,5 @@
 import { authFetch } from './auth'
-import { copyTextToClipboard, encodePathForUrl, normalizePath } from '@/lib/utils'
+import { copyTextToClipboard, encodePathForUrl, getFilenameFromContentDisposition, normalizePath, sanitizeFilename } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 const PUBLIC_SHARE_API_BASE = `${API_BASE}/public/shares`
@@ -194,29 +194,15 @@ function isValidPublicShareItem(value: unknown): value is PublicShareItem {
   )
 }
 
-function getFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
-  if (!contentDisposition) {
-    return fallback
-  }
-
-  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
-  if (utf8Match?.[1]) {
-    try {
-      return decodeURIComponent(utf8Match[1])
-    } catch {
-      return utf8Match[1]
-    }
-  }
-
-  const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
-  return filenameMatch?.[1] ?? fallback
-}
-
 function triggerBrowserDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = filename
+  try {
+    link.download = sanitizeFilename(filename)
+  } catch {
+    link.download = 'download'
+  }
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
@@ -422,7 +408,7 @@ export async function deleteShare(id: string): Promise<ShareActionResult> {
  * Get public share info (no auth required)
  */
 export async function getPublicShare(id: string): Promise<PublicShareInfo> {
-  const response = await fetch(`${PUBLIC_SHARE_API_BASE}/${id}`)
+  const response = await fetch(`${PUBLIC_SHARE_API_BASE}/${id}`, { credentials: 'same-origin' })
   
   if (!response.ok) {
     let message = '分享不存在或已失效'
@@ -458,7 +444,7 @@ export async function getPublicShareItems(
   }
   const query = params.toString()
   const url = query ? `${PUBLIC_SHARE_API_BASE}/${id}/items?${query}` : `${PUBLIC_SHARE_API_BASE}/${id}/items`
-  const response = await fetch(url)
+  const response = await fetch(url, { credentials: 'same-origin' })
 
   if (!response.ok) {
     let message = '获取分享文件夹失败'

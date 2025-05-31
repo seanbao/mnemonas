@@ -5,6 +5,8 @@ import { buildPreviewUrl } from '@/lib/preview-utils'
 import { authFetch } from '@/api/auth'
 import { cn } from '@/lib/utils'
 
+const pdfContentType = 'application/pdf'
+
 export interface PdfPreviewProps {
   path: string
   filename: string
@@ -13,7 +15,7 @@ export interface PdfPreviewProps {
 
 /**
  * PDF preview using native browser PDF viewer (iframe).
- * Fetches PDF with auth token and creates blob URL.
+ * Fetches PDF with the same-origin session cookie and creates a blob URL.
  */
 export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
   const pdfUrl = buildPreviewUrl(path, { includeAuth: false })
@@ -33,7 +35,12 @@ export function PdfPreview({ path, filename, className }: PdfPreviewProps) {
       try {
         const response = await authFetch(pdfUrl)
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const blob = await response.blob()
+        const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase()
+        if (contentType && contentType !== pdfContentType) {
+          throw new Error(`Unexpected PDF content type: ${contentType}`)
+        }
+        const data = await response.arrayBuffer()
+        const blob = new Blob([data], { type: pdfContentType })
         if (!cancelled) {
           currentBlobUrl = URL.createObjectURL(blob)
           setBlobUrl(currentBlobUrl)

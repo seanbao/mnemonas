@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/seanbao/mnemonas/internal/requestip"
 )
 
@@ -403,21 +405,24 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	refreshTokens := make([]string, 0, 1)
 	refreshToken := strings.TrimSpace(req.RefreshToken)
 	refreshFromCookie := false
-	if refreshToken == "" {
-		if cookie, err := r.Cookie(RefreshSessionCookieName); err == nil {
-			refreshToken = strings.TrimSpace(cookie.Value)
-			refreshFromCookie = true
-		}
+	if refreshToken != "" {
+		refreshTokens = append(refreshTokens, refreshToken)
+	} else {
+		refreshTokens = cookieValuesFromRequest(r, RefreshSessionCookieName)
+		refreshFromCookie = len(refreshTokens) > 0
 	}
 
-	if refreshToken == "" {
+	if len(refreshTokens) == 0 {
+		clearSessionCookies(w, r)
+		clearDownloadSessionCookie(w, r)
 		writeError(w, http.StatusBadRequest, "refresh token required", "MISSING_TOKEN")
 		return
 	}
 
-	claims, err := h.tokenManager.validateRefreshTokenClaims(refreshToken)
+	_, claims, err := h.validateRefreshTokenCandidates(refreshTokens)
 	if err != nil {
 		if refreshFromCookie {
 			clearSessionCookies(w, r)
@@ -480,6 +485,23 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		message = "refresh token rotated with persistence warning"
 	}
 	writeSuccess(w, http.StatusOK, resp, message)
+}
+
+func (h *Handler) validateRefreshTokenCandidates(candidates []string) (string, *jwt.RegisteredClaims, error) {
+	var firstErr error
+	for _, refreshToken := range candidates {
+		claims, err := h.tokenManager.validateRefreshTokenClaims(refreshToken)
+		if err == nil {
+			return refreshToken, claims, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		firstErr = ErrInvalidToken
+	}
+	return "", nil, firstErr
 }
 
 // HandleLogout handles POST /api/v1/auth/logout
@@ -645,6 +667,8 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "current password is incorrect", "INVALID_PASSWORD")
 		case ErrPasswordTooShort:
 			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
+		case ErrPasswordTooLong:
+			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "PASSWORD_ERROR")
 		}
@@ -760,6 +784,8 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "user already exists", "USER_EXISTS")
 		case ErrPasswordTooShort:
 			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
+		case ErrPasswordTooLong:
+			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "CREATE_ERROR")
 		}
@@ -864,6 +890,8 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
 		case ErrPasswordTooShort:
 			writeError(w, http.StatusBadRequest, "password must be at least 8 characters", "PASSWORD_TOO_SHORT")
+		case ErrPasswordTooLong:
+			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "RESET_ERROR")
 		}

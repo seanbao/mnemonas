@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/seanbao/mnemonas/internal/rootio"
 )
 
 var readDirEntryInfo = func(root *os.Root, name string, entry os.DirEntry) (os.FileInfo, error) {
@@ -96,7 +98,7 @@ func cleanupWorkspaceCreatedDirs(rootPath string, root *os.Root, createdDirs []s
 }
 
 func syncWorkspaceParentDir(dir string) error {
-	dirHandle, err := os.Open(dir)
+	dirHandle, err := rootio.OpenDirPathNoFollow(dir)
 	if err != nil {
 		return err
 	}
@@ -117,35 +119,6 @@ func syncWorkspaceRenameDirs(oldPath, newPath string) error {
 	return syncWorkspaceDir(oldDir)
 }
 
-func collectMissingWorkspaceDirs(fullPath string) ([]string, error) {
-	missing := make([]string, 0)
-	current := fullPath
-	for {
-		info, err := os.Stat(current)
-		if err == nil {
-			if !info.IsDir() {
-				return nil, ErrNotDir
-			}
-			break
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			if errors.Is(err, syscall.ENOTDIR) {
-				return nil, ErrNotDir
-			}
-			return nil, err
-		}
-
-		missing = append(missing, current)
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-
-	return missing, nil
-}
-
 func syncCreatedWorkspaceDirs(createdDirs []string) error {
 	return syncCreatedWorkspaceDirsWith(createdDirs, syncWorkspaceDir)
 }
@@ -157,6 +130,71 @@ func syncCreatedWorkspaceDirsWith(createdDirs []string, syncDir func(string) err
 		}
 	}
 	return nil
+}
+
+func ensureWorkspaceDirsTracked(rootPath string, root *os.Root, relDir string, perm os.FileMode) ([]string, error) {
+	cleanRel := path.Clean(strings.ReplaceAll(relDir, "\\", "/"))
+	if cleanRel == "." || cleanRel == "/" {
+		return nil, nil
+	}
+	if strings.HasPrefix(cleanRel, "../") || cleanRel == ".." {
+		return nil, ErrNotFound
+	}
+
+	createdDirs := make([]string, 0)
+	currentRel := "."
+	for _, part := range strings.Split(cleanRel, "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, ErrNotFound)
+		}
+		if currentRel == "." {
+			currentRel = part
+		} else {
+			currentRel = path.Join(currentRel, part)
+		}
+
+		info, err := root.Lstat(currentRel)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, ErrNotFound)
+			}
+			if !info.IsDir() {
+				return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, ErrNotDir)
+			}
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			mappedErr := mapWorkspaceRootPathError(err)
+			return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, mappedErr)
+		}
+
+		if err := rootio.MkdirNoFollow(root, currentRel, perm); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				info, statErr := root.Lstat(currentRel)
+				if statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+					continue
+				}
+				if statErr == nil {
+					if info.Mode()&os.ModeSymlink != 0 {
+						err = ErrNotFound
+					} else {
+						err = ErrNotDir
+					}
+				} else {
+					err = statErr
+				}
+			}
+			return nil, cleanupWorkspaceCreatedDirs(rootPath, root, createdDirs, mapWorkspaceRootPathError(err))
+		}
+
+		absDir := filepath.Join(rootPath, filepath.FromSlash(currentRel))
+		createdDirs = append([]string{absDir}, createdDirs...)
+	}
+
+	return createdDirs, nil
 }
 
 func normalizeWorkspaceRootPath(root string) (string, error) {
@@ -223,11 +261,11 @@ func ensureWorkspaceRoot(root string) (string, *os.Root, error) {
 		return "", nil, err
 	}
 
-	createdDirs, err := collectMissingWorkspaceDirs(normalizedRoot)
+	createdDirs, err := rootio.MkdirAllPathNoFollowTracked(normalizedRoot, 0755)
 	if err != nil {
-		return "", nil, err
-	}
-	if err := os.MkdirAll(normalizedRoot, 0755); err != nil {
+		if rootio.IsSymlinkError(err) {
+			return "", nil, errWorkspaceRootSymlink
+		}
 		return "", nil, err
 	}
 	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
@@ -255,8 +293,9 @@ var (
 )
 
 type WriteFileOptions struct {
-	MaxBytes   int64
-	SyncParent func(string) error
+	MaxBytes    int64
+	SyncParent  func(string) error
+	CreatedDirs *[]string
 }
 
 // VisibleMutationWarningError reports that a workspace mutation is already
@@ -389,7 +428,7 @@ func mapWorkspaceRootPathError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if isWorkspaceRootEscapeError(err) || errors.Is(err, os.ErrNotExist) {
+	if isWorkspaceRootEscapeError(err) || rootio.IsSymlinkError(err) || errors.Is(err, os.ErrNotExist) {
 		return ErrNotFound
 	}
 	if errors.Is(err, syscall.ENOTDIR) {
@@ -428,7 +467,7 @@ func createWorkspaceTempFile(root *os.Root, parentName string) (*os.File, string
 		if err != nil {
 			return nil, "", err
 		}
-		tempFile, err := root.OpenFile(tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		tempFile, err := rootio.OpenFileNoFollow(root, tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 		if err == nil {
 			return tempFile, tempName, nil
 		}
@@ -477,6 +516,9 @@ func CleanPath(name string) string {
 
 func validateWorkspaceName(name string) error {
 	normalized := strings.ReplaceAll(name, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return ErrNotFound
+	}
 	for _, segment := range strings.Split(normalized, "/") {
 		if segment == ".." {
 			return ErrNotFound
@@ -508,9 +550,12 @@ func (w *Workspace) Stat(ctx context.Context, name string) (*FileInfo, error) {
 		return nil, err
 	}
 
-	info, err := w.rootHandle.Stat(workspaceRootRelativeName(name))
+	info, err := w.rootHandle.Lstat(workspaceRootRelativeName(name))
 	if err != nil {
 		return nil, mapWorkspaceRootPathError(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, ErrNotFound
 	}
 
 	return &FileInfo{
@@ -538,7 +583,7 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 		return nil, err
 	}
 
-	dirHandle, err := w.rootHandle.Open(workspaceRootRelativeName(name))
+	dirHandle, err := rootio.OpenDirNoFollow(w.rootHandle, workspaceRootRelativeName(name))
 	if err != nil {
 		return nil, mapWorkspaceRootPathError(err)
 	}
@@ -567,12 +612,15 @@ func (w *Workspace) ReadDir(ctx context.Context, name string) ([]*FileInfo, erro
 		if err != nil {
 			return nil, mapWorkspaceRootPathError(err)
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 
 		childPath := path.Join(CleanPath(name), e.Name())
 		result = append(result, &FileInfo{
 			Path:    childPath,
 			Name:    e.Name(),
-			IsDir:   e.IsDir(),
+			IsDir:   info.IsDir(),
 			Size:    info.Size(),
 			ModTime: info.ModTime(),
 		})
@@ -594,7 +642,7 @@ func (w *Workspace) OpenFile(ctx context.Context, name string) (*os.File, error)
 		return nil, err
 	}
 
-	fileHandle, err := w.rootHandle.Open(workspaceRootRelativeName(name))
+	fileHandle, err := rootio.OpenFileNoFollow(w.rootHandle, workspaceRootRelativeName(name), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, mapWorkspaceRootPathError(err)
 	}
@@ -625,7 +673,7 @@ func (w *Workspace) ReadFile(ctx context.Context, name string) ([]byte, error) {
 		return nil, err
 	}
 
-	fileHandle, err := w.rootHandle.Open(workspaceRootRelativeName(name))
+	fileHandle, err := rootio.OpenFileNoFollow(w.rootHandle, workspaceRootRelativeName(name), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, mapWorkspaceRootPathError(err)
 	}
@@ -665,14 +713,14 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 
 	rootName := workspaceRootRelativeName(name)
 	parentName := workspaceParentRelativeName(name)
-	createdDirs, err := collectMissingWorkspaceDirs(filepath.Dir(fullPath))
-	if err != nil {
-		return 0, err
-	}
 
 	// Ensure parent directory exists
-	if err := w.rootHandle.MkdirAll(parentName, 0755); err != nil {
+	createdDirs, err := ensureWorkspaceDirsTracked(w.root, w.rootHandle, parentName, 0755)
+	if err != nil {
 		return 0, w.mapWorkspaceCreatePathError(filepath.Dir(fullPath), err)
+	}
+	if options.CreatedDirs != nil {
+		*options.CreatedDirs = append((*options.CreatedDirs)[:0], createdDirs...)
 	}
 
 	// Atomic write: write to temp file then rename
@@ -749,8 +797,11 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 	rootName := workspaceRootRelativeName(name)
 
 	// Check if already exists
-	info, err := w.rootHandle.Stat(rootName)
+	info, err := w.rootHandle.Lstat(rootName)
 	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return ErrNotFound
+		}
 		if info.IsDir() {
 			return ErrAlreadyExists
 		}
@@ -763,13 +814,13 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 		return ErrNotFound
 	}
 
-	createdDirs, err := collectMissingWorkspaceDirs(fullPath)
+	createdRelDirs, err := rootio.MkdirAllNoFollowTracked(w.rootHandle, rootName, 0755)
 	if err != nil {
-		return err
-	}
-
-	if err := w.rootHandle.MkdirAll(rootName, 0755); err != nil {
 		return w.mapWorkspaceCreatePathError(fullPath, err)
+	}
+	createdDirs := make([]string, len(createdRelDirs))
+	for i, relDir := range createdRelDirs {
+		createdDirs[i] = filepath.Join(w.root, relDir)
 	}
 	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
 		return WrapVisibleMutationWarning(fmt.Errorf("failed to sync directory: %w", err))
@@ -793,9 +844,12 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 
 	rootName := workspaceRootRelativeName(name)
 
-	info, err := w.rootHandle.Stat(rootName)
+	info, err := w.rootHandle.Lstat(rootName)
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return ErrNotFound
 	}
 
 	if info.IsDir() {
@@ -832,9 +886,12 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 
 	rootName := workspaceRootRelativeName(name)
 
-	_, err := w.rootHandle.Stat(rootName)
+	info, err := w.rootHandle.Lstat(rootName)
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return ErrNotFound
 	}
 
 	if err := w.rootHandle.RemoveAll(rootName); err != nil {
@@ -870,20 +927,29 @@ func (w *Workspace) Rename(ctx context.Context, oldName, newName string) error {
 	newRootName := workspaceRootRelativeName(newName)
 
 	// Check source exists
-	_, err := w.rootHandle.Stat(oldRootName)
+	oldInfo, err := w.rootHandle.Lstat(oldRootName)
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
 	}
+	if oldInfo.Mode()&os.ModeSymlink != 0 {
+		return ErrNotFound
+	}
 
-	if _, err := w.rootHandle.Stat(newRootName); err == nil {
+	if newInfo, err := w.rootHandle.Lstat(newRootName); err == nil {
+		if newInfo.Mode()&os.ModeSymlink != 0 {
+			return ErrNotFound
+		}
 		return ErrAlreadyExists
 	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) && !isWorkspaceRootEscapeError(err) {
 		return err
 	}
 
-	parentInfo, err := w.rootHandle.Stat(workspaceParentRelativeName(newName))
+	parentInfo, err := w.rootHandle.Lstat(workspaceParentRelativeName(newName))
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
+	}
+	if parentInfo.Mode()&os.ModeSymlink != 0 {
+		return ErrNotFound
 	}
 	if !parentInfo.IsDir() {
 		return ErrNotDir
@@ -939,7 +1005,7 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 	dstParentName := workspaceParentRelativeName(dstName)
 
 	// Check source exists and is a file
-	srcFile, err := w.rootHandle.Open(srcRootName)
+	srcFile, err := rootio.OpenFileNoFollow(w.rootHandle, srcRootName, os.O_RDONLY, 0)
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
 	}
@@ -953,9 +1019,12 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 		return ErrIsDir
 	}
 
-	parentInfo, err := w.rootHandle.Stat(dstParentName)
+	parentInfo, err := w.rootHandle.Lstat(dstParentName)
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
+	}
+	if parentInfo.Mode()&os.ModeSymlink != 0 {
+		return ErrNotFound
 	}
 	if !parentInfo.IsDir() {
 		return ErrNotDir
@@ -1026,6 +1095,9 @@ func (w *Workspace) walkWithRootHandle(ctx context.Context, rootName, cleanPath 
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
 	}
+	if entryInfo.Mode()&os.ModeSymlink != 0 {
+		return ErrNotFound
+	}
 
 	return w.walkWorkspaceEntry(ctx, rootName, cleanPath, entryInfo, fn)
 }
@@ -1041,7 +1113,7 @@ func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath 
 		return nil
 	}
 
-	dirHandle, err := w.rootHandle.Open(rootName)
+	dirHandle, err := rootio.OpenDirNoFollow(w.rootHandle, rootName)
 	if err != nil {
 		return mapWorkspaceRootPathError(err)
 	}
@@ -1064,6 +1136,9 @@ func (w *Workspace) walkWorkspaceEntry(ctx context.Context, rootName, cleanPath 
 		entryInfo, err := readDirEntryInfo(w.rootHandle, childRootName, entry)
 		if err != nil {
 			return mapWorkspaceRootPathError(err)
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			continue
 		}
 
 		childCleanPath := path.Join(cleanPath, entry.Name())
@@ -1157,8 +1232,8 @@ func (w *Workspace) Exists(ctx context.Context, name string) bool {
 	if err := afterValidateWorkspacePaths(); err != nil {
 		return false
 	}
-	_, err := w.rootHandle.Stat(workspaceRootRelativeName(name))
-	return err == nil
+	info, err := w.rootHandle.Lstat(workspaceRootRelativeName(name))
+	return err == nil && info.Mode()&os.ModeSymlink == 0
 }
 
 // IsDir checks if a path is a directory
@@ -1173,6 +1248,6 @@ func (w *Workspace) IsDir(ctx context.Context, name string) bool {
 	if err := afterValidateWorkspacePaths(); err != nil {
 		return false
 	}
-	info, err := w.rootHandle.Stat(workspaceRootRelativeName(name))
-	return err == nil && info.IsDir()
+	info, err := w.rootHandle.Lstat(workspaceRootRelativeName(name))
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir()
 }

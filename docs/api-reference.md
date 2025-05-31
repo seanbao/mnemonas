@@ -108,7 +108,10 @@ Authorization: Bearer <access_token>
 部分写接口在变更已经对外可见、但后续持久化或清理步骤失败时，仍返回成功状态码，并附带 HTTP `Warning` 响应头。当前使用的 warning 文案包括：
 
 - `199 MnemoNAS "activity log persistence failed"`
+- `199 MnemoNAS "auth state persistence incomplete"`
 - `199 MnemoNAS "workspace mutation persistence incomplete"`
+- `199 MnemoNAS "share persistence incomplete"`
+- `199 MnemoNAS "favorites persistence incomplete"`
 - `199 MnemoNAS "scrub result persistence incomplete"`
 - `199 MnemoNAS "trash restore metadata reconciliation failed"`
 - `199 MnemoNAS "delete cleanup incomplete"`
@@ -300,6 +303,8 @@ GET /api/v1/admin/users
 ```
 POST /api/v1/admin/users
 ```
+
+用户名最多 255 个字符，不能包含 `/`、`\`、控制字符或 `.` / `..`；密码长度必须为 8 到 72 字节。
 
 **删除用户**:
 ```
@@ -843,6 +848,7 @@ GET /api/v1/thumbnails/{path}
 **查询参数**:
 - `size`: 缩略图尺寸，可选值: `small` / `s` (150px), `medium` / `m` (300px), `large` / `l` (600px)
 - 传入未列出的 `size` 值时返回 `400 Bad Request`
+- 源文件超过 100 MiB，或图片尺寸超过 10000x10000 / 5000 万像素时返回 `400 Bad Request`
 
 **鉴权说明**:
 - API 客户端可使用现有认证会话或 `Authorization` 请求头
@@ -852,6 +858,8 @@ GET /api/v1/thumbnails/{path}
 **支持格式**: JPEG, PNG, GIF, WebP
 
 **响应**: 返回图片二进制数据
+
+缩略图响应是服务端生成的图片，并带 `X-Content-Type-Options: nosniff` 与 sandbox CSP。
 
 ---
 
@@ -1075,6 +1083,7 @@ POST /api/v1/shares
 
 **字段说明**:
 - `type`: `file` | `folder`
+- `password`: 可选分享访问密码；非空时最多 72 字节
 - `permission`: `read`
 - 响应中的 `url` 为动态生成字段：当 `share.base_url` 已配置时返回 `<base_url>/s/{id}`；未配置时返回相对路径 `/s/{id}`
 - `share.base_url` 为空时返回相对路径；非空时必须是完整的 `http` 或 `https` URL
@@ -1685,7 +1694,7 @@ PUT /api/v1/settings
 - `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
 - `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`；保存后需重启服务才能影响运行中的 HTTP 监听器
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
-- `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
+- `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
 - `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
@@ -1693,14 +1702,15 @@ PUT /api/v1/settings
 - `dataplane` 支持更新 `grpc_address`、`timeout`、`max_retries`；保存后会立即替换运行中的数据面 client，并用于后续按需重连和连接重试策略
 - 请求中的 `trash.retention_days` 不能为负数，`trash.max_size` 必须是正整数
 - 请求中的 `versioning.max_versioned_size` 必须是正整数，`versioning.auto_versioned_extensions` 每项必须以 `.` 开头，`versioning.auto_versioned_filenames` 不能包含空项
-- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
+- `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；`prefix` 会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能覆盖 `/`、`/api`、`/s`、`/health`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
 - 认证启用时，`webdav.username` 不得复用现有非 admin 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
+- 请求中的 `server.host` 必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符；端口必须通过 `server.port` 设置
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
 - 请求中的 `alerts.webhook_url` 为空时禁用 Webhook 发送，非空时必须是完整的 `http` 或 `https` URL
-- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `Key:Value` 格式
-- 请求中的 `dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
+- 请求中的 `alerts.webhook_method` 仅支持 `GET` 或 `POST`；`POST` 发送 JSON body，`GET` 将告警字段编码到 URL query。`alerts.webhook_headers` 每项必须是 `"Key: Value"` 格式，Header 名称必须是合法 HTTP token，值不能包含换行或控制字符
+- 请求中的 `dataplane.grpc_address` 必须是合法 `host:port` 地址，端口范围 1-65535，且不能包含空白或控制字符；`dataplane.timeout` 必须是正的 `time.ParseDuration` 字符串，`dataplane.max_retries` 必须是 `0` 或正整数
 - 配置校验失败时返回 `400 Bad Request` 和稳定错误消息 `invalid configuration`
 - 非法设置请求不会修改进程内当前生效配置
 
@@ -1764,7 +1774,7 @@ GET /api/v1/maintenance/scrub
       {
         "hash": "abc123...",
         "error_type": "corrupted",
-        "message": "Hash mismatch"
+        "message": "object failed integrity verification"
       }
     ],
     "error_message": ""
@@ -1792,6 +1802,7 @@ POST /api/v1/maintenance/scrub
 **说明**:
 - 此接口为同步执行，不会先返回 `running` 再异步完成
 - 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
+- `errors[].message` 返回稳定的公开文案，底层 IO/路径/校验细节只写入服务端日志
 - 当校验已完成、但结果持久化失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `scrub completed with persistence warning`
 
 **响应示例**:
@@ -1809,7 +1820,7 @@ POST /api/v1/maintenance/scrub
       {
         "hash": "abc123...",
         "error_type": "corrupted",
-        "message": "Hash mismatch"
+        "message": "object failed integrity verification"
       }
     ]
   },
@@ -1827,7 +1838,7 @@ GET /api/v1/maintenance/objects
 
 **查询参数**:
 - `limit`: 返回数量限制（默认 1000）
-- `cursor`: 游标（从上一次返回的 `next_cursor` 开始）
+- `cursor`: 游标（从上一次返回的 `next_cursor` 开始，必须是 64 位十六进制对象 hash）
 
 **说明**:
 - 当前响应仅返回 `hash` 和 `size`
@@ -1935,6 +1946,8 @@ GET /api/v1/diagnostics-export
 MnemoNAS 实现 WebDAV RFC 4918 核心读写方法，可用于文件管理器挂载。
 
 **挂载地址**: `http://localhost:8080/dav/`
+
+浏览器携带 `Origin` / `Referer` / `Sec-Fetch-Site` 元数据访问 WebDAV 写方法时，会执行同源检查；脚本客户端和标准 WebDAV 客户端通常不会发送这些浏览器来源头。WebDAV 文件和目录列表响应会带 `nosniff` 与 sandbox CSP，以降低用户文件在浏览器中同源打开时的脚本执行面。
 
 支持的 WebDAV 方法:
 - `PROPFIND` - 列出目录

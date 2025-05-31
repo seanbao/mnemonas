@@ -2,7 +2,7 @@
 //! Uses BLAKE3 as hash algorithm (10x faster than SHA256)
 //! Supports optional zstd compression for storage efficiency
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +30,9 @@ pub enum CasError {
 
     #[error("invalid object hash")]
     InvalidHash,
+
+    #[error("invalid CAS configuration: {0}")]
+    InvalidConfig(String),
 
     #[error("Compression error: {0}")]
     Compression(String),
@@ -73,6 +76,49 @@ impl Default for CasConfig {
     }
 }
 
+impl CasConfig {
+    /// Validate filesystem and sharding parameters before the store touches disk.
+    pub fn validate(&self) -> Result<()> {
+        if self.root.as_os_str().is_empty() {
+            return Err(CasError::InvalidConfig(
+                "root directory cannot be empty".to_string(),
+            ));
+        }
+        if path_contains_parent_segment(&self.root) {
+            return Err(CasError::InvalidConfig(
+                "root directory cannot contain parent directory segments".to_string(),
+            ));
+        }
+        if is_protected_system_directory(&self.root) {
+            return Err(CasError::InvalidConfig(
+                "root directory cannot be a protected system directory".to_string(),
+            ));
+        }
+        if self.shard_levels > 0 && self.shard_size == 0 {
+            return Err(CasError::InvalidConfig(
+                "shard_size must be positive when shard_levels is non-zero".to_string(),
+            ));
+        }
+        let sharded_chars = self
+            .shard_levels
+            .checked_mul(self.shard_size)
+            .ok_or_else(|| {
+                CasError::InvalidConfig("shard configuration is too large".to_string())
+            })?;
+        if sharded_chars > blake3::OUT_LEN * 2 {
+            return Err(CasError::InvalidConfig(
+                "shard configuration exceeds hash length".to_string(),
+            ));
+        }
+        if !(1..=22).contains(&self.compression_level) {
+            return Err(CasError::InvalidConfig(
+                "compression_level must be between 1 and 22".to_string(),
+            ));
+        }
+        validate_no_symlink_ancestors(&self.root)
+    }
+}
+
 /// CAS storage
 pub struct CasStore {
     config: CasConfig,
@@ -87,6 +133,14 @@ pub struct CasStore {
     fail_put_after: AtomicUsize,
     #[cfg(test)]
     fail_parent_sync: AtomicBool,
+    #[cfg(test)]
+    before_object_file_open: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    before_temp_file_create: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    before_object_rename: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    before_object_delete: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 pub struct PutResult {
@@ -136,8 +190,11 @@ pub struct ScrubSummary {
 impl CasStore {
     /// Create CAS storage
     pub async fn new(config: CasConfig) -> Result<Self> {
+        config.validate()?;
+
         // Create root directory
         fs::create_dir_all(&config.root).await?;
+        validate_no_symlink_ancestors(&config.root)?;
 
         info!(
             root = %config.root.display(),
@@ -156,6 +213,14 @@ impl CasStore {
             fail_put_after: AtomicUsize::new(usize::MAX),
             #[cfg(test)]
             fail_parent_sync: AtomicBool::new(false),
+            #[cfg(test)]
+            before_object_file_open: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_temp_file_create: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_object_rename: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_object_delete: std::sync::Mutex::new(None),
         };
 
         // Rebuild index (background task)
@@ -225,22 +290,28 @@ impl CasStore {
 
         // Create directory
         if let Some(parent) = path.parent() {
+            validate_no_symlink_ancestors(parent)?;
             fs::create_dir_all(parent).await?;
+            validate_no_symlink_ancestors(parent)?;
         }
 
         // Atomic write
         let (mut file, tmp_path) = self.create_temp_file(&path).await?;
         if let Err(err) = file.write_all(&write_data).await {
-            let _ = fs::remove_file(&tmp_path).await;
+            let _ = remove_file_no_follow(&tmp_path).await;
             return Err(CasError::Io(err));
         }
         if let Err(err) = file.sync_all().await {
-            let _ = fs::remove_file(&tmp_path).await;
+            let _ = remove_file_no_follow(&tmp_path).await;
             return Err(CasError::Io(err));
         }
         drop(file);
-        if let Err(err) = fs::rename(&tmp_path, &path).await {
-            let _ = fs::remove_file(&tmp_path).await;
+        #[cfg(test)]
+        if let Some(hook) = self.before_object_rename.lock().unwrap().take() {
+            hook();
+        }
+        if let Err(err) = rename_file_no_follow(&tmp_path, &path).await {
+            let _ = remove_file_no_follow(&tmp_path).await;
             return Err(CasError::Io(err));
         }
         self.sync_parent_dir(&path).await?;
@@ -337,14 +408,15 @@ impl CasStore {
     }
 
     async fn create_temp_file(&self, path: &Path) -> Result<(fs::File, PathBuf)> {
+        validate_object_parent(path)?;
+
         for _ in 0..8 {
             let tmp_path = self.next_temp_path(path);
-            match fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&tmp_path)
-                .await
-            {
+            #[cfg(test)]
+            if let Some(hook) = self.before_temp_file_create.lock().unwrap().take() {
+                hook();
+            }
+            match create_new_file_no_follow(&tmp_path).await {
                 Ok(file) => return Ok((file, tmp_path)),
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(err) => return Err(CasError::Io(err)),
@@ -369,11 +441,38 @@ impl CasStore {
     }
 
     async fn path_exists(&self, path: &Path) -> Result<bool> {
-        match fs::metadata(path).await {
-            Ok(metadata) => Ok(metadata.is_file()),
+        if validate_object_parent(path).is_err() {
+            return Ok(false);
+        }
+
+        match fs::symlink_metadata(path).await {
+            Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(err) => Err(CasError::Io(err)),
         }
+    }
+
+    async fn read_object_file(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+        if validate_object_parent(path).is_err() {
+            return Ok(None);
+        }
+
+        let metadata = match fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(CasError::Io(err)),
+        };
+
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+
+        #[cfg(test)]
+        if let Some(hook) = self.before_object_file_open.lock().unwrap().take() {
+            hook();
+        }
+
+        read_regular_file_no_follow(path).await
     }
 
     #[cfg(test)]
@@ -385,6 +484,38 @@ impl CasStore {
     #[cfg(test)]
     pub(crate) fn fail_next_parent_sync(&self) {
         self.fail_parent_sync.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_object_file_open<F>(&self, hook: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        *self.before_object_file_open.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_temp_file_create<F>(&self, hook: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        *self.before_temp_file_create.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_object_rename<F>(&self, hook: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        *self.before_object_rename.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_object_delete<F>(&self, hook: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        *self.before_object_delete.lock().unwrap() = Some(Box::new(hook));
     }
 
     pub(crate) fn rollback_logical_size(&self, bytes: u64) {
@@ -418,8 +549,8 @@ impl CasStore {
         let parent = path.parent().ok_or_else(|| {
             CasError::Io(std::io::Error::other("object path has no parent directory"))
         })?;
-        let dir = fs::File::open(parent).await?;
-        dir.sync_all().await?;
+        validate_no_symlink_ancestors(parent)?;
+        sync_dir_no_follow(parent).await?;
         Ok(())
     }
 
@@ -432,14 +563,15 @@ impl CasStore {
         let compressed_path = base_path.with_extension("zst");
 
         // Try compressed file first, then uncompressed
-        let (raw_data, is_compressed) = if compressed_path.exists() {
-            (fs::read(&compressed_path).await?, true)
-        } else if base_path.exists() {
-            (fs::read(&base_path).await?, false)
-        } else {
-            self.stats.miss_count.fetch_add(1, Ordering::Relaxed);
-            return Err(CasError::NotFound(hash.to_string()));
-        };
+        let (raw_data, is_compressed) =
+            if let Some(data) = self.read_object_file(&compressed_path).await? {
+                (data, true)
+            } else if let Some(data) = self.read_object_file(&base_path).await? {
+                (data, false)
+            } else {
+                self.stats.miss_count.fetch_add(1, Ordering::Relaxed);
+                return Err(CasError::NotFound(hash.to_string()));
+            };
 
         // Decompress if needed
         let data = if is_compressed {
@@ -495,11 +627,19 @@ impl CasStore {
     async fn delete_locked(&self, hash: &str) -> Result<bool> {
         let base_path = self.hash_to_path(hash);
         let compressed_path = base_path.with_extension("zst");
+        if validate_object_parent(&base_path).is_err() {
+            return Ok(false);
+        }
 
         if let Some(original_size) = self.index.get(hash).map(|r| *r) {
+            #[cfg(test)]
+            if let Some(hook) = self.before_object_delete.lock().unwrap().take() {
+                hook();
+            }
+
             // Try to delete both possible files
-            let deleted_compressed = fs::remove_file(&compressed_path).await.is_ok();
-            let deleted_plain = fs::remove_file(&base_path).await.is_ok();
+            let deleted_compressed = remove_file_no_follow(&compressed_path).await.is_ok();
+            let deleted_plain = remove_file_no_follow(&base_path).await.is_ok();
 
             if deleted_compressed || deleted_plain {
                 self.index.remove(hash);
@@ -686,9 +826,16 @@ impl CasStore {
         let base_path = self.hash_to_path(hash);
         let compressed_path = base_path.with_extension("zst");
 
-        let metadata = std::fs::metadata(&compressed_path)
-            .or_else(|_| std::fs::metadata(&base_path))
+        if validate_object_parent(&base_path).is_err() {
+            return None;
+        }
+
+        let metadata = std::fs::symlink_metadata(&compressed_path)
+            .or_else(|_| std::fs::symlink_metadata(&base_path))
             .ok()?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return None;
+        }
         metadata_timestamp_to_unix(metadata.created().ok(), metadata.modified().ok())
     }
 
@@ -749,6 +896,9 @@ impl CasStore {
             }
             let start = index * self.config.shard_size;
             let end = start + self.config.shard_size;
+            if end > hash.len() {
+                return None;
+            }
             if &hash[start..end] != *shard {
                 return None;
             }
@@ -903,6 +1053,386 @@ pub fn is_valid_hash(hash: &str) -> bool {
     hash.len() == blake3::OUT_LEN * 2 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn path_contains_parent_segment(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn is_protected_system_directory(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let normalized = normalize_path_for_compare(path);
+        [
+            Path::new("/"),
+            Path::new("/bin"),
+            Path::new("/boot"),
+            Path::new("/dev"),
+            Path::new("/etc"),
+            Path::new("/home"),
+            Path::new("/lib"),
+            Path::new("/lib64"),
+            Path::new("/media"),
+            Path::new("/mnt"),
+            Path::new("/opt"),
+            Path::new("/proc"),
+            Path::new("/root"),
+            Path::new("/run"),
+            Path::new("/sbin"),
+            Path::new("/srv"),
+            Path::new("/sys"),
+            Path::new("/tmp"),
+            Path::new("/usr"),
+            Path::new("/usr/local"),
+            Path::new("/usr/local/bin"),
+            Path::new("/usr/local/share"),
+            Path::new("/var"),
+        ]
+        .iter()
+        .any(|protected| normalized == *protected)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => normalized.push(component.as_os_str()),
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn validate_no_symlink_ancestors(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                return Err(CasError::InvalidConfig(
+                    "root directory cannot contain parent directory segments".to_string(),
+                ));
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(CasError::InvalidConfig(format!(
+                        "root directory component is a symlink: {}",
+                        current.display()
+                    )));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(CasError::Io(err)),
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_object_parent(path: &Path) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        CasError::Io(std::io::Error::other("object path has no parent directory"))
+    })?;
+    validate_no_symlink_ancestors(parent)
+}
+
+async fn create_new_file_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        create_new_file_no_follow_unix(path).map(fs::File::from_std)
+    }
+    #[cfg(not(unix))]
+    {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => Some(metadata),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        };
+        if let Some(metadata) = metadata {
+            if metadata.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "object path resolves through a symlink",
+                ));
+            }
+        }
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .await
+    }
+}
+
+async fn rename_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        rename_file_no_follow_unix(src, dst)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::rename(src, dst).await
+    }
+}
+
+async fn remove_file_no_follow(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unlink_file_no_follow_unix(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::remove_file(path).await
+    }
+}
+
+async fn sync_dir_no_follow(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let dir = open_dir_no_follow_unix(&path)?;
+            dir.sync_all()
+        })
+        .await
+        .map_err(|err| std::io::Error::other(format!("directory sync task failed: {err}")))?
+    }
+    #[cfg(not(unix))]
+    {
+        let dir = fs::File::open(path).await?;
+        dir.sync_all().await
+    }
+}
+
+#[cfg(unix)]
+fn path_component_cstring(
+    component: &std::ffi::OsStr,
+    context: &'static str,
+) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::ffi::CString::new(component.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, context))
+}
+
+#[cfg(unix)]
+fn open_dir_no_follow_unix(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let start = if path.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(start)?;
+
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => {
+                let name = path_component_cstring(name, "path component contains NUL")?;
+                let fd = unsafe {
+                    libc::openat(
+                        dir.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                    )
+                };
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                dir = unsafe { std::fs::File::from_raw_fd(fd) };
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path escapes CAS root",
+                ));
+            }
+        }
+    }
+
+    Ok(dir)
+}
+
+#[cfg(unix)]
+fn open_parent_dir_no_follow_unix(
+    path: &Path,
+) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("object path has no parent directory"))?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "object path has no file name",
+        )
+    })?;
+    let leaf = path_component_cstring(file_name, "file name contains NUL")?;
+    let dir = open_dir_no_follow_unix(parent)?;
+    Ok((dir, leaf))
+}
+
+#[cfg(unix)]
+fn create_new_file_no_follow_unix(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (dir, leaf) = open_parent_dir_no_follow_unix(path)?;
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            leaf.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn rename_file_no_follow_unix(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if src.parent() != dst.parent() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "CAS object rename requires same parent directory",
+        ));
+    }
+    let (dir, src_leaf) = open_parent_dir_no_follow_unix(src)?;
+    let dst_name = dst.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "object path has no file name",
+        )
+    })?;
+    let dst_leaf = path_component_cstring(dst_name, "file name contains NUL")?;
+    let result = unsafe {
+        libc::renameat(
+            dir.as_raw_fd(),
+            src_leaf.as_ptr(),
+            dir.as_raw_fd(),
+            dst_leaf.as_ptr(),
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlink_file_no_follow_unix(path: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let (dir, leaf) = open_parent_dir_no_follow_unix(path)?;
+    let result = unsafe { libc::unlinkat(dir.as_raw_fd(), leaf.as_ptr(), 0) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+async fn read_regular_file_no_follow(path: &Path) -> Result<Option<Vec<u8>>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || read_regular_file_no_follow_blocking(&path))
+        .await
+        .map_err(|err| {
+            CasError::Io(std::io::Error::other(format!(
+                "object read task failed: {err}"
+            )))
+        })?
+}
+
+#[cfg(unix)]
+fn read_regular_file_no_follow_blocking(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (dir, leaf) = match open_parent_dir_no_follow_unix(path) {
+        Ok(parent) => parent,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if is_unix_no_follow_rejection(&err) => return Ok(None),
+        Err(err) => return Err(CasError::Io(err)),
+    };
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    let mut file = match (fd < 0).then(std::io::Error::last_os_error) {
+        None => unsafe { std::fs::File::from_raw_fd(fd) },
+        Some(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Some(err) if is_unix_no_follow_rejection(&err) => return Ok(None),
+        Some(err) => return Err(CasError::Io(err)),
+    };
+
+    let metadata = file.metadata().map_err(CasError::Io)?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).map_err(CasError::Io)?;
+    Ok(Some(data))
+}
+
+#[cfg(unix)]
+fn is_unix_no_follow_rejection(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR))
+}
+
+#[cfg(not(unix))]
+fn read_regular_file_no_follow_blocking(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(CasError::Io(err)),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+
+    let mut file = std::fs::File::open(path).map_err(CasError::Io)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).map_err(CasError::Io)?;
+    Ok(Some(data))
+}
+
 fn system_time_to_unix_timestamp(time: SystemTime) -> Option<i64> {
     let duration = time.duration_since(UNIX_EPOCH).ok()?;
     duration_to_unix_timestamp(duration)
@@ -948,6 +1478,101 @@ mod tests {
                     .unwrap_or(false)
             })
             .collect()
+    }
+
+    #[test]
+    fn test_cas_config_rejects_empty_root_parent_segments_and_bad_sharding() {
+        let dir = tempdir().unwrap();
+
+        let err = CasConfig {
+            root: PathBuf::new(),
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("empty root should be rejected");
+        assert!(matches!(err, CasError::InvalidConfig(_)));
+
+        let err = CasConfig {
+            root: PathBuf::from("data/../objects"),
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("parent segments should be rejected");
+        assert!(matches!(err, CasError::InvalidConfig(_)));
+
+        let err = CasConfig {
+            root: dir.path().join("cas"),
+            shard_levels: 1,
+            shard_size: 0,
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("zero shard size should be rejected");
+        assert!(matches!(err, CasError::InvalidConfig(_)));
+
+        let err = CasConfig {
+            root: dir.path().join("cas"),
+            shard_levels: blake3::OUT_LEN * 2 + 1,
+            shard_size: 1,
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("oversized sharding should be rejected");
+        assert!(matches!(err, CasError::InvalidConfig(_)));
+
+        let err = CasConfig {
+            root: dir.path().join("cas"),
+            compression_level: 23,
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("invalid compression level should be rejected");
+        assert!(matches!(err, CasError::InvalidConfig(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cas_config_rejects_protected_system_roots() {
+        for root in ["/", "/tmp", "/usr/local/bin"] {
+            let err = CasConfig {
+                root: PathBuf::from(root),
+                ..Default::default()
+            }
+            .validate()
+            .expect_err("protected root should be rejected");
+
+            assert!(
+                matches!(err, CasError::InvalidConfig(_)),
+                "unexpected error for {root}: {err:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cas_new_rejects_symlink_root_ancestor() {
+        let dir = tempdir().unwrap();
+        let real_parent = dir.path().join("real-parent");
+        let linked_parent = dir.path().join("linked-parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+
+        let err = match CasStore::new(CasConfig {
+            root: linked_parent.join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        })
+        .await
+        {
+            Ok(_) => panic!("symlink ancestor should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, CasError::InvalidConfig(_)));
+        assert!(
+            !real_parent.join("cas").exists(),
+            "CAS root should not be created through a symlink ancestor"
+        );
     }
 
     #[test]
@@ -1264,6 +1889,293 @@ mod tests {
         assert_eq!(compressed_size, 0);
         assert_eq!(hits, 0);
         assert_eq!(misses, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_ignores_symlinked_object_paths() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"external object data";
+        let hash = store.put(data).await.unwrap();
+        let object_path = store.hash_to_path(&hash);
+        let external_path = dir.path().join("external-object");
+
+        tokio::fs::remove_file(&object_path).await.unwrap();
+        std::fs::write(&external_path, data).unwrap();
+        std::os::unix::fs::symlink(&external_path, &object_path).unwrap();
+
+        assert!(matches!(store.get(&hash).await, Err(CasError::NotFound(_))));
+        assert!(!store.object_exists(&hash).await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_read_object_file_does_not_follow_symlink_inserted_after_metadata() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"external object swapped after metadata";
+        let hash = compute_hash(data);
+        let object_path = store.hash_to_path(&hash);
+        std::fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        std::fs::write(&object_path, b"placeholder before race").unwrap();
+
+        let external_path = dir.path().join("external-object-after-metadata");
+        std::fs::write(&external_path, data).unwrap();
+        let hook_object_path = object_path.clone();
+        store.set_before_object_file_open(move || {
+            std::fs::remove_file(&hook_object_path).unwrap();
+            std::os::unix::fs::symlink(&external_path, &hook_object_path).unwrap();
+        });
+
+        let read = store.read_object_file(&object_path).await.unwrap();
+        assert!(
+            read.is_none(),
+            "CAS object reads must not follow a symlink inserted after metadata validation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_does_not_read_through_parent_symlink_inserted_after_metadata() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"do not read through swapped symlink parent";
+        let hash = store.put(data).await.unwrap();
+        let object_path = store.hash_to_path(&hash);
+        let object_parent = object_path.parent().unwrap().to_path_buf();
+        let backup_parent = dir.path().join("object-parent-read-backup");
+        let outside_parent = dir.path().join("outside-parent-read");
+
+        store.set_before_object_file_open({
+            let object_parent = object_parent.clone();
+            let backup_parent = backup_parent.clone();
+            let outside_parent = outside_parent.clone();
+            let hash = hash.clone();
+            move || {
+                std::fs::rename(&object_parent, &backup_parent).unwrap();
+                std::fs::create_dir(&outside_parent).unwrap();
+                std::fs::write(outside_parent.join(&hash), data).unwrap();
+                std::os::unix::fs::symlink(&outside_parent, &object_parent).unwrap();
+            }
+        });
+
+        assert!(matches!(store.get(&hash).await, Err(CasError::NotFound(_))));
+        assert!(
+            outside_parent.join(&hash).exists(),
+            "read path should not alter the outside object"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_ignores_symlinked_object_parent() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"external parent object";
+        let hash = store.put(data).await.unwrap();
+        let object_path = store.hash_to_path(&hash);
+        let object_parent = object_path.parent().unwrap().to_path_buf();
+        let outside_parent = dir.path().join("outside-parent");
+
+        tokio::fs::remove_dir_all(&object_parent).await.unwrap();
+        std::fs::create_dir(&outside_parent).unwrap();
+        std::fs::write(outside_parent.join(&hash), data).unwrap();
+        std::os::unix::fs::symlink(&outside_parent, &object_parent).unwrap();
+
+        assert!(matches!(store.get(&hash).await, Err(CasError::NotFound(_))));
+        assert!(!store.object_exists(&hash).await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_put_rejects_symlinked_object_parent() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"do not write through symlinked parent";
+        let hash = compute_hash(data);
+        let object_path = store.hash_to_path(&hash);
+        let object_parent = object_path.parent().unwrap().to_path_buf();
+        let shard_parent = object_parent.parent().unwrap();
+        let outside_parent = dir.path().join("outside-parent");
+
+        std::fs::create_dir_all(shard_parent).unwrap();
+        std::fs::create_dir(&outside_parent).unwrap();
+        std::os::unix::fs::symlink(&outside_parent, &object_parent).unwrap();
+
+        let err = store
+            .put(data)
+            .await
+            .expect_err("symlinked parent should fail");
+
+        assert!(matches!(err, CasError::InvalidConfig(_)));
+        assert!(
+            !outside_parent.join(&hash).exists(),
+            "CAS put should not write through a symlinked object parent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_put_does_not_follow_parent_symlink_inserted_before_temp_create() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"do not create temp through swapped symlink parent";
+        let hash = compute_hash(data);
+        let object_path = store.hash_to_path(&hash);
+        let object_parent = object_path.parent().unwrap().to_path_buf();
+        let outside_parent = dir.path().join("outside-parent-create");
+
+        store.set_before_temp_file_create({
+            let object_parent = object_parent.clone();
+            let outside_parent = outside_parent.clone();
+            move || {
+                std::fs::remove_dir_all(&object_parent).unwrap();
+                std::fs::create_dir(&outside_parent).unwrap();
+                std::os::unix::fs::symlink(&outside_parent, &object_parent).unwrap();
+            }
+        });
+
+        let err = store
+            .put(data)
+            .await
+            .expect_err("symlinked parent inserted before temp create should fail");
+
+        assert!(matches!(err, CasError::Io(_) | CasError::InvalidConfig(_)));
+        assert!(
+            !outside_parent.join(&hash).exists(),
+            "CAS put should not create the final object through a swapped symlink parent"
+        );
+        let outside_entries = std::fs::read_dir(&outside_parent).unwrap().count();
+        assert_eq!(outside_entries, 0, "outside parent should remain empty");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_put_does_not_rename_through_parent_symlink_inserted_after_temp_create() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"do not rename through swapped symlink parent";
+        let hash = compute_hash(data);
+        let object_path = store.hash_to_path(&hash);
+        let object_parent = object_path.parent().unwrap().to_path_buf();
+        let backup_parent = dir.path().join("object-parent-backup");
+        let outside_parent = dir.path().join("outside-parent-rename");
+
+        store.set_before_object_rename({
+            let object_parent = object_parent.clone();
+            let backup_parent = backup_parent.clone();
+            let outside_parent = outside_parent.clone();
+            move || {
+                std::fs::rename(&object_parent, &backup_parent).unwrap();
+                std::fs::create_dir(&outside_parent).unwrap();
+                std::os::unix::fs::symlink(&outside_parent, &object_parent).unwrap();
+            }
+        });
+
+        let err = store
+            .put(data)
+            .await
+            .expect_err("symlinked parent inserted before rename should fail");
+
+        assert!(matches!(err, CasError::Io(_) | CasError::InvalidConfig(_)));
+        assert!(
+            !outside_parent.join(&hash).exists(),
+            "CAS put should not rename the object through a swapped symlink parent"
+        );
+        let outside_entries = std::fs::read_dir(&outside_parent).unwrap().count();
+        assert_eq!(outside_entries, 0, "outside parent should remain empty");
+        assert!(
+            !store.has(&hash),
+            "index should not claim success after swapped-parent rename failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_delete_does_not_unlink_through_parent_symlink_inserted_after_validation() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().join("cas"),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"do not delete through swapped symlink parent";
+        let hash = store.put(data).await.unwrap();
+        let object_path = store.hash_to_path(&hash);
+        let object_parent = object_path.parent().unwrap().to_path_buf();
+        let backup_parent = dir.path().join("object-parent-delete-backup");
+        let outside_parent = dir.path().join("outside-parent-delete");
+
+        store.set_before_object_delete({
+            let object_parent = object_parent.clone();
+            let backup_parent = backup_parent.clone();
+            let outside_parent = outside_parent.clone();
+            let hash = hash.clone();
+            move || {
+                std::fs::rename(&object_parent, &backup_parent).unwrap();
+                std::fs::create_dir(&outside_parent).unwrap();
+                std::fs::write(outside_parent.join(&hash), data).unwrap();
+                std::os::unix::fs::symlink(&outside_parent, &object_parent).unwrap();
+            }
+        });
+
+        assert!(
+            !store.delete(&hash).await.unwrap(),
+            "delete should fail closed when the parent is swapped to a symlink"
+        );
+        assert!(
+            outside_parent.join(&hash).exists(),
+            "delete must not unlink the outside object"
+        );
+        assert!(
+            store.has(&hash),
+            "index should remain intact when filesystem delete is rejected"
+        );
     }
 
     #[tokio::test]

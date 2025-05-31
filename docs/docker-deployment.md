@@ -85,6 +85,8 @@ cd mnemonas
 
 镜像默认以非 root 用户运行，容器内数据目录是 `/data`，默认对应宿主机 `~/.mnemonas`。如需改宿主机数据目录，优先使用 `./scripts/docker-quickstart.sh --data-dir /path/to/mnemonas --start`；脚本会把该路径写入 `.env` 的 `MNEMONAS_DATA_DIR`。Docker 中的自定义配置必须显式设置 `[storage].root`，通常保持 `root = "/data"`，且不能设置为 `/`。启动时如果已有配置里的 `[storage].root` 和 Docker 的 `STORAGE_ROOT` 不一致，容器日志会输出警告，并继续以配置文件为准。如修改为其他容器内路径，需额外挂载该路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
 
+Docker quickstart、容器启动入口和预检脚本都会拒绝数据目录中的符号链接路径组件，避免把配置或对象数据写入被替换的目录。容器内 `CONFIG_PATH` 必须是绝对路径，并且位于 `STORAGE_ROOT` 之下；默认即为 `/data/config.toml`。如果需要自定义宿主机路径，请挂载真实目录而不是符号链接。
+
 仓库自带的 Compose 文件默认使用 UID/GID `1000:1000`，Compose 会自动读取 `.env`。如果你的宿主机用户不是 1000，优先按上面的命令把当前 UID/GID 写入 `.env`；也可以启动时显式传入当前用户：
 
 ```bash
@@ -458,8 +460,10 @@ docker compose start
 docker compose down
 
 # 恢复目录
-DATA_DIR="${MNEMONAS_DATA_DIR:-$HOME/.mnemonas}"
-test -n "$DATA_DIR" && test "$DATA_DIR" != "/" || { echo "refusing unsafe DATA_DIR"; exit 1; }
+DEFAULT_DATA_DIR="$HOME/.mnemonas"
+DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
+[ "$DATA_DIR" = "$DEFAULT_DATA_DIR" ] || { echo "refusing non-default DATA_DIR; inspect and delete manually: $DATA_DIR"; exit 1; }
+[ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR"
 tar xzf mnemonas-backup-YYYYMMDD.tar.gz -C ~
 

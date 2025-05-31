@@ -50,6 +50,7 @@ const maxPropfindTraversalDepth = 64
 const webdavLockDepthZero = "0"
 const webdavLockDepthInfinity = "infinity"
 const maxWebDAVXMLRequestBody = 1 << 20
+const untrustedWebDAVContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
 
 var webdavRandomRead = rand.Read
 
@@ -199,20 +200,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove prefix to get file path
-	filePath := strings.TrimPrefix(r.URL.Path, h.prefix)
-	if filePath == "" {
-		filePath = "/"
+	requestPath := r.URL.Path
+	if requestPath == "" {
+		requestPath = "/"
 	}
-	if hasTraversalSegment(filePath) {
+	if hasTraversalSegment(requestPath) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 
 	// Validate path to prevent path traversal attacks (C1 fix)
-	filePath = path.Clean(filePath)
-	if !path.IsAbs(filePath) {
-		filePath = "/" + filePath
+	cleanPath := path.Clean(requestPath)
+	if !path.IsAbs(cleanPath) {
+		cleanPath = "/" + cleanPath
+	}
+	filePath, ok := trimWebDAVPrefix(cleanPath, h.prefix)
+	if !ok {
+		http.NotFound(w, r)
+		return
 	}
 
 	ctx := r.Context()
@@ -270,6 +275,7 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 
 	if info.IsDir {
 		if r.Method == http.MethodHead {
+			setUntrustedWebDAVContentHeaders(w.Header())
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			return
 		}
@@ -323,6 +329,7 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	// Set ETag header for caching
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Accept-Ranges", "bytes")
+	setUntrustedWebDAVContentHeaders(w.Header())
 	if contentType := fileContentType(filePath); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
@@ -358,6 +365,7 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setUntrustedWebDAVContentHeaders(w.Header())
 	fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
 <head><title>Index of %s</title></head>
@@ -396,6 +404,11 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 
 func escapeDirectoryHref(rawPath string) string {
 	return (&url.URL{Path: rawPath}).EscapedPath()
+}
+
+func setUntrustedWebDAVContentHeaders(header http.Header) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Security-Policy", untrustedWebDAVContentSecurityPolicy)
 }
 
 func (h *Handler) webdavHref(filePath string, isDir bool) string {
@@ -558,7 +571,12 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 
 func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
 	// MKCOL does not allow request body
-	if requestHasBody(r) {
+	hasBody, err := requestHasBody(r)
+	if err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if hasBody {
 		http.Error(w, "MKCOL does not allow request body", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -602,24 +620,30 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 	w.WriteHeader(http.StatusCreated)
 }
 
-func requestHasBody(r *http.Request) bool {
+func requestHasBody(r *http.Request) (bool, error) {
 	if r.Body == nil || r.Body == http.NoBody {
-		return false
+		return false, nil
 	}
 	if r.ContentLength > 0 {
-		return true
+		return true, nil
 	}
 	if r.ContentLength == 0 {
-		return false
+		return false, nil
 	}
 
 	var probe [1]byte
 	n, err := r.Body.Read(probe[:])
 	if n > 0 {
 		r.Body = prependReadCloser(bytes.NewReader(probe[:n]), r.Body)
-		return true
+		if err != nil && err != io.EOF {
+			return true, err
+		}
+		return true, nil
 	}
-	return err != io.EOF
+	if err == io.EOF {
+		return false, nil
+	}
+	return false, err
 }
 
 func prependReadCloser(prefix io.Reader, body io.ReadCloser) io.ReadCloser {
@@ -1466,7 +1490,11 @@ func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http
 		h.handleError(w, err)
 		return
 	}
-	hasBody := requestHasBody(r)
+	hasBody, err := requestHasBody(r)
+	if err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
 	providedTokens := extractLockTokens(r, filePath, h.prefix)
 	hasRefreshCondition := len(providedTokens) > 0 || r.Header.Get("If") != "" || r.Header.Get("Lock-Token") != ""
 
@@ -1703,14 +1731,9 @@ func resolveIfHeaderPath(rawPath, expectedHost, prefix string) (string, bool) {
 	if !path.IsAbs(resolvedPath) {
 		resolvedPath = "/" + resolvedPath
 	}
-	if prefix != "" {
-		if resolvedPath != prefix && !strings.HasPrefix(resolvedPath, prefix+"/") {
-			return "", false
-		}
-		resolvedPath = strings.TrimPrefix(resolvedPath, prefix)
-		if resolvedPath == "" {
-			resolvedPath = "/"
-		}
+	resolvedPath, ok := trimWebDAVPrefix(resolvedPath, prefix)
+	if !ok {
+		return "", false
 	}
 	return resolvedPath, true
 }
@@ -2076,11 +2099,30 @@ func (h *Handler) getDestination(r *http.Request) string {
 		dstPath = "/" + dstPath
 	}
 
-	if h.prefix != "" && dstPath != h.prefix && !strings.HasPrefix(dstPath, h.prefix+"/") {
+	dstPath, ok := trimWebDAVPrefix(dstPath, h.prefix)
+	if !ok {
 		return ""
 	}
 
-	return strings.TrimPrefix(dstPath, h.prefix)
+	return dstPath
+}
+
+func trimWebDAVPrefix(cleanPath, prefix string) (string, bool) {
+	if prefix == "" || prefix == "/" {
+		return cleanPath, true
+	}
+	if cleanPath != prefix && !strings.HasPrefix(cleanPath, prefix+"/") {
+		return "", false
+	}
+
+	trimmed := strings.TrimPrefix(cleanPath, prefix)
+	if trimmed == "" {
+		return "/", true
+	}
+	if !path.IsAbs(trimmed) {
+		trimmed = "/" + trimmed
+	}
+	return trimmed, true
 }
 
 func requestHost(r *http.Request) string {
@@ -2092,6 +2134,9 @@ func requestHost(r *http.Request) string {
 
 func hasTraversalSegment(rawPath string) bool {
 	normalized := strings.ReplaceAll(rawPath, "\\", "/")
+	if strings.ContainsRune(normalized, '\x00') {
+		return true
+	}
 	for _, segment := range strings.Split(normalized, "/") {
 		if segment == ".." {
 			return true
@@ -2116,6 +2161,10 @@ func (h *Handler) handleError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, storage.ErrAlreadyExists) {
 		http.Error(w, "resource already exists", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, storage.ErrFileTooLarge) {
+		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	if errors.Is(err, storage.ErrFileLocked) {

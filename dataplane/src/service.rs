@@ -22,13 +22,10 @@ use proto::*;
 
 const DEFAULT_LIST_OBJECTS_LIMIT: u32 = 1000;
 const MAX_LIST_OBJECTS_LIMIT: u32 = 1000;
+const MAX_GRPC_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
 fn invalid_hash_status(err: crate::cas::CasError) -> Status {
     Status::invalid_argument(err.to_string())
-}
-
-fn validate_request_hash(hash: &str) -> Result<(), Status> {
-    crate::cas::validate_hash(hash).map_err(invalid_hash_status)
 }
 
 fn cas_read_status(err: crate::cas::CasError, not_found_message: &'static str) -> Status {
@@ -72,6 +69,8 @@ impl DataPlaneService {
     /// Get gRPC server
     pub fn into_server(self) -> DataPlaneServer<Self> {
         DataPlaneServer::new(self)
+            .max_decoding_message_size(MAX_GRPC_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_GRPC_MESSAGE_SIZE)
     }
 
     async fn store_uploaded_chunk(
@@ -153,7 +152,7 @@ impl DataPlane for DataPlaneService {
 
         // If expected hash provided, verify first
         if let Some(expected) = &req.expected_hash {
-            validate_request_hash(expected)?;
+            crate::cas::validate_hash(expected).map_err(invalid_hash_status)?;
             let actual = crate::cas::compute_hash(data);
             if &actual != expected {
                 return Err(Status::invalid_argument(format!(
@@ -199,7 +198,7 @@ impl DataPlane for DataPlaneService {
         request: Request<HasChunkRequest>,
     ) -> Result<Response<HasChunkResponse>, Status> {
         let hash = &request.into_inner().hash;
-        validate_request_hash(hash)?;
+        crate::cas::validate_hash(hash).map_err(invalid_hash_status)?;
         let exists = self.cas.has(hash);
         let size = self.cas.size(hash);
 
@@ -446,7 +445,7 @@ impl DataPlane for DataPlaneService {
         request: Request<GetFileRequest>,
     ) -> Result<Response<Self::GetFileStream>, Status> {
         let manifest_hash = request.into_inner().manifest_hash;
-        validate_request_hash(&manifest_hash)?;
+        crate::cas::validate_hash(&manifest_hash).map_err(invalid_hash_status)?;
 
         // Get manifest
         let manifest_data = self
@@ -457,6 +456,9 @@ impl DataPlane for DataPlaneService {
 
         let manifest = FileManifest::from_json(&manifest_data)
             .map_err(|e| Status::data_loss(format!("Failed to parse manifest: {}", e)))?;
+        manifest
+            .validate()
+            .map_err(|e| Status::data_loss(format!("Invalid file manifest: {}", e)))?;
 
         // Create streaming response
         let (tx, rx) = mpsc::channel(4);
@@ -466,6 +468,14 @@ impl DataPlane for DataPlaneService {
             for chunk_ref in manifest.chunks {
                 match cas.get(&chunk_ref.hash).await {
                     Ok(data) => {
+                        if data.len() as u64 != chunk_ref.size as u64 {
+                            let _ = tx
+                                .send(Err(Status::data_loss(
+                                    "File manifest chunk size does not match CAS object",
+                                )))
+                                .await;
+                            break;
+                        }
                         if tx.send(Ok(GetFileResponse { data })).await.is_err() {
                             break;
                         }
@@ -537,7 +547,7 @@ impl DataPlane for DataPlaneService {
             None
         } else {
             for hash in &req.hashes {
-                validate_request_hash(hash)?;
+                crate::cas::validate_hash(hash).map_err(invalid_hash_status)?;
             }
             Some(req.hashes)
         };
@@ -600,7 +610,7 @@ impl DataPlane for DataPlaneService {
         let limit = requested_limit as usize;
         let cursor = req.cursor.as_deref();
         if let Some(cursor) = cursor {
-            validate_request_hash(cursor)?;
+            crate::cas::validate_hash(cursor).map_err(invalid_hash_status)?;
         }
 
         let (objects, next_cursor) = self.cas.list_objects(cursor, limit);
@@ -634,6 +644,13 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::{Channel, Server};
     use tonic::Code;
+
+    #[test]
+    fn test_grpc_message_limit_has_version_object_headroom() {
+        let max_grpc_message_size = MAX_GRPC_MESSAGE_SIZE;
+        let default_max_version_object_size = 100 * 1024 * 1024;
+        assert!(max_grpc_message_size > default_max_version_object_size);
+    }
 
     async fn setup_test_client(
         service: DataPlaneService,

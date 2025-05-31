@@ -196,7 +196,11 @@ func TestRequestHasBody_PreservesProbeByteForUnknownLengthBody(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/dav/testdir", io.NopCloser(strings.NewReader("body")))
 	req.ContentLength = -1
 
-	if !requestHasBody(req) {
+	hasBody, err := requestHasBody(req)
+	if err != nil {
+		t.Fatalf("requestHasBody() error: %v", err)
+	}
+	if !hasBody {
 		t.Fatal("expected requestHasBody to detect an unknown-length body")
 	}
 
@@ -206,6 +210,65 @@ func TestRequestHasBody_PreservesProbeByteForUnknownLengthBody(t *testing.T) {
 	}
 	if string(remaining) != "body" {
 		t.Fatalf("expected probed body to remain intact, got %q", string(remaining))
+	}
+}
+
+type errorWithDataReadCloser struct {
+	data []byte
+	err  error
+}
+
+func (r *errorWithDataReadCloser) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, r.err
+}
+
+func (r *errorWithDataReadCloser) Close() error {
+	return nil
+}
+
+func TestRequestHasBody_ReturnsNonEOFReadErrorWithData(t *testing.T) {
+	readErr := errors.New("probe read failed")
+	req := httptest.NewRequest(http.MethodPost, "/dav/testdir", nil)
+	req.Body = &errorWithDataReadCloser{data: []byte("b"), err: readErr}
+	req.ContentLength = -1
+
+	hasBody, err := requestHasBody(req)
+	if !hasBody {
+		t.Fatal("expected requestHasBody to preserve body detection")
+	}
+	if !errors.Is(err, readErr) {
+		t.Fatalf("requestHasBody() error = %v, want %v", err, readErr)
+	}
+
+	remaining, readAllErr := io.ReadAll(req.Body)
+	if !errors.Is(readAllErr, readErr) {
+		t.Fatalf("ReadAll(body) error = %v, want %v", readAllErr, readErr)
+	}
+	if string(remaining) != "b" {
+		t.Fatalf("expected probed body to remain intact, got %q", string(remaining))
+	}
+}
+
+func TestHandler_MKCOL_RejectsUnreadableUnknownLengthBody(t *testing.T) {
+	handler, _, _ := setupTestHandler(t)
+
+	req := httptest.NewRequest("MKCOL", "/dav/testdir", nil)
+	req.Body = &errorWithDataReadCloser{data: []byte("b"), err: errors.New("probe read failed")}
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("MKCOL unreadable body status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid request body") {
+		t.Fatalf("expected invalid request body message, got %q", w.Body.String())
 	}
 }
 
@@ -516,6 +579,12 @@ func TestHandler_PUT_GET(t *testing.T) {
 	if w.Header().Get("ETag") == "" {
 		t.Error("GET should return ETag header")
 	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("GET X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("GET Content-Security-Policy = %q, want sandboxed default-src none", got)
+	}
 }
 
 func TestHandler_PUT_WithContentRangeReturnsBadRequestAndDoesNotOverwrite(t *testing.T) {
@@ -605,6 +674,12 @@ func TestHandler_HEAD_PreservesFileContentType(t *testing.T) {
 	}
 	if headW.Header().Get("Content-Type") != getW.Header().Get("Content-Type") {
 		t.Fatalf("HEAD Content-Type = %q, want GET Content-Type %q", headW.Header().Get("Content-Type"), getW.Header().Get("Content-Type"))
+	}
+	if got := headW.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("HEAD X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := headW.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("HEAD Content-Security-Policy = %q, want sandboxed default-src none", got)
 	}
 	if headW.Body.Len() != 0 {
 		t.Fatalf("HEAD body length = %d, want 0", headW.Body.Len())
@@ -4500,6 +4575,30 @@ func TestHandler_LegalDoubleDotFilenameAllowed(t *testing.T) {
 	}
 }
 
+func TestHandler_ServeHTTP_RejectsSimilarPrefix(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("GET", "/davish/file.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("GET similar WebDAV prefix status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandler_ServeHTTP_RejectsNULPath(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("GET", "/dav/%00.txt", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GET NUL path status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 func TestHandler_GetDestination_AllowsDoubleDotFilename(t *testing.T) {
 	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
 	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
@@ -4510,6 +4609,19 @@ func TestHandler_GetDestination_AllowsDoubleDotFilename(t *testing.T) {
 
 	if dst != "/dst/foo..txt" {
 		t.Fatalf("getDestination() = %q, want %q", dst, "/dst/foo..txt")
+	}
+}
+
+func TestHandler_GetDestination_ExactPrefixMapsToRoot(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "localhost"
+	req.Header.Set("Destination", "http://localhost/dav")
+
+	dst := handler.getDestination(req)
+
+	if dst != "/" {
+		t.Fatalf("getDestination() = %q, want root path", dst)
 	}
 }
 
@@ -4532,6 +4644,16 @@ func TestHandler_GetDestination_RejectsPercentEncodedTraversal(t *testing.T) {
 
 	if dst := handler.getDestination(req); dst != "" {
 		t.Fatalf("getDestination() = %q, want empty string for encoded traversal destination", dst)
+	}
+}
+
+func TestResolveIfHeaderPath_ExactPrefixMapsToRoot(t *testing.T) {
+	resolved, ok := resolveIfHeaderPath("http://localhost/dav", "localhost", "/dav")
+	if !ok {
+		t.Fatal("expected exact WebDAV prefix If URI to resolve")
+	}
+	if resolved != "/" {
+		t.Fatalf("resolveIfHeaderPath() = %q, want root path", resolved)
 	}
 }
 
@@ -4586,6 +4708,12 @@ func TestHandler_HeadDirectoryRequest(t *testing.T) {
 	if contentType := w.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
 		t.Fatalf("HEAD directory content type = %q, want %q", contentType, "text/html; charset=utf-8")
 	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("HEAD directory X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("HEAD directory Content-Security-Policy = %q, want sandboxed default-src none", got)
+	}
 }
 
 func TestHandler_DirectoryListing(t *testing.T) {
@@ -4604,6 +4732,12 @@ func TestHandler_DirectoryListing(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("GET dir status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("directory listing X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("directory listing Content-Security-Policy = %q, want sandboxed default-src none", got)
 	}
 
 	body := w.Body.String()
@@ -4674,6 +4808,20 @@ func TestHandler_WriteExpectedWebDAVError_UsesSentinelMessageForWrappedError(t *
 	}
 	if !strings.Contains(w.Body.String(), errDestinationInsideSourceDirectory.Error()) {
 		t.Fatalf("expected sentinel message in response, got %q", w.Body.String())
+	}
+}
+
+func TestHandler_HandleError_MapsFileTooLargeToPayloadTooLarge(t *testing.T) {
+	handler := NewHandler(Config{AuthType: "none"})
+	w := httptest.NewRecorder()
+
+	handler.handleError(w, fmt.Errorf("write failed: %w", storage.ErrFileTooLarge))
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("handleError(file too large) status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(w.Body.String(), "file too large") {
+		t.Fatalf("expected file too large response body, got %q", w.Body.String())
 	}
 }
 
