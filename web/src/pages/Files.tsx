@@ -53,7 +53,7 @@ import { PreviewModal, type PreviewFile } from '@/components/preview'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useFilesStore, type FileItem } from '@/stores/files'
 import { useClipboardStore } from '@/stores/clipboard'
-import { useCanWrite, useUser } from '@/stores/auth'
+import { useCanWrite, useShareEnabled, useUser } from '@/stores/auth'
 import { useContextMenu, useKeyboardShortcuts } from '@/hooks'
 import {
   listFiles,
@@ -77,10 +77,25 @@ import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope
 
 type SortKey = 'name' | 'size' | 'modTime'
 
+const UPLOAD_HISTORY_SUCCESS_RETENTION_MS = 15000
+
 const sortLabels: Record<SortKey, string> = {
   name: '名称',
   size: '大小',
   modTime: '修改时间',
+}
+
+function getFileTypeLabel(file: FileItem): string {
+  if (file.isDir) {
+    return '文件夹'
+  }
+
+  const dotIndex = file.name.lastIndexOf('.')
+  if (dotIndex <= 0 || dotIndex === file.name.length - 1) {
+    return '文件'
+  }
+
+  return file.name.slice(dotIndex + 1).toUpperCase()
 }
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
@@ -558,9 +573,7 @@ function FileRow({
 }) {
   const detailLabel = isSelected && isMultiSelection
     ? '多选中'
-    : file.isDir
-      ? '文件夹'
-      : file.name.split('.').pop()?.toUpperCase() || 'FILE'
+    : getFileTypeLabel(file)
   const handleDownload = useCallback(() => {
     void downloadFile(file.path, { filename: file.name }).catch((error: unknown) => {
       addToast(getFilesActionErrorToast(error, {
@@ -750,29 +763,25 @@ function PreviewPanel({ file }: { file: FileItem | null }) {
   if (!file) return null
 
   return (
-    <aside className="relative hidden w-[300px] shrink-0 flex-col gap-6 overflow-hidden border-l border-divider bg-content2 p-6 xl:flex">
+    <aside className="relative hidden w-[300px] shrink-0 flex-col gap-5 overflow-hidden border-l border-divider bg-content2/70 p-5 xl:flex">
       <div className="text-center relative z-10">
-        <div className="mx-auto mb-4 flex h-[88px] w-[88px] items-center justify-center rounded-lg border border-divider bg-content1">
-          <FileIcon name={file.name} isDir={file.isDir} size={88} variant="tile" />
+        <div className="mx-auto mb-3 flex h-20 w-20 items-center justify-center rounded-lg border border-divider bg-content1">
+          <FileIcon name={file.name} isDir={file.isDir} size={76} variant="tile" />
         </div>
         <h3 className="font-semibold text-base text-foreground mb-1 truncate px-2">{file.name}</h3>
-        <p className="text-[13px] text-default-600">{file.isDir ? '文件夹' : file.name.split('.').pop()?.toUpperCase() || '文件'}</p>
+        <p className="text-[13px] text-default-600">{getFileTypeLabel(file)}</p>
       </div>
 
-      <div className="bg-content1 rounded-lg p-4 relative z-10 border border-divider">
-        <div className="mb-3.5 text-[10px] font-semibold uppercase text-default-500">详情</div>
-        <div className="grid grid-cols-2 gap-4">
-          <div className="text-center">
-            <div className="text-lg font-semibold text-foreground">
-              {file.isDir ? '-' : formatBytes(file.size)}
-            </div>
-            <div className="text-[11px] text-default-500 mt-1">大小</div>
+      <div className="relative z-10 rounded-lg border border-divider bg-content1 p-4">
+        <div className="mb-3 text-[10px] font-semibold uppercase text-default-500">详情</div>
+        <div className="space-y-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-default-500">大小</span>
+            <span className="font-medium text-foreground">{file.isDir ? '-' : formatBytes(file.size)}</span>
           </div>
-          <div className="text-center">
-            <div className="text-lg font-semibold text-foreground">
-              {file.name.split('.').pop()?.toUpperCase() || '-'}
-            </div>
-            <div className="text-[11px] text-default-500 mt-1">类型</div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-default-500">类型</span>
+            <span className="font-medium text-foreground">{getFileTypeLabel(file)}</span>
           </div>
         </div>
       </div>
@@ -1035,6 +1044,7 @@ export function FilesPage() {
   // Clipboard state
   const clipboard = useClipboardStore()
   const canWrite = useCanWrite()
+  const configuredShareEnabled = useShareEnabled()
   const user = useUser()
   const authScopeKey = user?.id ?? 'anonymous'
   const fileScopeKey = getFileQueryScopeKey(user)
@@ -1435,7 +1445,7 @@ export function FilesPage() {
   const { error: shareAvailabilityError } = useQuery({
     queryKey: ['shares-availability'],
     queryFn: () => listShares(),
-    enabled: canWrite,
+    enabled: canWrite && configuredShareEnabled !== false,
     retry: false,
     staleTime: 30000,
   })
@@ -1451,7 +1461,7 @@ export function FilesPage() {
       return { ...current, [path]: isFavorited }
     })
   }, [favoritesCheckQueryKey, queryClient])
-  const shareFeatureState = shareFeatureDisabled ? 'disabled' : getShareFeatureState(shareAvailabilityError)
+  const shareFeatureState = shareFeatureDisabled || configuredShareEnabled === false ? 'disabled' : getShareFeatureState(shareAvailabilityError)
   const shareActionsAvailable = shareFeatureState === null
   const shareActionLabel = getShareActionLabel(shareFeatureState)
   const shareBanner = shareFeatureState === 'disabled'
@@ -1915,16 +1925,19 @@ export function FilesPage() {
     
     // Show summary toast for folder upload
     if (isFolderUpload) {
-      addToast(getFolderUploadSummaryToast(successCount, errorCount, uploadErrors, uploadWarningMessages))
+      const summaryToast = getFolderUploadSummaryToast(successCount, errorCount, uploadErrors, uploadWarningMessages)
+      if (summaryToast.color !== 'success') {
+        addToast(summaryToast)
+      }
     } else if (errorCount === 0 && uploadWarningMessages.length > 0) {
       addToast(getUploadWarningSummaryToast(successCount, uploadWarningMessages))
     }
     
-    // Auto-clear successful uploads after 3 seconds
+    // Keep completed uploads visible long enough to review, then remove successes.
     uploadClearTimeoutRef.current = setTimeout(() => {
       setUploadQueue(prev => prev.filter(item => item.status === 'error'))
       uploadClearTimeoutRef.current = null
-    }, 3000)
+    }, UPLOAD_HISTORY_SUCCESS_RETENTION_MS)
   }, [canWrite, currentPath, ensureDirectoryExists, filesQueryKey, queryClient])
 
   const handleUploadInputChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -2664,18 +2677,75 @@ export function FilesPage() {
         <Breadcrumbs path={currentPath} onNavigate={navigateToFilePath} />
         
         {/* Toolbar */}
-        <div className="mb-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex min-w-0 flex-wrap items-center gap-2.5 sm:gap-3">
-            {hasSelection ? (
-              <>
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-divider bg-content2 px-3 py-1.5 text-sm">
-                  <span className="text-default-600">已选</span>
-                  <span className="font-semibold text-foreground">{selectedFiles.size}</span>
-                  <span className="text-default-600">项</span>
-                  <span className="text-default-400">({selectedCounts.files} 文件 / {selectedCounts.folders} 文件夹)</span>
+        <div className="mb-4 rounded-lg border border-divider bg-content1/95 shadow-[var(--shadow-soft)]">
+          <div className="flex flex-col gap-3 p-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {hasSelection ? (
+                <>
+                  <div className="flex h-10 min-w-0 items-center gap-2 rounded-lg bg-content2 px-3 text-sm">
+                    <span className="text-default-600">已选</span>
+                    <span className="font-semibold text-foreground">{selectedFiles.size}</span>
+                    <span className="text-default-600">项</span>
+                    <span className="hidden text-default-400 sm:inline">
+                      {selectedCounts.files} 文件 / {selectedCounts.folders} 文件夹
+                    </span>
+                  </div>
+                  <Button
+                    variant="bordered"
+                    className="btn-secondary btn-sm rounded-lg"
+                    startContent={<X size={16} />}
+                    onPress={clearSelection}
+                  >
+                    取消选择
+                  </Button>
+                  <Button
+                    color="primary"
+                    variant="flat"
+                    className="rounded-lg"
+                    startContent={<Download size={16} />}
+                    onPress={handleBatchDownload}
+                  >
+                    批量下载
+                  </Button>
+                  {canWrite && (
+                    <Button
+                      variant="bordered"
+                      className="btn-secondary btn-sm rounded-lg text-default-600"
+                      startContent={<Move size={16} />}
+                      onPress={() => handleOpenMoveModal(selectedFileItems)}
+                    >
+                      批量移动
+                    </Button>
+                  )}
+                  {canWrite && (
+                    <Button
+                      variant="bordered"
+                      className="btn-secondary btn-sm rounded-lg text-default-600"
+                      startContent={<Files size={16} />}
+                      onPress={() => handleOpenCopyModal(selectedFileItems)}
+                    >
+                      批量复制
+                    </Button>
+                  )}
+                  {canWrite && (
+                    <Button
+                      color="danger"
+                      variant="flat"
+                      className="rounded-lg"
+                      startContent={<Trash2 size={16} />}
+                      onPress={onBatchDeleteOpen}
+                    >
+                      批量删除
+                    </Button>
+                  )}
+                  {!canWrite && (
+                    <span className="text-sm text-default-500">
+                      只读账户可查看、预览和下载文件
+                    </span>
+                  )}
                   <Dropdown>
                     <DropdownTrigger>
-                      <button className="ml-1 px-2 py-0.5 text-xs text-default-500 hover:text-default-700 hover:bg-content3 rounded-lg transition-colors">
+                      <button className="h-9 rounded-lg px-2.5 text-sm text-default-500 transition-colors hover:bg-content2 hover:text-foreground">
                         选择工具
                       </button>
                     </DropdownTrigger>
@@ -2683,23 +2753,14 @@ export function FilesPage() {
                       aria-label="选择工具"
                       classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
                     >
-                      <DropdownSection title="快捷键" showDivider>
-                        <DropdownItem key="range" isDisabled>
-                          Shift: 范围选择
+                      <DropdownSection title="选择" showDivider>
+                        <DropdownItem key="clear" onPress={clearSelection} startContent={<X size={14} />}>
+                          清空选择
                         </DropdownItem>
-                        <DropdownItem key="multi" isDisabled>
-                          Ctrl/Cmd: 追加选择
-                        </DropdownItem>
-                        <DropdownItem key="clear-shortcut" isDisabled>
-                          Esc: 清空选择
+                        <DropdownItem key="invert" onPress={handleInvertSelection} startContent={<RotateCcw size={14} />}>
+                          反选
                         </DropdownItem>
                       </DropdownSection>
-                      <DropdownItem key="clear" onPress={clearSelection} startContent={<X size={14} />}>
-                        清空选择
-                      </DropdownItem>
-                      <DropdownItem key="invert" onPress={handleInvertSelection} startContent={<RotateCcw size={14} />}>
-                        反选
-                      </DropdownItem>
                       <DropdownItem key="only-files" onPress={handleSelectOnlyFiles} isDisabled={totalCounts.files === 0} startContent={<Files size={14} />}>
                         {totalCounts.files === 0 ? '仅文件（无文件）' : '仅文件'}
                       </DropdownItem>
@@ -2708,205 +2769,144 @@ export function FilesPage() {
                       </DropdownItem>
                     </DropdownMenu>
                   </Dropdown>
-                </div>
-                <Button 
-                  variant="bordered" 
-                  className="btn-secondary btn-sm rounded-lg"
-                  startContent={<X size={16} />}
-                  onPress={clearSelection}
-                >
-                  取消选择 ({selectedFiles.size})
-                </Button>
-                <Button 
-                  color="primary"
-                  variant="flat" 
-                  className="rounded-lg"
-                  startContent={<Download size={16} />}
-                  onPress={handleBatchDownload}
-                >
-                  批量下载（仅文件）
-                </Button>
-                <span className="text-xs text-default-500">
-                  可下载 {selectedCounts.files} 个
-                </span>
-                {canWrite && (
-                  <Button 
-                    variant="bordered" 
-                    className="btn-secondary btn-sm rounded-lg text-default-500"
-                    startContent={<Move size={16} />}
-                    onPress={() => handleOpenMoveModal(selectedFileItems)}
-                  >
-                    批量移动
-                  </Button>
-                )}
-                {canWrite && (
-                  <Button 
-                    variant="bordered" 
-                    className="btn-secondary btn-sm rounded-lg text-default-500"
-                    startContent={<Files size={16} />}
-                    onPress={() => handleOpenCopyModal(selectedFileItems)}
-                  >
-                    批量复制
-                  </Button>
-                )}
-                {canWrite && (
-                  <Button 
-                    color="danger"
-                    variant="flat"
-                    className="rounded-lg"
-                    startContent={<Trash2 size={16} />}
-                    onPress={onBatchDeleteOpen}
-                  >
-                    批量删除
-                  </Button>
-                )}
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-xs text-default-400">删除将进入回收站</span>
-                  {!canWrite && (
-                    <span className="text-xs text-default-400">访客账户为只读，仅可查看和下载</span>
+                </>
+              ) : (
+                <>
+                  {canWrite ? (
+                    <>
+                      <Button
+                        className="btn-primary btn-md border-none font-medium rounded-lg"
+                        startContent={<Upload size={16} />}
+                        onPress={() => fileInputRef.current?.click()}
+                        isLoading={isUploading}
+                      >
+                        {isUploading ? '上传中...' : '上传文件'}
+                      </Button>
+                      <Button
+                        variant="bordered"
+                        className="btn-secondary btn-md rounded-lg"
+                        startContent={<FolderUp size={16} />}
+                        onPress={() => folderInputRef.current?.click()}
+                        isLoading={isUploading}
+                        isDisabled={isUploading}
+                      >
+                        上传文件夹
+                      </Button>
+                      <Button
+                        variant="bordered"
+                        className="btn-secondary btn-md rounded-lg"
+                        startContent={<FolderPlus size={16} />}
+                        onPress={handleOpenNewFolderModal}
+                      >
+                        新建文件夹
+                      </Button>
+                    </>
+                  ) : (
+                    <div className="rounded-lg border border-divider bg-content2/50 px-3 py-2 text-sm text-default-500">
+                      只读账户可查看、预览和下载文件
+                    </div>
                   )}
-                  {selectedCounts.files > 0 && selectedCounts.folders > 0 && (
-                    <span className="text-xs text-default-400 flex items-center gap-1">
-                      <Folder size={12} />
-                      将跳过文件夹，仅下载文件
-                    </span>
-                  )}
-                  {selectedCounts.files === 0 && selectedCounts.folders > 0 && (
-                    <span className="text-xs text-default-400 flex items-center gap-1">
-                      <Folder size={12} />
-                      当前选择不含可下载文件
-                    </span>
-                  )}
-                </div>
-              </>
-            ) : (
-              <>
-                {canWrite ? (
-                  <>
-                    <Button 
-                      className="btn-primary btn-md border-none font-medium rounded-lg"
-                      startContent={<Upload size={16} />}
-                      onPress={() => fileInputRef.current?.click()}
-                      isLoading={isUploading}
-                    >
-                      {isUploading ? '上传中...' : '上传文件'}
-                    </Button>
-                    <Button 
-                      variant="bordered" 
-                      className="btn-secondary btn-md rounded-lg"
-                      startContent={<FolderUp size={16} />}
-                      onPress={() => folderInputRef.current?.click()}
-                      isLoading={isUploading}
-                      isDisabled={isUploading}
-                    >
-                      上传文件夹
-                    </Button>
-                    <Button 
-                      variant="bordered" 
-                      className="btn-secondary btn-md rounded-lg"
-                      startContent={<FolderPlus size={16} />}
-                      onPress={handleOpenNewFolderModal}
-                    >
-                      新建空间
-                    </Button>
-                  </>
-                ) : (
-                  <div className="rounded-lg border border-divider bg-content1 px-4 py-2 text-sm text-default-500">
-                    访客账户为只读，仅可查看、预览和下载文件
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          
-          <div className="flex shrink-0 items-center gap-2 self-start xl:self-auto">
-            <div className="flex items-center gap-1 rounded-lg border border-divider bg-content1 p-0.5 shadow-[var(--shadow-soft)]">
-              <Dropdown placement="bottom-end">
-                <DropdownTrigger>
-                  <button
-                    type="button"
-                    className="flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
-                    aria-label={`排序：${sortLabels[sortBy as SortKey]}`}
-                  >
-                    <ArrowUpDown size={15} />
-                    <span className="hidden sm:inline">排序：{sortLabels[sortBy as SortKey]}</span>
-                  </button>
-                </DropdownTrigger>
-                <DropdownMenu
-                  aria-label="排序字段"
-                  classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
-                >
-                  <DropdownItem key="name" onPress={() => setSortBy('name')}>
-                    按名称
-                  </DropdownItem>
-                  <DropdownItem key="size" onPress={() => setSortBy('size')}>
-                    按大小
-                  </DropdownItem>
-                  <DropdownItem key="modTime" onPress={() => setSortBy('modTime')}>
-                    按修改时间
-                  </DropdownItem>
-                </DropdownMenu>
-              </Dropdown>
-              <button
-                type="button"
-                className="flex h-9 min-w-9 items-center justify-center rounded-lg px-2 text-xs font-semibold text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
-                onClick={toggleSortOrder}
-                aria-label={sortOrder === 'asc' ? '切换为降序' : '切换为升序'}
-                title={sortOrder === 'asc' ? '升序' : '降序'}
-              >
-                {sortOrder === 'asc' ? '↑' : '↓'}
-              </button>
+                </>
+              )}
             </div>
 
-            <div className="flex bg-content1 border border-divider rounded-lg p-0.5 shadow-[var(--shadow-soft)]">
-              <button
-                className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
-                onClick={() => setViewMode('list')}
-                aria-label="列表视图"
-              >
-                <List size={16} />
-              </button>
-              <button
-                className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
-                onClick={() => setViewMode('grid')}
-                aria-label="网格视图"
-              >
-                <Grid size={16} />
-              </button>
-            </div>
+            <div className="flex shrink-0 items-center gap-2 self-start xl:self-auto">
+              <div className="flex items-center gap-1 rounded-lg border border-divider bg-content1 p-0.5 shadow-[var(--shadow-soft)]">
+                <Dropdown placement="bottom-end">
+                  <DropdownTrigger>
+                    <button
+                      type="button"
+                      className="flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
+                      aria-label={`排序：${sortLabels[sortBy as SortKey]}`}
+                    >
+                      <ArrowUpDown size={15} />
+                      <span className="hidden sm:inline">排序：{sortLabels[sortBy as SortKey]}</span>
+                    </button>
+                  </DropdownTrigger>
+                  <DropdownMenu
+                    aria-label="排序字段"
+                    classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
+                  >
+                    <DropdownItem key="name" onPress={() => setSortBy('name')}>
+                      按名称
+                    </DropdownItem>
+                    <DropdownItem key="size" onPress={() => setSortBy('size')}>
+                      按大小
+                    </DropdownItem>
+                    <DropdownItem key="modTime" onPress={() => setSortBy('modTime')}>
+                      按修改时间
+                    </DropdownItem>
+                  </DropdownMenu>
+                </Dropdown>
+                <button
+                  type="button"
+                  className="flex h-9 min-w-9 items-center justify-center rounded-lg px-2 text-xs font-semibold text-default-600 transition-colors hover:bg-content2 hover:text-foreground"
+                  onClick={toggleSortOrder}
+                  aria-label={sortOrder === 'asc' ? '切换为降序' : '切换为升序'}
+                  title={sortOrder === 'asc' ? '升序' : '降序'}
+                >
+                  {sortOrder === 'asc' ? '↑' : '↓'}
+                </button>
+              </div>
+
+              <div className="flex bg-content1 border border-divider rounded-lg p-0.5 shadow-[var(--shadow-soft)]">
+                <button
+                  className={cn("p-2 rounded-lg transition-all", viewMode === 'list' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+                  onClick={() => setViewMode('list')}
+                  aria-label="列表视图"
+                >
+                  <List size={16} />
+                </button>
+                <button
+                  className={cn("p-2 rounded-lg transition-all", viewMode === 'grid' ? "bg-accent-primary text-white shadow-sm" : "text-default-500 hover:text-default-600")}
+                  onClick={() => setViewMode('grid')}
+                  aria-label="网格视图"
+                >
+                  <Grid size={16} />
+                </button>
+              </div>
           
-          {/* Upload history button */}
-          {uploadQueue.length > 0 && (
-            <button 
-              onClick={() => setShowUploadPanel(!showUploadPanel)}
-              className={cn(
-                "relative p-2.5 rounded-lg border transition-all",
-                showUploadPanel 
-                  ? "bg-accent-primary text-white border-accent-primary shadow-sm" 
-                  : "bg-content1 border-divider text-default-500 hover:text-default-600 hover:border-default-400"
+              {uploadQueue.length > 0 && (
+                <button 
+                  onClick={() => setShowUploadPanel(!showUploadPanel)}
+                  className={cn(
+                    "relative p-2.5 rounded-lg border transition-all",
+                    showUploadPanel 
+                      ? "bg-accent-primary text-white border-accent-primary shadow-sm" 
+                      : "bg-content1 border-divider text-default-500 hover:text-default-600 hover:border-default-400"
+                  )}
+                  title="上传记录"
+                  aria-label="上传记录"
+                >
+                  <Upload size={16} />
+                  {isUploading && (
+                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-accent-primary rounded-full animate-pulse" />
+                  )}
+                  {!isUploading && uploadQueue.filter(i => i.status === 'error').length > 0 && (
+                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose rounded-full" />
+                  )}
+                </button>
               )}
-              title="上传记录"
-              aria-label="上传记录"
-            >
-              <Upload size={16} />
-              {isUploading && (
-                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-accent-primary rounded-full animate-pulse" />
-              )}
-              {!isUploading && uploadQueue.filter(i => i.status === 'error').length > 0 && (
-                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose rounded-full" />
-              )}
-            </button>
-          )}
+            </div>
           </div>
+
+          {hasSelection && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-divider px-3 pb-3 text-xs text-default-500">
+              <span>下载将处理 {selectedCounts.files} 个文件</span>
+              <span>删除会进入回收站</span>
+              {selectedCounts.files === 0 && selectedCounts.folders > 0 && <span>当前选择不含可下载文件</span>}
+              {selectedCounts.files > 0 && selectedCounts.folders > 0 && <span>将跳过文件夹，仅下载文件</span>}
+            </div>
+          )}
         </div>
 
         {/* File List / Grid */}
         {canWrite && favoritesError && (
-          <div className="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
-            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
-            <div className="flex-1">
+          <div className="mb-3 flex items-center gap-3 rounded-lg border border-divider bg-content1 px-3 py-2 text-sm text-default-600">
+            <AlertCircle size={16} className="shrink-0 text-warning" />
+            <div className="min-w-0 flex-1">
               <p className="font-medium">{favoritesBanner?.title ?? '收藏状态加载失败'}</p>
-              <p className="text-default-600">{favoritesBanner?.description ?? '请稍后重试'}</p>
+              <p className="truncate text-xs text-default-500">{favoritesBanner?.description ?? '请稍后重试'}</p>
             </div>
             <Button size="sm" variant="bordered" className="rounded-lg" onPress={handleRefreshFavoritesBanner}>
               重新加载收藏状态
@@ -2915,11 +2915,11 @@ export function FilesPage() {
         )}
 
         {canWrite && shareBanner && (
-          <div className="mb-4 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
-            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
-            <div className="flex-1">
+          <div className="mb-3 flex items-center gap-3 rounded-lg border border-divider bg-content1 px-3 py-2 text-sm text-default-600">
+            <AlertCircle size={16} className="shrink-0 text-warning" />
+            <div className="min-w-0 flex-1">
               <p className="font-medium">{shareBanner.title}</p>
-              <p className="text-default-600">{shareBanner.description}</p>
+              <p className="truncate text-xs text-default-500">{shareBanner.description}</p>
             </div>
           </div>
         )}
@@ -3371,7 +3371,7 @@ export function FilesPage() {
                     contextMenu.hide()
                   }}
                 >
-                  批量下载（仅文件）
+                  批量下载
                 </ContextMenuItem>
                 {canWrite && (
                   <ContextMenuItem

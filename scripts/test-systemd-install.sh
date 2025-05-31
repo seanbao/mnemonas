@@ -112,6 +112,64 @@ run_fresh_install_test() {
   assert_mode "$storage_dir/.mnemonas/objects" "700"
 }
 
+run_source_checkout_stale_binary_test() {
+  local case_dir="$TMP_ROOT/stale-source-binary"
+  local fake_path="$case_dir/fake-bin"
+  local checkout_dir="$case_dir/checkout"
+  local install_dir="$case_dir/install"
+
+  make_fake_admin_path "$fake_path"
+  mkdir -p \
+    "$checkout_dir/.git" \
+    "$checkout_dir/bin" \
+    "$checkout_dir/cmd/nasd" \
+    "$checkout_dir/internal/auth" \
+    "$checkout_dir/dataplane/src" \
+    "$checkout_dir/proto" \
+    "$checkout_dir/scripts" \
+    "$checkout_dir/web/dist/assets" \
+    "$checkout_dir/web/src"
+
+  write_executable "$checkout_dir/bin/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then exit 0; fi' \
+    'exit 0'
+  write_executable "$checkout_dir/bin/dataplane" '#!/usr/bin/env bash' 'exit 0'
+  cp "$REPO_ROOT/scripts/install-systemd.sh" "$checkout_dir/scripts/install-systemd.sh"
+  cp "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh" "$checkout_dir/scripts/mnemonas-dataplane-start.sh"
+  cp "$REPO_ROOT/scripts/mnemonas-doctor.sh" "$checkout_dir/scripts/mnemonas-doctor.sh"
+  cp "$REPO_ROOT/scripts/uninstall-systemd.sh" "$checkout_dir/scripts/uninstall-systemd.sh"
+  cp "$REPO_ROOT/mnemonas.example.toml" "$checkout_dir/mnemonas.example.toml"
+  printf '<div id="root"></div>\n' > "$checkout_dir/web/dist/index.html"
+  printf 'console.log("mnemonas")\n' > "$checkout_dir/web/dist/assets/index.js"
+  printf 'package github.com/seanbao/mnemonas/cmd/nasd\n' > "$checkout_dir/cmd/nasd/main.go"
+  printf 'package auth\n' > "$checkout_dir/internal/auth/handler.go"
+  printf 'fn main() {}\n' > "$checkout_dir/dataplane/src/main.rs"
+  printf 'syntax = "proto3";\n' > "$checkout_dir/proto/dataplane.proto"
+  touch -d '2026-01-01 00:00:00Z' "$checkout_dir/bin/nasd" "$checkout_dir/bin/dataplane" "$checkout_dir/web/dist/index.html"
+  touch -d '2026-01-02 00:00:00Z' "$checkout_dir/internal/auth/handler.go"
+
+  set +e
+  (
+    cd "$checkout_dir"
+    PATH="$fake_path:$PATH" \
+      BIN_DIR="$install_dir/bin" \
+      SHARE_DIR="$install_dir/share/mnemonas" \
+      CONFIG_DIR="$install_dir/etc/mnemonas" \
+      CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+      SYSTEMD_DIR="$install_dir/systemd" \
+      STORAGE_ROOT="$install_dir/storage" \
+      ENABLE_NOW=0 \
+      "$checkout_dir/scripts/install-systemd.sh"
+  ) > "$case_dir/install.log" 2>&1
+  local status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer accepted a stale nasd binary from a source checkout"
+  assert_file_contains "$case_dir/install.log" "nasd binary is older than Go sources"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting stale source artifacts"
+}
+
 run_existing_config_test() {
   local case_dir="$TMP_ROOT/existing"
   local fake_path="$case_dir/fake-bin"
@@ -766,6 +824,7 @@ run_doctor_input_validation_test() {
 }
 
 run_fresh_install_test
+run_source_checkout_stale_binary_test
 run_existing_config_test
 run_invalid_input_test
 run_service_account_validation_test

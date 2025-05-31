@@ -1387,6 +1387,30 @@ func validatePath(filePath string) (string, error) {
 	return cleaned, nil
 }
 
+func routePathAfterPrefix(r *http.Request, routePrefix string) (string, error) {
+	escapedPath := r.URL.EscapedPath()
+	if !strings.HasPrefix(escapedPath, routePrefix) {
+		return "", errInvalidPath
+	}
+
+	encodedPath := strings.TrimPrefix(escapedPath, routePrefix)
+	if encodedPath == "" {
+		return "/", nil
+	}
+	if !strings.HasPrefix(encodedPath, "/") {
+		return "", errInvalidPath
+	}
+
+	decodedPath, err := url.PathUnescape(encodedPath)
+	if err != nil {
+		return "", errInvalidPath
+	}
+	if decodedPath == "" {
+		return "/", nil
+	}
+	return decodedPath, nil
+}
+
 func hasTraversalSegment(filePath string) bool {
 	for _, segment := range strings.Split(filePath, "/") {
 		if segment == ".." {
@@ -1828,13 +1852,14 @@ func respondPayloadTooLarge(w http.ResponseWriter, message string) {
 }
 
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
-	filePath := chi.URLParam(r, "*")
-	if filePath == "" {
-		filePath = "/"
+	filePath, err := routePathAfterPrefix(r, "/api/v1/files")
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
 	}
 
 	// REM-5 fix: Validate path to prevent traversal attacks
-	filePath, err := validatePath(filePath)
+	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -1889,10 +1914,14 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
-	filePath := "/" + chi.URLParam(r, "*")
+	filePath, err := routePathAfterPrefix(r, "/api/v1/files")
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 
 	// REM-5 fix: Validate path
-	filePath, err := validatePath(filePath)
+	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -1937,10 +1966,14 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
-	dirPath := "/" + chi.URLParam(r, "*")
+	dirPath, err := routePathAfterPrefix(r, "/api/v1/directories")
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 
 	// REM-5 fix: Validate path
-	dirPath, err := validatePath(dirPath)
+	dirPath, err = validatePath(dirPath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -2013,10 +2046,14 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	filePath := "/" + chi.URLParam(r, "*")
+	filePath, err := routePathAfterPrefix(r, "/api/v1/files")
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 
 	// REM-5 fix: Validate path
-	filePath, err := validatePath(filePath)
+	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -2095,10 +2132,14 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
-	filePath := "/" + chi.URLParam(r, "*")
+	filePath, err := routePathAfterPrefix(r, "/api/v1/download")
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 
 	// REM-5 fix: Validate path
-	filePath, err := validatePath(filePath)
+	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -2551,10 +2592,14 @@ func (s *Server) removeCopiedTree(ctx context.Context, targetPath string) error 
 }
 
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
-	filePath := "/" + chi.URLParam(r, "*")
+	filePath, err := routePathAfterPrefix(r, "/api/v1/versions")
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 
 	// REM-5 fix: Validate path
-	filePath, err := validatePath(filePath)
+	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -3967,10 +4012,14 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := "/" + chi.URLParam(r, "*")
+	filePath, err := routePathAfterPrefix(r, "/api/v1/thumbnails")
+	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
 
 	// Validate path
-	filePath, err := validatePath(filePath)
+	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
 		return
@@ -5189,6 +5238,7 @@ type SetupStatusResponse struct {
 	Success        bool   `json:"success"`
 	IsFirstRun     bool   `json:"is_first_run"`
 	AuthEnabled    bool   `json:"auth_enabled"`
+	ShareEnabled   bool   `json:"share_enabled"`
 	WebDAVEnabled  bool   `json:"webdav_enabled"`
 	WebDAVAuthType string `json:"webdav_auth_type"`
 }
@@ -5220,6 +5270,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 		Success:        true,
 		IsFirstRun:     !secrets.SetupShown,
 		AuthEnabled:    s.authEnabled,
+		ShareEnabled:   cfg.Share.Enabled,
 		WebDAVEnabled:  cfg.WebDAV.Enabled,
 		WebDAVAuthType: cfg.WebDAV.AuthType,
 	}

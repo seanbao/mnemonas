@@ -368,6 +368,67 @@ first_built_web_dir() {
   return 1
 }
 
+has_newer_file_than() {
+  local reference="$1"
+  shift
+
+  local candidate found
+  for candidate in "$@"; do
+    [[ -e "$candidate" ]] || continue
+    if [[ -f "$candidate" ]]; then
+      [[ "$candidate" -nt "$reference" ]] && return 0
+      continue
+    fi
+
+    found="$(find "$candidate" -type f -newer "$reference" \
+      ! -path '*/.git/*' \
+      ! -path '*/node_modules/*' \
+      ! -path '*/dist/*' \
+      ! -path '*/target/*' \
+      -print -quit)"
+    [[ -n "$found" ]] && return 0
+  done
+
+  return 1
+}
+
+require_checkout_artifacts_current() {
+  local release_root="$1"
+  local nasd_src="$2"
+  local dataplane_src="$3"
+  local web_src="$4"
+
+  [[ -z "${RELEASE_DIR:-}" && -d "$release_root/.git" ]] || return 0
+
+  if has_newer_file_than "$nasd_src" \
+    "$release_root/cmd" \
+    "$release_root/internal" \
+    "$release_root/proto" \
+    "$release_root/go.mod" \
+    "$release_root/go.sum"; then
+    fail "nasd binary is older than Go sources; run make build before installing from a source checkout"
+  fi
+
+  if has_newer_file_than "$dataplane_src" \
+    "$release_root/dataplane/src" \
+    "$release_root/dataplane/Cargo.toml" \
+    "$release_root/dataplane/Cargo.lock" \
+    "$release_root/proto"; then
+    fail "dataplane binary is older than Rust/proto sources; run make build before installing from a source checkout"
+  fi
+
+  if has_newer_file_than "$web_src/index.html" \
+    "$release_root/web/src" \
+    "$release_root/web/public" \
+    "$release_root/web/package.json" \
+    "$release_root/web/package-lock.json" \
+    "$release_root/web/vite.config.ts" \
+    "$release_root/web/tsconfig.json" \
+    "$release_root/web/tsconfig.app.json"; then
+    fail "Web UI assets are older than frontend sources; run make build before installing from a source checkout"
+  fi
+}
+
 toml_value() {
   local section="$1"
   local key="$2"
@@ -661,6 +722,8 @@ main() {
   uninstall_src="$(first_existing_file "$release_root/scripts/uninstall-systemd.sh" "$SCRIPT_DIR/uninstall-systemd.sh" "$PWD/scripts/uninstall-systemd.sh" 2>/dev/null || true)"
   web_src="$(first_built_web_dir "$release_root/web/dist" "$release_root/web" "$PWD/web/dist" "$PWD/web")" || fail "built web assets not found; install from a release package or run npm run build in web/"
   config_template="$(first_existing_file "$release_root/mnemonas.example.toml" "$PWD/mnemonas.example.toml")" || fail "mnemonas.example.toml not found"
+
+  require_checkout_artifacts_current "$release_root" "$nasd_src" "$dataplane_src" "$web_src"
 
   apply_existing_config_defaults
   require_safe_directory_path "$BIN_DIR" "BIN_DIR"

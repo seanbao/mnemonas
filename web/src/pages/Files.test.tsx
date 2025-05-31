@@ -407,7 +407,7 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByText('新建文件夹')).toBeTruthy()
       })
     })
 
@@ -428,14 +428,14 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+        expect(screen.getByText('批量下载')).toBeTruthy()
       })
 
       expect(screen.queryByText('批量移动')).toBeNull()
       expect(screen.queryByText('批量复制')).toBeNull()
       expect(screen.queryByText('批量删除')).toBeNull()
-      expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
-      expect(screen.getByText('访客账户为只读，仅可查看和下载')).toBeTruthy()
+      expect(screen.getByText('批量下载')).toBeTruthy()
+      expect(screen.getByText('只读账户可查看、预览和下载文件')).toBeTruthy()
     })
   })
 
@@ -445,14 +445,14 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      const newFolderBtn = screen.getByText('新建空间')
+      const newFolderBtn = screen.getByRole('button', { name: '新建文件夹' })
       await user.click(newFolderBtn)
 
       await waitFor(() => {
-        expect(screen.getByText('新建文件夹')).toBeTruthy()
+        expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
         expect(screen.getByPlaceholderText('请输入文件夹名称')).toBeTruthy()
       })
     })
@@ -464,10 +464,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
       await waitFor(() => {
         expect(screen.getByPlaceholderText('请输入文件夹名称')).toBeTruthy()
@@ -492,10 +492,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
       await waitFor(() => {
         expect(screen.getByPlaceholderText('请输入文件夹名称')).toBeTruthy()
@@ -523,10 +523,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
       const input = await screen.findByPlaceholderText('请输入文件夹名称')
       await user.type(input, 'first-folder')
@@ -538,13 +538,13 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
-      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
       expect(screen.getByDisplayValue('first-folder')).toBeTruthy()
 
       firstCreate.resolve(successActionResult)
 
       await waitFor(() => {
-        expect(screen.queryByText('新建文件夹')).toBeFalsy()
+        expect(screen.queryByRole('heading', { name: '新建文件夹' })).toBeFalsy()
       })
     })
 
@@ -556,10 +556,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
       const input = await screen.findByPlaceholderText('请输入文件夹名称')
       await user.type(input, 'failed-folder')
@@ -571,7 +571,7 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '取消' }))
 
-      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
       expect(screen.getByDisplayValue('failed-folder')).toBeTruthy()
 
       await act(async () => {
@@ -586,7 +586,7 @@ describe('FilesPage', () => {
         })
       })
 
-      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
       expect(screen.getByDisplayValue('failed-folder')).toBeTruthy()
     })
 
@@ -595,20 +595,20 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
 
       await waitFor(() => {
-        expect(screen.getByText('新建文件夹')).toBeTruthy()
+        expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
       })
 
       const cancelBtn = screen.getByRole('button', { name: '取消' })
       await user.click(cancelBtn)
 
       await waitFor(() => {
-        expect(screen.queryByText('新建文件夹')).toBeFalsy()
+        expect(screen.queryByRole('heading', { name: '新建文件夹' })).toBeFalsy()
       })
     })
 
@@ -619,10 +619,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
       await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'warn-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
@@ -641,10 +641,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
       await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'existing-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
@@ -656,7 +656,7 @@ describe('FilesPage', () => {
       })
 
       await waitFor(() => {
-        expect(screen.queryByText('新建文件夹')).toBeFalsy()
+        expect(screen.queryByRole('heading', { name: '新建文件夹' })).toBeFalsy()
       })
     })
 
@@ -667,10 +667,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('新建空间')).toBeTruthy()
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
       })
 
-      await user.click(screen.getByText('新建空间'))
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
       await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'conflict-folder')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
@@ -682,7 +682,7 @@ describe('FilesPage', () => {
         })
       })
 
-      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
       expect(screen.getByDisplayValue('conflict-folder')).toBeTruthy()
     })
 
@@ -692,7 +692,7 @@ describe('FilesPage', () => {
 
       render(<FilesPage />)
 
-      await user.click(await screen.findByText('新建空间'))
+      await user.click(await screen.findByRole('button', { name: '新建文件夹' }))
       await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'stale-parent')
       await user.click(screen.getByRole('button', { name: '创建' }))
 
@@ -704,7 +704,7 @@ describe('FilesPage', () => {
         })
       })
 
-      expect(screen.getByText('新建文件夹')).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
       expect(screen.getByDisplayValue('stale-parent')).toBeTruthy()
     })
   })
@@ -736,6 +736,20 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.clearSelection).not.toHaveBeenCalled()
       expect(screen.queryByText('已选')).toBeNull()
       expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(1)
+    })
+
+    it('shows folder as the type in the details panel instead of uppercasing its name', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      render(<FilesPage />)
+
+      await user.click(await screen.findByText('documents'))
+
+      const detailsPanel = document.querySelector('aside')
+      expect(detailsPanel).toBeTruthy()
+      expect(within(detailsPanel as HTMLElement).getByRole('heading', { name: 'documents' })).toBeTruthy()
+      expect(within(detailsPanel as HTMLElement).getAllByText('文件夹').length).toBeGreaterThanOrEqual(2)
+      expect(within(detailsPanel as HTMLElement).queryByText('DOCUMENTS')).toBeNull()
     })
 
     it('selects a row only from its checkbox', async () => {
@@ -905,7 +919,7 @@ describe('FilesPage', () => {
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
       render(<FilesPage />)
 
-      await screen.findByText('批量下载（仅文件）')
+      await screen.findByText('批量下载')
       mockFilesStoreState.toggleFileSelection.mockClear()
 
       await act(async () => {
@@ -942,7 +956,7 @@ describe('FilesPage', () => {
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
       render(<FilesPage />)
 
-      await screen.findByText('批量下载（仅文件）')
+      await screen.findByText('批量下载')
 
       await act(async () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }))
@@ -1144,7 +1158,7 @@ describe('FilesPage', () => {
 
       render(<FilesPage />)
 
-      await screen.findByText('批量下载（仅文件）')
+      await screen.findByText('批量下载')
 
       await act(async () => {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }))
@@ -1442,7 +1456,7 @@ describe('FilesPage', () => {
       expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith(['/documents'])
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 170, clientY: 110 })
-      await user.click(within(menu).getByRole('button', { name: '批量下载（仅文件）' }))
+      await user.click(within(menu).getByRole('button', { name: '批量下载' }))
 
       await waitFor(() => {
         expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
@@ -1577,10 +1591,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+        expect(screen.getByText('批量下载')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('批量下载（仅文件）'))
+      await user.click(screen.getByText('批量下载'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1599,10 +1613,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+        expect(screen.getByText('批量下载')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('批量下载（仅文件）'))
+      await user.click(screen.getByText('批量下载'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
@@ -1620,11 +1634,11 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+        expect(screen.getByText('批量下载')).toBeTruthy()
         expect(screen.getByText('当前选择不含可下载文件')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('批量下载（仅文件）'))
+      await user.click(screen.getByText('批量下载'))
 
       expect(mockDownloadFile).not.toHaveBeenCalled()
       await waitFor(() => {
@@ -1646,7 +1660,7 @@ describe('FilesPage', () => {
         expect(screen.getByText('将跳过文件夹，仅下载文件')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('批量下载（仅文件）'))
+      await user.click(screen.getByText('批量下载'))
 
       await waitFor(() => {
         expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
@@ -1966,10 +1980,10 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('批量下载（仅文件）')).toBeTruthy()
+        expect(screen.getByText('批量下载')).toBeTruthy()
       })
 
-      await user.click(screen.getByText('批量下载（仅文件）'))
+      await user.click(screen.getByText('批量下载'))
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({

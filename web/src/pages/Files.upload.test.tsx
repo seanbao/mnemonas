@@ -220,6 +220,12 @@ describe('FilesPage upload queue', () => {
       vi.advanceTimersByTime(3000)
     })
 
+    expect(screen.queryByText('上传完成')).toBeTruthy()
+
+    act(() => {
+      vi.advanceTimersByTime(12000)
+    })
+
     expect(screen.queryByText('上传完成')).toBeNull()
   })
 
@@ -375,7 +381,7 @@ describe('FilesPage upload queue', () => {
     expect(screen.queryByText('上传完成')).toBeTruthy()
 
     act(() => {
-      vi.advanceTimersByTime(1000)
+      vi.advanceTimersByTime(13000)
     })
 
     expect(screen.queryByText('上传完成')).toBeNull()
@@ -457,7 +463,7 @@ describe('FilesPage upload queue', () => {
     expect(screen.getByText('权限不足')).toBeTruthy()
   })
 
-  it('shows a success summary for a clean folder upload', async () => {
+  it('keeps clean folder upload success feedback in the upload panel', async () => {
     render(<FilesPage />)
 
     await act(async () => {
@@ -476,11 +482,9 @@ describe('FilesPage upload queue', () => {
 
     expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
     expect(mockUploadFile).toHaveBeenCalledWith('/folder', file, expect.any(Function))
-    expect(mockAddToast).toHaveBeenCalledWith({
-      title: '文件夹上传完成',
-      description: '成功上传 1 个文件',
-      color: 'success',
-    })
+    expect(screen.getByText('上传完成')).toBeTruthy()
+    expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain('成功 1 个')
+    expect(mockAddToast).not.toHaveBeenCalled()
   })
 
   it('continues folder upload when the parent directory already exists and avoids duplicate directory creation', async () => {
@@ -507,11 +511,8 @@ describe('FilesPage upload queue', () => {
     expect(mockCreateDirectory).toHaveBeenCalledTimes(1)
     expect(mockUploadFile).toHaveBeenCalledWith('/folder', firstFile, expect.any(Function))
     expect(mockUploadFile).toHaveBeenCalledWith('/folder', secondFile, expect.any(Function))
-    expect(mockAddToast).toHaveBeenCalledWith({
-      title: '文件夹上传完成',
-      description: '成功上传 2 个文件',
-      color: 'success',
-    })
+    expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain('成功 2 个')
+    expect(mockAddToast).not.toHaveBeenCalled()
   })
 
   it('rejects oversized files before starting the upload request', async () => {
