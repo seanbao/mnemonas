@@ -2,13 +2,23 @@
 
 English | [简体中文](reverse-proxy-setup.md)
 
-This guide explains how to expose MnemoNAS through HTTPS with a reverse proxy. Public access should go through HTTPS on `80/443`, not by exposing the raw `8080` service directly.
+This guide explains how to expose MnemoNAS through HTTPS with a reverse proxy. Public access should go through HTTPS on `80/443`, not by exposing the raw `8080` service directly. If you are starting from a public server, follow the [Public server quickstart](public-server-quickstart.en.md) first; this guide keeps the detailed Caddy, Nginx, and Traefik examples.
 
 ## Prerequisites
 
 - A public server or a working tunnel.
 - A domain name pointing to the server.
 - Firewall rules allowing `80` and `443`.
+
+## Recommended Script
+
+After systemd deployment, use the helper to create the public HTTPS entry and restrict the MnemoNAS backend listener:
+
+```bash
+sudo ./scripts/setup-reverse-proxy.sh --proxy caddy nas.example.com admin@example.com
+```
+
+The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091`.
 
 ## MnemoNAS Configuration
 

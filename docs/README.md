@@ -12,6 +12,7 @@
 |------|---------|------|
 | [README](../README.md) | [README](../README.en.md) | 项目介绍与快速开始 |
 | [Linux/systemd 部署指南](linux-systemd-deployment.md) | [Linux/systemd deployment](linux-systemd-deployment.en.md) | 在 Linux 服务器上用 systemd 长期运行 |
+| [公网服务器快速上线](public-server-quickstart.md) | [Public server quickstart](public-server-quickstart.en.md) | 公网域名、HTTPS、反向代理和安全检查的一条推荐路径 |
 | [Docker 部署指南](docker-deployment.md) | [Docker deployment](docker-deployment.en.md) | 使用 Docker 部署 MnemoNAS |
 | [挂载指南](mounting-guide.md) | [Mounting guide](mounting-guide.en.md) | 各平台 WebDAV 挂载教程 |
 | [反向代理配置](reverse-proxy-setup.md) | [Reverse proxy setup](reverse-proxy-setup.en.md) | HTTPS 外网访问配置（Caddy/Nginx/Traefik） |
@@ -64,7 +65,8 @@
 **首次使用**：
 1. 阅读 [README](../README.md) 了解项目
 2. 长期运行优先按 [Linux/systemd 部署指南](linux-systemd-deployment.md) 安装；临时试用可按 [Docker 部署指南](docker-deployment.md) 启动
-3. 参考 [挂载指南](mounting-guide.md) 连接到 NAS
+3. 需要公网访问时，按 [公网服务器快速上线](public-server-quickstart.md) 配置 HTTPS 入口
+4. 参考 [挂载指南](mounting-guide.md) 连接到 NAS
 
 **遇到问题**：
 1. 查看 [FAQ](faq.md) 寻找解决方案

@@ -200,7 +200,7 @@ cloudflared tunnel run mnemonas
 - [ ] Administrator password changed.
 - [ ] WebDAV Basic Auth credentials recorded or changed to a strong password.
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
-- [ ] Firewall is configured when `server.host = "0.0.0.0"`.
+- [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
 - [ ] `mnemonas-doctor` reports no dataplane exposure warnings.
 - [ ] Public deployments use HTTPS.
@@ -211,9 +211,12 @@ Runtime checks:
 ss -tlnp | grep 8080
 ss -tlnp | grep -E '9090|9091'
 
-curl http://<server-ip>:8080/health
+curl -I https://<domain>/health
 
-curl http://<server-ip>:8080/dav/
+curl --connect-timeout 3 http://<domain>:8080/health
+# expected: failed connection or timeout
+
+curl https://<domain>/dav/
 # expected: 401 Unauthorized when WebDAV Basic Auth is enabled
 ```
 

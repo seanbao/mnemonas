@@ -61,6 +61,18 @@ func TestDefault(t *testing.T) {
 	if cfg.WebDAV.Prefix != "/dav" {
 		t.Errorf("Default WebDAV prefix = %s, want /dav", cfg.WebDAV.Prefix)
 	}
+	if cfg.SMB.Enabled {
+		t.Error("Default SMB should be disabled")
+	}
+	if cfg.SMB.Listen != "127.0.0.1:1445" {
+		t.Errorf("Default SMB listen = %s, want 127.0.0.1:1445", cfg.SMB.Listen)
+	}
+	if cfg.SMB.ServerName != "mnemonas" {
+		t.Errorf("Default SMB server name = %s, want mnemonas", cfg.SMB.ServerName)
+	}
+	if !cfg.SMB.SigningRequired {
+		t.Error("Default SMB signing should be required")
+	}
 
 	internalRoot := filepath.Join(cfg.Storage.Root, ".mnemonas")
 	if cfg.Server.TLS.CertDir != filepath.Join(internalRoot, "certs") {
@@ -74,6 +86,12 @@ func TestDefault(t *testing.T) {
 	}
 	if cfg.Favorites.StoreFile != filepath.Join(internalRoot, "favorites.json") {
 		t.Errorf("Default favorites store = %s, want %s", cfg.Favorites.StoreFile, filepath.Join(internalRoot, "favorites.json"))
+	}
+	if cfg.SMB.GatewaySocket != filepath.Join(internalRoot, "run", "smb-gateway.sock") {
+		t.Errorf("Default SMB gateway socket = %s, want %s", cfg.SMB.GatewaySocket, filepath.Join(internalRoot, "run", "smb-gateway.sock"))
+	}
+	if cfg.SMB.CredentialFile != filepath.Join(internalRoot, "smb-credentials.json") {
+		t.Errorf("Default SMB credential file = %s, want %s", cfg.SMB.CredentialFile, filepath.Join(internalRoot, "smb-credentials.json"))
 	}
 	if cfg.Storage.Versioning.AutoVersionedExtensions == nil {
 		t.Error("Default versioning extensions should be initialized to an empty or populated slice")
@@ -254,6 +272,82 @@ func TestConfig_Validate(t *testing.T) {
 				c.WebDAV.Prefix = "/api/v1"
 			},
 			wantErr: false,
+		},
+		{
+			name:    "Invalid SMB listen",
+			modify:  func(c *Config) { c.SMB.Listen = "localhost:not-a-port" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid SMB server name",
+			modify:  func(c *Config) { c.SMB.ServerName = "bad/name" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid SMB gateway socket relative path",
+			modify:  func(c *Config) { c.SMB.GatewaySocket = "run/smb.sock" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid SMB credential file relative path",
+			modify:  func(c *Config) { c.SMB.CredentialFile = "smb-credentials.json" },
+			wantErr: true,
+		},
+		{
+			name:    "Enabled SMB requires shares",
+			modify:  func(c *Config) { c.SMB.Enabled = true },
+			wantErr: true,
+		},
+		{
+			name: "Valid SMB share",
+			modify: func(c *Config) {
+				c.SMB.Enabled = true
+				c.SMB.Shares = []SMBShareConfig{{
+					Name:         "homes",
+					Path:         "/",
+					AllowedRoles: []string{"admin", "user"},
+				}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "Invalid SMB share path traversal",
+			modify: func(c *Config) {
+				c.SMB.Shares = []SMBShareConfig{{
+					Name:         "bad",
+					Path:         "/home/../secret",
+					AllowedRoles: []string{"admin"},
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SMB duplicate share name",
+			modify: func(c *Config) {
+				c.SMB.Shares = []SMBShareConfig{
+					{Name: "docs", Path: "/", AllowedRoles: []string{"admin"}},
+					{Name: "DOCS", Path: "/docs", AllowedRoles: []string{"admin"}},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SMB share without allow list",
+			modify: func(c *Config) {
+				c.SMB.Shares = []SMBShareConfig{{Name: "open", Path: "/"}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid SMB share role",
+			modify: func(c *Config) {
+				c.SMB.Shares = []SMBShareConfig{{
+					Name:         "docs",
+					Path:         "/docs",
+					AllowedRoles: []string{"owner"},
+				}}
+			},
+			wantErr: true,
 		},
 		{
 			name:    "Invalid share base URL scheme",
@@ -725,6 +819,12 @@ root = "~/.mnemonas-custom"
 	if cfg.Favorites.StoreFile != filepath.Join(wantInternal, "favorites.json") {
 		t.Fatalf("favorites store = %q, want %q", cfg.Favorites.StoreFile, filepath.Join(wantInternal, "favorites.json"))
 	}
+	if cfg.SMB.GatewaySocket != filepath.Join(wantInternal, "run", "smb-gateway.sock") {
+		t.Fatalf("SMB gateway socket = %q, want %q", cfg.SMB.GatewaySocket, filepath.Join(wantInternal, "run", "smb-gateway.sock"))
+	}
+	if cfg.SMB.CredentialFile != filepath.Join(wantInternal, "smb-credentials.json") {
+		t.Fatalf("SMB credential file = %q, want %q", cfg.SMB.CredentialFile, filepath.Join(wantInternal, "smb-credentials.json"))
+	}
 }
 
 func TestLoad_ExpandsExplicitHomeRelativePaths(t *testing.T) {
@@ -746,6 +846,10 @@ store_file = "~/data/shares.json"
 
 [favorites]
 store_file = "~/data/favorites.json"
+
+[smb]
+gateway_socket = "~/run/smb-gateway.sock"
+credential_file = "~/data/smb-credentials.json"
 
 [log]
 output = "~/logs/mnemonas.log"
@@ -776,6 +880,12 @@ output = "~/logs/mnemonas.log"
 	}
 	if cfg.Favorites.StoreFile != filepath.Join(homeDir, "data", "favorites.json") {
 		t.Fatalf("favorites store = %q, want %q", cfg.Favorites.StoreFile, filepath.Join(homeDir, "data", "favorites.json"))
+	}
+	if cfg.SMB.GatewaySocket != filepath.Join(homeDir, "run", "smb-gateway.sock") {
+		t.Fatalf("SMB gateway socket = %q, want %q", cfg.SMB.GatewaySocket, filepath.Join(homeDir, "run", "smb-gateway.sock"))
+	}
+	if cfg.SMB.CredentialFile != filepath.Join(homeDir, "data", "smb-credentials.json") {
+		t.Fatalf("SMB credential file = %q, want %q", cfg.SMB.CredentialFile, filepath.Join(homeDir, "data", "smb-credentials.json"))
 	}
 	if cfg.Log.Output != filepath.Join(homeDir, "logs", "mnemonas.log") {
 		t.Fatalf("log output = %q, want %q", cfg.Log.Output, filepath.Join(homeDir, "logs", "mnemonas.log"))
@@ -1270,6 +1380,7 @@ func TestConfig_EnsureDirs(t *testing.T) {
 		filepath.Join(tmpDir, ".mnemonas", "maintenance"),
 		filepath.Join(tmpDir, ".mnemonas", "activity"),
 		filepath.Join(tmpDir, ".mnemonas", "tmp"),
+		filepath.Join(tmpDir, ".mnemonas", "run"),
 	}
 
 	for _, dir := range dirs {
@@ -1286,6 +1397,7 @@ func TestConfig_EnsureDirs(t *testing.T) {
 		filepath.Join(tmpDir, "files"):         0750,
 		filepath.Join(tmpDir, ".mnemonas"):     0700,
 		filepath.Join(tmpDir, ".mnemonas/tmp"): 0700,
+		filepath.Join(tmpDir, ".mnemonas/run"): 0700,
 	}
 	for dir, wantMode := range wantModes {
 		info, err := os.Stat(dir)
@@ -1392,6 +1504,8 @@ func TestConfig_DerivedStoragePaths(t *testing.T) {
 		{name: "index", got: cfg.IndexDBPath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "index.db")},
 		{name: "objects", got: cfg.ObjectsDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "objects")},
 		{name: "trash", got: cfg.TrashDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "trash")},
+		{name: "smb_gateway_socket", got: cfg.SMBGatewaySocketPath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "run", "smb-gateway.sock")},
+		{name: "smb_credentials", got: cfg.SMBCredentialFilePath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "smb-credentials.json")},
 	}
 
 	for _, tt := range tests {
