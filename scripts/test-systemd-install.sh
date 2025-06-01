@@ -48,6 +48,7 @@ make_release_tree() {
   cp "$REPO_ROOT/mnemonas.example.toml" "$dir/mnemonas.example.toml"
   cp "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh" "$dir/scripts/mnemonas-dataplane-start.sh"
   cp "$REPO_ROOT/scripts/mnemonas-doctor.sh" "$dir/scripts/mnemonas-doctor.sh"
+  cp "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$dir/scripts/setup-reverse-proxy.sh"
   cp "$REPO_ROOT/scripts/uninstall-systemd.sh" "$dir/scripts/uninstall-systemd.sh"
 }
 
@@ -90,6 +91,7 @@ run_fresh_install_test() {
   test -x "$install_dir/bin/dataplane" || fail "dataplane was not installed"
   test -x "$install_dir/bin/mnemonas-dataplane-start" || fail "dataplane start helper was not installed"
   test -x "$install_dir/bin/mnemonas-doctor" || fail "doctor was not installed"
+  test -x "$install_dir/bin/mnemonas-public-setup" || fail "public setup helper was not installed"
   test -x "$install_dir/bin/mnemonas-uninstall-systemd" || fail "uninstaller was not installed"
   test -f "$install_dir/share/mnemonas/web/index.html" || fail "web assets were not installed"
   assert_file_contains "$install_dir/etc/mnemonas/config.toml" "root = \"$storage_dir\""
@@ -105,6 +107,7 @@ run_fresh_install_test() {
   assert_file_contains "$install_dir/systemd/mnemonas.service" "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
   assert_file_contains "$case_dir/install.log" "Next steps:"
   assert_file_contains "$case_dir/install.log" "Read initial password: sudo cat $storage_dir/.mnemonas/initial-password.txt"
+  assert_file_contains "$case_dir/install.log" "Configure public HTTPS: sudo $install_dir/bin/mnemonas-public-setup --proxy caddy <domain> <email>"
   assert_file_contains "$case_dir/install.log" "Uninstall: sudo $install_dir/bin/mnemonas-uninstall-systemd"
   assert_mode "$storage_dir" "750"
   assert_mode "$storage_dir/files" "750"
@@ -138,6 +141,7 @@ run_source_checkout_stale_binary_test() {
   cp "$REPO_ROOT/scripts/install-systemd.sh" "$checkout_dir/scripts/install-systemd.sh"
   cp "$REPO_ROOT/scripts/mnemonas-dataplane-start.sh" "$checkout_dir/scripts/mnemonas-dataplane-start.sh"
   cp "$REPO_ROOT/scripts/mnemonas-doctor.sh" "$checkout_dir/scripts/mnemonas-doctor.sh"
+  cp "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$checkout_dir/scripts/setup-reverse-proxy.sh"
   cp "$REPO_ROOT/scripts/uninstall-systemd.sh" "$checkout_dir/scripts/uninstall-systemd.sh"
   cp "$REPO_ROOT/mnemonas.example.toml" "$checkout_dir/mnemonas.example.toml"
   printf '<div id="root"></div>\n' > "$checkout_dir/web/dist/index.html"
@@ -790,6 +794,127 @@ EOF
   assert_file_contains "$case_dir/doctor-unsafe.log" "Summary: 0 failure(s), 4 warning(s)"
 }
 
+run_doctor_public_domain_test() {
+  local case_dir="$TMP_ROOT/doctor-public"
+  local fake_path="$case_dir/fake-bin"
+  local bin_dir="$case_dir/bin"
+  local web_dir="$case_dir/web"
+  local storage_dir="$case_dir/storage"
+  local backup_dir="$case_dir/backup"
+  mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/files" "$storage_dir/.mnemonas" "$backup_dir"
+  chmod 0750 "$storage_dir" "$storage_dir/files"
+  chmod 0700 "$storage_dir/.mnemonas"
+
+  write_executable "$bin_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then exit 0; fi' \
+    'exit 0'
+  write_executable "$bin_dir/dataplane" '#!/usr/bin/env bash' 'exit 0'
+  printf '<div id="root"></div>\n' > "$web_dir/index.html"
+
+  write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
+  write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/systemctl" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "is-active" ]]; then exit 0; fi' \
+    'exit 0'
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+  write_executable "$fake_path/timeout" '#!/usr/bin/env bash' 'exit 1'
+  write_executable "$fake_path/ss" \
+    '#!/usr/bin/env bash' \
+    'printf "LISTEN 0 4096 127.0.0.1:18080 0.0.0.0:*\n"' \
+    'printf "LISTEN 0 4096 127.0.0.1:19090 0.0.0.0:*\n"' \
+    'printf "LISTEN 0 4096 127.0.0.1:19091 0.0.0.0:*\n"'
+  write_executable "$fake_path/findmnt" \
+    '#!/usr/bin/env bash' \
+    'printf "tank/data zfs %s\n" "${@: -1}"'
+  write_executable "$fake_path/df" \
+    '#!/usr/bin/env bash' \
+    'printf "Filesystem 1024-blocks Used Available Capacity Mounted on\n"' \
+    'printf "/dev/fake 20971520 5242880 15728640 25%% %s\n" "${@: -1}"'
+  write_executable "$fake_path/ufw" \
+    '#!/usr/bin/env bash' \
+    'printf "Status: active\n"'
+
+  cat > "$case_dir/config.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public.log"
+
+  assert_file_contains "$case_dir/doctor-public.log" "Public access checks for nas.example.com"
+  assert_file_contains "$case_dir/doctor-public.log" "public backend host is loopback-only: 127.0.0.1"
+  assert_file_contains "$case_dir/doctor-public.log" "trusted proxy hops configured: 1"
+  assert_file_contains "$case_dir/doctor-public.log" "public HTTPS health reachable: https://nas.example.com/health"
+  assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
+  assert_file_contains "$case_dir/doctor-public.log" "public dataplane gRPC port 19090 is not publicly reachable on nas.example.com"
+  assert_file_contains "$case_dir/doctor-public.log" "control plane port 18080 is loopback-only"
+  assert_file_contains "$case_dir/doctor-public.log" "Summary: 0 failure(s)"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) printf "open\n";;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+  cat > "$case_dir/config-unsafe.toml" <<EOF
+[server]
+host = "0.0.0.0"
+port = 18080
+trusted_proxy_hops = 0
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+EOF
+  touch "$storage_dir/.mnemonas/initial-password.txt"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-unsafe.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-unsafe.log"
+  local status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted unsafe public deployment"
+  assert_file_contains "$case_dir/doctor-public-unsafe.log" "public backend host should be 127.0.0.1"
+  assert_file_contains "$case_dir/doctor-public-unsafe.log" "server.trusted_proxy_hops should be at least 1"
+  assert_file_contains "$case_dir/doctor-public-unsafe.log" "public direct control plane is publicly reachable"
+  assert_file_contains "$case_dir/doctor-public-unsafe.log" "initial admin password file still exists"
+}
+
 run_doctor_input_validation_test() {
   local case_dir="$TMP_ROOT/doctor-input-validation"
   local status
@@ -821,6 +946,14 @@ run_doctor_input_validation_test() {
 
   [[ "$status" -ne 0 ]] || fail "doctor accepted a non-http SERVER_URL"
   assert_file_contains "$case_dir/server-url.log" "SERVER_URL must be an http(s) URL"
+
+  set +e
+  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain https://nas.example.com > "$case_dir/public-domain.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted PUBLIC_DOMAIN with scheme"
+  assert_file_contains "$case_dir/public-domain.log" "PUBLIC_DOMAIN must be a hostname without scheme or port"
 }
 
 run_fresh_install_test
@@ -840,6 +973,7 @@ run_symlink_path_rejection_test
 run_systemd_newline_rejection_test
 run_dataplane_addr_validation_test
 run_doctor_config_test
+run_doctor_public_domain_test
 run_doctor_input_validation_test
 
 printf '[systemd-install-test] all checks passed\n'

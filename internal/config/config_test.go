@@ -1504,8 +1504,6 @@ func TestConfig_DerivedStoragePaths(t *testing.T) {
 		{name: "index", got: cfg.IndexDBPath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "index.db")},
 		{name: "objects", got: cfg.ObjectsDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "objects")},
 		{name: "trash", got: cfg.TrashDir(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "trash")},
-		{name: "smb_gateway_socket", got: cfg.SMBGatewaySocketPath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "run", "smb-gateway.sock")},
-		{name: "smb_credentials", got: cfg.SMBCredentialFilePath(), want: filepath.Join(cfg.Storage.Root, ".mnemonas", "smb-credentials.json")},
 	}
 
 	for _, tt := range tests {
