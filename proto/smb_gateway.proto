@@ -1,0 +1,176 @@
+syntax = "proto3";
+
+package mnemonas.smb.v1;
+
+option go_package = "github.com/seanbao/mnemonas/proto/smbgateway;smbgatewaypb";
+
+service SmbGateway {
+  rpc GetCredential(GetCredentialRequest) returns (GetCredentialResponse);
+  rpc ListShares(ListSharesRequest) returns (ListSharesResponse);
+  rpc ResolvePath(ResolvePathRequest) returns (ResolvePathResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc BeginWrite(BeginWriteRequest) returns (BeginWriteResponse);
+  rpc WriteChunk(WriteChunkRequest) returns (WriteChunkResponse);
+  rpc CommitWrite(CommitWriteRequest) returns (CommitWriteResponse);
+  rpc AbortWrite(AbortWriteRequest) returns (AbortWriteResponse);
+  rpc CreateDirectory(CreateDirectoryRequest) returns (CreateDirectoryResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Rename(RenameRequest) returns (RenameResponse);
+}
+
+message GetCredentialRequest {
+  string username = 1;
+}
+
+message GetCredentialResponse {
+  bool found = 1;
+  bool enabled = 2;
+  string user_id = 3;
+  string username = 4;
+  string role = 5;
+  string home_dir = 6;
+  bytes nt_hash = 7;
+}
+
+message ListSharesRequest {
+  string user_id = 1;
+}
+
+message Share {
+  string name = 1;
+  string path = 2;
+  bool read_only = 3;
+  bool can_write = 4;
+}
+
+message ListSharesResponse {
+  repeated Share shares = 1;
+}
+
+message ResolvePathRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string path = 3;
+  bool write = 4;
+}
+
+message ResolvePathResponse {
+  string share_name = 1;
+  string share_root = 2;
+  string path = 3;
+  bool read_only = 4;
+  bool can_write = 5;
+}
+
+message StatRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string path = 3;
+}
+
+message FileMetadata {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_FILE = 1;
+    KIND_DIRECTORY = 2;
+  }
+
+  Kind kind = 1;
+  uint64 size = 2;
+  int64 modified_unix_nanos = 3;
+  bool read_only = 4;
+}
+
+message StatResponse {
+  FileMetadata metadata = 1;
+}
+
+message ListDirectoryRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string path = 3;
+}
+
+message DirectoryEntry {
+  string name = 1;
+  FileMetadata metadata = 2;
+}
+
+message ListDirectoryResponse {
+  repeated DirectoryEntry entries = 1;
+}
+
+message ReadFileRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string path = 3;
+  uint64 offset = 4;
+  uint32 length = 5;
+}
+
+message ReadFileResponse {
+  bytes data = 1;
+  bool eof = 2;
+}
+
+message BeginWriteRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string path = 3;
+  bool truncate = 4;
+  uint64 expected_size = 5;
+}
+
+message BeginWriteResponse {
+  string upload_id = 1;
+}
+
+message WriteChunkRequest {
+  string upload_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+
+message WriteChunkResponse {
+  uint64 accepted = 1;
+}
+
+message CommitWriteRequest {
+  string upload_id = 1;
+}
+
+message CommitWriteResponse {}
+
+message AbortWriteRequest {
+  string upload_id = 1;
+}
+
+message AbortWriteResponse {}
+
+message CreateDirectoryRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string path = 3;
+}
+
+message CreateDirectoryResponse {}
+
+message DeleteRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string path = 3;
+  bool permanent = 4;
+}
+
+message DeleteResponse {}
+
+message RenameRequest {
+  string user_id = 1;
+  string share_name = 2;
+  string old_path = 3;
+  string new_path = 4;
+}
+
+message RenameResponse {}

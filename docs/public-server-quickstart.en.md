@@ -68,13 +68,13 @@ Caddy is the recommended default. The helper script will:
 - run basic public-entry checks.
 
 ```bash
-sudo ./scripts/setup-reverse-proxy.sh --proxy caddy nas.example.com admin@example.com
+sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 ```
 
 For Nginx:
 
 ```bash
-sudo ./scripts/setup-reverse-proxy.sh --proxy nginx nas.example.com admin@example.com
+sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
 The script cannot modify cloud-provider security groups. After running it, confirm in the cloud console:
@@ -108,6 +108,7 @@ On the server:
 
 ```bash
 sudo mnemonas-doctor
+sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 

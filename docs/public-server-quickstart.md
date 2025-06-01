@@ -68,13 +68,13 @@ http://localhost:18080
 - 运行基础公网入口检查。
 
 ```bash
-sudo ./scripts/setup-reverse-proxy.sh --proxy caddy nas.example.com admin@example.com
+sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 ```
 
 如需 Nginx：
 
 ```bash
-sudo ./scripts/setup-reverse-proxy.sh --proxy nginx nas.example.com admin@example.com
+sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
 脚本不能修改云厂商安全组。运行后仍需在云控制台确认只开放：
@@ -108,6 +108,7 @@ curl --connect-timeout 3 http://nas.example.com:9091/health
 
 ```bash
 sudo mnemonas-doctor
+sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 

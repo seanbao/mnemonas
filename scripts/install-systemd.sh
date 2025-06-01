@@ -713,12 +713,13 @@ main() {
   require_command sed
   require_command systemctl
 
-  local release_root nasd_src dataplane_src dataplane_start_src doctor_src uninstall_src web_src config_template
+  local release_root nasd_src dataplane_src dataplane_start_src doctor_src public_setup_src uninstall_src web_src config_template
   release_root="$(resolve_release_root)"
   nasd_src="$(first_existing_file "$release_root/nasd" "$release_root/bin/nasd" "$PWD/nasd" "$PWD/bin/nasd")" || fail "nasd binary not found; run from a release tarball or set RELEASE_DIR"
   dataplane_src="$(first_existing_file "$release_root/dataplane" "$release_root/bin/dataplane" "$PWD/dataplane" "$PWD/bin/dataplane")" || fail "dataplane binary not found; run from a release tarball or set RELEASE_DIR"
   dataplane_start_src="$(first_existing_file "$release_root/scripts/mnemonas-dataplane-start.sh" "$SCRIPT_DIR/mnemonas-dataplane-start.sh" "$PWD/scripts/mnemonas-dataplane-start.sh")" || fail "mnemonas-dataplane-start.sh not found"
   doctor_src="$(first_existing_file "$release_root/scripts/mnemonas-doctor.sh" "$SCRIPT_DIR/mnemonas-doctor.sh" "$PWD/scripts/mnemonas-doctor.sh" 2>/dev/null || true)"
+  public_setup_src="$(first_existing_file "$release_root/scripts/setup-reverse-proxy.sh" "$SCRIPT_DIR/setup-reverse-proxy.sh" "$PWD/scripts/setup-reverse-proxy.sh" 2>/dev/null || true)"
   uninstall_src="$(first_existing_file "$release_root/scripts/uninstall-systemd.sh" "$SCRIPT_DIR/uninstall-systemd.sh" "$PWD/scripts/uninstall-systemd.sh" 2>/dev/null || true)"
   web_src="$(first_built_web_dir "$release_root/web/dist" "$release_root/web" "$PWD/web/dist" "$PWD/web")" || fail "built web assets not found; install from a release package or run npm run build in web/"
   config_template="$(first_existing_file "$release_root/mnemonas.example.toml" "$PWD/mnemonas.example.toml")" || fail "mnemonas.example.toml not found"
@@ -763,6 +764,9 @@ main() {
   if [[ -n "$doctor_src" ]]; then
     install -m 0755 "$doctor_src" "$BIN_DIR/mnemonas-doctor"
   fi
+  if [[ -n "$public_setup_src" ]]; then
+    install -m 0755 "$public_setup_src" "$BIN_DIR/mnemonas-public-setup"
+  fi
   if [[ -n "$uninstall_src" ]]; then
     install -m 0755 "$uninstall_src" "$BIN_DIR/mnemonas-uninstall-systemd"
   fi
@@ -795,6 +799,7 @@ main() {
   log "  Open Web UI: $web_url"
   log "  Read initial password: sudo cat $initial_password_file"
   log "  Run doctor: sudo $BIN_DIR/mnemonas-doctor"
+  log "  Configure public HTTPS: sudo $BIN_DIR/mnemonas-public-setup --proxy caddy <domain> <email>"
   log "  Check status: systemctl status mnemonas --no-pager"
   log "  View logs: journalctl -u mnemonas -f"
   log "  Uninstall: sudo $BIN_DIR/mnemonas-uninstall-systemd"

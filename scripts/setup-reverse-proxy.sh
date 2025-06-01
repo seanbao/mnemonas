@@ -750,7 +750,7 @@ run_post_setup_checks() {
     fi
 
     if command -v mnemonas-doctor >/dev/null 2>&1; then
-        if SERVER_URL="http://127.0.0.1:$UPSTREAM_PORT" mnemonas-doctor; then
+        if SERVER_URL="http://127.0.0.1:$UPSTREAM_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
             log_info "mnemonas-doctor 检查通过"
         else
             log_warn "mnemonas-doctor 存在失败或警告，请按输出处理后再开放给真实用户"

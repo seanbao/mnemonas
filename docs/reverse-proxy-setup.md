@@ -15,10 +15,10 @@
 systemd 部署完成后，推荐用脚本自动生成公网 HTTPS 入口并收紧 MnemoNAS 后端监听：
 
 ```bash
-sudo ./scripts/setup-reverse-proxy.sh --proxy caddy nas.example.com admin@example.com
+sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 ```
 
-脚本会设置 `server.host = "127.0.0.1"`、`trusted_proxy_hops = 1`、配置 Caddy/Nginx、调整本机 UFW 规则并运行基础检查。云厂商安全组仍需人工确认只开放 `80/443`，不要开放 `8080/9090/9091`。
+systemd 安装会把源码中的 `scripts/setup-reverse-proxy.sh` 安装为 `mnemonas-public-setup`。脚本会设置 `server.host = "127.0.0.1"`、`trusted_proxy_hops = 1`、配置 Caddy/Nginx、调整本机 UFW 规则并运行基础检查。云厂商安全组仍需人工确认只开放 `80/443`，不要开放 `8080/9090/9091`。
 
 ## MnemoNAS 配置
 
