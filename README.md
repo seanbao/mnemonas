@@ -87,7 +87,7 @@ sudo ./scripts/install-systemd.sh
 sudo mnemonas-doctor
 ```
 
-默认会安装到 `/usr/local/bin`，配置写入 `/etc/mnemonas/config.toml`，数据放在 `/srv/mnemonas`，Web UI 监听 `http://<server-ip>:8080`。首次登录密码在 `/srv/mnemonas/.mnemonas/initial-password.txt`。
+默认会安装到 `/usr/local/bin`，配置写入 `/etc/mnemonas/config.toml`，数据放在 `/srv/mnemonas`，Web UI 监听 `http://<server-ip>:8080`。首次登录密码在 `/srv/mnemonas/.mnemonas/initial-password.txt`。如果要通过公网域名访问，先按 [公网服务器快速上线](docs/public-server-quickstart.md) 收紧后端端口并配置 HTTPS 反向代理。
 
 详见 [Linux/systemd 部署指南](docs/linux-systemd-deployment.md)。
 
@@ -281,6 +281,7 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [开发指南](docs/development.md) | 本地开发环境搭建与调试 |
 | [English documentation index](docs/README.en.md) | English entry point with English links for the main docs |
 | [Linux/systemd 部署](docs/linux-systemd-deployment.md) | Linux 服务器的 systemd 长期运行指南 |
+| [公网服务器快速上线](docs/public-server-quickstart.md) | 公网域名、HTTPS、反向代理和安全检查的一条推荐路径 |
 | [Docker 部署](docs/docker-deployment.md) | Docker 部署指南 |
 | [挂载指南](docs/mounting-guide.md) | 各平台 WebDAV 连接教程 |
 | [WebDAV 兼容性](docs/webdav-compatibility.md) | 客户端兼容性与协议支持范围 |
@@ -308,7 +309,7 @@ Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 da
 | [scripts/run-benchmark-isolated.sh](scripts/run-benchmark-isolated.sh) | 启动隔离后端并运行性能基准测试，`make bench` 默认使用它 |
 | [scripts/benchmark.sh](scripts/benchmark.sh) | 对显式指定的本地服务和存储根执行性能基准测试 |
 | [scripts/fault-injection-test.sh](scripts/fault-injection-test.sh) | 破坏性故障注入测试；默认关闭，必须显式指定隔离目标 |
-| [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | 反向代理配置 |
+| [scripts/setup-reverse-proxy.sh](scripts/setup-reverse-proxy.sh) | 公网 HTTPS 反向代理配置与 MnemoNAS 安全入口收紧 |
 
 ## 📜 License
 

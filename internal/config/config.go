@@ -54,6 +54,7 @@ type Config struct {
 	Storage   StorageConfig   `toml:"storage"`
 	DataPlane DataPlaneConfig `toml:"dataplane"`
 	WebDAV    WebDAVConfig    `toml:"webdav"`
+	SMB       SMBConfig       `toml:"smb"`
 	Auth      AuthConfig      `toml:"auth"`
 	Share     ShareConfig     `toml:"share"`
 	Favorites FavoritesConfig `toml:"favorites"`
@@ -159,6 +160,27 @@ type WebDAVConfig struct {
 	AuthType string `toml:"auth_type"` // none, basic
 	Username string `toml:"username"`  // for basic auth
 	Password string `toml:"password"`  // for basic auth
+}
+
+// SMBConfig holds SMB sidecar configuration.
+type SMBConfig struct {
+	Enabled            bool             `toml:"enabled"`
+	Listen             string           `toml:"listen"`
+	ServerName         string           `toml:"server_name"`
+	GatewaySocket      string           `toml:"gateway_socket"`
+	CredentialFile     string           `toml:"credential_file"`
+	SigningRequired    bool             `toml:"signing_required"`
+	EncryptionRequired bool             `toml:"encryption_required"`
+	Shares             []SMBShareConfig `toml:"shares"`
+}
+
+// SMBShareConfig maps an SMB share to a MnemoNAS virtual path.
+type SMBShareConfig struct {
+	Name         string   `toml:"name"`
+	Path         string   `toml:"path"`
+	ReadOnly     bool     `toml:"read_only"`
+	AllowedRoles []string `toml:"allowed_roles"`
+	AllowedUsers []string `toml:"allowed_users"`
 }
 
 // AuthConfig holds authentication configuration
@@ -285,6 +307,15 @@ func Default() *Config {
 			ReadOnly: false,
 			AuthType: "basic", // default to basic auth with auto-generated password
 		},
+		SMB: SMBConfig{
+			Enabled:         false,
+			Listen:          "127.0.0.1:1445",
+			ServerName:      "mnemonas",
+			GatewaySocket:   filepath.Join(storageRoot, ".mnemonas", "run", "smb-gateway.sock"),
+			CredentialFile:  filepath.Join(storageRoot, ".mnemonas", "smb-credentials.json"),
+			SigningRequired: true,
+			Shares:          []SMBShareConfig{},
+		},
 		Auth: AuthConfig{
 			Enabled:         true, // enabled by default for security
 			AccessTokenTTL:  15 * time.Minute,
@@ -339,6 +370,9 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	cfg.Auth.UsersFile = expandUserPath(cfg.Auth.UsersFile)
 	cfg.Share.StoreFile = expandUserPath(cfg.Share.StoreFile)
 	cfg.Favorites.StoreFile = expandUserPath(cfg.Favorites.StoreFile)
+	cfg.SMB.GatewaySocket = expandUserPath(cfg.SMB.GatewaySocket)
+	cfg.SMB.CredentialFile = expandUserPath(cfg.SMB.CredentialFile)
+	cfg.SMB.Shares = normalizeSMBShares(cfg.SMB.Shares)
 	cfg.Log.Output = expandUserPath(cfg.Log.Output)
 
 	defaultInternal := filepath.Join(defaultRoot, ".mnemonas")
@@ -362,6 +396,23 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	defaultFavoritesFile := filepath.Join(defaultInternal, "favorites.json")
 	if cfg.Favorites.StoreFile == "" || cfg.Favorites.StoreFile == defaultFavoritesFile {
 		cfg.Favorites.StoreFile = filepath.Join(internal, "favorites.json")
+	}
+
+	if cfg.SMB.Listen == "" {
+		cfg.SMB.Listen = "127.0.0.1:1445"
+	}
+	if cfg.SMB.ServerName == "" {
+		cfg.SMB.ServerName = "mnemonas"
+	}
+
+	defaultSMBGatewaySocket := filepath.Join(defaultInternal, "run", "smb-gateway.sock")
+	if cfg.SMB.GatewaySocket == "" || cfg.SMB.GatewaySocket == defaultSMBGatewaySocket {
+		cfg.SMB.GatewaySocket = filepath.Join(internal, "run", "smb-gateway.sock")
+	}
+
+	defaultSMBCredentialFile := filepath.Join(defaultInternal, "smb-credentials.json")
+	if cfg.SMB.CredentialFile == "" || cfg.SMB.CredentialFile == defaultSMBCredentialFile {
+		cfg.SMB.CredentialFile = filepath.Join(internal, "smb-credentials.json")
 	}
 }
 
@@ -419,6 +470,17 @@ func normalizeStringSlice(values []string) []string {
 	return values
 }
 
+func normalizeSMBShares(shares []SMBShareConfig) []SMBShareConfig {
+	if shares == nil {
+		return []SMBShareConfig{}
+	}
+	for i := range shares {
+		shares[i].AllowedRoles = normalizeStringSlice(shares[i].AllowedRoles)
+		shares[i].AllowedUsers = normalizeStringSlice(shares[i].AllowedUsers)
+	}
+	return shares
+}
+
 // Load loads configuration from file
 func Load(path string) (*Config, error) {
 	cfg := Default()
@@ -452,6 +514,7 @@ func Load(path string) (*Config, error) {
 	cfg.Share.BaseURL = strings.TrimSpace(cfg.Share.BaseURL)
 	cfg.Alerts.WebhookURL = strings.TrimSpace(cfg.Alerts.WebhookURL)
 	cfg.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
+	cfg.SMB.ServerName = strings.TrimSpace(cfg.SMB.ServerName)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
@@ -1042,6 +1105,9 @@ func (c *Config) Validate() error {
 	if !c.Security.AllowUnsafeNoAuth && serverBeyondLoopback && c.WebDAV.Enabled && webdavAuthType == "none" {
 		errs = append(errs, errors.New("webdav.auth_type=none requires server.host to be loopback or security.allow_unsafe_no_auth=true"))
 	}
+	if err := validateSMBConfig(c.SMB); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateOptionalHTTPURL(c.Share.BaseURL, "share.base_url"); err != nil {
 		errs = append(errs, err)
 	}
@@ -1138,6 +1204,145 @@ func validateWebhookHeader(header string) error {
 	}
 	if hasInvalidHTTPHeaderValueControl(value) {
 		return fmt.Errorf("invalid alerts.webhook_headers header value for %q", key)
+	}
+	return nil
+}
+
+func validateSMBConfig(smb SMBConfig) error {
+	var errs []error
+
+	if err := validateTCPAddress(smb.Listen, "smb.listen"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateSMBServerName(smb.ServerName); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAbsoluteFilePath(smb.GatewaySocket, "smb.gateway_socket"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAbsoluteFilePath(smb.CredentialFile, "smb.credential_file"); err != nil {
+		errs = append(errs, err)
+	}
+	if smb.Enabled && len(smb.Shares) == 0 {
+		errs = append(errs, errors.New("smb.shares must contain at least one share when smb.enabled=true"))
+	}
+
+	seen := map[string]struct{}{}
+	for _, share := range smb.Shares {
+		if err := validateSMBShare(share, seen); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateSMBServerName(name string) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return errors.New("smb.server_name cannot be empty")
+	}
+	if trimmed != name || len(trimmed) > 63 || strings.ContainsAny(trimmed, "\\/:*?\"<>|") {
+		return fmt.Errorf("invalid smb.server_name: %q", name)
+	}
+	if strings.IndexFunc(trimmed, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f
+	}) >= 0 {
+		return errors.New("smb.server_name must not contain whitespace or control characters")
+	}
+	return nil
+}
+
+func validateAbsoluteFilePath(path, field string) error {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return fmt.Errorf("%s cannot be empty", field)
+	}
+	if trimmed != path {
+		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
+	}
+	if strings.IndexFunc(trimmed, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return fmt.Errorf("%s must not contain control characters", field)
+	}
+	if !filepath.IsAbs(trimmed) {
+		return fmt.Errorf("%s must be an absolute path", field)
+	}
+	return nil
+}
+
+func validateSMBShare(share SMBShareConfig, seen map[string]struct{}) error {
+	var errs []error
+
+	name := strings.TrimSpace(share.Name)
+	switch {
+	case name == "":
+		errs = append(errs, errors.New("smb.shares.name cannot be empty"))
+	case name != share.Name:
+		errs = append(errs, fmt.Errorf("smb share name %q must not contain leading or trailing whitespace", share.Name))
+	case strings.EqualFold(name, "IPC$"):
+		errs = append(errs, errors.New("smb share name IPC$ is reserved"))
+	case strings.ContainsAny(name, "\\/:*?\"<>|"):
+		errs = append(errs, fmt.Errorf("invalid smb share name: %q", share.Name))
+	case strings.IndexFunc(name, func(r rune) bool { return r <= 0x20 || r == 0x7f }) >= 0:
+		errs = append(errs, fmt.Errorf("smb share name %q must not contain whitespace or control characters", share.Name))
+	default:
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			errs = append(errs, fmt.Errorf("duplicate smb share name: %q", share.Name))
+		}
+		seen[key] = struct{}{}
+	}
+
+	if err := validateSMBSharePath(share.Path); err != nil {
+		errs = append(errs, err)
+	}
+	if len(share.AllowedRoles) == 0 && len(share.AllowedUsers) == 0 {
+		errs = append(errs, fmt.Errorf("smb share %q must allow at least one role or user", share.Name))
+	}
+	for _, role := range share.AllowedRoles {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "admin", "user", "guest":
+		default:
+			errs = append(errs, fmt.Errorf("invalid smb share role %q for share %q", role, share.Name))
+		}
+	}
+	for _, user := range share.AllowedUsers {
+		if strings.TrimSpace(user) == "" || strings.IndexFunc(user, func(r rune) bool {
+			return r <= 0x20 || r == 0x7f
+		}) >= 0 {
+			errs = append(errs, fmt.Errorf("invalid smb share user %q for share %q", user, share.Name))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateSMBSharePath(path string) error {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return errors.New("smb.shares.path cannot be empty")
+	}
+	if trimmed != path {
+		return fmt.Errorf("smb share path %q must not contain leading or trailing whitespace", path)
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		return fmt.Errorf("smb share path %q must be absolute", path)
+	}
+	if strings.ContainsAny(trimmed, "\\?#") {
+		return fmt.Errorf("smb share path %q must be a clean MnemoNAS path", path)
+	}
+	if strings.IndexFunc(trimmed, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return errors.New("smb share path must not contain control characters")
+	}
+	if urlpath.Clean(trimmed) != trimmed {
+		return fmt.Errorf("smb share path %q must be clean", path)
+	}
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("smb share path %q must not contain dot segments", path)
+		}
 	}
 	return nil
 }
@@ -1384,6 +1589,7 @@ func (c *Config) EnsureDirs() error {
 		{filepath.Join(root, ".mnemonas", "maintenance"), 0700},
 		{filepath.Join(root, ".mnemonas", "activity"), 0700},
 		{filepath.Join(root, ".mnemonas", "tmp"), 0700},
+		{filepath.Join(root, ".mnemonas", "run"), 0700},
 	}
 
 	for _, dir := range dirs {
@@ -1424,6 +1630,16 @@ func (c *Config) ObjectsDir() string {
 // TrashDir returns the path to trash directory
 func (c *Config) TrashDir() string {
 	return filepath.Join(c.Storage.Root, ".mnemonas", "trash")
+}
+
+// SMBGatewaySocketPath returns the SMB gateway Unix socket path.
+func (c *Config) SMBGatewaySocketPath() string {
+	return c.SMB.GatewaySocket
+}
+
+// SMBCredentialFilePath returns the SMB credential store path.
+func (c *Config) SMBCredentialFilePath() string {
+	return c.SMB.CredentialFile
 }
 
 // Address returns the server listen address
