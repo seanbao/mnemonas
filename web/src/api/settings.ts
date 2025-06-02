@@ -86,6 +86,29 @@ export interface SettingsResponse {
   data: SettingsData
 }
 
+export type SecurityCheckStatus = 'pass' | 'warning' | 'block'
+
+export interface SecurityCheckItem {
+  id: string
+  status: SecurityCheckStatus
+  title: string
+  message: string
+  details?: Record<string, unknown>
+}
+
+export interface SecurityCheckData {
+  status: SecurityCheckStatus
+  generated_at: string
+  checks: SecurityCheckItem[]
+  request: Record<string, unknown>
+  config: Record<string, unknown>
+}
+
+export interface SecurityCheckResponse {
+  success: boolean
+  data: SecurityCheckData
+}
+
 interface SettingsApiError {
   code?: string
   message: string
@@ -216,6 +239,29 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
+function isSecurityCheckStatus(value: unknown): value is SecurityCheckStatus {
+  return value === 'pass' || value === 'warning' || value === 'block'
+}
+
+function isValidSecurityCheckItem(value: unknown): value is SecurityCheckItem {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && isSecurityCheckStatus(value.status)
+    && typeof value.title === 'string'
+    && typeof value.message === 'string'
+    && (value.details === undefined || isRecord(value.details))
+}
+
+function isValidSecurityCheckData(value: unknown): value is SecurityCheckData {
+  return isRecord(value)
+    && isSecurityCheckStatus(value.status)
+    && typeof value.generated_at === 'string'
+    && Array.isArray(value.checks)
+    && value.checks.every(isValidSecurityCheckItem)
+    && isRecord(value.request)
+    && isRecord(value.config)
+}
+
 function isValidWebDAVCredentials(value: unknown): value is WebDAVCredentialsResponse {
   return isRecord(value)
     && typeof value.enabled === 'boolean'
@@ -330,6 +376,26 @@ export async function getSettings(): Promise<SettingsResponse> {
   const body = await parseSettingsSuccess<unknown>(response, 'Invalid settings response')
   if (!isValidSettingsData(body.data)) {
     throw new Error('Invalid settings response')
+  }
+  return {
+    success: body.success,
+    data: body.data,
+  }
+}
+
+/**
+ * Get public-access security self-check
+ */
+export async function getSecurityCheck(): Promise<SecurityCheckResponse> {
+  const response = await authFetch(`${API_BASE}/security-check`)
+
+  if (!response.ok) {
+    throw await parseSettingsError(response, 'Failed to get security check')
+  }
+
+  const body = await parseSettingsSuccess<unknown>(response, 'Invalid security check response')
+  if (!isValidSecurityCheckData(body.data)) {
+    throw new Error('Invalid security check response')
   }
   return {
     success: body.success,
