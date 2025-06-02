@@ -40,7 +40,17 @@ import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { useAuthStore, useUser } from '@/stores/auth'
-import { SettingsError, getSettings, updateSettings, getWebDAVCredentials, type UpdateSettingsRequest } from '@/api/settings'
+import {
+  SettingsError,
+  getSecurityCheck,
+  getSettings,
+  getWebDAVCredentials,
+  updateSettings,
+  type SecurityCheckData,
+  type SecurityCheckItem,
+  type SecurityCheckStatus,
+  type UpdateSettingsRequest,
+} from '@/api/settings'
 
 const MIN_CDC_CHUNK_SIZE_BYTES = 64 * 1024
 const MAX_CDC_CHUNK_SIZE_BYTES = 64 * 1024 * 1024
@@ -354,6 +364,169 @@ function SettingRow({
   )
 }
 
+function getSecurityStatusMeta(status: SecurityCheckStatus): {
+  label: string
+  tone: string
+  badgeClassName: string
+  iconClassName: string
+  Icon: React.ComponentType<{ size?: number; className?: string }>
+} {
+  if (status === 'pass') {
+    return {
+      label: '通过',
+      tone: 'border-success/30 bg-success/5',
+      badgeClassName: 'bg-success/10 text-success',
+      iconClassName: 'text-success',
+      Icon: CheckCircle2,
+    }
+  }
+
+  if (status === 'block') {
+    return {
+      label: '需修复',
+      tone: 'border-danger/30 bg-danger/5',
+      badgeClassName: 'bg-danger/10 text-danger',
+      iconClassName: 'text-danger',
+      Icon: AlertCircle,
+    }
+  }
+
+  return {
+    label: '需确认',
+    tone: 'border-warning/30 bg-warning/5',
+    badgeClassName: 'bg-warning/10 text-warning',
+    iconClassName: 'text-warning',
+    Icon: AlertCircle,
+  }
+}
+
+function SecurityCheckRow({ check }: { check: SecurityCheckItem }) {
+  const meta = getSecurityStatusMeta(check.status)
+  const Icon = meta.Icon
+
+  return (
+    <div className={cn("flex items-start gap-3 rounded-lg border px-3 py-3", meta.tone)}>
+      <Icon size={18} className={cn("mt-0.5 shrink-0", meta.iconClassName)} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="break-anywhere text-sm font-semibold text-foreground">{check.title}</span>
+          <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", meta.badgeClassName)}>
+            {meta.label}
+          </span>
+        </div>
+        <p className="break-anywhere mt-1 text-xs leading-relaxed text-default-600">{check.message}</p>
+      </div>
+    </div>
+  )
+}
+
+function SecurityCheckCard({
+  data,
+  error,
+  isLoading,
+  isRefreshing,
+  onRefresh,
+}: {
+  data?: SecurityCheckData
+  error: unknown
+  isLoading: boolean
+  isRefreshing: boolean
+  onRefresh: () => void
+}) {
+  const checks = data?.checks ?? []
+  const issueChecks = checks.filter((check) => check.status !== 'pass')
+  const visibleChecks = issueChecks.length > 0 ? issueChecks : checks.slice(0, 3)
+  const counts = {
+    block: checks.filter((check) => check.status === 'block').length,
+    warning: checks.filter((check) => check.status === 'warning').length,
+    pass: checks.filter((check) => check.status === 'pass').length,
+  }
+  const overallStatus = data?.status ?? (error ? 'warning' : 'pass')
+  const meta = getSecurityStatusMeta(overallStatus)
+  const Icon = meta.Icon
+
+  return (
+    <Card className="card-meridian">
+      <CardHeader className="flex min-w-0 flex-col gap-4 pb-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 gap-4">
+          <div className="gradient-meridian shrink-0 rounded-lg p-2.5 shadow-sm">
+            <Shield size={20} className="text-white" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="break-anywhere text-base font-semibold text-foreground">公网访问安全自检</h3>
+              {!isLoading && (
+                <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold", meta.badgeClassName)}>
+                  <Icon size={13} />
+                  {meta.label}
+                </span>
+              )}
+            </div>
+            <p className="break-anywhere mt-0.5 text-xs text-default-500">
+              检查当前运行态中和公网暴露直接相关的配置。
+            </p>
+          </div>
+        </div>
+        <Button
+          size="sm"
+          variant="bordered"
+          className="btn-secondary rounded-lg"
+          startContent={<RefreshCw size={14} />}
+          isLoading={isRefreshing}
+          onPress={onRefresh}
+        >
+          重新检查
+        </Button>
+      </CardHeader>
+      <CardBody className="pt-2">
+        {isLoading && !data ? (
+          <div className="flex items-center gap-3 rounded-lg border border-divider bg-content2/40 px-4 py-4 text-sm text-default-500">
+            <div className="h-5 w-5 rounded-full border-2 border-accent-primary border-t-transparent animate-spin" />
+            正在检查安全配置...
+          </div>
+        ) : error && !data ? (
+          <div className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+            <div>
+              <div className="font-medium">安全自检暂不可用</div>
+              <div className="text-default-600">
+                {error instanceof Error ? error.message : '请稍后重试。'}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-3 gap-2 rounded-lg border border-divider bg-content2/40 p-2">
+              <div className="rounded-md px-3 py-2">
+                <div className="text-xs text-default-500">需修复</div>
+                <div className="text-lg font-semibold text-danger">{counts.block}</div>
+              </div>
+              <div className="rounded-md px-3 py-2">
+                <div className="text-xs text-default-500">需确认</div>
+                <div className="text-lg font-semibold text-warning">{counts.warning}</div>
+              </div>
+              <div className="rounded-md px-3 py-2">
+                <div className="text-xs text-default-500">通过</div>
+                <div className="text-lg font-semibold text-success">{counts.pass}</div>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {visibleChecks.map((check) => (
+                <SecurityCheckRow key={check.id} check={check} />
+              ))}
+            </div>
+            {issueChecks.length === 0 && (
+              <p className="text-xs text-default-500">
+                当前自检项均已通过。公网域名、云防火墙和端口暴露仍建议使用服务器上的 mnemonas-doctor 复核。
+              </p>
+            )}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
 export function SettingsPage() {
   const user = useUser()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -423,6 +596,18 @@ export function SettingsPage() {
     queryFn: getSettings,
   })
   const settingsLoadErrorPresentation = error ? getSettingsLoadErrorPresentation(error) : null
+
+  const {
+    data: securityCheckResponse,
+    error: securityCheckError,
+    refetch: refetchSecurityCheck,
+    isLoading: isLoadingSecurityCheck,
+    isRefetching: isRefetchingSecurityCheck,
+  } = useQuery({
+    queryKey: ['security-check', user?.id ?? 'anonymous'],
+    queryFn: getSecurityCheck,
+    enabled: selectedTab === 'general',
+  })
 
   // Fetch WebDAV credentials
   const {
@@ -600,6 +785,9 @@ export function SettingsPage() {
     if (result.data?.data) {
       setDraftSettings(mapServerSettings(result.data.data))
     }
+    if (selectedTab === 'general') {
+      void refetchSecurityCheck()
+    }
     setSavedSettingsOverride(null)
     setSavedSettingsOverrideUpdatedAt(null)
     setIsDirty(false)
@@ -623,6 +811,9 @@ export function SettingsPage() {
     setSavedSettingsOverride(null)
     setSavedSettingsOverrideUpdatedAt(null)
     setIsDirty(false)
+    if (selectedTab === 'general') {
+      void refetchSecurityCheck()
+    }
     addToast({ title: '设置已刷新', color: 'success' })
   }
 
@@ -650,6 +841,9 @@ export function SettingsPage() {
 
       addToast(getSettingsSaveSuccessToast(result.message))
       void refetch()
+      if (selectedTab === 'general') {
+        void refetchSecurityCheck()
+      }
     },
     onError: (err: unknown) => {
       addToast(getSettingsActionErrorToast(err, {
@@ -1139,6 +1333,14 @@ export function SettingsPage() {
         >
           <Tab key="general" title="常规">
             <div className="space-y-6 mt-6">
+              <SecurityCheckCard
+                data={securityCheckResponse?.data}
+                error={securityCheckError}
+                isLoading={isLoadingSecurityCheck}
+                isRefreshing={isRefetchingSecurityCheck}
+                onRefresh={() => { void refetchSecurityCheck() }}
+              />
+
               <SettingsSection
                 title="服务器"
                 description="配置服务器网络参数；保存后需重启服务才能影响监听地址、端口和 HTTP 超时"

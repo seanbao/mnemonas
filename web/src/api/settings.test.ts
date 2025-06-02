@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { getSettings, getWebDAVCredentials, SettingsError, updateSettings, type SettingsData } from './settings'
+import { getSecurityCheck, getSettings, getWebDAVCredentials, SettingsError, updateSettings, type SettingsData } from './settings'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -201,6 +201,67 @@ describe('Settings API', () => {
       status: 503,
       code: 'SERVICE_UNAVAILABLE',
       isUnavailable: true,
+    })
+  })
+
+  it('unwraps security check responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'https_request',
+              status: 'warning',
+              title: '当前访问不是 HTTPS',
+              message: '公网访问前应启用 HTTPS。',
+              details: { direct_tls: false },
+            },
+          ],
+          request: { scheme: 'http' },
+          config: { trusted_proxy_hops: 0 },
+        },
+      }),
+    })
+
+    const result = await getSecurityCheck()
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/security-check')
+    expect(result.data.status).toBe('warning')
+    expect(result.data.checks[0].id).toBe('https_request')
+  })
+
+  it('rejects malformed security check responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          status: 'unknown',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [],
+          request: {},
+          config: {},
+        },
+      }),
+    })
+
+    await expect(getSecurityCheck()).rejects.toThrow('Invalid security check response')
+  })
+
+  it('uses structured api error message when security check fails', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'settings not available' } }),
+    })
+
+    await expect(getSecurityCheck()).rejects.toMatchObject({
+      message: 'settings not available',
+      status: 503,
     })
   })
 

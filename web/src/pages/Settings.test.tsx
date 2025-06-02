@@ -15,12 +15,14 @@ import { getSettings } from '@/api/settings'
 import { SettingsError } from '@/api/settings'
 import { updateSettings } from '@/api/settings'
 import { getWebDAVCredentials } from '@/api/settings'
+import { getSecurityCheck } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
 const mockUpdateSettings = vi.mocked(updateSettings)
 const mockGetWebDAVCredentials = vi.mocked(getWebDAVCredentials)
+const mockGetSecurityCheck = vi.mocked(getSecurityCheck)
 
-const { defaultSettingsResponse } = vi.hoisted(() => ({
+const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
     data: {
       server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '60s', idle_timeout: '120s', trusted_proxy_hops: 1, read_timeout_seconds: 60, write_timeout_seconds: 300 },
@@ -34,6 +36,29 @@ const { defaultSettingsResponse } = vi.hoisted(() => ({
       alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
       dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+    },
+  },
+  defaultSecurityCheckResponse: {
+    success: true,
+    data: {
+      status: 'warning' as const,
+      generated_at: '2026-05-08T00:00:00Z',
+      checks: [
+        {
+          id: 'https_request',
+          status: 'warning' as const,
+          title: '当前访问不是 HTTPS',
+          message: '公网访问前应通过内置 TLS 或受信反向代理提供 HTTPS。',
+        },
+        {
+          id: 'auth_enabled',
+          status: 'pass' as const,
+          title: 'Web 登录认证已启用',
+          message: '管理界面需要账号登录。',
+        },
+      ],
+      request: { scheme: 'http' },
+      config: { trusted_proxy_hops: 1 },
     },
   },
 }))
@@ -113,6 +138,7 @@ vi.mock('@/api/settings', () => ({
     }
   },
   getSettings: vi.fn().mockResolvedValue(defaultSettingsResponse),
+  getSecurityCheck: vi.fn().mockResolvedValue(defaultSecurityCheckResponse),
   updateSettings: vi.fn().mockResolvedValue({ success: true }),
   getWebDAVCredentials: vi.fn().mockResolvedValue({
     success: true,
@@ -134,6 +160,7 @@ describe('SettingsPage', () => {
     mockUser.homeDir = '/'
     window.history.pushState({}, '', '/settings')
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
+    mockGetSecurityCheck.mockResolvedValue(defaultSecurityCheckResponse)
     mockGetWebDAVCredentials.mockResolvedValue({
       enabled: true,
       url: '/dav/',
@@ -259,6 +286,8 @@ describe('SettingsPage', () => {
     it('shows general settings by default', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
+        expect(screen.getByText('公网访问安全自检')).toBeTruthy()
+        expect(screen.getByText('当前访问不是 HTTPS')).toBeTruthy()
         expect(screen.getByText('服务器')).toBeTruthy()
         expect(screen.getByText('存储路径')).toBeTruthy()
       })
