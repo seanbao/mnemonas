@@ -68,6 +68,34 @@ describe('Users API', () => {
     expect(result.user.username).toBe('admin')
   })
 
+  it('rejects malformed successful list users responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          users: [{ id: 'u1', username: 'admin', email: '', role: 'superadmin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 }],
+        },
+      }),
+    })
+
+    await expect(listUsers()).rejects.toThrow('Invalid users response')
+  })
+
+  it('rejects malformed successful create user responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+        },
+      }),
+    })
+
+    await expect(createUser({ username: 'admin', password: 'password123' })).rejects.toThrow('Invalid create user response')
+  })
+
   it('uses structured error messages', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -133,6 +161,15 @@ describe('Users API', () => {
 
     await expect(deleteUser('u1')).rejects.toThrow('Invalid delete user response')
     await expect(resetUserPassword('u1', { new_password: 'password123' })).rejects.toThrow('Invalid reset password response')
+    await expect(toggleUserStatus('u1', true)).rejects.toThrow('Invalid update user status response')
+  })
+
+  it('rejects toggle status success responses that omit the disabled field', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: {} }),
+    })
+
     await expect(toggleUserStatus('u1', true)).rejects.toThrow('Invalid update user status response')
   })
 })

@@ -360,6 +360,19 @@ describe('AlbumPage', () => {
       })
     })
 
+    it('shows a warning banner when a thumbnail still fails after auth refresh cannot recover', async () => {
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      fireEvent.error(thumbnail)
+
+      await waitFor(() => {
+        expect(mockRefreshAuthSession).toHaveBeenCalledTimes(1)
+        expect(screen.getByText('部分缩略图加载失败')).toBeTruthy()
+        expect(screen.getByText('部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。')).toBeTruthy()
+      })
+    })
+
     it('retries fullscreen image loading once after refreshing the auth session', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockRefreshAuthSession.mockResolvedValueOnce(true)
@@ -379,6 +392,29 @@ describe('AlbumPage', () => {
 
       await waitFor(() => {
         expect(previewImage).toHaveAttribute('src', '/api/v1/download/photos/photo1.jpg?download=true&session_retry=1')
+      })
+    })
+
+    it('shows an explicit preview error state when fullscreen loading still fails after retry cannot recover', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      await user.click(thumbnail)
+
+      await waitFor(() => {
+        expect(screen.getAllByRole('img', { name: 'photo1.jpg' }).length).toBeGreaterThan(1)
+      })
+
+      const previewImage = screen.getAllByRole('img', { name: 'photo1.jpg' }).at(-1)
+      expect(previewImage).toBeTruthy()
+      fireEvent.error(previewImage)
+
+      await waitFor(() => {
+        expect(mockRefreshAuthSession).toHaveBeenCalledTimes(1)
+        expect(screen.getByText('图片预览加载失败')).toBeTruthy()
+        expect(screen.getByText('可尝试下载原图，或稍后重试。')).toBeTruthy()
       })
     })
 

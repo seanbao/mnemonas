@@ -123,10 +123,12 @@ async function fetchAllImages(
 function ImageThumbnail({ 
   file, 
   onClick,
+  onThumbnailLoadFailure,
   index
 }: { 
   file: FileItem
   onClick: () => void
+  onThumbnailLoadFailure: () => void
   index: number
 }) {
   const [loaded, setLoaded] = useState(false)
@@ -134,6 +136,15 @@ function ImageThumbnail({
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
   const [hasRetried, setHasRetried] = useState(false)
   const imgRef = useRef<HTMLImageElement>(null)
+  const reportedErrorRef = useRef(false)
+
+  const markThumbnailLoadFailure = useCallback(() => {
+    if (reportedErrorRef.current) {
+      return
+    }
+    reportedErrorRef.current = true
+    onThumbnailLoadFailure()
+  }, [onThumbnailLoadFailure])
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -194,10 +205,12 @@ function ImageThumbnail({
                 return
               }
               setError(true)
+              markThumbnailLoadFailure()
             })()
             return
           }
           setError(true)
+          markThumbnailLoadFailure()
         }}
       />
       
@@ -240,6 +253,7 @@ function ImagePreview({
   const [rotation, setRotation] = useState(0)
   const [showInfo, setShowInfo] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
   const [imageUrl, setImageUrl] = useState(() => currentImage?.path ? getDownloadUrl(currentImage.path) : '')
   const [hasRetried, setHasRetried] = useState(false)
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null)
@@ -425,17 +439,30 @@ function ImagePreview({
                     const refreshed = await refreshAuthSession()
                     if (refreshed) {
                       setHasRetried(true)
+                      setLoadError(false)
                       setLoading(true)
                       setImageUrl(withSessionRetryParam(getDownloadUrl(currentImage.path)))
                       return
                     }
+                    setLoadError(true)
                     setLoading(false)
                   })()
                   return
                 }
+                setLoadError(true)
                 setLoading(false)
               }}
             />
+
+            {loadError && !loading && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-2xl border border-danger/20 bg-danger/5 p-6 text-center text-white">
+                <AlertCircle size={40} className="text-danger-300" />
+                <div>
+                  <p className="font-medium">图片预览加载失败</p>
+                  <p className="text-sm text-white/70">可尝试下载原图，或稍后重试。</p>
+                </div>
+              </div>
+            )}
           </div>
           )}
           
@@ -535,6 +562,7 @@ function ImagePreview({
 
 export function AlbumPage() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
+  const [hasThumbnailLoadFailures, setHasThumbnailLoadFailures] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
   const user = useUser()
   const rootPath = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : '/'
@@ -563,6 +591,10 @@ export function AlbumPage() {
       abortControllerRef.current?.abort()
     }
   }, [])
+
+  useEffect(() => {
+    setHasThumbnailLoadFailures(false)
+  }, [rootPath, data?.images])
 
   const handleOpenPreview = useCallback((index: number) => {
     setPreviewIndex(index)
@@ -647,6 +679,16 @@ export function AlbumPage() {
           </div>
         )}
 
+        {hasThumbnailLoadFailures && (
+          <div className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-foreground">
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+            <div>
+              <p className="font-medium">部分缩略图加载失败</p>
+              <p className="text-default-600">部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。</p>
+            </div>
+          </div>
+        )}
+
         {images && images.length > 0 ? (
           <>
             {/* Masonry grid */}
@@ -657,6 +699,7 @@ export function AlbumPage() {
                   file={image}
                   index={index}
                   onClick={() => handleOpenPreview(index)}
+                  onThumbnailLoadFailure={() => setHasThumbnailLoadFailures(true)}
                 />
               ))}
             </div>

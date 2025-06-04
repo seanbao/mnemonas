@@ -663,6 +663,14 @@ func (s *Server) setupRoutes() {
 			r.Get("/{id}/download", s.handleDownloadShare)
 			r.Get("/{id}/download/*", s.handleDownloadShareFile)
 		})
+
+		s.router.Route("/api/v1/public/shares", func(r chi.Router) {
+			r.Get("/{id}", s.handleAccessShare)
+			r.Post("/{id}/access", s.handleAccessShareWithPassword)
+			r.Get("/{id}/items", s.handleListShareItems)
+			r.Get("/{id}/download", s.handleDownloadShare)
+			r.Get("/{id}/download/*", s.handleDownloadShareFile)
+		})
 	}
 
 	// API v1 - protected routes
@@ -3025,14 +3033,19 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 
 	// Get size parameter
 	sizeParam := r.URL.Query().Get("size")
-	var size thumbnail.Size
-	switch sizeParam {
-	case "small", "s":
-		size = thumbnail.SizeSmall
-	case "large", "l":
-		size = thumbnail.SizeLarge
-	default:
-		size = thumbnail.SizeMedium
+	size := thumbnail.SizeMedium
+	if sizeParam != "" {
+		switch sizeParam {
+		case "small", "s":
+			size = thumbnail.SizeSmall
+		case "medium", "m":
+			size = thumbnail.SizeMedium
+		case "large", "l":
+			size = thumbnail.SizeLarge
+		default:
+			BadRequest(w, "size parameter must be one of: small, medium, large")
+			return
+		}
 	}
 
 	// Open original file
