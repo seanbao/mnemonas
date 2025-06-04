@@ -144,8 +144,8 @@ describe('Users API', () => {
 
   it('maps wrapped success for delete, reset password, and toggle status', async () => {
     mockAuthFetch
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, message: 'user deleted successfully' }) })
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, message: 'password reset successfully' }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: null, message: 'user deleted successfully' }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: null, message: 'password reset successfully' }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: { disabled: true }, message: 'user status updated successfully' }) })
 
     await expect(deleteUser('u1')).resolves.toEqual({ success: true })
@@ -155,8 +155,8 @@ describe('Users API', () => {
 
   it('rejects malformed successful delete/reset/toggle responses instead of treating them as success', async () => {
     mockAuthFetch
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ message: 'user deleted successfully' }) })
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, message: 'user deleted successfully' }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, message: 'password reset successfully' }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: false, data: { disabled: true } }) })
 
     await expect(deleteUser('u1')).rejects.toThrow('Invalid delete user response')

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { accessShareWithPassword, copyShareUrl, createShare, downloadShare, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl, ShareError } from './share'
+import { accessShareWithPassword, copyShareUrl, createShare, deleteShare, downloadShare, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl, ShareError } from './share'
 
 const mockCopyTextToClipboard = vi.fn()
 
@@ -139,6 +139,19 @@ describe('Share API', () => {
         status: 200,
       })
     })
+
+    it('rejects malformed successful folder item entries', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ path: 'docs', items: [{ name: 'bad-entry' }] }),
+      })
+
+      await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
+        message: '分享文件夹响应无效',
+        status: 200,
+      })
+    })
   })
 
   describe('getPublicShare', () => {
@@ -187,6 +200,19 @@ describe('Share API', () => {
         ok: true,
         status: 200,
         json: () => Promise.resolve(null),
+      })
+
+      await expect(getPublicShare('share-1')).rejects.toMatchObject({
+        message: '分享信息无效',
+        status: 200,
+      })
+    })
+
+    it('rejects malformed successful public share payloads', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ id: 'share-1', type: 'file' }),
       })
 
       await expect(getPublicShare('share-1')).rejects.toMatchObject({
@@ -326,6 +352,32 @@ describe('Share API', () => {
       })
     })
 
+    it('rejects malformed successful delete share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true }),
+      })
+
+      await expect(deleteShare('share-1')).rejects.toMatchObject({
+        message: '删除分享响应无效',
+        status: 200,
+      })
+    })
+
+    it('rejects false-success delete share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: false, data: null }),
+      })
+
+      await expect(deleteShare('share-1')).rejects.toMatchObject({
+        message: '删除分享响应无效',
+        status: 200,
+      })
+    })
+
     it('copies relative share URLs as absolute URLs', async () => {
       vi.stubGlobal('location', { origin: 'https://nas.example.com' })
 
@@ -393,6 +445,19 @@ describe('Share API', () => {
         ok: true,
         status: 200,
         json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+      })
+
+      await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({
+        message: '分享信息无效',
+        status: 200,
+      })
+    })
+
+    it('rejects malformed successful password access payloads', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ id: 'share-1', type: 'file' }),
       })
 
       await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({

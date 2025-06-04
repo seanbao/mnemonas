@@ -180,6 +180,17 @@ async function handleWrappedResponse<T>(response: Response, errorPrefix: string)
   return body.data
 }
 
+async function expectWrappedActionResponse<T>(
+  response: Response,
+  errorPrefix: string,
+  isValid: (value: unknown) => value is T,
+): Promise<void> {
+  const data = await handleWrappedResponse<unknown>(response, errorPrefix)
+  if (!isValid(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+}
+
 async function throwApiErrorFromResponse(response: Response, fallback: string): Promise<never> {
   let message = fallback
   let code: string | undefined
@@ -264,6 +275,26 @@ function isDiagnosticsVersionShape(value: unknown): value is DiagnosticsInfo['ve
     && typeof value.name === 'string'
     && typeof value.version === 'string'
     && typeof value.go === 'string'
+}
+
+function isPathActionShape(value: unknown): value is { path: string } {
+  return isRecord(value) && typeof value.path === 'string'
+}
+
+function isMoveCopyActionShape(value: unknown): value is { from: string; to: string } {
+  return isRecord(value) && typeof value.from === 'string' && typeof value.to === 'string'
+}
+
+function isRestoreVersionActionShape(value: unknown): value is { path: string; restored: string } {
+  return isRecord(value) && typeof value.path === 'string' && typeof value.restored === 'string'
+}
+
+function isRestoreTrashActionShape(value: unknown): value is { id: string; restored: boolean } {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.restored === 'boolean'
+}
+
+function isDeleteTrashActionShape(value: unknown): value is { id: string; deleted: boolean } {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.deleted === 'boolean'
 }
 
 function isHealthShape(value: unknown): value is HealthStatus {
@@ -491,9 +522,7 @@ export async function deleteFile(path: string): Promise<void> {
   const response = await authFetch(`${API_BASE}/files${encodedPath}`, {
     method: 'DELETE',
   })
-  if (!response.ok) {
-    await throwApiErrorFromResponse(response, '删除文件失败')
-  }
+  await expectWrappedActionResponse(response, '删除文件失败', isPathActionShape)
 }
 
 // Get storage stats (direct response, not wrapped)
@@ -595,9 +624,7 @@ export async function createDirectory(path: string): Promise<void> {
   const response = await authFetch(`${API_BASE}/directories${encodedPath}`, {
     method: 'POST',
   })
-  if (!response.ok) {
-    await throwApiErrorFromResponse(response, '创建文件夹失败')
-  }
+  await expectWrappedActionResponse(response, '创建文件夹失败', isPathActionShape)
 }
 
 // Upload file
@@ -775,9 +802,7 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
       to: normalizedTo,
     }),
   })
-  if (!response.ok) {
-    await throwApiErrorFromResponse(response, '移动文件失败')
-  }
+  await expectWrappedActionResponse(response, '移动文件失败', isMoveCopyActionShape)
 }
 
 // Copy file
@@ -795,9 +820,7 @@ export async function copyFile(fromPath: string, toPath: string): Promise<void> 
       to: normalizedTo,
     }),
   })
-  if (!response.ok) {
-    await throwApiErrorFromResponse(response, '复制文件失败')
-  }
+  await expectWrappedActionResponse(response, '复制文件失败', isMoveCopyActionShape)
 }
 
 // Restore file to a specific version
@@ -807,9 +830,7 @@ export async function restoreVersion(path: string, hash: string): Promise<void> 
   const response = await authFetch(`${API_BASE}/versions/${hash}/restore?path=${encodedPath}`, {
     method: 'POST',
   })
-  if (!response.ok) {
-    await throwApiErrorFromResponse(response, '恢复版本失败')
-  }
+  await expectWrappedActionResponse(response, '恢复版本失败', isRestoreVersionActionShape)
 }
 
 // === Trash/Recycle Bin API ===
@@ -892,9 +913,7 @@ export async function restoreFromTrash(id: string, newPath?: string): Promise<vo
   const response = await authFetch(url, {
     method: 'POST',
   })
-  if (!response.ok) {
-    await throwApiErrorFromResponse(response, '恢复文件失败')
-  }
+  await expectWrappedActionResponse(response, '恢复文件失败', isRestoreTrashActionShape)
 }
 
 // Permanently delete item from trash
@@ -902,9 +921,7 @@ export async function deleteFromTrash(id: string): Promise<void> {
   const response = await authFetch(`${API_BASE}/trash/${id}`, {
     method: 'DELETE',
   })
-  if (!response.ok) {
-    await throwApiErrorFromResponse(response, '永久删除失败')
-  }
+  await expectWrappedActionResponse(response, '永久删除失败', isDeleteTrashActionShape)
 }
 
 // Empty trash (delete all items permanently)

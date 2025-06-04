@@ -89,6 +89,19 @@ describe('Favorites API', () => {
       })
     })
 
+    it('rejects malformed successful favorite list responses', async () => {
+	  mockAuthFetch.mockResolvedValueOnce({
+	    ok: true,
+	    status: 200,
+	    json: () => Promise.resolve({ success: true, data: { favorites: [{ path: '/file1.txt' }], count: 1 } }),
+	  })
+
+	  await expect(listFavorites()).rejects.toMatchObject({
+	    message: '获取收藏列表响应无效',
+	    status: 200,
+	  })
+	})
+
     it('uses default message when error parsing fails', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -139,12 +152,19 @@ describe('Favorites API', () => {
     })
 
     it('adds favorite with note', async () => {
+      const mockFavorite = {
+        path: '/file.txt',
+        user_id: 'user1',
+        created_at: '2024-01-01',
+        note: '重要文件',
+      }
+
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ success: true, data: {} }),
+        json: () => Promise.resolve({ success: true, data: mockFavorite }),
       })
 
-      await addFavorite('/file.txt', '重要文件')
+      await expect(addFavorite('/file.txt', '重要文件')).resolves.toEqual(mockFavorite)
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         method: 'POST',
@@ -154,12 +174,18 @@ describe('Favorites API', () => {
     })
 
     it('normalizes path before adding', async () => {
+      const mockFavorite = {
+        path: '/file.txt',
+        user_id: 'user1',
+        created_at: '2024-01-01',
+      }
+
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ success: true, data: {} }),
+        json: () => Promise.resolve({ success: true, data: mockFavorite }),
       })
 
-      await addFavorite('file.txt') // Without leading slash
+      await expect(addFavorite('file.txt')).resolves.toEqual(mockFavorite)
 
       expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/favorites', {
         method: 'POST',
@@ -189,6 +215,19 @@ describe('Favorites API', () => {
       })
 
       await expect(addFavorite('/file.txt')).rejects.toThrow(FavoritesError)
+    })
+
+    it('rejects malformed successful add favorite responses', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: { path: '/file.txt' } }),
+      })
+
+      await expect(addFavorite('/file.txt')).rejects.toMatchObject({
+        message: '添加收藏响应无效',
+        status: 200,
+      })
     })
   })
 
@@ -392,6 +431,19 @@ describe('Favorites API', () => {
       })
     })
 
+    it('rejects successful batch favorite responses with non-boolean values', async () => {
+      mockAuthFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: { favorites: { '/file1.txt': 'yes' } } }),
+      })
+
+      await expect(checkFavorites(['/file1.txt'])).rejects.toMatchObject({
+        message: '获取收藏状态响应无效',
+        status: 200,
+      })
+    })
+
     it('falls back to all false when batch check is unsupported', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: false,
@@ -483,7 +535,10 @@ describe('Favorites API', () => {
     it('adds favorite when not currently favorited', async () => {
       mockAuthFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ success: true, data: {} }),
+        json: () => Promise.resolve({
+          success: true,
+          data: { path: '/file.txt', user_id: 'user1', created_at: '2024-01-01' },
+        }),
       })
 
       const result = await toggleFavorite('/file.txt', false)

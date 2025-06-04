@@ -20,10 +20,11 @@ describe('Settings API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          server: { host: '0.0.0.0', port: 8080 },
+          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s' },
           storage: { root: '/root/.mnemonas' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+          share: { enabled: true, base_url: 'http://localhost:8080' },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
         },
@@ -39,6 +40,25 @@ describe('Settings API', () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ success: true }),
+    })
+
+    await expect(getSettings()).rejects.toThrow('Invalid settings response')
+  })
+
+  it('rejects successful settings responses with malformed data shape', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s' },
+          storage: { root: '/root/.mnemonas' },
+          retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
+          webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
+          dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
+          cdc: { min_chunk_size: 1, avg_chunk_size: 2, max_chunk_size: 3 },
+        },
+      }),
     })
 
     await expect(getSettings()).rejects.toThrow('Invalid settings response')
@@ -72,12 +92,21 @@ describe('Settings API', () => {
   it('returns update success message', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ success: true, message: 'settings updated, some changes may require restart' }),
+      json: () => Promise.resolve({ success: true, data: null, message: 'settings updated, some changes may require restart' }),
     })
 
     const result = await updateSettings({ server: { port: 8081 } })
 
     expect(result.message).toContain('require restart')
+  })
+
+  it('rejects successful update responses missing wrapped data', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, message: 'settings updated, some changes may require restart' }),
+    })
+
+    await expect(updateSettings({ server: { port: 8081 } })).rejects.toThrow('Invalid update settings response')
   })
 
   it('rejects malformed successful update responses', async () => {
@@ -113,6 +142,22 @@ describe('Settings API', () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ success: true }),
+    })
+
+    await expect(getWebDAVCredentials()).rejects.toThrow('Invalid WebDAV credentials response')
+  })
+
+  it('rejects webdav credentials responses with malformed data shape', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          enabled: 'yes',
+          url: '/dav/',
+          auth_type: 'basic',
+        },
+      }),
     })
 
     await expect(getWebDAVCredentials()).rejects.toThrow('Invalid WebDAV credentials response')

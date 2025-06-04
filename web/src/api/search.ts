@@ -61,12 +61,24 @@ interface SearchResultWire {
   hash?: string
 }
 
+function isSearchResultWire(value: unknown): value is SearchResultWire {
+  return !!value
+    && typeof value === 'object'
+    && typeof (value as SearchResultWire).name === 'string'
+    && typeof (value as SearchResultWire).path === 'string'
+    && typeof (value as SearchResultWire).size === 'number'
+    && (typeof (value as SearchResultWire).isDir === 'boolean' || typeof (value as SearchResultWire).is_dir === 'boolean')
+    && (typeof (value as SearchResultWire).modTime === 'string' || typeof (value as SearchResultWire).mod_time === 'string')
+    && ((value as SearchResultWire).hash === undefined || typeof (value as SearchResultWire).hash === 'string')
+}
+
 function isSearchResponse(value: unknown): value is SearchResponse & { results: SearchResultWire[] } {
   return !!value &&
     typeof value === 'object' &&
     typeof (value as SearchResponse).query === 'string' &&
     typeof (value as SearchResponse).count === 'number' &&
-    Array.isArray((value as SearchResponse).results)
+    Array.isArray((value as SearchResponse).results) &&
+    (value as SearchResponse & { results: unknown[] }).results.every((item) => isSearchResultWire(item))
 }
 
 /**
