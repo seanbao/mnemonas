@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -648,6 +649,130 @@ func TestSendWebhook_GETEncodesPayloadInQueryWithoutBody(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for GET webhook request")
+	}
+}
+
+func TestSendEvent_PostsGenericWebhookPayload(t *testing.T) {
+	reqCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll(request body) error: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		reqCh <- string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:       true,
+		WebhookURL:    server.URL,
+		WebhookMethod: http.MethodPost,
+	}, t.TempDir(), zerolog.Nop())
+
+	err := monitor.SendEvent(context.Background(), EventPayload{
+		Type:      "backup_run",
+		Level:     AlertLevelCritical,
+		Message:   "backup failed",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+		Details: map[string]any{
+			"job_id": "external-disk",
+			"status": "failed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendEvent() error: %v", err)
+	}
+
+	select {
+	case body := <-reqCh:
+		var payload EventPayload
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatalf("decode event payload: %v; body=%s", err, body)
+		}
+		if payload.Type != "backup_run" || payload.Level != AlertLevelCritical || payload.Message != "backup failed" {
+			t.Fatalf("unexpected event payload: %+v", payload)
+		}
+		if payload.Details["job_id"] != "external-disk" {
+			t.Fatalf("job_id detail = %v, want external-disk", payload.Details["job_id"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event webhook request")
+	}
+}
+
+func TestSendEvent_GETEncodesDetailsInQuery(t *testing.T) {
+	reqCh := make(chan map[string]string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := make(map[string]string)
+		for key, values := range r.URL.Query() {
+			if len(values) > 0 {
+				query[key] = values[0]
+			}
+		}
+		reqCh <- query
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:       true,
+		WebhookURL:    server.URL,
+		WebhookMethod: http.MethodGet,
+	}, t.TempDir(), zerolog.Nop())
+
+	err := monitor.SendEvent(context.Background(), EventPayload{
+		Type:      "backup_restore_drill",
+		Level:     AlertLevelWarning,
+		Message:   "restore drill warning",
+		Timestamp: time.Unix(1710000000, 0).UTC(),
+		Hostname:  "mnemonas-host",
+		Details: map[string]any{
+			"job_id": "external-disk",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendEvent() error: %v", err)
+	}
+
+	select {
+	case query := <-reqCh:
+		if query["type"] != "backup_restore_drill" {
+			t.Fatalf("type query = %q, want backup_restore_drill", query["type"])
+		}
+		if query["level"] != string(AlertLevelWarning) {
+			t.Fatalf("level query = %q, want warning", query["level"])
+		}
+		if !strings.Contains(query["details"], "external-disk") {
+			t.Fatalf("details query = %q, want job id", query["details"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event webhook request")
+	}
+}
+
+func TestSendEventDisabledDoesNotSend(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	monitor := NewMonitor(Config{
+		Enabled:       false,
+		WebhookURL:    server.URL,
+		WebhookMethod: http.MethodPost,
+	}, t.TempDir(), zerolog.Nop())
+
+	if err := monitor.SendEvent(context.Background(), EventPayload{Type: "backup_run"}); err != nil {
+		t.Fatalf("SendEvent() error: %v", err)
+	}
+	if got := requestCount.Load(); got != 0 {
+		t.Fatalf("disabled SendEvent sent %d requests, want 0", got)
 	}
 }
 

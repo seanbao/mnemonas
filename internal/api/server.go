@@ -29,6 +29,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/activity"
 	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/backup"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/favorites"
@@ -98,9 +99,11 @@ type Server struct {
 	fs                    *storage.FileSystem
 	thumbnail             *thumbnail.Service
 	maintenance           *maintenance.HistoryStore
+	backupManager         *backup.Manager
 	activity              *activity.Store
 	thumbnailConfigured   bool
 	maintenanceConfigured bool
+	backupConfigured      bool
 	activityConfigured    bool
 	startTime             time.Time
 	appVersion            string
@@ -151,6 +154,10 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
 	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
 	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
+	cloned.Backup.Jobs = append([]config.BackupJobConfig(nil), cfg.Backup.Jobs...)
+	for i := range cloned.Backup.Jobs {
+		cloned.Backup.Jobs[i].Exclude = append([]string(nil), cfg.Backup.Jobs[i].Exclude...)
+	}
 	return &cloned
 }
 
@@ -563,12 +570,67 @@ type AlertMonitor interface {
 	UpdateConfig(cfg alerts.Config)
 }
 
+type AlertEventSender interface {
+	SendEvent(ctx context.Context, event alerts.EventPayload) error
+}
+
 type alertStatsProvider interface {
 	LastStats() *alerts.StorageStats
 }
 
 type RetentionMonitor interface {
 	UpdateConfig(cfg storage.RetentionMonitorConfig)
+}
+
+func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.Notifier {
+	sender, ok := monitor.(AlertEventSender)
+	if !ok || sender == nil {
+		return nil
+	}
+	return backup.NotifierFunc(func(ctx context.Context, event backup.NotificationEvent) error {
+		alertEvent := alerts.EventPayload{
+			Type:      event.Type,
+			Level:     backupNotificationLevel(event.Level),
+			Message:   event.Message,
+			Timestamp: event.Timestamp,
+			Details: map[string]any{
+				"job_id":           event.JobID,
+				"job_name":         event.JobName,
+				"job_type":         event.JobType,
+				"run_id":           event.RunID,
+				"trigger":          event.Trigger,
+				"status":           event.Status,
+				"started_at":       event.StartedAt,
+				"finished_at":      event.FinishedAt,
+				"source":           event.Source,
+				"destination":      event.Destination,
+				"snapshot_path":    event.SnapshotPath,
+				"manifest_path":    event.ManifestPath,
+				"file_count":       event.FileCount,
+				"total_bytes":      event.TotalBytes,
+				"verified_bytes":   event.VerifiedBytes,
+				"pruned_snapshots": event.PrunedSnapshots,
+				"warnings":         event.Warnings,
+				"error_message":    event.ErrorMessage,
+			},
+		}
+		if err := sender.SendEvent(ctx, alertEvent); err != nil {
+			logger.Warn().
+				Err(err).
+				Str("backup_job", event.JobID).
+				Str("event_type", event.Type).
+				Msg("failed to send backup alert event")
+			return err
+		}
+		return nil
+	})
+}
+
+func backupNotificationLevel(level string) alerts.AlertLevel {
+	if level == backup.NotificationLevelCritical {
+		return alerts.AlertLevelCritical
+	}
+	return alerts.AlertLevelWarning
 }
 
 func formatSettingsDuration(d time.Duration) string {
@@ -789,7 +851,10 @@ type ServerConfig struct {
 	// Storage service roots
 	ThumbnailRoot   string
 	MaintenanceRoot string
+	BackupRoot      string
 	ActivityRoot    string
+	StorageRoot     string
+	BackupJobs      []config.BackupJobConfig
 	// Auth configuration
 	AuthEnabled    bool
 	AuthUsersFile  string
@@ -908,6 +973,31 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		} else {
 			s.maintenance = maint
 			logger.Info().Str("path", cfg.MaintenanceRoot).Msg("Maintenance history store initialized")
+		}
+	}
+
+	// Initialize backup manager
+	if cfg != nil && cfg.BackupRoot != "" {
+		s.backupConfigured = true
+		storageRoot := cfg.StorageRoot
+		if storageRoot == "" && cfg.Config != nil {
+			storageRoot = cfg.Config.Storage.Root
+		}
+		backupManager, err := backup.NewManager(backup.ManagerConfig{
+			Root:        cfg.BackupRoot,
+			StorageRoot: storageRoot,
+			ConfigPath:  cfg.ConfigPath,
+			Jobs:        cfg.BackupJobs,
+			Notifier:    newBackupAlertNotifier(cfg.AlertMonitor, logger),
+		})
+		if err != nil {
+			logger.Warn().Err(err).Msg("Failed to initialize backup manager")
+		} else {
+			s.backupManager = backupManager
+			logger.Info().Str("path", cfg.BackupRoot).Msg("Backup manager initialized")
+			if backupManager.StartScheduler(context.Background()) {
+				logger.Info().Msg("Backup scheduler started")
+			}
 		}
 	}
 
@@ -1356,6 +1446,11 @@ func (s *Server) setupRoutes() {
 			r.Post("/scrub", s.handleScrub)
 			r.Get("/objects", s.handleListObjects)
 			r.Post("/gc", s.handleGC)
+			r.Get("/backups", s.handleListBackups)
+			r.Get("/backups/{id}", s.handleGetBackup)
+			r.Post("/backups/{id}/run", s.handleRunBackup)
+			r.Post("/backups/{id}/restore", s.handleRunBackupRestore)
+			r.Post("/backups/{id}/restore-drill", s.handleRunBackupRestoreDrill)
 		})
 
 	})
@@ -2926,6 +3021,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"dataplane_connected":       dataplaneConnected,
 		"thumbnail_service_ready":   s.thumbnail != nil,
 		"maintenance_history_ready": s.maintenance != nil,
+		"backup_manager_ready":      s.backupManager != nil,
 		"activity_log_ready":        s.activity != nil,
 	}
 	if cfg != nil && cfg.WebDAV.Enabled {
@@ -5448,6 +5544,10 @@ func (s *Server) prepareDataplaneReplacement(ctx context.Context, req UpdateSett
 }
 
 func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client, preparedWebDAV *WebDAVRuntimeConfig) {
+	if req.Server != nil && req.Server.TrustedProxyHops != nil {
+		requestip.SetTrustedProxyHops(cfg.Server.TrustedProxyHops)
+	}
+
 	if req.DataPlane != nil && req.DataPlane.GRPCAddress != nil {
 		swapDataplane := s.dataplane == nil || s.dataplane.Addr() != cfg.DataPlane.GRPCAddress
 		if swapDataplane {

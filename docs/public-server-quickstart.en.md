@@ -77,6 +77,8 @@ For Nginx:
 sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
+For Traefik or Cloudflare Tunnel, start from `deploy/public-access/traefik/` or `deploy/public-access/cloudflare-tunnel/config.yml` and see [Reverse proxy setup](reverse-proxy-setup.en.md).
+
 If you are already logged into the Web UI, you can also open `System Settings -> General -> Public Access Wizard`:
 
 - enter the public domain;
@@ -86,7 +88,7 @@ If you are already logged into the Web UI, you can also open `System Settings ->
 
 The Web UI wizard adjusts the MnemoNAS form settings for a reverse-proxy deployment, but certificate issuance, firewall changes, and reverse-proxy installation still need to run on the server.
 
-The script cannot modify cloud-provider security groups. After running it, confirm in the cloud console:
+The script cannot modify cloud-provider security groups. After running it, use the [Public cloud firewall checklist](cloud-firewall-checklist.en.md) and confirm in the cloud console:
 
 | Port | Recommendation |
 | --- | --- |
@@ -120,6 +122,8 @@ sudo mnemonas-doctor
 sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
+
+The `--public-domain` check verifies public HTTPS health, HTTP-to-HTTPS redirect behavior, certificate hostname, remaining certificate validity, direct backend exposure, and dataplane port exposure, then prints the manual cloud-firewall review item. Certificate inspection requires `openssl` on the server.
 
 Expected state:
 

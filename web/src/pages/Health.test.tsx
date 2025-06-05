@@ -48,6 +48,7 @@ describe('HealthPage', () => {
       dataplaneConnected: true,
       thumbnailServiceReady: true,
       maintenanceHistoryReady: true,
+      backupManagerReady: true,
       activityLogReady: true,
       favoritesStoreReady: true,
     },
@@ -288,6 +289,14 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('维护历史')).toBeTruthy()
+      })
+    })
+
+    it('displays backup manager status when diagnostics provide it', async () => {
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('备份管理')).toBeTruthy()
       })
     })
 

@@ -20,6 +20,13 @@ sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 
 The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091`.
 
+For Traefik or Cloudflare Tunnel, start from the repository templates instead of assembling commands ad hoc:
+
+- `deploy/public-access/traefik/`: Traefik on a Linux host, while MnemoNAS still runs under systemd on `127.0.0.1:8080`.
+- `deploy/public-access/cloudflare-tunnel/config.yml`: Cloudflare Tunnel ingress for deployments without a directly reachable public IP.
+
+After copying a template, replace at least `nas.example.com`, the ACME email or tunnel ID, and run `sudo mnemonas-doctor --public-domain <domain>`.
+
 ## MnemoNAS Configuration
 
 MnemoNAS does not trust `X-Forwarded-*` headers by default. When it is behind trusted proxies, set the number of proxy hops:
@@ -155,7 +162,22 @@ sudo certbot renew --dry-run
 
 Set `trusted_proxy_hops = 1` in MnemoNAS for a single Nginx proxy.
 
-## Option 3: Docker Compose with Traefik
+## Option 3: Traefik Template
+
+The repository includes a Traefik file-provider template that fits a systemd MnemoNAS backend:
+
+```bash
+cp -r deploy/public-access/traefik ./mnemonas-traefik
+cd ./mnemonas-traefik
+
+# Edit the ACME email in traefik.yml.
+# Edit nas.example.com in dynamic/mnemonas.yml.
+docker compose up -d
+```
+
+The template uses `network_mode: host` so Traefik can reach the host's `127.0.0.1:8080` MnemoNAS listener. Expose only `80/443` publicly; do not add port mappings or security-group rules for `8080/9090/9091`.
+
+### Docker Compose All-in-One Example
 
 When MnemoNAS and the reverse proxy both run under Docker, the example defaults to the source-built `mnemonas:local` image. After public release images are available, set `MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>` in `.env`.
 
@@ -201,6 +223,18 @@ services:
 The example does not enable the insecure Traefik dashboard. If a dashboard is needed, protect it separately with authentication, HTTPS, and network restrictions.
 
 Mounting `/var/run/docker.sock` read-only still gives Traefik broad Docker API visibility. More hardened deployments can use a Docker socket proxy or a static Caddy/Nginx config.
+
+## Option 4: Cloudflare Tunnel Template
+
+Use Cloudflare Tunnel if the server has no public IP or you do not want to expose inbound `80/443` directly:
+
+```bash
+cp deploy/public-access/cloudflare-tunnel/config.yml ./cloudflared-config.yml
+# Replace tunnel, credentials-file, and nas.example.com.
+cloudflared tunnel run --config ./cloudflared-config.yml
+```
+
+The tunnel template forwards the public HTTPS hostname to local `http://127.0.0.1:8080` and ends with `http_status:404` for unmatched hosts. Even with a tunnel, keep dataplane `9090/9091` loopback-only or private-network-only.
 
 ## Hardening
 

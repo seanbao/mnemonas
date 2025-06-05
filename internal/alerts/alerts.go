@@ -91,6 +91,16 @@ type AlertPayload struct {
 	Hostname  string       `json:"hostname"`
 }
 
+// EventPayload is a generic webhook event payload for non-storage alerts.
+type EventPayload struct {
+	Type      string         `json:"type"`
+	Level     AlertLevel     `json:"level"`
+	Message   string         `json:"message"`
+	Details   map[string]any `json:"details,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
+	Hostname  string         `json:"hostname"`
+}
+
 // Monitor monitors storage space and sends alerts
 type Monitor struct {
 	cfg     Config
@@ -236,6 +246,37 @@ func (m *Monitor) LastStats() *StorageStats {
 	return cloneStorageStats(m.lastStats)
 }
 
+// SendEvent sends a generic alert event through the configured webhook.
+func (m *Monitor) SendEvent(ctx context.Context, event EventPayload) error {
+	cfg := m.currentConfig()
+	if !cfg.Enabled || strings.TrimSpace(cfg.WebhookURL) == "" {
+		return nil
+	}
+	if strings.TrimSpace(event.Type) == "" {
+		event.Type = "event"
+	}
+	if strings.TrimSpace(event.Message) == "" {
+		event.Message = event.Type
+	}
+	if event.Level == "" {
+		event.Level = AlertLevelWarning
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+	if strings.TrimSpace(event.Hostname) == "" {
+		hostname, _ := os.Hostname()
+		event.Hostname = hostname
+	}
+
+	m.logger.Warn().
+		Str("type", event.Type).
+		Str("level", string(event.Level)).
+		Msg("Alert event triggered")
+
+	return m.sendEventWebhook(ctx, event, cfg)
+}
+
 func (m *Monitor) currentConfig() Config {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -369,6 +410,33 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 }
 
 func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Config) error {
+	return m.sendWebhookRequest(ctx, payload, cfg, func(query url.Values) error {
+		setCommonWebhookQuery(query, payload.Type, payload.Level, payload.Message, payload.Hostname, payload.Timestamp)
+		query.Set("path", payload.Stats.Path)
+		query.Set("total_bytes", strconv.FormatUint(payload.Stats.TotalBytes, 10))
+		query.Set("free_bytes", strconv.FormatUint(payload.Stats.FreeBytes, 10))
+		query.Set("used_bytes", strconv.FormatUint(payload.Stats.UsedBytes, 10))
+		query.Set("used_pct", strconv.FormatFloat(payload.Stats.UsedPct, 'f', -1, 64))
+		query.Set("checked_at", payload.Stats.CheckedAt.UTC().Format(time.RFC3339Nano))
+		return nil
+	})
+}
+
+func (m *Monitor) sendEventWebhook(ctx context.Context, payload EventPayload, cfg Config) error {
+	return m.sendWebhookRequest(ctx, payload, cfg, func(query url.Values) error {
+		setCommonWebhookQuery(query, payload.Type, payload.Level, payload.Message, payload.Hostname, payload.Timestamp)
+		if len(payload.Details) > 0 {
+			details, err := json.Marshal(payload.Details)
+			if err != nil {
+				return fmt.Errorf("marshal event details: %w", err)
+			}
+			query.Set("details", string(details))
+		}
+		return nil
+	})
+}
+
+func (m *Monitor) sendWebhookRequest(ctx context.Context, payload any, cfg Config, encodeGET func(url.Values) error) error {
 	method := strings.ToUpper(strings.TrimSpace(cfg.WebhookMethod))
 	if method == "" {
 		method = http.MethodPost
@@ -382,17 +450,11 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Con
 			return sanitizedWebhookRequestError("parse URL", cfg.WebhookURL, err)
 		}
 		query := parsedURL.Query()
-		query.Set("type", payload.Type)
-		query.Set("level", string(payload.Level))
-		query.Set("message", payload.Message)
-		query.Set("hostname", payload.Hostname)
-		query.Set("timestamp", payload.Timestamp.UTC().Format(time.RFC3339Nano))
-		query.Set("path", payload.Stats.Path)
-		query.Set("total_bytes", strconv.FormatUint(payload.Stats.TotalBytes, 10))
-		query.Set("free_bytes", strconv.FormatUint(payload.Stats.FreeBytes, 10))
-		query.Set("used_bytes", strconv.FormatUint(payload.Stats.UsedBytes, 10))
-		query.Set("used_pct", strconv.FormatFloat(payload.Stats.UsedPct, 'f', -1, 64))
-		query.Set("checked_at", payload.Stats.CheckedAt.UTC().Format(time.RFC3339Nano))
+		if encodeGET != nil {
+			if err := encodeGET(query); err != nil {
+				return err
+			}
+		}
 		parsedURL.RawQuery = query.Encode()
 		requestURL = parsedURL.String()
 	} else {
@@ -439,6 +501,14 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Con
 		Msg("Webhook sent successfully")
 
 	return nil
+}
+
+func setCommonWebhookQuery(query url.Values, eventType string, level AlertLevel, message string, hostname string, timestamp time.Time) {
+	query.Set("type", eventType)
+	query.Set("level", string(level))
+	query.Set("message", message)
+	query.Set("hostname", hostname)
+	query.Set("timestamp", timestamp.UTC().Format(time.RFC3339Nano))
 }
 
 func sanitizedWebhookRequestError(action, rawURL string, err error) error {

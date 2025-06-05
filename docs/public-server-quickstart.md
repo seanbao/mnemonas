@@ -77,6 +77,8 @@ sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 ```
 
+如需 Traefik 或 Cloudflare Tunnel，请从 `deploy/public-access/traefik/` 或 `deploy/public-access/cloudflare-tunnel/config.yml` 模板开始，并参考 [反向代理配置](reverse-proxy-setup.md)。
+
 如果已经登录 Web UI，也可以打开 `系统设置 -> 常规 -> 公网访问向导`：
 
 - 填写公网域名；
@@ -86,7 +88,7 @@ sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 
 Web UI 向导会把 MnemoNAS 调整为适合反向代理的表单配置，但证书签发、防火墙和反向代理安装仍需要在服务器上执行脚本。
 
-脚本不能修改云厂商安全组。运行后仍需在云控制台确认只开放：
+脚本不能修改云厂商安全组。运行后仍需按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 在云控制台确认只开放：
 
 | 端口 | 建议 |
 | --- | --- |
@@ -120,6 +122,8 @@ sudo mnemonas-doctor
 sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
+
+带 `--public-domain` 的检查会验证公网 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书剩余有效期、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。
 
 期望状态：
 

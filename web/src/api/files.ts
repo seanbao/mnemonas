@@ -74,6 +74,7 @@ export interface DiagnosticsInfo {
     dataplaneConnected?: boolean
     thumbnailServiceReady?: boolean
     maintenanceHistoryReady?: boolean
+    backupManagerReady?: boolean
     activityLogReady?: boolean
     favoritesStoreReady?: boolean
   }
@@ -566,6 +567,7 @@ function isDiagnosticsShape(value: unknown): value is {
     dataplane_connected?: boolean
     thumbnail_service_ready?: boolean
     maintenance_history_ready?: boolean
+    backup_manager_ready?: boolean
     activity_log_ready?: boolean
     favorites_store_ready?: boolean
   }
@@ -629,6 +631,7 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isBooleanOrUndefined(value.system.dataplane_connected)
       || !isBooleanOrUndefined(value.system.thumbnail_service_ready)
       || !isBooleanOrUndefined(value.system.maintenance_history_ready)
+      || !isBooleanOrUndefined(value.system.backup_manager_ready)
       || !isBooleanOrUndefined(value.system.activity_log_ready)
       || !isBooleanOrUndefined(value.system.favorites_store_ready)) {
       return false
@@ -766,6 +769,181 @@ function isRunScrubResponseShape(value: unknown): value is Omit<ScrubResult, 'ha
   return isScrubResultShape(candidate)
 }
 
+export type BackupTaskStatus = 'running' | 'completed' | 'failed'
+
+export interface BackupRunResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  source: string
+  destination: string
+  snapshot_path?: string
+  manifest_path?: string
+  file_count: number
+  total_bytes: number
+  config_included: boolean
+  trigger?: string
+  warning?: boolean
+  warnings?: string[]
+  pruned_snapshots?: number
+  error_message?: string
+}
+
+export interface BackupRestoreDrillResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  snapshot_path?: string
+  manifest_path?: string
+  restored_path?: string
+  artifact_kept: boolean
+  file_count: number
+  verified_bytes: number
+  error_message?: string
+}
+
+export interface BackupRestoreResult {
+  id: string
+  job_id: string
+  status: BackupTaskStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  snapshot_path?: string
+  manifest_path?: string
+  target_path: string
+  config_restored: boolean
+  config_path?: string
+  file_count: number
+  verified_bytes: number
+  error_message?: string
+}
+
+export interface BackupJob {
+  id: string
+  name: string
+  type: string
+  source: string
+  destination: string
+  repository?: string
+  remote?: string
+  command?: string
+  disabled: boolean
+  schedule_interval?: string
+  schedule_window_start?: string
+  schedule_window_end?: string
+  next_run_at?: string
+  stale_after?: string
+  max_snapshots?: number
+  max_age?: string
+  health_status: string
+  health_message?: string
+  include_config: boolean
+  verify_after_backup: boolean
+  exclude: string[]
+  running: boolean
+  last_run?: BackupRunResult
+  last_successful_run?: BackupRunResult
+  last_restore_drill?: BackupRestoreDrillResult
+}
+
+function isBackupStatus(value: unknown): value is BackupTaskStatus {
+  return value === 'running' || value === 'completed' || value === 'failed'
+}
+
+function isBackupRunResultShape(value: unknown): value is BackupRunResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && typeof value.source === 'string'
+    && typeof value.destination === 'string'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
+    && typeof value.file_count === 'number'
+    && typeof value.total_bytes === 'number'
+    && typeof value.config_included === 'boolean'
+    && isStringOrUndefined(value.trigger)
+    && isBooleanOrUndefined(value.warning)
+    && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
+    && isNumberOrUndefined(value.pruned_snapshots)
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestoreDrillResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
+    && isStringOrUndefined(value.restored_path)
+    && typeof value.artifact_kept === 'boolean'
+    && typeof value.file_count === 'number'
+    && typeof value.verified_bytes === 'number'
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResult {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.job_id === 'string'
+    && isBackupStatus(value.status)
+    && typeof value.started_at === 'string'
+    && isStringOrUndefined(value.finished_at)
+    && typeof value.duration_ms === 'number'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
+    && typeof value.target_path === 'string'
+    && typeof value.config_restored === 'boolean'
+    && isStringOrUndefined(value.config_path)
+    && typeof value.file_count === 'number'
+    && typeof value.verified_bytes === 'number'
+    && isStringOrUndefined(value.error_message)
+}
+
+function isBackupJobShape(value: unknown): value is BackupJob {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.type === 'string'
+    && typeof value.source === 'string'
+    && typeof value.destination === 'string'
+    && isStringOrUndefined(value.repository)
+    && isStringOrUndefined(value.remote)
+    && isStringOrUndefined(value.command)
+    && typeof value.disabled === 'boolean'
+    && isStringOrUndefined(value.schedule_interval)
+    && isStringOrUndefined(value.schedule_window_start)
+    && isStringOrUndefined(value.schedule_window_end)
+    && isStringOrUndefined(value.next_run_at)
+    && isStringOrUndefined(value.stale_after)
+    && isNumberOrUndefined(value.max_snapshots)
+    && isStringOrUndefined(value.max_age)
+    && typeof value.health_status === 'string'
+    && isStringOrUndefined(value.health_message)
+    && typeof value.include_config === 'boolean'
+    && typeof value.verify_after_backup === 'boolean'
+    && Array.isArray(value.exclude)
+    && value.exclude.every((entry) => typeof entry === 'string')
+    && typeof value.running === 'boolean'
+    && (value.last_run === undefined || isBackupRunResultShape(value.last_run))
+    && (value.last_successful_run === undefined || isBackupRunResultShape(value.last_successful_run))
+    && (value.last_restore_drill === undefined || isBackupRestoreDrillResultShape(value.last_restore_drill))
+}
+
 // List files in a directory
 export async function listFiles(path: string): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
@@ -885,6 +1063,7 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
       dataplaneConnected: data.system.dataplane_connected,
       thumbnailServiceReady: data.system.thumbnail_service_ready,
       maintenanceHistoryReady: data.system.maintenance_history_ready,
+      backupManagerReady: data.system.backup_manager_ready,
       activityLogReady: data.system.activity_log_ready,
       favoritesStoreReady: data.system.favorites_store_ready,
     } : undefined,
@@ -1311,6 +1490,58 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     result.status = 'completed'
   }
   return result
+}
+
+// List configured backup jobs
+export async function listBackupJobs(): Promise<BackupJob[]> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups`)
+  const data = await handleWrappedResponse<unknown>(response, '获取备份任务失败')
+  if (!Array.isArray(data) || !data.every(isBackupJobShape)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Run a backup job immediately
+export async function runBackupJob(id: string): Promise<BackupRunResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  const data = await handleWrappedResponse<unknown>(response, '执行备份任务失败')
+  if (!isBackupRunResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Run a restore drill against the latest completed backup snapshot
+export async function runBackupRestoreDrill(id: string, keepArtifact = false): Promise<BackupRestoreDrillResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore-drill`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep_artifact: keepArtifact }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '执行恢复演练失败')
+  if (!isBackupRestoreDrillResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
+}
+
+// Restore a supported backup job to a safe target directory
+export async function restoreBackupJob(id: string, targetPath: string, includeConfig = false): Promise<BackupRestoreResult> {
+  const response = await authFetch(`${API_BASE}/maintenance/backups/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_path: targetPath, include_config: includeConfig }),
+  })
+  const data = await handleWrappedResponse<unknown>(response, '恢复备份失败')
+  if (!isBackupRestoreResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
 }
 
 // Download diagnostics export

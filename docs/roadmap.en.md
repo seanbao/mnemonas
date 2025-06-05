@@ -6,9 +6,9 @@ This document tracks the product path from a self-hosted file cloud toward a pra
 
 ## Current Assessment
 
-As of 2026-05-08, MnemoNAS already includes Web file management, WebDAV, version history, trash, multi-user auth, sharing, activity logs, health checks, Scrub, GC, diagnostics export, Docker deployment, and systemd deployment. It is usable as a local private file cloud for personal or small-team evaluation, especially when the data is not the only copy.
+As of 2026-05-09, MnemoNAS already includes Web file management, WebDAV, version history, trash, multi-user auth, sharing, activity logs, health checks, Scrub, GC, diagnostics export, Docker deployment, and systemd deployment. It is usable as a local private file cloud for personal or small-team evaluation, especially when the data is not the only copy.
 
-It is not yet a complete NAS appliance. The main missing areas are a public-exposure security wizard, SMB, built-in backup jobs, disk health alerts, quotas, folder-level permissions, notification workflows, and fuller storage-pool visibility. Until external backups and a public-access security baseline are in place, MnemoNAS should not be treated as the only long-term copy of important data or exposed directly to the public internet.
+The public-access track now has a first baseline: reverse-proxy scripts, `mnemonas-public-setup`, `mnemonas-doctor --public-domain`, the Web public-access wizard, the security self-check API, the Web settings flow, and E2E regression coverage. The backup track now has local jobs, command-backed restic/rclone remote targets, restore drills or remote checks, lightweight scheduling, automatic backup windows, retention, safe-directory local and rclone restores, Web maintenance status, and webhook failure notifications. It is not yet a complete NAS appliance. The main missing areas are SMB, full one-click restore workflows, disk health alerts, quotas, folder-level permissions, multi-channel notifications, and fuller storage-pool visibility. Until external backups and the public-access security loop are mature, MnemoNAS should not be treated as the only long-term copy of important data or exposed directly without an HTTPS reverse proxy.
 
 ## Product Positioning
 
@@ -31,7 +31,7 @@ Priorities:
 | L2 | Home NAS baseline | Long-running LAN deployment | SMB, backup jobs, SMART/disk alerts, notifications, quotas, restore drills |
 | L3 | Small-team NAS | Collaboration and auditability | Folder permissions, groups, share governance, audit reports, disaster recovery flow |
 
-The project is currently close to L1. The next stage is to complete the L1+ public-access security entry point before continuing the data-protection and LAN-compatibility work needed for L2.
+The project is currently close to L1 and has the first baseline for the L1+ public-access entry point. The next stage is to harden that public-access security loop before continuing the data-protection and LAN-compatibility work needed for L2.
 
 ## Priority Roadmap
 
@@ -41,9 +41,9 @@ Goal: make MnemoNAS safe enough for cautious real-world personal use, assuming t
 
 | Capability | Current state | Next step | Acceptance criteria |
 | --- | --- | --- | --- |
-| Backup and restore | Backup guide exists; no built-in jobs | Add backup job model and restore-drill entry point | Local directory, external drive, or rclone targets can be configured; each job shows latest backup and restore verification |
+| Backup and restore | Backup guide, local backup/restore-drill API, safe-directory local snapshot restore, safe-directory rclone restore, command-backed restic/rclone remote targets, Web maintenance view, lightweight scheduling, automatic backup windows, local snapshot retention, and webhook failure notifications exist; restic one-click restore orchestration is still missing | Add remote-retention guidance and restic restore workflows | Local directory, external drive, or rclone/restic targets can be configured; each job shows latest backup, restore verification, and alert state |
 | Deployment reliability | Docker and systemd paths exist | Formalize upgrade, rollback, and config migration | Release install, upgrade, uninstall, and data retention are covered by automated tests |
-| HTTPS and security wizard | Reverse proxy and security docs exist; productized preflight is missing | Add a public-access wizard, Caddy/Nginx/Traefik templates, certificate status checks, exposed-port checks, and a security self-check page | Public domain, LAN self-signed, reverse-proxy headers, Secure/SameSite cookies, CSRF, download sessions, and internal dataplane ports are covered by automated tests and docs |
+| HTTPS and security wizard | Reverse-proxy scripts, Traefik/Cloudflare Tunnel templates, Web wizard, security self-check API, public/certificate/HTTP-redirect doctor checks, cloud-firewall checklist, and desktop/mobile E2E regression coverage exist | Add renewal guidance and stronger failure guidance | Public domain, LAN self-signed, reverse-proxy headers, Secure/SameSite cookies, CSRF, download sessions, and internal dataplane ports are covered by automated tests and docs |
 | Data integrity | Scrub, GC, diagnostics exist | Add schedules and failure notifications | Scrub failures are visible in UI, activity logs, and notifications |
 | Secure defaults | Web session uses HttpOnly cookies | Add login rate limiting, session revocation, admin security reminders, and dangerous-configuration warnings | Weak passwords, default passwords, cross-site requests, suspicious logins, and public-share misconfiguration are blocked or warned clearly |
 | WebDAV compatibility | Basic matrix exists | Expand Windows, macOS, and rclone regression coverage | Critical clients cover read, write, rename, delete, and recovery behavior |
@@ -56,7 +56,7 @@ Goal: cover the basic expectations for a LAN home NAS.
 | --- | --- | --- | --- |
 | SMB/Samba | Current access is mainly Web and WebDAV | Provide an official Samba integration path, starting with generated systemd/Docker configuration | Windows and macOS can mount it directly; permission and path mapping do not bypass security boundaries |
 | Disk health | Storage stats exist; SMART is missing | Add SMART collection, temperature, bad disk, missing disk, and lifetime status | UI shows disk health; anomalies are recorded in activity logs and notifications |
-| Notifications | Alert direction exists; workflow is incomplete | Support email, webhook, Telegram, and WeCom-style channels | Disk-full, backup-failed, Scrub-failed, and suspicious-login events can notify users |
+| Notifications | Webhook covers disk-space and backup-failure/warning events; channel coverage is still limited | Support email, Telegram, WeCom-style channels, and more event sources | Disk-full, backup-failed, Scrub-failed, and suspicious-login events can notify users |
 | User quotas | User isolation does not enforce capacity | Add user and directory quota models | Upload, WebDAV write, copy, and restore all honor quotas |
 
 ### P2: Small-Team Collaboration
@@ -84,7 +84,7 @@ Goal: improve long-term usability after the L2/L3 baseline is stable.
 
 ## Recommended Implementation Order
 
-1. **HTTPS and security guidance**: if public access is planned, reduce certificate, reverse-proxy, cookie, CSRF, exposed-port, and default-account misconfiguration first.
+1. **Improve HTTPS and security guidance**: if public access is planned, continue reducing certificate, reverse-proxy, cookie, CSRF, exposed-port, cloud-firewall, and default-account misconfiguration.
 2. **Backup jobs and restore drills**: verify recoverability before expanding real-world usage.
 3. **Disk health and notifications**: surface failures before data loss.
 4. **SMB/Samba integration**: cover the most common LAN file-sharing workflow.
@@ -110,7 +110,7 @@ The near-term roadmap does not prioritize:
 - Replacing full NAS distributions for disk-array management.
 - Implementing a custom SMB or NFS protocol stack.
 - Claiming long-term single-copy data safety without external backups.
-- Recommending direct public-internet deployment before the security preflight exists.
+- Recommending direct public-internet deployment that bypasses the security preflight, doctor checks, and HTTPS reverse proxy.
 - Weakening default security boundaries for public anonymous sharing.
 
 ## Maintenance Rules
