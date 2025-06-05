@@ -411,6 +411,12 @@ export function HealthPage() {
               status={diagnostics?.system?.maintenanceHistoryReady ?? 'unknown'} 
               label="维护历史" 
             />
+            {diagnostics?.system?.backupManagerReady !== undefined && (
+              <StatusIndicator
+                status={diagnostics.system.backupManagerReady}
+                label="备份管理"
+              />
+            )}
             <StatusIndicator 
               status={diagnostics?.system?.activityLogReady ?? 'unknown'} 
               label="活动日志" 

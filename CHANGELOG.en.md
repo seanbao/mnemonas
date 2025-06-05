@@ -21,20 +21,25 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - User management with create/edit/delete, password reset, and enable/disable flows.
 - Share management with link creation, password protection, expiration, access statistics, and public share access.
 - Settings for server, storage, retention, WebDAV, CDC parameters, and data-plane connection status.
-- Health and maintenance views for uptime, storage health, scrub, GC, object browsing, and diagnostic bundle export.
+- Public access wizard and security self-check entry point for HTTPS reverse proxy, trusted proxy hops, and share-domain configuration.
+- Desktop and mobile E2E coverage for the public access wizard.
+- Health and maintenance views for uptime, storage health, scrub, GC, object browsing, backup job health/schedules/retention/restore drills, and diagnostic bundle export.
 
 #### Backend API
 - Authentication APIs for JWT login, logout, refresh, password changes, and current-user lookup.
 - User management APIs.
 - Share-link APIs including public access and password checks.
 - Activity log APIs.
-- Runtime settings APIs.
+- Runtime settings APIs, including public-access security self-check.
+- Configured local backup jobs and command-backed restic/rclone remote targets with run-now execution, lightweight scheduling, automatic backup windows, local snapshot retention, job health status, manifest-based local restore drills, safe-directory local snapshot restore, safe-directory rclone restore, remote consistency checks, and webhook events for backup failures/warnings.
 
 #### Project Tooling
 - GitHub Actions CI/CD for Go, Rust, frontend checks, Docker builds, and release packaging.
 - Release workflow for multi-platform binaries and container images.
 - Linux/systemd install and uninstall scripts.
-- `mnemonas-doctor` deployment diagnostics.
+- `mnemonas-doctor` deployment diagnostics, including public HTTPS certificate checks, HTTP-to-HTTPS redirect checks, and manual cloud-firewall review guidance.
+- `mnemonas-public-setup` public HTTPS reverse-proxy setup helper.
+- Traefik and Cloudflare Tunnel public-access templates with script checks that prevent backend and dataplane port exposure.
 - Docker Compose preflight checks for Compose v2, Buildx, ports, permissions, disk space, and existing config.
 - Container healthcheck binary so runtime images do not depend on `curl`.
 - `tools/proto-gen` Rust protobuf generator so normal dataplane and Docker builds do not require system `protoc`.
@@ -45,7 +50,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 #### Documentation
 - Linux/systemd deployment guide.
 - Docker deployment guide covering Compose v2, non-root UID/GID, configurable HTTP port, weak-network build strategies, and dataplane port boundaries.
-- Backup guide, API reference, storage internals, WebDAV compatibility, mounting guide, reverse proxy setup, security guide, and FAQ.
+- Backup guide, including built-in local backup jobs and restore drills, API reference, storage internals, WebDAV compatibility, mounting guide, reverse proxy setup, security guide, and FAQ.
 - Bilingual README, documentation index, main topic docs, support policy, and security policy.
 
 ### Changed
@@ -60,9 +65,11 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - CI and release workflows use narrower permissions, concurrency controls, and job timeouts.
 - Security docs distinguish the Web UI initial admin password from generated WebDAV Basic Auth credentials.
 - Security docs and doctor checks warn that dataplane ports `9090/9091` should not be exposed to untrusted networks.
+- Added a public cloud firewall checklist covering common cloud security groups, VPC firewalls, IPv6, and port-forwarding mistakes.
 - Backup docs describe consistency windows and snapshot recommendations for live data.
 
 ### Fixed
+- Fixed `server.trusted_proxy_hops` updates through the settings API not immediately updating runtime client-IP and HTTPS forwarded-header interpretation.
 - Prevented systemd installation and static-file discovery from treating Vite source directories as built Web UI output.
 - Fixed broad `.gitignore` / `.dockerignore` rules for `nasd`.
 - Removed runtime `apt-get` dependency from Docker health checks.

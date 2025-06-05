@@ -517,7 +517,10 @@ func main() {
 		AfterPathDeleted: runtimeWebDAV.OnPathDeleted,
 		ThumbnailRoot:    filepath.Join(cfg.InternalDir(), "thumbnails"),
 		MaintenanceRoot:  filepath.Join(cfg.InternalDir(), "maintenance"),
+		BackupRoot:       filepath.Join(cfg.InternalDir(), "backup"),
 		ActivityRoot:     filepath.Join(cfg.InternalDir(), "activity"),
+		StorageRoot:      cfg.Storage.Root,
+		BackupJobs:       cfg.Backup.Jobs,
 		// Auth configuration
 		AuthEnabled:    cfg.Auth.Enabled,
 		AuthUsersFile:  cfg.Auth.UsersFile,

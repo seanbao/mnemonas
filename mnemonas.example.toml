@@ -69,6 +69,58 @@ encryption_required = false
 # allowed_roles = ["admin", "user"]
 # allowed_users = []
 
+[backup]
+# 默认不启用内置备份任务。source 留空表示备份 storage.root；生产环境更建议填快照挂载目录。
+# type 支持 local、restic、rclone。local 的 destination 不能位于 storage.root 内。
+# [[backup.jobs]]
+# id = "external-disk"
+# name = "外置硬盘备份"
+# type = "local"
+# source = ""                 # 留空表示备份 storage.root；也可以填写 ZFS/Btrfs/LVM 快照挂载目录
+# destination = "/mnt/backup-drive/mnemonas"
+# disabled = false            # 临时停用该任务
+# schedule_interval = "24h"    # 大于 0 时服务启动后自动按间隔执行
+# schedule_window_start = "02:00" # 可选；自动任务只在服务器本地时间窗口内启动
+# schedule_window_end = "05:00"   # 支持跨午夜，例如 22:00 到 06:00
+# stale_after = "72h"          # 超过该时间没有成功备份时，健康状态显示为过期
+# max_snapshots = 7            # 最多保留的本地快照数；0 表示不按数量清理
+# max_age = "720h"             # 快照最长保留时间；0 表示不按时间清理
+# include_config = true       # 同时复制当前 config.toml
+# verify_after_backup = true  # 备份完成后校验快照文件哈希
+# exclude = [".mnemonas/thumbnails"]
+#
+# [[backup.jobs]]
+# id = "restic-remote"
+# name = "Restic 加密备份"
+# type = "restic"
+# source = "/mnt/snapshots/mnemonas-latest"
+# repository = "rest:http://backup.example:8000/mnemonas"
+# command = "restic"                       # 也可写绝对路径，如 /usr/bin/restic
+# password_file = "/etc/mnemonas/restic.pass" # 必须是 storage.root/source 之外的普通文件
+# schedule_interval = "24h"
+# schedule_window_start = "02:00"
+# schedule_window_end = "05:00"
+# stale_after = "72h"
+# verify_after_backup = true               # 执行 restic check
+# exclude = [".mnemonas/thumbnails"]
+# extra_args = ["--compression", "max"]
+#
+# [[backup.jobs]]
+# id = "rclone-cloud"
+# name = "Rclone 云端同步"
+# type = "rclone"
+# source = "/mnt/snapshots/mnemonas-latest"
+# remote = "cloud:mnemonas/current"
+# command = "rclone"                       # 也可写绝对路径，如 /usr/bin/rclone
+# config_file = "/etc/mnemonas/rclone.conf" # 可选；必须是 storage.root/source 之外的普通文件
+# schedule_interval = "24h"
+# schedule_window_start = "02:00"
+# schedule_window_end = "05:00"
+# stale_after = "72h"
+# verify_after_backup = true               # 执行 rclone check --one-way
+# exclude = [".mnemonas/thumbnails"]
+# extra_args = ["--fast-list"]
+
 [auth]
 enabled = true               # 启用后所有 API 需要 JWT 认证
 jwt_secret = ""              # JWT 签名密钥（留空则自动生成）
@@ -86,7 +138,7 @@ enabled = true               # 启用收藏功能
 store_file = ""              # 收藏数据文件路径（默认 ~/.mnemonas/.mnemonas/favorites.json）
 
 [alerts]
-enabled = false              # 启用存储空间告警
+enabled = false              # 启用存储空间告警；配置 Webhook 后也会发送备份失败/警告事件
 check_interval = "1h"        # 检查间隔
 threshold_pct = 90.0         # 使用率达到此百分比时发送警告
 critical_pct = 95.0          # 使用率达到此百分比时发送严重告警

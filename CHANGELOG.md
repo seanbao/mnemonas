@@ -73,6 +73,8 @@
   - WebDAV 配置（启用开关、URL 前缀、只读模式、用户认证）
   - CDC 分块参数说明
   - 数据面连接状态
+  - 公网访问向导和安全自检入口，辅助配置 HTTPS 反向代理、受信代理跳数和分享域名
+  - 公网访问向导桌面与移动端 E2E 回归覆盖
 
 - **Health 健康状态**
   - 系统运行时间
@@ -83,6 +85,7 @@
   - Scrub 数据完整性校验
   - GC 垃圾回收
   - 对象列表浏览
+  - 备份任务健康状态、定时计划、快照保留策略和恢复演练状态
   - 诊断包导出
 
 #### 后端 API
@@ -110,12 +113,22 @@
 - **系统设置 API**
   - 配置读取
   - 配置更新
+  - 公网访问安全自检
+
+- **备份与恢复 API**
+  - 配置化本地备份任务与 restic/rclone 命令型远端目标
+  - 立即执行备份
+  - 轻量定时调度、自动备份时间窗、成功快照保留策略和任务健康状态
+  - 最近快照恢复演练与 manifest 校验；本地快照和 rclone 远端可恢复到安全目录；restic/rclone 任务支持远端一致性校验
+  - 备份失败、恢复演练失败和备份警告事件接入 Webhook 告警
 
 #### 项目工程化
 - GitHub Actions CI/CD 工作流（Go/Rust/Frontend 测试、Docker 构建）
 - Release 自动化工作流（多平台二进制构建、Docker 镜像发布）
 - Ubuntu/systemd 安装脚本，可将 release 包安装为 `mnemonas` 与 `mnemonas-dataplane` 服务
-- `mnemonas-doctor` 部署诊断脚本，检查二进制、配置、systemd、健康端点、端口、存储挂载与备份目录
+- `mnemonas-doctor` 部署诊断脚本，检查二进制、配置、systemd、健康端点、端口、存储挂载、备份目录、公网 HTTPS 证书状态、HTTP 到 HTTPS 跳转，并提示云安全组人工复核项
+- `mnemonas-public-setup` 公网 HTTPS 反向代理配置助手
+- Traefik 和 Cloudflare Tunnel 公网访问模板，并通过脚本检查避免开放后端和 dataplane 端口
 - `mnemonas-uninstall-systemd` 卸载脚本，默认保留配置和数据，删除数据需要显式确认
 - Docker Compose 启动前预检脚本，检查 Compose v2、Buildx、端口、目录权限、磁盘空间和已有配置
 - Docker 镜像内置 `mnemonas-healthcheck` 健康检查二进制，不再依赖运行时 `curl`
@@ -131,7 +144,7 @@
 
 #### 文档完善
 - Linux/systemd 部署指南，覆盖 ZFS/Btrfs/mdadm 分层、systemd 安装、网络、备份、升级和故障排查
-- 备份指南（3-2-1 策略、rclone/restic 配置、恢复流程）
+- 备份指南（3-2-1 策略、内置本地备份任务、恢复演练、rclone/restic 配置、恢复流程）
 - API 参考文档
 - README 徽章和快速开始指南
 - README、文档索引、主要专题文档、支持说明和安全策略提供中英文版本
@@ -155,12 +168,14 @@
 - Release archive 随包附带 README、支持说明和安全策略的中英文版本
 - 安全文档区分 Web UI 初始管理员密码与 WebDAV Basic Auth 自动密码
 - 安全文档和 doctor 明确提示 dataplane `9090/9091` 不应被防火墙放行到不可信网络
+- 新增公网云防火墙复核清单，覆盖常见云安全组、VPC 防火墙、IPv6 和端口转发误配置
 - 备份文档补充运行中数据的一致性窗口和快照建议
 - 优化 Files 页面表格列布局，新增操作列
 - 优化 Vite 代理配置，添加 `/health` 端点代理
 - 改进配置加载逻辑，支持配置路径传递
 
 ### Fixed
+- 修复通过设置 API 修改 `server.trusted_proxy_hops` 后，运行态请求来源和 HTTPS 转发语义识别未立即同步的问题
 - 防止 systemd 安装和 `nasd` 静态文件发现误把 Vite 源码目录当成已构建 Web UI
 - 修复 `.gitignore` / `.dockerignore` 中 `nasd` 规则过宽，避免忽略 `cmd/nasd` 下的新文件或 Docker 构建上下文
 - 修复 Docker 运行镜像依赖 `apt-get` 安装健康检查工具的问题

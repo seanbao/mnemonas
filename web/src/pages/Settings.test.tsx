@@ -456,7 +456,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('CDC 分块参数')).toBeTruthy()
-        expect(screen.getByText('存储告警')).toBeTruthy()
+        expect(screen.getByText('系统告警')).toBeTruthy()
       })
     })
   })
@@ -694,7 +694,7 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警')).toBeTruthy()
+        expect(screen.getByText('系统告警')).toBeTruthy()
       })
 
       await user.click(screen.getByRole('switch', { name: '启用告警' }))
@@ -748,7 +748,7 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警')).toBeTruthy()
+        expect(screen.getByText('系统告警')).toBeTruthy()
       })
 
       await user.click(screen.getByRole('switch', { name: '启用告警' }))

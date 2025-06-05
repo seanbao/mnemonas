@@ -3,6 +3,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,9 @@ func TestDefault(t *testing.T) {
 	}
 	if cfg.Alerts.WebhookHeaders == nil {
 		t.Error("Default alerts webhook headers should be initialized to an empty slice")
+	}
+	if cfg.Backup.Jobs == nil {
+		t.Error("Default backup jobs should be initialized to an empty slice")
 	}
 }
 
@@ -616,6 +620,333 @@ func TestConfig_Validate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestConfig_ValidateBackupJobs(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "destination")
+	resticPasswordFile := filepath.Join(tmpDir, "restic.pass")
+	rcloneConfigFile := filepath.Join(tmpDir, "rclone.conf")
+	if err := os.WriteFile(resticPasswordFile, []byte("test-password"), 0600); err != nil {
+		t.Fatalf("WriteFile(resticPasswordFile) error: %v", err)
+	}
+	if err := os.WriteFile(rcloneConfigFile, []byte("[remote]\ntype = local\n"), 0600); err != nil {
+		t.Fatalf("WriteFile(rcloneConfigFile) error: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr bool
+	}{
+		{
+			name: "valid local backup job",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:                  "home",
+					Name:                "Home backup",
+					Type:                "local",
+					Source:              source,
+					Destination:         destination,
+					ScheduleWindowStart: "02:00",
+					ScheduleWindowEnd:   "05:30",
+				}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid restic backup job",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "restic-remote",
+					Name:         "Restic remote",
+					Type:         "restic",
+					Source:       source,
+					Repository:   "rest:http://backup.example/repo",
+					Command:      "restic",
+					PasswordFile: resticPasswordFile,
+					ExtraArgs:    []string{"--compression", "max"},
+				}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid rclone backup job",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:         "rclone-remote",
+					Name:       "Rclone remote",
+					Type:       "rclone",
+					Source:     source,
+					Remote:     "b2:mnemonas/backups",
+					Command:    "rclone",
+					ConfigFile: rcloneConfigFile,
+					ExtraArgs:  []string{"--fast-list"},
+				}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "duplicate backup job id",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{
+					{ID: "home", Name: "A", Type: "local", Source: source, Destination: destination},
+					{ID: "HOME", Name: "B", Type: "local", Source: source, Destination: filepath.Join(tmpDir, "destination-2")},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "destination inside source",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:          "home",
+					Name:        "Home backup",
+					Type:        "local",
+					Source:      source,
+					Destination: filepath.Join(source, "backup"),
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "destination inside storage root",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:          "home",
+					Name:        "Home backup",
+					Type:        "local",
+					Source:      filepath.Join(tmpDir, "snapshot"),
+					Destination: filepath.Join(source, "backup"),
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "unsupported type",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:          "home",
+					Name:        "Home backup",
+					Type:        "s3",
+					Source:      source,
+					Destination: destination,
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "restic requires password file",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:         "restic-remote",
+					Name:       "Restic remote",
+					Type:       "restic",
+					Source:     source,
+					Repository: "rest:http://backup.example/repo",
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "rclone requires remote",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:     "rclone-remote",
+					Name:   "Rclone remote",
+					Type:   "rclone",
+					Source: source,
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "command cannot contain shell words",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "restic-remote",
+					Name:         "Restic remote",
+					Type:         "restic",
+					Source:       source,
+					Repository:   "rest:http://backup.example/repo",
+					Command:      "restic --repo",
+					PasswordFile: resticPasswordFile,
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "extra args cannot normalize to empty",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "restic-remote",
+					Name:         "Restic remote",
+					Type:         "restic",
+					Source:       source,
+					Repository:   "rest:http://backup.example/repo",
+					PasswordFile: resticPasswordFile,
+					ExtraArgs:    []string{"  "},
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "credential file cannot be inside source",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "restic-remote",
+					Name:         "Restic remote",
+					Type:         "restic",
+					Source:       source,
+					Repository:   "rest:http://backup.example/repo",
+					PasswordFile: filepath.Join(source, "restic.pass"),
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "credential file must exist",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "restic-remote",
+					Name:         "Restic remote",
+					Type:         "restic",
+					Source:       source,
+					Repository:   "rest:http://backup.example/repo",
+					PasswordFile: filepath.Join(tmpDir, "missing-restic.pass"),
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative schedule interval",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:               "home",
+					Name:             "Home backup",
+					Type:             "local",
+					Source:           source,
+					Destination:      destination,
+					ScheduleInterval: -time.Hour,
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "partial schedule window",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:                  "home",
+					Name:                "Home backup",
+					Type:                "local",
+					Source:              source,
+					Destination:         destination,
+					ScheduleWindowStart: "02:00",
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid schedule window clock",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:                  "home",
+					Name:                "Home backup",
+					Type:                "local",
+					Source:              source,
+					Destination:         destination,
+					ScheduleWindowStart: "25:00",
+					ScheduleWindowEnd:   "05:00",
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "equal schedule window bounds",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:                  "home",
+					Name:                "Home backup",
+					Type:                "local",
+					Source:              source,
+					Destination:         destination,
+					ScheduleWindowStart: "02:00",
+					ScheduleWindowEnd:   "02:00",
+				}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative retention",
+			modify: func(c *Config) {
+				c.Backup.Jobs = []BackupJobConfig{{
+					ID:           "home",
+					Name:         "Home backup",
+					Type:         "local",
+					Source:       source,
+					Destination:  destination,
+					MaxSnapshots: -1,
+				}}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Storage.Root = source
+			tt.modify(cfg)
+			cfg.Backup.Jobs = normalizeBackupJobs(cfg.Backup.Jobs)
+
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad_NormalizesBackupJobDurationFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageRoot := filepath.Join(tmpDir, "data")
+	backupRoot := filepath.Join(tmpDir, "backup")
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := fmt.Sprintf(`
+[storage]
+root = %q
+
+[[backup.jobs]]
+id = "external"
+name = "External Backup"
+type = "local"
+destination = %q
+schedule_interval = "1h"
+stale_after = "3h"
+max_age = "24h"
+`, storageRoot, backupRoot)
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Backup.Jobs) != 1 {
+		t.Fatalf("backup job count = %d, want 1", len(cfg.Backup.Jobs))
+	}
+	job := cfg.Backup.Jobs[0]
+	if job.ScheduleInterval != time.Hour {
+		t.Fatalf("schedule interval = %s, want 1h", job.ScheduleInterval)
+	}
+	if job.StaleAfter != 3*time.Hour {
+		t.Fatalf("stale after = %s, want 3h", job.StaleAfter)
+	}
+	if job.MaxAge != 24*time.Hour {
+		t.Fatalf("max age = %s, want 24h", job.MaxAge)
 	}
 }
 

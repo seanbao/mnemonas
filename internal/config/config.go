@@ -48,6 +48,12 @@ var durationFieldPaths = [][]string{
 	{"alerts", "cooldown_period"},
 }
 
+var backupJobDurationFields = []string{
+	"schedule_interval",
+	"max_age",
+	"stale_after",
+}
+
 // Config is the main configuration structure for MnemoNAS
 type Config struct {
 	Server    ServerConfig    `toml:"server"`
@@ -55,6 +61,7 @@ type Config struct {
 	DataPlane DataPlaneConfig `toml:"dataplane"`
 	WebDAV    WebDAVConfig    `toml:"webdav"`
 	SMB       SMBConfig       `toml:"smb"`
+	Backup    BackupConfig    `toml:"backup"`
 	Auth      AuthConfig      `toml:"auth"`
 	Share     ShareConfig     `toml:"share"`
 	Favorites FavoritesConfig `toml:"favorites"`
@@ -181,6 +188,36 @@ type SMBShareConfig struct {
 	ReadOnly     bool     `toml:"read_only"`
 	AllowedRoles []string `toml:"allowed_roles"`
 	AllowedUsers []string `toml:"allowed_users"`
+}
+
+// BackupConfig holds configured backup jobs.
+type BackupConfig struct {
+	Jobs []BackupJobConfig `toml:"jobs"`
+}
+
+// BackupJobConfig describes a local backup job.
+type BackupJobConfig struct {
+	ID                  string        `toml:"id"`
+	Name                string        `toml:"name"`
+	Type                string        `toml:"type"`
+	Source              string        `toml:"source"`
+	Destination         string        `toml:"destination"`
+	Repository          string        `toml:"repository"`
+	Remote              string        `toml:"remote"`
+	Command             string        `toml:"command"`
+	PasswordFile        string        `toml:"password_file"`
+	ConfigFile          string        `toml:"config_file"`
+	ExtraArgs           []string      `toml:"extra_args"`
+	Disabled            bool          `toml:"disabled"`
+	ScheduleInterval    time.Duration `toml:"schedule_interval"`
+	ScheduleWindowStart string        `toml:"schedule_window_start"`
+	ScheduleWindowEnd   string        `toml:"schedule_window_end"`
+	StaleAfter          time.Duration `toml:"stale_after"`
+	MaxSnapshots        int           `toml:"max_snapshots"`
+	MaxAge              time.Duration `toml:"max_age"`
+	IncludeConfig       bool          `toml:"include_config"`
+	VerifyAfterBackup   bool          `toml:"verify_after_backup"`
+	Exclude             []string      `toml:"exclude"`
 }
 
 // AuthConfig holds authentication configuration
@@ -316,6 +353,9 @@ func Default() *Config {
 			SigningRequired: true,
 			Shares:          []SMBShareConfig{},
 		},
+		Backup: BackupConfig{
+			Jobs: []BackupJobConfig{},
+		},
 		Auth: AuthConfig{
 			Enabled:         true, // enabled by default for security
 			AccessTokenTTL:  15 * time.Minute,
@@ -373,6 +413,7 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	cfg.SMB.GatewaySocket = expandUserPath(cfg.SMB.GatewaySocket)
 	cfg.SMB.CredentialFile = expandUserPath(cfg.SMB.CredentialFile)
 	cfg.SMB.Shares = normalizeSMBShares(cfg.SMB.Shares)
+	cfg.Backup.Jobs = normalizeBackupJobs(cfg.Backup.Jobs)
 	cfg.Log.Output = expandUserPath(cfg.Log.Output)
 
 	defaultInternal := filepath.Join(defaultRoot, ".mnemonas")
@@ -481,6 +522,38 @@ func normalizeSMBShares(shares []SMBShareConfig) []SMBShareConfig {
 	return shares
 }
 
+func normalizeBackupJobs(jobs []BackupJobConfig) []BackupJobConfig {
+	if jobs == nil {
+		return []BackupJobConfig{}
+	}
+	for i := range jobs {
+		jobs[i].ID = strings.TrimSpace(jobs[i].ID)
+		jobs[i].Name = strings.TrimSpace(jobs[i].Name)
+		jobs[i].Type = strings.ToLower(strings.TrimSpace(jobs[i].Type))
+		if jobs[i].Type == "" {
+			jobs[i].Type = "local"
+		}
+		jobs[i].Source = expandUserPath(strings.TrimSpace(jobs[i].Source))
+		jobs[i].Destination = expandUserPath(strings.TrimSpace(jobs[i].Destination))
+		jobs[i].Repository = strings.TrimSpace(jobs[i].Repository)
+		jobs[i].Remote = strings.TrimSpace(jobs[i].Remote)
+		jobs[i].Command = expandUserPath(strings.TrimSpace(jobs[i].Command))
+		jobs[i].PasswordFile = expandUserPath(strings.TrimSpace(jobs[i].PasswordFile))
+		jobs[i].ConfigFile = expandUserPath(strings.TrimSpace(jobs[i].ConfigFile))
+		jobs[i].ScheduleWindowStart = strings.TrimSpace(jobs[i].ScheduleWindowStart)
+		jobs[i].ScheduleWindowEnd = strings.TrimSpace(jobs[i].ScheduleWindowEnd)
+		jobs[i].ExtraArgs = normalizeStringSlice(jobs[i].ExtraArgs)
+		for j := range jobs[i].ExtraArgs {
+			jobs[i].ExtraArgs[j] = strings.TrimSpace(jobs[i].ExtraArgs[j])
+		}
+		jobs[i].Exclude = normalizeStringSlice(jobs[i].Exclude)
+		for j := range jobs[i].Exclude {
+			jobs[i].Exclude[j] = strings.TrimSpace(filepath.ToSlash(jobs[i].Exclude[j]))
+		}
+	}
+	return jobs
+}
+
 // Load loads configuration from file
 func Load(path string) (*Config, error) {
 	cfg := Default()
@@ -534,6 +607,9 @@ func normalizeDurationFields(data []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if err := normalizeBackupJobDurationFields(raw); err != nil {
+		return nil, err
+	}
 
 	normalizedData, err := toml.Marshal(raw)
 	if err != nil {
@@ -579,6 +655,54 @@ func normalizeDurationFieldValue(raw map[string]any, fieldPath []string) error {
 	}
 
 	current[leafKey] = int64(parsedDuration)
+	return nil
+}
+
+func normalizeBackupJobDurationFields(raw map[string]any) error {
+	backupValue, ok := raw["backup"]
+	if !ok {
+		return nil
+	}
+	backupMap, ok := backupValue.(map[string]any)
+	if !ok {
+		return errors.New("invalid config structure at backup")
+	}
+	jobsValue, ok := backupMap["jobs"]
+	if !ok {
+		return nil
+	}
+	jobs, ok := jobsValue.([]any)
+	if !ok {
+		return errors.New("invalid config structure at backup.jobs")
+	}
+	for i, jobValue := range jobs {
+		jobMap, ok := jobValue.(map[string]any)
+		if !ok {
+			return fmt.Errorf("invalid config structure at backup.jobs[%d]", i)
+		}
+		for _, field := range backupJobDurationFields {
+			if err := normalizeBackupJobDurationField(jobMap, i, field); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeBackupJobDurationField(job map[string]any, index int, field string) error {
+	value, ok := job[field]
+	if !ok {
+		return nil
+	}
+	durationText, ok := value.(string)
+	if !ok {
+		return nil
+	}
+	parsedDuration, err := time.ParseDuration(durationText)
+	if err != nil {
+		return fmt.Errorf("invalid backup.jobs[%d].%s duration %q: %w", index, field, durationText, err)
+	}
+	job[field] = int64(parsedDuration)
 	return nil
 }
 
@@ -1108,6 +1232,9 @@ func (c *Config) Validate() error {
 	if err := validateSMBConfig(c.SMB); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateBackupConfig(c.Backup, c.Storage.Root); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateOptionalHTTPURL(c.Share.BaseURL, "share.base_url"); err != nil {
 		errs = append(errs, err)
 	}
@@ -1345,6 +1472,288 @@ func validateSMBSharePath(path string) error {
 		}
 	}
 	return nil
+}
+
+func validateBackupConfig(backup BackupConfig, storageRoot string) error {
+	var errs []error
+
+	seen := map[string]struct{}{}
+	for _, job := range backup.Jobs {
+		if err := validateBackupJob(job, storageRoot, seen); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateBackupJob(job BackupJobConfig, storageRoot string, seen map[string]struct{}) error {
+	var errs []error
+
+	if !isValidBackupJobID(job.ID) {
+		errs = append(errs, fmt.Errorf("invalid backup job id: %q", job.ID))
+	} else {
+		key := strings.ToLower(job.ID)
+		if _, ok := seen[key]; ok {
+			errs = append(errs, fmt.Errorf("duplicate backup job id: %q", job.ID))
+		}
+		seen[key] = struct{}{}
+	}
+
+	if job.Name == "" {
+		errs = append(errs, fmt.Errorf("backup job %q name cannot be empty", job.ID))
+	}
+	if job.Type != "local" && job.Type != "restic" && job.Type != "rclone" {
+		errs = append(errs, fmt.Errorf("backup job %q has unsupported type: %q", job.ID, job.Type))
+	}
+	if err := validateBackupCommand(job.Command, fmt.Sprintf("backup job %q command", job.ID)); err != nil {
+		errs = append(errs, err)
+	}
+	for _, arg := range job.ExtraArgs {
+		if err := validateBackupCommandArg(arg, fmt.Sprintf("backup job %q extra_args", job.ID)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if job.ScheduleInterval < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q schedule_interval cannot be negative", job.ID))
+	}
+	if err := validateBackupScheduleWindow(job); err != nil {
+		errs = append(errs, err)
+	}
+	if job.StaleAfter < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q stale_after cannot be negative", job.ID))
+	}
+	if job.MaxSnapshots < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q max_snapshots cannot be negative", job.ID))
+	}
+	if job.MaxAge < 0 {
+		errs = append(errs, fmt.Errorf("backup job %q max_age cannot be negative", job.ID))
+	}
+
+	source := job.Source
+	if source == "" {
+		source = storageRoot
+		if !filepath.IsAbs(source) {
+			if absSource, err := filepath.Abs(source); err == nil {
+				source = absSource
+			}
+		}
+	}
+	if err := validateBackupAbsoluteDirectory(source, fmt.Sprintf("backup job %q source", job.ID)); err != nil {
+		errs = append(errs, err)
+	}
+	switch job.Type {
+	case "local":
+		if err := validateBackupAbsoluteDirectory(job.Destination, fmt.Sprintf("backup job %q destination", job.ID)); err != nil {
+			errs = append(errs, err)
+		}
+		if source != "" && job.Destination != "" && pathContainsOrEquals(source, job.Destination) {
+			errs = append(errs, fmt.Errorf("backup job %q destination must not be inside source", job.ID))
+		}
+	case "restic":
+		if job.Repository == "" {
+			errs = append(errs, fmt.Errorf("backup job %q repository cannot be empty", job.ID))
+		}
+		if strings.Contains(job.Repository, "\x00") || hasControlChar(job.Repository) {
+			errs = append(errs, fmt.Errorf("backup job %q repository contains invalid control characters", job.ID))
+		}
+		if job.PasswordFile == "" {
+			errs = append(errs, fmt.Errorf("backup job %q password_file cannot be empty for restic", job.ID))
+		}
+	case "rclone":
+		if job.Remote == "" {
+			errs = append(errs, fmt.Errorf("backup job %q remote cannot be empty", job.ID))
+		}
+		if strings.Contains(job.Remote, "\x00") || hasControlChar(job.Remote) {
+			errs = append(errs, fmt.Errorf("backup job %q remote contains invalid control characters", job.ID))
+		}
+	}
+	storageRootForValidation := storageRoot
+	if storageRootForValidation != "" && !filepath.IsAbs(storageRootForValidation) {
+		if absStorageRoot, err := filepath.Abs(storageRootForValidation); err == nil {
+			storageRootForValidation = absStorageRoot
+		}
+	}
+	if job.Type == "local" && filepath.IsAbs(storageRootForValidation) && job.Destination != "" && pathContainsOrEquals(storageRootForValidation, job.Destination) {
+		errs = append(errs, fmt.Errorf("backup job %q destination must not be inside storage.root", job.ID))
+	}
+	for field, filePath := range map[string]string{
+		"password_file": job.PasswordFile,
+		"config_file":   job.ConfigFile,
+	} {
+		if err := validateBackupCredentialFile(filePath, field, job.ID, source, storageRootForValidation); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, pattern := range job.Exclude {
+		if pattern == "" {
+			errs = append(errs, fmt.Errorf("backup job %q exclude patterns cannot contain empty entries", job.ID))
+			continue
+		}
+		if strings.Contains(pattern, "\x00") {
+			errs = append(errs, fmt.Errorf("backup job %q exclude pattern must not contain NUL", job.ID))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateBackupCommand(command string, label string) error {
+	if command == "" {
+		return nil
+	}
+	if strings.Contains(command, "\x00") || hasControlChar(command) || strings.ContainsAny(command, " \t\r\n") {
+		return fmt.Errorf("%s must be a single executable path without whitespace or control characters", label)
+	}
+	if filepath.IsAbs(command) {
+		return nil
+	}
+	if strings.ContainsRune(command, filepath.Separator) || (filepath.Separator != '/' && strings.ContainsRune(command, '/')) {
+		return fmt.Errorf("%s must be an absolute path or a bare executable name", label)
+	}
+	if command == "." || command == ".." {
+		return fmt.Errorf("%s must be an executable name", label)
+	}
+	return nil
+}
+
+func validateBackupScheduleWindow(job BackupJobConfig) error {
+	if job.ScheduleWindowStart == "" && job.ScheduleWindowEnd == "" {
+		return nil
+	}
+	if job.ScheduleWindowStart == "" || job.ScheduleWindowEnd == "" {
+		return fmt.Errorf("backup job %q schedule window requires both schedule_window_start and schedule_window_end", job.ID)
+	}
+	start, err := parseBackupWindowClock(job.ScheduleWindowStart, fmt.Sprintf("backup job %q schedule_window_start", job.ID))
+	if err != nil {
+		return err
+	}
+	end, err := parseBackupWindowClock(job.ScheduleWindowEnd, fmt.Sprintf("backup job %q schedule_window_end", job.ID))
+	if err != nil {
+		return err
+	}
+	if start == end {
+		return fmt.Errorf("backup job %q schedule window start and end cannot be equal", job.ID)
+	}
+	return nil
+}
+
+func parseBackupWindowClock(value string, label string) (int, error) {
+	if len(value) != len("15:04") || value[2] != ':' {
+		return 0, fmt.Errorf("%s must use HH:MM format", label)
+	}
+	hour, err := strconv.Atoi(value[:2])
+	if err != nil {
+		return 0, fmt.Errorf("%s must use HH:MM format", label)
+	}
+	minute, err := strconv.Atoi(value[3:])
+	if err != nil {
+		return 0, fmt.Errorf("%s must use HH:MM format", label)
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, fmt.Errorf("%s must be a valid 24-hour time", label)
+	}
+	return hour*60 + minute, nil
+}
+
+func hasControlChar(value string) bool {
+	return strings.IndexFunc(value, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0
+}
+
+func validateBackupCommandArg(arg string, label string) error {
+	if arg == "" {
+		return fmt.Errorf("%s cannot contain empty entries", label)
+	}
+	if strings.Contains(arg, "\x00") || hasControlChar(arg) {
+		return fmt.Errorf("%s contains invalid control characters", label)
+	}
+	return nil
+}
+
+func validateBackupCredentialFile(filePath string, field string, jobID string, source string, storageRoot string) error {
+	if filePath == "" {
+		return nil
+	}
+	if !filepath.IsAbs(filePath) {
+		return fmt.Errorf("backup job %q %s must be an absolute path", jobID, field)
+	}
+	if strings.Contains(filePath, "\x00") || hasControlChar(filePath) {
+		return fmt.Errorf("backup job %q %s contains invalid control characters", jobID, field)
+	}
+	if source != "" && filepath.IsAbs(source) && pathContainsOrEquals(source, filePath) {
+		return fmt.Errorf("backup job %q %s must not be inside backup source", jobID, field)
+	}
+	if storageRoot != "" && filepath.IsAbs(storageRoot) && pathContainsOrEquals(storageRoot, filePath) {
+		return fmt.Errorf("backup job %q %s must not be inside storage.root", jobID, field)
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("backup job %q %s does not exist", jobID, field)
+		}
+		return fmt.Errorf("backup job %q %s cannot be checked: %w", jobID, field, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("backup job %q %s must not be a symlink", jobID, field)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("backup job %q %s must be a regular file", jobID, field)
+	}
+	return nil
+}
+
+func isValidBackupJobID(id string) bool {
+	if id == "" || len(id) > 64 || id == "." || id == ".." {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validateBackupAbsoluteDirectory(value, field string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("%s cannot be empty", field)
+	}
+	if trimmed != value {
+		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
+	}
+	if strings.IndexFunc(trimmed, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return fmt.Errorf("%s must not contain control characters", field)
+	}
+	if !filepath.IsAbs(trimmed) {
+		return fmt.Errorf("%s must be an absolute path", field)
+	}
+	if isFilesystemRoot(trimmed) || isProtectedStorageRoot(trimmed) {
+		return fmt.Errorf("%s must not be a protected system directory", field)
+	}
+	return nil
+}
+
+func pathContainsOrEquals(parent, child string) bool {
+	parentClean := filepath.Clean(parent)
+	childClean := filepath.Clean(child)
+	if parentClean == childClean {
+		return true
+	}
+	rel, err := filepath.Rel(parentClean, childClean)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func isValidHTTPHeaderToken(value string) bool {

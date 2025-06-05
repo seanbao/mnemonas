@@ -327,12 +327,61 @@ Activity visibility follows user scope. Admins can see all activity.
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/v1/settings` | Get current settings |
+| `GET` | `/api/v1/settings/security-check` | Run public-access security self-check |
 | `PUT` | `/api/v1/settings` | Update settings |
 | `GET` | `/api/v1/settings/webdav-credentials` | Get current WebDAV credential status |
 
 Settings updates can change WebDAV prefix, read-only mode, share configuration, favorite configuration, alert configuration, dataplane connection settings, and retention/versioning policies at runtime. Server listener/TLS changes and CDC chunk-size changes are saved but require restarting the affected service before they take effect.
 
-`server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters; set the port through `server.port`. `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`. Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `"Key: Value"` strings with valid HTTP token names and values without newlines or control characters. `dataplane.grpc_address` must be a valid `host:port` address with port 1-65535 and no whitespace or control characters. CDC chunk sizes must satisfy `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`. Invalid settings return `400 Bad Request` without mutating the running config.
+`server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters; set the port through `server.port`. `server.trusted_proxy_hops` controls whether forwarded headers from trusted reverse proxies are honored when evaluating HTTPS request semantics. `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`. Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `"Key: Value"` strings with valid HTTP token names and values without newlines or control characters. `dataplane.grpc_address` must be a valid `host:port` address with port 1-65535 and no whitespace or control characters. CDC chunk sizes must satisfy `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`. Invalid settings return `400 Bad Request` without mutating the running config.
+
+### Public-Access Security Self-Check
+
+`GET /api/v1/settings/security-check` requires administrator access. It returns the runtime checks used by the Web UI security self-check and can also be consumed by deployment automation:
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "warning",
+    "generated_at": "2026-05-09T10:00:00Z",
+    "checks": [
+      {
+        "id": "https_request",
+        "status": "warning",
+        "title": "Current request is not HTTPS",
+        "message": "Public access should use built-in TLS or a trusted HTTPS reverse proxy.",
+        "details": {
+          "direct_tls": false,
+          "forwarded_proto": "",
+          "trusted_forwarded_source": true
+        }
+      }
+    ],
+    "request": {
+      "scheme": "http",
+      "direct_tls": false,
+      "host": "localhost:8080",
+      "remote_ip": "127.0.0.1",
+      "trusted_forwarded_source": true,
+      "forwarded_proto": ""
+    },
+    "config": {
+      "auth_enabled": true,
+      "server_host": "0.0.0.0",
+      "server_port": 8080,
+      "tls_enabled": false,
+      "trusted_proxy_hops": 0,
+      "dataplane_grpc_addr": "127.0.0.1:9090",
+      "webdav_enabled": true,
+      "webdav_auth_type": "basic",
+      "share_enabled": false
+    }
+  }
+}
+```
+
+`data.status` and `checks[].status` use `pass`, `warning`, or `block`; `block` dominates `warning`, and `warning` dominates `pass` for the aggregate status. Current check IDs include `auth_enabled`, `https_request`, `trusted_proxy_or_tls`, `server_listen`, `dataplane_listen`, `webdav_auth`, `share_base_url`, and `initial_password_file`. The endpoint can verify only what the MnemoNAS process can observe: runtime configuration and the current request's proxy/TLS semantics. It cannot directly verify cloud security groups, public routing, externally exposed ports, or certificate-chain validity. Public deployments should still run `sudo mnemonas-doctor --public-domain <domain>` on the server and confirm in the cloud console that only `80/443` are publicly reachable.
 
 ## Maintenance
 
@@ -342,11 +391,17 @@ Settings updates can change WebDAV prefix, read-only mode, share configuration, 
 | `POST` | `/api/v1/maintenance/scrub` | Start scrub |
 | `GET` | `/api/v1/maintenance/objects` | List storage objects |
 | `POST` | `/api/v1/maintenance/gc` | Run garbage collection |
+| `GET` | `/api/v1/maintenance/backups` | List configured backup jobs |
+| `GET` | `/api/v1/maintenance/backups/{id}` | Get one backup job status |
+| `POST` | `/api/v1/maintenance/backups/{id}/run` | Run a backup job now |
+| `POST` | `/api/v1/maintenance/backups/{id}/restore` | Restore a supported backup job into a safe target directory |
+| `POST` | `/api/v1/maintenance/backups/{id}/restore-drill` | Restore-drill the latest completed snapshot |
 | `GET` | `/api/v1/diagnostics-export` | Export diagnostic bundle |
 
 Maintenance endpoints are admin-oriented and may be long-running. The Web UI exposes the same operations from maintenance pages.
 Scrub object errors return stable public `errors[].message` values; lower-level IO, path, and verification details are kept in server logs.
 `GET /api/v1/maintenance/objects` accepts an optional `cursor` query parameter from the previous `next_cursor`; non-empty cursors must be 64-character hexadecimal object hashes.
+Backup endpoints operate on jobs configured under `[[backup.jobs]]`. Supported job types are `local`, `restic`, and `rclone`. Local jobs copy into `destination/<job-id>/snapshots/<run-id>/` and can prune old snapshots by `max_snapshots` and `max_age`. Restic jobs invoke `restic -r <repository> --password-file <password_file> backup <source>` and optionally `restic check`; rclone jobs invoke `rclone sync <source> <remote>` and optionally `rclone check --one-way`. External commands are executed without a shell; `command` must be a bare executable name or absolute path, and `extra_args` are appended as argv entries. Jobs may define `disabled`, `schedule_interval`, `schedule_window_start`, `schedule_window_end`, `stale_after`, `max_snapshots`, and `max_age`; a positive `schedule_interval` enables the in-process scheduler. If both schedule-window fields are set, automatic runs only start inside that server-local `HH:MM` window, while manual run-now operations are unaffected. Job views include `health_status` (`ok`, `manual`, `running`, `due`, `stale`, `failed`, or `disabled`) plus optional `next_run_at`, `schedule_window_start`, `schedule_window_end`, `health_message`, `repository`, `remote`, and `command`. When `[alerts] enabled = true` and `webhook_url` is configured, backup failures, restore-drill failures, and backup-warning runs send webhook events with type `backup_run` or `backup_restore_drill`, level `warning` or `critical`, and task/run/error details. `POST /run` accepts an empty body or `{}`. `POST /restore-drill` accepts optional `{"keep_artifact": true}`; local jobs temporarily restore and verify the latest snapshot, restic jobs run `restic check`, and rclone jobs run `rclone check --one-way`. `POST /restore` supports local and rclone jobs and requires `{"target_path": "/absolute/restore/path", "include_config": true}`. The target must be outside `storage.root`, the backup source, and any local backup destination. Its parent must exist, and the target must not exist or must be empty. Local restore copies snapshot `data/` contents into the target root, verifies size and SHA-256, and restores config to `.mnemonas-restore/config.toml` when requested. Rclone restore runs `rclone copy <remote> <target>` and then `rclone check <remote> <target> --one-way`; `include_config` has no special handling for rclone jobs. Backup failures return `500` with the failed run result in `details`; unknown jobs return `404`; disabled jobs, concurrent operations, local restore drills without any completed snapshot, and non-empty restore targets return `409`.
 
 ## WebDAV
 

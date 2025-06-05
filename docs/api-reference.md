@@ -521,6 +521,7 @@ GET /api/v1/diagnostics
       "dataplane_connected": true,
       "thumbnail_service_ready": true,
       "maintenance_history_ready": true,
+      "backup_manager_ready": true,
       "activity_log_ready": true,
       "favorites_store_ready": true
     },
@@ -1532,6 +1533,7 @@ GET /api/v1/settings
       "read_timeout": "30s",
       "write_timeout": "60s",
       "idle_timeout": "120s",
+      "trusted_proxy_hops": 1,
       "tls": {
         "enabled": false,
         "cert_file": "",
@@ -1603,6 +1605,81 @@ GET /api/v1/settings
 - `webdav.runtime_enabled` 表示当前进程中的 WebDAV 服务是否处于运行状态；当 `webdav.enabled = true` 但自动生成凭据不可用时，该值为 `false`
 - `favorites.runtime_available` 表示当前进程中的收藏接口是否可用；当 `favorites.enabled = true` 但收藏存储初始化失败或运行态依赖缺失时，该值为 `false`
 
+### 公网访问安全自检
+
+```
+GET /api/v1/settings/security-check
+```
+
+**需要管理员权限**
+
+该接口返回当前运行态中与公网暴露直接相关的配置检查结果。它用于 Web UI 的“公网访问安全自检”，也可供自动化部署工具读取。
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": {
+    "status": "warning",
+    "generated_at": "2026-05-09T10:00:00Z",
+    "checks": [
+      {
+        "id": "https_request",
+        "status": "warning",
+        "title": "当前访问不是 HTTPS",
+        "message": "公网访问前应通过内置 TLS 或受信反向代理提供 HTTPS。",
+        "details": {
+          "direct_tls": false,
+          "forwarded_proto": "",
+          "trusted_forwarded_source": true
+        }
+      },
+      {
+        "id": "server_listen",
+        "status": "warning",
+        "title": "Web 服务监听范围偏宽",
+        "message": "Web 服务当前监听非本机地址；公网部署时建议只监听 127.0.0.1 或 ::1，并由反向代理对外暴露。",
+        "details": {
+          "host": "0.0.0.0",
+          "port": 8080
+        }
+      }
+    ],
+    "request": {
+      "scheme": "http",
+      "direct_tls": false,
+      "host": "localhost:8080",
+      "remote_ip": "127.0.0.1",
+      "trusted_forwarded_source": true,
+      "forwarded_proto": ""
+    },
+    "config": {
+      "auth_enabled": true,
+      "server_host": "0.0.0.0",
+      "server_port": 8080,
+      "tls_enabled": false,
+      "trusted_proxy_hops": 0,
+      "dataplane_grpc_addr": "127.0.0.1:9090",
+      "webdav_enabled": true,
+      "webdav_auth_type": "basic",
+      "share_enabled": false
+    }
+  }
+}
+```
+
+**字段说明**:
+- `data.status` 是整体状态，取值为 `pass`、`warning`、`block`
+- `checks[].status` 是单项状态，取值同上；存在任一 `block` 时整体为 `block`，否则存在任一 `warning` 时整体为 `warning`
+- `checks[].id` 当前包含 `auth_enabled`、`https_request`、`trusted_proxy_or_tls`、`server_listen`、`dataplane_listen`、`webdav_auth`、`share_base_url`、`initial_password_file`
+- `request` 描述当前请求如何被服务端识别，例如是否 HTTPS、是否来自受信转发源、`X-Forwarded-Proto` 是否被采纳
+- `config` 描述自检使用的关键运行配置
+
+**边界说明**:
+- 该接口只检查服务端能可靠读取到的运行态和当前请求语义
+- 它不能直接检查云厂商安全组、公网路由、真实外部端口暴露或证书链可用性
+- 公网部署仍应在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，并在云控制台确认只开放 `80/443`
+
 ### 更新设置
 
 ```
@@ -1624,6 +1701,7 @@ PUT /api/v1/settings
     "read_timeout": "30s",
     "write_timeout": "60s",
     "idle_timeout": "120s",
+    "trusted_proxy_hops": 1,
     "tls": {
       "enabled": true,
       "auto_generate": true,
@@ -1692,7 +1770,7 @@ PUT /api/v1/settings
 - 成功响应的 `message` 在仅包含热更新字段、或请求中携带但值未变化的重启类字段时为 `settings updated`；当 `server.host`、`server.port`、`server.read_timeout`、`server.write_timeout`、`server.idle_timeout`、`server.tls.*` 或 `cdc.*` 的值实际变化时为 `settings updated, some changes may require restart`
 - `trash` 支持更新 `enabled`、`retention_days`、`max_size`；保存后会立即影响运行中的回收站策略
 - `retention` 支持更新 `max_versions`、`max_age`、`min_free_space`、`gc_interval`；保存后会立即更新运行中的版本保留阈值与周期清理任务，`gc_interval` 设为 `0` 表示禁用周期清理
-- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`；保存后需重启服务才能影响运行中的 HTTP 监听器
+- `server` 支持更新 `host`、`port`、`read_timeout`、`write_timeout`、`idle_timeout`、`trusted_proxy_hops`；监听地址和超时保存后需重启服务才能影响运行中的 HTTP 监听器，`trusted_proxy_hops` 会立即影响请求来源和 HTTPS 转发语义识别
 - `server.tls` 支持更新 `enabled`、`cert_file`、`key_file`、`auto_generate`、`cert_dir`；保存后需重启服务才能切换 HTTPS 监听
 - `cdc` 支持更新 `min_chunk_size`、`avg_chunk_size`、`max_chunk_size`；必须满足 `65536 <= min < avg < max <= 67108864`。Docker 和 systemd 启动入口会在 dataplane 重启时读取这些字节值，新对象写入才会使用新分块参数
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
@@ -1705,6 +1783,7 @@ PUT /api/v1/settings
 - `webdav` 支持更新 `enabled`、`prefix`、`read_only`、`auth_type`、`username`、`password`；`prefix` 会归一化为以 `/` 开头的 URL 路径，不能包含反斜杠、`?`、`#` 或控制字符，启用时不能覆盖 `/`、`/api`、`/s`、`/health`；保存后会立即切换运行中的 WebDAV 前缀、鉴权方式和只读状态
 - 认证启用时，`webdav.username` 不得复用现有非 admin 用户名；WebDAV 基本认证是全局服务凭据，不携带应用层 `home_dir` 隔离
 - 请求中的 `server.host` 必须为空、`*`、合法主机名、IPv4 或 IPv6 字面量，不能包含端口、空白或控制字符；端口必须通过 `server.port` 设置
+- 请求中的 `server.trusted_proxy_hops` 不能为负数；默认值 `0` 表示不信任转发头
 - 请求中的 `server.read_timeout`、`server.write_timeout`、`server.idle_timeout` 必须是正的 `time.ParseDuration` 字符串，例如 `30s`、`2m`
 - 请求中的 `retention.max_age`、`retention.gc_interval` 必须是 `time.ParseDuration` 可解析的字符串，例如 `720h`、`24h`、`0`
 - 请求中的 `alerts.check_interval`、`alerts.cooldown_period` 必须是正的 `time.ParseDuration` 字符串
@@ -1924,6 +2003,124 @@ POST /api/v1/maintenance/gc
   "timestamp": "2024-01-15T10:00:00Z"
 }
 ```
+
+### 备份任务
+
+列出 `[[backup.jobs]]` 中配置的备份任务和最近状态。
+
+```
+GET /api/v1/maintenance/backups
+```
+
+**响应示例**:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "external-disk",
+      "name": "外置硬盘备份",
+      "type": "local",
+      "source": "/srv/mnemonas",
+      "destination": "/mnt/backup-drive/mnemonas",
+      "disabled": false,
+      "schedule_interval": "24h0m0s",
+      "schedule_window_start": "02:00",
+      "schedule_window_end": "05:00",
+      "next_run_at": "2026-05-10T02:03:04Z",
+      "stale_after": "72h0m0s",
+      "max_snapshots": 7,
+      "max_age": "720h0m0s",
+      "health_status": "ok",
+      "health_message": "last successful backup completed recently",
+      "include_config": true,
+      "verify_after_backup": true,
+      "exclude": [".mnemonas/thumbnails"],
+      "running": false,
+      "last_run": {
+        "id": "20260509T020304.000000000Z",
+        "job_id": "external-disk",
+        "status": "completed",
+        "started_at": "2026-05-09T02:03:04Z",
+        "duration_ms": 1200,
+        "file_count": 42,
+        "total_bytes": 1048576,
+        "trigger": "scheduled",
+        "warning": false,
+        "warnings": [],
+        "pruned_snapshots": 1
+      }
+    }
+  ]
+}
+```
+
+获取单个任务：
+
+```
+GET /api/v1/maintenance/backups/{id}
+```
+
+立即执行备份：
+
+```
+POST /api/v1/maintenance/backups/{id}/run
+```
+
+请求体可为空，也可传 `{}`。备份任务支持三种类型：
+
+- `type = "local"`：复制本地目录到 `destination/<job-id>/snapshots/<run-id>/`，写入 `manifest.json`，并在 `verify_after_backup = true` 时校验快照文件大小和 SHA-256。
+- `type = "restic"`：调用 `command` 指定的 restic 可执行文件，执行 `restic -r <repository> --password-file <password_file> backup <source>`；`verify_after_backup = true` 时执行 `restic check`。
+- `type = "rclone"`：调用 `command` 指定的 rclone 可执行文件，执行 `rclone sync <source> <remote>`；`verify_after_backup = true` 时执行 `rclone check --one-way`。
+
+`restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。
+
+任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`max_snapshots` 和 `max_age`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。`restic` 和 `rclone` 的远端保留策略由外部工具管理。`health_status` 可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。
+
+当 `[alerts] enabled = true` 且 `webhook_url` 已配置时，备份失败、恢复演练失败或备份完成但带警告会发送 Webhook 事件。事件 `type` 为 `backup_run` 或 `backup_restore_drill`，`level` 为 `warning` 或 `critical`，`details` 包含任务 ID、运行 ID、状态、错误信息、快照路径和文件/字节统计。
+
+对最近一次成功快照执行恢复演练，或对远端备份执行一致性校验：
+
+```
+POST /api/v1/maintenance/backups/{id}/restore-drill
+```
+
+**请求体** (可选):
+```json
+{
+  "keep_artifact": false
+}
+```
+
+`local` 默认会把快照恢复到临时目录、校验每个文件后删除临时目录；`keep_artifact = true` 会保留临时恢复目录并在响应中返回 `restored_path`。`restic` 当前执行 `restic check`，`rclone` 当前执行 `rclone check --one-way`；这用于验证仓库或远端一致性。需要真正恢复 rclone 数据时使用 `/restore`。
+
+把支持的备份任务恢复到指定目录：
+
+```
+POST /api/v1/maintenance/backups/{id}/restore
+```
+
+**请求体**:
+```json
+{
+  "target_path": "/mnt/restore/mnemonas",
+  "include_config": true
+}
+```
+
+当前显式恢复支持 `type = "local"` 和 `type = "rclone"`。`target_path` 必须是服务器上的绝对路径，并且必须位于 `storage.root`、备份来源和本地备份目标之外；父目录必须已存在，目标目录不存在或为空。该接口不会覆盖当前在线数据目录。
+
+- `local`：把最近一次成功快照中的 `data/` 内容复制到 `target_path` 根目录并校验大小和 SHA-256；`include_config = true` 时，备份中的配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。
+- `rclone`：执行 `rclone copy <remote> <target>` 恢复远端内容，再执行 `rclone check <remote> <target> --one-way` 校验恢复目录。`include_config` 对 rclone 任务无特殊处理。
+
+**错误语义**:
+- 未配置备份管理器：`503 Service Unavailable`
+- 任务不存在：`404 Not Found`
+- 同一任务已有备份或恢复演练在运行：`409 Conflict`
+- 任务已停用：`409 Conflict`
+- 本地任务没有可演练的成功快照：`409 Conflict`
+- 显式恢复目标目录非空：`409 Conflict`
+- 任务执行失败：`500 Internal Server Error`，错误响应 `details` 中包含失败的 run/drill 结果
 
 ### 导出诊断信息
 

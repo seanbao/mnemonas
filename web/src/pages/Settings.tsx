@@ -2421,14 +2421,14 @@ export function SettingsPage() {
               </SettingsSection>
 
               <SettingsSection
-                title="存储告警"
-                description="配置磁盘空间监控和 Webhook 告警；保存后会立即更新运行中的告警监控"
+                title="系统告警"
+                description="配置磁盘空间监控、备份事件和 Webhook 通知；保存后立即更新运行态"
                 icon={AlertCircle}
               >
                 <div className="space-y-4">
                   <SettingRow
                     label="启用告警"
-                    description="启用后定期检查存储空间并发送告警，保存后立即生效"
+                    description="启用后定期检查存储空间，并在备份失败或备份警告时发送通知"
                   >
                     <Switch
                       aria-label="启用告警"
@@ -2524,7 +2524,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="Webhook URL"
-                    description="发送告警通知的目标地址"
+                    description="发送磁盘空间和备份事件通知的目标地址"
                   >
                     <Input
                       type="url"
@@ -2540,7 +2540,7 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="Webhook 方法"
-                    description="告警通知请求使用的 HTTP 方法"
+                    description="通知请求使用的 HTTP 方法；GET 会把事件字段编码到 URL query"
                   >
                     <select
                       aria-label="Webhook 方法"

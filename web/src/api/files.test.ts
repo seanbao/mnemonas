@@ -23,6 +23,10 @@ import {
   getDiagnostics,
   getScrubResult,
   runScrub,
+  listBackupJobs,
+  runBackupJob,
+  runBackupRestoreDrill,
+  restoreBackupJob,
   uploadFile,
   downloadDiagnosticsExport,
 } from './files'
@@ -2296,6 +2300,191 @@ describe('API: files', () => {
       })
 
       await expect(runScrub()).rejects.toThrow('服务器返回了无效的数据')
+    })
+  })
+
+  describe('backup jobs', () => {
+    const backupJob = {
+      id: 'external-disk',
+      name: 'External disk',
+      type: 'local',
+      source: '/srv/mnemonas',
+      destination: '/mnt/backup-drive/mnemonas',
+      disabled: false,
+      schedule_interval: '24h0m0s',
+      schedule_window_start: '02:00',
+      schedule_window_end: '05:00',
+      next_run_at: '2026-05-10T02:03:04Z',
+      stale_after: '72h0m0s',
+      max_snapshots: 7,
+      max_age: '720h0m0s',
+      health_status: 'ok',
+      health_message: 'last successful backup completed recently',
+      include_config: true,
+      verify_after_backup: true,
+      exclude: ['.mnemonas/thumbnails'],
+      running: false,
+      last_run: {
+        id: '20260509T020304.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T02:03:04Z',
+        finished_at: '2026-05-09T02:03:05Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        snapshot_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z',
+        manifest_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json',
+        file_count: 12,
+        total_bytes: 4096,
+        config_included: true,
+        trigger: 'scheduled',
+        warning: false,
+        warnings: [],
+        pruned_snapshots: 1,
+      },
+      last_successful_run: {
+        id: '20260509T020304.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T02:03:04Z',
+        finished_at: '2026-05-09T02:03:05Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        snapshot_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z',
+        manifest_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json',
+        file_count: 12,
+        total_bytes: 4096,
+        config_included: true,
+        trigger: 'scheduled',
+        warning: false,
+        warnings: [],
+        pruned_snapshots: 1,
+      },
+      last_restore_drill: {
+        id: '20260509T030000.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T03:00:00Z',
+        finished_at: '2026-05-09T03:00:01Z',
+        duration_ms: 1000,
+        snapshot_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z',
+        manifest_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json',
+        restored_path: '/mnt/backup-drive/mnemonas/external-disk/restore-drills/20260509T030000.000000000Z/restored',
+        artifact_kept: true,
+        file_count: 12,
+        verified_bytes: 4096,
+      },
+    }
+
+    it('lists configured backup jobs', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: [backupJob],
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const jobs = await listBackupJobs()
+      expect(jobs).toHaveLength(1)
+      expect(jobs[0].id).toBe('external-disk')
+      expect(jobs[0].health_status).toBe('ok')
+      expect(jobs[0].schedule_interval).toBe('24h0m0s')
+      expect(jobs[0].schedule_window_start).toBe('02:00')
+      expect(jobs[0].schedule_window_end).toBe('05:00')
+      expect(jobs[0].max_snapshots).toBe(7)
+      expect(jobs[0].last_run?.file_count).toBe(12)
+      expect(jobs[0].last_run?.pruned_snapshots).toBe(1)
+      expectFetchCall(1, '/api/v1/maintenance/backups')
+    })
+
+    it('runs a backup job', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: backupJob.last_run,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const result = await runBackupJob('external-disk')
+      expect(result.status).toBe('completed')
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+    })
+
+    it('runs a backup restore drill', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: backupJob.last_restore_drill,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const result = await runBackupRestoreDrill('external-disk', true)
+      expect(result.status).toBe('completed')
+      expect(result.artifact_kept).toBe(true)
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-drill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keep_artifact: true }),
+      })
+    })
+
+    it('restores a local backup job to a target path', async () => {
+      const restoreResult = {
+        id: '20260509T040000.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:00Z',
+        finished_at: '2026-05-09T04:00:01Z',
+        duration_ms: 1000,
+        snapshot_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z',
+        manifest_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json',
+        target_path: '/restore/mnemonas',
+        config_restored: true,
+        config_path: '/restore/mnemonas/.mnemonas-restore/config.toml',
+        file_count: 12,
+        verified_bytes: 4096,
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: restoreResult,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const result = await restoreBackupJob('external-disk', '/restore/mnemonas', true)
+      expect(result.status).toBe('completed')
+      expect(result.target_path).toBe('/restore/mnemonas')
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_path: '/restore/mnemonas', include_config: true }),
+      })
+    })
+
+    it('rejects malformed backup job responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: [{ ...backupJob, running: 'no' }],
+        }),
+      })
+
+      await expect(listBackupJobs()).rejects.toThrow('服务器返回了无效的数据')
     })
   })
 

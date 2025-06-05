@@ -227,6 +227,29 @@ test.describe('设置页面响应式', () => {
     await expect(title).toBeVisible({ timeout: 5000 })
   })
 
+  test('移动端公网访问向导主要操作可用且不产生横向溢出', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await ensureAuthenticatedAt(page, '/settings')
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+
+    const wizardHeading = page.getByRole('heading', { name: '公网访问向导' })
+    await wizardHeading.scrollIntoViewIfNeeded()
+    await expect(wizardHeading).toBeVisible({ timeout: 5000 })
+
+    await page.getByLabel('公网域名').fill('nas.example.com')
+    await expect(page.getByText('sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com')).toBeVisible()
+    await expect(page.getByText('sudo mnemonas-doctor --public-domain nas.example.com')).toBeVisible()
+
+    await page.getByRole('button', { name: '应用推荐到表单' }).click()
+    await expect(page.getByLabel('受信代理层数')).toHaveValue('1')
+
+    const horizontalOverflow = await page.evaluate(() => {
+      const pageWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)
+      return pageWidth - window.innerWidth
+    })
+    expect(horizontalOverflow).toBeLessThanOrEqual(2)
+  })
+
   test('平板端布局', async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 })
     await ensureAuthenticatedAt(page, '/settings')
