@@ -310,7 +310,7 @@ function canRunBackupRestoreDrill(job: BackupJob): boolean {
 }
 
 function canRunBackupRestore(job: BackupJob): boolean {
-  if (job.type === 'rclone') {
+  if (job.type === 'restic' || job.type === 'rclone') {
     return true
   }
   return job.type === 'local' && job.last_run?.status === 'completed'
@@ -338,6 +338,9 @@ function getBackupRestoreMetricText(result: BackupRestoreResult): string {
 }
 
 function getRestoreTargetDescription(job: BackupJob | null): string {
+  if (job?.type === 'restic') {
+    return '目标目录必须在 storage.root、备份来源和本地 restic 仓库之外；父目录存在，目标不存在或为空。'
+  }
   if (job?.type === 'rclone') {
     return '目标目录必须在 storage.root 和备份来源之外；父目录存在，目标不存在或为空。'
   }
@@ -982,7 +985,7 @@ export default function Maintenance() {
             <li>本地备份任务应写入 storage.root 之外的磁盘、挂载点或快照目标</li>
             <li>restic/rclone 任务会调用外部工具执行备份与校验</li>
             <li>本地恢复演练会复制最近快照并通过 manifest 校验</li>
-            <li>rclone 恢复会从 remote 复制到独立目录，并在安装前执行一致性校验</li>
+            <li>restic/rclone 恢复会先写入独立目录，并在安装前执行恢复校验</li>
           </ul>
         </CardBody>
       </Card>

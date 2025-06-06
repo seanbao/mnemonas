@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -804,6 +805,8 @@ func (m *Manager) runRestore(ctx context.Context, job config.BackupJobConfig, op
 	switch job.Type {
 	case JobTypeLocal:
 		return m.runLocalRestore(ctx, job, opts, result)
+	case JobTypeRestic:
+		return m.runResticRestore(ctx, job, opts, result)
 	case JobTypeRclone:
 		return m.runRcloneRestore(ctx, job, opts, result)
 	default:
@@ -854,7 +857,7 @@ func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConf
 	if strings.TrimSpace(job.Remote) == "" {
 		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
 	}
-	targetPath, err := validateRestoreTarget(effectiveSource(job, m.storageRoot), job.Destination, m.storageRoot, opts.TargetPath)
+	targetPath, err := validateRestoreTarget(effectiveSource(job, m.storageRoot), backupTarget(job), m.storageRoot, opts.TargetPath)
 	if err != nil {
 		return err
 	}
@@ -873,7 +876,6 @@ func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConf
 	for _, pattern := range job.Exclude {
 		args = append(args, "--exclude", pattern)
 	}
-	args = append(args, job.ExtraArgs...)
 	if err := runExternalCommand(ctx, backupCommand(job, JobTypeRclone), args...); err != nil {
 		return fmt.Errorf("restore rclone remote: %w", err)
 	}
@@ -893,6 +895,75 @@ func (m *Manager) runRcloneRestore(ctx context.Context, job config.BackupJobConf
 
 	result.ManifestPath = job.Remote
 	result.TargetPath = targetPath
+	return nil
+}
+
+func (m *Manager) runResticRestore(ctx context.Context, job config.BackupJobConfig, opts RestoreOptions, result *RestoreResult) error {
+	source := filepath.Clean(effectiveSource(job, m.storageRoot))
+	if strings.TrimSpace(job.Repository) == "" {
+		return fmt.Errorf("%w: restic repository is empty", ErrUnsafePath)
+	}
+	if strings.TrimSpace(job.PasswordFile) == "" {
+		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
+	}
+	targetPath, err := validateRestoreTarget(source, backupTarget(job), m.storageRoot, opts.TargetPath)
+	if err != nil {
+		return err
+	}
+	partialPath, err := createPartialRestoreTarget(targetPath, result.ID)
+	if err != nil {
+		return err
+	}
+	rawPath, err := createNamedRestoreTarget(targetPath, ".restic-"+result.ID)
+	if err != nil {
+		_ = os.RemoveAll(partialPath)
+		return err
+	}
+	cleanupPartial := true
+	cleanupRaw := true
+	defer func() {
+		if cleanupRaw {
+			_ = os.RemoveAll(rawPath)
+		}
+		if cleanupPartial {
+			_ = os.RemoveAll(partialPath)
+		}
+	}()
+
+	args := []string{
+		"-r", job.Repository,
+		"--password-file", job.PasswordFile,
+		"restore", "latest",
+		"--target", rawPath,
+		"--tag", "mnemonas",
+		"--tag", "job:" + job.ID,
+		"--path", source,
+	}
+	for _, pattern := range job.Exclude {
+		args = append(args, "--exclude", pattern)
+	}
+	if err := runExternalCommand(ctx, backupCommand(job, JobTypeRestic), args...); err != nil {
+		return fmt.Errorf("restore restic repository: %w", err)
+	}
+
+	fileCount, restoredBytes, err := moveResticRestoredSource(ctx, rawPath, partialPath, source)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(rawPath); err != nil {
+		return fmt.Errorf("cleanup restic restore staging: %w", err)
+	}
+	cleanupRaw = false
+
+	if err := installRestoreTarget(partialPath, targetPath); err != nil {
+		return err
+	}
+	cleanupPartial = false
+
+	result.ManifestPath = job.Repository
+	result.TargetPath = targetPath
+	result.FileCount = fileCount
+	result.VerifiedBytes = restoredBytes
 	return nil
 }
 
@@ -1946,16 +2017,105 @@ func validateRestoreTarget(source, destination, storageRoot, targetPath string) 
 }
 
 func createPartialRestoreTarget(targetPath, runID string) (string, error) {
-	partialPath := targetPath + ".partial-" + runID
-	if _, err := os.Lstat(partialPath); err == nil {
+	return createNamedRestoreTarget(targetPath, ".partial-"+runID)
+}
+
+func createNamedRestoreTarget(targetPath, suffix string) (string, error) {
+	namedPath := targetPath + suffix
+	if _, err := os.Lstat(namedPath); err == nil {
 		return "", ErrRestoreTargetExists
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("stat partial restore target: %w", err)
+		return "", fmt.Errorf("stat restore staging target: %w", err)
 	}
-	if err := os.Mkdir(partialPath, 0700); err != nil {
-		return "", fmt.Errorf("create partial restore target: %w", err)
+	if err := os.Mkdir(namedPath, 0700); err != nil {
+		return "", fmt.Errorf("create restore staging target: %w", err)
 	}
-	return partialPath, nil
+	return namedPath, nil
+}
+
+func moveResticRestoredSource(ctx context.Context, rawPath, partialPath, source string) (int64, int64, error) {
+	restoredSourcePath, err := resticRestoredSourcePath(rawPath, source)
+	if err != nil {
+		return 0, 0, err
+	}
+	info, err := os.Lstat(restoredSourcePath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("stat restic restored source: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return 0, 0, fmt.Errorf("%w: restic restored source must not be a symlink", ErrUnsafePath)
+	}
+	if !info.IsDir() {
+		return 0, 0, fmt.Errorf("%w: restic restored source must be a directory", ErrUnsafePath)
+	}
+
+	entries, err := os.ReadDir(restoredSourcePath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read restic restored source: %w", err)
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+		sourceEntry := filepath.Join(restoredSourcePath, entry.Name())
+		targetEntry := filepath.Join(partialPath, entry.Name())
+		if _, err := os.Lstat(targetEntry); err == nil {
+			return 0, 0, ErrRestoreTargetExists
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return 0, 0, fmt.Errorf("stat restored target entry: %w", err)
+		}
+		if err := os.Rename(sourceEntry, targetEntry); err != nil {
+			return 0, 0, fmt.Errorf("move restored entry %s: %w", entry.Name(), err)
+		}
+	}
+
+	fileCount, totalBytes, err := summarizeRestoredTree(ctx, partialPath)
+	if err != nil {
+		return 0, 0, err
+	}
+	return fileCount, totalBytes, nil
+}
+
+func resticRestoredSourcePath(rawPath, source string) (string, error) {
+	source = filepath.Clean(source)
+	volume := filepath.VolumeName(source)
+	if volume != "" {
+		source = strings.TrimPrefix(source, volume)
+	}
+	source = strings.TrimPrefix(source, string(filepath.Separator))
+	if source == "" || source == "." {
+		return "", fmt.Errorf("%w: restic restore source must not be filesystem root", ErrUnsafePath)
+	}
+	return safeJoin(rawPath, source)
+}
+
+func summarizeRestoredTree(ctx context.Context, root string) (int64, int64, error) {
+	var fileCount int64
+	var totalBytes int64
+	err := filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if filePath == root {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("stat restored entry: %w", err)
+		}
+		if info.Mode().IsRegular() {
+			fileCount++
+			totalBytes += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("summarize restored tree: %w", err)
+	}
+	return fileCount, totalBytes, nil
 }
 
 func installRestoreTarget(partialPath, targetPath string) error {

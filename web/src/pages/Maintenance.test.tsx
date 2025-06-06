@@ -473,6 +473,62 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('restores a restic remote backup from the task list', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue([{
+        ...mockBackupJobs[0],
+        id: 'restic-remote',
+        name: 'Restic 远端备份',
+        type: 'restic',
+        destination: 'rest:http://backup.example/repo',
+        repository: 'rest:http://backup.example/repo',
+        command: '/usr/bin/restic',
+        include_config: true,
+        last_run: undefined,
+        last_successful_run: undefined,
+        last_restore_drill: undefined,
+      }])
+      mockRestoreBackupJob.mockResolvedValueOnce({
+        id: '20260509T040000.000000000Z',
+        job_id: 'restic-remote',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:00Z',
+        finished_at: '2026-05-09T04:00:01Z',
+        duration_ms: 1000,
+        manifest_path: 'rest:http://backup.example/repo',
+        target_path: '/restore/restic',
+        config_restored: false,
+        file_count: 3,
+        verified_bytes: 2048,
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('Restic 远端备份')).toBeTruthy()
+      })
+
+      const restoreButton = screen.getByRole('button', { name: /^恢复$/ }) as HTMLButtonElement
+      expect(restoreButton.disabled).toBe(false)
+      await user.click(restoreButton)
+
+      await waitFor(() => {
+        expect(screen.getByText('恢复备份到目录')).toBeTruthy()
+        expect(screen.queryByText('同时恢复备份中的配置文件')).toBeNull()
+      })
+
+      await user.type(screen.getByLabelText('目标目录'), '/restore/restic')
+      await user.click(screen.getByRole('button', { name: /开始恢复/ }))
+
+      await waitFor(() => {
+        expect(mockRestoreBackupJob).toHaveBeenCalledWith('restic-remote', '/restore/restic', false)
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+          title: '备份已恢复',
+          description: '3 个文件 · 2 KB，目标: /restore/restic',
+        }))
+      })
+    })
+
     it('allows remote restore checks before a local snapshot exists', async () => {
       const user = userEvent.setup()
       const remoteDrill = {

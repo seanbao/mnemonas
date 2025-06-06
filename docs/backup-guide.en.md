@@ -84,7 +84,7 @@ Limits:
 - `local.destination` must be an absolute path outside `storage.root`, otherwise the backup can recurse into itself.
 - The default source is `storage.root`; for production data, prefer a ZFS, Btrfs, or LVM snapshot mount as `source`.
 - Symlinks inside the source directory abort the job so the backup cannot escape the intended source tree.
-- `restic` and `rclone` jobs do not build shell command strings; `command` must be a bare executable name or absolute path, and `extra_args` are appended as argv entries.
+- `restic` and `rclone` jobs do not build shell command strings; `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands as argv entries. Restore commands do not reuse backup-specific extra args.
 - `password_file` and `config_file` must be regular files outside `source` and `storage.root` so backup credentials are not included in the data being backed up.
 - `schedule_interval` is a lightweight in-process scheduler for fixed intervals. For complex windows, bandwidth limits, network wake-up, and multi-stage recovery, continue to use systemd timers or external orchestration.
 
@@ -171,7 +171,7 @@ curl -X POST -b cookies.txt \
 
 For `local`, the restore drill copies the latest snapshot into a temporary directory and verifies every file size and SHA-256 from the manifest. Set `keep_artifact = true` to retain the restored directory for manual inspection. For `restic`, the drill currently runs `restic check`; for `rclone`, it runs `rclone check --one-way` to verify remote consistency.
 
-When you need to retrieve data from a `local` or `rclone` job, restore it into an explicit independent directory:
+When you need to retrieve data from a `local`, `restic`, or `rclone` job, restore it into an explicit independent directory:
 
 ```bash
 curl -X POST -b cookies.txt \
@@ -184,9 +184,15 @@ curl -X POST -b cookies.txt \
   http://localhost:8080/api/v1/maintenance/backups/rclone-cloud/restore \
   -H 'Content-Type: application/json' \
   -d '{"target_path":"/mnt/restore/mnemonas-rclone","include_config":false}'
+
+# restic job example: restore latest + job tag and install source contents at the target root
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/restic-cloud/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
 ```
 
-`target_path` must be an absolute server-side path outside the current `storage.root`, backup source, and any local backup destination. Its parent must exist, and the target must not exist or must be empty. Local restore copies snapshot `data/` contents into the target root and verifies them immediately. With `include_config = true`, the config file is restored to `target_path/.mnemonas-restore/config.toml`. Rclone restore runs `rclone copy <remote> <target>` and `rclone check <remote> <target> --one-way`. Inspect the restored directory first, then stop services and migrate paths or update `storage.root` when you are ready to switch over.
+`target_path` must be an absolute server-side path outside the current `storage.root`, backup source, and any local backup destination or repository. Its parent must exist, and the target must not exist or must be empty. Local restore copies snapshot `data/` contents into the target root and verifies them immediately. With `include_config = true`, the config file is restored to `target_path/.mnemonas-restore/config.toml`. Restic restore runs `restic restore latest --tag mnemonas --tag job:<id> --path <source>` and installs the restored source directory contents at the target root. Rclone restore runs `rclone copy <remote> <target>` and `rclone check <remote> <target> --one-way`. Inspect the restored directory first, then stop services and migrate paths or update `storage.root` when you are ready to switch over.
 
 ## Method 1: rclone
 
@@ -341,6 +347,8 @@ restic restore <snapshot-id> \
   --repo /backup/mnemonas-restic \
   --target /restore/mnemonas
 ```
+
+When restoring a restic job through the Maintenance page or `/api/v1/maintenance/backups/{id}/restore`, MnemoNAS automatically selects the latest snapshot with the `mnemonas` and `job:<id>` tags and moves the restored source contents to the target root, so you do not have to manually move nested paths such as `/restore/.../srv/mnemonas`.
 
 For Docker, replace the systemd commands with `docker compose stop` and `docker compose start`, and ensure restored ownership matches `MNEMONAS_UID` and `MNEMONAS_GID`.
 

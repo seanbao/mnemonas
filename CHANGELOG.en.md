@@ -31,7 +31,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Share-link APIs including public access and password checks.
 - Activity log APIs.
 - Runtime settings APIs, including public-access security self-check.
-- Configured local backup jobs and command-backed restic/rclone remote targets with run-now execution, lightweight scheduling, automatic backup windows, local snapshot retention, job health status, manifest-based local restore drills, safe-directory local snapshot restore, safe-directory rclone restore, remote consistency checks, and webhook events for backup failures/warnings.
+- Configured local backup jobs and command-backed restic/rclone remote targets with run-now execution, lightweight scheduling, automatic backup windows, local snapshot retention, job health status, manifest-based local restore drills, safe-directory local snapshot restore, safe-directory restic/rclone restore, remote consistency checks, and webhook events for backup failures/warnings.
 
 #### Project Tooling
 - GitHub Actions CI/CD for Go, Rust, frontend checks, Docker builds, and release packaging.
