@@ -92,7 +92,7 @@ MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查
 - `local.destination` 必须是 `storage.root` 之外的绝对路径，避免递归把备份写回源目录。
 - 默认来源是 `storage.root`；生产环境更推荐把 `source` 指向 ZFS/Btrfs/LVM 快照挂载目录。
 - 源目录中遇到符号链接会中止任务，避免备份逃逸到源目录之外。
-- `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加。
+- `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。
 - `password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件，避免把备份凭据重新纳入备份数据。
 - `schedule_interval` 是服务内置的轻量调度器，适合固定间隔任务；复杂窗口、限速、网络唤醒和多阶段恢复仍建议配合 systemd timer 或外部编排。
 
@@ -179,7 +179,7 @@ curl -X POST -b cookies.txt \
 
 `local` 恢复演练会把最近一次快照复制到临时目录，然后按 manifest 校验每个文件的大小和 SHA-256。`keep_artifact = true` 会保留临时恢复目录，便于人工抽查。`restic` 恢复演练当前执行 `restic check`；`rclone` 恢复演练当前执行 `rclone check --one-way`，用于验证仓库或远端一致性。
 
-需要真正取回数据时，`local` 和 `rclone` 任务可以恢复到指定的独立目录：
+需要真正取回数据时，`local`、`restic` 和 `rclone` 任务可以恢复到指定的独立目录：
 
 ```bash
 curl -X POST -b cookies.txt \
@@ -192,9 +192,15 @@ curl -X POST -b cookies.txt \
   http://localhost:8080/api/v1/maintenance/backups/rclone-cloud/restore \
   -H 'Content-Type: application/json' \
   -d '{"target_path":"/mnt/restore/mnemonas-rclone","include_config":false}'
+
+# restic 任务示例：恢复 latest + job tag，并把来源目录内容安装到目标根目录
+curl -X POST -b cookies.txt \
+  http://localhost:8080/api/v1/maintenance/backups/restic-cloud/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
 ```
 
-`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和备份目标之外；父目录必须已存在，目标目录不存在或为空。恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验。`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。建议先人工检查该目录，再通过停服务、迁移目录或调整 `storage.root` 完成真正切换。
+`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复会执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复会执行 `rclone copy` 和 `rclone check --one-way`。建议先人工检查该目录，再通过停服务、迁移目录或调整 `storage.root` 完成真正切换。
 
 ### 方法 1：使用 rclone
 
@@ -390,6 +396,8 @@ restic restore <snapshot-id> \
     --repo /backup/mnemonas-restic \
     --target /restore/mnemonas
 ```
+
+通过 MnemoNAS 维护页或 `/api/v1/maintenance/backups/{id}/restore` 恢复 restic 任务时，服务会自动使用 `mnemonas` 与 `job:<id>` tag 选择最近快照，并把 restic 默认生成的原始来源路径整理为目标目录根部，避免手动移动 `/restore/.../srv/mnemonas` 这类嵌套路径。
 
 如果恢复目标是 Docker 的宿主机目录，把上面的服务命令替换为 `docker compose stop` / `docker compose start`，并确认目录所有者与 `.env` 中的 `MNEMONAS_UID` / `MNEMONAS_GID` 一致。
 

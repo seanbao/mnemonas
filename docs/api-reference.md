@@ -2073,7 +2073,7 @@ POST /api/v1/maintenance/backups/{id}/run
 - `type = "restic"`：调用 `command` 指定的 restic 可执行文件，执行 `restic -r <repository> --password-file <password_file> backup <source>`；`verify_after_backup = true` 时执行 `restic check`。
 - `type = "rclone"`：调用 `command` 指定的 rclone 可执行文件，执行 `rclone sync <source> <remote>`；`verify_after_backup = true` 时执行 `rclone check --one-way`。
 
-`restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。
+`restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。
 
 任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`max_snapshots` 和 `max_age`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。`restic` 和 `rclone` 的远端保留策略由外部工具管理。`health_status` 可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。
 
@@ -2092,7 +2092,7 @@ POST /api/v1/maintenance/backups/{id}/restore-drill
 }
 ```
 
-`local` 默认会把快照恢复到临时目录、校验每个文件后删除临时目录；`keep_artifact = true` 会保留临时恢复目录并在响应中返回 `restored_path`。`restic` 当前执行 `restic check`，`rclone` 当前执行 `rclone check --one-way`；这用于验证仓库或远端一致性。需要真正恢复 rclone 数据时使用 `/restore`。
+`local` 默认会把快照恢复到临时目录、校验每个文件后删除临时目录；`keep_artifact = true` 会保留临时恢复目录并在响应中返回 `restored_path`。`restic` 当前执行 `restic check`，`rclone` 当前执行 `rclone check --one-way`；这用于验证仓库或远端一致性。需要真正恢复 restic/rclone 数据时使用 `/restore`。
 
 把支持的备份任务恢复到指定目录：
 
@@ -2108,9 +2108,10 @@ POST /api/v1/maintenance/backups/{id}/restore
 }
 ```
 
-当前显式恢复支持 `type = "local"` 和 `type = "rclone"`。`target_path` 必须是服务器上的绝对路径，并且必须位于 `storage.root`、备份来源和本地备份目标之外；父目录必须已存在，目标目录不存在或为空。该接口不会覆盖当前在线数据目录。
+当前显式恢复支持 `type = "local"`、`type = "restic"` 和 `type = "rclone"`。`target_path` 必须是服务器上的绝对路径，并且必须位于 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空。该接口不会覆盖当前在线数据目录。
 
 - `local`：把最近一次成功快照中的 `data/` 内容复制到 `target_path` 根目录并校验大小和 SHA-256；`include_config = true` 时，备份中的配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。
+- `restic`：执行 `restic restore latest --target <临时目录> --tag mnemonas --tag job:<id> --path <source>`，再把 restic 恢复出的来源目录内容安装到 `target_path` 根目录。`include_config` 对 restic 任务无特殊处理。
 - `rclone`：执行 `rclone copy <remote> <target>` 恢复远端内容，再执行 `rclone check <remote> <target> --one-way` 校验恢复目录。`include_config` 对 rclone 任务无特殊处理。
 
 **错误语义**:

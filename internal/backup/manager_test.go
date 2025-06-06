@@ -434,7 +434,7 @@ func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
 	passwordFile := filepath.Join(tmpDir, "restic.pass")
-	commandPath, logPath := newRecordingCommand(t, 0, "")
+	commandPath, logPath := newRecordingResticCommand(t, source)
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "restic")
 	mustWriteFile(t, passwordFile, "secret")
 
@@ -481,9 +481,24 @@ func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
 		t.Fatalf("unexpected restore drill result: %+v", drill)
 	}
 
+	restoreTarget := filepath.Join(tmpDir, "restic-restore-target")
+	restore, err := manager.RunRestore(context.Background(), "restic-remote", RestoreOptions{
+		TargetPath: restoreTarget,
+	})
+	if err != nil {
+		t.Fatalf("RunRestore() error: %v", err)
+	}
+	if restore.Status != StatusCompleted || restore.TargetPath != restoreTarget || restore.ManifestPath != "rest:http://backup.example/repo" {
+		t.Fatalf("unexpected restore result: %+v", restore)
+	}
+	if restore.FileCount != 1 || restore.VerifiedBytes != int64(len("restic restored")) {
+		t.Fatalf("unexpected restore metrics: %+v", restore)
+	}
+	assertFileContent(t, filepath.Join(restoreTarget, "docs", "note.txt"), "restic restored")
+
 	calls := readCommandCalls(t, logPath)
-	if len(calls) != 3 {
-		t.Fatalf("command call count = %d, want 3: %#v", len(calls), calls)
+	if len(calls) != 4 {
+		t.Fatalf("command call count = %d, want 4: %#v", len(calls), calls)
 	}
 	assertCommandArgs(t, calls[0], []string{
 		"-r", "rest:http://backup.example/repo",
@@ -500,6 +515,16 @@ func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
 		"check",
 	})
 	assertCommandArgs(t, calls[2], calls[1])
+	assertCommandArgs(t, calls[3], []string{
+		"-r", "rest:http://backup.example/repo",
+		"--password-file", passwordFile,
+		"restore", "latest",
+		"--target", restoreTarget + ".restic-" + restore.ID,
+		"--tag", "mnemonas",
+		"--tag", "job:restic-remote",
+		"--path", source,
+		"--exclude", "cache/**",
+	})
 }
 
 func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
@@ -583,7 +608,6 @@ func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
 		"copy", "backup:mnemonas/source", restoreTarget + ".partial-" + restore.ID,
 		"--create-empty-src-dirs",
 		"--exclude", "tmp/**",
-		"--fast-list",
 	})
 	assertCommandArgs(t, calls[4], []string{
 		"--config", configFile,
@@ -763,6 +787,40 @@ func newRecordingCommand(t *testing.T, exitCode int, stderr string) (string, str
 	if exitCode != 0 {
 		script += "exit " + strconv.Itoa(exitCode) + "\n"
 	}
+	if err := os.WriteFile(commandPath, []byte(script), 0700); err != nil {
+		t.Fatalf("WriteFile(command) error: %v", err)
+	}
+	return commandPath, logPath
+}
+
+func newRecordingResticCommand(t *testing.T, source string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	commandPath := filepath.Join(dir, "mnemonas-test-restic")
+	logPath := filepath.Join(dir, "args.log")
+	sourceRel := filepath.Clean(source)
+	if volume := filepath.VolumeName(sourceRel); volume != "" {
+		sourceRel = strings.TrimPrefix(sourceRel, volume)
+	}
+	sourceRel = strings.TrimPrefix(sourceRel, string(filepath.Separator))
+	sourceRel = filepath.ToSlash(sourceRel)
+	restoredDir := sourceRel + "/docs"
+	restoredFile := restoredDir + "/note.txt"
+	script := "#!/bin/sh\n" +
+		"{\n" +
+		"  printf '%s\\n' '__CALL__'\n" +
+		"  for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n" +
+		"} >> " + shellQuote(logPath) + "\n" +
+		"restore_target=''\n" +
+		"prev=''\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$prev\" = '--target' ]; then restore_target=$arg; fi\n" +
+		"  prev=$arg\n" +
+		"done\n" +
+		"if [ -n \"$restore_target\" ]; then\n" +
+		"  mkdir -p \"$restore_target\"/" + shellQuote(restoredDir) + "\n" +
+		"  printf '%s' 'restic restored' > \"$restore_target\"/" + shellQuote(restoredFile) + "\n" +
+		"fi\n"
 	if err := os.WriteFile(commandPath, []byte(script), 0700); err != nil {
 		t.Fatalf("WriteFile(command) error: %v", err)
 	}
