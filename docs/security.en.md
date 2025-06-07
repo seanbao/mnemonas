@@ -32,9 +32,19 @@ Docker default path:
 cat ~/.mnemonas/.mnemonas/initial-password.txt
 ```
 
-## WebDAV Basic Auth
+## WebDAV Authentication
 
 Configure WebDAV in `config.toml`:
+
+```toml
+[webdav]
+enabled = true
+auth_type = "users"
+```
+
+`auth_type = "users"` is recommended for day-to-day mounting. WebDAV clients log in with MnemoNAS usernames and passwords; admins see the global namespace; regular users see their `home_dir` as the mount root; guest users are read-only; user quotas limit WebDAV PUT/COPY writes.
+
+For legacy setups or a separate service credential, use global Basic Auth:
 
 ```toml
 [webdav]
@@ -74,7 +84,7 @@ auth_type = "none"
 host = "127.0.0.1"
 ```
 
-`auth.enabled = false` disables Web UI/API login. `webdav.auth_type = "none"` disables WebDAV Basic Auth. If either is disabled, bind only to loopback. If a non-loopback bind is intentionally protected by an outer firewall, container port binding, or reverse proxy, set `security.allow_unsafe_no_auth = true` explicitly to pass configuration validation.
+`auth.enabled = false` disables Web UI/API login. `webdav.auth_type = "none"` disables WebDAV authentication. If either is disabled, bind only to loopback. If a non-loopback bind is intentionally protected by an outer firewall, container port binding, or reverse proxy, set `security.allow_unsafe_no_auth = true` explicitly to pass configuration validation.
 
 ## Network Binding
 
@@ -96,9 +106,7 @@ host = "0.0.0.0"
 port = 8080
 
 [webdav]
-auth_type = "basic"
-username = "webdav"
-password = "your-password"
+auth_type = "users"
 ```
 
 Firewall example:
@@ -207,7 +215,7 @@ cloudflared tunnel run mnemonas
 
 - [ ] First login completed using server-side `initial-password.txt`.
 - [ ] Administrator password changed.
-- [ ] WebDAV Basic Auth credentials recorded or changed to a strong password.
+- [ ] WebDAV uses `auth_type = "users"`, or global Basic Auth credentials are recorded and changed to a strong password.
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
@@ -231,7 +239,7 @@ curl --connect-timeout 3 http://<domain>:8080/health
 # expected: failed connection or timeout
 
 curl https://<domain>/dav/
-# expected: 401 Unauthorized when WebDAV Basic Auth is enabled
+# expected: 401 Unauthorized when WebDAV authentication is enabled
 ```
 
 Regular maintenance:
@@ -249,9 +257,9 @@ Regular maintenance:
 
 ### Multi-User Boundary
 
-MnemoNAS supports users and roles. Non-admin users are limited by `home_dir` for files, search, favorites, shares, trash, and activity log views.
+MnemoNAS supports users and roles. Non-admin users are limited by `home_dir` for files, search, favorites, shares, trash, and activity log views. Admins can set `quota_bytes`; non-admin Web/API uploads, copies, trash restores, and WebDAV PUT/COPY writes in `webdav.auth_type = "users"` are checked against the current logical size of that user's `home_dir`.
 
-WebDAV Basic Auth is a global service credential and does not carry application-level user identity. Use Web UI/API accounts when per-user isolation is required.
+WebDAV `users` mode carries application user identity and enforces role/`home_dir` boundaries. WebDAV `basic` mode remains a global service credential compatibility mode.
 
 ### Rate Limiting
 
@@ -302,7 +310,7 @@ Five failed password attempts for the same share and client address lock access 
 
 | Status | Capability |
 | --- | --- |
-| Supported | Web UI login, users and roles, user root-directory isolation, WebDAV Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
+| Supported | Web UI login, users and roles, user root-directory isolation, WebDAV user auth/global Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
 | Add through reverse proxy | HTTPS certificate renewal, finer rate limits, public access controls |
 | Planned | OAuth/OIDC integration, finer application-level access policies |
 

@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/seanbao/mnemonas/internal/api"
+	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/storage"
@@ -461,6 +462,33 @@ func TestBuildWebDAVHandler(t *testing.T) {
 	}
 	if handler == nil {
 		t.Fatal("expected handler for normalized prefix")
+	}
+	if closer, ok := handler.(io.Closer); ok {
+		_ = closer.Close()
+	}
+
+	userStore, _, err := auth.NewUserStore(filepath.Join(t.TempDir(), "users.json"))
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	if _, err := userStore.Create("davuser", "password123", "", auth.RoleUser); err != nil {
+		t.Fatalf("Create(davuser) error: %v", err)
+	}
+	prefix, handler = buildWebDAVHandler(nil, api.WebDAVRuntimeConfig{
+		Enabled:   true,
+		Prefix:    "/dav",
+		AuthType:  "users",
+		UserStore: userStore,
+	})
+	if prefix != "/dav" || handler == nil {
+		t.Fatalf("users auth buildWebDAVHandler() = (%q, %#v), want /dav and handler", prefix, handler)
+	}
+	req := httptest.NewRequest("OPTIONS", "/dav/", nil)
+	req.SetBasicAuth("davuser", "password123")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("users auth OPTIONS status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
 	if closer, ok := handler.(io.Closer); ok {
 		_ = closer.Close()

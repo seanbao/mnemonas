@@ -141,7 +141,7 @@ Security boundaries:
 - Web UI/API authentication is JWT-backed and enabled by default; browser sessions store access and refresh tokens in same-origin `HttpOnly` cookies.
 - User roles are `admin`, `user`, and `guest`.
 - Non-admin users are scoped to their configured `home_dir`.
-- WebDAV Basic Auth is a separate global service credential.
+- WebDAV can authenticate MnemoNAS users and apply role/`home_dir` boundaries; the legacy `basic` mode remains a separate global service credential.
 - Share-link password validation uses short-lived HttpOnly cookies.
 - Download and preview flows use short-lived download-session cookies instead of long-lived tokens in URLs.
 

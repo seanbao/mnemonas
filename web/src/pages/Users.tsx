@@ -36,8 +36,10 @@ import {
   HardDrive,
   RefreshCw,
   AlertCircle,
+  Pencil,
+  FolderOpen,
 } from 'lucide-react'
-import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, UsersError, type ListUsersResponse, type User } from '@/api/users'
+import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, updateUser, UsersError, type ListUsersResponse, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -46,9 +48,48 @@ import { StatCard } from '@/components/ui/StatCard'
 
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
 const maxPasswordBytes = 72
+const quotaUnits = [
+  { key: 'B', label: 'B', multiplier: 1 },
+  { key: 'MB', label: 'MB', multiplier: 1024 ** 2 },
+  { key: 'GB', label: 'GB', multiplier: 1024 ** 3 },
+  { key: 'TB', label: 'TB', multiplier: 1024 ** 4 },
+] as const
+
+type QuotaUnit = typeof quotaUnits[number]['key']
 
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
+}
+
+function quotaBytesToFormValue(bytes: number): { value: string; unit: QuotaUnit } {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return { value: '0', unit: 'GB' }
+  }
+
+  for (const unit of [...quotaUnits].reverse()) {
+    const value = bytes / unit.multiplier
+    if (value >= 1 && Number.isInteger(value)) {
+      return { value: String(value), unit: unit.key }
+    }
+  }
+
+  return { value: String(bytes), unit: 'B' }
+}
+
+function quotaFormValueToBytes(value: string, unitKey: QuotaUnit): number | null {
+  const normalized = value.trim()
+  if (!normalized) {
+    return 0
+  }
+
+  const numericValue = Number(normalized)
+  const unit = quotaUnits.find((candidate) => candidate.key === unitKey)
+  if (!unit || !Number.isFinite(numericValue) || numericValue < 0) {
+    return null
+  }
+
+  const bytes = Math.round(numericValue * unit.multiplier)
+  return Number.isSafeInteger(bytes) ? bytes : null
 }
 
 function isMissingUserError(error: unknown): boolean {
@@ -157,6 +198,30 @@ function getUsersActionErrorPresentation(
         color: 'warning',
       }
     }
+
+    if (error.code === 'INVALID_HOME_DIR') {
+      return {
+        title: '主目录无效',
+        description: '主目录必须是站内绝对路径，例如 /alice。',
+        color: 'warning',
+      }
+    }
+
+    if (error.code === 'INVALID_QUOTA') {
+      return {
+        title: '配额无效',
+        description: '配额必须大于或等于 0，0 表示不限额。',
+        color: 'warning',
+      }
+    }
+
+    if (error.code === 'SELF_ROLE_CHANGE') {
+      return {
+        title: '不能修改当前管理员角色',
+        description: '请使用其他管理员账号调整当前账号角色。',
+        color: 'warning',
+      }
+    }
   }
 
   return {
@@ -178,7 +243,7 @@ function getUsersRefreshErrorPresentation(error: unknown): {
 }
 
 function getUsersActionSuccessToast(
-  action: 'create' | 'delete' | 'reset-password' | 'toggle-status',
+  action: 'create' | 'update' | 'delete' | 'reset-password' | 'toggle-status',
   options?: { warning?: boolean; disabled?: boolean }
 ): {
   title: string
@@ -192,6 +257,10 @@ function getUsersActionSuccessToast(
       return options?.warning
         ? { title: '用户已创建，但持久化存在告警', description: warningDescription, color: 'warning' }
         : { title: '用户创建成功', color: 'success' }
+    case 'update':
+      return options?.warning
+        ? { title: '用户已更新，但持久化存在告警', description: warningDescription, color: 'warning' }
+        : { title: '用户已更新', color: 'success' }
     case 'delete':
       return options?.warning
         ? { title: '用户已删除，但持久化存在告警', description: warningDescription, color: 'warning' }
@@ -235,12 +304,14 @@ function RoleBadge({ role }: { role: string }) {
 // User card component
 function UserCard({
   user,
+  onEdit,
   onResetPassword,
   onDelete,
   onToggleStatus,
   isCurrentUser,
 }: {
   user: User
+  onEdit: () => void
   onResetPassword: () => void
   onDelete: () => void
   onToggleStatus: () => void
@@ -294,6 +365,13 @@ function UserCard({
               classNames={{ base: "bg-content1 border border-divider shadow-lg" }}
             >
               <DropdownSection title="操作">
+                <DropdownItem
+                  key="edit"
+                  startContent={<Pencil size={16} />}
+                  onPress={onEdit}
+                >
+                  编辑用户
+                </DropdownItem>
                 <DropdownItem
                   key="toggle-status"
                   startContent={user.disabled ? <UserIcon size={16} /> : <UserX size={16} />}
@@ -358,9 +436,16 @@ function UserCard({
 export function UsersPage() {
   const queryClient = useQueryClient()
   const { isOpen: isCreateOpen, onOpen: onCreateOpen, onClose: onCreateClose } = useDisclosure()
+  const { isOpen: isEditOpen, onOpen: onEditOpen, onClose: onEditClose } = useDisclosure()
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure()
   const { isOpen: isResetOpen, onOpen: onResetOpen, onClose: onResetClose } = useDisclosure()
 
+  const [editTarget, setEditTarget] = useState<User | null>(null)
+  const [editEmail, setEditEmail] = useState('')
+  const [editRole, setEditRole] = useState<User['role']>('user')
+  const [editHomeDir, setEditHomeDir] = useState('')
+  const [editQuotaValue, setEditQuotaValue] = useState('0')
+  const [editQuotaUnit, setEditQuotaUnit] = useState<QuotaUnit>('GB')
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null)
   const [resetTarget, setResetTarget] = useState<User | null>(null)
   const [newUsername, setNewUsername] = useState('')
@@ -408,6 +493,41 @@ export function UsersPage() {
       addToast(getUsersActionErrorPresentation(error, {
         unavailable: '创建用户暂不可用',
         failure: '创建失败',
+      }))
+    },
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ userId, email, role, homeDir, quotaBytes }: {
+      userId: string
+      email: string
+      role: User['role']
+      homeDir: string
+      quotaBytes: number
+    }) => updateUser(userId, {
+      email,
+      role,
+      home_dir: homeDir,
+      quota_bytes: quotaBytes,
+    }),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: usersQueryKey })
+      onEditClose()
+      setEditTarget(null)
+      addToast(getUsersActionSuccessToast('update', { warning: result.warning }))
+    },
+    onError: (error, variables) => {
+      if (isMissingUserError(error)) {
+        syncMissingUserInCache(queryClient, variables.userId)
+        onEditClose()
+        setEditTarget(null)
+        addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
+        return
+      }
+
+      addToast(getUsersActionErrorPresentation(error, {
+        unavailable: '更新用户暂不可用',
+        failure: '更新失败',
       }))
     },
   })
@@ -530,6 +650,45 @@ export function UsersPage() {
       createSession: createSessionRef.current,
     })
   }, [newUsername, newPassword, newEmail, newRole, createMutation])
+
+  const handleOpenEditModal = useCallback((user: User) => {
+    const quota = quotaBytesToFormValue(user.quota_bytes)
+    setEditTarget(user)
+    setEditEmail(user.email ?? '')
+    setEditRole(user.role)
+    setEditHomeDir(user.home_dir)
+    setEditQuotaValue(quota.value)
+    setEditQuotaUnit(quota.unit)
+    onEditOpen()
+  }, [onEditOpen])
+
+  const handleCloseEditModal = useCallback(() => {
+    if (updateMutation.isPending) return
+    onEditClose()
+    setEditTarget(null)
+  }, [onEditClose, updateMutation.isPending])
+
+  const handleUpdateUser = useCallback(() => {
+    if (!editTarget) return
+    const homeDir = editHomeDir.trim()
+    if (!homeDir.startsWith('/')) {
+      addToast({ title: '主目录必须以 / 开头', color: 'warning' })
+      return
+    }
+    const quotaBytes = quotaFormValueToBytes(editQuotaValue, editQuotaUnit)
+    if (quotaBytes == null) {
+      addToast({ title: '配额无效', description: '请输入非负数字，0 表示不限额。', color: 'warning' })
+      return
+    }
+
+    updateMutation.mutate({
+      userId: editTarget.id,
+      email: editEmail.trim(),
+      role: editRole,
+      homeDir,
+      quotaBytes,
+    })
+  }, [editEmail, editHomeDir, editQuotaUnit, editQuotaValue, editRole, editTarget, updateMutation])
 
   const handleDelete = useCallback(() => {
     if (!deleteTarget) return
@@ -686,6 +845,7 @@ export function UsersPage() {
                   key={user.id}
                   user={user}
                   isCurrentUser={user.id === currentUserId}
+                  onEdit={() => handleOpenEditModal(user)}
                   onResetPassword={() => handleOpenResetModal(user)}
                   onDelete={() => handleOpenDeleteModal(user)}
                   onToggleStatus={() => handleToggleStatus(user)}
@@ -814,6 +974,156 @@ export function UsersPage() {
               className="rounded-lg"
             >
               创建
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Edit User Modal */}
+      <Modal
+        isOpen={isEditOpen}
+        onClose={handleCloseEditModal}
+        size="lg"
+        placement="center"
+        classNames={{
+          base: "bg-content1 border border-divider shadow-xl rounded-lg",
+          backdrop: "bg-black/60 backdrop-blur-md",
+          closeButton: "top-4 right-4 text-default-400 hover:text-foreground hover:bg-default-100 rounded-lg",
+        }}
+      >
+        <ModalContent>
+          <ModalHeader className="flex items-center gap-3 px-6 pt-6 pb-2">
+            <div className="w-10 h-10 rounded-lg bg-accent-primary/10 text-accent-primary flex items-center justify-center">
+              <Pencil size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">编辑用户</h3>
+              <p className="text-xs text-default-500 font-normal">{editTarget?.username ?? ''}</p>
+            </div>
+          </ModalHeader>
+          <ModalBody className="px-6 py-4 space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Input
+                type="email"
+                label="邮箱"
+                aria-label="邮箱"
+                placeholder="可留空"
+                value={editEmail}
+                onValueChange={setEditEmail}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                startContent={<Mail size={16} className="text-default-400" />}
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+              <Select
+                label="角色"
+                aria-label="角色"
+                selectedKeys={[editRole]}
+                onSelectionChange={(keys) => {
+                  const value = Array.from(keys)[0] as User['role']
+                  if (value) setEditRole(value)
+                }}
+                isDisabled={editTarget?.id === currentUserId}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                classNames={{
+                  trigger: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                }}
+              >
+                <SelectItem key="admin" startContent={<Shield size={16} />}>
+                  管理员
+                </SelectItem>
+                <SelectItem key="user" startContent={<UserIcon size={16} />}>
+                  普通用户
+                </SelectItem>
+                <SelectItem key="guest" startContent={<UserX size={16} />}>
+                  访客
+                </SelectItem>
+              </Select>
+            </div>
+
+            <Input
+              label="主目录"
+              aria-label="主目录"
+              placeholder="/username"
+              value={editHomeDir}
+              onValueChange={setEditHomeDir}
+              size="lg"
+              variant="bordered"
+              labelPlacement="outside"
+              startContent={<FolderOpen size={16} className="text-default-400" />}
+              classNames={{
+                inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                input: "text-sm placeholder:text-default-400 font-mono",
+              }}
+            />
+
+            <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-3">
+              <Input
+                type="number"
+                min={0}
+                label="容量配额"
+                aria-label="容量配额"
+                placeholder="0 表示不限额"
+                value={editQuotaValue}
+                onValueChange={setEditQuotaValue}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                startContent={<HardDrive size={16} className="text-default-400" />}
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+              <Select
+                label="单位"
+                aria-label="容量配额单位"
+                selectedKeys={[editQuotaUnit]}
+                onSelectionChange={(keys) => {
+                  const value = Array.from(keys)[0] as QuotaUnit
+                  if (value) setEditQuotaUnit(value)
+                }}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                classNames={{
+                  trigger: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                }}
+              >
+                {quotaUnits.map((unit) => (
+                  <SelectItem key={unit.key}>{unit.label}</SelectItem>
+                ))}
+              </Select>
+            </div>
+
+            <div className="rounded-lg border border-divider bg-default-50 px-4 py-3 text-sm text-default-600">
+              当前用量 {formatBytes(editTarget?.used_bytes ?? 0)}
+              {editTarget?.quota_bytes && editTarget.quota_bytes > 0 ? ` / ${formatBytes(editTarget.quota_bytes)}` : '，未设置配额'}
+            </div>
+          </ModalBody>
+          <ModalFooter className="px-6 pb-6 pt-2 gap-2">
+            <Button
+              variant="flat"
+              onPress={handleCloseEditModal}
+              isDisabled={updateMutation.isPending}
+              className="text-default-600 rounded-lg"
+            >
+              取消
+            </Button>
+            <Button
+              color="primary"
+              onPress={handleUpdateUser}
+              isLoading={updateMutation.isPending}
+              isDisabled={!editTarget || !editHomeDir.trim() || quotaFormValueToBytes(editQuotaValue, editQuotaUnit) == null}
+              className="rounded-lg"
+            >
+              保存
             </Button>
           </ModalFooter>
         </ModalContent>

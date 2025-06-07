@@ -419,6 +419,42 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("verify credentials without login mutation", func(t *testing.T) {
+		usersFile := filepath.Join(dir, "users-verify.json")
+		store, _, err := NewUserStore(usersFile)
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		user, err := store.Create("verifyuser", "password123", "verify@example.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		verified, err := store.VerifyCredentials("verifyuser", "password123")
+		if err != nil {
+			t.Fatalf("failed to verify credentials: %v", err)
+		}
+		if verified.ID != user.ID {
+			t.Fatalf("verified user ID = %s, want %s", verified.ID, user.ID)
+		}
+		if verified.LastLoginAt != nil {
+			t.Fatal("VerifyCredentials should not update last_login_at")
+		}
+
+		reloaded, err := store.GetByUsername("verifyuser")
+		if err != nil {
+			t.Fatalf("failed to reload user: %v", err)
+		}
+		if reloaded.LastLoginAt != nil {
+			t.Fatal("VerifyCredentials should not persist last_login_at")
+		}
+
+		if _, err := store.VerifyCredentials("verifyuser", "wrongpassword"); err != ErrInvalidCredentials {
+			t.Fatalf("wrong password error = %v, want %v", err, ErrInvalidCredentials)
+		}
+	})
+
 	t.Run("duplicate username", func(t *testing.T) {
 		store, _, _ := NewUserStore(filepath.Join(dir, "users2.json"))
 		store.Create("duplicate", "password123", "", RoleUser)
@@ -3527,6 +3563,56 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if _, err := store.GetByUsername("../escape"); err == nil {
 			t.Fatal("expected invalid username create to be rejected before persistence")
+		}
+	})
+
+	t.Run("admin update user metadata and quota", func(t *testing.T) {
+		user, err := store.Create("editableuser", "password123", "old@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create editable user: %v", err)
+		}
+
+		body := `{"email":"new@test.com","role":"guest","home_dir":"/guests/editableuser","quota_bytes":1048576}`
+		req := httptest.NewRequest("PUT", "/api/v1/admin/users/"+user.ID, bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleUpdateUser(rec, req, user.ID)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		updated, err := store.GetByID(user.ID)
+		if err != nil {
+			t.Fatalf("GetByID(updated) error: %v", err)
+		}
+		if updated.Email != "new@test.com" || updated.Role != RoleGuest || updated.HomeDir != "/guests/editableuser" || updated.QuotaBytes != 1048576 {
+			t.Fatalf("unexpected updated user: %+v", updated)
+		}
+	})
+
+	t.Run("admin update user rejects negative quota", func(t *testing.T) {
+		user, err := store.Create("negativequota", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create quota user: %v", err)
+		}
+
+		req := httptest.NewRequest("PUT", "/api/v1/admin/users/"+user.ID, bytes.NewBufferString(`{"quota_bytes":-1}`))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleUpdateUser(rec, req, user.ID)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal update error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_QUOTA" {
+			t.Fatalf("expected INVALID_QUOTA error, got %+v", envelope.Error)
 		}
 	})
 

@@ -106,9 +106,9 @@ sudo systemctl status caddy
 # 检查 HTTPS 证书
 curl -I https://nas.example.com/health
 
-# 测试 WebDAV
-WEBDAV_USER="webdav"
-WEBDAV_PASS="your-webdav-password"
+# 测试 WebDAV；auth_type=users 时使用 MnemoNAS 用户名和密码
+WEBDAV_USER="admin"
+WEBDAV_PASS="your-mnemonas-password"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
@@ -400,9 +400,9 @@ ss -tlnp | grep -E '80|443|8080'
 ### WebDAV 问题
 
 ```bash
-# 测试 PROPFIND
-WEBDAV_USER="webdav"
-WEBDAV_PASS="your-webdav-password"
+# 测试 PROPFIND；auth_type=users 时使用 MnemoNAS 用户名和密码
+WEBDAV_USER="admin"
+WEBDAV_PASS="your-mnemonas-password"
 curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
   -v

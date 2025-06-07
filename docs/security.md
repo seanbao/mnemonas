@@ -34,9 +34,19 @@ Docker 默认路径：
 cat ~/.mnemonas/.mnemonas/initial-password.txt
 ```
 
-### WebDAV Basic Auth
+### WebDAV 认证
 
 编辑 `~/.mnemonas/config.toml`：
+
+```toml
+[webdav]
+enabled = true
+auth_type = "users"
+```
+
+推荐使用 `auth_type = "users"`：WebDAV 客户端用 MnemoNAS 用户名和密码登录，管理员访问全局目录，普通用户的挂载根目录映射到自己的 `home_dir`，guest 账号只读，用户配额会限制 WebDAV PUT/COPY 写入。
+
+如需兼容旧配置或单独的服务凭据，可使用全局 Basic Auth：
 
 ```toml
 [webdav]
@@ -79,7 +89,7 @@ auth_type = "none"
 host = "127.0.0.1"  # 仅本地访问
 ```
 
-⚠️ **警告**：`auth.enabled = false` 会关闭 Web UI/API 登录；`webdav.auth_type = "none"` 会关闭 WebDAV Basic Auth。禁用任一认证时必须将 `host` 设为 `127.0.0.1`。如果非 loopback 监听确实由外层防火墙、容器端口绑定或反向代理限制访问范围，必须显式设置 `security.allow_unsafe_no_auth = true` 才能通过配置校验。
+⚠️ **警告**：`auth.enabled = false` 会关闭 Web UI/API 登录；`webdav.auth_type = "none"` 会关闭 WebDAV 认证。禁用任一认证时必须将 `host` 设为 `127.0.0.1`。如果非 loopback 监听确实由外层防火墙、容器端口绑定或反向代理限制访问范围，必须显式设置 `security.allow_unsafe_no_auth = true` 才能通过配置校验。
 
 ---
 
@@ -103,9 +113,7 @@ host = "0.0.0.0"    # 监听所有接口
 port = 8080
 
 [webdav]
-auth_type = "basic"  # 必须启用认证
-username = "webdav"
-password = "your-password"
+auth_type = "users"  # 必须启用认证
 ```
 
 **防火墙配置**：
@@ -225,7 +233,7 @@ cloudflared tunnel run mnemonas
 ### 部署前检查
 
 - [ ] 已通过服务器端 `initial-password.txt` 完成首次 Web UI 登录，并已修改管理员密码
-- [ ] 已记录 WebDAV Basic Auth 凭据，或已设置自定义强密码
+- [ ] WebDAV 使用 `auth_type = "users"`，或已记录全局 Basic Auth 凭据并设置自定义强密码
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
@@ -278,7 +286,8 @@ curl https://<domain>/dav/
 
 - 当前版本已支持多用户与角色（admin/user/guest）
 - 非管理员用户按账号 `home_dir` 限制文件、搜索、收藏、分享、回收站与活动日志范围
-- WebDAV Basic Auth 是全局服务凭据，不携带应用层用户身份；需要按用户隔离时应使用 Web UI/API 账号访问
+- 管理员可为用户设置 `quota_bytes`；非管理员通过 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前用量执行服务端配额限制
+- WebDAV `users` 模式携带应用层用户身份并执行 `home_dir`/角色边界；`basic` 模式是全局服务凭据兼容模式，不携带应用层用户身份
 
 #### 速率限制粒度
 
@@ -325,7 +334,7 @@ location /api/ {
 
 | 状态 | 安全特性 |
 | ---- | -------- |
-| 已支持 | Web UI 登录、多用户与角色、用户根目录隔离、WebDAV Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
+| 已支持 | Web UI 登录、多用户与角色、用户根目录隔离、WebDAV 用户认证/全局 Basic Auth、路径遍历保护、WebDAV 只读模式、公开分享密码验证与失败锁定 |
 | 建议通过反向代理补充 | HTTPS 证书自动续期、按 IP/用户限速、公网访问控制 |
 | 计划中 | OAuth/OIDC 集成、更细粒度的应用层访问策略 |
 
