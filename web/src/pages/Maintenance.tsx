@@ -27,11 +27,15 @@ import {
   listBackupJobs,
   runBackupJob,
   runBackupRestoreDrill,
+  previewBackupRestoreJob,
   restoreBackupJob,
+  verifyBackupRestoreJob,
   type BackupJob,
   type BackupRunResult,
   type BackupRestoreDrillResult,
+  type BackupRestorePreviewResult,
   type BackupRestoreResult,
+  type BackupRestoreVerifyResult,
   type ScrubResult,
   type ScrubError,
 } from '@/api/files'
@@ -236,6 +240,24 @@ function BackupHealthChip({ status }: { status: string }) {
   )
 }
 
+function BackupPolicyChip({ status, staleLabel = '过期' }: { status: string; staleLabel?: string }) {
+  const configs: Record<string, { color: 'success' | 'warning' | 'danger' | 'default'; icon: React.ReactNode; label: string }> = {
+    ok: { color: 'success', icon: <CheckCircle size={14} />, label: '已确认' },
+    due: { color: 'warning', icon: <Clock size={14} />, label: '待验证' },
+    stale: { color: 'warning', icon: <FileWarning size={14} />, label: staleLabel },
+    warning: { color: 'warning', icon: <FileWarning size={14} />, label: '需确认' },
+    failed: { color: 'danger', icon: <XCircle size={14} />, label: '失败' },
+    running: { color: 'warning', icon: <RefreshCw size={14} className="animate-spin" />, label: '运行中' },
+    disabled: { color: 'default', icon: <AlertCircle size={14} />, label: '已停用' },
+  }
+  const config = configs[status] || { color: 'default', icon: <AlertCircle size={14} />, label: status }
+  return (
+    <Chip size="sm" color={config.color} variant="flat" startContent={config.icon}>
+      {config.label}
+    </Chip>
+  )
+}
+
 function formatDateTime(value?: string): string {
   if (!value) {
     return '--'
@@ -282,8 +304,8 @@ function getBackupTriggerLabel(trigger?: string): string {
 }
 
 function getBackupRetentionText(job: BackupJob): string {
-  if (job.type === 'restic' || job.type === 'rclone') {
-    return '远端保留策略由外部工具管理'
+  if ((job.type === 'restic' || job.type === 'rclone') && job.retention_message) {
+    return job.retention_message
   }
   const parts: string[] = []
   if (job.max_snapshots && job.max_snapshots > 0) {
@@ -292,7 +314,7 @@ function getBackupRetentionText(job: BackupJob): string {
   if (job.max_age) {
     parts.push(`最长 ${formatBackupDuration(job.max_age)}`)
   }
-  return parts.length > 0 ? parts.join(' · ') : '未配置自动清理'
+  return parts.length > 0 ? parts.join(' · ') : (job.retention_message || '未配置自动清理')
 }
 
 function getBackupScheduleWindowText(job: BackupJob): string {
@@ -337,6 +359,20 @@ function getBackupRestoreMetricText(result: BackupRestoreResult): string {
   return `${result.file_count} 个文件 · ${formatBytes(result.verified_bytes)}`
 }
 
+function getBackupRestorePreviewMetricText(result: BackupRestorePreviewResult): string {
+  if (result.file_count === 0 && result.total_bytes === 0 && !result.snapshot_path) {
+    return '可恢复内容已确认'
+  }
+  return `预计 ${result.file_count} 个文件 · ${formatBytes(result.total_bytes)}`
+}
+
+function getBackupRestoreVerifyMetricText(result: BackupRestoreVerifyResult): string {
+  if (result.file_count === 0 && result.verified_bytes === 0) {
+    return '目标目录已检查'
+  }
+  return `检查 ${result.file_count} 个文件 · ${formatBytes(result.verified_bytes)}`
+}
+
 function getRestoreTargetDescription(job: BackupJob | null): string {
   if (job?.type === 'restic') {
     return '目标目录必须在 storage.root、备份来源和本地 restic 仓库之外；父目录存在，目标不存在或为空。'
@@ -345,6 +381,107 @@ function getRestoreTargetDescription(job: BackupJob | null): string {
     return '目标目录必须在 storage.root 和备份来源之外；父目录存在，目标不存在或为空。'
   }
   return '目标目录必须在 storage.root、备份来源和备份目标之外；父目录存在，目标不存在或为空。'
+}
+
+function RestoreCheckRow({
+  tone,
+  title,
+  description,
+}: {
+  tone: 'success' | 'warning' | 'default'
+  title: string
+  description: string
+}) {
+  const iconClass = tone === 'success' ? 'text-success' : tone === 'warning' ? 'text-warning' : 'text-default-400'
+  const borderClass = tone === 'success' ? 'border-success/20 bg-success/5' : tone === 'warning' ? 'border-warning/20 bg-warning/10' : 'border-divider bg-content2/60'
+  const Icon = tone === 'success' ? CheckCircle : tone === 'warning' ? AlertCircle : Clock
+
+  return (
+    <div className={`flex items-start gap-3 rounded-lg border p-3 text-sm ${borderClass}`}>
+      <Icon size={16} className={`mt-0.5 shrink-0 ${iconClass}`} />
+      <div className="min-w-0">
+        <div className="font-medium text-default-800">{title}</div>
+        <div className="mt-1 text-default-500">{description}</div>
+      </div>
+    </div>
+  )
+}
+
+function RestoreCutoverChecklist({
+  result,
+  verifyResult,
+  isVerifying,
+}: {
+  result: BackupRestoreResult
+  verifyResult: BackupRestoreVerifyResult | null
+  isVerifying: boolean
+}) {
+  const verifyWarnings = verifyResult?.warnings ?? []
+  const verifyTone = !verifyResult || isVerifying ? 'default' : verifyWarnings.length > 0 ? 'warning' : 'success'
+  const storageTone = !verifyResult || isVerifying ? 'default' : verifyResult.looks_like_storage_root ? 'success' : 'warning'
+  const configTone = result.config_restored ? (verifyResult?.config_found ? 'success' : 'warning') : 'default'
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-success/20 bg-success/10 p-4 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div className="font-medium text-success">恢复已完成</div>
+          <BackupStatusChip status={result.status} />
+        </div>
+        <div className="mt-2 text-default-600">{getBackupRestoreMetricText(result)}</div>
+        <div className="mt-1 truncate font-mono text-xs text-default-500" title={result.target_path}>
+          {result.target_path}
+        </div>
+      </div>
+
+      <div className="grid gap-3">
+        <RestoreCheckRow
+          tone="success"
+          title="恢复目录"
+          description="数据已写入独立目录，当前数据目录未被覆盖。"
+        />
+        <RestoreCheckRow
+          tone={verifyTone}
+          title="只读校验"
+          description={isVerifying ? '正在检查恢复目录。' : verifyResult ? getBackupRestoreVerifyMetricText(verifyResult) : '尚未完成恢复目录检查。'}
+        />
+        <RestoreCheckRow
+          tone={storageTone}
+          title="存储结构"
+          description={
+            verifyResult?.looks_like_storage_root
+              ? '已检测到 files/ 和 .mnemonas/，可作为完整 storage.root 候选目录。'
+              : '未确认完整 storage.root 结构；如果本次只恢复子目录，请按子目录迁移处理。'
+          }
+        />
+        <RestoreCheckRow
+          tone={configTone}
+          title="配置文件"
+          description={
+            result.config_restored
+              ? (verifyResult?.config_found ? `已恢复到 ${verifyResult.config_path}` : '恢复记录包含配置文件，但校验未找到该文件。')
+              : '本次恢复未包含配置文件。'
+          }
+        />
+        <RestoreCheckRow
+          tone={verifyResult && verifyWarnings.length === 0 ? 'success' : 'default'}
+          title="切换准备"
+          description="切换前保留旧目录和旧配置；切换后确认健康检查、登录、文件列表、上传、下载和版本历史。"
+        />
+      </div>
+
+      {verifyWarnings.length > 0 && (
+        <div className="rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+          <div className="font-medium">校验警告</div>
+          <div className="mt-2 space-y-1">
+            {verifyWarnings.map((warning) => (
+              <div key={warning}>{warning}</div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function BackupRunSummary({ result }: { result?: BackupRunResult }) {
@@ -371,10 +508,53 @@ function BackupRunSummary({ result }: { result?: BackupRunResult }) {
   )
 }
 
-function BackupDrillSummary({ result }: { result?: BackupRestoreDrillResult }) {
+function BackupDrillSummary({ job }: { job: BackupJob }) {
+  const result = job.last_restore_drill
   if (!result) {
-    return <span className="text-default-400">尚未演练</span>
+    return (
+      <div className="space-y-1 text-sm">
+        <div className="flex items-center gap-2">
+          <BackupPolicyChip status={job.restore_drill_status} staleLabel="演练过期" />
+        </div>
+        <div className="text-default-500">{job.restore_drill_message || '尚未演练'}</div>
+        {job.restore_drill_stale_after && (
+          <div className="text-default-400">提醒周期: {formatBackupDuration(job.restore_drill_stale_after)}</div>
+        )}
+        {job.last_restore_drill_reminder_at && (
+          <div className="text-default-400">最近提醒: {formatDateTime(job.last_restore_drill_reminder_at)}</div>
+        )}
+      </div>
+    )
   }
+  return (
+    <div className="space-y-1 text-sm">
+      <div className="flex items-center gap-2">
+        <BackupStatusChip status={result.status} />
+        <BackupPolicyChip status={job.restore_drill_status} staleLabel="演练过期" />
+        <span className="text-default-500">{formatDateTime(result.finished_at ?? result.started_at)}</span>
+      </div>
+      <div className="text-default-500">
+        {getBackupRestoreDrillMetricText(result)}
+      </div>
+      {job.restore_drill_message && (
+        <div className={job.restore_drill_status === 'failed' ? 'text-danger' : job.restore_drill_status === 'stale' || job.restore_drill_status === 'due' ? 'text-warning' : 'text-default-400'}>
+          {job.restore_drill_message}
+        </div>
+      )}
+      {job.last_restore_drill_reminder_at && (
+        <div className="text-default-400">最近提醒: {formatDateTime(job.last_restore_drill_reminder_at)}</div>
+      )}
+      {result.error_message && <div className="text-danger">{result.error_message}</div>}
+    </div>
+  )
+}
+
+function BackupRestoreSummary({ job }: { job: BackupJob }) {
+  const result = job.last_restore
+  if (!result) {
+    return <span className="text-default-400">尚未恢复</span>
+  }
+
   return (
     <div className="space-y-1 text-sm">
       <div className="flex items-center gap-2">
@@ -382,8 +562,14 @@ function BackupDrillSummary({ result }: { result?: BackupRestoreDrillResult }) {
         <span className="text-default-500">{formatDateTime(result.finished_at ?? result.started_at)}</span>
       </div>
       <div className="text-default-500">
-        {getBackupRestoreDrillMetricText(result)}
+        {getBackupRestoreMetricText(result)}
       </div>
+      <div className="max-w-[18rem] truncate text-default-400" title={result.target_path}>
+        目标: {result.target_path}
+      </div>
+      {job.restore_history && job.restore_history.length > 1 && (
+        <div className="text-default-400">历史 {job.restore_history.length} 条</div>
+      )}
       {result.error_message && <div className="text-danger">{result.error_message}</div>}
     </div>
   )
@@ -413,12 +599,37 @@ function getBackupConflictDescription(error: unknown, fallback: string): string 
     return '请先在配置文件中启用该任务并重启服务。'
   }
   if (error.message.includes('no completed snapshots')) {
-    return '请先完成一次成功备份，再执行恢复演练。'
+    return '请先完成一次成功备份，再执行恢复或演练。'
   }
   if (error.message.includes('already running')) {
     return '已有备份或恢复演练正在执行，请稍后刷新状态。'
   }
   return fallback
+}
+
+function normalizeRestoreTargetForCompare(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length <= 1) {
+    return trimmed
+  }
+  return trimmed.replace(/\/+$/, '')
+}
+
+function effectiveRestoreIncludeConfig(job: BackupJob | null, includeConfig: boolean): boolean {
+  return job?.type === 'local' && includeConfig
+}
+
+function isCurrentRestorePreview(
+  preview: BackupRestorePreviewResult | null,
+  job: BackupJob | null,
+  targetPath: string,
+  includeConfig: boolean,
+): boolean {
+  if (!preview || !job || preview.job_id !== job.id || preview.status !== 'completed') {
+    return false
+  }
+  return normalizeRestoreTargetForCompare(preview.target_path) === normalizeRestoreTargetForCompare(targetPath)
+    && preview.config_included === effectiveRestoreIncludeConfig(job, includeConfig)
 }
 
 export default function Maintenance() {
@@ -429,6 +640,9 @@ export default function Maintenance() {
   const [restoreJob, setRestoreJob] = useState<BackupJob | null>(null)
   const [restoreTargetPath, setRestoreTargetPath] = useState('')
   const [restoreIncludeConfig, setRestoreIncludeConfig] = useState(false)
+  const [restorePreview, setRestorePreview] = useState<BackupRestorePreviewResult | null>(null)
+  const [restoreResult, setRestoreResult] = useState<BackupRestoreResult | null>(null)
+  const [restoreVerifyResult, setRestoreVerifyResult] = useState<BackupRestoreVerifyResult | null>(null)
   const scrubResultQueryKey = ['scrub-result', user?.id ?? 'anonymous'] as const
   const backupJobsQueryKey = ['backup-jobs', user?.id ?? 'anonymous'] as const
   
@@ -497,15 +711,35 @@ export default function Maintenance() {
     setRestoreJob(job)
     setRestoreTargetPath('')
     setRestoreIncludeConfig(job.type === 'local' && Boolean(job.include_config))
+    setRestorePreview(null)
+    setRestoreResult(null)
+    setRestoreVerifyResult(null)
   }
 
   const closeRestoreModal = () => {
-    if (restoreMutation.isPending) {
+    if (restoreMutation.isPending || restorePreviewMutation.isPending || restoreVerifyMutation.isPending) {
       return
     }
     setRestoreJob(null)
     setRestoreTargetPath('')
     setRestoreIncludeConfig(false)
+    setRestorePreview(null)
+    setRestoreResult(null)
+    setRestoreVerifyResult(null)
+  }
+
+  const handleRestoreTargetPathChange = (value: string) => {
+    setRestoreTargetPath(value)
+    setRestorePreview(null)
+    setRestoreResult(null)
+    setRestoreVerifyResult(null)
+  }
+
+  const handleRestoreIncludeConfigChange = (value: boolean) => {
+    setRestoreIncludeConfig(value)
+    setRestorePreview(null)
+    setRestoreResult(null)
+    setRestoreVerifyResult(null)
   }
   
   // Run scrub mutation
@@ -609,18 +843,71 @@ export default function Maintenance() {
     },
   })
 
+  const restorePreviewMutation = useMutation({
+    mutationFn: (req: { jobId: string; targetPath: string; includeConfig: boolean }) => previewBackupRestoreJob(req.jobId, req.targetPath, req.includeConfig),
+    onSuccess: (result) => {
+      setRestorePreview(result)
+      addToast({
+        title: '恢复预览已生成',
+        description: getBackupRestorePreviewMetricText(result).replace(' · ', '，'),
+        color: 'success',
+      })
+    },
+    onError: (error: unknown) => {
+      setRestorePreview(null)
+      const errorPresentation = getMaintenanceActionErrorPresentation(
+        error,
+        '生成恢复预览失败',
+        '恢复预览暂不可用',
+        '备份管理器当前不可用，请检查配置后重试。',
+      )
+      addToast({
+        title: getBackupConflictTitle(error, errorPresentation.title),
+        description: getBackupConflictDescription(error, errorPresentation.description),
+        color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
+      })
+    },
+  })
+
+  const restoreVerifyMutation = useMutation({
+    mutationFn: (req: { jobId: string; targetPath: string }) => verifyBackupRestoreJob(req.jobId, req.targetPath),
+    onSuccess: (result) => {
+      setRestoreVerifyResult(result)
+      addToast({
+        title: result.warnings && result.warnings.length > 0 ? '恢复目录检查完成，有警告' : '恢复目录检查完成',
+        description: getBackupRestoreVerifyMetricText(result).replace(' · ', '，'),
+        color: result.warnings && result.warnings.length > 0 ? 'warning' : 'success',
+      })
+    },
+    onError: (error: unknown) => {
+      setRestoreVerifyResult(null)
+      const errorPresentation = getMaintenanceActionErrorPresentation(
+        error,
+        '校验恢复目录失败',
+        '恢复校验暂不可用',
+        '备份管理器当前不可用，请检查配置后重试。',
+      )
+      addToast({
+        title: getBackupConflictTitle(error, errorPresentation.title),
+        description: getBackupConflictDescription(error, errorPresentation.description),
+        color: error instanceof ApiError && error.status === 409 ? 'warning' : errorPresentation.color,
+      })
+    },
+  })
+
   const restoreMutation = useMutation({
     mutationFn: (req: { jobId: string; targetPath: string; includeConfig: boolean }) => restoreBackupJob(req.jobId, req.targetPath, req.includeConfig),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: backupJobsQueryKey })
+      setRestoreResult(result)
+      setRestoreVerifyResult(null)
+      setRestoreTargetPath(result.target_path)
       addToast({
         title: '备份已恢复',
         description: `${getBackupRestoreMetricText(result)}，目标: ${result.target_path}`,
         color: 'success',
       })
-      setRestoreJob(null)
-      setRestoreTargetPath('')
-      setRestoreIncludeConfig(false)
+      restoreVerifyMutation.mutate({ jobId: result.job_id, targetPath: result.target_path })
     },
     onError: (error: unknown) => {
       const errorPresentation = getMaintenanceActionErrorPresentation(
@@ -661,6 +948,9 @@ export default function Maintenance() {
   }
   
   const isRunning = scrubResult?.status === 'running' || isAwaitingRunningState
+  const restoreIncludeConfigForRequest = effectiveRestoreIncludeConfig(restoreJob, restoreIncludeConfig)
+  const restorePreviewMatches = isCurrentRestorePreview(restorePreview, restoreJob, restoreTargetPath, restoreIncludeConfig)
+  const restoreActionPending = restoreMutation.isPending || restorePreviewMutation.isPending || restoreVerifyMutation.isPending
   
   return (
     <div className="h-full overflow-auto custom-scrollbar">
@@ -862,6 +1152,7 @@ export default function Maintenance() {
                   <TableColumn>计划与保留</TableColumn>
                   <TableColumn>最近备份</TableColumn>
                   <TableColumn>恢复演练</TableColumn>
+                  <TableColumn>最近恢复</TableColumn>
                   <TableColumn>操作</TableColumn>
                 </TableHeader>
                 <TableBody>
@@ -915,9 +1206,15 @@ export default function Maintenance() {
                                 {getBackupScheduleWindowText(job)}
                               </div>
                             )}
-                            <div className="text-xs text-default-500">
-                              {getBackupRetentionText(job)}
+                            <div className="flex items-center gap-2 text-xs text-default-500">
+                              <BackupPolicyChip status={job.retention_status} />
+                              <span>{getBackupRetentionText(job)}</span>
                             </div>
+                            {job.retention_policy && (
+                              <div className="max-w-[18rem] truncate text-xs text-default-400" title={job.retention_policy}>
+                                策略: {job.retention_policy}
+                              </div>
+                            )}
                             {job.health_message && (
                               <div className={job.health_status === 'failed' ? 'text-xs text-danger' : 'text-xs text-default-400'}>
                                 {job.health_message}
@@ -926,7 +1223,8 @@ export default function Maintenance() {
                           </div>
                         </TableCell>
                         <TableCell><BackupRunSummary result={job.last_run} /></TableCell>
-                        <TableCell><BackupDrillSummary result={job.last_restore_drill} /></TableCell>
+                        <TableCell><BackupDrillSummary job={job} /></TableCell>
+                        <TableCell><BackupRestoreSummary job={job} /></TableCell>
                         <TableCell>
                           <div className="flex flex-wrap gap-2">
                             <Button
@@ -1005,59 +1303,137 @@ export default function Maintenance() {
             </div>
           </ModalHeader>
           <ModalBody>
-            <div className="space-y-4">
-              {restoreJob && (
-                <div className="rounded-lg border border-divider bg-content2/50 p-4 text-sm">
-                  <div className="font-medium">{restoreJob.name}</div>
-                  <div className="mt-1 text-default-500">{restoreJob.id} · {restoreJob.type}</div>
-                  <div className="mt-1 truncate text-default-400" title={restoreJob.destination}>
-                    备份目标: {restoreJob.destination}
-                  </div>
-                </div>
-              )}
-              <Input
-                label="目标目录"
-                placeholder="/mnt/restore/mnemonas"
-                value={restoreTargetPath}
-                onValueChange={setRestoreTargetPath}
-                isDisabled={restoreMutation.isPending}
-                description={getRestoreTargetDescription(restoreJob)}
+            {restoreResult ? (
+              <RestoreCutoverChecklist
+                result={restoreResult}
+                verifyResult={restoreVerifyResult}
+                isVerifying={restoreVerifyMutation.isPending}
               />
-              {restoreJob?.type === 'local' && (
-                <Checkbox
-                  isSelected={restoreIncludeConfig}
-                  onValueChange={setRestoreIncludeConfig}
-                  isDisabled={restoreMutation.isPending}
-                >
-                  同时恢复备份中的配置文件
-                </Checkbox>
-              )}
-              <div className="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
-                <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                <span>恢复不会覆盖当前数据目录。请先恢复到独立目录，人工确认后再切换服务配置或迁移数据。</span>
+            ) : (
+              <div className="space-y-4">
+                {restoreJob && (
+                  <div className="rounded-lg border border-divider bg-content2/50 p-4 text-sm">
+                    <div className="font-medium">{restoreJob.name}</div>
+                    <div className="mt-1 text-default-500">{restoreJob.id} · {restoreJob.type}</div>
+                    <div className="mt-1 truncate text-default-400" title={restoreJob.destination}>
+                      备份目标: {restoreJob.destination}
+                    </div>
+                  </div>
+                )}
+                <Input
+                  label="目标目录"
+                  placeholder="/mnt/restore/mnemonas"
+                  value={restoreTargetPath}
+                  onValueChange={handleRestoreTargetPathChange}
+                  isDisabled={restoreActionPending}
+                  description={getRestoreTargetDescription(restoreJob)}
+                />
+                {restoreJob?.type === 'local' && (
+                  <Checkbox
+                    isSelected={restoreIncludeConfig}
+                    onValueChange={handleRestoreIncludeConfigChange}
+                    isDisabled={restoreActionPending}
+                  >
+                    同时恢复备份中的配置文件
+                  </Checkbox>
+                )}
+                <div className="flex items-start gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+                  <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                  <span>恢复不会覆盖当前数据目录。请先恢复到独立目录，人工确认后再切换服务配置或迁移数据。</span>
+                </div>
+                {restorePreview && (
+                  <div className={restorePreviewMatches ? 'rounded-lg border border-success/20 bg-success/10 p-4 text-sm' : 'rounded-lg border border-default-200 bg-content2/70 p-4 text-sm'}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium">{restorePreviewMatches ? '预览已确认' : '预览已失效'}</div>
+                      <BackupStatusChip status={restorePreview.status} />
+                    </div>
+                    <div className="mt-2 text-default-600">{getBackupRestorePreviewMetricText(restorePreview)}</div>
+                    <div className="mt-1 truncate text-default-500" title={restorePreview.target_path}>
+                      目标: {restorePreview.target_path}
+                    </div>
+                    {restorePreview.config_available && (
+                      <div className="mt-1 text-default-500">
+                        配置文件: {restorePreview.config_included ? '将恢复到 .mnemonas-restore/config.toml' : '本次不恢复'}
+                      </div>
+                    )}
+                    {restorePreview.sample_paths && restorePreview.sample_paths.length > 0 && (
+                      <div className="mt-3 space-y-1">
+                        <div className="text-xs font-medium text-default-500">样例文件</div>
+                        <div className="space-y-1">
+                          {restorePreview.sample_paths.slice(0, 5).map((sample) => (
+                            <div key={sample} className="truncate rounded-md bg-content1 px-2 py-1 font-mono text-xs text-default-600" title={sample}>
+                              {sample}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {!restorePreviewMatches && (
+                      <div className="mt-3 text-xs text-warning">目标目录或配置选项已变更，请重新生成预览。</div>
+                    )}
+                  </div>
+                )}
               </div>
-            </div>
+            )}
           </ModalBody>
           <ModalFooter>
-            <Button variant="light" className="rounded-lg" onPress={closeRestoreModal} isDisabled={restoreMutation.isPending}>
-              取消
-            </Button>
-            <Button
-              color="warning"
-              className="rounded-lg"
-              isLoading={restoreMutation.isPending}
-              isDisabled={!restoreJob || restoreTargetPath.trim() === ''}
-              onPress={() => {
-                if (!restoreJob) return
-                restoreMutation.mutate({
-                  jobId: restoreJob.id,
-                  targetPath: restoreTargetPath.trim(),
-                  includeConfig: restoreIncludeConfig,
-                })
-              }}
-            >
-              开始恢复
-            </Button>
+            {restoreResult ? (
+              <>
+                <Button variant="light" className="rounded-lg" onPress={closeRestoreModal} isDisabled={restoreVerifyMutation.isPending}>
+                  关闭
+                </Button>
+                <Button
+                  color="primary"
+                  className="rounded-lg"
+                  isLoading={restoreVerifyMutation.isPending}
+                  isDisabled={!restoreJob}
+                  onPress={() => {
+                    if (!restoreJob || !restoreResult) return
+                    restoreVerifyMutation.mutate({ jobId: restoreJob.id, targetPath: restoreResult.target_path })
+                  }}
+                >
+                  重新检查
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button variant="light" className="rounded-lg" onPress={closeRestoreModal} isDisabled={restoreActionPending}>
+                  取消
+                </Button>
+                <Button
+                  variant="bordered"
+                  className="rounded-lg"
+                  isLoading={restorePreviewMutation.isPending}
+                  isDisabled={!restoreJob || restoreTargetPath.trim() === '' || restoreMutation.isPending}
+                  onPress={() => {
+                    if (!restoreJob) return
+                    restorePreviewMutation.mutate({
+                      jobId: restoreJob.id,
+                      targetPath: restoreTargetPath.trim(),
+                      includeConfig: restoreIncludeConfigForRequest,
+                    })
+                  }}
+                >
+                  生成预览
+                </Button>
+                <Button
+                  color="warning"
+                  className="rounded-lg"
+                  isLoading={restoreMutation.isPending}
+                  isDisabled={!restoreJob || restoreTargetPath.trim() === '' || !restorePreviewMatches || restorePreviewMutation.isPending}
+                  onPress={() => {
+                    if (!restoreJob) return
+                    restoreMutation.mutate({
+                      jobId: restoreJob.id,
+                      targetPath: restoreTargetPath.trim(),
+                      includeConfig: restoreIncludeConfigForRequest,
+                    })
+                  }}
+                >
+                  开始恢复
+                </Button>
+              </>
+            )}
           </ModalFooter>
         </ModalContent>
       </Modal>

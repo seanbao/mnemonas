@@ -26,9 +26,11 @@ import {
   User,
   Filter,
   AlertCircle,
+  HardDrive,
   Star,
   StarOff,
   MessageSquareText,
+  Database,
 } from 'lucide-react'
 import {
   ApiError,
@@ -66,6 +68,8 @@ function ActionIcon({ action }: { action: ActionType }) {
     trash_restore: RotateCcw,
     trash_delete: Trash2,
     trash_empty: Trash2,
+    disk_health: HardDrive,
+    scrub: Database,
   }
 
   const Icon = icons[action] || Activity
@@ -126,7 +130,7 @@ const ALL_ACTIONS: ActionType[] = [
   'upload', 'download', 'delete', 'rename', 'move', 'copy',
   'create', 'restore', 'share', 'unshare', 'login', 'logout',
   'favorite', 'unfavorite', 'favorite_note_update',
-  'trash_restore', 'trash_delete', 'trash_empty',
+  'trash_restore', 'trash_delete', 'trash_empty', 'disk_health',
 ]
 
 function getActivityErrorState(error: unknown): 'unavailable' | null {

@@ -35,6 +35,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/auth"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/diskhealth"
 	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/requestip"
@@ -110,22 +111,59 @@ func testDataplaneAddr() string {
 }
 
 type fakeAlertMonitor struct {
+	mu          sync.Mutex
 	updateCount int
 	lastConfig  alerts.Config
 	lastStats   *alerts.StorageStats
+	events      []alerts.EventPayload
 }
 
 func (m *fakeAlertMonitor) UpdateConfig(cfg alerts.Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.updateCount++
 	m.lastConfig = cfg
 }
 
 func (m *fakeAlertMonitor) LastStats() *alerts.StorageStats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.lastStats == nil {
 		return nil
 	}
 	clone := *m.lastStats
 	return &clone
+}
+
+func (m *fakeAlertMonitor) SendEvent(_ context.Context, event alerts.EventPayload) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, event)
+	return nil
+}
+
+func waitForFakeAlertEvent(t *testing.T, monitor *fakeAlertMonitor, eventType string) alerts.EventPayload {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		monitor.mu.Lock()
+		for _, event := range monitor.events {
+			if event.Type == eventType {
+				monitor.mu.Unlock()
+				return event
+			}
+		}
+		monitor.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for alert event %q", eventType)
+	return alerts.EventPayload{}
+}
+
+func fakeAlertEventCount(monitor *fakeAlertMonitor) int {
+	monitor.mu.Lock()
+	defer monitor.mu.Unlock()
+	return len(monitor.events)
 }
 
 type fakeRetentionMonitor struct {
@@ -136,6 +174,44 @@ type fakeRetentionMonitor struct {
 func (m *fakeRetentionMonitor) UpdateConfig(cfg storage.RetentionMonitorConfig) {
 	m.updateCount++
 	m.lastConfig = cfg
+}
+
+type fakeDiskHealthMonitor struct {
+	updateCount int
+	lastConfig  diskhealth.Config
+	report      *diskhealth.Report
+	checkErr    error
+	recorder    diskhealth.Recorder
+}
+
+func (m *fakeDiskHealthMonitor) Check(context.Context) (*diskhealth.Report, error) {
+	if m.checkErr != nil {
+		return nil, m.checkErr
+	}
+	return cloneDiskHealthReport(m.report), nil
+}
+
+func (m *fakeDiskHealthMonitor) LastReport() *diskhealth.Report {
+	return cloneDiskHealthReport(m.report)
+}
+
+func (m *fakeDiskHealthMonitor) UpdateConfig(cfg diskhealth.Config) {
+	m.updateCount++
+	m.lastConfig = cfg
+}
+
+func (m *fakeDiskHealthMonitor) SetActivityRecorder(recorder diskhealth.Recorder) {
+	m.recorder = recorder
+}
+
+func cloneDiskHealthReport(report *diskhealth.Report) *diskhealth.Report {
+	if report == nil {
+		return nil
+	}
+	clone := *report
+	clone.Devices = append([]diskhealth.DeviceStatus(nil), report.Devices...)
+	clone.Warnings = append([]string(nil), report.Warnings...)
+	return &clone
 }
 
 type fakeWebDAVUpdater struct {
@@ -3201,6 +3277,48 @@ func TestServer_Login_DoesNotTrustSpoofedForwardedHeadersFromUntrustedRemote(t *
 	}
 }
 
+func TestServer_LoginRateLimitSendsThrottledAlertEvent(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := fmt.Sprintf(`{"username":"%s","password":"wrong-password"}`, username)
+	for attempt := 1; attempt <= 5; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		req.RemoteAddr = "203.0.113.10:4123"
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		if attempt < 5 && w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, w.Code, http.StatusUnauthorized)
+		}
+		if attempt == 5 && w.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, w.Code, http.StatusTooManyRequests)
+		}
+	}
+
+	event := waitForFakeAlertEvent(t, monitor, "login_rate_limited")
+	if event.Level != alerts.AlertLevelWarning {
+		t.Fatalf("login alert level = %q, want warning", event.Level)
+	}
+	if event.Details["username"] != username || event.Details["client_ip"] != "203.0.113.10" {
+		t.Fatalf("unexpected login alert details: %+v", event.Details)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+	req.RemoteAddr = "203.0.113.10:4123"
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("post-lock status = %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := fakeAlertEventCount(monitor); got != 1 {
+		t.Fatalf("expected login rate-limit alert to be throttled, got %d events", got)
+	}
+}
+
 func TestServer_Login_AddsAuditWarningHeaderWhenActivityLogSaveFails(t *testing.T) {
 	server, _, tmpDir, username, password := setupAuthServer(t)
 	if server.activity == nil {
@@ -5126,6 +5244,14 @@ func TestServer_Diagnostics_IncludesSanitizedAlertsStatus(t *testing.T) {
 	cfg.Alerts.WebhookURL = "https://hooks.example.com/storage"
 	cfg.Alerts.WebhookMethod = "GET"
 	cfg.Alerts.WebhookHeaders = []string{"Authorization: Bearer token"}
+	cfg.Alerts.TelegramEnabled = true
+	cfg.Alerts.TelegramBotToken = "123456:secret-token"
+	cfg.Alerts.TelegramChatID = "-1001234567890"
+	cfg.Alerts.EmailEnabled = true
+	cfg.Alerts.SMTPHost = "smtp.example.com"
+	cfg.Alerts.SMTPFrom = "alerts@example.com"
+	cfg.Alerts.SMTPTo = []string{"admin@example.com"}
+	cfg.Alerts.SMTPPassword = "secret"
 	server.storeConfig(cfg)
 	server.alertMonitor = &fakeAlertMonitor{lastStats: &alerts.StorageStats{
 		Level:     alerts.AlertLevelWarning,
@@ -5159,6 +5285,12 @@ func TestServer_Diagnostics_IncludesSanitizedAlertsStatus(t *testing.T) {
 	if webhookConfigured, ok := payload.Data.Alerts["webhook_configured"].(bool); !ok || !webhookConfigured {
 		t.Fatalf("alerts.webhook_configured = %v, want true", payload.Data.Alerts["webhook_configured"])
 	}
+	if telegramConfigured, ok := payload.Data.Alerts["telegram_configured"].(bool); !ok || !telegramConfigured {
+		t.Fatalf("alerts.telegram_configured = %v, want true", payload.Data.Alerts["telegram_configured"])
+	}
+	if emailConfigured, ok := payload.Data.Alerts["email_configured"].(bool); !ok || !emailConfigured {
+		t.Fatalf("alerts.email_configured = %v, want true", payload.Data.Alerts["email_configured"])
+	}
 	if got, ok := payload.Data.Alerts["webhook_method"].(string); !ok || got != "GET" {
 		t.Fatalf("alerts.webhook_method = %v, want GET", payload.Data.Alerts["webhook_method"])
 	}
@@ -5176,6 +5308,345 @@ func TestServer_Diagnostics_IncludesSanitizedAlertsStatus(t *testing.T) {
 	}
 	if _, ok := payload.Data.Alerts["webhook_headers"]; ok {
 		t.Fatalf("alerts diagnostics must not expose webhook_headers")
+	}
+	if _, ok := payload.Data.Alerts["telegram_bot_token"]; ok {
+		t.Fatalf("alerts diagnostics must not expose telegram_bot_token")
+	}
+	if _, ok := payload.Data.Alerts["smtp_password"]; ok {
+		t.Fatalf("alerts diagnostics must not expose smtp_password")
+	}
+}
+
+func TestServer_Diagnostics_IncludesDiskHealthSummary(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	cfg := server.currentConfig()
+	cfg.DiskHealth.Enabled = true
+	cfg.DiskHealth.CheckInterval = 30 * time.Minute
+	cfg.DiskHealth.ProbeTimeout = 10 * time.Second
+	cfg.DiskHealth.CooldownPeriod = 2 * time.Hour
+	cfg.DiskHealth.TemperatureWarningC = 48
+	cfg.DiskHealth.TemperatureCriticalC = 58
+	cfg.DiskHealth.Devices = []config.DiskHealthDeviceConfig{{Path: "/dev/disk/by-id/test"}}
+	server.storeConfig(cfg)
+	server.diskHealth = &fakeDiskHealthMonitor{report: &diskhealth.Report{
+		Enabled:   true,
+		Status:    diskhealth.StatusWarning,
+		CheckedAt: time.Date(2026, 5, 13, 8, 30, 0, 0, time.UTC),
+		Devices: []diskhealth.DeviceStatus{{
+			Path:    "/dev/disk/by-id/test",
+			Status:  diskhealth.StatusWarning,
+			Message: "temperature high",
+		}},
+		Warnings: []string{"data: temperature high"},
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			DiskHealth map[string]any `json:"disk_health"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if enabled, ok := payload.Data.DiskHealth["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("disk_health.enabled = %v, want true", payload.Data.DiskHealth["enabled"])
+	}
+	if got, ok := payload.Data.DiskHealth["last_status"].(string); !ok || got != "warning" {
+		t.Fatalf("disk_health.last_status = %v, want warning", payload.Data.DiskHealth["last_status"])
+	}
+	if got, ok := payload.Data.DiskHealth["last_checked_at"].(string); !ok || got != "2026-05-13T08:30:00Z" {
+		t.Fatalf("disk_health.last_checked_at = %v, want timestamp", payload.Data.DiskHealth["last_checked_at"])
+	}
+	if got, ok := payload.Data.DiskHealth["last_warning_devices"].(float64); !ok || got != 1 {
+		t.Fatalf("disk_health.last_warning_devices = %v, want 1", payload.Data.DiskHealth["last_warning_devices"])
+	}
+	if _, ok := payload.Data.DiskHealth["devices"]; ok {
+		t.Fatalf("disk health diagnostics must not expose device details")
+	}
+}
+
+func TestServer_Diagnostics_IncludesMaintenanceScrubSchedule(t *testing.T) {
+	tmpDir := t.TempDir()
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		Config:          settings,
+		MaintenanceRoot: path.Join(tmpDir, "maintenance"),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	cfg := server.currentConfig()
+	cfg.Maintenance.Scrub.Enabled = true
+	cfg.Maintenance.Scrub.ScheduleInterval = 12 * time.Hour
+	cfg.Maintenance.Scrub.RetryInterval = 30 * time.Minute
+	cfg.Maintenance.Scrub.MaxRetries = 2
+	server.storeConfig(cfg)
+
+	failed := &maintenance.ScrubResult{
+		ID:           "scrub-failed",
+		StartTime:    time.Date(2026, 5, 13, 8, 0, 0, 0, time.UTC),
+		EndTime:      time.Date(2026, 5, 13, 8, 5, 0, 0, time.UTC),
+		Status:       "failed",
+		ErrorMessage: scrubFailurePublicMessage,
+	}
+	if err := server.maintenance.SaveScrubResult(failed); err != nil {
+		t.Fatalf("SaveScrubResult() error: %v", err)
+	}
+	server.recordScheduledScrubOutcome(scrubTriggerRetry, failed)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Maintenance map[string]any `json:"maintenance"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if ready, ok := payload.Data.Maintenance["history_ready"].(bool); !ok || !ready {
+		t.Fatalf("maintenance.history_ready = %v, want true", payload.Data.Maintenance["history_ready"])
+	}
+	if enabled, ok := payload.Data.Maintenance["scrub_schedule_enabled"].(bool); !ok || !enabled {
+		t.Fatalf("maintenance.scrub_schedule_enabled = %v, want true", payload.Data.Maintenance["scrub_schedule_enabled"])
+	}
+	if got, ok := payload.Data.Maintenance["scrub_schedule_interval"].(string); !ok || got != "12h0m0s" {
+		t.Fatalf("maintenance.scrub_schedule_interval = %v, want 12h0m0s", payload.Data.Maintenance["scrub_schedule_interval"])
+	}
+	if got, ok := payload.Data.Maintenance["scrub_retry_interval"].(string); !ok || got != "30m0s" {
+		t.Fatalf("maintenance.scrub_retry_interval = %v, want 30m0s", payload.Data.Maintenance["scrub_retry_interval"])
+	}
+	if got, ok := payload.Data.Maintenance["scrub_max_retries"].(float64); !ok || got != 2 {
+		t.Fatalf("maintenance.scrub_max_retries = %v, want 2", payload.Data.Maintenance["scrub_max_retries"])
+	}
+	if got, ok := payload.Data.Maintenance["last_scrub_status"].(string); !ok || got != "failed" {
+		t.Fatalf("maintenance.last_scrub_status = %v, want failed", payload.Data.Maintenance["last_scrub_status"])
+	}
+	if got, ok := payload.Data.Maintenance["last_scrub_at"].(string); !ok || got != "2026-05-13T08:05:00Z" {
+		t.Fatalf("maintenance.last_scrub_at = %v, want timestamp", payload.Data.Maintenance["last_scrub_at"])
+	}
+	if got, ok := payload.Data.Maintenance["scrub_failure_retries"].(float64); !ok || got != 1 {
+		t.Fatalf("maintenance.scrub_failure_retries = %v, want 1", payload.Data.Maintenance["scrub_failure_retries"])
+	}
+}
+
+func TestServer_Diagnostics_IncludesSMBPreviewSummary(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	cfg := server.currentConfig()
+	cfg.SMB.Enabled = true
+	cfg.SMB.Listen = "127.0.0.1:1445"
+	cfg.SMB.ServerName = "mnemonas"
+	cfg.SMB.SigningRequired = true
+	cfg.SMB.EncryptionRequired = true
+	cfg.SMB.Shares = []config.SMBShareConfig{{
+		Name:         "homes",
+		Path:         "/",
+		AllowedRoles: []string{"admin", "user"},
+	}}
+	server.storeConfig(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			System map[string]any `json:"system"`
+			SMB    map[string]any `json:"smb"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if ready, ok := payload.Data.System["smb_runtime_ready"].(bool); !ok || ready {
+		t.Fatalf("system.smb_runtime_ready = %v, want false", payload.Data.System["smb_runtime_ready"])
+	}
+	if enabled, ok := payload.Data.SMB["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("smb.enabled = %v, want true", payload.Data.SMB["enabled"])
+	}
+	if runtimeAvailable, ok := payload.Data.SMB["runtime_available"].(bool); !ok || runtimeAvailable {
+		t.Fatalf("smb.runtime_available = %v, want false", payload.Data.SMB["runtime_available"])
+	}
+	if got, ok := payload.Data.SMB["implementation"].(string); !ok || got != "planned_sidecar" {
+		t.Fatalf("smb.implementation = %v, want planned_sidecar", payload.Data.SMB["implementation"])
+	}
+	if got, ok := payload.Data.SMB["share_count"].(float64); !ok || got != 1 {
+		t.Fatalf("smb.share_count = %v, want 1", payload.Data.SMB["share_count"])
+	}
+	if got, ok := payload.Data.SMB["server_name"].(string); !ok || got != "mnemonas" {
+		t.Fatalf("smb.server_name = %v, want mnemonas", payload.Data.SMB["server_name"])
+	}
+	if got, ok := payload.Data.SMB["message"].(string); !ok || !strings.Contains(got, "not implemented") {
+		t.Fatalf("smb.message = %v, want implementation warning", payload.Data.SMB["message"])
+	}
+}
+
+func TestDiskHealthActivityDetails_SummarizesProblemDevices(t *testing.T) {
+	temp := 61
+	report := &diskhealth.Report{
+		Status:    diskhealth.StatusCritical,
+		Message:   "one or more disks require immediate attention",
+		CheckedAt: time.Date(2026, 5, 13, 8, 30, 0, 0, time.UTC),
+		Devices: []diskhealth.DeviceStatus{
+			{
+				Name:         "data",
+				Path:         "/dev/disk/by-id/data",
+				Status:       diskhealth.StatusCritical,
+				Message:      "temperature 61 C reached critical threshold 60 C",
+				TemperatureC: &temp,
+			},
+			{
+				Name:    "backup",
+				Path:    "/dev/disk/by-id/backup",
+				Status:  diskhealth.StatusWarning,
+				Message: "SMART self-assessment is unavailable",
+			},
+			{
+				Name:   "archive",
+				Path:   "/dev/disk/by-id/archive",
+				Status: diskhealth.StatusOK,
+			},
+		},
+		Warnings: []string{"data: temperature high", "backup: SMART unavailable"},
+	}
+
+	details := diskHealthActivityDetails(report)
+
+	if details["status"] != diskhealth.StatusCritical {
+		t.Fatalf("status detail = %q, want %q", details["status"], diskhealth.StatusCritical)
+	}
+	if details["checked_at"] != "2026-05-13T08:30:00Z" {
+		t.Fatalf("checked_at detail = %q, want timestamp", details["checked_at"])
+	}
+	if details["device_count"] != "3" || details["warning_count"] != "2" {
+		t.Fatalf("unexpected count details: %+v", details)
+	}
+	if details["critical_devices"] != "data" || details["warning_devices"] != "backup" {
+		t.Fatalf("unexpected device group details: %+v", details)
+	}
+	if details["device"] != "data" || details["device_status"] != diskhealth.StatusCritical || details["temperature_c"] != "61" {
+		t.Fatalf("unexpected first problem device details: %+v", details)
+	}
+	if _, ok := details["serial"]; ok {
+		t.Fatalf("disk health activity details must not expose serials")
+	}
+}
+
+func TestServer_ConfiguresDiskHealthActivityRecorder(t *testing.T) {
+	monitor := &fakeDiskHealthMonitor{}
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		ActivityRoot: path.Join(t.TempDir(), "activity"),
+		DiskHealth:   monitor,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+	if monitor.recorder == nil {
+		t.Fatal("expected disk health activity recorder to be configured")
+	}
+
+	err = monitor.recorder(context.Background(), &diskhealth.Report{
+		Status:    diskhealth.StatusUnavailable,
+		Message:   "disk health status is unavailable",
+		CheckedAt: time.Date(2026, 5, 13, 8, 30, 0, 0, time.UTC),
+		Devices: []diskhealth.DeviceStatus{{
+			Name:    "usb-backup",
+			Path:    "/dev/disk/by-id/usb-backup",
+			Status:  diskhealth.StatusUnavailable,
+			Message: "smart probe returned no JSON",
+		}},
+		Warnings: []string{"usb-backup: smart probe returned no JSON"},
+	})
+	if err != nil {
+		t.Fatalf("disk health recorder error: %v", err)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionDiskHealth, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("disk health activity total=%d len=%d, want 1", total, len(entries))
+	}
+	entry := entries[0]
+	if entry.Action != activity.ActionDiskHealth || entry.User != diskHealthActivityUser || entry.Path != diskHealthActivityPath {
+		t.Fatalf("unexpected disk health activity entry: %+v", entry)
+	}
+	if entry.Details["status"] != diskhealth.StatusUnavailable || entry.Details["device"] != "usb-backup" {
+		t.Fatalf("unexpected disk health activity details: %+v", entry.Details)
+	}
+}
+
+func TestServer_DiskHealth_ReturnsReport(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.diskHealth = &fakeDiskHealthMonitor{report: &diskhealth.Report{
+		Enabled:   true,
+		Status:    diskhealth.StatusOK,
+		CheckedAt: time.Date(2026, 5, 13, 9, 0, 0, 0, time.UTC),
+		Devices: []diskhealth.DeviceStatus{{
+			Name:           "data",
+			Path:           "/dev/disk/by-id/test",
+			Present:        true,
+			SMARTAvailable: true,
+			Status:         diskhealth.StatusOK,
+		}},
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance/disk-health", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("disk health status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var payload struct {
+		Success bool              `json:"success"`
+		Data    diskhealth.Report `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse disk health response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatal("expected disk health response success=true")
+	}
+	if payload.Data.Status != diskhealth.StatusOK {
+		t.Fatalf("disk health status = %q, want ok", payload.Data.Status)
+	}
+	if len(payload.Data.Devices) != 1 || payload.Data.Devices[0].Name != "data" {
+		t.Fatalf("unexpected disk health devices: %+v", payload.Data.Devices)
+	}
+}
+
+func TestServer_DiskHealthUnavailableWhenMonitorMissing(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.diskHealth = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance/disk-health", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disk health status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -8468,6 +8939,8 @@ func TestServer_Scrub_RejectsInvalidHashFilterBeforeDataplane(t *testing.T) {
 
 func TestServer_Scrub_SaveCompletedResultFailureReturnsWarning(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
 	maintRoot := filepath.Join(tmpDir, "maintenance")
 	maint, err := maintenance.NewHistoryStore(maintRoot)
 	if err != nil {
@@ -8523,6 +8996,12 @@ func TestServer_Scrub_SaveCompletedResultFailureReturnsWarning(t *testing.T) {
 	}
 	if warning, ok := payload.Data["warning"].(bool); !ok || !warning {
 		t.Fatalf("expected warning flag in response data, got %+v", payload.Data)
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("expected one scrub alert event, got %d", len(monitor.events))
+	}
+	if event := monitor.events[0]; event.Type != scrubNotificationType || event.Level != alerts.AlertLevelWarning {
+		t.Fatalf("scrub alert event = %s/%s, want %s/warning", event.Type, event.Level, scrubNotificationType)
 	}
 
 	result := server.maintenance.GetLastScrubResult()
@@ -8605,6 +9084,162 @@ func TestServer_Scrub_StartPersistenceWarningStillRuns(t *testing.T) {
 	result := server.maintenance.GetLastScrubResult()
 	if result == nil || result.Status != "completed" {
 		t.Fatalf("expected completed scrub result after start warning, got %#v", result)
+	}
+}
+
+func TestServer_Scrub_LogsCompletionActivity(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("scrub status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionScrub, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one scrub activity entry, got total=%d len=%d", total, len(entries))
+	}
+	entry := entries[0]
+	if entry.Path != scrubActivityPath {
+		t.Fatalf("scrub activity path = %q, want %q", entry.Path, scrubActivityPath)
+	}
+	if got := entry.Details["status"]; got != "completed" {
+		t.Fatalf("scrub activity status = %q, want completed", got)
+	}
+	if got := entry.Details["total_objects"]; got == "" {
+		t.Fatalf("expected scrub activity total_objects detail, got %+v", entry.Details)
+	}
+}
+
+func TestServer_ScrubSchedulerDueAndRetryPolicy(t *testing.T) {
+	tmpDir := t.TempDir()
+	maint, err := maintenance.NewHistoryStore(path.Join(tmpDir, "maintenance"))
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+	server := &Server{maintenance: maint}
+	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	cfg := config.ScrubMaintenanceConfig{
+		Enabled:          true,
+		ScheduleInterval: 24 * time.Hour,
+		RetryInterval:    time.Hour,
+		MaxRetries:       1,
+	}
+
+	if trigger, due := server.nextScheduledScrubTrigger(cfg, now); !due || trigger != scrubTriggerScheduled {
+		t.Fatalf("empty scrub history trigger = %q due=%v, want scheduled due", trigger, due)
+	}
+
+	if err := maint.SaveScrubResult(&maintenance.ScrubResult{
+		ID:        "recent",
+		StartTime: now.Add(-30 * time.Minute),
+		EndTime:   now.Add(-25 * time.Minute),
+		Status:    "completed",
+	}); err != nil {
+		t.Fatalf("SaveScrubResult(recent) error: %v", err)
+	}
+	if trigger, due := server.nextScheduledScrubTrigger(cfg, now); due {
+		t.Fatalf("recent completed scrub trigger = %q due=%v, want not due", trigger, due)
+	}
+
+	failed := &maintenance.ScrubResult{
+		ID:           "failed",
+		StartTime:    now.Add(-2 * time.Hour),
+		EndTime:      now.Add(-90 * time.Minute),
+		Status:       "failed",
+		ErrorMessage: scrubFailurePublicMessage,
+	}
+	if err := maint.SaveScrubResult(failed); err != nil {
+		t.Fatalf("SaveScrubResult(failed) error: %v", err)
+	}
+	if trigger, due := server.nextScheduledScrubTrigger(cfg, now); !due || trigger != scrubTriggerRetry {
+		t.Fatalf("failed scrub retry trigger = %q due=%v, want retry due", trigger, due)
+	}
+
+	server.recordScheduledScrubOutcome(scrubTriggerRetry, failed)
+	if trigger, due := server.nextScheduledScrubTrigger(cfg, now); due {
+		t.Fatalf("retry-exhausted scrub trigger = %q due=%v, want not due", trigger, due)
+	}
+
+	if trigger, due := server.nextScheduledScrubTrigger(cfg, now.Add(25*time.Hour)); !due || trigger != scrubTriggerScheduled {
+		t.Fatalf("regular interval after failed scrub trigger = %q due=%v, want scheduled due", trigger, due)
+	}
+}
+
+func TestServer_RunScheduledScrubRecordsPreflightFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	maint, err := maintenance.NewHistoryStore(path.Join(tmpDir, "maintenance"))
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+	monitor := &fakeAlertMonitor{}
+	server := &Server{
+		logger:       zerolog.Nop(),
+		maintenance:  maint,
+		alertMonitor: monitor,
+	}
+	now := time.Now().UTC()
+	cfg := config.ScrubMaintenanceConfig{
+		Enabled:          true,
+		ScheduleInterval: 24 * time.Hour,
+		RetryInterval:    time.Hour,
+		MaxRetries:       1,
+	}
+
+	if ran := server.runScheduledScrubIfDue(context.Background(), cfg, now); !ran {
+		t.Fatal("expected scheduled scrub to run when no history exists")
+	}
+	result := maint.GetLastScrubResult()
+	if result == nil || result.Status != "failed" {
+		t.Fatalf("expected dataplane preflight failure to be recorded, got %#v", result)
+	}
+	if result.ErrorMessage != scrubFailurePublicMessage {
+		t.Fatalf("scrub failure message = %q, want public message", result.ErrorMessage)
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("expected one scrub alert event, got %d", len(monitor.events))
+	}
+	if event := monitor.events[0]; event.Type != scrubNotificationType || event.Level != alerts.AlertLevelCritical {
+		t.Fatalf("scrub alert event = %s/%s, want %s/critical", event.Type, event.Level, scrubNotificationType)
+	}
+
+	if ran := server.runScheduledScrubIfDue(context.Background(), cfg, now.Add(30*time.Minute)); ran {
+		t.Fatal("expected scheduled scrub to wait for retry interval after preflight failure")
+	}
+	if trigger, due := server.nextScheduledScrubTrigger(cfg, now.Add(2*time.Hour)); !due || trigger != scrubTriggerRetry {
+		t.Fatalf("post-preflight retry trigger = %q due=%v, want retry due", trigger, due)
+	}
+}
+
+func TestScrubCompletedAlertEvent_MarksCorruptionCritical(t *testing.T) {
+	event, ok := scrubCompletedAlertEvent(&maintenance.ScrubResult{ID: "scrub-1"}, &dataplane.ScrubResult{
+		TotalObjects:     3,
+		ValidObjects:     2,
+		CorruptedObjects: 1,
+		Errors: []dataplane.ScrubError{{
+			Hash:      strings.Repeat("a", 64),
+			ErrorType: "corrupted",
+			Message:   "internal checksum mismatch",
+		}},
+	}, false)
+	if !ok {
+		t.Fatal("expected scrub alert event")
+	}
+	if event.Type != scrubNotificationType || event.Level != alerts.AlertLevelCritical {
+		t.Fatalf("scrub alert event = %s/%s, want %s/critical", event.Type, event.Level, scrubNotificationType)
+	}
+	samples, ok := event.Details["sample_errors"].([]map[string]string)
+	if !ok || len(samples) != 1 {
+		t.Fatalf("expected one sanitized scrub error sample, got %#v", event.Details["sample_errors"])
+	}
+	if samples[0]["message"] != scrubObjectCorruptedPublicMessage {
+		t.Fatalf("sample error message = %q, want %q", samples[0]["message"], scrubObjectCorruptedPublicMessage)
 	}
 }
 
@@ -9663,6 +10298,9 @@ func TestServer_DiagnosticsExport_IncludesSanitizedAlertsStatus(t *testing.T) {
 	cfg.Alerts.MinFreeBytes = 10 * 1024 * 1024 * 1024
 	cfg.Alerts.WebhookURL = "https://hooks.example.com/storage"
 	cfg.Alerts.WebhookHeaders = []string{"Authorization: Bearer token"}
+	cfg.Alerts.TelegramEnabled = true
+	cfg.Alerts.TelegramBotToken = "123456:secret-token"
+	cfg.Alerts.TelegramChatID = "-1001234567890"
 	server.storeConfig(cfg)
 	server.alertMonitor = &fakeAlertMonitor{lastStats: &alerts.StorageStats{
 		Level:     alerts.AlertLevelCritical,
@@ -9697,11 +10335,17 @@ func TestServer_DiagnosticsExport_IncludesSanitizedAlertsStatus(t *testing.T) {
 	if webhookConfigured, ok := payload.Alerts["webhook_configured"].(bool); !ok || !webhookConfigured {
 		t.Fatalf("alerts.webhook_configured = %v, want true", payload.Alerts["webhook_configured"])
 	}
+	if telegramConfigured, ok := payload.Alerts["telegram_configured"].(bool); !ok || !telegramConfigured {
+		t.Fatalf("alerts.telegram_configured = %v, want true", payload.Alerts["telegram_configured"])
+	}
 	if _, ok := payload.Alerts["webhook_url"]; ok {
 		t.Fatalf("diagnostics export must not expose webhook_url")
 	}
 	if _, ok := payload.Alerts["webhook_headers"]; ok {
 		t.Fatalf("diagnostics export must not expose webhook_headers")
+	}
+	if _, ok := payload.Alerts["telegram_bot_token"]; ok {
+		t.Fatalf("diagnostics export must not expose telegram_bot_token")
 	}
 }
 
@@ -11910,7 +12554,7 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	monitor := &fakeAlertMonitor{}
 	server.alertMonitor = monitor
 
-	body := `{"alerts":{"enabled":true,"check_interval":"30m","threshold_pct":85,"critical_pct":92,"min_free_bytes":21474836480,"cooldown_period":"2h","webhook_url":"https://hooks.example.com/storage","webhook_method":"POST","webhook_headers":["Authorization: Bearer token","X-MnemoNAS: alerts"]}}`
+	body := `{"alerts":{"enabled":true,"check_interval":"30m","threshold_pct":85,"critical_pct":92,"min_free_bytes":21474836480,"cooldown_period":"2h","webhook_url":"https://hooks.example.com/storage","webhook_method":"POST","webhook_headers":["Authorization: Bearer token","X-MnemoNAS: alerts"],"telegram_enabled":true,"telegram_bot_token":"123456:secret-token","telegram_chat_id":"-1001234567890","email_enabled":true,"smtp_host":"smtp.example.com","smtp_port":587,"smtp_username":"alerts","smtp_password":"secret","smtp_from":"MnemoNAS <alerts@example.com>","smtp_to":["admin@example.com"]}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -11947,11 +12591,86 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	if len(server.config.Alerts.WebhookHeaders) != 2 {
 		t.Fatalf("expected webhook headers updated, got %#v", server.config.Alerts.WebhookHeaders)
 	}
+	if !server.config.Alerts.TelegramEnabled || server.config.Alerts.TelegramBotToken != "123456:secret-token" || server.config.Alerts.TelegramChatID != "-1001234567890" {
+		t.Fatalf("unexpected Telegram alert config: %+v", server.config.Alerts)
+	}
+	if !server.config.Alerts.EmailEnabled || server.config.Alerts.SMTPHost != "smtp.example.com" || server.config.Alerts.SMTPPort != 587 {
+		t.Fatalf("unexpected email alert config: %+v", server.config.Alerts)
+	}
+	if len(server.config.Alerts.SMTPTo) != 1 || server.config.Alerts.SMTPTo[0] != "admin@example.com" {
+		t.Fatalf("unexpected email recipients: %+v", server.config.Alerts.SMTPTo)
+	}
 	if monitor.updateCount != 1 {
 		t.Fatalf("expected alert monitor update once, got %d", monitor.updateCount)
 	}
-	if monitor.lastConfig.CheckInterval != 30*time.Minute || monitor.lastConfig.WebhookURL != "https://hooks.example.com/storage" {
+	if monitor.lastConfig.CheckInterval != 30*time.Minute || monitor.lastConfig.WebhookURL != "https://hooks.example.com/storage" || !monitor.lastConfig.TelegramEnabled || monitor.lastConfig.TelegramChatID != "-1001234567890" || !monitor.lastConfig.EmailEnabled {
 		t.Fatalf("unexpected alert monitor config: %+v", monitor.lastConfig)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesDiskHealthConfig(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	monitor := &fakeDiskHealthMonitor{}
+	server.diskHealth = monitor
+
+	body := `{"disk_health":{"enabled":true,"check_interval":"45m","probe_timeout":"20s","cooldown_period":"3h","command":"smartctl","temperature_warning_c":47,"temperature_critical_c":57,"media_wear_warning_percent":82,"media_wear_critical_percent":98,"devices":[{"name":"Data","path":"/dev/disk/by-id/test","type":"sat","serial":"SER123","temperature_warning_c":45,"temperature_critical_c":55}]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings disk health status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if !server.config.DiskHealth.Enabled {
+		t.Fatalf("expected disk health enabled")
+	}
+	if server.config.DiskHealth.CheckInterval != 45*time.Minute {
+		t.Fatalf("expected check interval 45m, got %s", server.config.DiskHealth.CheckInterval)
+	}
+	if server.config.DiskHealth.ProbeTimeout != 20*time.Second {
+		t.Fatalf("expected probe timeout 20s, got %s", server.config.DiskHealth.ProbeTimeout)
+	}
+	if server.config.DiskHealth.CooldownPeriod != 3*time.Hour {
+		t.Fatalf("expected cooldown 3h, got %s", server.config.DiskHealth.CooldownPeriod)
+	}
+	if server.config.DiskHealth.MediaWearWarningPct != 82 || server.config.DiskHealth.MediaWearCriticalPct != 98 {
+		t.Fatalf("unexpected media wear thresholds: %+v", server.config.DiskHealth)
+	}
+	if len(server.config.DiskHealth.Devices) != 1 || server.config.DiskHealth.Devices[0].Path != "/dev/disk/by-id/test" {
+		t.Fatalf("unexpected disk health devices: %+v", server.config.DiskHealth.Devices)
+	}
+	if monitor.updateCount != 1 {
+		t.Fatalf("expected disk health monitor update once, got %d", monitor.updateCount)
+	}
+	if !monitor.lastConfig.Enabled || len(monitor.lastConfig.Devices) != 1 || monitor.lastConfig.Devices[0].Serial != "SER123" {
+		t.Fatalf("unexpected disk health runtime config: %+v", monitor.lastConfig)
+	}
+	if monitor.lastConfig.MediaWearWarningPct != 82 || monitor.lastConfig.MediaWearCriticalPct != 98 {
+		t.Fatalf("unexpected disk health media wear runtime config: %+v", monitor.lastConfig)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidDiskHealthDoesNotUpdateMonitor(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	monitor := &fakeDiskHealthMonitor{}
+	server.diskHealth = monitor
+
+	body := `{"disk_health":{"command":"smartctl --json"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid disk health status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if monitor.updateCount != 0 {
+		t.Fatalf("expected invalid configuration not to update disk health monitor, got %d updates", monitor.updateCount)
 	}
 }
 
@@ -12022,6 +12741,30 @@ func TestServer_UpdateSettings_InvalidAlertsWebhookURLDoesNotUpdateAlertMonitor(
 	}
 	if server.config.Alerts.WebhookURL != "https://hooks.example.com/old" {
 		t.Fatalf("expected invalid webhook URL update to leave config unchanged, got %q", server.config.Alerts.WebhookURL)
+	}
+	if monitor.updateCount != 0 {
+		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidAlertsTelegramDoesNotUpdateAlertMonitor(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	body := `{"alerts":{"telegram_enabled":true,"telegram_chat_id":"-1001234567890"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid Telegram alert status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
 	}
 	if monitor.updateCount != 0 {
 		t.Fatalf("expected invalid configuration not to update alert monitor, got %d updates", monitor.updateCount)
@@ -12518,6 +13261,150 @@ func TestServer_GetSettings_NormalizesNilSliceFields(t *testing.T) {
 	}
 	if len(resp.Data.Alerts.WebhookHeaders) != 0 {
 		t.Fatalf("expected empty webhook_headers, got %v", resp.Data.Alerts.WebhookHeaders)
+	}
+}
+
+func TestServer_GetSettings_IncludesTelegramAlertStatusWithoutToken(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Alerts.TelegramEnabled = true
+	server.config.Alerts.TelegramBotToken = "123456:secret-token"
+	server.config.Alerts.TelegramChatID = "-1001234567890"
+	server.storeConfig(server.config)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Alerts struct {
+				TelegramEnabled            bool   `json:"telegram_enabled"`
+				TelegramBotTokenConfigured bool   `json:"telegram_bot_token_configured"`
+				TelegramBotToken           string `json:"telegram_bot_token"`
+				TelegramChatID             string `json:"telegram_chat_id"`
+			} `json:"alerts"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if !resp.Data.Alerts.TelegramEnabled || !resp.Data.Alerts.TelegramBotTokenConfigured {
+		t.Fatalf("unexpected Telegram alert status: %+v", resp.Data.Alerts)
+	}
+	if resp.Data.Alerts.TelegramChatID != "-1001234567890" {
+		t.Fatalf("telegram_chat_id = %q, want configured chat", resp.Data.Alerts.TelegramChatID)
+	}
+	if resp.Data.Alerts.TelegramBotToken != "" {
+		t.Fatalf("settings response must not expose telegram_bot_token")
+	}
+}
+
+func TestServer_GetSettings_IncludesMaintenanceScrubConfig(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	cfg := server.currentConfig()
+	cfg.Maintenance.Scrub.Enabled = true
+	cfg.Maintenance.Scrub.ScheduleInterval = 12 * time.Hour
+	cfg.Maintenance.Scrub.RetryInterval = 30 * time.Minute
+	cfg.Maintenance.Scrub.MaxRetries = 2
+	server.storeConfig(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Maintenance struct {
+				Scrub struct {
+					Enabled          bool   `json:"enabled"`
+					ScheduleInterval string `json:"schedule_interval"`
+					RetryInterval    string `json:"retry_interval"`
+					MaxRetries       int    `json:"max_retries"`
+				} `json:"scrub"`
+			} `json:"maintenance"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if !resp.Data.Maintenance.Scrub.Enabled {
+		t.Fatal("expected maintenance scrub schedule to be enabled")
+	}
+	if resp.Data.Maintenance.Scrub.ScheduleInterval != "12h0m0s" {
+		t.Fatalf("schedule interval = %q, want 12h0m0s", resp.Data.Maintenance.Scrub.ScheduleInterval)
+	}
+	if resp.Data.Maintenance.Scrub.RetryInterval != "30m0s" {
+		t.Fatalf("retry interval = %q, want 30m0s", resp.Data.Maintenance.Scrub.RetryInterval)
+	}
+	if resp.Data.Maintenance.Scrub.MaxRetries != 2 {
+		t.Fatalf("max retries = %d, want 2", resp.Data.Maintenance.Scrub.MaxRetries)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesMaintenanceScrubConfig(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	body := `{"maintenance":{"scrub":{"enabled":true,"schedule_interval":"12h","retry_interval":"30m","max_retries":2}}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings maintenance scrub status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	cfg := server.currentConfig()
+	if !cfg.Maintenance.Scrub.Enabled {
+		t.Fatal("expected maintenance scrub schedule to be enabled")
+	}
+	if cfg.Maintenance.Scrub.ScheduleInterval != 12*time.Hour {
+		t.Fatalf("schedule interval = %s, want 12h", cfg.Maintenance.Scrub.ScheduleInterval)
+	}
+	if cfg.Maintenance.Scrub.RetryInterval != 30*time.Minute {
+		t.Fatalf("retry interval = %s, want 30m", cfg.Maintenance.Scrub.RetryInterval)
+	}
+	if cfg.Maintenance.Scrub.MaxRetries != 2 {
+		t.Fatalf("max retries = %d, want 2", cfg.Maintenance.Scrub.MaxRetries)
+	}
+}
+
+func TestServer_UpdateSettings_InvalidMaintenanceScrubRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	original := server.currentConfig().Maintenance.Scrub
+
+	body := `{"maintenance":{"scrub":{"retry_interval":"0","max_retries":-1}}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid maintenance scrub status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if server.currentConfig().Maintenance.Scrub != original {
+		t.Fatalf("expected invalid maintenance scrub update to leave config unchanged")
 	}
 }
 

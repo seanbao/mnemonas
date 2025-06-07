@@ -110,6 +110,50 @@ func (s *Server) handleRunBackupRestore(w http.ResponseWriter, r *http.Request) 
 	NewAPIResponse(result).WithMessage("restore completed").Write(w, http.StatusOK)
 }
 
+func (s *Server) handlePreviewBackupRestore(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.backupService()
+	if !ok {
+		ServiceUnavailable(w, "backup manager not initialized")
+		return
+	}
+
+	var req backup.RestorePreviewOptions
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	result, err := manager.RunRestorePreview(r.Context(), chi.URLParam(r, "id"), req)
+	if err != nil {
+		s.writeBackupError(w, "preview backup restore", err, result)
+		return
+	}
+
+	NewAPIResponse(result).WithMessage("restore preview completed").Write(w, http.StatusOK)
+}
+
+func (s *Server) handleVerifyBackupRestore(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.backupService()
+	if !ok {
+		ServiceUnavailable(w, "backup manager not initialized")
+		return
+	}
+
+	var req backup.RestoreVerifyOptions
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	result, err := manager.RunRestoreVerify(r.Context(), chi.URLParam(r, "id"), req)
+	if err != nil {
+		s.writeBackupError(w, "verify backup restore", err, result)
+		return
+	}
+
+	NewAPIResponse(result).WithMessage("restore target verified").Write(w, http.StatusOK)
+}
+
 func (s *Server) writeBackupError(w http.ResponseWriter, operation string, err error, details any) {
 	switch {
 	case errors.Is(err, backup.ErrJobNotFound):

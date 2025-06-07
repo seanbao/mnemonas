@@ -33,7 +33,8 @@ const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() 
       webdav: { enabled: true, runtime_enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
       share: { enabled: false, base_url: '' },
       favorites: { enabled: true, runtime_available: true },
-      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
+      alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '' },
+      maintenance: { scrub: { enabled: false, schedule_interval: '168h', retry_interval: '1h', max_retries: 1 } },
       cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
       dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
     },
@@ -288,6 +289,8 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('公网访问向导')).toBeTruthy()
         expect(screen.getByText('公网访问安全自检')).toBeTruthy()
+        expect(screen.getByText('证书续期检查')).toBeTruthy()
+        expect(screen.getByText("sudo journalctl -u caddy --since '24 hours ago'")).toBeTruthy()
         expect(screen.getByText('当前访问不是 HTTPS')).toBeTruthy()
         expect(screen.getByText('服务器')).toBeTruthy()
         expect(screen.getByText('存储路径')).toBeTruthy()
@@ -311,6 +314,18 @@ describe('SettingsPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已应用公网访问推荐',
       }))
+    })
+
+    it('switches certificate renewal guidance for nginx proxy setup', async () => {
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('公网访问向导')).toBeTruthy()
+      })
+
+      fireEvent.change(screen.getByLabelText('反向代理'), { target: { value: 'nginx' } })
+
+      expect(screen.getByText('sudo certbot renew --dry-run')).toBeTruthy()
     })
 
     it('offers a repair action for security check findings', async () => {
@@ -446,8 +461,8 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       expect(await screen.findByPlaceholderText('30s')).toBeTruthy()
-      expect(screen.getByPlaceholderText('1h')).toBeTruthy()
-      expect(screen.getByPlaceholderText('4h')).toBeTruthy()
+      expect(screen.getByLabelText('告警检查间隔')).toHaveAttribute('placeholder', '1h')
+      expect(screen.getByLabelText('告警冷却时间')).toHaveAttribute('placeholder', '4h')
     })
 
     it('opens the tab selected in the query string on first render', async () => {
@@ -618,6 +633,83 @@ describe('SettingsPage', () => {
     })
   })
 
+  describe('scrub schedule settings', () => {
+    it('renders scheduled scrub controls', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('数据巡检计划')).toBeTruthy()
+        expect(screen.getByRole('switch', { name: '启用周期 Scrub' })).toBeTruthy()
+        expect(screen.getByLabelText('Scrub 常规间隔')).toHaveValue('168h')
+      })
+    })
+
+    it('allows editing scheduled scrub settings and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByRole('switch', { name: '启用周期 Scrub' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用周期 Scrub' }))
+      const scheduleInput = screen.getByLabelText('Scrub 常规间隔')
+      await user.clear(scheduleInput)
+      await user.type(scheduleInput, '12h')
+      const retryInput = screen.getByLabelText('Scrub 失败重试间隔')
+      await user.clear(retryInput)
+      await user.type(retryInput, '30m')
+      const maxRetriesInput = screen.getByLabelText('Scrub 最大重试次数')
+      await user.clear(maxRetriesInput)
+      await user.type(maxRetriesInput, '2')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          maintenance: {
+            scrub: {
+              enabled: true,
+              schedule_interval: '12h',
+              retry_interval: '30m',
+              max_retries: 2,
+            },
+          },
+        }))
+      })
+    })
+
+    it('rejects invalid scheduled scrub retry count before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Scrub 最大重试次数')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用周期 Scrub' }))
+      const maxRetriesInput = screen.getByLabelText('Scrub 最大重试次数')
+      await user.clear(maxRetriesInput)
+      await user.type(maxRetriesInput, '-1')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'Scrub 重试次数格式无效',
+          description: '最大重试次数必须是 0 或正整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+  })
+
   describe('share settings', () => {
     it('allows editing share configuration and saves it', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
@@ -699,7 +791,7 @@ describe('SettingsPage', () => {
 
       await user.click(screen.getByRole('switch', { name: '启用告警' }))
 
-      const checkIntervalInput = screen.getByDisplayValue('1h')
+      const checkIntervalInput = screen.getByLabelText('告警检查间隔')
       fireEvent.change(checkIntervalInput, { target: { value: '30m' } })
 
       const thresholdInput = screen.getByDisplayValue('90')
@@ -711,7 +803,7 @@ describe('SettingsPage', () => {
       const minFreeInput = screen.getByDisplayValue('10 GB')
       fireEvent.change(minFreeInput, { target: { value: '20GB' } })
 
-      const cooldownInput = screen.getByDisplayValue('4h')
+      const cooldownInput = screen.getByLabelText('告警冷却时间')
       fireEvent.change(cooldownInput, { target: { value: '2h' } })
 
       const webhookInput = screen.getByPlaceholderText('https://hooks.example.com/alert')
@@ -721,6 +813,10 @@ describe('SettingsPage', () => {
 
       const headersInput = screen.getByLabelText('Webhook 自定义 Header')
       fireEvent.change(headersInput, { target: { value: 'Authorization: Bearer token\nX-MnemoNAS: alerts' } })
+
+      await user.click(screen.getByRole('switch', { name: '启用 Telegram 通知' }))
+      fireEvent.change(screen.getByLabelText('Telegram Bot Token'), { target: { value: '123456:secret-token' } })
+      fireEvent.change(screen.getByLabelText('Telegram Chat ID'), { target: { value: '-1001234567890' } })
 
       await user.click(screen.getByText('保存设置'))
 
@@ -736,9 +832,48 @@ describe('SettingsPage', () => {
             webhook_url: 'https://hooks.example.com/storage',
             webhook_method: 'GET',
             webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'],
+            telegram_enabled: true,
+            telegram_bot_token: '123456:secret-token',
+            telegram_chat_id: '-1001234567890',
           }),
         }))
       })
+    })
+
+    it('keeps existing Telegram token when the token field is left blank', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          alerts: {
+            ...defaultSettingsResponse.data.alerts,
+            enabled: true,
+            telegram_enabled: true,
+            telegram_bot_token_configured: true,
+            telegram_chat_id: '-1001234567890',
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Telegram Bot Token')).toHaveAttribute('placeholder', '已配置，留空不变')
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          alerts: expect.objectContaining({
+            telegram_enabled: true,
+            telegram_chat_id: '-1001234567890',
+          }),
+        }))
+      })
+      expect(mockUpdateSettings.mock.calls[0][0].alerts).not.toHaveProperty('telegram_bot_token')
     })
 
     it('rejects invalid webhook header names before saving', async () => {
@@ -1075,7 +1210,7 @@ describe('SettingsPage', () => {
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
             favorites: { enabled: true },
-            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
+            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '' },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -1090,7 +1225,7 @@ describe('SettingsPage', () => {
             webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
             share: { enabled: true, base_url: 'https://share.example.com' },
             favorites: { enabled: false },
-            alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'] },
+            alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'], telegram_enabled: true, telegram_bot_token_configured: true, telegram_chat_id: '-1001234567890' },
             cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -1317,7 +1452,7 @@ describe('SettingsPage', () => {
           webdav: { enabled: false, prefix: '/files', read_only: true, auth_type: 'basic', username: 'sync-user' },
           share: { enabled: true, base_url: 'https://share.example.com' },
           favorites: { enabled: false },
-          alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'] },
+          alerts: { enabled: true, check_interval: '30m', threshold_pct: 85, critical_pct: 92, min_free_bytes: 21474836480, cooldown_period: '2h', webhook_url: 'https://hooks.example.com/storage', webhook_method: 'GET', webhook_headers: ['Authorization: Bearer token', 'X-MnemoNAS: alerts'], telegram_enabled: true, telegram_bot_token_configured: true, telegram_chat_id: '-1001234567890' },
           cdc: { min_chunk_size: 131072, avg_chunk_size: 524288, max_chunk_size: 2097152 },
           dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
         },
@@ -2076,7 +2211,7 @@ describe('SettingsPage', () => {
     await openTab(user, '高级')
 
     await user.click(await screen.findByRole('switch', { name: '启用告警' }))
-    fireEvent.change(screen.getByDisplayValue('1h'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('告警检查间隔'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
@@ -2310,7 +2445,7 @@ describe('SettingsPage', () => {
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
             favorites: { enabled: true },
-            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
+            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '' },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },
@@ -2440,7 +2575,7 @@ describe('SettingsPage', () => {
             webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
             share: { enabled: false, base_url: '' },
             favorites: { enabled: true },
-            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [] },
+            alerts: { enabled: false, check_interval: '1h', threshold_pct: 90, critical_pct: 95, min_free_bytes: 10737418240, cooldown_period: '4h', webhook_url: '', webhook_method: 'POST', webhook_headers: [], telegram_enabled: false, telegram_bot_token_configured: false, telegram_chat_id: '' },
             cdc: { min_chunk_size: 262144, avg_chunk_size: 1048576, max_chunk_size: 4194304 },
             dataplane: { grpc_address: '127.0.0.1:9090', timeout: '30s', max_retries: 3 },
           },

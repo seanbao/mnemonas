@@ -18,7 +18,7 @@ Core principles:
 
 Current non-goals:
 
-- SMB/NFS support.
+- Mountable SMB/NFS runtimes. SMB currently has preview gateway config only; protocol compatibility and security boundaries are not complete.
 - RAID or volume management inside MnemoNAS.
 - Multi-node cluster consistency.
 

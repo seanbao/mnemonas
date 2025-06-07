@@ -103,8 +103,38 @@ func TestDefault(t *testing.T) {
 	if cfg.Alerts.WebhookHeaders == nil {
 		t.Error("Default alerts webhook headers should be initialized to an empty slice")
 	}
+	if cfg.Alerts.SMTPPort != 587 {
+		t.Errorf("Default alerts SMTP port = %d, want 587", cfg.Alerts.SMTPPort)
+	}
+	if cfg.Alerts.SMTPTo == nil {
+		t.Error("Default alerts SMTP recipients should be initialized to an empty slice")
+	}
+	if cfg.Alerts.TelegramEnabled {
+		t.Error("Default Telegram alerts should be disabled")
+	}
+	if cfg.Alerts.TelegramBotToken != "" || cfg.Alerts.TelegramChatID != "" {
+		t.Errorf("Default Telegram alert credentials should be empty, got token=%q chat=%q", cfg.Alerts.TelegramBotToken, cfg.Alerts.TelegramChatID)
+	}
 	if cfg.Backup.Jobs == nil {
 		t.Error("Default backup jobs should be initialized to an empty slice")
+	}
+	if cfg.Maintenance.Scrub.ScheduleInterval != 7*24*time.Hour {
+		t.Errorf("Default maintenance scrub schedule interval = %s, want 168h", cfg.Maintenance.Scrub.ScheduleInterval)
+	}
+	if cfg.Maintenance.Scrub.RetryInterval != time.Hour {
+		t.Errorf("Default maintenance scrub retry interval = %s, want 1h", cfg.Maintenance.Scrub.RetryInterval)
+	}
+	if cfg.Maintenance.Scrub.MaxRetries != 1 {
+		t.Errorf("Default maintenance scrub max retries = %d, want 1", cfg.Maintenance.Scrub.MaxRetries)
+	}
+	if cfg.DiskHealth.Command != "smartctl" {
+		t.Errorf("Default disk health command = %s, want smartctl", cfg.DiskHealth.Command)
+	}
+	if cfg.DiskHealth.CheckInterval != time.Hour {
+		t.Errorf("Default disk health check interval = %s, want 1h", cfg.DiskHealth.CheckInterval)
+	}
+	if cfg.DiskHealth.Devices == nil {
+		t.Error("Default disk health devices should be initialized to an empty slice")
 	}
 }
 
@@ -364,6 +394,37 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Valid Telegram alerts",
+			modify: func(c *Config) {
+				c.Alerts.TelegramEnabled = true
+				c.Alerts.TelegramBotToken = "123456:ABC_def-ghi"
+				c.Alerts.TelegramChatID = "-1001234567890"
+			},
+			wantErr: false,
+		},
+		{
+			name: "Enabled Telegram alerts require token",
+			modify: func(c *Config) {
+				c.Alerts.TelegramEnabled = true
+				c.Alerts.TelegramChatID = "-1001234567890"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid Telegram token path character",
+			modify: func(c *Config) {
+				c.Alerts.TelegramBotToken = "123456/bad"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid Telegram chat whitespace",
+			modify: func(c *Config) {
+				c.Alerts.TelegramChatID = "bad chat"
+			},
+			wantErr: true,
+		},
+		{
 			name:    "Valid share base URL",
 			modify:  func(c *Config) { c.Share.BaseURL = "https://nas.example.com" },
 			wantErr: false,
@@ -586,10 +647,108 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Invalid alerts email missing recipients",
+			modify: func(c *Config) {
+				c.Alerts.EmailEnabled = true
+				c.Alerts.SMTPHost = "smtp.example.com"
+				c.Alerts.SMTPFrom = "alerts@example.com"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid alerts email recipient",
+			modify: func(c *Config) {
+				c.Alerts.SMTPTo = []string{"not an email"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Valid alerts email",
+			modify: func(c *Config) {
+				c.Alerts.EmailEnabled = true
+				c.Alerts.SMTPHost = "smtp.example.com"
+				c.Alerts.SMTPPort = 587
+				c.Alerts.SMTPFrom = "MnemoNAS <alerts@example.com>"
+				c.Alerts.SMTPTo = []string{"admin@example.com"}
+			},
+			wantErr: false,
+		},
+		{
 			name: "Invalid alerts critical threshold below warning",
 			modify: func(c *Config) {
 				c.Alerts.ThresholdPct = 90
 				c.Alerts.CriticalPct = 80
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid disk health command with shell words",
+			modify: func(c *Config) {
+				c.DiskHealth.Command = "smartctl --json"
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid disk health check interval",
+			modify: func(c *Config) {
+				c.DiskHealth.CheckInterval = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid disk health critical temperature below warning",
+			modify: func(c *Config) {
+				c.DiskHealth.TemperatureWarningC = 55
+				c.DiskHealth.TemperatureCriticalC = 50
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid disk health critical media wear below warning",
+			modify: func(c *Config) {
+				c.DiskHealth.MediaWearWarningPct = 90
+				c.DiskHealth.MediaWearCriticalPct = 80
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid disk health relative device path",
+			modify: func(c *Config) {
+				c.DiskHealth.Devices = []DiskHealthDeviceConfig{{Path: "sda"}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Valid disk health device",
+			modify: func(c *Config) {
+				c.DiskHealth.Enabled = true
+				c.DiskHealth.Devices = []DiskHealthDeviceConfig{{
+					Name:   "Data disk",
+					Path:   "/dev/disk/by-id/test",
+					Type:   "sat",
+					Serial: "SER123",
+				}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "Invalid maintenance scrub schedule interval",
+			modify: func(c *Config) {
+				c.Maintenance.Scrub.ScheduleInterval = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid maintenance scrub retry interval",
+			modify: func(c *Config) {
+				c.Maintenance.Scrub.RetryInterval = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid maintenance scrub max retries",
+			modify: func(c *Config) {
+				c.Maintenance.Scrub.MaxRetries = -1
 			},
 			wantErr: true,
 		},
@@ -925,6 +1084,8 @@ type = "local"
 destination = %q
 schedule_interval = "1h"
 stale_after = "3h"
+restore_drill_stale_after = "168h"
+retention_policy = "external: restic forget --keep-daily 7 --prune"
 max_age = "24h"
 `, storageRoot, backupRoot)
 	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
@@ -945,8 +1106,50 @@ max_age = "24h"
 	if job.StaleAfter != 3*time.Hour {
 		t.Fatalf("stale after = %s, want 3h", job.StaleAfter)
 	}
+	if job.RestoreDrillStaleAfter != 168*time.Hour {
+		t.Fatalf("restore drill stale after = %s, want 168h", job.RestoreDrillStaleAfter)
+	}
+	if job.RetentionPolicy != "external: restic forget --keep-daily 7 --prune" {
+		t.Fatalf("retention policy = %q", job.RetentionPolicy)
+	}
 	if job.MaxAge != 24*time.Hour {
 		t.Fatalf("max age = %s, want 24h", job.MaxAge)
+	}
+}
+
+func TestLoad_NormalizesMaintenanceScrubDurationFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageRoot := filepath.Join(tmpDir, "data")
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := fmt.Sprintf(`
+[storage]
+root = %q
+
+[maintenance.scrub]
+enabled = true
+schedule_interval = "12h"
+retry_interval = "30m"
+max_retries = 2
+`, storageRoot)
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.Maintenance.Scrub.Enabled {
+		t.Fatal("expected maintenance scrub schedule to be enabled")
+	}
+	if cfg.Maintenance.Scrub.ScheduleInterval != 12*time.Hour {
+		t.Fatalf("schedule interval = %s, want 12h", cfg.Maintenance.Scrub.ScheduleInterval)
+	}
+	if cfg.Maintenance.Scrub.RetryInterval != 30*time.Minute {
+		t.Fatalf("retry interval = %s, want 30m", cfg.Maintenance.Scrub.RetryInterval)
+	}
+	if cfg.Maintenance.Scrub.MaxRetries != 2 {
+		t.Fatalf("max retries = %d, want 2", cfg.Maintenance.Scrub.MaxRetries)
 	}
 }
 
@@ -1021,6 +1224,11 @@ refresh_token_ttl = "240h"
 [alerts]
 check_interval = "2h"
 cooldown_period = "6h"
+
+[disk_health]
+check_interval = "3h"
+probe_timeout = "20s"
+cooldown_period = "8h"
 `)
 	if err := os.WriteFile(configPath, content, 0644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -1061,6 +1269,15 @@ cooldown_period = "6h"
 	if cfg.Alerts.CooldownPeriod != 6*time.Hour {
 		t.Fatalf("expected alerts cooldown 6h, got %s", cfg.Alerts.CooldownPeriod)
 	}
+	if cfg.DiskHealth.CheckInterval != 3*time.Hour {
+		t.Fatalf("expected disk health check interval 3h, got %s", cfg.DiskHealth.CheckInterval)
+	}
+	if cfg.DiskHealth.ProbeTimeout != 20*time.Second {
+		t.Fatalf("expected disk health probe timeout 20s, got %s", cfg.DiskHealth.ProbeTimeout)
+	}
+	if cfg.DiskHealth.CooldownPeriod != 8*time.Hour {
+		t.Fatalf("expected disk health cooldown 8h, got %s", cfg.DiskHealth.CooldownPeriod)
+	}
 }
 
 func TestLoad_ParsesTrustedProxyHops(t *testing.T) {
@@ -1095,6 +1312,10 @@ base_url = " https://nas.example.com/base/ "
 [alerts]
 webhook_url = " https://hooks.example.com/storage "
 webhook_method = "post"
+smtp_host = " smtp.example.com "
+smtp_username = " alerts "
+smtp_from = " MnemoNAS <alerts@example.com> "
+smtp_to = [" admin@example.com ", " ops@example.com "]
 `)
 	if err := os.WriteFile(configPath, content, 0644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -1112,6 +1333,15 @@ webhook_method = "post"
 	}
 	if cfg.Alerts.WebhookMethod != "POST" {
 		t.Fatalf("alerts webhook method = %q, want POST", cfg.Alerts.WebhookMethod)
+	}
+	if cfg.Alerts.SMTPHost != "smtp.example.com" || cfg.Alerts.SMTPUsername != "alerts" {
+		t.Fatalf("alerts SMTP fields were not normalized: %+v", cfg.Alerts)
+	}
+	if cfg.Alerts.SMTPFrom != "MnemoNAS <alerts@example.com>" {
+		t.Fatalf("alerts SMTP sender = %q, want trimmed sender", cfg.Alerts.SMTPFrom)
+	}
+	if got := strings.Join(cfg.Alerts.SMTPTo, ","); got != "admin@example.com,ops@example.com" {
+		t.Fatalf("alerts SMTP recipients = %q, want trimmed recipients", got)
 	}
 }
 

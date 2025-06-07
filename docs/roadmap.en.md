@@ -6,9 +6,9 @@ This document tracks the product path from a self-hosted file cloud toward a pra
 
 ## Current Assessment
 
-As of 2026-05-09, MnemoNAS already includes Web file management, WebDAV, version history, trash, multi-user auth, sharing, activity logs, health checks, Scrub, GC, diagnostics export, Docker deployment, and systemd deployment. It is usable as a local private file cloud for personal or small-team evaluation, especially when the data is not the only copy.
+As of 2026-05-13, MnemoNAS already includes Web file management, WebDAV, version history, trash, multi-user auth, sharing, activity logs, health checks, Scrub, GC, diagnostics export, Docker deployment, and systemd deployment. It is usable as a local private file cloud for personal or small-team evaluation, especially when the data is not the only copy.
 
-The public-access track now has a first baseline: reverse-proxy scripts, `mnemonas-public-setup`, `mnemonas-doctor --public-domain`, the Web public-access wizard, the security self-check API, the Web settings flow, and E2E regression coverage. The backup track now has local jobs, command-backed restic/rclone remote targets, restore drills or remote checks, lightweight scheduling, automatic backup windows, retention, safe-directory local/restic/rclone restores, Web maintenance status, and webhook failure notifications. It is not yet a complete NAS appliance. The main missing areas are SMB, full one-click restore workflows, disk health alerts, quotas, folder-level permissions, multi-channel notifications, and fuller storage-pool visibility. Until external backups and the public-access security loop are mature, MnemoNAS should not be treated as the only long-term copy of important data or exposed directly without an HTTPS reverse proxy.
+The public-access track now has a first baseline: reverse-proxy scripts, `mnemonas-public-setup`, `mnemonas-doctor --public-domain`, the Web public-access wizard, the security self-check API, certificate-renewal guidance, certificate-failure triage guidance, the Web settings flow, and E2E regression coverage. The backup track now has local jobs, command-backed restic/rclone remote targets, restore drills or remote checks, lightweight scheduling, automatic backup windows, retention, safe-directory local/restic/rclone restores, post-restore read-only verification, post-restore cutover checklists, restore audit history, stale restore-drill reminders, Web maintenance status, and Webhook/Telegram/SMTP failure notifications. Disk health now has `smartctl`-based SMART, temperature, missing-device, and serial-drift checks wired into the health page, diagnostic summaries, activity logs, and Webhook/Telegram/SMTP events. SMB now has preview config, credentials, gateway authorization, and diagnostics, but this build still does not start a mountable SMB/Samba runtime. It is not yet a complete NAS appliance. The main missing areas are a mountable SMB runtime, full one-click restore workflows, quotas, folder-level permissions, more notification event sources, and fuller storage-pool visibility. Until external backups and the public-access security loop are mature, MnemoNAS should not be treated as the only long-term copy of important data or exposed directly without an HTTPS reverse proxy.
 
 ## Product Positioning
 
@@ -41,10 +41,10 @@ Goal: make MnemoNAS safe enough for cautious real-world personal use, assuming t
 
 | Capability | Current state | Next step | Acceptance criteria |
 | --- | --- | --- | --- |
-| Backup and restore | Backup guide, local backup/restore-drill API, safe-directory local snapshot restore, safe-directory restic/rclone restore, command-backed restic/rclone remote targets, Web maintenance view, lightweight scheduling, automatic backup windows, local snapshot retention, and webhook failure notifications exist | Add remote-retention guidance, restore result audit, and more granular restore previews | Local directory, external drive, or rclone/restic targets can be configured; each job shows latest backup, restore verification, and alert state |
+| Backup and restore | Backup guide, local backup/restore-drill API, safe-directory local snapshot restore, safe-directory restic/rclone restore previews and restores, post-restore read-only verification, post-restore cutover checklist, restore result audit, remote-retention guidance, scheduled restore-drill status and stale notifications, command-backed restic/rclone remote targets, Web maintenance view, lightweight scheduling, automatic backup windows, local snapshot retention, and Webhook/Telegram/SMTP failure notifications exist | Add deeper remote-retention auto-detection | Local directory, external drive, or rclone/restic targets can be configured; each job shows latest backup, restore verification, restore history, and alert state |
 | Deployment reliability | Docker and systemd paths exist | Formalize upgrade, rollback, and config migration | Release install, upgrade, uninstall, and data retention are covered by automated tests |
-| HTTPS and security wizard | Reverse-proxy scripts, Traefik/Cloudflare Tunnel templates, Web wizard, security self-check API, public/certificate/HTTP-redirect doctor checks, cloud-firewall checklist, and desktop/mobile E2E regression coverage exist | Add renewal guidance and stronger failure guidance | Public domain, LAN self-signed, reverse-proxy headers, Secure/SameSite cookies, CSRF, download sessions, and internal dataplane ports are covered by automated tests and docs |
-| Data integrity | Scrub, GC, diagnostics exist | Add schedules and failure notifications | Scrub failures are visible in UI, activity logs, and notifications |
+| HTTPS and security wizard | Reverse-proxy scripts, Traefik/Cloudflare Tunnel templates, Web wizard, security self-check API, public/certificate/HTTP-redirect doctor checks, renewal guidance, certificate-failure triage guidance, cloud-firewall checklist, and desktop/mobile E2E regression coverage exist | Expand more failure cases and mobile wizard coverage | Public domain, LAN self-signed, reverse-proxy headers, Secure/SameSite cookies, CSRF, download sessions, and internal dataplane ports are covered by automated tests and docs |
+| Data integrity | Scrub, GC, and diagnostics exist; manual and scheduled Scrub runs write activity entries; failures, object anomalies, or incomplete result persistence send Webhook/Telegram/SMTP notifications; scheduled Scrub has bounded failure retries, can be hot-updated from Web settings, and surfaces schedule state in health/diagnostics | Add native ZFS/Btrfs scrub coordination and deeper failure remediation guidance | Scrub failures are visible in UI, activity logs, and notifications |
 | Secure defaults | Web session uses HttpOnly cookies | Add login rate limiting, session revocation, admin security reminders, and dangerous-configuration warnings | Weak passwords, default passwords, cross-site requests, suspicious logins, and public-share misconfiguration are blocked or warned clearly |
 | WebDAV compatibility | Basic matrix exists | Expand Windows, macOS, and rclone regression coverage | Critical clients cover read, write, rename, delete, and recovery behavior |
 
@@ -54,9 +54,9 @@ Goal: cover the basic expectations for a LAN home NAS.
 
 | Capability | Gap | Suggested implementation | Acceptance criteria |
 | --- | --- | --- | --- |
-| SMB/Samba | Current access is mainly Web and WebDAV | Provide an official Samba integration path, starting with generated systemd/Docker configuration | Windows and macOS can mount it directly; permission and path mapping do not bypass security boundaries |
-| Disk health | Storage stats exist; SMART is missing | Add SMART collection, temperature, bad disk, missing disk, and lifetime status | UI shows disk health; anomalies are recorded in activity logs and notifications |
-| Notifications | Webhook covers disk-space and backup-failure/warning events; channel coverage is still limited | Support email, Telegram, WeCom-style channels, and more event sources | Disk-full, backup-failed, Scrub-failed, and suspicious-login events can notify users |
+| SMB/Samba | Preview config, credentials, gateway authorization, and diagnostics exist; current builds are not mountable | Provide an official Samba integration path or standalone SMB sidecar while preserving permission and versioning boundaries | Windows and macOS can mount it directly; permission and path mapping do not bypass security boundaries; health and doctor output report runtime state accurately |
+| Disk health | SMART JSON collection, temperature thresholds, lifetime/media-wear fields, missing-device detection, serial mismatch detection, health UI, activity logs, and Webhook/Telegram/SMTP alerts exist | Add more USB/RAID bridge compatibility notes | UI shows disk health; anomalies are recorded in activity logs and notifications |
+| Notifications | Webhook, Telegram, and SMTP email cover disk-space, backup-failure/warning, restore-drill reminders, disk-health anomalies, Scrub anomalies, and login rate limits; event-source coverage is still limited | Support WeCom-style channels and more event sources such as quotas and permission changes | Disk-full, backup-failed, Scrub-failed, and login-rate-limited events can notify users |
 | User quotas | User isolation does not enforce capacity | Add user and directory quota models | Upload, WebDAV write, copy, and restore all honor quotas |
 
 ### P2: Small-Team Collaboration
@@ -86,7 +86,7 @@ Goal: improve long-term usability after the L2/L3 baseline is stable.
 
 1. **Improve HTTPS and security guidance**: if public access is planned, continue reducing certificate, reverse-proxy, cookie, CSRF, exposed-port, cloud-firewall, and default-account misconfiguration.
 2. **Backup jobs and restore drills**: verify recoverability before expanding real-world usage.
-3. **Disk health and notifications**: surface failures before data loss.
+3. **Disk health and notifications**: expand USB/RAID bridge compatibility and broaden notification channels.
 4. **SMB/Samba integration**: cover the most common LAN file-sharing workflow.
 5. **Quotas and permissions**: prevent long-running multi-user deployments from interfering with each other.
 6. **Full-text indexing, sync clients, and plugins**: proceed after data protection and permissions stabilize.
@@ -108,7 +108,7 @@ Every P0/P1 feature should meet at least:
 The near-term roadmap does not prioritize:
 
 - Replacing full NAS distributions for disk-array management.
-- Implementing a custom SMB or NFS protocol stack.
+- Shipping a custom SMB or NFS protocol stack before permission, version-history, trash, and audit boundaries are closed.
 - Claiming long-term single-copy data safety without external backups.
 - Recommending direct public-internet deployment that bypasses the security preflight, doctor checks, and HTTPS reverse proxy.
 - Weakening default security boundaries for public anonymous sharing.

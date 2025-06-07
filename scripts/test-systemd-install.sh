@@ -890,6 +890,7 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate matches nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate is valid for at least 30 days"
+  assert_file_contains "$case_dir/doctor-public.log" "certificate automation detected: Caddy"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
   assert_file_contains "$case_dir/doctor-public.log" "public dataplane gRPC port 19090 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "control plane port 18080 is loopback-only"
@@ -910,6 +911,7 @@ EOF
 
   [[ "$status" -ne 0 ]] || fail "public doctor accepted expiring public HTTPS certificate"
   assert_file_contains "$case_dir/doctor-public-expiring-cert.log" "public HTTPS certificate expires within 30 days or cannot be parsed"
+  assert_file_contains "$case_dir/doctor-public-expiring-cert.log" "certificate failure triage for nas.example.com"
 
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \

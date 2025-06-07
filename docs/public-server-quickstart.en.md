@@ -123,7 +123,7 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 
-The `--public-domain` check verifies public HTTPS health, HTTP-to-HTTPS redirect behavior, certificate hostname, remaining certificate validity, direct backend exposure, and dataplane port exposure, then prints the manual cloud-firewall review item. Certificate inspection requires `openssl` on the server.
+The `--public-domain` check verifies public HTTPS health, HTTP-to-HTTPS redirect behavior, certificate hostname, remaining certificate validity, direct backend exposure, and dataplane port exposure, then prints the manual cloud-firewall review item. Certificate inspection requires `openssl` on the server. It also reports detectable renewal paths: Nginx/certbot deployments should pass `sudo certbot renew --dry-run`, and Caddy deployments should have clean ACME logs from `sudo journalctl -u caddy --since '24 hours ago'`.
 
 Expected state:
 

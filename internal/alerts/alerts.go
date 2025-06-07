@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"os"
 	"strconv"
@@ -21,15 +24,25 @@ import (
 
 // Config holds alerting configuration
 type Config struct {
-	Enabled        bool          `toml:"enabled"`
-	CheckInterval  time.Duration `toml:"check_interval"`  // How often to check (default 1h)
-	ThresholdPct   float64       `toml:"threshold_pct"`   // Alert when usage exceeds this % (default 90)
-	CriticalPct    float64       `toml:"critical_pct"`    // Critical alert threshold (default 95)
-	MinFreeBytes   uint64        `toml:"min_free_bytes"`  // Alert when free space < this (default 10GB)
-	CooldownPeriod time.Duration `toml:"cooldown_period"` // Min time between alerts (default 4h)
-	WebhookURL     string        `toml:"webhook_url"`     // Webhook URL for notifications
-	WebhookMethod  string        `toml:"webhook_method"`  // POST or GET (default POST)
-	WebhookHeaders []string      `toml:"webhook_headers"` // Additional headers (key:value format)
+	Enabled          bool          `toml:"enabled"`
+	CheckInterval    time.Duration `toml:"check_interval"`     // How often to check (default 1h)
+	ThresholdPct     float64       `toml:"threshold_pct"`      // Alert when usage exceeds this % (default 90)
+	CriticalPct      float64       `toml:"critical_pct"`       // Critical alert threshold (default 95)
+	MinFreeBytes     uint64        `toml:"min_free_bytes"`     // Alert when free space < this (default 10GB)
+	CooldownPeriod   time.Duration `toml:"cooldown_period"`    // Min time between alerts (default 4h)
+	WebhookURL       string        `toml:"webhook_url"`        // Webhook URL for notifications
+	WebhookMethod    string        `toml:"webhook_method"`     // POST or GET (default POST)
+	WebhookHeaders   []string      `toml:"webhook_headers"`    // Additional headers (key:value format)
+	TelegramEnabled  bool          `toml:"telegram_enabled"`   // Send Telegram notifications
+	TelegramBotToken string        `toml:"telegram_bot_token"` // Telegram bot token
+	TelegramChatID   string        `toml:"telegram_chat_id"`   // Telegram chat ID or @channel
+	EmailEnabled     bool          `toml:"email_enabled"`      // Send email notifications
+	SMTPHost         string        `toml:"smtp_host"`          // SMTP host without port
+	SMTPPort         int           `toml:"smtp_port"`          // SMTP port
+	SMTPUsername     string        `toml:"smtp_username"`      // SMTP username
+	SMTPPassword     string        `toml:"smtp_password"`      // SMTP password
+	SMTPFrom         string        `toml:"smtp_from"`          // Sender address
+	SMTPTo           []string      `toml:"smtp_to"`            // Recipient addresses
 }
 
 // DefaultConfig returns default alerting configuration
@@ -42,6 +55,7 @@ func DefaultConfig() Config {
 		MinFreeBytes:   10 * 1024 * 1024 * 1024, // 10GB
 		CooldownPeriod: 4 * time.Hour,
 		WebhookMethod:  "POST",
+		SMTPPort:       587,
 	}
 }
 
@@ -78,8 +92,14 @@ func cloneConfig(cfg Config) Config {
 	if cfg.WebhookHeaders != nil {
 		clone.WebhookHeaders = append([]string(nil), cfg.WebhookHeaders...)
 	}
+	if cfg.SMTPTo != nil {
+		clone.SMTPTo = append([]string(nil), cfg.SMTPTo...)
+	}
 	return clone
 }
+
+var sendSMTPMail = smtp.SendMail
+var telegramAPIBaseURL = "https://api.telegram.org"
 
 // AlertPayload is the webhook payload
 type AlertPayload struct {
@@ -246,10 +266,10 @@ func (m *Monitor) LastStats() *StorageStats {
 	return cloneStorageStats(m.lastStats)
 }
 
-// SendEvent sends a generic alert event through the configured webhook.
+// SendEvent sends a generic alert event through configured notification channels.
 func (m *Monitor) SendEvent(ctx context.Context, event EventPayload) error {
 	cfg := m.currentConfig()
-	if !cfg.Enabled || strings.TrimSpace(cfg.WebhookURL) == "" {
+	if !cfg.Enabled || !hasNotificationChannel(cfg) {
 		return nil
 	}
 	if strings.TrimSpace(event.Type) == "" {
@@ -274,7 +294,17 @@ func (m *Monitor) SendEvent(ctx context.Context, event EventPayload) error {
 		Str("level", string(event.Level)).
 		Msg("Alert event triggered")
 
-	return m.sendEventWebhook(ctx, event, cfg)
+	var sendErr error
+	if strings.TrimSpace(cfg.WebhookURL) != "" {
+		sendErr = errors.Join(sendErr, m.sendEventWebhook(ctx, event, cfg))
+	}
+	if cfg.TelegramEnabled {
+		sendErr = errors.Join(sendErr, m.sendEventTelegram(ctx, event, cfg))
+	}
+	if cfg.EmailEnabled {
+		sendErr = errors.Join(sendErr, m.sendEventEmail(ctx, event, cfg))
+	}
+	return sendErr
 }
 
 func (m *Monitor) currentConfig() Config {
@@ -390,7 +420,7 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 		Str("free", formatBytes(stats.FreeBytes)).
 		Msg("Storage alert triggered")
 
-	// Send webhook if configured
+	var sendErr error
 	if cfg.WebhookURL != "" {
 		payload := AlertPayload{
 			Type:      "storage_alert",
@@ -402,11 +432,21 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config
 		}
 
 		if err := m.sendWebhook(ctx, payload, cfg); err != nil {
-			return err
+			sendErr = errors.Join(sendErr, err)
+		}
+	}
+	if cfg.EmailEnabled {
+		if err := m.sendStorageEmail(ctx, stats, cfg, message, hostname); err != nil {
+			sendErr = errors.Join(sendErr, err)
+		}
+	}
+	if cfg.TelegramEnabled {
+		if err := m.sendStorageTelegram(ctx, stats, cfg, message, hostname); err != nil {
+			sendErr = errors.Join(sendErr, err)
 		}
 	}
 
-	return nil
+	return sendErr
 }
 
 func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Config) error {
@@ -501,6 +541,212 @@ func (m *Monitor) sendWebhookRequest(ctx context.Context, payload any, cfg Confi
 		Msg("Webhook sent successfully")
 
 	return nil
+}
+
+func hasNotificationChannel(cfg Config) bool {
+	return strings.TrimSpace(cfg.WebhookURL) != "" || cfg.EmailEnabled || cfg.TelegramEnabled
+}
+
+type telegramMessagePayload struct {
+	ChatID                string `json:"chat_id"`
+	Text                  string `json:"text"`
+	DisableWebPagePreview bool   `json:"disable_web_page_preview"`
+}
+
+func (m *Monitor) sendStorageTelegram(ctx context.Context, stats *StorageStats, cfg Config, message, hostname string) error {
+	if stats == nil {
+		return nil
+	}
+	lines := []string{
+		"[MnemoNAS] storage " + string(stats.Level),
+		message,
+		"",
+		"Host: " + hostname,
+		"Path: " + stats.Path,
+		"Used: " + formatBytes(stats.UsedBytes) + " (" + strconv.FormatFloat(stats.UsedPct, 'f', 1, 64) + "%)",
+		"Free: " + formatBytes(stats.FreeBytes),
+		"Checked at: " + stats.CheckedAt.UTC().Format(time.RFC3339),
+	}
+	return m.sendTelegram(ctx, cfg, strings.Join(lines, "\n"))
+}
+
+func (m *Monitor) sendEventTelegram(ctx context.Context, event EventPayload, cfg Config) error {
+	lines := []string{
+		"[MnemoNAS] " + event.Type + " " + string(event.Level),
+		event.Message,
+		"",
+		"Host: " + event.Hostname,
+		"Timestamp: " + event.Timestamp.UTC().Format(time.RFC3339),
+	}
+	if len(event.Details) > 0 {
+		details, err := json.MarshalIndent(event.Details, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal event details for telegram: %w", err)
+		}
+		lines = append(lines, "", "Details:", string(details))
+	}
+	return m.sendTelegram(ctx, cfg, strings.Join(lines, "\n"))
+}
+
+func (m *Monitor) sendTelegram(ctx context.Context, cfg Config, text string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if !cfg.TelegramEnabled {
+		return nil
+	}
+	token := strings.TrimSpace(cfg.TelegramBotToken)
+	chatID := strings.TrimSpace(cfg.TelegramChatID)
+	if token == "" || chatID == "" {
+		return errors.New("telegram alert missing bot token or chat id")
+	}
+	if strings.ContainsAny(token, "/?#") || strings.IndexFunc(token, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f
+	}) >= 0 {
+		return errors.New("telegram alert bot token contains invalid characters")
+	}
+
+	apiBase := strings.TrimRight(strings.TrimSpace(telegramAPIBaseURL), "/")
+	if apiBase == "" {
+		apiBase = "https://api.telegram.org"
+	}
+	endpoint := apiBase + "/bot" + token + "/sendMessage"
+
+	payload := telegramMessagePayload{
+		ChatID:                chatID,
+		Text:                  truncateTelegramText(text),
+		DisableWebPagePreview: true,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal telegram payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("create telegram request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send telegram request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("telegram request returned status %d", resp.StatusCode)
+	}
+
+	m.logger.Info().
+		Str("channel", "telegram").
+		Msg("Telegram alert sent successfully")
+	return nil
+}
+
+func truncateTelegramText(text string) string {
+	const maxTelegramMessageRunes = 4096
+	runes := []rune(text)
+	if len(runes) <= maxTelegramMessageRunes {
+		return text
+	}
+	return string(runes[:maxTelegramMessageRunes-1]) + "…"
+}
+
+func (m *Monitor) sendStorageEmail(ctx context.Context, stats *StorageStats, cfg Config, message, hostname string) error {
+	if stats == nil {
+		return nil
+	}
+	body := strings.Join([]string{
+		message,
+		"",
+		"Type: storage_alert",
+		"Level: " + string(stats.Level),
+		"Host: " + hostname,
+		"Path: " + stats.Path,
+		"Used: " + formatBytes(stats.UsedBytes) + " (" + strconv.FormatFloat(stats.UsedPct, 'f', 1, 64) + "%)",
+		"Free: " + formatBytes(stats.FreeBytes),
+		"Checked at: " + stats.CheckedAt.UTC().Format(time.RFC3339),
+	}, "\n")
+	return m.sendEmail(ctx, cfg, "[MnemoNAS] storage "+string(stats.Level), body)
+}
+
+func (m *Monitor) sendEventEmail(ctx context.Context, event EventPayload, cfg Config) error {
+	lines := []string{
+		event.Message,
+		"",
+		"Type: " + event.Type,
+		"Level: " + string(event.Level),
+		"Host: " + event.Hostname,
+		"Timestamp: " + event.Timestamp.UTC().Format(time.RFC3339),
+	}
+	if len(event.Details) > 0 {
+		details, err := json.MarshalIndent(event.Details, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal event details for email: %w", err)
+		}
+		lines = append(lines, "", "Details:", string(details))
+	}
+	return m.sendEmail(ctx, cfg, "[MnemoNAS] "+event.Type+" "+string(event.Level), strings.Join(lines, "\n"))
+}
+
+func (m *Monitor) sendEmail(ctx context.Context, cfg Config, subject, body string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if !cfg.EmailEnabled {
+		return nil
+	}
+	recipients := cleanedSMTPRecipients(cfg.SMTPTo)
+	if len(recipients) == 0 {
+		return errors.New("email alert has no recipients configured")
+	}
+
+	addr := net.JoinHostPort(strings.TrimSpace(cfg.SMTPHost), strconv.Itoa(cfg.SMTPPort))
+	from := strings.TrimSpace(cfg.SMTPFrom)
+	var auth smtp.Auth
+	if strings.TrimSpace(cfg.SMTPUsername) != "" {
+		auth = smtp.PlainAuth("", strings.TrimSpace(cfg.SMTPUsername), cfg.SMTPPassword, strings.TrimSpace(cfg.SMTPHost))
+	}
+	message := buildEmailMessage(from, recipients, subject, body)
+	if err := sendSMTPMail(addr, auth, from, recipients, message); err != nil {
+		return fmt.Errorf("send email alert via %s: %w", addr, err)
+	}
+	m.logger.Info().
+		Str("smtp_host", strings.TrimSpace(cfg.SMTPHost)).
+		Int("recipients", len(recipients)).
+		Msg("Email alert sent successfully")
+	return nil
+}
+
+func cleanedSMTPRecipients(values []string) []string {
+	recipients := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			recipients = append(recipients, trimmed)
+		}
+	}
+	return recipients
+}
+
+func buildEmailMessage(from string, to []string, subject, body string) []byte {
+	encodedSubject := mime.QEncoding.Encode("UTF-8", strings.NewReplacer("\r", " ", "\n", " ").Replace(subject))
+	headers := []string{
+		"From: " + strings.TrimSpace(from),
+		"To: " + strings.Join(to, ", "),
+		"Subject: " + encodedSubject,
+		"Date: " + time.Now().UTC().Format(time.RFC1123Z),
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"Content-Transfer-Encoding: 8bit",
+	}
+	return []byte(strings.Join(headers, "\r\n") + "\r\n\r\n" + body + "\r\n")
 }
 
 func setCommonWebhookQuery(query url.Values, eventType string, level AlertLevel, message string, hostname string, timestamp time.Time) {

@@ -25,6 +25,7 @@ vi.mock('@/api/files', () => ({
     }
   },
   getDiagnostics: vi.fn(),
+  getDiskHealth: vi.fn(),
   getStorageStats: vi.fn(),
 }))
 
@@ -36,9 +37,10 @@ vi.mock('@/stores/auth', async (importOriginal) => {
   }
 })
 
-import { ApiError, getDiagnostics, getStorageStats } from '@/api/files'
+import { ApiError, getDiagnostics, getDiskHealth, getStorageStats } from '@/api/files'
 
 const mockGetDiagnostics = getDiagnostics as ReturnType<typeof vi.fn>
+const mockGetDiskHealth = getDiskHealth as ReturnType<typeof vi.fn>
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 
 describe('HealthPage', () => {
@@ -70,6 +72,16 @@ describe('HealthPage', () => {
       trashItems: 5,
       trashSize: 52428800,
     },
+    maintenance: {
+      historyReady: true,
+      scrubScheduleEnabled: true,
+      scrubScheduleInterval: '168h0m0s',
+      scrubRetryInterval: '1h0m0s',
+      scrubMaxRetries: 1,
+      lastScrubStatus: 'completed',
+      lastScrubAt: '2026-05-13T08:30:00Z',
+      scrubFailureRetries: 0,
+    },
     dataplane: {
       healthy: true,
       version: '0.3.0',
@@ -91,6 +103,28 @@ describe('HealthPage', () => {
     diskNativeDataChecksumSupport: true,
   }
 
+  const mockDiskHealth = {
+    enabled: true,
+    status: 'ok',
+    checkedAt: '2026-05-13T08:30:00Z',
+    message: 'all configured disks are healthy',
+    devices: [{
+      name: 'data',
+      path: '/dev/disk/by-id/test',
+      model: 'TestDisk',
+      present: true,
+      smartAvailable: true,
+      smartPassed: true,
+      temperatureC: 42,
+      powerOnHours: 1234,
+      wearPercentUsed: 8,
+      availableSparePercent: 95,
+      mediaErrors: 0,
+      status: 'ok',
+      message: 'device is healthy',
+    }],
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
     mockUser.id = 'u1'
@@ -100,12 +134,14 @@ describe('HealthPage', () => {
     mockUser.homeDir = '/'
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     mockGetDiagnostics.mockResolvedValue(mockDiagnostics)
+    mockGetDiskHealth.mockResolvedValue(mockDiskHealth)
     mockGetStorageStats.mockResolvedValue(mockStats)
   })
 
   describe('loading state', () => {
     it('shows refresh button with loading state', () => {
       mockGetDiagnostics.mockImplementation(() => new Promise(() => {}))
+      mockGetDiskHealth.mockImplementation(() => new Promise(() => {}))
       mockGetStorageStats.mockImplementation(() => new Promise(() => {}))
       render(<HealthPage />)
 
@@ -150,6 +186,7 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(mockGetDiagnostics.mock.calls.length).toBeGreaterThanOrEqual(2)
+        expect(mockGetDiskHealth.mock.calls.length).toBeGreaterThanOrEqual(2)
         expect(mockGetStorageStats.mock.calls.length).toBeGreaterThanOrEqual(2)
       })
     })
@@ -172,8 +209,10 @@ describe('HealthPage', () => {
     it('shows warning toast when refresh is temporarily unavailable', async () => {
     const user = userEvent.setup()
     mockGetDiagnostics.mockResolvedValueOnce(mockDiagnostics)
+    mockGetDiskHealth.mockResolvedValueOnce(mockDiskHealth)
     mockGetStorageStats.mockResolvedValueOnce(mockStats)
     mockGetDiagnostics.mockResolvedValueOnce(mockDiagnostics)
+    mockGetDiskHealth.mockResolvedValueOnce(mockDiskHealth)
     mockGetStorageStats.mockRejectedValueOnce(new ApiError('health unavailable', 503, 'SERVICE_UNAVAILABLE'))
 
     render(<HealthPage />)
@@ -187,7 +226,7 @@ describe('HealthPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '刷新暂不可用',
-        description: '诊断或存储统计服务当前不可用，请检查系统状态或稍后重试。',
+        description: '健康数据服务当前不可用，请检查系统状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -196,8 +235,10 @@ describe('HealthPage', () => {
     it('shows danger toast when refresh fails with a generic error', async () => {
     const user = userEvent.setup()
     mockGetDiagnostics.mockResolvedValueOnce(mockDiagnostics)
+    mockGetDiskHealth.mockResolvedValueOnce(mockDiskHealth)
     mockGetStorageStats.mockResolvedValueOnce(mockStats)
     mockGetDiagnostics.mockRejectedValueOnce(new Error('refresh failed'))
+    mockGetDiskHealth.mockResolvedValueOnce(mockDiskHealth)
     mockGetStorageStats.mockResolvedValueOnce(mockStats)
 
     render(<HealthPage />)
@@ -230,11 +271,18 @@ describe('HealthPage', () => {
           ...mockStats,
           totalObjects: 2048,
         })
+      mockGetDiskHealth
+        .mockResolvedValueOnce(mockDiskHealth)
+        .mockResolvedValueOnce({
+          ...mockDiskHealth,
+          checkedAt: '2026-05-13T09:30:00Z',
+        })
 
       const { rerender } = render(<HealthPage />)
 
       await waitFor(() => {
         expect(mockGetDiagnostics).toHaveBeenCalledTimes(1)
+        expect(mockGetDiskHealth).toHaveBeenCalledTimes(1)
         expect(mockGetStorageStats).toHaveBeenCalledTimes(1)
       })
 
@@ -246,6 +294,7 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(mockGetDiagnostics).toHaveBeenCalledTimes(2)
+        expect(mockGetDiskHealth).toHaveBeenCalledTimes(2)
         expect(mockGetStorageStats).toHaveBeenCalledTimes(2)
       })
     })
@@ -292,6 +341,38 @@ describe('HealthPage', () => {
       })
     })
 
+    it('displays scheduled scrub status', async () => {
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('周期 Scrub 已启用')).toBeTruthy()
+        expect(screen.getByText(/每 7 天 自动巡检/)).toBeTruthy()
+      })
+    })
+
+    it('warns when scheduled scrub recently failed', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        maintenance: {
+          historyReady: true,
+          scrubScheduleEnabled: true,
+          scrubScheduleInterval: '24h0m0s',
+          scrubRetryInterval: '30m0s',
+          scrubMaxRetries: 2,
+          lastScrubStatus: 'failed',
+          lastScrubAt: '2026-05-13T08:30:00Z',
+          scrubFailureRetries: 1,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('周期 Scrub 最近失败')).toBeTruthy()
+        expect(screen.getByText(/当前已重试 1\/2 次/)).toBeTruthy()
+      })
+    })
+
     it('displays backup manager status when diagnostics provide it', async () => {
       render(<HealthPage />)
 
@@ -313,6 +394,37 @@ describe('HealthPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('收藏存储')).toBeTruthy()
+      })
+    })
+
+    it('warns when SMB is configured without a runtime', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        system: {
+          ...mockDiagnostics.system,
+          smbRuntimeReady: false,
+        },
+        smb: {
+          enabled: true,
+          runtimeAvailable: false,
+          implementation: 'planned_sidecar',
+          listen: '127.0.0.1:1445',
+          serverName: 'mnemonas',
+          signingRequired: true,
+          encryptionRequired: false,
+          shareCount: 2,
+          credentialsReady: true,
+          gatewayConfigured: true,
+          message: 'SMB sidecar is not implemented.',
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('SMB 运行态')).toBeTruthy()
+        expect(screen.getByText('SMB 当前不可挂载')).toBeTruthy()
+        expect(screen.getByText(/已配置 2 个共享/)).toBeTruthy()
       })
     })
 
@@ -439,8 +551,77 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警已启用，未配置 Webhook')).toBeTruthy()
+        expect(screen.getByText('存储告警已启用，未配置通知通道')).toBeTruthy()
         expect(screen.getByText(/等待首次检查/)).toBeTruthy()
+      })
+    })
+
+    it('treats Telegram as a configured alert notification channel', async () => {
+      mockGetDiagnostics.mockResolvedValue({
+        ...mockDiagnostics,
+        alerts: {
+          enabled: true,
+          runtimeAvailable: true,
+          webhookConfigured: false,
+          telegramConfigured: true,
+          emailConfigured: false,
+        },
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('存储告警已启用')).toBeTruthy()
+        expect(screen.getByText(/通知通道已配置/)).toBeTruthy()
+      })
+    })
+
+    it('displays disk health summary and devices', async () => {
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康')).toBeTruthy()
+        expect(screen.getByText('磁盘健康正常')).toBeTruthy()
+        expect(screen.getByText('TestDisk')).toBeTruthy()
+        expect(screen.getByText('42 C · 磨损 8% · 备用 95%')).toBeTruthy()
+      })
+    })
+
+    it('surfaces critical disk health status', async () => {
+      mockGetDiskHealth.mockResolvedValue({
+        ...mockDiskHealth,
+        status: 'critical',
+        message: 'one or more disks require immediate attention',
+        devices: [{
+          ...mockDiskHealth.devices[0],
+          status: 'critical',
+          smartPassed: false,
+          message: 'SMART self-assessment failed',
+        }],
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康严重异常')).toBeTruthy()
+        expect(screen.getByText('SMART self-assessment failed')).toBeTruthy()
+        expect(screen.getByText('严重')).toBeTruthy()
+      })
+    })
+
+    it('shows disabled disk health guidance', async () => {
+      mockGetDiskHealth.mockResolvedValue({
+        enabled: false,
+        status: 'disabled',
+        checkedAt: '2026-05-13T08:30:00Z',
+        devices: [],
+        message: 'disk health checks are disabled',
+      })
+
+      render(<HealthPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康监控未启用')).toBeTruthy()
       })
     })
   })
@@ -658,6 +839,7 @@ describe('HealthPage', () => {
 
     it('shows retryable error state when health queries fail', async () => {
       mockGetDiagnostics.mockRejectedValue(new Error('Network error'))
+      mockGetDiskHealth.mockRejectedValue(new Error('Network error'))
       mockGetStorageStats.mockRejectedValue(new Error('Network error'))
       render(<HealthPage />)
 
