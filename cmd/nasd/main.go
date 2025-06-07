@@ -30,6 +30,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/api"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/diskhealth"
 	"github.com/seanbao/mnemonas/internal/rootio"
 	"github.com/seanbao/mnemonas/internal/storage"
 	mnemonasTLS "github.com/seanbao/mnemonas/internal/tls"
@@ -65,6 +66,32 @@ func newSwitchableWebDAVHandler(prefix string, handler http.Handler) *switchable
 	s := &switchableWebDAVHandler{}
 	s.Update(prefix, handler)
 	return s
+}
+
+func diskHealthRuntimeConfig(cfg config.DiskHealthConfig) diskhealth.Config {
+	devices := make([]diskhealth.DeviceConfig, 0, len(cfg.Devices))
+	for _, device := range cfg.Devices {
+		devices = append(devices, diskhealth.DeviceConfig{
+			Name:                 device.Name,
+			Path:                 device.Path,
+			Type:                 device.Type,
+			Serial:               device.Serial,
+			TemperatureWarningC:  device.TemperatureWarningC,
+			TemperatureCriticalC: device.TemperatureCriticalC,
+		})
+	}
+	return diskhealth.Config{
+		Enabled:              cfg.Enabled,
+		CheckInterval:        cfg.CheckInterval,
+		ProbeTimeout:         cfg.ProbeTimeout,
+		CooldownPeriod:       cfg.CooldownPeriod,
+		Command:              cfg.Command,
+		TemperatureWarningC:  cfg.TemperatureWarningC,
+		TemperatureCriticalC: cfg.TemperatureCriticalC,
+		MediaWearWarningPct:  cfg.MediaWearWarningPct,
+		MediaWearCriticalPct: cfg.MediaWearCriticalPct,
+		Devices:              devices,
+	}
 }
 
 func (s *switchableWebDAVHandler) Update(prefix string, handler http.Handler) {
@@ -478,15 +505,25 @@ func main() {
 
 	// Initialize storage alerts monitor
 	alertMonitor := alerts.NewMonitor(alerts.Config{
-		Enabled:        cfg.Alerts.Enabled,
-		CheckInterval:  cfg.Alerts.CheckInterval,
-		ThresholdPct:   cfg.Alerts.ThresholdPct,
-		CriticalPct:    cfg.Alerts.CriticalPct,
-		MinFreeBytes:   cfg.Alerts.MinFreeBytes,
-		CooldownPeriod: cfg.Alerts.CooldownPeriod,
-		WebhookURL:     cfg.Alerts.WebhookURL,
-		WebhookMethod:  cfg.Alerts.WebhookMethod,
-		WebhookHeaders: cfg.Alerts.WebhookHeaders,
+		Enabled:          cfg.Alerts.Enabled,
+		CheckInterval:    cfg.Alerts.CheckInterval,
+		ThresholdPct:     cfg.Alerts.ThresholdPct,
+		CriticalPct:      cfg.Alerts.CriticalPct,
+		MinFreeBytes:     cfg.Alerts.MinFreeBytes,
+		CooldownPeriod:   cfg.Alerts.CooldownPeriod,
+		WebhookURL:       cfg.Alerts.WebhookURL,
+		WebhookMethod:    cfg.Alerts.WebhookMethod,
+		WebhookHeaders:   cfg.Alerts.WebhookHeaders,
+		TelegramEnabled:  cfg.Alerts.TelegramEnabled,
+		TelegramBotToken: cfg.Alerts.TelegramBotToken,
+		TelegramChatID:   cfg.Alerts.TelegramChatID,
+		EmailEnabled:     cfg.Alerts.EmailEnabled,
+		SMTPHost:         cfg.Alerts.SMTPHost,
+		SMTPPort:         cfg.Alerts.SMTPPort,
+		SMTPUsername:     cfg.Alerts.SMTPUsername,
+		SMTPPassword:     cfg.Alerts.SMTPPassword,
+		SMTPFrom:         cfg.Alerts.SMTPFrom,
+		SMTPTo:           cfg.Alerts.SMTPTo,
 	}, cfg.Storage.Root, log.Logger)
 	alertMonitor.Start(ctx)
 	if cfg.Alerts.Enabled {
@@ -495,6 +532,16 @@ func main() {
 			Float64("critical_pct", cfg.Alerts.CriticalPct).
 			Dur("interval", cfg.Alerts.CheckInterval).
 			Msg("storage alerts enabled")
+	}
+
+	diskHealthMonitor := diskhealth.NewMonitor(diskHealthRuntimeConfig(cfg.DiskHealth), alertMonitor, log.Logger)
+	diskHealthMonitor.Start(ctx)
+	defer diskHealthMonitor.Stop()
+	if cfg.DiskHealth.Enabled {
+		log.Info().
+			Int("devices", len(cfg.DiskHealth.Devices)).
+			Dur("interval", cfg.DiskHealth.CheckInterval).
+			Msg("disk health monitoring enabled")
 	}
 
 	// Mount API with data plane connection
@@ -533,6 +580,7 @@ func main() {
 		ShareBaseURL:     cfg.Share.BaseURL,
 		AlertMonitor:     alertMonitor,
 		RetentionMonitor: retentionMonitor,
+		DiskHealth:       diskHealthMonitor,
 		// Favorites configuration
 		FavoritesEnabled:   cfg.Favorites.Enabled,
 		FavoritesStoreFile: cfg.Favorites.StoreFile,
@@ -928,6 +976,9 @@ func configWarnings(cfg *config.Config) []string {
 	}
 	if listensBeyondLoopback(hostFromTCPAddress(cfg.DataPlane.GRPCAddress)) {
 		warnings = append(warnings, "dataplane.grpc_address listens beyond loopback; dataplane has no external authentication")
+	}
+	if cfg.SMB.Enabled {
+		warnings = append(warnings, "smb.enabled=true configures a preview gateway contract only; this build does not start an SMB/Samba listener")
 	}
 	return warnings
 }

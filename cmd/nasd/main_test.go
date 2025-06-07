@@ -198,6 +198,28 @@ func TestConfigWarnings_AllowsLoopbackOnlyDevConfig(t *testing.T) {
 	}
 }
 
+func TestConfigWarnings_ReportsSMBPreviewRuntime(t *testing.T) {
+	cfg := config.Default()
+	cfg.SMB.Enabled = true
+	cfg.SMB.Shares = []config.SMBShareConfig{{
+		Name:         "homes",
+		Path:         "/",
+		AllowedRoles: []string{"admin"},
+	}}
+
+	warnings := configWarnings(cfg)
+	var found bool
+	for _, warning := range warnings {
+		if strings.Contains(warning, "does not start an SMB/Samba listener") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected SMB preview warning, got %v", warnings)
+	}
+}
+
 func TestHostFromTCPAddress(t *testing.T) {
 	tests := []struct {
 		name    string

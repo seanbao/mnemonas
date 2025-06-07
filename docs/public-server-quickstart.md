@@ -123,7 +123,7 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 
-带 `--public-domain` 的检查会验证公网 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书剩余有效期、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。
+带 `--public-domain` 的检查会验证公网 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书剩余有效期、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。它也会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
 
 期望状态：
 

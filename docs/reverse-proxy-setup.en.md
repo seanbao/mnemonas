@@ -302,7 +302,11 @@ Certificate checks:
 
 ```bash
 sudo certbot certificates
-sudo certbot renew
+sudo certbot renew --dry-run
+systemctl list-timers 'certbot*' 'snap.certbot*'
+journalctl -u certbot --since '24 hours ago'
+journalctl -u caddy --since '24 hours ago'
+sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
 Connectivity:

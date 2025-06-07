@@ -15,7 +15,7 @@ If no file is found, defaults are used.
 
 The Ubuntu/systemd installer writes `/etc/mnemonas/config.toml` and points the systemd unit to it with `--config`.
 
-Config files can contain sensitive values such as `auth.jwt_secret`, WebDAV passwords, and alert webhook headers. MnemoNAS saves config files with `0600` permissions and tightens existing config files when they are loaded.
+Config files can contain sensitive values such as `auth.jwt_secret`, WebDAV passwords, alert webhook headers, and Telegram bot tokens. MnemoNAS saves config files with `0600` permissions and tightens existing config files when they are loaded.
 
 ## Validate Configuration
 
@@ -108,6 +108,30 @@ min_free_bytes = 10737418240
 cooldown_period = "4h"
 webhook_url = ""
 webhook_method = "POST"
+email_enabled = false
+smtp_host = ""
+smtp_port = 587
+smtp_username = ""
+smtp_password = ""
+smtp_from = ""
+smtp_to = []
+
+[disk_health]
+enabled = false
+check_interval = "1h"
+probe_timeout = "15s"
+cooldown_period = "4h"
+command = "smartctl"
+temperature_warning_c = 50
+temperature_critical_c = 60
+media_wear_warning_percent = 80
+media_wear_critical_percent = 100
+
+[[disk_health.devices]]
+name = "data-disk"
+path = "/dev/disk/by-id/ata-example"
+type = "sat"
+serial = ""
 
 [security]
 allow_unsafe_no_auth = false
@@ -279,6 +303,23 @@ Runtime behavior:
 - WebDAV is matched before the API and frontend handlers, so enabled prefixes cannot overlap reserved application routes.
 - WebDAV Basic Auth is a global service credential and does not carry app-level user identity.
 
+## `[smb]`
+
+The current release does not start an SMB/Samba listener. This section is a preview contract for a future SMB gateway sidecar. If `enabled = true`, `nasd --check-config` prints a preview warning, and the health page plus diagnostics export report SMB runtime as unavailable. Use WebDAV for current LAN mounts.
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Preview switch; does not start an SMB service in this build |
+| `listen` | string | `"127.0.0.1:1445"` | Reserved sidecar listen address |
+| `server_name` | string | `"mnemonas"` | Reserved SMB server name |
+| `gateway_socket` | string | `<storage.root>/.mnemonas/run/smb-gateway.sock` | Reserved MnemoNAS gateway Unix socket |
+| `credential_file` | string | `<storage.root>/.mnemonas/smb-credentials.json` | Reserved SMB-only credential file; does not reuse Web login passwords |
+| `signing_required` | bool | `true` | Reserved SMB signing policy |
+| `encryption_required` | bool | `false` | Reserved SMB encryption policy |
+| `[[smb.shares]]` | array | `[]` | Reserved share mapping; required when the preview switch is enabled |
+
+Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`. The intended sidecar path is to keep file access behind MnemoNAS authorization, `home_dir`, and gateway APIs instead of sharing `files/` directly through Samba and bypassing version history, trash, and audit.
+
 ## `[auth]`
 
 | Option | Type | Default | Description |
@@ -335,8 +376,74 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `webhook_url` | string | `""` | Alert webhook URL; non-empty values must be absolute `http` or `https` URLs |
 | `webhook_method` | string | `"POST"` | `POST` sends JSON; `GET` encodes fields into query |
 | `webhook_headers` | string[] | `[]` | Additional headers, `"Key: Value"`; names must be valid HTTP tokens and values cannot contain newlines or control characters |
+| `telegram_enabled` | bool | `false` | Enable Telegram bot notifications |
+| `telegram_bot_token` | string | `""` | Telegram bot token; never returned in diagnostics or settings responses |
+| `telegram_chat_id` | string | `""` | Telegram chat ID or `@channel` username |
+| `email_enabled` | bool | `false` | Enable SMTP email notifications |
+| `smtp_host` | string | `""` | SMTP host without port |
+| `smtp_port` | int | `587` | SMTP port |
+| `smtp_username` | string | `""` | SMTP username |
+| `smtp_password` | string | `""` | SMTP password or app password |
+| `smtp_from` | string | `""` | Sender address, such as `MnemoNAS <alerts@example.com>` |
+| `smtp_to` | string[] | `[]` | Recipient addresses |
 
-Health pages and diagnostics show alert state but do not expose webhook URL or headers. Successful and failed webhook logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields.
+Health pages and diagnostics show alert state and whether Webhook, Telegram, or email notifications are configured, but do not expose webhook URL, webhook headers, `telegram_bot_token`, or `smtp_password`. The same notification channels are used for backup failures, restore-drill failures, stale or missing restore-drill reminders, disk-health anomalies, scrub anomalies, and login rate-limit events. Successful and failed webhook logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token.
+
+## `[disk_health]`
+
+Disk health uses `smartctl --json --all` to collect SMART self-assessment, temperature, power-on hours, and device presence for configured devices. It is disabled by default. Install `smartmontools` first, and ensure the user running `nasd` can read the configured devices.
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enable periodic disk health checks |
+| `check_interval` | duration | `"1h"` | Background check interval |
+| `probe_timeout` | duration | `"15s"` | Timeout for each single-device `smartctl` probe |
+| `cooldown_period` | duration | `"4h"` | Minimum repeat interval for the same alert status |
+| `command` | string | `"smartctl"` | Bare executable name or absolute path; whitespace and shell arguments are rejected |
+| `temperature_warning_c` | int | `50` | Default warning temperature threshold in Celsius |
+| `temperature_critical_c` | int | `60` | Default critical temperature threshold in Celsius |
+| `media_wear_warning_percent` | int | `80` | Warning threshold for media lifetime used percentage; `0` uses the default |
+| `media_wear_critical_percent` | int | `100` | Critical threshold for media lifetime used percentage; `0` uses the default |
+| `devices` | array | `[]` | Devices to monitor |
+
+`[[disk_health.devices]]` fields:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | `""` | Display name in the Web UI |
+| `path` | string | required | Absolute device path; stable `/dev/disk/by-id/...` paths are recommended |
+| `type` | string | `""` | Optional `smartctl --device` value such as `sat`, `scsi`, `nvme`, or a USB bridge type |
+| `serial` | string | `""` | Optional expected serial number; mismatches are reported as critical to detect replacement or path drift |
+| `temperature_warning_c` | int | global value | Per-device warning threshold override |
+| `temperature_critical_c` | int | global value | Per-device critical threshold override |
+
+Runtime behavior:
+
+- `GET /api/v1/maintenance/disk-health` runs an immediate probe and returns full device details.
+- Diagnostics and diagnostic exports include only a sanitized summary, not serial numbers.
+- Background checks that find `warning`, `critical`, or `unavailable` status write a `disk_health` activity-log entry as the system user, with repeats limited by `cooldown_period`.
+- NVMe `percentage_used`, `available_spare`, `critical_warning`, `media_errors`, and common ATA lifetime attributes participate in status evaluation.
+- When `[alerts] enabled = true` and Webhook, Telegram, or SMTP email is configured, missing devices, SMART failures, high temperature, serial mismatch, or unavailable SMART data send a `disk_health` event.
+- Missing device paths are `critical`; unavailable `smartctl` or invalid JSON is `unavailable`.
+
+## `[maintenance.scrub]`
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enable background scheduled Scrub runs |
+| `schedule_interval` | duration | `"168h"` | Regular Scrub interval |
+| `retry_interval` | duration | `"1h"` | Automatic retry interval after a failed Scrub |
+| `max_retries` | int | `1` | Maximum automatic retries after one failure; `0` disables retries |
+
+When enabled, the server triggers full Scrub runs in the background as the system user. Completion, failure, object anomalies, and result-persistence warnings continue to use maintenance history, activity logs, and configured alert channels. After a failed Scrub, the scheduler first retries according to `retry_interval` up to `max_retries`; after that, the next regular attempt follows `schedule_interval`. These fields can also be updated from the Web settings page or Settings API, and saving them immediately replaces the running background scheduler.
+
+```toml
+[maintenance.scrub]
+enabled = true
+schedule_interval = "168h"
+retry_interval = "1h"
+max_retries = 1
+```
 
 ## `[log]`
 

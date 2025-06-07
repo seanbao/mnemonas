@@ -230,7 +230,7 @@ cloudflared tunnel run mnemonas
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
 - [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`
-- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
+- [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
 
@@ -239,7 +239,7 @@ cloudflared tunnel run mnemonas
 ```bash
 # MnemoNAS 自检
 sudo mnemonas-doctor --public-domain <domain>
-# 该命令会检查 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书 30 天有效期、后端直连端口和 dataplane 端口
+# 该命令会检查 HTTPS health、HTTP 到 HTTPS 跳转、证书 hostname、证书 30 天有效期、证书续期提示、后端直连端口和 dataplane 端口
 
 # 检查监听端口
 ss -tlnp | grep 8080

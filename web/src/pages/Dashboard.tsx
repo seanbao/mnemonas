@@ -83,6 +83,8 @@ function ActionIcon({ action }: { action: ActionType }) {
     trash_restore: RotateCcw,
     trash_delete: Trash2,
     trash_empty: Trash2,
+    disk_health: HardDrive,
+    scrub: Database,
   }
   const Icon = icons[action] || Activity
   return <Icon size={14} />
@@ -169,6 +171,7 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
     trash_restore: 'text-emerald-500',
     trash_delete: 'text-red-500',
     trash_empty: 'text-red-500',
+    disk_health: 'text-amber-500',
   }
 
   const statusMap: Record<string, 'success' | 'warning' | 'primary'> = {
@@ -177,6 +180,7 @@ function RecentActivityItem({ entry }: { entry: ActivityEntry }) {
     delete: 'warning',
     create: 'success',
     share: 'primary',
+    disk_health: 'warning',
   }
 
   return (

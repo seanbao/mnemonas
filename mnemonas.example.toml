@@ -54,6 +54,7 @@ username = "admin"           # Basic Auth 用户名（默认 admin）
 password = ""                # Basic Auth 密码（留空则首次启动时自动生成并写入 secrets.json）
 
 [smb]
+# 预览配置：当前版本不会启动 SMB/Samba 监听器；局域网挂载请继续使用 WebDAV。
 enabled = false
 listen = "127.0.0.1:1445"    # 建议由反向代理/端口转发绑定到 445；普通用户进程默认不能直接监听 445
 server_name = "mnemonas"
@@ -121,6 +122,12 @@ encryption_required = false
 # exclude = [".mnemonas/thumbnails"]
 # extra_args = ["--fast-list"]
 
+[maintenance.scrub]
+enabled = false              # 启用后后台按计划执行数据完整性校验
+schedule_interval = "168h"   # 常规 Scrub 间隔（默认 7 天）
+retry_interval = "1h"        # Scrub 失败后的重试间隔
+max_retries = 1              # 每次失败后最多自动重试次数
+
 [auth]
 enabled = true               # 启用后所有 API 需要 JWT 认证
 jwt_secret = ""              # JWT 签名密钥（留空则自动生成）
@@ -147,6 +154,9 @@ cooldown_period = "4h"       # 同级别告警冷却时间
 webhook_url = ""             # Webhook URL（如企业微信机器人、Slack 等）
 webhook_method = "POST"      # HTTP 方法；GET 时将告警字段编码到 URL query
 # webhook_headers = ["Authorization: Bearer xxx"] # 自定义请求头；名称必须是合法 HTTP header token，值不能包含换行或控制字符
+telegram_enabled = false     # 启用 Telegram 机器人通知
+telegram_bot_token = ""      # Telegram Bot Token；仅写入配置文件，不会在诊断或设置响应中明文返回
+telegram_chat_id = ""        # Telegram Chat ID 或 @channel 用户名
 
 [security]
 allow_unsafe_no_auth = false  # 仅在明确接受非 loopback 无认证暴露风险时才设为 true

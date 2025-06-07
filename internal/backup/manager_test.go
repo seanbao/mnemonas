@@ -95,6 +95,23 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	assertFileContent(t, filepath.Join(drill.RestoredPath, "config", "config.toml"), "[server]\nport = 8080\n")
 
 	restoreTarget := filepath.Join(tmpDir, "restore-target")
+	preview, err := manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{
+		TargetPath:    restoreTarget,
+		IncludeConfig: true,
+	})
+	if err != nil {
+		t.Fatalf("RunRestorePreview() error: %v", err)
+	}
+	if preview.Status != StatusCompleted || preview.TargetPath != restoreTarget || preview.FileCount != result.FileCount || !preview.ConfigAvailable || !preview.ConfigIncluded {
+		t.Fatalf("unexpected RunRestorePreview result: %+v", preview)
+	}
+	if len(preview.SamplePaths) != 2 || preview.SamplePaths[0] != "docs/note.txt" || preview.SamplePaths[1] != ".mnemonas-restore/config.toml" {
+		t.Fatalf("preview sample paths = %#v", preview.SamplePaths)
+	}
+	if _, err := os.Stat(restoreTarget); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("RunRestorePreview target stat error = %v, want not exist", err)
+	}
+
 	restore, err := manager.RunRestore(context.Background(), "home", RestoreOptions{
 		TargetPath:    restoreTarget,
 		IncludeConfig: true,
@@ -113,6 +130,19 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(restoreTarget, "cache", "skip.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("excluded restored file stat error = %v, want not exist", err)
 	}
+	verify, err := manager.RunRestoreVerify(context.Background(), "home", RestoreVerifyOptions{TargetPath: restoreTarget})
+	if err != nil {
+		t.Fatalf("RunRestoreVerify() error: %v", err)
+	}
+	if verify.Status != StatusCompleted || verify.TargetPath != restoreTarget || verify.FileCount != restore.FileCount || verify.VerifiedBytes != restore.VerifiedBytes {
+		t.Fatalf("unexpected RunRestoreVerify result: %+v", verify)
+	}
+	if !verify.ConfigFound || verify.ConfigPath != filepath.Join(restoreTarget, ".mnemonas-restore", "config.toml") {
+		t.Fatalf("RunRestoreVerify config result = %+v", verify)
+	}
+	if verify.LooksLikeStorageRoot {
+		t.Fatalf("RunRestoreVerify should not classify this test source as a storage root: %+v", verify)
+	}
 
 	reloaded, err := NewManager(ManagerConfig{
 		Root:        stateRoot,
@@ -130,8 +160,14 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 		t.Fatalf("NewManager() reload error: %v", err)
 	}
 	jobs := reloaded.ListJobs()
-	if len(jobs) != 1 || jobs[0].LastRun == nil || jobs[0].LastRestoreDrill == nil {
+	if len(jobs) != 1 || jobs[0].LastRun == nil || jobs[0].LastRestoreDrill == nil || jobs[0].LastRestore == nil {
 		t.Fatalf("reloaded jobs missing persisted status: %+v", jobs)
+	}
+	if jobs[0].LastRestore.TargetPath != restoreTarget || jobs[0].LastRestore.Status != StatusCompleted {
+		t.Fatalf("reloaded last restore = %+v, want completed restore to %s", jobs[0].LastRestore, restoreTarget)
+	}
+	if len(jobs[0].RestoreHistory) != 1 || jobs[0].RestoreHistory[0].ID != restore.ID {
+		t.Fatalf("reloaded restore history = %+v, want restore %s", jobs[0].RestoreHistory, restore.ID)
 	}
 }
 
@@ -186,9 +222,20 @@ func TestManager_RunRestoreRejectsUnsafeTarget(t *testing.T) {
 		t.Fatalf("RunJob() error: %v", err)
 	}
 
-	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: filepath.Join(source, "restored")})
+	sourceTarget := filepath.Join(source, "restored")
+	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: sourceTarget})
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("RunRestore() source target error = %v, want ErrUnsafePath", err)
+	}
+	job, err := manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() error: %v", err)
+	}
+	if job.LastRestore == nil || job.LastRestore.Status != StatusFailed || job.LastRestore.TargetPath != sourceTarget {
+		t.Fatalf("failed restore was not persisted: %+v", job.LastRestore)
+	}
+	if len(job.RestoreHistory) != 1 || job.RestoreHistory[0].Status != StatusFailed {
+		t.Fatalf("failed restore history = %+v, want one failed restore", job.RestoreHistory)
 	}
 
 	existingTarget := filepath.Join(tmpDir, "existing")
@@ -196,6 +243,106 @@ func TestManager_RunRestoreRejectsUnsafeTarget(t *testing.T) {
 	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: existingTarget})
 	if !errors.Is(err, ErrRestoreTargetExists) {
 		t.Fatalf("RunRestore() existing target error = %v, want ErrRestoreTargetExists", err)
+	}
+	job, err = manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() after existing target error: %v", err)
+	}
+	if len(job.RestoreHistory) != 2 || job.RestoreHistory[0].TargetPath != existingTarget {
+		t.Fatalf("restore history after second failure = %+v, want latest existing target failure", job.RestoreHistory)
+	}
+
+	missingTarget := filepath.Join(tmpDir, "missing")
+	_, err = manager.RunRestoreVerify(context.Background(), "home", RestoreVerifyOptions{TargetPath: missingTarget})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestoreVerify() missing target error = %v, want ErrUnsafePath", err)
+	}
+	job, err = manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() after verify error: %v", err)
+	}
+	if len(job.RestoreHistory) != 2 {
+		t.Fatalf("restore verify should not write restore history: %+v", job.RestoreHistory)
+	}
+}
+
+func TestManager_JobViewRestoreDrillAndRetentionHealth(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{
+			{
+				ID:                     "local-unbounded",
+				Name:                   "Local unbounded",
+				Type:                   JobTypeLocal,
+				Source:                 source,
+				Destination:            filepath.Join(tmpDir, "backups"),
+				ScheduleInterval:       24 * time.Hour,
+				RestoreDrillStaleAfter: 24 * time.Hour,
+			},
+			{
+				ID:              "restic-retained",
+				Name:            "Restic retained",
+				Type:            JobTypeRestic,
+				Source:          source,
+				Repository:      "rest:http://backup.example/repo",
+				PasswordFile:    filepath.Join(tmpDir, "restic-password"),
+				RetentionPolicy: "external: restic forget --keep-daily 7 --prune",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	manager.now = func() time.Time { return now }
+
+	lastBackupFinished := now.Add(-2 * time.Hour)
+	staleDrillFinished := now.Add(-25 * time.Hour)
+	manager.mu.Lock()
+	manager.state.Jobs["local-unbounded"] = JobState{
+		LastSuccessfulRun: &RunResult{
+			ID:         "backup",
+			JobID:      "local-unbounded",
+			Status:     StatusCompleted,
+			StartedAt:  lastBackupFinished.Add(-time.Minute),
+			FinishedAt: &lastBackupFinished,
+		},
+		LastRestoreDrill: &RestoreDrillResult{
+			ID:         "drill",
+			JobID:      "local-unbounded",
+			Status:     StatusCompleted,
+			StartedAt:  staleDrillFinished.Add(-time.Minute),
+			FinishedAt: &staleDrillFinished,
+		},
+	}
+	manager.mu.Unlock()
+
+	jobs := manager.ListJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("job count = %d, want 2", len(jobs))
+	}
+	localJob := jobs[0]
+	if localJob.ID != "local-unbounded" || localJob.RetentionStatus != "warning" || localJob.RestoreDrillStatus != "stale" {
+		t.Fatalf("unexpected local job policy state: %+v", localJob)
+	}
+	if localJob.RestoreDrillStaleAfter != "24h0m0s" {
+		t.Fatalf("restore drill stale after = %q, want 24h0m0s", localJob.RestoreDrillStaleAfter)
+	}
+	remoteJob := jobs[1]
+	if remoteJob.ID != "restic-retained" || remoteJob.RetentionStatus != "ok" || remoteJob.RestoreDrillStatus != "due" {
+		t.Fatalf("unexpected remote job policy state: %+v", remoteJob)
+	}
+	if remoteJob.RetentionPolicy != "external: restic forget --keep-daily 7 --prune" {
+		t.Fatalf("retention policy = %q", remoteJob.RetentionPolicy)
+	}
+	if remoteJob.RestoreDrillStaleAfter != "720h0m0s" {
+		t.Fatalf("default restore drill stale after = %q, want 720h0m0s", remoteJob.RestoreDrillStaleAfter)
 	}
 }
 
@@ -482,6 +629,22 @@ func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
 	}
 
 	restoreTarget := filepath.Join(tmpDir, "restic-restore-target")
+	preview, err := manager.RunRestorePreview(context.Background(), "restic-remote", RestorePreviewOptions{
+		TargetPath: restoreTarget,
+	})
+	if err != nil {
+		t.Fatalf("RunRestorePreview() error: %v", err)
+	}
+	if preview.Status != StatusCompleted || preview.TargetPath != restoreTarget || preview.ManifestPath != "rest:http://backup.example/repo" {
+		t.Fatalf("unexpected restore preview result: %+v", preview)
+	}
+	if preview.FileCount != 1 || preview.TotalBytes != int64(len("restic restored")) || len(preview.SamplePaths) != 1 || preview.SamplePaths[0] != "docs/note.txt" {
+		t.Fatalf("unexpected restore preview metrics: %+v", preview)
+	}
+	if _, err := os.Stat(restoreTarget); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("RunRestorePreview target stat error = %v, want not exist", err)
+	}
+
 	restore, err := manager.RunRestore(context.Background(), "restic-remote", RestoreOptions{
 		TargetPath: restoreTarget,
 	})
@@ -495,10 +658,21 @@ func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
 		t.Fatalf("unexpected restore metrics: %+v", restore)
 	}
 	assertFileContent(t, filepath.Join(restoreTarget, "docs", "note.txt"), "restic restored")
+	verify, err := manager.RunRestoreVerify(context.Background(), "restic-remote", RestoreVerifyOptions{TargetPath: restoreTarget})
+	if err != nil {
+		t.Fatalf("RunRestoreVerify() error: %v", err)
+	}
+	if verify.Status != StatusCompleted || verify.TargetPath != restoreTarget || verify.FileCount != restore.FileCount || verify.VerifiedBytes != restore.VerifiedBytes {
+		t.Fatalf("unexpected restore verify result: %+v", verify)
+	}
+	jobs := manager.ListJobs()
+	if len(jobs) != 1 || jobs[0].LastRestore == nil || jobs[0].LastRestore.ID != restore.ID || len(jobs[0].RestoreHistory) != 1 {
+		t.Fatalf("restic restore audit was not recorded: %+v", jobs)
+	}
 
 	calls := readCommandCalls(t, logPath)
-	if len(calls) != 4 {
-		t.Fatalf("command call count = %d, want 4: %#v", len(calls), calls)
+	if len(calls) != 5 {
+		t.Fatalf("command call count = %d, want 5: %#v", len(calls), calls)
 	}
 	assertCommandArgs(t, calls[0], []string{
 		"-r", "rest:http://backup.example/repo",
@@ -518,6 +692,16 @@ func TestManager_RunResticBackupUsesExternalCommand(t *testing.T) {
 	assertCommandArgs(t, calls[3], []string{
 		"-r", "rest:http://backup.example/repo",
 		"--password-file", passwordFile,
+		"ls", "latest",
+		"--json",
+		"--tag", "mnemonas",
+		"--tag", "job:restic-remote",
+		"--path", source,
+		"--exclude", "cache/**",
+	})
+	assertCommandArgs(t, calls[4], []string{
+		"-r", "rest:http://backup.example/repo",
+		"--password-file", passwordFile,
 		"restore", "latest",
 		"--target", restoreTarget + ".restic-" + restore.ID,
 		"--tag", "mnemonas",
@@ -531,7 +715,7 @@ func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
 	configFile := filepath.Join(tmpDir, "rclone.conf")
-	commandPath, logPath := newRecordingCommand(t, 0, "")
+	commandPath, logPath := newRecordingRcloneCommand(t)
 	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "rclone")
 	mustWriteFile(t, configFile, "[remote]\ntype = local\n")
 
@@ -572,6 +756,22 @@ func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
 	}
 
 	restoreTarget := filepath.Join(tmpDir, "rclone-restore-target")
+	preview, err := manager.RunRestorePreview(context.Background(), "rclone-remote", RestorePreviewOptions{
+		TargetPath: restoreTarget,
+	})
+	if err != nil {
+		t.Fatalf("RunRestorePreview() error: %v", err)
+	}
+	if preview.Status != StatusCompleted || preview.TargetPath != restoreTarget || preview.ManifestPath != "backup:mnemonas/source" {
+		t.Fatalf("unexpected restore preview result: %+v", preview)
+	}
+	if preview.FileCount != 1 || preview.TotalBytes != 6 || len(preview.SamplePaths) != 1 || preview.SamplePaths[0] != "docs/note.txt" {
+		t.Fatalf("unexpected restore preview metrics: %+v", preview)
+	}
+	if _, err := os.Stat(restoreTarget); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("RunRestorePreview target stat error = %v, want not exist", err)
+	}
+
 	restore, err := manager.RunRestore(context.Background(), "rclone-remote", RestoreOptions{
 		TargetPath: restoreTarget,
 	})
@@ -581,13 +781,28 @@ func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
 	if restore.Status != StatusCompleted || restore.TargetPath != restoreTarget || restore.ManifestPath != "backup:mnemonas/source" {
 		t.Fatalf("unexpected restore result: %+v", restore)
 	}
+	if restore.FileCount != 1 || restore.VerifiedBytes != int64(len("rclone")) {
+		t.Fatalf("unexpected restore metrics: %+v", restore)
+	}
 	if _, err := os.Stat(restoreTarget); err != nil {
 		t.Fatalf("restored target stat error: %v", err)
 	}
+	assertFileContent(t, filepath.Join(restoreTarget, "docs", "note.txt"), "rclone")
+	verify, err := manager.RunRestoreVerify(context.Background(), "rclone-remote", RestoreVerifyOptions{TargetPath: restoreTarget})
+	if err != nil {
+		t.Fatalf("RunRestoreVerify() error: %v", err)
+	}
+	if verify.Status != StatusCompleted || verify.TargetPath != restoreTarget || verify.FileCount != restore.FileCount || verify.VerifiedBytes != restore.VerifiedBytes {
+		t.Fatalf("unexpected restore verify result: %+v", verify)
+	}
+	jobs := manager.ListJobs()
+	if len(jobs) != 1 || jobs[0].LastRestore == nil || jobs[0].LastRestore.ID != restore.ID || len(jobs[0].RestoreHistory) != 1 {
+		t.Fatalf("rclone restore audit was not recorded: %+v", jobs)
+	}
 
 	calls := readCommandCalls(t, logPath)
-	if len(calls) != 5 {
-		t.Fatalf("command call count = %d, want 5: %#v", len(calls), calls)
+	if len(calls) != 6 {
+		t.Fatalf("command call count = %d, want 6: %#v", len(calls), calls)
 	}
 	assertCommandArgs(t, calls[0], []string{
 		"--config", configFile,
@@ -605,11 +820,18 @@ func TestManager_RunRcloneBackupUsesExternalCommand(t *testing.T) {
 	assertCommandArgs(t, calls[2], calls[1])
 	assertCommandArgs(t, calls[3], []string{
 		"--config", configFile,
+		"lsjson", "backup:mnemonas/source",
+		"--recursive",
+		"--files-only",
+		"--exclude", "tmp/**",
+	})
+	assertCommandArgs(t, calls[4], []string{
+		"--config", configFile,
 		"copy", "backup:mnemonas/source", restoreTarget + ".partial-" + restore.ID,
 		"--create-empty-src-dirs",
 		"--exclude", "tmp/**",
 	})
-	assertCommandArgs(t, calls[4], []string{
+	assertCommandArgs(t, calls[5], []string{
 		"--config", configFile,
 		"check", "backup:mnemonas/source", restoreTarget + ".partial-" + restore.ID,
 		"--one-way",
@@ -742,6 +964,82 @@ func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
 	}
 }
 
+func TestManager_RestoreDrillReminderNotifiesWhenDueAndStale(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore reminder")
+
+	now := time.Date(2026, 5, 10, 2, 0, 0, 0, time.UTC)
+	notifier := &recordingNotifier{}
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Notifier:    notifier,
+		Jobs: []config.BackupJobConfig{{
+			ID:                     "home",
+			Name:                   "Home backup",
+			Type:                   JobTypeLocal,
+			Source:                 source,
+			Destination:            destination,
+			RestoreDrillStaleAfter: time.Hour,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	manager.now = func() time.Time { return now }
+
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 0 {
+		t.Fatalf("SendRestoreDrillReminders() immediate events = %+v, want none", events)
+	}
+
+	now = now.Add(2 * time.Hour)
+	events := manager.SendRestoreDrillReminders(context.Background())
+	if len(events) != 1 {
+		t.Fatalf("SendRestoreDrillReminders() due event count = %d, want 1", len(events))
+	}
+	if events[0].Type != NotificationTypeRestoreDrill || events[0].Level != NotificationLevelWarning || events[0].Status != "due" {
+		t.Fatalf("due reminder event = %+v", events[0])
+	}
+	if events[0].Trigger != NotificationTriggerReminder || events[0].LastSuccessfulRunAt == nil || events[0].StaleAfter == "" {
+		t.Fatalf("due reminder missing metadata: %+v", events[0])
+	}
+	if len(notifier.Events()) != 1 {
+		t.Fatalf("notifier event count after due reminder = %d, want 1", len(notifier.Events()))
+	}
+
+	now = now.Add(time.Hour)
+	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 0 {
+		t.Fatalf("SendRestoreDrillReminders() cooldown events = %+v, want none", events)
+	}
+
+	now = now.Add(24 * time.Hour)
+	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 1 || events[0].Status != "due" {
+		t.Fatalf("SendRestoreDrillReminders() after cooldown = %+v, want due reminder", events)
+	}
+
+	now = now.Add(time.Minute)
+	if _, err := manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{}); err != nil {
+		t.Fatalf("RunRestoreDrill() error: %v", err)
+	}
+	if events := manager.SendRestoreDrillReminders(context.Background()); len(events) != 0 {
+		t.Fatalf("SendRestoreDrillReminders() after fresh drill = %+v, want none", events)
+	}
+
+	now = now.Add(25 * time.Hour)
+	events = manager.SendRestoreDrillReminders(context.Background())
+	if len(events) != 1 {
+		t.Fatalf("SendRestoreDrillReminders() stale event count = %d, want 1", len(events))
+	}
+	if events[0].Status != "stale" || events[0].RunID == "" || events[0].LastRestoreDrillAt == nil {
+		t.Fatalf("stale reminder event = %+v", events[0])
+	}
+}
+
 func TestSafeJoinRejectsTraversalManifestPaths(t *testing.T) {
 	for _, archivePath := range []string{"../secret", "data/../secret", "data//secret", "./data/secret"} {
 		if _, err := safeJoin(t.TempDir(), archivePath); !errors.Is(err, ErrUnsafePath) {
@@ -806,20 +1104,59 @@ func newRecordingResticCommand(t *testing.T, source string) (string, string) {
 	sourceRel = filepath.ToSlash(sourceRel)
 	restoredDir := sourceRel + "/docs"
 	restoredFile := restoredDir + "/note.txt"
+	resticPreviewPath := filepath.ToSlash(filepath.Join(source, "docs", "note.txt"))
 	script := "#!/bin/sh\n" +
 		"{\n" +
 		"  printf '%s\\n' '__CALL__'\n" +
 		"  for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n" +
 		"} >> " + shellQuote(logPath) + "\n" +
+		"mode=''\n" +
 		"restore_target=''\n" +
 		"prev=''\n" +
 		"for arg in \"$@\"; do\n" +
+		"  if [ \"$arg\" = 'ls' ]; then mode='ls'; fi\n" +
 		"  if [ \"$prev\" = '--target' ]; then restore_target=$arg; fi\n" +
 		"  prev=$arg\n" +
 		"done\n" +
+		"if [ \"$mode\" = 'ls' ]; then\n" +
+		"  printf '%s\\n' " + shellQuote(`{"path":"`+resticPreviewPath+`","type":"file","size":15}`) + "\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"if [ -n \"$restore_target\" ]; then\n" +
 		"  mkdir -p \"$restore_target\"/" + shellQuote(restoredDir) + "\n" +
 		"  printf '%s' 'restic restored' > \"$restore_target\"/" + shellQuote(restoredFile) + "\n" +
+		"fi\n"
+	if err := os.WriteFile(commandPath, []byte(script), 0700); err != nil {
+		t.Fatalf("WriteFile(command) error: %v", err)
+	}
+	return commandPath, logPath
+}
+
+func newRecordingRcloneCommand(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	commandPath := filepath.Join(dir, "mnemonas-test-rclone")
+	logPath := filepath.Join(dir, "args.log")
+	script := "#!/bin/sh\n" +
+		"{\n" +
+		"  printf '%s\\n' '__CALL__'\n" +
+		"  for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n" +
+		"} >> " + shellQuote(logPath) + "\n" +
+		"mode=''\n" +
+		"copy_target=''\n" +
+		"after_copy=0\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$arg\" = 'lsjson' ]; then\n" +
+		"    printf '%s\\n' " + shellQuote(`[{"Path":"docs/note.txt","Size":6,"IsDir":false}]`) + "\n" +
+		"    exit 0\n" +
+		"  fi\n" +
+		"  if [ \"$arg\" = 'copy' ]; then mode='copy'; after_copy=1; continue; fi\n" +
+		"  if [ \"$after_copy\" = '1' ]; then after_copy=2; continue; fi\n" +
+		"  if [ \"$after_copy\" = '2' ]; then copy_target=$arg; after_copy=0; fi\n" +
+		"done\n" +
+		"if [ \"$mode\" = 'copy' ] && [ -n \"$copy_target\" ]; then\n" +
+		"  mkdir -p \"$copy_target/docs\"\n" +
+		"  printf '%s' 'rclone' > \"$copy_target/docs/note.txt\"\n" +
 		"fi\n"
 	if err := os.WriteFile(commandPath, []byte(script), 0700); err != nil {
 		t.Fatalf("WriteFile(command) error: %v", err)

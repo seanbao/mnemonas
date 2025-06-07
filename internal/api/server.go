@@ -32,6 +32,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/backup"
 	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/dataplane"
+	"github.com/seanbao/mnemonas/internal/diskhealth"
 	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
 	"github.com/seanbao/mnemonas/internal/metrics"
@@ -54,6 +55,8 @@ const scrubObjectMissingPublicMessage = "object is missing"
 const scrubObjectReadPublicMessage = "object could not be read"
 const scrubObjectUnknownPublicMessage = "object verification failed"
 const untrustedDownloadContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
+
+var errScrubDataplaneNotConnected = errors.New("dataplane not connected")
 
 var startScrub = func(store *maintenance.HistoryStore) (*maintenance.ScrubResult, error) {
 	return store.StartScrub()
@@ -105,6 +108,12 @@ type Server struct {
 	maintenanceConfigured bool
 	backupConfigured      bool
 	activityConfigured    bool
+	scrubSchedulerMu      sync.Mutex
+	scrubSchedulerCancel  context.CancelFunc
+	scrubLastFailureID    string
+	scrubFailureRetries   int
+	loginAlertMu          sync.Mutex
+	loginRateLimitAlerts  map[string]time.Time
 	startTime             time.Time
 	appVersion            string
 	buildTime             string
@@ -119,6 +128,7 @@ type Server struct {
 	shareHandler     *share.Handler
 	alertMonitor     AlertMonitor
 	retentionMonitor RetentionMonitor
+	diskHealth       DiskHealthMonitor
 	// Favorites components
 	favoritesStore      *favorites.Store
 	favoritesHandler    *favorites.Handler
@@ -154,6 +164,8 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
 	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
 	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
+	cloned.Alerts.SMTPTo = append([]string(nil), cfg.Alerts.SMTPTo...)
+	cloned.DiskHealth.Devices = append([]config.DiskHealthDeviceConfig(nil), cfg.DiskHealth.Devices...)
 	cloned.Backup.Jobs = append([]config.BackupJobConfig(nil), cfg.Backup.Jobs...)
 	for i := range cloned.Backup.Jobs {
 		cloned.Backup.Jobs[i].Exclude = append([]string(nil), cfg.Backup.Jobs[i].Exclude...)
@@ -582,6 +594,16 @@ type RetentionMonitor interface {
 	UpdateConfig(cfg storage.RetentionMonitorConfig)
 }
 
+type DiskHealthMonitor interface {
+	Check(ctx context.Context) (*diskhealth.Report, error)
+	LastReport() *diskhealth.Report
+	UpdateConfig(cfg diskhealth.Config)
+}
+
+type DiskHealthActivityRecorder interface {
+	SetActivityRecorder(recorder diskhealth.Recorder)
+}
+
 func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.Notifier {
 	sender, ok := monitor.(AlertEventSender)
 	if !ok || sender == nil {
@@ -594,24 +616,28 @@ func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.
 			Message:   event.Message,
 			Timestamp: event.Timestamp,
 			Details: map[string]any{
-				"job_id":           event.JobID,
-				"job_name":         event.JobName,
-				"job_type":         event.JobType,
-				"run_id":           event.RunID,
-				"trigger":          event.Trigger,
-				"status":           event.Status,
-				"started_at":       event.StartedAt,
-				"finished_at":      event.FinishedAt,
-				"source":           event.Source,
-				"destination":      event.Destination,
-				"snapshot_path":    event.SnapshotPath,
-				"manifest_path":    event.ManifestPath,
-				"file_count":       event.FileCount,
-				"total_bytes":      event.TotalBytes,
-				"verified_bytes":   event.VerifiedBytes,
-				"pruned_snapshots": event.PrunedSnapshots,
-				"warnings":         event.Warnings,
-				"error_message":    event.ErrorMessage,
+				"job_id":                 event.JobID,
+				"job_name":               event.JobName,
+				"job_type":               event.JobType,
+				"run_id":                 event.RunID,
+				"trigger":                event.Trigger,
+				"status":                 event.Status,
+				"started_at":             event.StartedAt,
+				"finished_at":            event.FinishedAt,
+				"source":                 event.Source,
+				"destination":            event.Destination,
+				"snapshot_path":          event.SnapshotPath,
+				"manifest_path":          event.ManifestPath,
+				"file_count":             event.FileCount,
+				"total_bytes":            event.TotalBytes,
+				"verified_bytes":         event.VerifiedBytes,
+				"last_successful_run_at": event.LastSuccessfulRunAt,
+				"last_restore_drill_at":  event.LastRestoreDrillAt,
+				"stale_after":            event.StaleAfter,
+				"reminder_cooldown":      event.ReminderCooldown,
+				"pruned_snapshots":       event.PrunedSnapshots,
+				"warnings":               event.Warnings,
+				"error_message":          event.ErrorMessage,
 			},
 		}
 		if err := sender.SendEvent(ctx, alertEvent); err != nil {
@@ -631,6 +657,284 @@ func backupNotificationLevel(level string) alerts.AlertLevel {
 		return alerts.AlertLevelCritical
 	}
 	return alerts.AlertLevelWarning
+}
+
+func diskHealthRuntimeConfig(cfg config.DiskHealthConfig) diskhealth.Config {
+	devices := make([]diskhealth.DeviceConfig, 0, len(cfg.Devices))
+	for _, device := range cfg.Devices {
+		devices = append(devices, diskhealth.DeviceConfig{
+			Name:                 device.Name,
+			Path:                 device.Path,
+			Type:                 device.Type,
+			Serial:               device.Serial,
+			TemperatureWarningC:  device.TemperatureWarningC,
+			TemperatureCriticalC: device.TemperatureCriticalC,
+		})
+	}
+	return diskhealth.Config{
+		Enabled:              cfg.Enabled,
+		CheckInterval:        cfg.CheckInterval,
+		ProbeTimeout:         cfg.ProbeTimeout,
+		CooldownPeriod:       cfg.CooldownPeriod,
+		Command:              cfg.Command,
+		TemperatureWarningC:  cfg.TemperatureWarningC,
+		TemperatureCriticalC: cfg.TemperatureCriticalC,
+		MediaWearWarningPct:  cfg.MediaWearWarningPct,
+		MediaWearCriticalPct: cfg.MediaWearCriticalPct,
+		Devices:              devices,
+	}
+}
+
+const (
+	diskHealthActivityPath = "/system/disk-health"
+	diskHealthActivityUser = "system"
+	scrubActivityPath      = "/system/scrub"
+	scrubNotificationType  = "scrub_run"
+	scrubTriggerManual     = "manual"
+	scrubTriggerScheduled  = "scheduled"
+	scrubTriggerRetry      = "scheduled_retry"
+
+	defaultScrubSchedulerPollInterval = time.Minute
+	loginRateLimitAlertCooldown       = 15 * time.Minute
+)
+
+func (s *Server) configureDiskHealthActivityRecorder() {
+	if s.activity == nil || s.diskHealth == nil {
+		return
+	}
+	recorder, ok := s.diskHealth.(DiskHealthActivityRecorder)
+	if !ok {
+		return
+	}
+	recorder.SetActivityRecorder(func(ctx context.Context, report *diskhealth.Report) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		return s.logActivityEntry(
+			activity.ActionDiskHealth,
+			diskHealthActivityPath,
+			diskHealthActivityUser,
+			"",
+			diskHealthActivityDetails(report),
+		)
+	})
+}
+
+func diskHealthActivityDetails(report *diskhealth.Report) map[string]string {
+	if report == nil {
+		return map[string]string{"status": "unknown"}
+	}
+
+	details := map[string]string{
+		"status":       report.Status,
+		"message":      report.Message,
+		"checked_at":   report.CheckedAt.UTC().Format(time.RFC3339),
+		"device_count": strconv.Itoa(len(report.Devices)),
+	}
+	if len(report.Warnings) > 0 {
+		details["warning_count"] = strconv.Itoa(len(report.Warnings))
+	}
+
+	deviceGroups := map[string][]string{}
+	for _, device := range report.Devices {
+		if device.Status == diskhealth.StatusOK || device.Status == "" {
+			continue
+		}
+		deviceGroups[device.Status] = append(deviceGroups[device.Status], diskHealthActivityDeviceLabel(device))
+	}
+	for _, status := range []string{diskhealth.StatusCritical, diskhealth.StatusWarning, diskhealth.StatusUnavailable} {
+		if labels := joinDiskHealthActivityLabels(deviceGroups[status]); labels != "" {
+			details[status+"_devices"] = labels
+		}
+	}
+
+	if device, ok := firstProblemDiskHealthDevice(report.Devices); ok {
+		details["device"] = diskHealthActivityDeviceLabel(device)
+		details["device_status"] = device.Status
+		if device.Message != "" {
+			details["device_message"] = device.Message
+		}
+		if device.TemperatureC != nil {
+			details["temperature_c"] = strconv.Itoa(*device.TemperatureC)
+		}
+		if device.WearPercentUsed != nil {
+			details["wear_percent_used"] = strconv.Itoa(*device.WearPercentUsed)
+		}
+		if device.AvailableSparePct != nil {
+			details["available_spare_percent"] = strconv.Itoa(*device.AvailableSparePct)
+		}
+		if device.MediaErrors != nil {
+			details["media_errors"] = strconv.FormatInt(*device.MediaErrors, 10)
+		}
+	}
+	return details
+}
+
+func diskHealthActivityDeviceLabel(device diskhealth.DeviceStatus) string {
+	if strings.TrimSpace(device.Name) != "" {
+		return strings.TrimSpace(device.Name)
+	}
+	if strings.TrimSpace(device.Path) != "" {
+		return strings.TrimSpace(device.Path)
+	}
+	return "unknown device"
+}
+
+func joinDiskHealthActivityLabels(labels []string) string {
+	const maxLabels = 5
+	if len(labels) == 0 {
+		return ""
+	}
+	if len(labels) <= maxLabels {
+		return strings.Join(labels, ", ")
+	}
+	return strings.Join(labels[:maxLabels], ", ") + fmt.Sprintf(" (+%d more)", len(labels)-maxLabels)
+}
+
+func firstProblemDiskHealthDevice(devices []diskhealth.DeviceStatus) (diskhealth.DeviceStatus, bool) {
+	for _, device := range devices {
+		if device.Status != "" && device.Status != diskhealth.StatusOK {
+			return device, true
+		}
+	}
+	return diskhealth.DeviceStatus{}, false
+}
+
+func scrubActivityDetails(status string, result *dataplane.ScrubResult, record *maintenance.ScrubResult, persistenceWarning bool) map[string]string {
+	details := map[string]string{"status": status}
+	if record != nil && record.ID != "" {
+		details["id"] = record.ID
+	}
+	if record != nil && !record.StartTime.IsZero() {
+		details["started_at"] = record.StartTime.UTC().Format(time.RFC3339)
+	}
+	if record != nil && !record.EndTime.IsZero() {
+		details["finished_at"] = record.EndTime.UTC().Format(time.RFC3339)
+	}
+	if record != nil && record.ErrorMessage != "" {
+		details["error_message"] = sanitizeScrubErrorMessage(record.ErrorMessage)
+	}
+	if result != nil {
+		details["total_objects"] = strconv.FormatUint(result.TotalObjects, 10)
+		details["valid_objects"] = strconv.FormatUint(result.ValidObjects, 10)
+		details["corrupted_objects"] = strconv.FormatUint(result.CorruptedObjects, 10)
+		details["missing_objects"] = strconv.FormatUint(result.MissingObjects, 10)
+		details["total_size"] = strconv.FormatUint(result.TotalSize, 10)
+		details["duration_ms"] = strconv.FormatUint(result.DurationMs, 10)
+		details["error_count"] = strconv.Itoa(len(result.Errors))
+	} else if record != nil {
+		details["total_objects"] = strconv.FormatUint(record.TotalObjects, 10)
+		details["valid_objects"] = strconv.FormatUint(record.ValidObjects, 10)
+		details["corrupted_objects"] = strconv.FormatUint(record.CorruptedObjects, 10)
+		details["missing_objects"] = strconv.FormatUint(record.MissingObjects, 10)
+		details["total_size"] = strconv.FormatUint(record.TotalSize, 10)
+		details["duration_ms"] = strconv.FormatUint(record.DurationMs, 10)
+		details["error_count"] = strconv.Itoa(len(record.Errors))
+	}
+	if persistenceWarning {
+		details["persistence_warning"] = "true"
+	}
+	return details
+}
+
+func scrubCompletedAlertEvent(record *maintenance.ScrubResult, result *dataplane.ScrubResult, persistenceWarning bool) (alerts.EventPayload, bool) {
+	if result == nil {
+		return alerts.EventPayload{}, false
+	}
+
+	level := alerts.AlertLevelWarning
+	message := ""
+	switch {
+	case result.CorruptedObjects > 0 || result.MissingObjects > 0:
+		level = alerts.AlertLevelCritical
+		message = "scrub found corrupted or missing objects"
+	case len(result.Errors) > 0:
+		message = "scrub found object verification errors"
+	case persistenceWarning:
+		message = "scrub completed but result persistence was incomplete"
+	default:
+		return alerts.EventPayload{}, false
+	}
+
+	details := map[string]any{
+		"status":              "completed",
+		"total_objects":       result.TotalObjects,
+		"valid_objects":       result.ValidObjects,
+		"corrupted_objects":   result.CorruptedObjects,
+		"missing_objects":     result.MissingObjects,
+		"total_size":          result.TotalSize,
+		"duration_ms":         result.DurationMs,
+		"error_count":         len(result.Errors),
+		"persistence_warning": persistenceWarning,
+	}
+	if record != nil {
+		details["id"] = record.ID
+		details["started_at"] = record.StartTime.UTC().Format(time.RFC3339)
+		if !record.EndTime.IsZero() {
+			details["finished_at"] = record.EndTime.UTC().Format(time.RFC3339)
+		}
+	}
+	if len(result.Errors) > 0 {
+		details["sample_errors"] = scrubAlertSampleErrors(result.Errors)
+	}
+	return alerts.EventPayload{
+		Type:      scrubNotificationType,
+		Level:     level,
+		Message:   message,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+	}, true
+}
+
+func scrubFailedAlertEvent(record *maintenance.ScrubResult) alerts.EventPayload {
+	details := map[string]any{
+		"status":        "failed",
+		"error_message": scrubFailurePublicMessage,
+	}
+	if record != nil {
+		details["id"] = record.ID
+		details["started_at"] = record.StartTime.UTC().Format(time.RFC3339)
+		if !record.EndTime.IsZero() {
+			details["finished_at"] = record.EndTime.UTC().Format(time.RFC3339)
+		}
+		details["duration_ms"] = record.DurationMs
+	}
+	return alerts.EventPayload{
+		Type:      scrubNotificationType,
+		Level:     alerts.AlertLevelCritical,
+		Message:   "scrub failed before completion",
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+	}
+}
+
+func scrubAlertSampleErrors(errors []dataplane.ScrubError) []map[string]string {
+	const maxSamples = 5
+	limit := len(errors)
+	if limit > maxSamples {
+		limit = maxSamples
+	}
+	samples := make([]map[string]string, 0, limit)
+	for _, scrubErr := range errors[:limit] {
+		samples = append(samples, map[string]string{
+			"hash":       scrubErr.Hash,
+			"error_type": scrubErr.ErrorType,
+			"message":    publicScrubObjectErrorMessage(scrubErr.ErrorType),
+		})
+	}
+	return samples
+}
+
+func (s *Server) sendScrubAlertEvent(ctx context.Context, event alerts.EventPayload) {
+	sender, ok := s.alertMonitor.(AlertEventSender)
+	if !ok || sender == nil {
+		return
+	}
+	if err := sender.SendEvent(ctx, event); err != nil {
+		s.logger.Warn().Err(err).Str("event_type", event.Type).Msg("failed to send scrub alert event")
+	}
 }
 
 func formatSettingsDuration(d time.Duration) string {
@@ -867,6 +1171,7 @@ type ServerConfig struct {
 	ShareBaseURL     string
 	AlertMonitor     AlertMonitor
 	RetentionMonitor RetentionMonitor
+	DiskHealth       DiskHealthMonitor
 	// Favorites configuration
 	FavoritesEnabled   bool
 	FavoritesStoreFile string
@@ -950,6 +1255,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	if cfg != nil {
 		s.alertMonitor = cfg.AlertMonitor
 		s.retentionMonitor = cfg.RetentionMonitor
+		s.diskHealth = cfg.DiskHealth
 	}
 
 	// Initialize thumbnail service
@@ -1010,6 +1316,12 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		} else {
 			s.activity = actStore
 			logger.Info().Str("path", cfg.ActivityRoot).Msg("Activity store initialized")
+		}
+	}
+	s.configureDiskHealthActivityRecorder()
+	if cfg != nil && cfg.Config != nil {
+		if s.startScrubScheduler(context.Background(), cfg.Config.Maintenance.Scrub) {
+			logger.Info().Msg("Scrub scheduler started")
 		}
 	}
 
@@ -1444,11 +1756,14 @@ func (s *Server) setupRoutes() {
 			}
 			r.Get("/scrub", s.handleGetScrubResult)
 			r.Post("/scrub", s.handleScrub)
+			r.Get("/disk-health", s.handleDiskHealth)
 			r.Get("/objects", s.handleListObjects)
 			r.Post("/gc", s.handleGC)
 			r.Get("/backups", s.handleListBackups)
 			r.Get("/backups/{id}", s.handleGetBackup)
 			r.Post("/backups/{id}/run", s.handleRunBackup)
+			r.Post("/backups/{id}/restore-preview", s.handlePreviewBackupRestore)
+			r.Post("/backups/{id}/restore-verify", s.handleVerifyBackupRestore)
 			r.Post("/backups/{id}/restore", s.handleRunBackupRestore)
 			r.Post("/backups/{id}/restore-drill", s.handleRunBackupRestoreDrill)
 		})
@@ -2979,6 +3294,8 @@ func (s *Server) alertsDiagnostics(cfg *config.Config) map[string]any {
 		info["min_free_bytes"] = cfg.Alerts.MinFreeBytes
 		info["cooldown_period"] = cfg.Alerts.CooldownPeriod.String()
 		info["webhook_configured"] = strings.TrimSpace(cfg.Alerts.WebhookURL) != ""
+		info["telegram_configured"] = cfg.Alerts.TelegramEnabled && strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "" && strings.TrimSpace(cfg.Alerts.TelegramChatID) != ""
+		info["email_configured"] = cfg.Alerts.EmailEnabled && strings.TrimSpace(cfg.Alerts.SMTPHost) != "" && len(cfg.Alerts.SMTPTo) > 0
 		method := strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
 		if method == "" {
 			method = http.MethodPost
@@ -2995,6 +3312,104 @@ func (s *Server) alertsDiagnostics(cfg *config.Config) map[string]any {
 		}
 	}
 
+	return info
+}
+
+func (s *Server) diskHealthDiagnostics(cfg *config.Config) map[string]any {
+	info := map[string]any{
+		"enabled":           false,
+		"runtime_available": s.diskHealth != nil,
+		"device_count":      0,
+	}
+	if cfg != nil {
+		info["enabled"] = cfg.DiskHealth.Enabled
+		info["check_interval"] = cfg.DiskHealth.CheckInterval.String()
+		info["probe_timeout"] = cfg.DiskHealth.ProbeTimeout.String()
+		info["cooldown_period"] = cfg.DiskHealth.CooldownPeriod.String()
+		info["temperature_warning_c"] = cfg.DiskHealth.TemperatureWarningC
+		info["temperature_critical_c"] = cfg.DiskHealth.TemperatureCriticalC
+		info["media_wear_warning_percent"] = cfg.DiskHealth.MediaWearWarningPct
+		info["media_wear_critical_percent"] = cfg.DiskHealth.MediaWearCriticalPct
+		info["device_count"] = len(cfg.DiskHealth.Devices)
+	}
+	if s.diskHealth != nil {
+		if report := s.diskHealth.LastReport(); report != nil {
+			info["last_status"] = report.Status
+			info["last_checked_at"] = report.CheckedAt.UTC().Format(time.RFC3339)
+			info["last_warning_count"] = len(report.Warnings)
+			info["last_device_count"] = len(report.Devices)
+			var criticalCount int
+			var warningCount int
+			var unavailableCount int
+			for _, device := range report.Devices {
+				switch device.Status {
+				case diskhealth.StatusCritical:
+					criticalCount++
+				case diskhealth.StatusWarning:
+					warningCount++
+				case diskhealth.StatusUnavailable:
+					unavailableCount++
+				}
+			}
+			info["last_critical_devices"] = criticalCount
+			info["last_warning_devices"] = warningCount
+			info["last_unavailable_devices"] = unavailableCount
+		}
+	}
+	return info
+}
+
+func (s *Server) maintenanceDiagnostics(cfg *config.Config) map[string]any {
+	info := map[string]any{
+		"history_ready":           s.maintenance != nil,
+		"scrub_schedule_enabled":  false,
+		"scrub_schedule_interval": "",
+		"scrub_retry_interval":    "",
+		"scrub_max_retries":       0,
+	}
+	if cfg != nil {
+		info["scrub_schedule_enabled"] = cfg.Maintenance.Scrub.Enabled
+		info["scrub_schedule_interval"] = cfg.Maintenance.Scrub.ScheduleInterval.String()
+		info["scrub_retry_interval"] = cfg.Maintenance.Scrub.RetryInterval.String()
+		info["scrub_max_retries"] = cfg.Maintenance.Scrub.MaxRetries
+	}
+	if s.maintenance != nil {
+		if result := s.maintenance.GetLastScrubResult(); result != nil {
+			info["last_scrub_status"] = result.Status
+			info["last_scrub_at"] = scrubResultFinishedAt(result).Format(time.RFC3339)
+			if result.Status == "failed" {
+				info["scrub_failure_retries"] = s.scrubFailureRetryCount(result.ID)
+			}
+		}
+	}
+	return info
+}
+
+func (s *Server) smbDiagnostics(cfg *config.Config) map[string]any {
+	info := map[string]any{
+		"enabled":            false,
+		"runtime_available":  false,
+		"implementation":     "planned_sidecar",
+		"share_count":        0,
+		"credentials_ready":  false,
+		"gateway_configured": false,
+		"message":            "SMB sidecar is not bundled in this build; use WebDAV for current LAN mounts.",
+	}
+	if cfg == nil {
+		return info
+	}
+
+	info["enabled"] = cfg.SMB.Enabled
+	info["listen"] = cfg.SMB.Listen
+	info["server_name"] = cfg.SMB.ServerName
+	info["signing_required"] = cfg.SMB.SigningRequired
+	info["encryption_required"] = cfg.SMB.EncryptionRequired
+	info["share_count"] = len(cfg.SMB.Shares)
+	info["credentials_ready"] = strings.TrimSpace(cfg.SMB.CredentialFile) != ""
+	info["gateway_configured"] = strings.TrimSpace(cfg.SMB.GatewaySocket) != ""
+	if cfg.SMB.Enabled {
+		info["message"] = "SMB is configured but the protocol sidecar is not implemented in this build."
+	}
 	return info
 }
 
@@ -3030,8 +3445,14 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if s.favoritesConfigured {
 		systemStatus["favorites_store_ready"] = !s.favoritesConfiguredButUnavailable()
 	}
+	if cfg != nil && cfg.SMB.Enabled {
+		systemStatus["smb_runtime_ready"] = false
+	}
 	diag["system"] = systemStatus
 	diag["alerts"] = s.alertsDiagnostics(cfg)
+	diag["maintenance"] = s.maintenanceDiagnostics(cfg)
+	diag["disk_health"] = s.diskHealthDiagnostics(cfg)
+	diag["smb"] = s.smbDiagnostics(cfg)
 
 	// Memory stats
 	var memStats runtime.MemStats
@@ -3093,6 +3514,245 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(diag).Write(w, http.StatusOK)
+}
+
+func (s *Server) handleDiskHealth(w http.ResponseWriter, r *http.Request) {
+	if s.diskHealth == nil {
+		ServiceUnavailable(w, "disk health monitor not initialized")
+		return
+	}
+
+	report, err := s.diskHealth.Check(r.Context())
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to collect disk health")
+		ServiceUnavailable(w, "disk health unavailable")
+		return
+	}
+
+	NewAPIResponse(report).Write(w, http.StatusOK)
+}
+
+func (s *Server) startScrubScheduler(ctx context.Context, cfg config.ScrubMaintenanceConfig) bool {
+	s.scrubSchedulerMu.Lock()
+	if s.scrubSchedulerCancel != nil {
+		s.scrubSchedulerCancel()
+		s.scrubSchedulerCancel = nil
+	}
+	if !cfg.Enabled || s.maintenance == nil {
+		s.scrubSchedulerMu.Unlock()
+		return false
+	}
+	schedulerCtx, cancel := context.WithCancel(ctx)
+	s.scrubSchedulerCancel = cancel
+	s.scrubSchedulerMu.Unlock()
+
+	go func() {
+		_ = s.runScheduledScrubIfDue(schedulerCtx, cfg, apiTimeNow().UTC())
+		ticker := time.NewTicker(defaultScrubSchedulerPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-schedulerCtx.Done():
+				return
+			case <-ticker.C:
+				_ = s.runScheduledScrubIfDue(schedulerCtx, cfg, apiTimeNow().UTC())
+			}
+		}
+	}()
+	return true
+}
+
+func (s *Server) runScheduledScrubIfDue(ctx context.Context, cfg config.ScrubMaintenanceConfig, now time.Time) bool {
+	trigger, due := s.nextScheduledScrubTrigger(cfg, now)
+	if !due {
+		return false
+	}
+
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DefaultScrubTimeout*time.Second)
+	defer cancel()
+	result, _, _, err := s.runScrubMaintenance(runCtx, nil, trigger)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("trigger", trigger).Msg("scheduled scrub failed")
+		if result == nil && errors.Is(err, errScrubDataplaneNotConnected) {
+			result = s.recordScheduledScrubPreflightFailure(runCtx, trigger)
+		}
+	}
+	s.recordScheduledScrubOutcome(trigger, result)
+	return true
+}
+
+func (s *Server) nextScheduledScrubTrigger(cfg config.ScrubMaintenanceConfig, now time.Time) (string, bool) {
+	if !cfg.Enabled || s.maintenance == nil || s.maintenance.ScrubIsRunning() {
+		return "", false
+	}
+	result := s.maintenance.GetLastScrubResult()
+	if result == nil {
+		return scrubTriggerScheduled, true
+	}
+	lastFinishedAt := scrubResultFinishedAt(result)
+	if result.Status == "failed" && cfg.MaxRetries > 0 {
+		retries := s.scrubFailureRetryCount(result.ID)
+		if retries < cfg.MaxRetries && now.Sub(lastFinishedAt) >= cfg.RetryInterval {
+			return scrubTriggerRetry, true
+		}
+	}
+	if now.Sub(lastFinishedAt) >= cfg.ScheduleInterval {
+		return scrubTriggerScheduled, true
+	}
+	return "", false
+}
+
+func (s *Server) scrubFailureRetryCount(resultID string) int {
+	s.scrubSchedulerMu.Lock()
+	defer s.scrubSchedulerMu.Unlock()
+	if resultID == "" || resultID != s.scrubLastFailureID {
+		return 0
+	}
+	return s.scrubFailureRetries
+}
+
+func (s *Server) recordScheduledScrubOutcome(trigger string, result *maintenance.ScrubResult) {
+	s.scrubSchedulerMu.Lock()
+	defer s.scrubSchedulerMu.Unlock()
+	if result == nil || result.Status != "failed" {
+		s.scrubLastFailureID = ""
+		s.scrubFailureRetries = 0
+		return
+	}
+	if result.ID != s.scrubLastFailureID {
+		s.scrubLastFailureID = result.ID
+		s.scrubFailureRetries = 0
+	}
+	if trigger == scrubTriggerRetry {
+		s.scrubFailureRetries++
+	}
+}
+
+func scrubResultFinishedAt(result *maintenance.ScrubResult) time.Time {
+	if result == nil {
+		return time.Time{}
+	}
+	if !result.EndTime.IsZero() {
+		return result.EndTime.UTC()
+	}
+	return result.StartTime.UTC()
+}
+
+func (s *Server) recordScheduledScrubPreflightFailure(ctx context.Context, trigger string) *maintenance.ScrubResult {
+	if s.maintenance == nil || s.maintenance.ScrubIsRunning() {
+		return nil
+	}
+
+	scrubRecord, err := startScrub(s.maintenance)
+	if err != nil {
+		if scrubRecord == nil {
+			s.logger.Warn().Err(err).Str("trigger", trigger).Msg("failed to persist scheduled scrub preflight failure")
+			return nil
+		}
+		s.logger.Warn().Err(err).Str("trigger", trigger).Msg("scheduled scrub preflight failure start persisted with warning")
+	}
+
+	finishedAt := time.Now()
+	scrubRecord.Status = "failed"
+	scrubRecord.EndTime = finishedAt
+	scrubRecord.ErrorMessage = scrubFailurePublicMessage
+	scrubRecord.DurationMs = uint64(finishedAt.Sub(scrubRecord.StartTime).Milliseconds())
+	if err := saveScrubResult(s.maintenance, scrubRecord); err != nil {
+		s.logger.Warn().Err(err).Str("trigger", trigger).Msg("failed to persist scheduled scrub preflight failure result")
+	}
+	s.logScheduledScrubActivity("failed", nil, scrubRecord, false, trigger)
+	s.sendScrubAlertEvent(ctx, scrubFailedAlertEvent(scrubRecord))
+	return scrubRecord
+}
+
+func (s *Server) runScrubMaintenance(ctx context.Context, hashes []string, trigger string) (*maintenance.ScrubResult, *dataplane.ScrubResult, bool, error) {
+	if s.maintenance == nil {
+		return nil, nil, false, errors.New("maintenance history not initialized")
+	}
+	if s.maintenance.ScrubIsRunning() {
+		return nil, nil, false, maintenance.ErrScrubAlreadyRunning
+	}
+	if !s.ensureDataplaneConnected(ctx) {
+		return nil, nil, false, errScrubDataplaneNotConnected
+	}
+
+	scrubRecord, err := startScrub(s.maintenance)
+	if err != nil {
+		if errors.Is(err, maintenance.ErrScrubAlreadyRunning) {
+			return nil, nil, false, err
+		}
+		if scrubRecord == nil {
+			return nil, nil, false, err
+		}
+		s.logger.Warn().Err(err).Str("trigger", trigger).Msg("scrub start persistence warning")
+	}
+
+	result, err := s.dataplane.Scrub(ctx, hashes)
+	if err != nil {
+		if scrubRecord != nil {
+			scrubRecord.Status = "failed"
+			scrubRecord.EndTime = time.Now()
+			scrubRecord.ErrorMessage = scrubFailurePublicMessage
+			scrubRecord.DurationMs = uint64(time.Since(scrubRecord.StartTime).Milliseconds())
+			if saveErr := saveScrubResult(s.maintenance, scrubRecord); saveErr != nil {
+				s.logger.Error().Err(saveErr).Msg("failed to persist failed scrub result")
+			}
+		}
+		s.logScheduledScrubActivity("failed", nil, scrubRecord, false, trigger)
+		s.sendScrubAlertEvent(ctx, scrubFailedAlertEvent(scrubRecord))
+		return scrubRecord, nil, false, err
+	}
+
+	maintErrors := make([]maintenance.ScrubError, 0, len(result.Errors))
+	for _, e := range result.Errors {
+		if e.Message != "" {
+			s.logger.Warn().
+				Str("hash", e.Hash).
+				Str("error_type", e.ErrorType).
+				Str("scrub_error", e.Message).
+				Str("trigger", trigger).
+				Msg("scrub reported object error")
+		}
+		maintErrors = append(maintErrors, maintenance.ScrubError{
+			Hash:      e.Hash,
+			ErrorType: e.ErrorType,
+			Message:   publicScrubObjectErrorMessage(e.ErrorType),
+		})
+	}
+
+	scrubPersistenceWarning := false
+	if scrubRecord != nil {
+		scrubRecord.Status = "completed"
+		scrubRecord.EndTime = time.Now()
+		scrubRecord.TotalObjects = result.TotalObjects
+		scrubRecord.ValidObjects = result.ValidObjects
+		scrubRecord.CorruptedObjects = result.CorruptedObjects
+		scrubRecord.MissingObjects = result.MissingObjects
+		scrubRecord.TotalSize = result.TotalSize
+		scrubRecord.DurationMs = result.DurationMs
+		scrubRecord.Errors = maintErrors
+		if err := saveScrubResult(s.maintenance, scrubRecord); err != nil {
+			scrubPersistenceWarning = true
+			s.logger.Warn().Err(err).Msg("failed to persist completed scrub result")
+		}
+	}
+
+	s.logScheduledScrubActivity("completed", result, scrubRecord, scrubPersistenceWarning, trigger)
+	if event, ok := scrubCompletedAlertEvent(scrubRecord, result, scrubPersistenceWarning); ok {
+		s.sendScrubAlertEvent(ctx, event)
+	}
+	return scrubRecord, result, scrubPersistenceWarning, nil
+}
+
+func (s *Server) logScheduledScrubActivity(status string, result *dataplane.ScrubResult, record *maintenance.ScrubResult, persistenceWarning bool, trigger string) {
+	details := scrubActivityDetails(status, result, record, persistenceWarning)
+	if details == nil {
+		details = map[string]string{}
+	}
+	details["trigger"] = trigger
+	if err := s.logActivityEntry(activity.ActionScrub, scrubActivityPath, "system", "", details); err != nil {
+		s.logger.Warn().Err(err).Msg("Failed to log scheduled scrub activity")
+	}
 }
 
 func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
@@ -3168,6 +3828,8 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error().Err(saveErr).Msg("failed to persist failed scrub result")
 			}
 		}
+		s.LogActivity(r, activity.ActionScrub, scrubActivityPath, scrubActivityDetails("failed", nil, scrubRecord, false))
+		s.sendScrubAlertEvent(r.Context(), scrubFailedAlertEvent(scrubRecord))
 		s.respondInternalError(w, "run scrub", err)
 		return
 	}
@@ -3229,6 +3891,10 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		markScrubResultPersistenceWarningHeaders(w)
 		response["warning"] = true
 		apiResponse = apiResponse.WithMessage("scrub completed with persistence warning")
+	}
+	s.LogActivityWithWarning(w, r, activity.ActionScrub, scrubActivityPath, scrubActivityDetails("completed", result, scrubRecord, scrubPersistenceWarning))
+	if event, ok := scrubCompletedAlertEvent(scrubRecord, result, scrubPersistenceWarning); ok {
+		s.sendScrubAlertEvent(r.Context(), event)
 	}
 	apiResponse.Write(w, http.StatusOK)
 }
@@ -3493,6 +4159,8 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 		"uptime_sec": int64(time.Since(s.startTime).Seconds()),
 	}
 	export["alerts"] = s.alertsDiagnostics(cfg)
+	export["disk_health"] = s.diskHealthDiagnostics(cfg)
+	export["smb"] = s.smbDiagnostics(cfg)
 
 	// Filesystem stats (sanitized)
 	if s.fs != nil {
@@ -4536,6 +5204,10 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 	rec := newBufferedResponseRecorder()
 	s.authHandler.HandleLogin(rec, r)
 
+	if rec.statusCode == http.StatusTooManyRequests {
+		s.sendLoginRateLimitAlert(user, requestip.ClientIP(r))
+	}
+
 	if rec.statusCode == http.StatusOK && s.activity != nil {
 		ip := requestip.ClientIP(r)
 		if err := s.logActivityEntry(activity.ActionLogin, "", user, ip, nil); err != nil {
@@ -4545,6 +5217,68 @@ func (s *Server) handleLoginWithActivity(w http.ResponseWriter, r *http.Request)
 	}
 
 	rec.FlushTo(w)
+}
+
+func (s *Server) sendLoginRateLimitAlert(username, clientIP string) {
+	sender, ok := s.alertMonitor.(AlertEventSender)
+	if !ok || sender == nil {
+		return
+	}
+
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = "unknown"
+	}
+	clientIP = strings.TrimSpace(clientIP)
+	if clientIP == "" {
+		clientIP = "unknown"
+	}
+
+	if !s.reserveLoginRateLimitAlert(username, clientIP) {
+		return
+	}
+
+	event := alerts.EventPayload{
+		Type:      "login_rate_limited",
+		Level:     alerts.AlertLevelWarning,
+		Message:   "login attempts were rate limited",
+		Timestamp: apiTimeNow().UTC(),
+		Details: map[string]any{
+			"username":  username,
+			"client_ip": clientIP,
+			"trigger":   "rate_limited",
+		},
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := sender.SendEvent(ctx, event); err != nil {
+			s.logger.Warn().Err(err).Str("event_type", event.Type).Msg("failed to send login rate-limit alert event")
+		}
+	}()
+}
+
+func (s *Server) reserveLoginRateLimitAlert(username, clientIP string) bool {
+	now := apiTimeNow()
+	key := strings.ToLower(username) + "\x00" + clientIP
+
+	s.loginAlertMu.Lock()
+	defer s.loginAlertMu.Unlock()
+
+	if s.loginRateLimitAlerts == nil {
+		s.loginRateLimitAlerts = make(map[string]time.Time)
+	}
+	if last, ok := s.loginRateLimitAlerts[key]; ok && now.Sub(last) < loginRateLimitAlertCooldown {
+		return false
+	}
+	for existingKey, last := range s.loginRateLimitAlerts {
+		if now.Sub(last) >= loginRateLimitAlertCooldown {
+			delete(s.loginRateLimitAlerts, existingKey)
+		}
+	}
+	s.loginRateLimitAlerts[key] = now
+	return true
 }
 
 func readLoginUsername(r *http.Request) (string, error) {
@@ -4678,9 +5412,11 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 	serverLoopback := securityListenHostIsLoopback(cfg.Server.Host)
 	dataplaneHost := securityTCPAddressHost(cfg.DataPlane.GRPCAddress)
 	dataplaneLoopback := securityListenHostIsLoopback(dataplaneHost)
+	smbHost := securityTCPAddressHost(cfg.SMB.Listen)
+	smbLoopback := securityListenHostIsLoopback(smbHost)
 	initialPasswordFile := filepath.Join(filepath.Dir(cfg.Auth.UsersFile), "initial-password.txt")
 
-	checks := make([]securityCheckItem, 0, 8)
+	checks := make([]securityCheckItem, 0, 9)
 
 	if s.authEnabled {
 		checks = append(checks, securityCheckItem{
@@ -4847,6 +5583,33 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
+	if !cfg.SMB.Enabled {
+		checks = append(checks, securityCheckItem{
+			ID:      "smb_preview",
+			Status:  securityCheckPass,
+			Title:   "SMB 预览未启用",
+			Message: "当前版本不会启动 SMB/Samba 监听器，局域网挂载请使用 WebDAV。",
+		})
+	} else {
+		status := securityCheckWarning
+		message := "当前版本只保留 SMB 网关配置，不会启动可挂载的 SMB/Samba 运行时。"
+		if !smbLoopback {
+			message = "SMB 预览监听地址配置为非本机地址，但当前版本仍不会启动 SMB/Samba 运行时；后续启用前需先收紧监听范围和防火墙。"
+		}
+		checks = append(checks, securityCheckItem{
+			ID:      "smb_preview",
+			Status:  status,
+			Title:   "SMB 仍是预览能力",
+			Message: message,
+			Details: map[string]interface{}{
+				"listen":            cfg.SMB.Listen,
+				"listen_loopback":   smbLoopback,
+				"share_count":       len(cfg.SMB.Shares),
+				"runtime_available": false,
+			},
+		})
+	}
+
 	switch {
 	case !cfg.Share.Enabled:
 		checks = append(checks, securityCheckItem{
@@ -4935,6 +5698,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			"dataplane_grpc_addr": cfg.DataPlane.GRPCAddress,
 			"webdav_enabled":      cfg.WebDAV.Enabled,
 			"webdav_auth_type":    cfg.WebDAV.AuthType,
+			"smb_enabled":         cfg.SMB.Enabled,
 			"share_enabled":       cfg.Share.Enabled,
 		},
 	}
@@ -5002,15 +5766,45 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"runtime_available": cfg.Favorites.Enabled && s.favoritesRuntimeReady(),
 		},
 		"alerts": map[string]interface{}{
-			"enabled":         cfg.Alerts.Enabled,
-			"check_interval":  cfg.Alerts.CheckInterval.String(),
-			"threshold_pct":   cfg.Alerts.ThresholdPct,
-			"critical_pct":    cfg.Alerts.CriticalPct,
-			"min_free_bytes":  cfg.Alerts.MinFreeBytes,
-			"cooldown_period": cfg.Alerts.CooldownPeriod.String(),
-			"webhook_url":     cfg.Alerts.WebhookURL,
-			"webhook_method":  cfg.Alerts.WebhookMethod,
-			"webhook_headers": settingsStringSlice(cfg.Alerts.WebhookHeaders),
+			"enabled":                       cfg.Alerts.Enabled,
+			"check_interval":                cfg.Alerts.CheckInterval.String(),
+			"threshold_pct":                 cfg.Alerts.ThresholdPct,
+			"critical_pct":                  cfg.Alerts.CriticalPct,
+			"min_free_bytes":                cfg.Alerts.MinFreeBytes,
+			"cooldown_period":               cfg.Alerts.CooldownPeriod.String(),
+			"webhook_url":                   cfg.Alerts.WebhookURL,
+			"webhook_method":                cfg.Alerts.WebhookMethod,
+			"webhook_headers":               settingsStringSlice(cfg.Alerts.WebhookHeaders),
+			"telegram_enabled":              cfg.Alerts.TelegramEnabled,
+			"telegram_bot_token_configured": strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "",
+			"telegram_chat_id":              cfg.Alerts.TelegramChatID,
+			"email_enabled":                 cfg.Alerts.EmailEnabled,
+			"smtp_host":                     cfg.Alerts.SMTPHost,
+			"smtp_port":                     cfg.Alerts.SMTPPort,
+			"smtp_username":                 cfg.Alerts.SMTPUsername,
+			"smtp_password_configured":      strings.TrimSpace(cfg.Alerts.SMTPPassword) != "",
+			"smtp_from":                     cfg.Alerts.SMTPFrom,
+			"smtp_to":                       settingsStringSlice(cfg.Alerts.SMTPTo),
+		},
+		"disk_health": map[string]interface{}{
+			"enabled":                     cfg.DiskHealth.Enabled,
+			"check_interval":              cfg.DiskHealth.CheckInterval.String(),
+			"probe_timeout":               cfg.DiskHealth.ProbeTimeout.String(),
+			"cooldown_period":             cfg.DiskHealth.CooldownPeriod.String(),
+			"command":                     cfg.DiskHealth.Command,
+			"temperature_warning_c":       cfg.DiskHealth.TemperatureWarningC,
+			"temperature_critical_c":      cfg.DiskHealth.TemperatureCriticalC,
+			"media_wear_warning_percent":  cfg.DiskHealth.MediaWearWarningPct,
+			"media_wear_critical_percent": cfg.DiskHealth.MediaWearCriticalPct,
+			"devices":                     cfg.DiskHealth.Devices,
+		},
+		"maintenance": map[string]interface{}{
+			"scrub": map[string]interface{}{
+				"enabled":           cfg.Maintenance.Scrub.Enabled,
+				"schedule_interval": cfg.Maintenance.Scrub.ScheduleInterval.String(),
+				"retry_interval":    cfg.Maintenance.Scrub.RetryInterval.String(),
+				"max_retries":       cfg.Maintenance.Scrub.MaxRetries,
+			},
 		},
 		"dataplane": map[string]interface{}{
 			"grpc_address": cfg.DataPlane.GRPCAddress,
@@ -5029,16 +5823,18 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 // UpdateSettingsRequest represents settings update request
 type UpdateSettingsRequest struct {
-	Server     *ServerSettingsUpdate     `json:"server,omitempty"`
-	Trash      *TrashSettingsUpdate      `json:"trash,omitempty"`
-	Retention  *RetentionSettingsUpdate  `json:"retention,omitempty"`
-	Versioning *VersioningSettingsUpdate `json:"versioning,omitempty"`
-	DataPlane  *DataPlaneSettingsUpdate  `json:"dataplane,omitempty"`
-	CDC        *CDCSettingsUpdate        `json:"cdc,omitempty"`
-	Share      *ShareSettingsUpdate      `json:"share,omitempty"`
-	Favorites  *FavoritesSettingsUpdate  `json:"favorites,omitempty"`
-	Alerts     *AlertsSettingsUpdate     `json:"alerts,omitempty"`
-	WebDAV     *WebDAVSettingsUpdate     `json:"webdav,omitempty"`
+	Server      *ServerSettingsUpdate      `json:"server,omitempty"`
+	Trash       *TrashSettingsUpdate       `json:"trash,omitempty"`
+	Retention   *RetentionSettingsUpdate   `json:"retention,omitempty"`
+	Versioning  *VersioningSettingsUpdate  `json:"versioning,omitempty"`
+	DataPlane   *DataPlaneSettingsUpdate   `json:"dataplane,omitempty"`
+	CDC         *CDCSettingsUpdate         `json:"cdc,omitempty"`
+	Share       *ShareSettingsUpdate       `json:"share,omitempty"`
+	Favorites   *FavoritesSettingsUpdate   `json:"favorites,omitempty"`
+	Alerts      *AlertsSettingsUpdate      `json:"alerts,omitempty"`
+	DiskHealth  *DiskHealthSettingsUpdate  `json:"disk_health,omitempty"`
+	Maintenance *MaintenanceSettingsUpdate `json:"maintenance,omitempty"`
+	WebDAV      *WebDAVSettingsUpdate      `json:"webdav,omitempty"`
 }
 
 type ServerSettingsUpdate struct {
@@ -5094,15 +5890,49 @@ type FavoritesSettingsUpdate struct {
 }
 
 type AlertsSettingsUpdate struct {
-	Enabled        *bool     `json:"enabled,omitempty"`
-	CheckInterval  *string   `json:"check_interval,omitempty"`
-	ThresholdPct   *float64  `json:"threshold_pct,omitempty"`
-	CriticalPct    *float64  `json:"critical_pct,omitempty"`
-	MinFreeBytes   *uint64   `json:"min_free_bytes,omitempty"`
-	CooldownPeriod *string   `json:"cooldown_period,omitempty"`
-	WebhookURL     *string   `json:"webhook_url,omitempty"`
-	WebhookMethod  *string   `json:"webhook_method,omitempty"`
-	WebhookHeaders *[]string `json:"webhook_headers,omitempty"`
+	Enabled          *bool     `json:"enabled,omitempty"`
+	CheckInterval    *string   `json:"check_interval,omitempty"`
+	ThresholdPct     *float64  `json:"threshold_pct,omitempty"`
+	CriticalPct      *float64  `json:"critical_pct,omitempty"`
+	MinFreeBytes     *uint64   `json:"min_free_bytes,omitempty"`
+	CooldownPeriod   *string   `json:"cooldown_period,omitempty"`
+	WebhookURL       *string   `json:"webhook_url,omitempty"`
+	WebhookMethod    *string   `json:"webhook_method,omitempty"`
+	WebhookHeaders   *[]string `json:"webhook_headers,omitempty"`
+	TelegramEnabled  *bool     `json:"telegram_enabled,omitempty"`
+	TelegramBotToken *string   `json:"telegram_bot_token,omitempty"`
+	TelegramChatID   *string   `json:"telegram_chat_id,omitempty"`
+	EmailEnabled     *bool     `json:"email_enabled,omitempty"`
+	SMTPHost         *string   `json:"smtp_host,omitempty"`
+	SMTPPort         *int      `json:"smtp_port,omitempty"`
+	SMTPUsername     *string   `json:"smtp_username,omitempty"`
+	SMTPPassword     *string   `json:"smtp_password,omitempty"`
+	SMTPFrom         *string   `json:"smtp_from,omitempty"`
+	SMTPTo           *[]string `json:"smtp_to,omitempty"`
+}
+
+type DiskHealthSettingsUpdate struct {
+	Enabled              *bool                            `json:"enabled,omitempty"`
+	CheckInterval        *string                          `json:"check_interval,omitempty"`
+	ProbeTimeout         *string                          `json:"probe_timeout,omitempty"`
+	CooldownPeriod       *string                          `json:"cooldown_period,omitempty"`
+	Command              *string                          `json:"command,omitempty"`
+	TemperatureWarningC  *int                             `json:"temperature_warning_c,omitempty"`
+	TemperatureCriticalC *int                             `json:"temperature_critical_c,omitempty"`
+	MediaWearWarningPct  *int                             `json:"media_wear_warning_percent,omitempty"`
+	MediaWearCriticalPct *int                             `json:"media_wear_critical_percent,omitempty"`
+	Devices              *[]config.DiskHealthDeviceConfig `json:"devices,omitempty"`
+}
+
+type MaintenanceSettingsUpdate struct {
+	Scrub *ScrubMaintenanceSettingsUpdate `json:"scrub,omitempty"`
+}
+
+type ScrubMaintenanceSettingsUpdate struct {
+	Enabled          *bool   `json:"enabled,omitempty"`
+	ScheduleInterval *string `json:"schedule_interval,omitempty"`
+	RetryInterval    *string `json:"retry_interval,omitempty"`
+	MaxRetries       *int    `json:"max_retries,omitempty"`
 }
 
 type WebDAVSettingsUpdate struct {
@@ -5431,6 +6261,122 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			updatedConfig.Alerts.WebhookHeaders = cleaned
 		}
+		if req.Alerts.TelegramEnabled != nil {
+			updatedConfig.Alerts.TelegramEnabled = *req.Alerts.TelegramEnabled
+		}
+		if req.Alerts.TelegramBotToken != nil {
+			updatedConfig.Alerts.TelegramBotToken = strings.TrimSpace(*req.Alerts.TelegramBotToken)
+		}
+		if req.Alerts.TelegramChatID != nil {
+			updatedConfig.Alerts.TelegramChatID = strings.TrimSpace(*req.Alerts.TelegramChatID)
+		}
+		if req.Alerts.EmailEnabled != nil {
+			updatedConfig.Alerts.EmailEnabled = *req.Alerts.EmailEnabled
+		}
+		if req.Alerts.SMTPHost != nil {
+			updatedConfig.Alerts.SMTPHost = strings.TrimSpace(*req.Alerts.SMTPHost)
+		}
+		if req.Alerts.SMTPPort != nil {
+			updatedConfig.Alerts.SMTPPort = *req.Alerts.SMTPPort
+		}
+		if req.Alerts.SMTPUsername != nil {
+			updatedConfig.Alerts.SMTPUsername = strings.TrimSpace(*req.Alerts.SMTPUsername)
+		}
+		if req.Alerts.SMTPPassword != nil {
+			updatedConfig.Alerts.SMTPPassword = *req.Alerts.SMTPPassword
+		}
+		if req.Alerts.SMTPFrom != nil {
+			updatedConfig.Alerts.SMTPFrom = strings.TrimSpace(*req.Alerts.SMTPFrom)
+		}
+		if req.Alerts.SMTPTo != nil {
+			cleaned := make([]string, 0, len(*req.Alerts.SMTPTo))
+			for _, recipient := range *req.Alerts.SMTPTo {
+				trimmed := strings.TrimSpace(recipient)
+				if trimmed == "" {
+					continue
+				}
+				cleaned = append(cleaned, trimmed)
+			}
+			updatedConfig.Alerts.SMTPTo = cleaned
+		}
+	}
+
+	if req.DiskHealth != nil {
+		if req.DiskHealth.Enabled != nil {
+			updatedConfig.DiskHealth.Enabled = *req.DiskHealth.Enabled
+		}
+		if req.DiskHealth.CheckInterval != nil {
+			d, err := time.ParseDuration(*req.DiskHealth.CheckInterval)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid disk_health.check_interval")
+				return
+			}
+			updatedConfig.DiskHealth.CheckInterval = d
+		}
+		if req.DiskHealth.ProbeTimeout != nil {
+			d, err := time.ParseDuration(*req.DiskHealth.ProbeTimeout)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid disk_health.probe_timeout")
+				return
+			}
+			updatedConfig.DiskHealth.ProbeTimeout = d
+		}
+		if req.DiskHealth.CooldownPeriod != nil {
+			d, err := time.ParseDuration(*req.DiskHealth.CooldownPeriod)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid disk_health.cooldown_period")
+				return
+			}
+			updatedConfig.DiskHealth.CooldownPeriod = d
+		}
+		if req.DiskHealth.Command != nil {
+			updatedConfig.DiskHealth.Command = strings.TrimSpace(*req.DiskHealth.Command)
+		}
+		if req.DiskHealth.TemperatureWarningC != nil {
+			updatedConfig.DiskHealth.TemperatureWarningC = *req.DiskHealth.TemperatureWarningC
+		}
+		if req.DiskHealth.TemperatureCriticalC != nil {
+			updatedConfig.DiskHealth.TemperatureCriticalC = *req.DiskHealth.TemperatureCriticalC
+		}
+		if req.DiskHealth.MediaWearWarningPct != nil {
+			updatedConfig.DiskHealth.MediaWearWarningPct = *req.DiskHealth.MediaWearWarningPct
+		}
+		if req.DiskHealth.MediaWearCriticalPct != nil {
+			updatedConfig.DiskHealth.MediaWearCriticalPct = *req.DiskHealth.MediaWearCriticalPct
+		}
+		if req.DiskHealth.Devices != nil {
+			devices := append([]config.DiskHealthDeviceConfig(nil), (*req.DiskHealth.Devices)...)
+			updatedConfig.DiskHealth.Devices = devices
+		}
+	}
+
+	if req.Maintenance != nil && req.Maintenance.Scrub != nil {
+		if req.Maintenance.Scrub.Enabled != nil {
+			updatedConfig.Maintenance.Scrub.Enabled = *req.Maintenance.Scrub.Enabled
+		}
+		if req.Maintenance.Scrub.ScheduleInterval != nil {
+			d, err := time.ParseDuration(*req.Maintenance.Scrub.ScheduleInterval)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid maintenance.scrub.schedule_interval")
+				return
+			}
+			updatedConfig.Maintenance.Scrub.ScheduleInterval = d
+		}
+		if req.Maintenance.Scrub.RetryInterval != nil {
+			d, err := time.ParseDuration(*req.Maintenance.Scrub.RetryInterval)
+			if err != nil || d <= 0 {
+				BadRequest(w, "invalid maintenance.scrub.retry_interval")
+				return
+			}
+			updatedConfig.Maintenance.Scrub.RetryInterval = d
+		}
+		if req.Maintenance.Scrub.MaxRetries != nil {
+			if *req.Maintenance.Scrub.MaxRetries < 0 {
+				BadRequest(w, "invalid maintenance.scrub.max_retries")
+				return
+			}
+			updatedConfig.Maintenance.Scrub.MaxRetries = *req.Maintenance.Scrub.MaxRetries
+		}
 	}
 
 	if req.CDC != nil {
@@ -5622,16 +6568,36 @@ func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsReq
 
 	if req.Alerts != nil && s.alertMonitor != nil {
 		s.alertMonitor.UpdateConfig(alerts.Config{
-			Enabled:        cfg.Alerts.Enabled,
-			CheckInterval:  cfg.Alerts.CheckInterval,
-			ThresholdPct:   cfg.Alerts.ThresholdPct,
-			CriticalPct:    cfg.Alerts.CriticalPct,
-			MinFreeBytes:   cfg.Alerts.MinFreeBytes,
-			CooldownPeriod: cfg.Alerts.CooldownPeriod,
-			WebhookURL:     cfg.Alerts.WebhookURL,
-			WebhookMethod:  cfg.Alerts.WebhookMethod,
-			WebhookHeaders: cfg.Alerts.WebhookHeaders,
+			Enabled:          cfg.Alerts.Enabled,
+			CheckInterval:    cfg.Alerts.CheckInterval,
+			ThresholdPct:     cfg.Alerts.ThresholdPct,
+			CriticalPct:      cfg.Alerts.CriticalPct,
+			MinFreeBytes:     cfg.Alerts.MinFreeBytes,
+			CooldownPeriod:   cfg.Alerts.CooldownPeriod,
+			WebhookURL:       cfg.Alerts.WebhookURL,
+			WebhookMethod:    cfg.Alerts.WebhookMethod,
+			WebhookHeaders:   cfg.Alerts.WebhookHeaders,
+			TelegramEnabled:  cfg.Alerts.TelegramEnabled,
+			TelegramBotToken: cfg.Alerts.TelegramBotToken,
+			TelegramChatID:   cfg.Alerts.TelegramChatID,
+			EmailEnabled:     cfg.Alerts.EmailEnabled,
+			SMTPHost:         cfg.Alerts.SMTPHost,
+			SMTPPort:         cfg.Alerts.SMTPPort,
+			SMTPUsername:     cfg.Alerts.SMTPUsername,
+			SMTPPassword:     cfg.Alerts.SMTPPassword,
+			SMTPFrom:         cfg.Alerts.SMTPFrom,
+			SMTPTo:           cfg.Alerts.SMTPTo,
 		})
+	}
+
+	if req.DiskHealth != nil && s.diskHealth != nil {
+		s.diskHealth.UpdateConfig(diskHealthRuntimeConfig(cfg.DiskHealth))
+	}
+
+	if req.Maintenance != nil && req.Maintenance.Scrub != nil {
+		if s.startScrubScheduler(context.Background(), cfg.Maintenance.Scrub) {
+			s.logger.Info().Msg("Scrub scheduler updated")
+		}
 	}
 }
 

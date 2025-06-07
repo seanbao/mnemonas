@@ -371,11 +371,19 @@ bantime = 3600
 # 检查证书状态
 sudo certbot certificates
 
-# 手动续期
-sudo certbot renew
+# 续期演练
+sudo certbot renew --dry-run
 
-# Caddy 证书位置
+# 查看 certbot 定时任务和最近日志
+systemctl list-timers 'certbot*' 'snap.certbot*'
+journalctl -u certbot --since '24 hours ago'
+
+# Caddy 证书位置与续期日志
 ls ~/.local/share/caddy/certificates/
+journalctl -u caddy --since '24 hours ago'
+
+# 统一复核证书 hostname、30 天有效期、续期提示和端口暴露
+sudo mnemonas-doctor --public-domain nas.example.com
 ```
 
 ### 连接超时

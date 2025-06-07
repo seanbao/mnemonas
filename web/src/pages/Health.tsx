@@ -14,9 +14,11 @@ import {
   ShieldCheck,
   Clock,
   BellRing,
+  Thermometer,
+  Network,
   type LucideIcon,
 } from 'lucide-react'
-import { ApiError, getDiagnostics, getStorageStats, type DiagnosticsInfo } from '@/api/files'
+import { ApiError, getDiagnostics, getDiskHealth, getStorageStats, type DiagnosticsInfo, type DiskHealthReport } from '@/api/files'
 import { formatBytes } from '@/lib/utils'
 import { areDiskStatsAvailable, areStorageStatsAvailable, clampUsagePercent, formatFilesystemType, formatUsagePercent } from '@/lib/storageStats'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -210,20 +212,224 @@ function getAlertsPresentation(alerts: DiagnosticsInfo['alerts']): {
     }
   }
 
+  const hasNotificationChannel = alerts.webhookConfigured || alerts.telegramConfigured || alerts.emailConfigured
+  const notificationText = hasNotificationChannel
+    ? '通知通道已配置。'
+    : '如需外部通知，请在设置中配置 Webhook、Telegram 或邮件。'
+
   return {
     icon: BellRing,
-    title: alerts.webhookConfigured ? '存储告警已启用' : '存储告警已启用，未配置 Webhook',
-    description: `${checkedText}。${alerts.webhookConfigured ? 'Webhook 通知已配置。' : '如需外部通知，请在设置中配置 Webhook。'}`,
+    title: hasNotificationChannel ? '存储告警已启用' : '存储告警已启用，未配置通知通道',
+    description: `${checkedText}。${notificationText}`,
     className: 'border-success/25 bg-success/5',
     iconClassName: 'text-success',
   }
+}
+
+function formatGoDurationLabel(value: string | undefined): string {
+  if (!value) {
+    return '--'
+  }
+
+  const match = value.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/)
+  if (!match || match[0] === '') {
+    return value
+  }
+
+  const hours = Number(match[1] ?? 0)
+  const minutes = Number(match[2] ?? 0)
+  const seconds = Number(match[3] ?? 0)
+  if (hours > 0 && minutes === 0 && seconds === 0 && hours % 24 === 0) {
+    return `${hours / 24} 天`
+  }
+
+  const parts: string[] = []
+  if (hours > 0) parts.push(`${hours} 小时`)
+  if (minutes > 0) parts.push(`${minutes} 分钟`)
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds} 秒`)
+  return parts.join(' ')
+}
+
+function getMaintenancePresentation(maintenance: DiagnosticsInfo['maintenance']): {
+  icon: LucideIcon
+  title: string
+  description: string
+  className: string
+  iconClassName: string
+} | undefined {
+  if (!maintenance) {
+    return undefined
+  }
+
+  if (maintenance.historyReady === false) {
+    return {
+      icon: AlertCircle,
+      title: '维护历史不可用',
+      description: 'Scrub 和备份恢复演练记录无法读取，请检查维护目录权限和服务日志。',
+      className: 'border-danger/25 bg-danger/5',
+      iconClassName: 'text-danger',
+    }
+  }
+
+  if (maintenance.scrubScheduleEnabled !== true) {
+    return {
+      icon: Clock,
+      title: '周期 Scrub 未启用',
+      description: '可在配置中启用自动数据巡检，定期校验 CAS 对象完整性。',
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  const scheduleText = formatGoDurationLabel(maintenance.scrubScheduleInterval)
+  const retryText = formatGoDurationLabel(maintenance.scrubRetryInterval)
+  const maxRetries = maintenance.scrubMaxRetries ?? 0
+  const lastText = maintenance.lastScrubAt ? `最近 Scrub ${maintenance.lastScrubAt}` : '等待首次 Scrub'
+
+  if (maintenance.lastScrubStatus === 'failed') {
+    const retries = maintenance.scrubFailureRetries ?? 0
+    const retryDescription = maxRetries > 0
+      ? `失败后每 ${retryText} 重试，当前已重试 ${retries}/${maxRetries} 次。`
+      : '失败后不会自动重试。'
+    return {
+      icon: AlertCircle,
+      title: '周期 Scrub 最近失败',
+      description: `${lastText}。${retryDescription}`,
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  const retryDescription = maxRetries > 0
+    ? `失败后每 ${retryText} 重试，最多 ${maxRetries} 次。`
+    : '失败后不自动重试。'
+  return {
+    icon: ShieldCheck,
+    title: '周期 Scrub 已启用',
+    description: `每 ${scheduleText} 自动巡检。${lastText}。${retryDescription}`,
+    className: 'border-success/25 bg-success/5',
+    iconClassName: 'text-success',
+  }
+}
+
+function getSMBPresentation(smb: DiagnosticsInfo['smb']): {
+  icon: LucideIcon
+  title: string
+  description: string
+  className: string
+  iconClassName: string
+} | undefined {
+  if (!smb || smb.enabled !== true) {
+    return undefined
+  }
+
+  if (smb.runtimeAvailable === false) {
+    const shareText = smb.shareCount !== undefined ? `已配置 ${smb.shareCount} 个共享。` : ''
+    return {
+      icon: Network,
+      title: 'SMB 当前不可挂载',
+      description: `${shareText}当前版本只保留 SMB 网关配置和权限模型，尚未内置 SMB/Samba 运行时。请继续使用 WebDAV。`,
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  return {
+    icon: Network,
+    title: 'SMB 运行态已就绪',
+    description: `${smb.serverName ?? 'MnemoNAS'} 正在监听 ${smb.listen ?? '--'}。`,
+    className: 'border-success/25 bg-success/5',
+    iconClassName: 'text-success',
+  }
+}
+
+function getDiskHealthPresentation(report: DiskHealthReport | undefined, diagnostics: DiagnosticsInfo['diskHealth']): {
+  icon: LucideIcon
+  title: string
+  description: string
+  className: string
+  iconClassName: string
+} {
+  const status = (report?.status ?? diagnostics?.lastStatus ?? '').trim().toLowerCase()
+  const enabled = report?.enabled ?? diagnostics?.enabled
+  const checkedAt = report?.checkedAt ?? diagnostics?.lastCheckedAt
+  const deviceCount = report?.devices.length ?? diagnostics?.lastDeviceCount ?? diagnostics?.deviceCount ?? 0
+  const checkedText = checkedAt ? `最近检查 ${checkedAt}` : '等待首次检查'
+
+  if (enabled !== true) {
+    return {
+      icon: AlertCircle,
+      title: '磁盘健康监控未启用',
+      description: '配置 SMART 设备后可监控温度、SMART 状态、介质磨损和掉盘。',
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  if (diagnostics?.runtimeAvailable === false && !report) {
+    return {
+      icon: AlertCircle,
+      title: '磁盘健康运行态不可用',
+      description: '配置已启用，但当前进程没有挂载磁盘健康监控。',
+      className: 'border-danger/25 bg-danger/5',
+      iconClassName: 'text-danger',
+    }
+  }
+
+  if (status === 'critical') {
+    return {
+      icon: AlertCircle,
+      title: '磁盘健康严重异常',
+      description: `${checkedText}。请检查 SMART、设备连接和序列号匹配。`,
+      className: 'border-danger/25 bg-danger/5',
+      iconClassName: 'text-danger',
+    }
+  }
+
+  if (status === 'warning' || status === 'unavailable') {
+    return {
+      icon: AlertCircle,
+      title: status === 'unavailable' ? '磁盘健康状态不可用' : '磁盘健康需要关注',
+      description: `${checkedText}。请确认 smartctl 权限、设备路径、温度和介质健康状态。`,
+      className: 'border-warning/25 bg-warning/5',
+      iconClassName: 'text-warning',
+    }
+  }
+
+  return {
+    icon: ShieldCheck,
+    title: deviceCount > 0 ? '磁盘健康正常' : '磁盘健康等待设备',
+    description: deviceCount > 0 ? `${checkedText}，已检查 ${deviceCount} 块磁盘。` : '已启用监控，但尚未配置磁盘设备。',
+    className: deviceCount > 0 ? 'border-success/25 bg-success/5' : 'border-warning/25 bg-warning/5',
+    iconClassName: deviceCount > 0 ? 'text-success' : 'text-warning',
+  }
+}
+
+function diskHealthDeviceMetricSummary(device: DiskHealthReport['devices'][number]): string {
+  const parts: string[] = []
+  if (device.temperatureC !== undefined) {
+    parts.push(`${device.temperatureC} C`)
+  }
+  if (device.wearPercentUsed !== undefined) {
+    parts.push(`磨损 ${device.wearPercentUsed}%`)
+  }
+  if (device.availableSparePercent !== undefined) {
+    parts.push(`备用 ${device.availableSparePercent}%`)
+  }
+  if (device.mediaErrors !== undefined && device.mediaErrors > 0) {
+    parts.push(`介质错误 ${device.mediaErrors}`)
+  }
+  if (parts.length > 0) {
+    return parts.join(' · ')
+  }
+  return device.present ? '在线' : '离线'
 }
 
 function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string; description: string } {
   if (errors.some((error) => error instanceof ApiError && error.isUnavailable)) {
     return {
       title: '系统健康信息暂不可用',
-      description: '诊断或存储统计服务当前不可用，请检查系统状态或稍后重试。',
+      description: '健康数据服务当前不可用，请检查系统状态或稍后重试。',
     }
   }
 
@@ -265,11 +471,18 @@ export function HealthPage() {
     refetchInterval: 30000,
   })
 
-  const isLoading = diagLoading || statsLoading
-  const hasAvailableData = diagnostics !== undefined || stats !== undefined
-  const hasPartialError = !isLoading && [diagError, statsError].some(Boolean) && hasAvailableData
-  const loadError = diagError || statsError
-  const loadErrorPresentation = getHealthLoadErrorPresentation([diagError, statsError])
+  const { data: diskHealth, isLoading: diskHealthLoading, error: diskHealthError, refetch: refetchDiskHealth } = useQuery({
+    queryKey: ['disk-health', user?.id ?? 'anonymous'],
+    queryFn: getDiskHealth,
+    refetchInterval: 30000,
+  })
+
+  const isLoading = diagLoading || statsLoading || diskHealthLoading
+  const healthErrors = [diagError, statsError, diskHealthError]
+  const hasAvailableData = diagnostics !== undefined || stats !== undefined || diskHealth !== undefined
+  const hasPartialError = !isLoading && healthErrors.some(Boolean) && hasAvailableData
+  const loadError = diagError || statsError || diskHealthError
+  const loadErrorPresentation = getHealthLoadErrorPresentation(healthErrors)
   const storageStatsAvailable = areStorageStatsAvailable(stats)
   const diskStatsAvailable = areDiskStatsAvailable(stats)
   const diskUsagePercent = diskStatsAvailable ? clampUsagePercent(stats?.diskUsageRatio) : undefined
@@ -281,11 +494,17 @@ export function HealthPage() {
   const FilesystemStatusIcon = filesystemPresentation?.icon
   const alertsPresentation = getAlertsPresentation(diagnostics?.alerts)
   const AlertsStatusIcon = alertsPresentation?.icon
+  const maintenancePresentation = getMaintenancePresentation(diagnostics?.maintenance)
+  const MaintenanceStatusIcon = maintenancePresentation?.icon
+  const smbPresentation = getSMBPresentation(diagnostics?.smb)
+  const SMBStatusIcon = smbPresentation?.icon
+  const diskHealthPresentation = getDiskHealthPresentation(diskHealth, diagnostics?.diskHealth)
+  const DiskHealthStatusIcon = diskHealthPresentation.icon
   const buildTime = formatBuildTime(diagnostics?.version?.buildTime)
 
   const handleRefresh = async () => {
-    const [diagResult, statsResult] = await Promise.all([refetchDiag(), refetchStats()])
-    const refreshErrors = [diagResult.error, statsResult.error].filter((error): error is Error => Boolean(error))
+    const [diagResult, statsResult, diskHealthResult] = await Promise.all([refetchDiag(), refetchStats(), refetchDiskHealth()])
+    const refreshErrors = [diagResult.error, statsResult.error, diskHealthResult.error].filter((error): error is Error => Boolean(error))
 
     if (refreshErrors.length > 0) {
       addToast(getHealthRefreshErrorToast(refreshErrors))
@@ -427,6 +646,12 @@ export function HealthPage() {
                 label="收藏存储" 
               />
             )}
+            {diagnostics?.system?.smbRuntimeReady !== undefined && (
+              <StatusIndicator
+                status={diagnostics.system.smbRuntimeReady}
+                label="SMB 运行态"
+              />
+            )}
           </div>
 
           {diagnostics?.version && (
@@ -458,6 +683,30 @@ export function HealthPage() {
         </Card>
       )}
 
+      {maintenancePresentation && MaintenanceStatusIcon && (
+        <Card className={`shadow-none ${maintenancePresentation.className}`}>
+          <CardBody className="flex items-start gap-3">
+            <MaintenanceStatusIcon size={18} className={`mt-0.5 shrink-0 ${maintenancePresentation.iconClassName}`} />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-foreground">{maintenancePresentation.title}</p>
+              <p className="mt-1 text-xs leading-5 text-default-600">{maintenancePresentation.description}</p>
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      {smbPresentation && SMBStatusIcon && (
+        <Card className={`shadow-none ${smbPresentation.className}`}>
+          <CardBody className="flex items-start gap-3">
+            <SMBStatusIcon size={18} className={`mt-0.5 shrink-0 ${smbPresentation.iconClassName}`} />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-foreground">{smbPresentation.title}</p>
+              <p className="mt-1 text-xs leading-5 text-default-600">{smbPresentation.description}</p>
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
       {/* Stats Grid */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {statsCards.map((stat) => (
@@ -483,7 +732,7 @@ export function HealthPage() {
       </div>
 
       {/* Storage Details */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         {/* Storage Card */}
         <Card className="card-meridian">
           <CardHeader className="pb-0">
@@ -562,6 +811,65 @@ export function HealthPage() {
                 <p className="text-default-500 text-xs">去重比例</p>
               </div>
             </div>
+          </CardBody>
+        </Card>
+
+        {/* Disk Health Card */}
+        <Card className="card-meridian">
+          <CardHeader className="pb-0">
+            <div className="flex items-center gap-2">
+              <div className="bg-success/10 rounded-lg p-2">
+                <Thermometer size={16} className="text-success" />
+              </div>
+              <div>
+                <span className="font-semibold">磁盘健康</span>
+                <p className="text-default-500 text-xs">SMART、温度与设备在线状态</p>
+              </div>
+            </div>
+          </CardHeader>
+          <CardBody className="space-y-4">
+            <div className={`flex items-start gap-3 rounded-lg border p-3 ${diskHealthPresentation.className}`}>
+              <DiskHealthStatusIcon size={17} className={`mt-0.5 shrink-0 ${diskHealthPresentation.iconClassName}`} />
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-foreground">{diskHealthPresentation.title}</p>
+                <p className="mt-1 text-xs leading-5 text-default-600">{diskHealthPresentation.description}</p>
+              </div>
+            </div>
+
+            {diskHealth?.devices.length ? (
+              <div className="space-y-2">
+                {diskHealth.devices.slice(0, 4).map((device) => (
+                  <div key={`${device.path}-${device.name ?? ''}`} className="flex items-start justify-between gap-3 rounded-lg bg-content2/50 p-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-foreground">{device.name || device.model || device.path}</p>
+                      <p className="mt-1 truncate text-xs text-default-500">{device.model || device.path}</p>
+                      {device.message && (
+                        <p className="mt-1 text-xs leading-4 text-default-500">{device.message}</p>
+                      )}
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <Chip
+                        size="sm"
+                        color={device.status === 'critical' ? 'danger' : device.status === 'warning' || device.status === 'unavailable' ? 'warning' : 'success'}
+                        variant="flat"
+                      >
+                        {device.status === 'critical' ? '严重' : device.status === 'warning' ? '提醒' : device.status === 'unavailable' ? '不可用' : '正常'}
+                      </Chip>
+                      <p className="mt-2 text-xs text-default-500">
+                        {diskHealthDeviceMetricSummary(device)}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+                {diskHealth.devices.length > 4 && (
+                  <p className="text-xs text-default-500">还有 {diskHealth.devices.length - 4} 块磁盘未显示</p>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-lg bg-content2/30 p-3 text-xs leading-5 text-default-500">
+                当前没有可展示的磁盘设备。
+              </div>
+            )}
           </CardBody>
         </Card>
 

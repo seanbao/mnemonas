@@ -604,6 +604,10 @@ function PublicAccessWizard({
   const publicBaseURL = normalizedDomain ? `https://${normalizedDomain}` : 'https://nas.example.com'
   const setupCommand = `sudo mnemonas-public-setup --proxy ${proxy} ${domainForCommand} admin@example.com`
   const doctorCommand = `sudo mnemonas-doctor --public-domain ${domainForCommand}`
+  const renewalCommand = proxy === 'nginx'
+    ? 'sudo certbot renew --dry-run'
+    : "sudo journalctl -u caddy --since '24 hours ago'"
+  const renewalLabel = proxy === 'nginx' ? '续期演练' : '续期日志'
 
   return (
     <SettingsSection
@@ -687,6 +691,30 @@ function PublicAccessWizard({
           </Snippet>
         </div>
 
+        <div className="rounded-lg border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-800">
+          <div className="font-medium">证书续期检查</div>
+          <div className="mt-1 text-warning-700">
+            {proxy === 'nginx'
+              ? 'Nginx 路径依赖 certbot 定时任务，公网开放前先执行一次 dry-run。'
+              : 'Caddy 会自动续期证书，公网开放后需要确认服务日志里没有 ACME 错误。'}
+          </div>
+          <Snippet
+            symbol=""
+            variant="flat"
+            className="mt-3 w-full"
+            classNames={{
+              base: "bg-content1 border border-warning-200",
+              pre: "font-mono text-xs whitespace-pre-wrap break-all",
+            }}
+            hideSymbol
+          >
+            {renewalCommand}
+          </Snippet>
+          <div className="mt-2 text-xs text-warning-700">
+            {renewalLabel}失败时，先检查 DNS、云防火墙 80/443、ACME challenge 路径和反向代理日志，再重新运行 doctor。
+          </div>
+        </div>
+
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs leading-relaxed text-default-500">
             应用推荐只会更新当前表单；点击“保存设置”后，监听地址变更需要重启服务。
@@ -749,6 +777,14 @@ export function SettingsPage() {
     alertsWebhookURL: '',
     alertsWebhookMethod: 'POST',
     alertsWebhookHeaders: '',
+    alertsTelegramEnabled: false,
+    alertsTelegramBotToken: '',
+    alertsTelegramBotTokenConfigured: false,
+    alertsTelegramChatID: '',
+    scrubScheduleEnabled: false,
+    scrubScheduleInterval: '168h',
+    scrubRetryInterval: '1h',
+    scrubMaxRetries: '1',
     dataplaneGrpcAddress: '127.0.0.1:9090',
     dataplaneTimeout: '30s',
     dataplaneMaxRetries: '3',
@@ -883,6 +919,14 @@ export function SettingsPage() {
       alertsWebhookURL: data.alerts?.webhook_url ?? '',
       alertsWebhookMethod: data.alerts?.webhook_method ?? 'POST',
       alertsWebhookHeaders: data.alerts?.webhook_headers?.join('\n') ?? '',
+      alertsTelegramEnabled: data.alerts?.telegram_enabled ?? false,
+      alertsTelegramBotToken: '',
+      alertsTelegramBotTokenConfigured: data.alerts?.telegram_bot_token_configured ?? false,
+      alertsTelegramChatID: data.alerts?.telegram_chat_id ?? '',
+      scrubScheduleEnabled: data.maintenance?.scrub?.enabled ?? false,
+      scrubScheduleInterval: data.maintenance?.scrub?.schedule_interval ?? '168h',
+      scrubRetryInterval: data.maintenance?.scrub?.retry_interval ?? '1h',
+      scrubMaxRetries: String(data.maintenance?.scrub?.max_retries ?? 1),
       dataplaneMaxRetries: String(data.dataplane.max_retries),
       dataplaneGrpcAddress: data.dataplane.grpc_address,
       dataplaneTimeout: data.dataplane.timeout,
@@ -1141,6 +1185,12 @@ export function SettingsPage() {
     const trimmedShareBaseURL = settings.shareBaseURL.trim()
     const trimmedAlertsWebhookURL = settings.alertsWebhookURL.trim()
     const trimmedAlertsWebhookMethod = settings.alertsWebhookMethod.trim().toUpperCase()
+    const trimmedAlertsTelegramBotToken = settings.alertsTelegramBotToken.trim()
+    const trimmedAlertsTelegramChatID = settings.alertsTelegramChatID.trim()
+    const trimmedScrubScheduleInterval = settings.scrubScheduleInterval.trim()
+    const trimmedScrubRetryInterval = settings.scrubRetryInterval.trim()
+    const trimmedScrubMaxRetries = settings.scrubMaxRetries.trim()
+    const parsedScrubMaxRetries = Number(trimmedScrubMaxRetries)
     const alertsWebhookHeaders = settings.alertsWebhookHeaders
       .split('\n')
       .map(header => header.trim())
@@ -1371,6 +1421,70 @@ export function SettingsPage() {
 		return
 	}
 
+    if (settings.alertsTelegramEnabled) {
+      if (!trimmedAlertsTelegramBotToken && !settings.alertsTelegramBotTokenConfigured) {
+        addToast({
+          title: 'Telegram Bot Token 缺失',
+          description: '首次启用 Telegram 通知时必须填写 Bot Token',
+          color: 'danger',
+        })
+        return
+      }
+      if (!trimmedAlertsTelegramChatID) {
+        addToast({
+          title: 'Telegram Chat ID 缺失',
+          description: '启用 Telegram 通知时必须填写 Chat ID 或频道用户名',
+          color: 'danger',
+        })
+        return
+      }
+    }
+
+    if (trimmedAlertsTelegramBotToken && /[\s/?#]/.test(trimmedAlertsTelegramBotToken)) {
+      addToast({
+        title: 'Telegram Bot Token 格式无效',
+        description: 'Bot Token 不能包含空白、/、? 或 #',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (trimmedAlertsTelegramChatID && /\s/.test(trimmedAlertsTelegramChatID)) {
+      addToast({
+        title: 'Telegram Chat ID 格式无效',
+        description: 'Chat ID 或频道用户名不能包含空白字符',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedScrubScheduleInterval) {
+      addToast({
+        title: 'Scrub 周期间隔格式无效',
+        description: '周期 Scrub 的常规间隔不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedScrubRetryInterval) {
+      addToast({
+        title: 'Scrub 重试间隔格式无效',
+        description: '周期 Scrub 的失败重试间隔不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedScrubMaxRetries) || !Number.isInteger(parsedScrubMaxRetries) || parsedScrubMaxRetries < 0) {
+      addToast({
+        title: 'Scrub 重试次数格式无效',
+        description: '最大重试次数必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
+
   if (!/^\d+$/.test(trimmedTrashRetentionDays) || !Number.isInteger(parsedTrashRetentionDays) || parsedTrashRetentionDays < 0) {
     addToast({
       title: '回收站保留天数格式无效',
@@ -1463,6 +1577,17 @@ export function SettingsPage() {
         webhook_url: trimmedAlertsWebhookURL,
         webhook_method: trimmedAlertsWebhookMethod,
         webhook_headers: alertsWebhookHeaders,
+        telegram_enabled: settings.alertsTelegramEnabled,
+        telegram_chat_id: trimmedAlertsTelegramChatID,
+        ...(trimmedAlertsTelegramBotToken && { telegram_bot_token: trimmedAlertsTelegramBotToken }),
+      },
+      maintenance: {
+        scrub: {
+          enabled: settings.scrubScheduleEnabled,
+          schedule_interval: trimmedScrubScheduleInterval,
+          retry_interval: trimmedScrubRetryInterval,
+          max_retries: parsedScrubMaxRetries,
+        },
       },
       cdc: {
         min_chunk_size: minChunkBytes,
@@ -2421,6 +2546,87 @@ export function SettingsPage() {
               </SettingsSection>
 
               <SettingsSection
+                title="数据巡检计划"
+                description="配置后台周期 Scrub；保存后立即更新调度，失败会按重试策略进入告警和健康状态"
+                icon={Clock}
+              >
+                <div className="space-y-4">
+                  <SettingRow
+                    label="启用周期 Scrub"
+                    description="启用后按计划校验 CAS 对象完整性"
+                  >
+                    <Switch
+                      aria-label="启用周期 Scrub"
+                      isSelected={settings.scrubScheduleEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubScheduleEnabled: v }))}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      启用周期 Scrub
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="常规间隔"
+                    description="两次计划巡检之间的间隔"
+                  >
+                    <Input
+                      aria-label="Scrub 常规间隔"
+                      value={settings.scrubScheduleInterval}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubScheduleInterval: v }))}
+                      placeholder="168h"
+                      className="w-32"
+                      isDisabled={!settings.scrubScheduleEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="失败重试间隔"
+                    description="巡检失败后等待多久再自动重试"
+                  >
+                    <Input
+                      aria-label="Scrub 失败重试间隔"
+                      value={settings.scrubRetryInterval}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubRetryInterval: v }))}
+                      placeholder="1h"
+                      className="w-32"
+                      isDisabled={!settings.scrubScheduleEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="最大重试次数"
+                    description="单次失败后最多自动重试次数；0 表示不自动重试"
+                  >
+                    <Input
+                      aria-label="Scrub 最大重试次数"
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      value={settings.scrubMaxRetries}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubMaxRetries: v }))}
+                      className="w-24"
+                      isDisabled={!settings.scrubScheduleEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                </div>
+              </SettingsSection>
+
+              <SettingsSection
                 title="系统告警"
                 description="配置磁盘空间监控、备份事件和 Webhook 通知；保存后立即更新运行态"
                 icon={AlertCircle}
@@ -2451,6 +2657,7 @@ export function SettingsPage() {
                     description="磁盘空间检查频率"
                   >
                     <Input
+                      aria-label="告警检查间隔"
                       value={settings.alertsCheckInterval}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCheckInterval: v }))}
                       placeholder="1h"
@@ -2511,6 +2718,7 @@ export function SettingsPage() {
                     description="同级别连续告警之间的最小间隔"
                   >
                     <Input
+                      aria-label="告警冷却时间"
                       value={settings.alertsCooldownPeriod}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCooldownPeriod: v }))}
                       placeholder="4h"
@@ -2571,6 +2779,60 @@ export function SettingsPage() {
                     />
                     <p className="text-xs text-default-500 mt-1">每行一个 Header，使用 Key:Value 格式。</p>
                   </div>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="Telegram 通知"
+                    description="将同一批告警事件发送到 Telegram 机器人"
+                  >
+                    <Switch
+                      aria-label="启用 Telegram 通知"
+                      isSelected={settings.alertsTelegramEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsTelegramEnabled: v }))}
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      启用 Telegram 通知
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="Telegram Bot Token"
+                    description={settings.alertsTelegramBotTokenConfigured ? '留空会保留现有 Token；填写后覆盖' : '从 BotFather 获取的机器人 Token'}
+                  >
+                    <Input
+                      type="password"
+                      aria-label="Telegram Bot Token"
+                      value={settings.alertsTelegramBotToken}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsTelegramBotToken: v }))}
+                      placeholder={settings.alertsTelegramBotTokenConfigured ? '已配置，留空不变' : '123456:ABC...'}
+                      isDisabled={!settings.alertsEnabled || !settings.alertsTelegramEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="Telegram Chat ID"
+                    description="支持数字 Chat ID 或 @channel 用户名"
+                  >
+                    <Input
+                      aria-label="Telegram Chat ID"
+                      value={settings.alertsTelegramChatID}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsTelegramChatID: v }))}
+                      placeholder="-1001234567890"
+                      isDisabled={!settings.alertsEnabled || !settings.alertsTelegramEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
                 </div>
               </SettingsSection>
 
