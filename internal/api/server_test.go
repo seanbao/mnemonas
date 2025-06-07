@@ -779,6 +779,19 @@ func setUserHomeDirForTest(t *testing.T, server *Server, username, homeDir strin
 	}
 }
 
+func setUserQuotaForTest(t *testing.T, server *Server, username string, quotaBytes int64) {
+	t.Helper()
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	user.QuotaBytes = quotaBytes
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(%s) quota error: %v", username, err)
+	}
+}
+
 func newActivityOnlyAuthServer(t *testing.T) *Server {
 	t.Helper()
 
@@ -1709,6 +1722,89 @@ func TestServer_UploadFile_TooLargeReturnsPayloadTooLarge(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/upload/toolarge.bin"); err == nil {
 		t.Fatal("expected oversized upload to leave no file behind")
+	}
+}
+
+func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/existing.txt", strings.NewReader("12345678")); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+	setUserQuotaForTest(t, server, username, 10)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/tester/new.txt", strings.NewReader("12345"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("quota upload status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"QUOTA_EXCEEDED"`) {
+		t.Fatalf("expected quota error code, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/new.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected upload to leave no file, got %v", err)
+	}
+}
+
+func TestServer_UploadFile_AllowsReplacingWithinUserQuota(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/existing.txt", strings.NewReader("12345678")); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+	setUserQuotaForTest(t, server, username, 10)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/tester/existing.txt", strings.NewReader("123456789"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("replace within quota status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	info, err := fs.Stat(ctx, "/tester/existing.txt")
+	if err != nil {
+		t.Fatalf("Stat(replaced) error: %v", err)
+	}
+	if info.Size != 9 {
+		t.Fatalf("replaced size = %d, want 9", info.Size)
+	}
+}
+
+func TestServer_UploadFile_EnforcesUserQuotaForUnknownContentLength(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	setUserQuotaForTest(t, server, username, 5)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/tester/streamed.txt", io.NopCloser(strings.NewReader("123456")))
+	req.ContentLength = -1
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("stream quota upload status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/streamed.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected stream upload to leave no file, got %v", err)
 	}
 }
 
@@ -7090,6 +7186,40 @@ func TestServer_CopyFile_ReturnsConflictWhenDestinationExists(t *testing.T) {
 	}
 }
 
+func TestServer_CopyFile_EnforcesUserQuota(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/src.txt", strings.NewReader("123456")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/used.txt", strings.NewReader("1234")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	setUserQuotaForTest(t, server, username, 10)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	body := `{"from":"/tester/src.txt","to":"/tester/copied.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("copy quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"QUOTA_EXCEEDED"`) {
+		t.Fatalf("expected quota error code, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/copied.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected copy to leave no destination, got %v", err)
+	}
+}
+
 func TestServer_CopyFile_RejectsOversizedRequestBody(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -7470,6 +7600,49 @@ func TestServer_RestoreFromTrash_InvalidPathIsSanitized(t *testing.T) {
 	}
 	if strings.Contains(bodyStr, "..") || strings.Contains(strings.ToLower(bodyStr), "traversal") {
 		t.Fatalf("expected sanitized invalid path error, got %s", bodyStr)
+	}
+}
+
+func TestServer_RestoreFromTrash_EnforcesUserQuota(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/deleted.txt", strings.NewReader("12345678")); err != nil {
+		t.Fatalf("WriteFile(deleted) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/tester/deleted.txt"); err != nil {
+		t.Fatalf("Delete(deleted) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/used.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("trash item count = %d, want 1", len(items))
+	}
+
+	setUserQuotaForTest(t, server, username, 10)
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("trash restore quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"QUOTA_EXCEEDED"`) {
+		t.Fatalf("expected quota error code, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/deleted.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected restore to leave original path absent, got %v", err)
 	}
 }
 
@@ -12043,6 +12216,37 @@ func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
 	}
 	if server.config.WebDAV.AuthType != originalAuthType {
 		t.Fatalf("expected invalid webdav auth type update to leave config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_AcceptsWebDAVUsersAuthType(t *testing.T) {
+	server, _, tmpDir, _, _ := setupAuthServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+
+	var applied WebDAVRuntimeConfig
+	server.updateWebDAV = func(cfg WebDAVRuntimeConfig) {
+		applied = cfg
+	}
+
+	body := `{"webdav":{"enabled":true,"auth_type":"users"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, "admin"))
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings users webdav auth type status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if server.config.WebDAV.AuthType != "users" {
+		t.Fatalf("config WebDAV auth type = %q, want users", server.config.WebDAV.AuthType)
+	}
+	if active := server.currentActiveWebDAV(); active.AuthType != "users" || active.UserStore != server.userStore {
+		t.Fatalf("active WebDAV config = %+v, want users auth with shared user store", active)
+	}
+	if applied.AuthType != "users" || applied.UserStore != server.userStore {
+		t.Fatalf("applied WebDAV config = %+v, want users auth with shared user store", applied)
 	}
 }
 

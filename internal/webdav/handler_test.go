@@ -4526,6 +4526,224 @@ func TestHandler_BasicAuth(t *testing.T) {
 	})
 }
 
+type webDAVTestCredential struct {
+	password string
+	identity UserIdentity
+}
+
+func setupUsersModeHandler(t *testing.T, credentials map[string]webDAVTestCredential) (*Handler, *storage.FileSystem) {
+	t.Helper()
+	handler, fs, _ := setupTestHandler(t)
+	handler.authType = webDAVAuthTypeUsers
+	handler.userAuthenticator = func(ctx context.Context, username, password string) (*UserIdentity, error) {
+		credential, ok := credentials[username]
+		if !ok || credential.password != password {
+			return nil, errors.New("invalid credentials")
+		}
+		identity := credential.identity
+		identity.Username = username
+		return &identity, nil
+	}
+	return handler, fs
+}
+
+func setWebDAVTestBasicAuth(req *http.Request, username string) {
+	req.SetBasicAuth(username, "password123")
+}
+
+func TestHandler_UsersAuthScopesHomeDirAsWebDAVRoot(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/users"); err != nil {
+		t.Fatalf("Mkdir(/users) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/users/alice"); err != nil {
+		t.Fatalf("Mkdir(/users/alice) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/users/alice/own.txt", strings.NewReader("own")); err != nil {
+		t.Fatalf("WriteFile own error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile secret error: %v", err)
+	}
+
+	req := httptest.NewRequest("PROPFIND", "/dav/", nil)
+	req.Header.Set("Depth", "1")
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND users mode status = %d, want %d; body=%s", w.Code, http.StatusMultiStatus, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "/dav/own.txt") {
+		t.Fatalf("expected scoped listing to include own file, body=%s", body)
+	}
+	if strings.Contains(body, "secret.txt") || strings.Contains(body, "/users/alice") {
+		t.Fatalf("expected scoped listing to hide global paths, body=%s", body)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/dav/own.txt", nil)
+	setWebDAVTestBasicAuth(getReq, "alice")
+	getW := httptest.NewRecorder()
+	handler.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("GET scoped file status = %d, want %d; body=%s", getW.Code, http.StatusOK, getW.Body.String())
+	}
+	if got := getW.Body.String(); got != "own" {
+		t.Fatalf("GET scoped file body = %q, want %q", got, "own")
+	}
+}
+
+func TestHandler_UsersAuthAdminCanAccessGlobalNamespace(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"admin": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleAdmin,
+				HomeDir: "/admins/admin",
+			},
+		},
+	})
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/global"); err != nil {
+		t.Fatalf("Mkdir(/global) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/global/file.txt", strings.NewReader("global")); err != nil {
+		t.Fatalf("WriteFile global error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/global/file.txt", nil)
+	setWebDAVTestBasicAuth(req, "admin")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin GET global file status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Body.String(); got != "global" {
+		t.Fatalf("admin GET global file body = %q, want %q", got, "global")
+	}
+}
+
+func TestHandler_UsersAuthGuestIsReadOnly(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"guest": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleGuest,
+				HomeDir: "/guests/guest",
+			},
+		},
+	})
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/guests"); err != nil {
+		t.Fatalf("Mkdir(/guests) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/guests/guest"); err != nil {
+		t.Fatalf("Mkdir(/guests/guest) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/guests/guest/read.txt", strings.NewReader("read")); err != nil {
+		t.Fatalf("WriteFile read error: %v", err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/dav/read.txt", nil)
+	setWebDAVTestBasicAuth(getReq, "guest")
+	getW := httptest.NewRecorder()
+	handler.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("guest GET status = %d, want %d", getW.Code, http.StatusOK)
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/dav/new.txt", strings.NewReader("new"))
+	setWebDAVTestBasicAuth(putReq, "guest")
+	putW := httptest.NewRecorder()
+	handler.ServeHTTP(putW, putReq)
+	if putW.Code != http.StatusForbidden {
+		t.Fatalf("guest PUT status = %d, want %d", putW.Code, http.StatusForbidden)
+	}
+}
+
+func TestHandler_UsersAuthPutEnforcesQuota(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:       webDAVRoleUser,
+				HomeDir:    "/users/alice",
+				QuotaBytes: 5,
+			},
+		},
+	})
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/users"); err != nil {
+		t.Fatalf("Mkdir(/users) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/users/alice"); err != nil {
+		t.Fatalf("Mkdir(/users/alice) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/dav/too-large.txt", strings.NewReader("123456"))
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("quota PUT status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/users/alice/too-large.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected quota-rejected file to be absent, got %v", err)
+	}
+}
+
+func TestHandler_UsersAuthCopyEnforcesQuota(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:       webDAVRoleUser,
+				HomeDir:    "/users/alice",
+				QuotaBytes: 6,
+			},
+		},
+	})
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/users"); err != nil {
+		t.Fatalf("Mkdir(/users) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/users/alice"); err != nil {
+		t.Fatalf("Mkdir(/users/alice) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/users/alice/src.txt", strings.NewReader("1234")); err != nil {
+		t.Fatalf("WriteFile src error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/copy.txt")
+	setWebDAVTestBasicAuth(req, "alice")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("quota COPY status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/users/alice/copy.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected quota-rejected copy to be absent, got %v", err)
+	}
+}
+
 func TestHandler_PathTraversal(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 

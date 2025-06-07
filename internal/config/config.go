@@ -173,7 +173,7 @@ type WebDAVConfig struct {
 	Enabled  bool   `toml:"enabled"`
 	Prefix   string `toml:"prefix"` // URL prefix, e.g., /dav
 	ReadOnly bool   `toml:"read_only"`
-	AuthType string `toml:"auth_type"` // none, basic
+	AuthType string `toml:"auth_type"` // none, basic, users
 	Username string `toml:"username"`  // for basic auth
 	Password string `toml:"password"`  // for basic auth
 }
@@ -1344,8 +1344,11 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("storage.versioning.max_versioned_size must be positive"))
 	}
 	webdavAuthType := strings.ToLower(strings.TrimSpace(c.WebDAV.AuthType))
-	if webdavAuthType != "" && webdavAuthType != "none" && webdavAuthType != "basic" {
+	if webdavAuthType != "" && webdavAuthType != "none" && webdavAuthType != "basic" && webdavAuthType != "users" {
 		errs = append(errs, fmt.Errorf("invalid webdav.auth_type: %q", c.WebDAV.AuthType))
+	}
+	if c.WebDAV.Enabled && webdavAuthType == "users" && !c.Auth.Enabled {
+		errs = append(errs, errors.New("webdav.auth_type=users requires auth.enabled=true"))
 	}
 	if err := validateWebDAVPrefix(c.WebDAV.Prefix); err != nil {
 		errs = append(errs, err)
