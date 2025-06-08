@@ -164,7 +164,7 @@ exclude = [".mnemonas/thumbnails"]
 extra_args = ["--fast-list"]
 ```
 
-`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。每次成功备份后会自动执行一次保留策略检测，也可以在维护页手动点击“检查保留”：`local` 会统计本地快照范围，`restic` 会执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 会执行 `rclone lsjson <remote> --recursive --files-only`。检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、下次自动运行时间、自动窗口、最近备份、最近恢复目标和最近清理的旧快照数量。恢复历史默认保留最近 20 条，失败恢复也会记录错误信息。
+`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。每次成功备份后会自动执行一次保留策略检测，也可以在维护页手动点击“检查保留”：`local` 会统计本地快照范围，`restic` 会执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 会执行 `rclone lsjson <remote> --recursive --files-only`。检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、恢复演练历史与成功率摘要、下次自动运行时间、自动窗口、最近备份、最近恢复目标和最近清理的旧快照数量。恢复演练历史与显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息；失败演练还会记录稳定的 `failure_category`，用于区分无快照、完整性校验失败、外部命令失败、I/O 问题等常见原因。
 
 重启服务后可通过维护 API 执行：
 
@@ -238,7 +238,7 @@ curl -X POST -b cookies.txt \
 
 批量恢复最多包含 20 个条目，并会拒绝同一批次内重复或父子嵌套的目标目录。批量预览不写入数据；批量恢复按顺序执行，每个成功恢复都会立即运行一次 `restore-verify`。部分失败时总结果会带 `warning`，因此应逐项检查 `items[]` 的状态、错误和只读校验结果。
 
-维护页的“导出报告”会下载当前备份任务的恢复审计 JSON，内容包括最近备份、保留检测、恢复演练、显式恢复、只读校验、恢复历史和待处理发现项。建议在切换 `storage.root` 前下载一份，恢复失败时也可连同诊断包一起保存。
+维护页的“导出报告”会下载当前备份任务的恢复审计 JSON，内容包括最近备份、保留检测、恢复演练、恢复演练历史、显式恢复、只读校验、恢复历史和待处理发现项。建议在切换 `storage.root` 前下载一份，恢复失败时也可连同诊断包一起保存。
 
 切换建议：
 

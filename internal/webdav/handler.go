@@ -72,6 +72,12 @@ type requestScope struct {
 	quotaBytes int64
 }
 
+// DirectoryQuota limits logical current-file bytes under a MnemoNAS path.
+type DirectoryQuota struct {
+	Path       string
+	QuotaBytes int64
+}
+
 func scopeFromContext(ctx context.Context) requestScope {
 	if ctx == nil {
 		return requestScope{}
@@ -203,6 +209,7 @@ type Handler struct {
 	password          string
 	userAuthenticator UserAuthenticator
 	quotaMu           sync.Mutex
+	directoryQuotas   []DirectoryQuota
 	beforeCopyFile    func(srcPath, dstPath string) error
 }
 
@@ -216,6 +223,7 @@ type Config struct {
 	Username          string
 	Password          string
 	UserAuthenticator UserAuthenticator
+	DirectoryQuotas   []DirectoryQuota
 }
 
 // NewHandler creates a WebDAV handler
@@ -236,7 +244,15 @@ func NewHandler(cfg Config) *Handler {
 		username:            cfg.Username,
 		password:            cfg.Password,
 		userAuthenticator:   cfg.UserAuthenticator,
+		directoryQuotas:     cloneWebDAVDirectoryQuotas(cfg.DirectoryQuotas),
 	}
+}
+
+func cloneWebDAVDirectoryQuotas(quotas []DirectoryQuota) []DirectoryQuota {
+	if len(quotas) == 0 {
+		return nil
+	}
+	return append([]DirectoryQuota(nil), quotas...)
 }
 
 // Close stops background resources owned by the handler.
@@ -904,23 +920,35 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 
 func (h *Handler) copyResourceWithQuota(ctx context.Context, srcPath, dstPath, depth string, allowOverwrite bool) error {
 	scope := scopeFromContext(ctx)
-	if !scope.scoped || scope.quotaBytes <= 0 {
+	directoryRules := h.directoryQuotaRulesForTarget(dstPath)
+	if (!scope.scoped || scope.quotaBytes <= 0) && len(directoryRules) == 0 {
 		return h.copyResource(ctx, srcPath, dstPath, depth, allowOverwrite)
 	}
 
 	h.quotaMu.Lock()
 	defer h.quotaMu.Unlock()
 
-	usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
-	if err != nil {
-		return err
-	}
 	requiredBytes, err := h.copyRequiredBytes(ctx, srcPath, dstPath, depth, allowOverwrite)
 	if err != nil {
 		return err
 	}
-	if err := ensureWebDAVQuotaAvailable(usedBytes, scope.quotaBytes, requiredBytes); err != nil {
-		return err
+	if scope.scoped && scope.quotaBytes > 0 {
+		usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
+		if err != nil {
+			return err
+		}
+		if err := ensureWebDAVQuotaAvailable(usedBytes, scope.quotaBytes, requiredBytes); err != nil {
+			return err
+		}
+	}
+	for _, rule := range directoryRules {
+		usedBytes, err := h.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			return err
+		}
+		if err := ensureWebDAVQuotaAvailable(usedBytes, rule.QuotaBytes, requiredBytes); err != nil {
+			return err
+		}
 	}
 
 	return h.copyResource(ctx, srcPath, dstPath, depth, allowOverwrite)
@@ -1010,7 +1038,8 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 
 func (h *Handler) quotaCheckedUploadReader(ctx context.Context, targetPath string, reader io.Reader, contentLength int64) (io.Reader, func(), error) {
 	scope := scopeFromContext(ctx)
-	if !scope.scoped || scope.quotaBytes <= 0 {
+	directoryRules := h.directoryQuotaRulesForTarget(targetPath)
+	if (!scope.scoped || scope.quotaBytes <= 0) && len(directoryRules) == 0 {
 		return reader, func() {}, nil
 	}
 
@@ -1019,30 +1048,42 @@ func (h *Handler) quotaCheckedUploadReader(ctx context.Context, targetPath strin
 		h.quotaMu.Unlock()
 	}
 
-	usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
-	if err != nil {
-		unlock()
-		return nil, nil, err
-	}
-
 	replacedBytes, err := h.existingUploadTargetSize(ctx, targetPath)
 	if err != nil {
 		unlock()
 		return nil, nil, err
 	}
 
-	baseUsed := usedBytes - replacedBytes
-	if baseUsed < 0 {
-		baseUsed = 0
+	availableBytes := int64(^uint64(0) >> 1)
+	if scope.scoped && scope.quotaBytes > 0 {
+		usedBytes, err := h.pathLogicalSizeIfExists(ctx, scope.homeDir)
+		if err != nil {
+			unlock()
+			return nil, nil, err
+		}
+		candidateAvailable := webDAVQuotaAvailableBytes(usedBytes-replacedBytes, scope.quotaBytes)
+		if contentLength >= 0 && contentLength > candidateAvailable {
+			unlock()
+			return nil, nil, errWebDAVQuotaExceeded
+		}
+		if candidateAvailable < availableBytes {
+			availableBytes = candidateAvailable
+		}
 	}
-	availableBytes := scope.quotaBytes - baseUsed
-	if availableBytes < 0 {
-		availableBytes = 0
-	}
-
-	if contentLength >= 0 && contentLength > availableBytes {
-		unlock()
-		return nil, nil, errWebDAVQuotaExceeded
+	for _, rule := range directoryRules {
+		usedBytes, err := h.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			unlock()
+			return nil, nil, err
+		}
+		candidateAvailable := webDAVQuotaAvailableBytes(usedBytes-replacedBytes, rule.QuotaBytes)
+		if contentLength >= 0 && contentLength > candidateAvailable {
+			unlock()
+			return nil, nil, errWebDAVQuotaExceeded
+		}
+		if candidateAvailable < availableBytes {
+			availableBytes = candidateAvailable
+		}
 	}
 
 	return &quotaLimitedReader{
@@ -1111,12 +1152,76 @@ func (h *Handler) fileInfoLogicalSize(ctx context.Context, info *storage.FileInf
 
 func ensureWebDAVQuotaAvailable(usedBytes, quotaBytes, requiredBytes int64) error {
 	requiredBytes = nonNegativeSize(requiredBytes)
+	if requiredBytes > webDAVQuotaAvailableBytes(usedBytes, quotaBytes) {
+		return errWebDAVQuotaExceeded
+	}
+	return nil
+}
+
+func webDAVQuotaAvailableBytes(usedBytes, quotaBytes int64) int64 {
+	if usedBytes < 0 {
+		usedBytes = 0
+	}
+	if quotaBytes < 0 {
+		quotaBytes = 0
+	}
 	availableBytes := quotaBytes - usedBytes
 	if availableBytes < 0 {
-		availableBytes = 0
+		return 0
 	}
-	if requiredBytes > availableBytes {
-		return errWebDAVQuotaExceeded
+	return availableBytes
+}
+
+func (h *Handler) directoryQuotaRulesForTarget(targetPath string) []DirectoryQuota {
+	if len(h.directoryQuotas) == 0 {
+		return nil
+	}
+	matched := make([]DirectoryQuota, 0, len(h.directoryQuotas))
+	for _, rule := range h.directoryQuotas {
+		if rule.QuotaBytes <= 0 {
+			continue
+		}
+		if pathMatchesOrDescendant(rule.Path, targetPath) {
+			matched = append(matched, rule)
+		}
+	}
+	return matched
+}
+
+func (h *Handler) ensureMoveDirectoryQuota(ctx context.Context, srcPath, dstPath string, dstExists bool) error {
+	directoryRules := h.directoryQuotaRulesForTarget(dstPath)
+	if len(directoryRules) == 0 {
+		return nil
+	}
+
+	requiredBytes, err := h.pathLogicalSize(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+
+	var replacedBytes int64
+	if dstExists {
+		replacedBytes, err = h.pathLogicalSizeIfExists(ctx, dstPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, rule := range directoryRules {
+		if pathMatchesOrDescendant(rule.Path, srcPath) {
+			continue
+		}
+		usedBytes, err := h.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			return err
+		}
+		deltaBytes := requiredBytes - replacedBytes
+		if deltaBytes < 0 {
+			deltaBytes = 0
+		}
+		if err := ensureWebDAVQuotaAvailable(usedBytes, rule.QuotaBytes, deltaBytes); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1345,6 +1450,13 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		if h.writeParentNotDirectoryConflict(w, err) {
 			return
 		}
+		h.handleError(w, err)
+		return
+	}
+
+	h.quotaMu.Lock()
+	defer h.quotaMu.Unlock()
+	if err := h.ensureMoveDirectoryQuota(ctx, srcPath, dst, dstExists); err != nil {
 		h.handleError(w, err)
 		return
 	}

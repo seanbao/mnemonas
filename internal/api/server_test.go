@@ -792,6 +792,17 @@ func setUserQuotaForTest(t *testing.T, server *Server, username string, quotaByt
 	}
 }
 
+func setDirectoryQuotasForTest(t *testing.T, server *Server, quotas []config.DirectoryQuotaConfig) {
+	t.Helper()
+
+	cfg := server.currentConfig()
+	if cfg == nil {
+		t.Fatal("server config is nil")
+	}
+	cfg.Storage.DirectoryQuotas = config.NormalizeDirectoryQuotas(quotas)
+	server.storeConfig(cfg)
+}
+
 func newActivityOnlyAuthServer(t *testing.T) *Server {
 	t.Helper()
 
@@ -1728,6 +1739,8 @@ func TestServer_UploadFile_TooLargeReturnsPayloadTooLarge(t *testing.T) {
 func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
 
 	if err := fs.Mkdir(ctx, "/tester"); err != nil {
 		t.Fatalf("Mkdir(/tester) error: %v", err)
@@ -1751,6 +1764,57 @@ func TestServer_UploadFile_EnforcesUserQuota(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/tester/new.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected upload to leave no file, got %v", err)
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("quota alert event count = %d, want 1", len(monitor.events))
+	}
+	event := monitor.events[0]
+	if event.Type != quotaExceededAlertType || event.Level != alerts.AlertLevelWarning {
+		t.Fatalf("quota alert event = %s/%s, want %s/warning", event.Type, event.Level, quotaExceededAlertType)
+	}
+	if event.Details["username"] != username || event.Details["operation"] != "upload" || event.Details["target_path"] != "/tester/new.txt" {
+		t.Fatalf("unexpected quota alert details: %+v", event.Details)
+	}
+	if event.Details["quota_bytes"] != int64(10) || event.Details["required_bytes"] != int64(5) {
+		t.Fatalf("quota alert size details = %+v", event.Details)
+	}
+}
+
+func TestServer_UploadFile_EnforcesDirectoryQuota(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 10}})
+
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/existing.txt", strings.NewReader("12345678")); err != nil {
+		t.Fatalf("WriteFile(existing) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/team/new.txt", strings.NewReader("123"))
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("directory quota upload status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"quota_type":"directory"`) || !strings.Contains(w.Body.String(), `"quota_path":"/team"`) {
+		t.Fatalf("expected directory quota details, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/new.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected upload to leave no file, got %v", err)
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("directory quota alert event count = %d, want 1", len(monitor.events))
+	}
+	if got := monitor.events[0].Details["quota_type"]; got != quotaTypeDirectory {
+		t.Fatalf("alert quota_type = %v, want %s", got, quotaTypeDirectory)
+	}
+	if got := monitor.events[0].Details["quota_path"]; got != "/team" {
+		t.Fatalf("alert quota_path = %v, want /team", got)
 	}
 }
 
@@ -4964,6 +5028,9 @@ func TestServer_Stats_IncludesDiskStats(t *testing.T) {
 			UsedBytes:                 750,
 			UsageRatio:                0.75,
 			FileSystemType:            "zfs",
+			MountPoint:                "/srv/mnemonas",
+			MountSource:               "tank/mnemonas",
+			MountOptions:              "rw,relatime",
 			NativeDataChecksumSupport: true,
 		}, nil
 	}
@@ -5001,8 +5068,80 @@ func TestServer_Stats_IncludesDiskStats(t *testing.T) {
 	if got, ok := payload.Data["disk_filesystem_type"].(string); !ok || got != "zfs" {
 		t.Fatalf("disk_filesystem_type = %v, want zfs", payload.Data["disk_filesystem_type"])
 	}
+	if got, ok := payload.Data["disk_mount_point"].(string); !ok || got != "/srv/mnemonas" {
+		t.Fatalf("disk_mount_point = %v, want /srv/mnemonas", payload.Data["disk_mount_point"])
+	}
+	if got, ok := payload.Data["disk_mount_source"].(string); !ok || got != "tank/mnemonas" {
+		t.Fatalf("disk_mount_source = %v, want tank/mnemonas", payload.Data["disk_mount_source"])
+	}
+	if got, ok := payload.Data["disk_mount_options"].(string); !ok || got != "rw,relatime" {
+		t.Fatalf("disk_mount_options = %v, want rw,relatime", payload.Data["disk_mount_options"])
+	}
 	if got, ok := payload.Data["disk_native_data_checksum_support"].(bool); !ok || !got {
 		t.Fatalf("disk_native_data_checksum_support = %v, want true", payload.Data["disk_native_data_checksum_support"])
+	}
+}
+
+func TestServer_Stats_IncludesDirectoryQuotaUsage(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	cfg := server.currentConfig()
+	cfg.Storage.DirectoryQuotas = []config.DirectoryQuotaConfig{
+		{Path: "/team", QuotaBytes: 10},
+		{Path: "/missing", QuotaBytes: 100},
+	}
+	server.storeConfig(cfg)
+
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/a.txt", bytes.NewReader([]byte("1234"))); err != nil {
+		t.Fatalf("WriteFile(/team/a.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/b.txt", bytes.NewReader([]byte("123456"))); err != nil {
+		t.Fatalf("WriteFile(/team/b.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Stats status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Failed to parse response JSON: %v", err)
+	}
+	if available, ok := payload.Data["directory_quota_stats_available"].(bool); !ok || !available {
+		t.Fatalf("expected directory quota stats to be available, got %v", payload.Data["directory_quota_stats_available"])
+	}
+	quotas, ok := payload.Data["directory_quotas"].([]any)
+	if !ok || len(quotas) != 2 {
+		t.Fatalf("directory_quotas = %#v, want 2 entries", payload.Data["directory_quotas"])
+	}
+	first, ok := quotas[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first quota has unexpected shape: %#v", quotas[0])
+	}
+	if first["path"] != "/team" || first["status"] != directoryQuotaStatusExceeded || first["exists"] != true {
+		t.Fatalf("first quota = %#v, want exceeded /team", first)
+	}
+	if first["quota_bytes"] != float64(10) || first["used_bytes"] != float64(10) || first["available_bytes"] != float64(0) || first["usage_ratio"] != float64(1) {
+		t.Fatalf("first quota numbers = %#v, want quota=10 used=10 available=0 ratio=1", first)
+	}
+	second, ok := quotas[1].(map[string]any)
+	if !ok {
+		t.Fatalf("second quota has unexpected shape: %#v", quotas[1])
+	}
+	if second["path"] != "/missing" || second["status"] != directoryQuotaStatusMissing || second["exists"] != false {
+		t.Fatalf("second quota = %#v, want missing /missing", second)
+	}
+	if second["quota_bytes"] != float64(100) || second["used_bytes"] != float64(0) || second["available_bytes"] != float64(100) || second["usage_ratio"] != float64(0) {
+		t.Fatalf("second quota numbers = %#v, want quota=100 used=0 available=100 ratio=0", second)
 	}
 }
 
@@ -5031,7 +5170,7 @@ func TestServer_Stats_OmitsDiskFieldsWhenCollectionFails(t *testing.T) {
 	if available, ok := payload.Data["disk_stats_available"].(bool); !ok || available {
 		t.Fatalf("expected stats to mark disk stats unavailable, got %v", payload.Data["disk_stats_available"])
 	}
-	for _, key := range []string{"disk_total", "disk_free", "disk_available", "disk_used", "disk_usage_ratio", "disk_filesystem_type", "disk_native_data_checksum_support"} {
+	for _, key := range []string{"disk_total", "disk_free", "disk_available", "disk_used", "disk_usage_ratio", "disk_filesystem_type", "disk_mount_point", "disk_mount_source", "disk_mount_options", "disk_native_data_checksum_support"} {
 		if _, ok := payload.Data[key]; ok {
 			t.Fatalf("expected stats to omit %s when disk stats fail, got %v", key, payload.Data[key])
 		}
@@ -5109,7 +5248,10 @@ func TestServer_Stats_HidesGlobalStatsForNonAdminHomeScopedUser(t *testing.T) {
 	if available, ok := payload.Data["disk_stats_available"].(bool); !ok || available {
 		t.Fatalf("expected non-admin stats to hide disk stats, got %v", payload.Data["disk_stats_available"])
 	}
-	for _, key := range []string{"total_files", "total_chunks", "total_size", "unique_size", "dedup_ratio", "disk_total", "disk_free", "disk_available", "disk_used", "disk_usage_ratio", "disk_filesystem_type", "disk_native_data_checksum_support"} {
+	if available, ok := payload.Data["directory_quota_stats_available"].(bool); !ok || available {
+		t.Fatalf("expected non-admin stats to hide directory quota stats, got %v", payload.Data["directory_quota_stats_available"])
+	}
+	for _, key := range []string{"total_files", "total_chunks", "total_size", "unique_size", "dedup_ratio", "disk_total", "disk_free", "disk_available", "disk_used", "disk_usage_ratio", "disk_filesystem_type", "disk_mount_point", "disk_mount_source", "disk_mount_options", "disk_native_data_checksum_support", "directory_quotas"} {
 		if _, ok := payload.Data[key]; ok {
 			t.Fatalf("expected non-admin stats to omit %s, got %v", key, payload.Data[key])
 		}
@@ -6117,6 +6259,40 @@ func TestServer_MoveFile_RejectsWorkspaceRootPath(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "invalid source path") {
 		t.Fatalf("expected invalid source path response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_MoveFile_EnforcesDirectoryQuotaWhenMovingIntoQuota(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 10}})
+
+	if err := fs.Mkdir(ctx, "/incoming"); err != nil {
+		t.Fatalf("Mkdir(/incoming) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/incoming/src.txt", strings.NewReader("123456")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/used.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(`{"from":"/incoming/src.txt","to":"/team/src.txt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("move directory quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/incoming/src.txt"); err != nil {
+		t.Fatalf("expected rejected move to keep source, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/team/src.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected move to leave destination absent, got %v", err)
 	}
 }
 
@@ -7643,6 +7819,56 @@ func TestServer_RestoreFromTrash_EnforcesUserQuota(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/tester/deleted.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected rejected restore to leave original path absent, got %v", err)
+	}
+}
+
+func TestServer_RestoreVersion_EnforcesDirectoryQuota(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+	setDirectoryQuotasForTest(t, server, []config.DirectoryQuotaConfig{{Path: "/team", QuotaBytes: 4}})
+
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/doc.md", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/doc.md", strings.NewReader("12")); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	versions, err := fs.ListVersions(ctx, "/team/doc.md")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+	var restoreHash string
+	for _, version := range versions {
+		if version.Size == 5 {
+			restoreHash = version.Hash
+			break
+		}
+	}
+	if restoreHash == "" {
+		t.Fatalf("expected historical version with size 5, got %+v", versions)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+restoreHash+"/restore?path=/team/doc.md", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("restore version directory quota status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	reader, err := fs.OpenFile(ctx, "/team/doc.md")
+	if err != nil {
+		t.Fatalf("OpenFile(current) error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(current) error: %v", err)
+	}
+	if string(data) != "12" {
+		t.Fatalf("expected rejected restore to keep current content, got %q", data)
 	}
 }
 
@@ -12130,6 +12356,61 @@ func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *tes
 	}
 	if !webdavUpdater.lastConfig.ReadOnly {
 		t.Fatalf("expected WebDAV updater to receive read-only=true")
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesDirectoryQuotasAndWebDAVRuntime(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.WebDAV.Enabled = true
+	server.config.WebDAV.Prefix = "/dav"
+	server.config.WebDAV.AuthType = "basic"
+	server.config.WebDAV.Username = "webdav-user"
+	server.config.WebDAV.Password = "webdav-pass"
+	server.storeConfig(server.config)
+	webdavUpdater := &fakeWebDAVUpdater{}
+	server.updateWebDAV = webdavUpdater.UpdateConfig
+
+	body := `{"storage":{"directory_quotas":[{"path":"/team/","quota_bytes":1048576}]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update directory quotas status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if len(server.config.Storage.DirectoryQuotas) != 1 {
+		t.Fatalf("directory quotas count = %d, want 1", len(server.config.Storage.DirectoryQuotas))
+	}
+	if got := server.config.Storage.DirectoryQuotas[0].Path; got != "/team" {
+		t.Fatalf("directory quota path = %q, want /team", got)
+	}
+	if webdavUpdater.updateCount != 1 {
+		t.Fatalf("webdav update count = %d, want 1", webdavUpdater.updateCount)
+	}
+	if len(webdavUpdater.lastConfig.DirectoryQuotas) != 1 || webdavUpdater.lastConfig.DirectoryQuotas[0].Path != "/team" {
+		t.Fatalf("webdav runtime directory quotas = %+v", webdavUpdater.lastConfig.DirectoryQuotas)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	getW := httptest.NewRecorder()
+	server.Router().ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", getW.Code, http.StatusOK)
+	}
+	var payload struct {
+		Data struct {
+			Storage struct {
+				DirectoryQuotas []config.DirectoryQuotaConfig `json:"directory_quotas"`
+			} `json:"storage"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(getW.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if len(payload.Data.Storage.DirectoryQuotas) != 1 || payload.Data.Storage.DirectoryQuotas[0].Path != "/team" {
+		t.Fatalf("settings directory quotas = %+v", payload.Data.Storage.DirectoryQuotas)
 	}
 }
 

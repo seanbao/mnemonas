@@ -50,6 +50,25 @@ describe('Settings API', () => {
     expect(result.data.server.trusted_proxy_hops).toBe(2)
   })
 
+  it('accepts directory quotas in settings responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: createSettings({
+          storage: {
+            root: '~/.mnemonas',
+            directory_quotas: [{ path: '/team', quota_bytes: 1048576 }],
+          },
+        }),
+      }),
+    })
+
+    const result = await getSettings()
+
+    expect(result.data.storage.directory_quotas?.[0]).toEqual({ path: '/team', quota_bytes: 1048576 })
+  })
+
   it('accepts favorites runtime availability in settings responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -336,6 +355,7 @@ describe('Settings API', () => {
   })
 
   it.each([
+    ['storage', { storage: { root: '~/.mnemonas', directory_quotas: [{ path: '/team', quota_bytes: '1GiB' }] } }],
     ['tls', { server: { ...createSettings().server, tls: { enabled: true } } }],
     ['trash', { trash: { enabled: true, retention_days: '30', max_size: 1024 } }],
     ['versioning', { versioning: { auto_versioned_extensions: ['.txt'], auto_versioned_filenames: [123], max_versioned_size: 1024 } }],

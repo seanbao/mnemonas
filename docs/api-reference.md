@@ -326,7 +326,8 @@ PUT /api/v1/admin/users/{id}
 ```
 
 - `quota_bytes = 0` 表示不限额；大于 0 时，非管理员用户的 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前逻辑大小执行硬限制。
-- 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`，`details` 包含 `used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。
+- 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`，`details` 包含 `used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。如果已启用告警通道，Web/API 的上传、复制和回收站恢复超限会发送 `quota_exceeded` warning 事件，事件详情包含用户、主目录、操作类型、目标路径和配额字节数。
+- `storage.directory_quotas` 可配置目录级硬限制。命中的 Web/API 上传、复制、移动、回收站恢复、版本恢复，以及 WebDAV PUT/COPY/MOVE 会返回同样的 `QUOTA_EXCEEDED`，并在 `details` 中额外包含 `quota_type="directory"` 和 `quota_path`。Web/API 目录配额拒绝同样会发送 `quota_exceeded` 告警事件。
 - `webdav.auth_type = "basic"` 仍是全局服务凭据兼容模式，不携带应用层 `home_dir` 用户身份。
 - 不允许把当前登录管理员自身角色改为非管理员，错误码为 `SELF_ROLE_CHANGE`；不允许移除最后一个启用管理员，错误码为 `LAST_ADMIN`。
 
@@ -491,6 +492,7 @@ GET /api/v1/stats
     "total_files_available": true,
     "storage_stats_available": true,
     "disk_stats_available": true,
+    "directory_quota_stats_available": true,
     "total_files": 0,
     "disk_total": 21474836480,
     "disk_free": 16106127360,
@@ -498,11 +500,25 @@ GET /api/v1/stats
     "disk_used": 5368709120,
     "disk_usage_ratio": 0.25,
     "disk_filesystem_type": "zfs",
+    "disk_mount_point": "/srv/mnemonas",
+    "disk_mount_source": "tank/mnemonas",
+    "disk_mount_options": "rw,relatime",
     "disk_native_data_checksum_support": true,
     "total_size": 5368709120,
     "unique_size": 2147483648,
     "dedup_ratio": 0.35,
-    "total_chunks": 1234
+    "total_chunks": 1234,
+    "directory_quotas": [
+      {
+        "path": "/team",
+        "quota_bytes": 10737418240,
+        "used_bytes": 5368709120,
+        "available_bytes": 5368709120,
+        "usage_ratio": 0.5,
+        "exists": true,
+        "status": "normal"
+      }
+    ]
   },
   "timestamp": "2024-01-15T10:00:00Z"
 }
@@ -512,9 +528,10 @@ GET /api/v1/stats
 - `total_files` 统计当前 `files/` workspace 中的文件数量，不包含目录；直接导入到 `files/` 的现有文件也会计入。
 - `total_chunks` 统计数据面中的存储对象（chunk）数量，不等同于用户文件数。
 - `disk_total` / `disk_used` / `disk_available` 来自托管 `files/` workspace 所在文件系统，可用于显示真实磁盘容量和剩余空间；`disk_free` 是底层文件系统报告的原始空闲空间。
-- `disk_filesystem_type` 是托管 `files/` workspace 所在挂载点的文件系统类型；`disk_native_data_checksum_support` 表示是否检测到 ZFS/Btrfs 级别的原生数据校验与 scrub 能力。
-- `total_files_available` 表示文件计数是否可用；`storage_stats_available` 表示数据面统计是否可用；`disk_stats_available` 表示磁盘容量统计是否可用。
-- 当文件计数、数据面统计或磁盘容量统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
+- `disk_filesystem_type` 是托管 `files/` workspace 所在挂载点的文件系统类型；`disk_mount_point`、`disk_mount_source` 和 `disk_mount_options` 来自 Linux mountinfo，可用于确认实际承载 MnemoNAS 的挂载点和设备/数据集；`disk_native_data_checksum_support` 表示是否检测到 ZFS/Btrfs 级别的原生数据校验与 scrub 能力。
+- `directory_quotas` 返回已配置目录配额的当前逻辑用量，`status` 可能为 `normal`、`warning`、`exceeded` 或 `missing`。
+- `total_files_available` 表示文件计数是否可用；`storage_stats_available` 表示数据面统计是否可用；`disk_stats_available` 表示磁盘容量统计是否可用；`directory_quota_stats_available` 表示目录配额用量统计是否可用。
+- 当文件计数、数据面统计、磁盘容量统计或目录配额统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
 
 ### 诊断信息
 
@@ -1619,7 +1636,10 @@ GET /api/v1/settings
       }
     },
     "storage": {
-      "root": "~/.mnemonas"
+      "root": "~/.mnemonas",
+      "directory_quotas": [
+        { "path": "/team", "quota_bytes": 1099511627776 }
+      ]
     },
     "retention": {
       "max_versions": 50,
@@ -1774,7 +1794,8 @@ PUT /api/v1/settings
 ```
 
 **说明**:
-- `storage` 路径为只读配置，需修改配置文件并重启服务
+- `storage.root` 路径为只读配置，需修改配置文件并重启服务
+- `storage.directory_quotas` 可通过设置 API 热更新，并同步到 WebDAV 运行态
 
 **请求体**:
 ```json
@@ -1791,6 +1812,11 @@ PUT /api/v1/settings
       "auto_generate": true,
       "cert_dir": "/etc/mnemonas/tls"
     }
+  },
+  "storage": {
+    "directory_quotas": [
+      { "path": "/team", "quota_bytes": 1099511627776 }
+    ]
   },
   "retention": {
     "max_versions": 10,
@@ -2289,7 +2315,7 @@ POST /api/v1/maintenance/backups/{id}/run
 
 `restic` 和 `rclone` 不通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。`password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件。
 
-任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置告警通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore`、`last_restore_verify` 与最近恢复历史 `restore_history`，用于审计恢复目标、恢复预检、只读校验报告、切换/回滚清单、状态、文件数、字节数和失败原因；历史默认保留最近 20 条。
+任务可配置 `disabled`、`schedule_interval`、`schedule_window_start`、`schedule_window_end`、`stale_after`、`restore_drill_stale_after`、`max_snapshots`、`max_age` 和 `retention_policy`。`schedule_interval` 大于 0 时服务内置调度器会自动按间隔执行；设置 `schedule_window_start`/`schedule_window_end` 后，自动任务只会在服务器本地时间窗口内启动，手动执行不受影响。`local` 成功备份后会按 `max_snapshots` 和 `max_age` 清理旧快照，并在响应的 `pruned_snapshots` 中返回清理数量。成功备份后会自动运行一次保留策略检测，也可调用 `POST /retention-check` 手动检查。`restic` 检测执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 检测执行 `rclone lsjson <remote> --recursive --files-only`；检测结果写入 `last_retention_check`，并影响 `retention_status`/`retention_message`。`restic` 和 `rclone` 的远端保留策略仍由外部工具管理；配置 `retention_policy` 会把该外部策略标记为已确认，否则会返回 `warning` 提醒确认。`restore_drill_stale_after` 未配置时默认 30 天，任务视图会通过 `restore_drill_status` 和 `restore_drill_message` 提示尚未演练、演练失败或演练过期；配置告警通道后，缺失或过期恢复演练会发送限频的 `backup_restore_drill` warning 事件，`trigger` 为 `restore_drill_reminder`，并持久化 `last_restore_drill_reminder_at`。`health_status` 只表示备份运行健康，可能为 `ok`、`manual`、`running`、`due`、`stale`、`failed` 或 `disabled`。任务视图会返回 `last_restore_drill`、最近恢复演练历史 `restore_drill_history`、恢复演练统计 `restore_drill_stats`、`last_restore`、`last_restore_verify` 与最近恢复历史 `restore_history`；恢复演练历史和显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息。失败的恢复演练会返回稳定的 `failure_category`，当前可能值包括 `no_snapshot`、`unsupported_job_type`、`unsafe_path`、`integrity_check`、`external_command`、`cancelled`、`io` 和 `unknown`，并会透传到告警事件。`restore_drill_stats` 汇总最近保留窗口内的总次数、成功次数、失败次数、成功率、连续成功/失败次数、最近成功/失败时间、最近失败原因和失败类型，便于审计恢复能力、恢复目标、恢复预检、只读校验报告、切换/回滚清单、状态、文件数和字节数。
 
 当 `[alerts] enabled = true` 且配置了 Webhook、Telegram 或 SMTP 邮件时，备份失败、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或备份完成但带警告会发送告警事件。事件 `type` 为 `backup_run`、`backup_restore_drill` 或 `backup_retention_check`，`level` 为 `warning` 或 `critical`，`details` 包含任务 ID、运行 ID、状态、错误信息、快照路径和文件/字节统计。
 
@@ -2423,7 +2449,7 @@ POST /api/v1/maintenance/backups/{id}/restore
 GET /api/v1/maintenance/backups/{id}/restore-report
 ```
 
-响应为 `application/json` 附件，包含 `job`、最近备份、最近保留检测、最近恢复演练、最近恢复、最近恢复后只读校验、恢复历史和 `findings`。该报告适合在切换 storage.root 前留档，或在恢复失败后随诊断信息一起保存。
+响应为 `application/json` 附件，包含 `job`、最近备份、最近保留检测、最近恢复演练、恢复演练历史、最近恢复、最近恢复后只读校验、恢复历史和 `findings`。该报告适合在切换 storage.root 前留档，或在恢复失败后随诊断信息一起保存。
 
 恢复完成后，对目标目录执行只读校验，不写入恢复历史：
 

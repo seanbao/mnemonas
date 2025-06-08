@@ -597,8 +597,86 @@ function BackupRunSummary({ result }: { result?: BackupRunResult }) {
   )
 }
 
+function getBackupTaskStatusLabel(status: string): string {
+  switch (status) {
+    case 'completed':
+      return '完成'
+    case 'running':
+      return '运行中'
+    case 'failed':
+      return '失败'
+    default:
+      return status
+  }
+}
+
+function getRestoreDrillFailureCategoryLabel(category?: string): string | null {
+  switch (category) {
+    case 'no_snapshot':
+      return '无可用快照'
+    case 'unsupported_job_type':
+      return '不支持的任务类型'
+    case 'unsafe_path':
+      return '路径安全检查失败'
+    case 'integrity_check':
+      return '完整性校验失败'
+    case 'external_command':
+      return '外部命令失败'
+    case 'cancelled':
+      return '任务被取消'
+    case 'io':
+      return '文件系统读写失败'
+    case 'unknown':
+      return '未分类失败'
+    default:
+      return null
+  }
+}
+
+function BackupDrillHistoryList({ history }: { history?: BackupRestoreDrillResult[] }) {
+  if (!history || history.length <= 1) {
+    return null
+  }
+  const visibleHistory = history.slice(0, 3)
+  const failedCount = history.filter((entry) => entry.status === 'failed').length
+  return (
+    <div className="mt-2 rounded-lg bg-default-50 p-2 text-xs text-default-500">
+      <div className="mb-1 font-medium text-default-600">最近演练记录</div>
+      <div className="space-y-1">
+        {visibleHistory.map((entry) => (
+          <div key={entry.id} className="flex items-center justify-between gap-2">
+            <span className={entry.status === 'failed' ? 'text-danger' : entry.status === 'running' ? 'text-warning' : 'text-default-500'}>
+              {getBackupTaskStatusLabel(entry.status)}
+            </span>
+            <span className="truncate text-default-400">{formatDateTime(entry.finished_at ?? entry.started_at)}</span>
+          </div>
+        ))}
+      </div>
+      {failedCount > 0 && (
+        <div className="mt-1 text-warning">近 {history.length} 次包含 {failedCount} 次失败</div>
+      )}
+    </div>
+  )
+}
+
+function getBackupRestoreDrillStatsText(job: BackupJob): string | null {
+  const stats = job.restore_drill_stats
+  if (!stats || stats.total_runs === 0) {
+    return null
+  }
+  const successRate = Math.round(stats.success_rate * 100)
+  const streakText = stats.consecutive_failures
+    ? `连续失败 ${stats.consecutive_failures} 次`
+    : stats.consecutive_successes
+      ? `连续成功 ${stats.consecutive_successes} 次`
+      : '暂无连续趋势'
+  return `近 ${stats.total_runs} 次成功率 ${successRate}% · ${streakText}`
+}
+
 function BackupDrillSummary({ job }: { job: BackupJob }) {
   const result = job.last_restore_drill
+  const statsText = getBackupRestoreDrillStatsText(job)
+  const latestFailureCategory = getRestoreDrillFailureCategoryLabel(job.restore_drill_stats?.last_failure_category ?? result?.failure_category)
   if (!result) {
     return (
       <div className="space-y-1 text-sm">
@@ -612,6 +690,7 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
         {job.last_restore_drill_reminder_at && (
           <div className="text-default-400">最近提醒: {formatDateTime(job.last_restore_drill_reminder_at)}</div>
         )}
+        {statsText && <div className="text-default-400">{statsText}</div>}
       </div>
     )
   }
@@ -633,7 +712,19 @@ function BackupDrillSummary({ job }: { job: BackupJob }) {
       {job.last_restore_drill_reminder_at && (
         <div className="text-default-400">最近提醒: {formatDateTime(job.last_restore_drill_reminder_at)}</div>
       )}
+      {statsText && (
+        <div className={job.restore_drill_stats?.consecutive_failures ? 'text-warning' : 'text-default-400'}>
+          {statsText}
+        </div>
+      )}
+      {job.restore_drill_stats?.last_failure_message && (
+        <div className="text-warning">最近失败: {job.restore_drill_stats.last_failure_message}</div>
+      )}
+      {latestFailureCategory && (
+        <div className="text-warning">失败类型: {latestFailureCategory}</div>
+      )}
       {result.error_message && <div className="text-danger">{result.error_message}</div>}
+      <BackupDrillHistoryList history={job.restore_drill_history} />
     </div>
   )
 }

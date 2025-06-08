@@ -58,11 +58,16 @@ describe('StoragePage', () => {
     dedupRatio: 0.35,
     storageStatsAvailable: true,
     diskStatsAvailable: true,
+    directoryQuotaStatsAvailable: true,
+    directoryQuotas: [],
     diskTotal: 21474836480, // 20 GB
     diskAvailable: 16106127360, // 15 GB
     diskUsed: 5368709120, // 5 GB
     diskUsageRatio: 0.25,
     diskFilesystemType: 'zfs',
+    diskMountPoint: '/srv/mnemonas',
+    diskMountSource: 'tank/mnemonas',
+    diskMountOptions: 'rw,relatime',
     diskNativeDataChecksumSupport: true,
   }
 
@@ -215,6 +220,17 @@ describe('StoragePage', () => {
       })
     })
 
+    it('displays the storage mount point and source', async () => {
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('挂载点')).toBeTruthy()
+        expect(screen.getByText('/srv/mnemonas')).toBeTruthy()
+        expect(screen.getByText('存储源')).toBeTruthy()
+        expect(screen.getByText('tank/mnemonas')).toBeTruthy()
+      })
+    })
+
     it('warns when disk space is below the safe operating margin', async () => {
       mockGetStorageStats.mockResolvedValue({
         ...mockStats,
@@ -300,6 +316,90 @@ describe('StoragePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('节省空间')).toBeTruthy()
+      })
+    })
+  })
+
+  describe('directory quotas', () => {
+    it('shows an empty directory quota state for admins when no quotas are configured', async () => {
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('目录配额')).toBeTruthy()
+        expect(screen.getByText('未配置目录配额。可在系统设置的版本保留页添加目录容量限制。')).toBeTruthy()
+      })
+    })
+
+    it('renders directory quota usage summaries', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        directoryQuotaStatsAvailable: true,
+        directoryQuotas: [
+          {
+            path: '/team',
+            quotaBytes: 2147483648,
+            usedBytes: 1073741824,
+            availableBytes: 1073741824,
+            usageRatio: 0.5,
+            exists: true,
+            status: 'normal',
+          },
+          {
+            path: '/archive',
+            quotaBytes: 1073741824,
+            usedBytes: 1046898278,
+            availableBytes: 1678546,
+            usageRatio: 0.975,
+            exists: true,
+            status: 'warning',
+          },
+          {
+            path: '/missing',
+            quotaBytes: 536870912,
+            usedBytes: 0,
+            availableBytes: 536870912,
+            usageRatio: 0,
+            exists: false,
+            status: 'missing',
+          },
+        ],
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('/team')).toBeTruthy()
+        expect(screen.getByText('/archive')).toBeTruthy()
+        expect(screen.getByText('/missing')).toBeTruthy()
+        expect(screen.getByText('正常')).toBeTruthy()
+        expect(screen.getByText('接近上限')).toBeTruthy()
+        expect(screen.getByText('目录未创建')).toBeTruthy()
+        expect(screen.getByText('50.0%')).toBeTruthy()
+        expect(screen.getByText('97.5%')).toBeTruthy()
+        expect(screen.getByText('路径不存在')).toBeTruthy()
+      })
+    })
+
+    it('shows quota stats unavailable state when collection fails', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        directoryQuotaStatsAvailable: false,
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('目录配额统计暂不可用，请稍后刷新或检查存储状态。')).toBeTruthy()
+      })
+    })
+
+    it('hides directory quota summaries from non-admin users', async () => {
+      useIsAdminMock.mockReturnValue(false)
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.queryByText('目录配额')).toBeNull()
       })
     })
   })

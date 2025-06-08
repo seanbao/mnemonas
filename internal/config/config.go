@@ -107,6 +107,9 @@ type StorageConfig struct {
 	// Internal data will be stored in Root/.mnemonas/
 	Root string `toml:"root"`
 
+	// DirectoryQuotas limits logical file bytes under selected MnemoNAS paths.
+	DirectoryQuotas []DirectoryQuotaConfig `toml:"directory_quotas"`
+
 	// Version retention policy
 	Retention RetentionConfig `toml:"retention"`
 
@@ -115,6 +118,12 @@ type StorageConfig struct {
 
 	// Trash configuration
 	Trash TrashConfig `toml:"trash"`
+}
+
+// DirectoryQuotaConfig limits the logical current-file bytes under a virtual path.
+type DirectoryQuotaConfig struct {
+	Path       string `toml:"path" json:"path"`
+	QuotaBytes int64  `toml:"quota_bytes" json:"quota_bytes"`
 }
 
 // VersioningConfig holds versioning policy configuration
@@ -725,6 +734,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyStorageRootDefaults(cfg, getDefaultStorageRoot())
+	cfg.Storage.DirectoryQuotas = NormalizeDirectoryQuotas(cfg.Storage.DirectoryQuotas)
 	cfg.WebDAV.Prefix = NormalizeWebDAVPrefix(cfg.WebDAV.Prefix)
 	cfg.Share.BaseURL = strings.TrimSpace(cfg.Share.BaseURL)
 	cfg.Alerts.WebhookURL = strings.TrimSpace(cfg.Alerts.WebhookURL)
@@ -745,6 +755,24 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// NormalizeDirectoryQuotas returns a copy with trimmed, clean MnemoNAS paths.
+func NormalizeDirectoryQuotas(quotas []DirectoryQuotaConfig) []DirectoryQuotaConfig {
+	if len(quotas) == 0 {
+		return nil
+	}
+
+	normalized := make([]DirectoryQuotaConfig, 0, len(quotas))
+	for _, quota := range quotas {
+		copied := quota
+		copied.Path = strings.TrimSpace(copied.Path)
+		if copied.Path != "" && strings.HasPrefix(copied.Path, "/") {
+			copied.Path = urlpath.Clean(copied.Path)
+		}
+		normalized = append(normalized, copied)
+	}
+	return normalized
 }
 
 func normalizeDurationFields(data []byte) ([]byte, error) {
@@ -1343,6 +1371,9 @@ func (c *Config) Validate() error {
 	if c.Storage.Versioning.MaxVersionedSize <= 0 {
 		errs = append(errs, errors.New("storage.versioning.max_versioned_size must be positive"))
 	}
+	if err := validateDirectoryQuotas(c.Storage.DirectoryQuotas); err != nil {
+		errs = append(errs, err)
+	}
 	webdavAuthType := strings.ToLower(strings.TrimSpace(c.WebDAV.AuthType))
 	if webdavAuthType != "" && webdavAuthType != "none" && webdavAuthType != "basic" && webdavAuthType != "users" {
 		errs = append(errs, fmt.Errorf("invalid webdav.auth_type: %q", c.WebDAV.AuthType))
@@ -1697,6 +1728,56 @@ func validateSMBSharePath(path string) error {
 	for _, segment := range strings.Split(trimmed, "/") {
 		if segment == "." || segment == ".." {
 			return fmt.Errorf("smb share path %q must not contain dot segments", path)
+		}
+	}
+	return nil
+}
+
+func validateDirectoryQuotas(quotas []DirectoryQuotaConfig) error {
+	var errs []error
+	seen := map[string]struct{}{}
+	for i, quota := range quotas {
+		fieldPrefix := fmt.Sprintf("storage.directory_quotas[%d]", i)
+		if err := validateDirectoryQuotaPath(quota.Path, fieldPrefix+".path"); err != nil {
+			errs = append(errs, err)
+		}
+		if quota.QuotaBytes <= 0 {
+			errs = append(errs, fmt.Errorf("%s.quota_bytes must be positive", fieldPrefix))
+		}
+		if quota.Path != "" {
+			key := quota.Path
+			if _, ok := seen[key]; ok {
+				errs = append(errs, fmt.Errorf("duplicate directory quota path: %q", quota.Path))
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func validateDirectoryQuotaPath(value, field string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("%s cannot be empty", field)
+	}
+	if trimmed != value {
+		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		return fmt.Errorf("%s must be absolute", field)
+	}
+	if strings.ContainsAny(trimmed, "\\?#") {
+		return fmt.Errorf("%s must be a clean MnemoNAS path", field)
+	}
+	if strings.IndexFunc(trimmed, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return fmt.Errorf("%s must not contain control characters", field)
+	}
+	if urlpath.Clean(trimmed) != trimmed {
+		return fmt.Errorf("%s must be clean", field)
+	}
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("%s must not contain dot segments", field)
 		}
 	}
 	return nil

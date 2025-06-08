@@ -131,6 +131,12 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if jobView.LastRestoreVerify == nil || jobView.LastRestoreVerify.ID != verifyResult.ID || jobView.LastRestoreVerify.TargetPath != restoreTarget {
 		t.Fatalf("backup job missing latest restore verify report: %+v", jobView.LastRestoreVerify)
 	}
+	if len(jobView.RestoreDrillHistory) != 1 || jobView.RestoreDrillHistory[0].ID != drillResult.ID {
+		t.Fatalf("backup job restore drill history = %+v, want latest drill", jobView.RestoreDrillHistory)
+	}
+	if jobView.RestoreDrillStats == nil || jobView.RestoreDrillStats.TotalRuns != 1 || jobView.RestoreDrillStats.SuccessfulRuns != 1 {
+		t.Fatalf("backup job restore drill stats = %+v, want one successful drill", jobView.RestoreDrillStats)
+	}
 	if jobView.LastRetentionCheck == nil || jobView.LastRetentionCheck.ID != retentionResult.ID {
 		t.Fatalf("backup job missing latest retention check: %+v", jobView.LastRetentionCheck)
 	}
@@ -151,7 +157,7 @@ func TestServer_BackupEndpoints_RunAndRestoreDrill(t *testing.T) {
 	if err := json.NewDecoder(reportResp.Body).Decode(&report); err != nil {
 		t.Fatalf("decode restore report: %v", err)
 	}
-	if report.Job.ID != "home" || report.LastRestore == nil || report.LastRestoreVerify == nil || len(report.Findings) == 0 {
+	if report.Job.ID != "home" || report.LastRestore == nil || report.LastRestoreVerify == nil || len(report.RestoreDrillHistory) != 1 || report.RestoreDrillStats == nil || len(report.Findings) == 0 {
 		t.Fatalf("unexpected restore report: %+v", report)
 	}
 
@@ -287,6 +293,7 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 		LastRestoreDrillAt:  &lastDrill,
 		StaleAfter:          "720h0m0s",
 		ReminderCooldown:    "24h0m0s",
+		FailureCategory:     backup.FailureCategoryNoSnapshot,
 		Timestamp:           time.Date(2026, 5, 10, 4, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -301,6 +308,9 @@ func TestBackupAlertNotifier_MapsRestoreDrillReminderMetadata(t *testing.T) {
 	}
 	if details["stale_after"] != "720h0m0s" || details["reminder_cooldown"] != "24h0m0s" {
 		t.Fatalf("missing reminder timing details: %+v", details)
+	}
+	if details["failure_category"] != backup.FailureCategoryNoSnapshot {
+		t.Fatalf("failure_category detail = %#v, want %q", details["failure_category"], backup.FailureCategoryNoSnapshot)
 	}
 	if _, ok := details["last_successful_run_at"].(*time.Time); !ok {
 		t.Fatalf("last_successful_run_at detail = %#v, want *time.Time", details["last_successful_run_at"])

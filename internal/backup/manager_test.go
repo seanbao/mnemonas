@@ -169,6 +169,12 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].LastRun == nil || jobs[0].LastRestoreDrill == nil || jobs[0].LastRestore == nil || jobs[0].LastRestoreVerify == nil {
 		t.Fatalf("reloaded jobs missing persisted status: %+v", jobs)
 	}
+	if len(jobs[0].RestoreDrillHistory) != 1 || jobs[0].RestoreDrillHistory[0].ID != drill.ID {
+		t.Fatalf("reloaded restore drill history = %+v, want drill %s", jobs[0].RestoreDrillHistory, drill.ID)
+	}
+	if jobs[0].RestoreDrillStats == nil || jobs[0].RestoreDrillStats.TotalRuns != 1 || jobs[0].RestoreDrillStats.SuccessfulRuns != 1 || jobs[0].RestoreDrillStats.ConsecutiveSuccesses != 1 {
+		t.Fatalf("reloaded restore drill stats = %+v, want one successful drill", jobs[0].RestoreDrillStats)
+	}
 	if jobs[0].LastRestore.TargetPath != restoreTarget || jobs[0].LastRestore.Status != StatusCompleted {
 		t.Fatalf("reloaded last restore = %+v, want completed restore to %s", jobs[0].LastRestore, restoreTarget)
 	}
@@ -182,7 +188,7 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildRestoreReport() error: %v", err)
 	}
-	if report.Job.ID != "home" || report.LastRestore == nil || report.LastRestoreVerify == nil || len(report.Findings) == 0 {
+	if report.Job.ID != "home" || report.LastRestore == nil || report.LastRestoreVerify == nil || len(report.RestoreDrillHistory) != 1 || report.RestoreDrillStats == nil || len(report.Findings) == 0 {
 		t.Fatalf("unexpected restore report: %+v", report)
 	}
 }
@@ -211,6 +217,77 @@ func TestManager_RunRestoreDrillWithoutSnapshot(t *testing.T) {
 	_, err = manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{})
 	if !errors.Is(err, ErrNoSnapshots) {
 		t.Fatalf("RunRestoreDrill() error = %v, want ErrNoSnapshots", err)
+	}
+	job, getErr := manager.GetJob("home")
+	if getErr != nil {
+		t.Fatalf("GetJob() error: %v", getErr)
+	}
+	if job.LastRestoreDrill == nil || job.LastRestoreDrill.Status != StatusFailed || job.LastRestoreDrill.FailureCategory != FailureCategoryNoSnapshot {
+		t.Fatalf("failed restore drill was not persisted: %+v", job.LastRestoreDrill)
+	}
+	if len(job.RestoreDrillHistory) != 1 || job.RestoreDrillHistory[0].Status != StatusFailed {
+		t.Fatalf("restore drill history = %+v, want one failed drill", job.RestoreDrillHistory)
+	}
+	if job.RestoreDrillStats == nil || job.RestoreDrillStats.TotalRuns != 1 || job.RestoreDrillStats.FailedRuns != 1 || job.RestoreDrillStats.ConsecutiveFailures != 1 || job.RestoreDrillStats.LastFailureMessage == "" || job.RestoreDrillStats.LastFailureCategory != FailureCategoryNoSnapshot {
+		t.Fatalf("restore drill stats = %+v, want one failed drill with failure message", job.RestoreDrillStats)
+	}
+}
+
+func TestManager_RestoreDrillHistoryCapsLatestResults(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: filepath.Join(tmpDir, "backups"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	base := time.Date(2026, 5, 9, 3, 0, 0, 0, time.UTC)
+	for i := 0; i < restoreDrillHistoryLimit+5; i++ {
+		startedAt := base.Add(time.Duration(i) * time.Minute)
+		finishedAt := startedAt.Add(time.Second)
+		result := &RestoreDrillResult{
+			ID:            formatRunID(startedAt),
+			JobID:         "home",
+			Status:        StatusCompleted,
+			StartedAt:     startedAt,
+			FinishedAt:    &finishedAt,
+			DurationMs:    1000,
+			FileCount:     int64(i),
+			VerifiedBytes: int64(i * 100),
+		}
+		if err := manager.updateLastRestoreDrill(result, true); err != nil {
+			t.Fatalf("updateLastRestoreDrill(%d) error: %v", i, err)
+		}
+	}
+
+	job, err := manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() error: %v", err)
+	}
+	if len(job.RestoreDrillHistory) != restoreDrillHistoryLimit {
+		t.Fatalf("restore drill history length = %d, want %d", len(job.RestoreDrillHistory), restoreDrillHistoryLimit)
+	}
+	if job.RestoreDrillStats == nil || job.RestoreDrillStats.TotalRuns != restoreDrillHistoryLimit || job.RestoreDrillStats.SuccessRate != 1 || job.RestoreDrillStats.ConsecutiveSuccesses != restoreDrillHistoryLimit {
+		t.Fatalf("restore drill stats = %+v, want all retained drills successful", job.RestoreDrillStats)
+	}
+	if job.RestoreDrillHistory[0].ID != formatRunID(base.Add(time.Duration(restoreDrillHistoryLimit+4)*time.Minute)) {
+		t.Fatalf("latest restore drill history entry = %+v", job.RestoreDrillHistory[0])
+	}
+	if job.RestoreDrillHistory[len(job.RestoreDrillHistory)-1].ID != formatRunID(base.Add(5*time.Minute)) {
+		t.Fatalf("oldest retained restore drill history entry = %+v", job.RestoreDrillHistory[len(job.RestoreDrillHistory)-1])
 	}
 }
 
@@ -1275,7 +1352,7 @@ func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
 	if event.Type != NotificationTypeRestoreDrill || event.Level != NotificationLevelCritical {
 		t.Fatalf("notification type/level = %s/%s, want backup_restore_drill/critical", event.Type, event.Level)
 	}
-	if event.JobID != "home" || event.Status != StatusFailed || event.ErrorMessage == "" {
+	if event.JobID != "home" || event.Status != StatusFailed || event.ErrorMessage == "" || event.FailureCategory != FailureCategoryNoSnapshot {
 		t.Fatalf("unexpected notification event: %+v", event)
 	}
 }

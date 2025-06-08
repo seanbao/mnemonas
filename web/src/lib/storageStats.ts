@@ -14,6 +14,9 @@ export interface DiskStorageStatsLike {
   diskUsed?: number
   diskUsageRatio?: number
   diskFilesystemType?: string
+  diskMountPoint?: string
+  diskMountSource?: string
+  diskMountOptions?: string
   diskNativeDataChecksumSupport?: boolean
 }
 
@@ -59,6 +62,9 @@ export function areDiskStatsAvailable(stats: DiskStorageStatsLike | undefined): 
     || stats.diskAvailable !== undefined
     || stats.diskUsed !== undefined
     || stats.diskUsageRatio !== undefined
+    || stats.diskFilesystemType !== undefined
+    || stats.diskMountPoint !== undefined
+    || stats.diskMountSource !== undefined
   )
 }
 

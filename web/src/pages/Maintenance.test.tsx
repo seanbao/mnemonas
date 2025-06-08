@@ -170,6 +170,17 @@ describe('MaintenancePage', () => {
     health_message: 'last successful backup completed recently',
     restore_drill_status: 'ok',
     restore_drill_message: '恢复演练仍在预期窗口内',
+    restore_drill_stats: {
+      total_runs: 2,
+      successful_runs: 1,
+      failed_runs: 1,
+      success_rate: 0.5,
+      consecutive_successes: 1,
+      latest_success_at: '2026-05-09T03:00:01Z',
+      latest_failure_at: '2026-05-08T03:00:01Z',
+      last_failure_message: 'manifest missing',
+      last_failure_category: 'integrity_check',
+    },
     include_config: true,
     verify_after_backup: true,
     exclude: ['.mnemonas/thumbnails'],
@@ -225,6 +236,31 @@ describe('MaintenancePage', () => {
       file_count: 12,
       verified_bytes: 4096,
     },
+    restore_drill_history: [{
+      id: '20260509T030000.000000000Z',
+      job_id: 'external-disk',
+      status: 'completed',
+      started_at: '2026-05-09T03:00:00Z',
+      finished_at: '2026-05-09T03:00:01Z',
+      duration_ms: 1000,
+      snapshot_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z',
+      manifest_path: '/mnt/backup-drive/mnemonas/external-disk/snapshots/20260509T020304.000000000Z/manifest.json',
+      artifact_kept: false,
+      file_count: 12,
+      verified_bytes: 4096,
+    }, {
+      id: '20260508T030000.000000000Z',
+      job_id: 'external-disk',
+      status: 'failed',
+      started_at: '2026-05-08T03:00:00Z',
+      finished_at: '2026-05-08T03:00:01Z',
+      duration_ms: 1000,
+      artifact_kept: false,
+      file_count: 0,
+      verified_bytes: 0,
+      error_message: 'manifest missing',
+      failure_category: 'integrity_check',
+    }],
     last_restore: {
       id: '20260509T040000.000000000Z',
       job_id: 'external-disk',
@@ -570,6 +606,11 @@ describe('MaintenancePage', () => {
         expect(screen.getAllByText(/12 个文件 · 4 KB/).length).toBeGreaterThan(0)
         expect(screen.getByText('校验 12 个文件 · 4 KB')).toBeTruthy()
         expect(screen.getByText('恢复演练仍在预期窗口内')).toBeTruthy()
+        expect(screen.getByText('近 2 次成功率 50% · 连续成功 1 次')).toBeTruthy()
+        expect(screen.getByText('最近失败: manifest missing')).toBeTruthy()
+        expect(screen.getByText('失败类型: 完整性校验失败')).toBeTruthy()
+        expect(screen.getByText('最近演练记录')).toBeTruthy()
+        expect(screen.getByText('近 2 次包含 1 次失败')).toBeTruthy()
         expect(screen.getByText('目标: /restore/mnemonas')).toBeTruthy()
         expect(screen.getByText('最近检查: 检查 12 个文件 · 4 KB')).toBeTruthy()
       })

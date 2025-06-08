@@ -46,6 +46,7 @@ import {
   getSettings,
   getWebDAVCredentials,
   updateSettings,
+  type DirectoryQuota,
   type SecurityCheckData,
   type SecurityCheckItem,
   type SecurityCheckStatus,
@@ -371,6 +372,70 @@ function isValidWebhookHeaderLine(header: string): boolean {
   const name = header.slice(0, separator).trim()
   const value = header.slice(separator + 1).trim()
   return httpHeaderNamePattern.test(name) && value.length > 0 && !hasInvalidHTTPHeaderValueChar(value)
+}
+
+function formatDirectoryQuotaLines(quotas: DirectoryQuota[] | undefined): string {
+  return (quotas ?? [])
+    .map((quota) => `${quota.path} ${formatBytes(quota.quota_bytes)}`)
+    .join('\n')
+}
+
+function normalizeDirectoryQuotaPathInput(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('/') || /[\s\\?#]/.test(trimmed) || hasControlChar(trimmed)) {
+    return null
+  }
+  const withoutTrailingSlash = trimmed === '/' ? '/' : trimmed.replace(/\/+$/, '')
+  if (withoutTrailingSlash === '') {
+    return null
+  }
+  const segments = withoutTrailingSlash.split('/').slice(1)
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    return null
+  }
+  return withoutTrailingSlash
+}
+
+function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; error?: string } {
+  const lines = value.split('\n')
+  const quotas: DirectoryQuota[] = []
+  const seenPaths = new Set<string>()
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim()
+    if (!line) {
+      continue
+    }
+
+    const parts = line.split(/\s+/)
+    if (parts.length < 2) {
+      return { quotas: [], error: `第 ${index + 1} 行需要填写路径和容量` }
+    }
+
+    const quotaPath = normalizeDirectoryQuotaPathInput(parts[0])
+    if (!quotaPath) {
+      return { quotas: [], error: `第 ${index + 1} 行路径无效` }
+    }
+    if (seenPaths.has(quotaPath)) {
+      return { quotas: [], error: `第 ${index + 1} 行路径重复` }
+    }
+
+    const sizeText = parts.slice(1).join(' ')
+    let quotaBytes: number
+    try {
+      quotaBytes = parseByteSize(sizeText)
+    } catch {
+      return { quotas: [], error: `第 ${index + 1} 行容量格式无效` }
+    }
+    if (!Number.isFinite(quotaBytes) || quotaBytes <= 0) {
+      return { quotas: [], error: `第 ${index + 1} 行容量必须大于 0` }
+    }
+
+    seenPaths.add(quotaPath)
+    quotas.push({ path: quotaPath, quota_bytes: quotaBytes })
+  }
+
+  return { quotas }
 }
 
 // Setting row component
@@ -750,6 +815,7 @@ export function SettingsPage() {
     tlsAutoGenerate: true,
     tlsCertDir: '',
     storageRoot: '',
+    directoryQuotas: '',
     trashEnabled: true,
     trashRetentionDays: '30',
     trashMaxSize: '10 GB',
@@ -892,6 +958,7 @@ export function SettingsPage() {
       tlsAutoGenerate: data.server.tls?.auto_generate ?? true,
       tlsCertDir: data.server.tls?.cert_dir ?? '',
       storageRoot: data.storage.root,
+      directoryQuotas: formatDirectoryQuotaLines(data.storage.directory_quotas),
       trashEnabled: data.trash?.enabled ?? true,
       trashRetentionDays: String(data.trash?.retention_days ?? 30),
       trashMaxSize: formatBytes(data.trash?.max_size ?? 10737418240),
@@ -1205,6 +1272,15 @@ export function SettingsPage() {
       .split('\n')
       .map(entry => entry.trim())
       .filter(Boolean)
+    const parsedDirectoryQuotas = parseDirectoryQuotaLines(settings.directoryQuotas)
+    if (parsedDirectoryQuotas.error) {
+      addToast({
+        title: '目录配额格式无效',
+        description: parsedDirectoryQuotas.error,
+        color: 'danger',
+      })
+      return
+    }
 
     try {
       minFreeSpaceBytes = parseByteSize(settings.minFreeSpace)
@@ -1538,6 +1614,9 @@ export function SettingsPage() {
           auto_generate: settings.tlsAutoGenerate,
           cert_dir: settings.tlsCertDir.trim(),
         },
+      },
+      storage: {
+        directory_quotas: parsedDirectoryQuotas.quotas,
       },
       retention: {
         max_versions: parsedMaxVersions,
@@ -2054,6 +2133,31 @@ export function SettingsPage() {
                       }}
                     />
                   </SettingRow>
+                </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="目录配额"
+                description="限制指定逻辑目录的当前文件总量；保存后会立即应用到 Web/API 与 WebDAV 写入"
+                icon={HardDrive}
+              >
+                <div className="space-y-3">
+                  <textarea
+                    aria-label="目录配额"
+                    value={settings.directoryQuotas}
+                    onChange={(event) => updateDirtySettings(s => ({ ...s, directoryQuotas: event.target.value }))}
+                    rows={4}
+                    placeholder="/team 1 TB"
+                    className="input-shell w-full rounded-medium border border-transparent bg-transparent px-3 py-2 font-mono text-sm outline-none focus:border-accent-primary"
+                  />
+                  <div className="grid gap-2 text-xs text-default-500 sm:grid-cols-2">
+                    <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+                      每行一个目录，例如 <span className="font-mono text-foreground">/team 1 TB</span>
+                    </div>
+                    <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+                      命中上传、复制、移动、回收站恢复、版本恢复和 WebDAV 写入
+                    </div>
+                  </div>
                 </div>
               </SettingsSection>
 
