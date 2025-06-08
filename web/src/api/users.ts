@@ -10,6 +10,7 @@ export interface User {
   username: string
   email: string
   role: 'admin' | 'user' | 'guest'
+  groups?: string[]
   disabled: boolean
   home_dir: string
   created_at: string
@@ -24,6 +25,7 @@ export interface CreateUserRequest {
   password: string
   email?: string
   role?: 'admin' | 'user' | 'guest'
+  groups?: string[]
 }
 
 export interface ResetPasswordRequest {
@@ -33,6 +35,7 @@ export interface ResetPasswordRequest {
 export interface UpdateUserRequest {
   email?: string
   role?: User['role']
+  groups?: string[]
   home_dir?: string
   quota_bytes?: number
 }
@@ -83,6 +86,7 @@ function isValidUser(value: unknown): value is User {
     typeof user.username === 'string' &&
     typeof user.email === 'string' &&
     isUserRole(user.role) &&
+    (user.groups === undefined || (Array.isArray(user.groups) && user.groups.every((group) => typeof group === 'string'))) &&
     typeof user.disabled === 'boolean' &&
     typeof user.home_dir === 'string' &&
     typeof user.created_at === 'string' &&

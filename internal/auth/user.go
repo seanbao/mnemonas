@@ -48,6 +48,7 @@ type User struct {
 	Email        string     `json:"email,omitempty"`
 	PasswordHash string     `json:"password_hash"`
 	Role         Role       `json:"role"`
+	Groups       []string   `json:"groups,omitempty"`
 	Disabled     bool       `json:"disabled"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
@@ -115,6 +116,7 @@ func cloneUser(user *User) *User {
 		return nil
 	}
 	clone := *user
+	clone.Groups = append([]string(nil), user.Groups...)
 	if user.LastLoginAt != nil {
 		lastLoginAt := *user.LastLoginAt
 		clone.LastLoginAt = &lastLoginAt
@@ -134,6 +136,7 @@ var (
 	ErrPasswordTooLong     = errors.New("password must be at most 72 bytes")
 	ErrLastAdmin           = errors.New("cannot delete last admin user")
 	errInvalidUserHomeDir  = errors.New("invalid home_dir")
+	errInvalidUserGroups   = errors.New("invalid groups")
 	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
 	errPasswordFileSymlink = errors.New("initial password file path must not be a symlink")
 )
@@ -215,10 +218,15 @@ func (s *UserStore) load() error {
 		if err != nil {
 			return fmt.Errorf("users file contains invalid home_dir for user %q: %w", u.Username, err)
 		}
+		groups, err := normalizeGroupNames(u.Groups)
+		if err != nil {
+			return fmt.Errorf("users file contains invalid groups for user %q: %w", u.Username, err)
+		}
 
 		loaded := cloneUser(u)
 		loaded.Username = cleanUsername
 		loaded.HomeDir = homeDir
+		loaded.Groups = groups
 		loadedUsers[loaded.ID] = loaded
 		loadedByName[normalizedUsername] = loaded
 	}
@@ -1014,11 +1022,20 @@ func removeInitialPasswordFileForUser(usersFilePath, username string) error {
 
 // Create creates a new user
 func (s *UserStore) Create(username, password, email string, role Role) (*User, error) {
+	return s.CreateWithGroups(username, password, email, role, nil)
+}
+
+// CreateWithGroups creates a new user with group memberships.
+func (s *UserStore) CreateWithGroups(username, password, email string, role Role, groups []string) (*User, error) {
 	cleanUsername, err := normalizeNewUsername(username)
 	if err != nil {
 		return nil, err
 	}
 	if err := validateRole(role); err != nil {
+		return nil, err
+	}
+	normalizedGroups, err := normalizeGroupNames(groups)
+	if err != nil {
 		return nil, err
 	}
 
@@ -1041,6 +1058,7 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 		Email:        email,
 		PasswordHash: string(hash),
 		Role:         role,
+		Groups:       normalizedGroups,
 		HomeDir:      "/" + cleanUsername,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
@@ -1091,6 +1109,11 @@ func (s *UserStore) Update(user *User) error {
 		if err := validateRole(updated.Role); err != nil {
 			return err
 		}
+		groups, err := normalizeGroupNames(updated.Groups)
+		if err != nil {
+			return err
+		}
+		updated.Groups = groups
 		homeDir, err := normalizeHomeDir(updated.HomeDir)
 		if err != nil {
 			return err
@@ -1358,6 +1381,40 @@ func normalizeHomeDir(homeDir string) (string, error) {
 		return "", errInvalidUserHomeDir
 	}
 	return cleaned, nil
+}
+
+func normalizeGroupNames(groups []string) ([]string, error) {
+	if len(groups) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(groups))
+	normalized := make([]string, 0, len(groups))
+	for _, group := range groups {
+		cleaned, err := normalizeGroupName(group)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		normalized = append(normalized, cleaned)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func normalizeGroupName(group string) (string, error) {
+	trimmed := strings.TrimSpace(group)
+	if trimmed == "" || len(trimmed) > maxUsernameRuneCount || utf8.RuneCountInString(trimmed) > maxUsernameRuneCount {
+		return "", errInvalidUserGroups
+	}
+	for _, r := range trimmed {
+		if r > unicode.MaxASCII || !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.') {
+			return "", errInvalidUserGroups
+		}
+	}
+	return normalizeUsername(trimmed), nil
 }
 
 func normalizeUsername(username string) string {
