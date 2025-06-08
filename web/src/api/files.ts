@@ -35,6 +35,7 @@ export interface StorageStats {
   fileCountAvailable?: boolean
   storageStatsAvailable?: boolean
   diskStatsAvailable?: boolean
+  directoryQuotaStatsAvailable?: boolean
   totalSize?: number
   totalObjects?: number
   uniqueSize?: number
@@ -45,7 +46,23 @@ export interface StorageStats {
   diskUsed?: number
   diskUsageRatio?: number
   diskFilesystemType?: string
+  diskMountPoint?: string
+  diskMountSource?: string
+  diskMountOptions?: string
   diskNativeDataChecksumSupport?: boolean
+  directoryQuotas?: DirectoryQuotaUsage[]
+}
+
+export type DirectoryQuotaUsageStatus = 'normal' | 'warning' | 'exceeded' | 'missing'
+
+export interface DirectoryQuotaUsage {
+  path: string
+  quotaBytes: number
+  usedBytes: number
+  availableBytes: number
+  usageRatio: number
+  exists: boolean
+  status: DirectoryQuotaUsageStatus
 }
 
 export interface HealthStatus {
@@ -492,6 +509,7 @@ function isStorageStatsShape(value: unknown): value is {
   total_files_available?: boolean
   storage_stats_available?: boolean
   disk_stats_available?: boolean
+  directory_quota_stats_available?: boolean
   total_size?: number
   total_chunks?: number
   unique_size?: number
@@ -502,13 +520,26 @@ function isStorageStatsShape(value: unknown): value is {
   disk_used?: number
   disk_usage_ratio?: number
   disk_filesystem_type?: string
+  disk_mount_point?: string
+  disk_mount_source?: string
+  disk_mount_options?: string
   disk_native_data_checksum_support?: boolean
+  directory_quotas?: {
+    path: string
+    quota_bytes: number
+    used_bytes: number
+    available_bytes: number
+    usage_ratio: number
+    exists: boolean
+    status: DirectoryQuotaUsageStatus
+  }[]
 } {
   return isRecord(value)
     && isNumberOrUndefined(value.total_files)
     && isBooleanOrUndefined(value.total_files_available)
     && isBooleanOrUndefined(value.storage_stats_available)
     && isBooleanOrUndefined(value.disk_stats_available)
+    && isBooleanOrUndefined(value.directory_quota_stats_available)
     && isNumberOrUndefined(value.total_size)
     && isNumberOrUndefined(value.total_chunks)
     && isNumberOrUndefined(value.unique_size)
@@ -519,7 +550,37 @@ function isStorageStatsShape(value: unknown): value is {
     && isNumberOrUndefined(value.disk_used)
     && isNumberOrUndefined(value.disk_usage_ratio)
     && isStringOrUndefined(value.disk_filesystem_type)
+    && isStringOrUndefined(value.disk_mount_point)
+    && isStringOrUndefined(value.disk_mount_source)
+    && isStringOrUndefined(value.disk_mount_options)
     && isBooleanOrUndefined(value.disk_native_data_checksum_support)
+    && (value.directory_quotas === undefined || (Array.isArray(value.directory_quotas) && value.directory_quotas.every(isDirectoryQuotaUsageShape)))
+}
+
+function isDirectoryQuotaUsageShape(value: unknown): value is {
+  path: string
+  quota_bytes: number
+  used_bytes: number
+  available_bytes: number
+  usage_ratio: number
+  exists: boolean
+  status: DirectoryQuotaUsageStatus
+} {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && typeof value.quota_bytes === 'number'
+    && typeof value.used_bytes === 'number'
+    && typeof value.available_bytes === 'number'
+    && typeof value.usage_ratio === 'number'
+    && typeof value.exists === 'boolean'
+    && isDirectoryQuotaUsageStatus(value.status)
+}
+
+function isDirectoryQuotaUsageStatus(value: unknown): value is DirectoryQuotaUsageStatus {
+  return value === 'normal'
+    || value === 'warning'
+    || value === 'exceeded'
+    || value === 'missing'
 }
 
 function isMoveCopyActionShape(value: unknown): value is { from: string; to: string } {
@@ -1069,6 +1130,20 @@ export interface BackupRestoreDrillResult {
   file_count: number
   verified_bytes: number
   error_message?: string
+  failure_category?: string
+}
+
+export interface BackupRestoreDrillStats {
+  total_runs: number
+  successful_runs: number
+  failed_runs: number
+  success_rate: number
+  consecutive_successes?: number
+  consecutive_failures?: number
+  latest_success_at?: string
+  latest_failure_at?: string
+  last_failure_message?: string
+  last_failure_category?: string
 }
 
 export interface BackupRestoreResult {
@@ -1249,6 +1324,7 @@ export interface BackupJob {
   restore_drill_status: string
   restore_drill_message?: string
   last_restore_drill_reminder_at?: string
+  restore_drill_stats?: BackupRestoreDrillStats
   include_config: boolean
   verify_after_backup: boolean
   exclude: string[]
@@ -1256,6 +1332,7 @@ export interface BackupJob {
   last_run?: BackupRunResult
   last_successful_run?: BackupRunResult
   last_restore_drill?: BackupRestoreDrillResult
+  restore_drill_history?: BackupRestoreDrillResult[]
   last_restore?: BackupRestoreResult
   last_restore_verify?: BackupRestoreVerifyResult
   restore_history?: BackupRestoreResult[]
@@ -1323,6 +1400,21 @@ function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestore
     && typeof value.file_count === 'number'
     && typeof value.verified_bytes === 'number'
     && isStringOrUndefined(value.error_message)
+    && isStringOrUndefined(value.failure_category)
+}
+
+function isBackupRestoreDrillStatsShape(value: unknown): value is BackupRestoreDrillStats {
+  return isRecord(value)
+    && typeof value.total_runs === 'number'
+    && typeof value.successful_runs === 'number'
+    && typeof value.failed_runs === 'number'
+    && typeof value.success_rate === 'number'
+    && isNumberOrUndefined(value.consecutive_successes)
+    && isNumberOrUndefined(value.consecutive_failures)
+    && isStringOrUndefined(value.latest_success_at)
+    && isStringOrUndefined(value.latest_failure_at)
+    && isStringOrUndefined(value.last_failure_message)
+    && isStringOrUndefined(value.last_failure_category)
 }
 
 function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResult {
@@ -1499,6 +1591,7 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && typeof value.restore_drill_status === 'string'
     && isStringOrUndefined(value.restore_drill_message)
     && isStringOrUndefined(value.last_restore_drill_reminder_at)
+    && (value.restore_drill_stats === undefined || isBackupRestoreDrillStatsShape(value.restore_drill_stats))
     && typeof value.include_config === 'boolean'
     && typeof value.verify_after_backup === 'boolean'
     && Array.isArray(value.exclude)
@@ -1507,6 +1600,7 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && (value.last_run === undefined || isBackupRunResultShape(value.last_run))
     && (value.last_successful_run === undefined || isBackupRunResultShape(value.last_successful_run))
     && (value.last_restore_drill === undefined || isBackupRestoreDrillResultShape(value.last_restore_drill))
+    && (value.restore_drill_history === undefined || (Array.isArray(value.restore_drill_history) && value.restore_drill_history.every(isBackupRestoreDrillResultShape)))
     && (value.last_restore === undefined || isBackupRestoreResultShape(value.last_restore))
     && (value.last_restore_verify === undefined || isBackupRestoreVerifyResultShape(value.last_restore_verify))
     && (value.restore_history === undefined || (Array.isArray(value.restore_history) && value.restore_history.every(isBackupRestoreResultShape)))
@@ -1570,7 +1664,11 @@ export async function getStorageStats(): Promise<StorageStats> {
       || data.disk_available !== undefined
       || data.disk_used !== undefined
       || data.disk_usage_ratio !== undefined
+      || data.disk_filesystem_type !== undefined
+      || data.disk_mount_point !== undefined
+      || data.disk_mount_source !== undefined
     ),
+    directoryQuotaStatsAvailable: data.directory_quota_stats_available ?? data.directory_quotas !== undefined,
     totalSize: data.total_size,
     totalObjects: data.total_chunks,
     uniqueSize: data.unique_size,
@@ -1581,7 +1679,19 @@ export async function getStorageStats(): Promise<StorageStats> {
     diskUsed: data.disk_used,
     diskUsageRatio: data.disk_usage_ratio,
     diskFilesystemType: data.disk_filesystem_type,
+    diskMountPoint: data.disk_mount_point,
+    diskMountSource: data.disk_mount_source,
+    diskMountOptions: data.disk_mount_options,
     diskNativeDataChecksumSupport: data.disk_native_data_checksum_support,
+    directoryQuotas: data.directory_quotas?.map((quota) => ({
+      path: quota.path,
+      quotaBytes: quota.quota_bytes,
+      usedBytes: quota.used_bytes,
+      availableBytes: quota.available_bytes,
+      usageRatio: quota.usage_ratio,
+      exists: quota.exists,
+      status: quota.status,
+    })),
   }
 }
 

@@ -46,10 +46,20 @@ const (
 	NotificationTypeRetention    = "backup_retention_check"
 	NotificationTriggerReminder  = "restore_drill_reminder"
 
+	FailureCategoryNoSnapshot         = "no_snapshot"
+	FailureCategoryUnsupportedJobType = "unsupported_job_type"
+	FailureCategoryUnsafePath         = "unsafe_path"
+	FailureCategoryIntegrityCheck     = "integrity_check"
+	FailureCategoryExternalCommand    = "external_command"
+	FailureCategoryCancelled          = "cancelled"
+	FailureCategoryIO                 = "io"
+	FailureCategoryUnknown            = "unknown"
+
 	stateFileName                 = "status.json"
 	manifestFileName              = "manifest.json"
 	manifestVersion               = 1
 	restoreHistoryLimit           = 20
+	restoreDrillHistoryLimit      = 20
 	restorePreviewLimit           = 10
 	restoreVerifyWarningLimit     = 8
 	defaultRestoreDrillStaleAfter = 30 * 24 * time.Hour
@@ -125,6 +135,7 @@ type JobState struct {
 	LastRun                    *RunResult            `json:"last_run,omitempty"`
 	LastSuccessfulRun          *RunResult            `json:"last_successful_run,omitempty"`
 	LastRestoreDrill           *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
+	RestoreDrillHistory        []*RestoreDrillResult `json:"restore_drill_history,omitempty"`
 	LastRestore                *RestoreResult        `json:"last_restore,omitempty"`
 	LastRestoreVerify          *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
 	RestoreHistory             []*RestoreResult      `json:"restore_history,omitempty"`
@@ -160,6 +171,7 @@ type JobView struct {
 	RestoreDrillStatus         string                `json:"restore_drill_status"`
 	RestoreDrillMessage        string                `json:"restore_drill_message,omitempty"`
 	LastRestoreDrillReminderAt *time.Time            `json:"last_restore_drill_reminder_at,omitempty"`
+	RestoreDrillStats          *RestoreDrillStats    `json:"restore_drill_stats,omitempty"`
 	IncludeConfig              bool                  `json:"include_config"`
 	VerifyAfterBackup          bool                  `json:"verify_after_backup"`
 	Exclude                    []string              `json:"exclude"`
@@ -167,6 +179,7 @@ type JobView struct {
 	LastRun                    *RunResult            `json:"last_run,omitempty"`
 	LastSuccessfulRun          *RunResult            `json:"last_successful_run,omitempty"`
 	LastRestoreDrill           *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
+	RestoreDrillHistory        []*RestoreDrillResult `json:"restore_drill_history,omitempty"`
 	LastRestore                *RestoreResult        `json:"last_restore,omitempty"`
 	LastRestoreVerify          *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
 	RestoreHistory             []*RestoreResult      `json:"restore_history,omitempty"`
@@ -175,16 +188,32 @@ type JobView struct {
 
 // RestoreReport is an exportable audit summary for one backup job.
 type RestoreReport struct {
-	GeneratedAt        time.Time             `json:"generated_at"`
-	Job                JobView               `json:"job"`
-	LastRun            *RunResult            `json:"last_run,omitempty"`
-	LastSuccessfulRun  *RunResult            `json:"last_successful_run,omitempty"`
-	LastRetentionCheck *RetentionCheckResult `json:"last_retention_check,omitempty"`
-	LastRestoreDrill   *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
-	LastRestore        *RestoreResult        `json:"last_restore,omitempty"`
-	LastRestoreVerify  *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
-	RestoreHistory     []*RestoreResult      `json:"restore_history,omitempty"`
-	Findings           []string              `json:"findings,omitempty"`
+	GeneratedAt         time.Time             `json:"generated_at"`
+	Job                 JobView               `json:"job"`
+	LastRun             *RunResult            `json:"last_run,omitempty"`
+	LastSuccessfulRun   *RunResult            `json:"last_successful_run,omitempty"`
+	LastRetentionCheck  *RetentionCheckResult `json:"last_retention_check,omitempty"`
+	LastRestoreDrill    *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
+	RestoreDrillHistory []*RestoreDrillResult `json:"restore_drill_history,omitempty"`
+	RestoreDrillStats   *RestoreDrillStats    `json:"restore_drill_stats,omitempty"`
+	LastRestore         *RestoreResult        `json:"last_restore,omitempty"`
+	LastRestoreVerify   *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
+	RestoreHistory      []*RestoreResult      `json:"restore_history,omitempty"`
+	Findings            []string              `json:"findings,omitempty"`
+}
+
+// RestoreDrillStats summarizes recent restore drill reliability.
+type RestoreDrillStats struct {
+	TotalRuns            int        `json:"total_runs"`
+	SuccessfulRuns       int        `json:"successful_runs"`
+	FailedRuns           int        `json:"failed_runs"`
+	SuccessRate          float64    `json:"success_rate"`
+	ConsecutiveSuccesses int        `json:"consecutive_successes,omitempty"`
+	ConsecutiveFailures  int        `json:"consecutive_failures,omitempty"`
+	LatestSuccessAt      *time.Time `json:"latest_success_at,omitempty"`
+	LatestFailureAt      *time.Time `json:"latest_failure_at,omitempty"`
+	LastFailureMessage   string     `json:"last_failure_message,omitempty"`
+	LastFailureCategory  string     `json:"last_failure_category,omitempty"`
 }
 
 // ScheduledRunResult describes one due job handled by the scheduler loop.
@@ -223,6 +252,7 @@ type NotificationEvent struct {
 	PrunedSnapshots     int        `json:"pruned_snapshots,omitempty"`
 	Warnings            []string   `json:"warnings,omitempty"`
 	ErrorMessage        string     `json:"error_message,omitempty"`
+	FailureCategory     string     `json:"failure_category,omitempty"`
 	Timestamp           time.Time  `json:"timestamp"`
 }
 
@@ -255,19 +285,20 @@ type RestoreDrillOptions struct {
 
 // RestoreDrillResult records one non-destructive restore verification.
 type RestoreDrillResult struct {
-	ID            string     `json:"id"`
-	JobID         string     `json:"job_id"`
-	Status        string     `json:"status"`
-	StartedAt     time.Time  `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	DurationMs    int64      `json:"duration_ms"`
-	SnapshotPath  string     `json:"snapshot_path,omitempty"`
-	ManifestPath  string     `json:"manifest_path,omitempty"`
-	RestoredPath  string     `json:"restored_path,omitempty"`
-	ArtifactKept  bool       `json:"artifact_kept"`
-	FileCount     int64      `json:"file_count"`
-	VerifiedBytes int64      `json:"verified_bytes"`
-	ErrorMessage  string     `json:"error_message,omitempty"`
+	ID              string     `json:"id"`
+	JobID           string     `json:"job_id"`
+	Status          string     `json:"status"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	DurationMs      int64      `json:"duration_ms"`
+	SnapshotPath    string     `json:"snapshot_path,omitempty"`
+	ManifestPath    string     `json:"manifest_path,omitempty"`
+	RestoredPath    string     `json:"restored_path,omitempty"`
+	ArtifactKept    bool       `json:"artifact_kept"`
+	FileCount       int64      `json:"file_count"`
+	VerifiedBytes   int64      `json:"verified_bytes"`
+	ErrorMessage    string     `json:"error_message,omitempty"`
+	FailureCategory string     `json:"failure_category,omitempty"`
 }
 
 // RestoreOptions controls an explicit snapshot restore.
@@ -569,7 +600,7 @@ func (m *Manager) RunRestoreDrill(ctx context.Context, id string, opts RestoreDr
 		StartedAt:    startedAt,
 		ArtifactKept: opts.KeepArtifact,
 	}
-	_ = m.updateLastRestoreDrill(result)
+	_ = m.updateLastRestoreDrill(result, false)
 
 	err = m.runRestoreDrill(ctx, job, opts, result)
 	finishedAt := m.now().UTC()
@@ -578,10 +609,11 @@ func (m *Manager) RunRestoreDrill(ctx context.Context, id string, opts RestoreDr
 	if err != nil {
 		result.Status = StatusFailed
 		result.ErrorMessage = err.Error()
+		result.FailureCategory = classifyRestoreDrillFailure(err)
 	} else {
 		result.Status = StatusCompleted
 	}
-	if saveErr := m.updateLastRestoreDrill(result); saveErr != nil {
+	if saveErr := m.updateLastRestoreDrill(result, true); saveErr != nil {
 		if err != nil {
 			return cloneRestoreDrillResult(result), errors.Join(err, saveErr)
 		}
@@ -776,22 +808,23 @@ func (m *Manager) notifyRestoreDrill(ctx context.Context, job config.BackupJobCo
 	}
 
 	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
-		Type:          NotificationTypeRestoreDrill,
-		Level:         NotificationLevelCritical,
-		Message:       fmt.Sprintf("备份任务 %s 恢复演练失败", job.Name),
-		JobID:         job.ID,
-		JobName:       job.Name,
-		JobType:       job.Type,
-		RunID:         result.ID,
-		Status:        result.Status,
-		StartedAt:     result.StartedAt,
-		FinishedAt:    result.FinishedAt,
-		SnapshotPath:  result.SnapshotPath,
-		ManifestPath:  result.ManifestPath,
-		FileCount:     result.FileCount,
-		VerifiedBytes: result.VerifiedBytes,
-		ErrorMessage:  result.ErrorMessage,
-		Timestamp:     time.Now().UTC(),
+		Type:            NotificationTypeRestoreDrill,
+		Level:           NotificationLevelCritical,
+		Message:         fmt.Sprintf("备份任务 %s 恢复演练失败", job.Name),
+		JobID:           job.ID,
+		JobName:         job.Name,
+		JobType:         job.Type,
+		RunID:           result.ID,
+		Status:          result.Status,
+		StartedAt:       result.StartedAt,
+		FinishedAt:      result.FinishedAt,
+		SnapshotPath:    result.SnapshotPath,
+		ManifestPath:    result.ManifestPath,
+		FileCount:       result.FileCount,
+		VerifiedBytes:   result.VerifiedBytes,
+		ErrorMessage:    result.ErrorMessage,
+		FailureCategory: result.FailureCategory,
+		Timestamp:       time.Now().UTC(),
 	})
 }
 
@@ -968,6 +1001,8 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 	healthStatus, healthMessage := m.healthLocked(job, state, running, m.now().UTC())
 	restoreDrillStatus, restoreDrillMessage := m.restoreDrillHealthLocked(job, state, m.now().UTC())
 	retentionStatus, retentionMessage := retentionHealth(job, state)
+	restoreDrillHistory := restoreDrillHistoryForView(state)
+	restoreDrillStats := buildRestoreDrillStats(restoreDrillHistory)
 	return JobView{
 		ID:                         job.ID,
 		Name:                       job.Name,
@@ -994,6 +1029,7 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 		RestoreDrillStatus:         restoreDrillStatus,
 		RestoreDrillMessage:        restoreDrillMessage,
 		LastRestoreDrillReminderAt: cloneTime(state.LastRestoreDrillReminderAt),
+		RestoreDrillStats:          cloneRestoreDrillStats(restoreDrillStats),
 		IncludeConfig:              job.IncludeConfig,
 		VerifyAfterBackup:          job.VerifyAfterBackup,
 		Exclude:                    append([]string(nil), job.Exclude...),
@@ -1001,6 +1037,7 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 		LastRun:                    cloneRunResult(state.LastRun),
 		LastSuccessfulRun:          cloneRunResult(state.LastSuccessfulRun),
 		LastRestoreDrill:           cloneRestoreDrillResult(state.LastRestoreDrill),
+		RestoreDrillHistory:        cloneRestoreDrillResults(restoreDrillHistory),
 		LastRestore:                cloneRestoreResult(state.LastRestore),
 		LastRestoreVerify:          cloneRestoreVerifyResult(state.LastRestoreVerify),
 		RestoreHistory:             cloneRestoreResults(state.RestoreHistory),
@@ -1933,6 +1970,34 @@ func restoreDrillFinishedAt(result *RestoreDrillResult) time.Time {
 	return result.StartedAt.UTC()
 }
 
+func classifyRestoreDrillFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, ErrNoSnapshots):
+		return FailureCategoryNoSnapshot
+	case errors.Is(err, ErrUnsupportedJobType):
+		return FailureCategoryUnsupportedJobType
+	case errors.Is(err, ErrUnsafePath), errors.Is(err, ErrSourceContainsSymlink), errors.Is(err, ErrUnsupportedFileType):
+		return FailureCategoryUnsafePath
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return FailureCategoryCancelled
+	}
+
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "run restic"), strings.Contains(message, "run rclone"):
+		return FailureCategoryExternalCommand
+	case strings.Contains(message, "checksum"), strings.Contains(message, "size mismatch"), strings.Contains(message, "verify"):
+		return FailureCategoryIntegrityCheck
+	case strings.Contains(message, "stat "), strings.Contains(message, "read "), strings.Contains(message, "create "), strings.Contains(message, "copy "), strings.Contains(message, "permission"), strings.Contains(message, "no such file"):
+		return FailureCategoryIO
+	default:
+		return FailureCategoryUnknown
+	}
+}
+
 func formatDurationForAPI(duration time.Duration) string {
 	if duration <= 0 {
 		return ""
@@ -2321,12 +2386,15 @@ func (m *Manager) updateLastRun(result *RunResult) error {
 	return m.saveStateLocked()
 }
 
-func (m *Manager) updateLastRestoreDrill(result *RestoreDrillResult) error {
+func (m *Manager) updateLastRestoreDrill(result *RestoreDrillResult, appendHistory bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state := m.state.Jobs[result.JobID]
 	state.LastRestoreDrill = cloneRestoreDrillResult(result)
+	if appendHistory {
+		state.RestoreDrillHistory = prependRestoreDrillHistory(state.RestoreDrillHistory, result)
+	}
 	m.state.Jobs[result.JobID] = state
 	return m.saveStateLocked()
 }
@@ -2513,6 +2581,16 @@ func cloneTime(value *time.Time) *time.Time {
 	return &clone
 }
 
+func cloneRestoreDrillStats(stats *RestoreDrillStats) *RestoreDrillStats {
+	if stats == nil {
+		return nil
+	}
+	clone := *stats
+	clone.LatestSuccessAt = cloneTime(stats.LatestSuccessAt)
+	clone.LatestFailureAt = cloneTime(stats.LatestFailureAt)
+	return &clone
+}
+
 func cloneRestoreDrillResult(result *RestoreDrillResult) *RestoreDrillResult {
 	if result == nil {
 		return nil
@@ -2523,6 +2601,19 @@ func cloneRestoreDrillResult(result *RestoreDrillResult) *RestoreDrillResult {
 		clone.FinishedAt = &finishedAt
 	}
 	return &clone
+}
+
+func cloneRestoreDrillResults(results []*RestoreDrillResult) []*RestoreDrillResult {
+	if len(results) == 0 {
+		return nil
+	}
+	clones := make([]*RestoreDrillResult, 0, len(results))
+	for _, result := range results {
+		if clone := cloneRestoreDrillResult(result); clone != nil {
+			clones = append(clones, clone)
+		}
+	}
+	return clones
 }
 
 func cloneRestorePreviewResult(result *RestorePreviewResult) *RestorePreviewResult {
@@ -2645,6 +2736,84 @@ func prependRestoreHistory(history []*RestoreResult, result *RestoreResult) []*R
 		}
 	}
 	return next
+}
+
+func prependRestoreDrillHistory(history []*RestoreDrillResult, result *RestoreDrillResult) []*RestoreDrillResult {
+	if result == nil {
+		return cloneRestoreDrillResults(history)
+	}
+	next := []*RestoreDrillResult{cloneRestoreDrillResult(result)}
+	for _, entry := range history {
+		if entry == nil || entry.ID == result.ID {
+			continue
+		}
+		next = append(next, cloneRestoreDrillResult(entry))
+		if len(next) >= restoreDrillHistoryLimit {
+			break
+		}
+	}
+	return next
+}
+
+func restoreDrillHistoryForView(state JobState) []*RestoreDrillResult {
+	if len(state.RestoreDrillHistory) > 0 {
+		return state.RestoreDrillHistory
+	}
+	if state.LastRestoreDrill == nil || state.LastRestoreDrill.Status == StatusRunning {
+		return nil
+	}
+	return []*RestoreDrillResult{state.LastRestoreDrill}
+}
+
+func buildRestoreDrillStats(history []*RestoreDrillResult) *RestoreDrillStats {
+	if len(history) == 0 {
+		return nil
+	}
+
+	stats := &RestoreDrillStats{}
+	var streakStatus string
+	for _, result := range history {
+		if result == nil || result.Status == StatusRunning {
+			continue
+		}
+		stats.TotalRuns++
+		finishedAt := restoreDrillFinishedAt(result)
+		switch result.Status {
+		case StatusCompleted:
+			stats.SuccessfulRuns++
+			if stats.LatestSuccessAt == nil {
+				value := finishedAt
+				stats.LatestSuccessAt = &value
+			}
+			if streakStatus == "" || streakStatus == StatusCompleted {
+				streakStatus = StatusCompleted
+				stats.ConsecutiveSuccesses++
+			}
+		case StatusFailed:
+			stats.FailedRuns++
+			if stats.LatestFailureAt == nil {
+				value := finishedAt
+				stats.LatestFailureAt = &value
+				stats.LastFailureMessage = result.ErrorMessage
+				stats.LastFailureCategory = result.FailureCategory
+			}
+			if streakStatus == "" || streakStatus == StatusFailed {
+				streakStatus = StatusFailed
+				stats.ConsecutiveFailures++
+			}
+		}
+		if streakStatus == StatusCompleted && result.Status != StatusCompleted {
+			stats.ConsecutiveFailures = 0
+		}
+		if streakStatus == StatusFailed && result.Status != StatusFailed {
+			stats.ConsecutiveSuccesses = 0
+		}
+	}
+	if stats.TotalRuns == 0 {
+		return nil
+	}
+	stats.SuccessRate = float64(stats.SuccessfulRuns) / float64(stats.TotalRuns)
+	return stats
 }
 
 func effectiveSource(job config.BackupJobConfig, storageRoot string) string {

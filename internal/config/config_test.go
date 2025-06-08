@@ -1082,6 +1082,63 @@ func TestConfig_ValidateBackupJobs(t *testing.T) {
 	}
 }
 
+func TestConfig_DirectoryQuotas(t *testing.T) {
+	cfg := Default()
+	cfg.Storage.DirectoryQuotas = []DirectoryQuotaConfig{
+		{Path: "/team", QuotaBytes: 1024},
+		{Path: "/", QuotaBytes: 4096},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		quota  DirectoryQuotaConfig
+		errSub string
+	}{
+		{name: "relative path", quota: DirectoryQuotaConfig{Path: "team", QuotaBytes: 1024}, errSub: "must be absolute"},
+		{name: "dirty path", quota: DirectoryQuotaConfig{Path: "/team/../other", QuotaBytes: 1024}, errSub: "must be clean"},
+		{name: "negative bytes", quota: DirectoryQuotaConfig{Path: "/team", QuotaBytes: -1}, errSub: "quota_bytes must be positive"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Storage.DirectoryQuotas = []DirectoryQuotaConfig{tt.quota}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.errSub) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.errSub)
+			}
+		})
+	}
+}
+
+func TestLoad_NormalizesDirectoryQuotaPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	data := []byte(`
+[storage]
+root = "` + filepath.ToSlash(filepath.Join(tmpDir, "data")) + `"
+directory_quotas = [
+  { path = "/team/", quota_bytes = 1048576 },
+]
+`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Storage.DirectoryQuotas) != 1 {
+		t.Fatalf("directory quotas count = %d, want 1", len(cfg.Storage.DirectoryQuotas))
+	}
+	if got := cfg.Storage.DirectoryQuotas[0].Path; got != "/team" {
+		t.Fatalf("directory quota path = %q, want /team", got)
+	}
+}
+
 func TestLoad_NormalizesBackupJobDurationFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageRoot := filepath.Join(tmpDir, "data")

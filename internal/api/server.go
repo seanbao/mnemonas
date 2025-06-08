@@ -156,6 +156,12 @@ type WebDAVRuntimeConfig struct {
 	Password            string
 	PasswordIsGenerated bool
 	UserStore           *auth.UserStore
+	DirectoryQuotas     []config.DirectoryQuotaConfig
+}
+
+func cloneWebDAVRuntimeConfig(cfg WebDAVRuntimeConfig) WebDAVRuntimeConfig {
+	cfg.DirectoryQuotas = append([]config.DirectoryQuotaConfig(nil), cfg.DirectoryQuotas...)
+	return cfg
 }
 
 func cloneConfigSnapshot(cfg *config.Config) *config.Config {
@@ -163,6 +169,7 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 		return nil
 	}
 	cloned := *cfg
+	cloned.Storage.DirectoryQuotas = append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...)
 	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
 	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
 	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
@@ -193,13 +200,13 @@ func (s *Server) storeConfig(cfg *config.Config) {
 func (s *Server) currentActiveWebDAV() WebDAVRuntimeConfig {
 	s.webdavMu.RLock()
 	defer s.webdavMu.RUnlock()
-	return s.activeWebDAV
+	return cloneWebDAVRuntimeConfig(s.activeWebDAV)
 }
 
 func (s *Server) storeActiveWebDAV(cfg WebDAVRuntimeConfig) {
 	s.webdavMu.Lock()
 	defer s.webdavMu.Unlock()
-	s.activeWebDAV = cfg
+	s.activeWebDAV = cloneWebDAVRuntimeConfig(cfg)
 }
 
 func webDAVUsesGeneratedPassword(cfg config.Config) bool {
@@ -641,6 +648,7 @@ func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.
 				"pruned_snapshots":       event.PrunedSnapshots,
 				"warnings":               event.Warnings,
 				"error_message":          event.ErrorMessage,
+				"failure_category":       event.FailureCategory,
 			},
 		}
 		if err := sender.SendEvent(ctx, alertEvent); err != nil {
@@ -1072,13 +1080,14 @@ func requestHasBody(r *http.Request) (bool, error) {
 
 func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConfig {
 	runtimeCfg := WebDAVRuntimeConfig{
-		Enabled:   cfg.WebDAV.Enabled,
-		Prefix:    cfg.WebDAV.Prefix,
-		ReadOnly:  cfg.WebDAV.ReadOnly,
-		AuthType:  cfg.WebDAV.AuthType,
-		Username:  cfg.WebDAV.Username,
-		Password:  cfg.WebDAV.Password,
-		UserStore: s.userStore,
+		Enabled:         cfg.WebDAV.Enabled,
+		Prefix:          cfg.WebDAV.Prefix,
+		ReadOnly:        cfg.WebDAV.ReadOnly,
+		AuthType:        cfg.WebDAV.AuthType,
+		Username:        cfg.WebDAV.Username,
+		Password:        cfg.WebDAV.Password,
+		UserStore:       s.userStore,
+		DirectoryQuotas: append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
 	}
 
 	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
@@ -1118,12 +1127,13 @@ func loadGeneratedWebDAVPassword(dataRoot string) (string, error) {
 
 func prepareWebDAVRuntimeConfig(cfg config.Config) (*WebDAVRuntimeConfig, error) {
 	runtimeCfg := WebDAVRuntimeConfig{
-		Enabled:  cfg.WebDAV.Enabled,
-		Prefix:   cfg.WebDAV.Prefix,
-		ReadOnly: cfg.WebDAV.ReadOnly,
-		AuthType: cfg.WebDAV.AuthType,
-		Username: cfg.WebDAV.Username,
-		Password: cfg.WebDAV.Password,
+		Enabled:         cfg.WebDAV.Enabled,
+		Prefix:          cfg.WebDAV.Prefix,
+		ReadOnly:        cfg.WebDAV.ReadOnly,
+		AuthType:        cfg.WebDAV.AuthType,
+		Username:        cfg.WebDAV.Username,
+		Password:        cfg.WebDAV.Password,
+		DirectoryQuotas: append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
 	}
 
 	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
@@ -2337,6 +2347,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
+			s.sendQuotaExceededAlertEvent(r.Context(), "upload", filePath, err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -2352,6 +2363,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
+			s.sendQuotaExceededAlertEvent(r.Context(), "upload", filePath, err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -2750,10 +2762,15 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.fs.Rename(r.Context(), fromPath, toPath); err != nil {
+	if err := s.moveResourceWithQuota(r.Context(), fromPath, toPath); err != nil {
 		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
 			markWorkspaceMutationWarningHeaders(w)
 		} else {
+			if errors.As(err, new(*quotaExceededError)) {
+				s.sendQuotaExceededAlertEvent(r.Context(), "move", toPath, err)
+				respondQuotaExceeded(w, err)
+				return
+			}
 			if isStorageConflict(err) {
 				if errors.Is(err, storage.ErrNotDir) {
 					Conflict(w, "parent path is not a directory")
@@ -2890,6 +2907,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.As(err, new(*quotaExceededError)) {
+			s.sendQuotaExceededAlertEvent(r.Context(), "copy", toPath, err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -3103,7 +3121,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
+	if err := s.restoreVersionWithQuota(r.Context(), filePath, hash); err != nil {
 		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
 			markWorkspaceMutationWarningHeaders(w)
 			s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{"hash": hash, "persistence_warning": "true"})
@@ -3124,6 +3142,11 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, storage.ErrNotDir) {
 			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if errors.As(err, new(*quotaExceededError)) {
+			s.sendQuotaExceededAlertEvent(r.Context(), "version_restore", filePath, err)
+			respondQuotaExceeded(w, err)
 			return
 		}
 		if isStorageNotFound(err) {
@@ -3221,9 +3244,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats := map[string]any{
-		"total_files_available":   false,
-		"storage_stats_available": false,
-		"disk_stats_available":    false,
+		"total_files_available":           false,
+		"storage_stats_available":         false,
+		"disk_stats_available":            false,
+		"directory_quota_stats_available": false,
 	}
 
 	if _, scoped, err := s.currentUserHomeDir(r.Context()); err != nil || scoped {
@@ -3246,6 +3270,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			addDiskStatsToMap(stats, diskStats)
 		} else {
 			s.logger.Warn().Err(err).Msg("failed to collect disk stats")
+		}
+
+		if quotaStats, err := s.directoryQuotaUsageStats(ctx); err == nil {
+			stats["directory_quota_stats_available"] = true
+			stats["directory_quotas"] = quotaStats
+		} else {
+			s.logger.Warn().Err(err).Msg("failed to collect directory quota stats")
 		}
 	}
 
@@ -3278,6 +3309,15 @@ func addDiskStatsToMap(target map[string]any, stats *storage.DiskStats) {
 	target["disk_usage_ratio"] = stats.UsageRatio
 	if stats.FileSystemType != "" {
 		target["disk_filesystem_type"] = stats.FileSystemType
+	}
+	if stats.MountPoint != "" {
+		target["disk_mount_point"] = stats.MountPoint
+	}
+	if stats.MountSource != "" {
+		target["disk_mount_source"] = stats.MountSource
+	}
+	if stats.MountOptions != "" {
+		target["disk_mount_options"] = stats.MountOptions
 	}
 	target["disk_native_data_checksum_support"] = stats.NativeDataChecksumSupport
 }
@@ -4554,6 +4594,11 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	if err != nil {
 		if errors.As(err, new(*quotaExceededError)) {
+			targetPath := ""
+			if item != nil {
+				targetPath = item.OriginalPath
+			}
+			s.sendQuotaExceededAlertEvent(r.Context(), "trash_restore", targetPath, err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -5742,7 +5787,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		"storage": map[string]interface{}{
-			"root": cfg.Storage.Root,
+			"root":             cfg.Storage.Root,
+			"directory_quotas": append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
 		},
 		"trash": map[string]interface{}{
 			"enabled":        cfg.Storage.Trash.Enabled,
@@ -5835,6 +5881,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 // UpdateSettingsRequest represents settings update request
 type UpdateSettingsRequest struct {
 	Server      *ServerSettingsUpdate      `json:"server,omitempty"`
+	Storage     *StorageSettingsUpdate     `json:"storage,omitempty"`
 	Trash       *TrashSettingsUpdate       `json:"trash,omitempty"`
 	Retention   *RetentionSettingsUpdate   `json:"retention,omitempty"`
 	Versioning  *VersioningSettingsUpdate  `json:"versioning,omitempty"`
@@ -5846,6 +5893,10 @@ type UpdateSettingsRequest struct {
 	DiskHealth  *DiskHealthSettingsUpdate  `json:"disk_health,omitempty"`
 	Maintenance *MaintenanceSettingsUpdate `json:"maintenance,omitempty"`
 	WebDAV      *WebDAVSettingsUpdate      `json:"webdav,omitempty"`
+}
+
+type StorageSettingsUpdate struct {
+	DirectoryQuotas *[]config.DirectoryQuotaConfig `json:"directory_quotas,omitempty"`
 }
 
 type ServerSettingsUpdate struct {
@@ -6106,6 +6157,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			if req.Server.TLS.CertDir != nil {
 				updatedConfig.Server.TLS.CertDir = *req.Server.TLS.CertDir
 			}
+		}
+	}
+
+	if req.Storage != nil {
+		if req.Storage.DirectoryQuotas != nil {
+			updatedConfig.Storage.DirectoryQuotas = config.NormalizeDirectoryQuotas(*req.Storage.DirectoryQuotas)
 		}
 	}
 
@@ -6440,7 +6497,8 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var preparedWebDAV *WebDAVRuntimeConfig
-	if req.WebDAV != nil {
+	webDAVRuntimeChanged := req.WebDAV != nil || req.Storage != nil
+	if webDAVRuntimeChanged {
 		resolvedWebDAV, resolveErr := prepareWebDAVRuntimeConfig(updatedConfig)
 		if resolveErr != nil {
 			s.logger.Error().Err(resolveErr).Msg("failed to resolve generated WebDAV password for updated config")
@@ -6566,7 +6624,7 @@ func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsReq
 		s.shareHandler.SetBaseURL(cfg.Share.BaseURL)
 	}
 
-	if req.WebDAV != nil {
+	if req.WebDAV != nil || req.Storage != nil {
 		runtimeCfg := s.resolveWebDAVRuntimeConfig(cfg)
 		if preparedWebDAV != nil {
 			runtimeCfg = *preparedWebDAV

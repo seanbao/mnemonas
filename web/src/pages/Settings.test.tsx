@@ -974,6 +974,59 @@ describe('SettingsPage', () => {
     })
   })
 
+  describe('directory quota settings', () => {
+    it('allows editing directory quotas and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_quotas: [{ path: '/team', quota_bytes: 1073741824 }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      expect(quotasInput).toHaveValue('/team 1 GB')
+
+      await user.clear(quotasInput)
+      await user.type(quotasInput, '/team 2 GB{enter}/media 512 MB')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          storage: {
+            directory_quotas: [
+              { path: '/team', quota_bytes: 2147483648 },
+              { path: '/media', quota_bytes: 536870912 },
+            ],
+          },
+        }))
+      })
+    })
+
+    it('rejects invalid directory quota lines before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      await user.type(quotasInput, 'team 1 GB')
+      await user.click(screen.getByText('保存设置'))
+
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '目录配额格式无效',
+      }))
+    })
+  })
+
   describe('trash settings', () => {
     it('allows editing trash retention policy and saves it', async () => {
     const user = userEvent.setup({ writeToClipboard: false })

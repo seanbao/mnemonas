@@ -7,9 +7,25 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/seanbao/mnemonas/internal/alerts"
 	"github.com/seanbao/mnemonas/internal/auth"
+	"github.com/seanbao/mnemonas/internal/config"
 	"github.com/seanbao/mnemonas/internal/storage"
+)
+
+const (
+	quotaExceededAlertType = "quota_exceeded"
+	quotaTypeUser          = "user"
+	quotaTypeDirectory     = "directory"
+
+	directoryQuotaStatusNormal   = "normal"
+	directoryQuotaStatusWarning  = "warning"
+	directoryQuotaStatusExceeded = "exceeded"
+	directoryQuotaStatusMissing  = "missing"
+
+	directoryQuotaWarningUsageRatio = 0.9
 )
 
 func pathWithinBase(basePath, targetPath string) bool {
@@ -71,6 +87,147 @@ func (s *Server) currentUserQuota(ctx context.Context) (homeDir string, quotaByt
 	}
 
 	return homeDir, user.QuotaBytes, true, nil
+}
+
+type quotaCheck struct {
+	QuotaType     string
+	QuotaPath     string
+	UsedBytes     int64
+	QuotaBytes    int64
+	RequiredBytes int64
+}
+
+type directoryQuotaUsageStat struct {
+	Path           string  `json:"path"`
+	QuotaBytes     int64   `json:"quota_bytes"`
+	UsedBytes      int64   `json:"used_bytes"`
+	AvailableBytes int64   `json:"available_bytes"`
+	UsageRatio     float64 `json:"usage_ratio"`
+	Exists         bool    `json:"exists"`
+	Status         string  `json:"status"`
+}
+
+func (c quotaCheck) availableBytes() int64 {
+	availableBytes := c.QuotaBytes - c.UsedBytes
+	if availableBytes < 0 {
+		return 0
+	}
+	return availableBytes
+}
+
+func (c quotaCheck) exceededError() *quotaExceededError {
+	return newQuotaExceededErrorFor(c.QuotaType, c.QuotaPath, c.UsedBytes, c.QuotaBytes, c.RequiredBytes, c.availableBytes())
+}
+
+func (s *Server) directoryQuotaRules() []config.DirectoryQuotaConfig {
+	cfg := s.currentConfig()
+	if cfg == nil || len(cfg.Storage.DirectoryQuotas) == 0 {
+		return nil
+	}
+	return append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...)
+}
+
+func directoryQuotaRulesForTarget(rules []config.DirectoryQuotaConfig, targetPath string) []config.DirectoryQuotaConfig {
+	if len(rules) == 0 {
+		return nil
+	}
+	matched := make([]config.DirectoryQuotaConfig, 0, len(rules))
+	for _, rule := range rules {
+		if rule.QuotaBytes <= 0 {
+			continue
+		}
+		if pathWithinBase(rule.Path, targetPath) {
+			matched = append(matched, rule)
+		}
+	}
+	return matched
+}
+
+func ensureQuotaCheckAvailable(check quotaCheck) error {
+	if check.RequiredBytes <= 0 {
+		return nil
+	}
+	if check.RequiredBytes > check.availableBytes() {
+		return check.exceededError()
+	}
+	return nil
+}
+
+func (s *Server) directoryQuotaChecksForRequiredBytes(ctx context.Context, targetPath string, requiredBytes int64) ([]quotaCheck, error) {
+	rules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), targetPath)
+	if len(rules) == 0 || requiredBytes <= 0 {
+		return nil, nil
+	}
+
+	checks := make([]quotaCheck, 0, len(rules))
+	for _, rule := range rules {
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			return nil, err
+		}
+		checks = append(checks, quotaCheck{
+			QuotaType:     quotaTypeDirectory,
+			QuotaPath:     rule.Path,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    rule.QuotaBytes,
+			RequiredBytes: requiredBytes,
+		})
+	}
+	return checks, nil
+}
+
+func (s *Server) directoryQuotaUsageStats(ctx context.Context) ([]directoryQuotaUsageStat, error) {
+	rules := s.directoryQuotaRules()
+	stats := make([]directoryQuotaUsageStat, 0, len(rules))
+	for _, rule := range rules {
+		info, err := s.fs.Stat(ctx, rule.Path)
+		if isStorageNotFound(err) {
+			stats = append(stats, newDirectoryQuotaUsageStat(rule, 0, false))
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		usedBytes, err := s.fileInfoLogicalSize(ctx, info)
+		if err != nil {
+			return nil, err
+		}
+		stats = append(stats, newDirectoryQuotaUsageStat(rule, usedBytes, true))
+	}
+	return stats, nil
+}
+
+func newDirectoryQuotaUsageStat(rule config.DirectoryQuotaConfig, usedBytes int64, exists bool) directoryQuotaUsageStat {
+	usedBytes = nonNegativeSize(usedBytes)
+	quotaBytes := nonNegativeSize(rule.QuotaBytes)
+	availableBytes := quotaBytes - usedBytes
+	if availableBytes < 0 {
+		availableBytes = 0
+	}
+
+	usageRatio := float64(0)
+	if quotaBytes > 0 {
+		usageRatio = float64(usedBytes) / float64(quotaBytes)
+	}
+
+	status := directoryQuotaStatusNormal
+	if !exists {
+		status = directoryQuotaStatusMissing
+	} else if quotaBytes > 0 && usedBytes >= quotaBytes {
+		status = directoryQuotaStatusExceeded
+	} else if usageRatio >= directoryQuotaWarningUsageRatio {
+		status = directoryQuotaStatusWarning
+	}
+
+	return directoryQuotaUsageStat{
+		Path:           rule.Path,
+		QuotaBytes:     quotaBytes,
+		UsedBytes:      usedBytes,
+		AvailableBytes: availableBytes,
+		UsageRatio:     usageRatio,
+		Exists:         exists,
+		Status:         status,
+	}
 }
 
 func (s *Server) resolveUserUsedBytes(ctx context.Context, user *auth.User) (int64, error) {
@@ -150,7 +307,8 @@ func (s *Server) quotaCheckedUploadReader(ctx context.Context, targetPath string
 	if err != nil {
 		return nil, nil, err
 	}
-	if !quotaScoped {
+	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), targetPath)
+	if !quotaScoped && len(directoryRules) == 0 {
 		return reader, func() {}, nil
 	}
 
@@ -159,36 +317,67 @@ func (s *Server) quotaCheckedUploadReader(ctx context.Context, targetPath string
 		s.quotaMu.Unlock()
 	}
 
-	usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
-	if err != nil {
-		unlock()
-		return nil, nil, err
-	}
-
 	replacedBytes, err := s.existingUploadTargetSize(ctx, targetPath)
 	if err != nil {
 		unlock()
 		return nil, nil, err
 	}
 
-	baseUsed := usedBytes - replacedBytes
-	if baseUsed < 0 {
-		baseUsed = 0
+	checks := make([]quotaCheck, 0, 1+len(directoryRules))
+	if quotaScoped {
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
+		if err != nil {
+			unlock()
+			return nil, nil, err
+		}
+		checks = append(checks, quotaCheck{
+			QuotaType:     quotaTypeUser,
+			QuotaPath:     homeDir,
+			UsedBytes:     usedBytes - replacedBytes,
+			QuotaBytes:    quotaBytes,
+			RequiredBytes: contentLength,
+		})
 	}
-	availableBytes := quotaBytes - baseUsed
-	if availableBytes < 0 {
-		availableBytes = 0
+	for _, rule := range directoryRules {
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			unlock()
+			return nil, nil, err
+		}
+		checks = append(checks, quotaCheck{
+			QuotaType:     quotaTypeDirectory,
+			QuotaPath:     rule.Path,
+			UsedBytes:     usedBytes - replacedBytes,
+			QuotaBytes:    rule.QuotaBytes,
+			RequiredBytes: contentLength,
+		})
 	}
 
-	if contentLength >= 0 && contentLength > availableBytes {
-		unlock()
-		return nil, nil, newQuotaExceededError(usedBytes, quotaBytes, contentLength, availableBytes)
+	var streamLimit *quotaCheck
+	for i := range checks {
+		if checks[i].UsedBytes < 0 {
+			checks[i].UsedBytes = 0
+		}
+		if contentLength >= 0 {
+			if err := ensureQuotaCheckAvailable(checks[i]); err != nil {
+				unlock()
+				return nil, nil, err
+			}
+		}
+		if streamLimit == nil || checks[i].availableBytes() < streamLimit.availableBytes() {
+			streamLimit = &checks[i]
+		}
 	}
+	if streamLimit == nil {
+		unlock()
+		return reader, func() {}, nil
+	}
+	streamErr := newQuotaExceededErrorFor(streamLimit.QuotaType, streamLimit.QuotaPath, streamLimit.UsedBytes, streamLimit.QuotaBytes, quotaStreamRequiredBytes(streamLimit.availableBytes()), streamLimit.availableBytes())
 
 	return &quotaLimitedReader{
 		reader:    reader,
-		remaining: availableBytes,
-		err:       newQuotaExceededError(usedBytes, quotaBytes, quotaStreamRequiredBytes(availableBytes), availableBytes),
+		remaining: streamLimit.availableBytes(),
+		err:       streamErr,
 	}, unlock, nil
 }
 
@@ -211,23 +400,41 @@ func (s *Server) copyResourceWithQuota(ctx context.Context, srcPath, dstPath str
 	if err != nil {
 		return err
 	}
-	if !quotaScoped {
+	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), dstPath)
+	if !quotaScoped && len(directoryRules) == 0 {
 		return s.copyResource(ctx, srcPath, dstPath)
 	}
 
 	s.quotaMu.Lock()
 	defer s.quotaMu.Unlock()
 
-	usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
-	if err != nil {
-		return err
-	}
 	requiredBytes, err := s.pathLogicalSize(ctx, srcPath)
 	if err != nil {
 		return err
 	}
-	if err := ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes); err != nil {
+	if quotaScoped {
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
+		if err != nil {
+			return err
+		}
+		if err := ensureQuotaCheckAvailable(quotaCheck{
+			QuotaType:     quotaTypeUser,
+			QuotaPath:     homeDir,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    quotaBytes,
+			RequiredBytes: requiredBytes,
+		}); err != nil {
+			return err
+		}
+	}
+	checks, err := s.directoryQuotaChecksForRequiredBytes(ctx, dstPath, requiredBytes)
+	if err != nil {
 		return err
+	}
+	for _, check := range checks {
+		if err := ensureQuotaCheckAvailable(check); err != nil {
+			return err
+		}
 	}
 
 	return s.copyResource(ctx, srcPath, dstPath)
@@ -238,26 +445,134 @@ func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.Tr
 	if err != nil {
 		return err
 	}
-	if !quotaScoped {
+	targetPath := ""
+	if item != nil {
+		targetPath = item.OriginalPath
+	}
+	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), targetPath)
+	if !quotaScoped && len(directoryRules) == 0 {
 		return restore()
 	}
 
 	s.quotaMu.Lock()
 	defer s.quotaMu.Unlock()
 
-	usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
-	if err != nil {
-		return err
-	}
 	requiredBytes := int64(0)
 	if item != nil {
 		requiredBytes = nonNegativeSize(item.Size)
 	}
-	if err := ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes); err != nil {
+	if quotaScoped {
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
+		if err != nil {
+			return err
+		}
+		if err := ensureQuotaCheckAvailable(quotaCheck{
+			QuotaType:     quotaTypeUser,
+			QuotaPath:     homeDir,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    quotaBytes,
+			RequiredBytes: requiredBytes,
+		}); err != nil {
+			return err
+		}
+	}
+	checks, err := s.directoryQuotaChecksForRequiredBytes(ctx, targetPath, requiredBytes)
+	if err != nil {
 		return err
+	}
+	for _, check := range checks {
+		if err := ensureQuotaCheckAvailable(check); err != nil {
+			return err
+		}
 	}
 
 	return restore()
+}
+
+func (s *Server) moveResourceWithQuota(ctx context.Context, srcPath, dstPath string) error {
+	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), dstPath)
+	if len(directoryRules) == 0 {
+		return s.fs.Rename(ctx, srcPath, dstPath)
+	}
+
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+
+	requiredBytes, err := s.pathLogicalSize(ctx, srcPath)
+	if err != nil {
+		return err
+	}
+	for _, rule := range directoryRules {
+		if pathWithinBase(rule.Path, srcPath) {
+			continue
+		}
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			return err
+		}
+		if err := ensureQuotaCheckAvailable(quotaCheck{
+			QuotaType:     quotaTypeDirectory,
+			QuotaPath:     rule.Path,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    rule.QuotaBytes,
+			RequiredBytes: requiredBytes,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return s.fs.Rename(ctx, srcPath, dstPath)
+}
+
+func (s *Server) restoreVersionWithQuota(ctx context.Context, filePath, hash string) error {
+	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), filePath)
+	if len(directoryRules) == 0 {
+		return s.fs.RestoreVersion(ctx, filePath, hash)
+	}
+
+	versions, err := s.fs.ListVersions(ctx, filePath)
+	if err != nil {
+		return err
+	}
+	currentSize := int64(0)
+	if len(versions) > 0 {
+		currentSize = nonNegativeSize(versions[0].Size)
+	}
+	restoredSize := int64(-1)
+	for _, version := range versions {
+		if strings.EqualFold(version.Hash, hash) {
+			restoredSize = nonNegativeSize(version.Size)
+			break
+		}
+	}
+	if restoredSize < 0 {
+		return storage.ErrVersionNotFound
+	}
+	requiredBytes := restoredSize - currentSize
+	if requiredBytes < 0 {
+		requiredBytes = 0
+	}
+
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+
+	for _, rule := range directoryRules {
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, rule.Path)
+		if err != nil {
+			return err
+		}
+		if err := ensureQuotaCheckAvailable(quotaCheck{
+			QuotaType:     quotaTypeDirectory,
+			QuotaPath:     rule.Path,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    rule.QuotaBytes,
+			RequiredBytes: requiredBytes,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return s.fs.RestoreVersion(ctx, filePath, hash)
 }
 
 func ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes int64) error {
@@ -273,6 +588,10 @@ func ensureQuotaAvailable(usedBytes, quotaBytes, requiredBytes int64) error {
 }
 
 func newQuotaExceededError(usedBytes, quotaBytes, requiredBytes, availableBytes int64) *quotaExceededError {
+	return newQuotaExceededErrorFor(quotaTypeUser, "", usedBytes, quotaBytes, requiredBytes, availableBytes)
+}
+
+func newQuotaExceededErrorFor(quotaType, quotaPath string, usedBytes, quotaBytes, requiredBytes, availableBytes int64) *quotaExceededError {
 	if usedBytes < 0 {
 		usedBytes = 0
 	}
@@ -286,6 +605,8 @@ func newQuotaExceededError(usedBytes, quotaBytes, requiredBytes, availableBytes 
 		availableBytes = 0
 	}
 	return &quotaExceededError{
+		QuotaType:      quotaType,
+		QuotaPath:      quotaPath,
 		UsedBytes:      usedBytes,
 		QuotaBytes:     quotaBytes,
 		RequiredBytes:  requiredBytes,
@@ -329,13 +650,18 @@ func (r *quotaLimitedReader) Read(p []byte) (int, error) {
 }
 
 type quotaExceededError struct {
-	UsedBytes      int64 `json:"used_bytes"`
-	QuotaBytes     int64 `json:"quota_bytes"`
-	RequiredBytes  int64 `json:"required_bytes"`
-	AvailableBytes int64 `json:"available_bytes"`
+	QuotaType      string `json:"quota_type,omitempty"`
+	QuotaPath      string `json:"quota_path,omitempty"`
+	UsedBytes      int64  `json:"used_bytes"`
+	QuotaBytes     int64  `json:"quota_bytes"`
+	RequiredBytes  int64  `json:"required_bytes"`
+	AvailableBytes int64  `json:"available_bytes"`
 }
 
 func (e *quotaExceededError) Error() string {
+	if e != nil && e.QuotaType == quotaTypeDirectory {
+		return "directory quota exceeded"
+	}
 	return "user quota exceeded"
 }
 
@@ -345,9 +671,55 @@ func respondQuotaExceeded(w http.ResponseWriter, err error) {
 	if errors.As(err, &quotaErr) {
 		details = quotaErr
 	}
-	apiErr := NewAPIError(ErrCodeQuotaExceeded, "user quota exceeded")
+	apiErr := NewAPIError(ErrCodeQuotaExceeded, quotaExceededMessage(quotaErr))
 	if details != nil {
 		apiErr = apiErr.WithDetails(details)
 	}
 	apiErr.Write(w, http.StatusInsufficientStorage)
+}
+
+func quotaExceededMessage(err *quotaExceededError) string {
+	if err == nil {
+		return "quota exceeded"
+	}
+	return err.Error()
+}
+
+func (s *Server) sendQuotaExceededAlertEvent(ctx context.Context, operation, targetPath string, err error) {
+	var quotaErr *quotaExceededError
+	if !errors.As(err, &quotaErr) {
+		return
+	}
+	sender, ok := s.alertMonitor.(AlertEventSender)
+	if !ok || sender == nil {
+		return
+	}
+
+	username := ""
+	homeDir := ""
+	if user := auth.GetUserFromContext(ctx); user != nil {
+		username = user.Username
+		homeDir = user.HomeDir
+	}
+	event := alerts.EventPayload{
+		Type:      quotaExceededAlertType,
+		Level:     alerts.AlertLevelWarning,
+		Message:   "user quota exceeded",
+		Timestamp: time.Now().UTC(),
+		Details: map[string]any{
+			"operation":       operation,
+			"target_path":     targetPath,
+			"username":        username,
+			"home_dir":        homeDir,
+			"quota_type":      quotaErr.QuotaType,
+			"quota_path":      quotaErr.QuotaPath,
+			"used_bytes":      quotaErr.UsedBytes,
+			"quota_bytes":     quotaErr.QuotaBytes,
+			"required_bytes":  quotaErr.RequiredBytes,
+			"available_bytes": quotaErr.AvailableBytes,
+		},
+	}
+	if sendErr := sender.SendEvent(context.WithoutCancel(ctx), event); sendErr != nil {
+		s.logger.Warn().Err(sendErr).Str("event_type", event.Type).Msg("failed to send quota alert event")
+	}
 }

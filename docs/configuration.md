@@ -235,18 +235,23 @@ auto_generate = true
 | 选项 | 类型 | 默认值 | 说明 |
 | ---- | ---- | ------ | ---- |
 | `root` | string | `~/.mnemonas` | 存储根目录（用户文件在 `root/files`） |
+| `directory_quotas` | array | `[]` | 目录级容量配额；每项包含 `path` 和 `quota_bytes` |
 
 **存储目录说明：**
 
 - **root**: 存储根目录，不能设置为文件系统根目录 `/`。用户文件位于 `root/files`，内部数据位于 `root/.mnemonas`
 - 内部数据目录结构固定在 `root/.mnemonas` 下。
 - 启动时会将 `root` 和 `root/files` 权限收紧为 `0750`，内部目录为 `0700`。
+- `directory_quotas` 使用 MnemoNAS 逻辑路径，例如 `/team`。上传、复制、移动、回收站恢复、版本恢复和 WebDAV PUT/COPY/MOVE 会在写入前检查当前目录逻辑大小。根目录 `/` 可用于设置全局硬限制。管理员可在存储页查看每个目录配额的当前用量、剩余额度和状态。
 
 **示例：**
 
 ```toml
 [storage]
 root = "~/.mnemonas"
+directory_quotas = [
+  { path = "/team", quota_bytes = 1099511627776 }, # 1 TiB
+]
 ```
 
 ---
