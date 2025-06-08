@@ -34,11 +34,16 @@ const (
 	StatusCompleted = "completed"
 	StatusFailed    = "failed"
 
+	RestorePreflightPassed  = "passed"
+	RestorePreflightWarning = "warning"
+	RestorePreflightFailed  = "failed"
+
 	NotificationLevelWarning  = "warning"
 	NotificationLevelCritical = "critical"
 
 	NotificationTypeBackupRun    = "backup_run"
 	NotificationTypeRestoreDrill = "backup_restore_drill"
+	NotificationTypeRetention    = "backup_retention_check"
 	NotificationTriggerReminder  = "restore_drill_reminder"
 
 	stateFileName                 = "status.json"
@@ -54,6 +59,8 @@ const (
 	externalCommandStderrLimit   = 4096
 	externalCommandStdoutLimit   = 4 * 1024 * 1024
 )
+
+var restoreAvailableBytesFunc = restoreAvailableBytes
 
 var (
 	ErrJobNotFound           = errors.New("backup job not found")
@@ -115,51 +122,69 @@ type persistedState struct {
 
 // JobState contains the latest persisted status for a configured job.
 type JobState struct {
-	LastRun                    *RunResult          `json:"last_run,omitempty"`
-	LastSuccessfulRun          *RunResult          `json:"last_successful_run,omitempty"`
-	LastRestoreDrill           *RestoreDrillResult `json:"last_restore_drill,omitempty"`
-	LastRestore                *RestoreResult      `json:"last_restore,omitempty"`
-	RestoreHistory             []*RestoreResult    `json:"restore_history,omitempty"`
-	LastScheduledRunAt         *time.Time          `json:"last_scheduled_run_at,omitempty"`
-	LastRestoreDrillReminderAt *time.Time          `json:"last_restore_drill_reminder_at,omitempty"`
+	LastRun                    *RunResult            `json:"last_run,omitempty"`
+	LastSuccessfulRun          *RunResult            `json:"last_successful_run,omitempty"`
+	LastRestoreDrill           *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
+	LastRestore                *RestoreResult        `json:"last_restore,omitempty"`
+	LastRestoreVerify          *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
+	RestoreHistory             []*RestoreResult      `json:"restore_history,omitempty"`
+	LastRetentionCheck         *RetentionCheckResult `json:"last_retention_check,omitempty"`
+	LastScheduledRunAt         *time.Time            `json:"last_scheduled_run_at,omitempty"`
+	LastRestoreDrillReminderAt *time.Time            `json:"last_restore_drill_reminder_at,omitempty"`
 }
 
 // JobView is returned by the API for configured backup jobs.
 type JobView struct {
-	ID                         string              `json:"id"`
-	Name                       string              `json:"name"`
-	Type                       string              `json:"type"`
-	Source                     string              `json:"source"`
-	Destination                string              `json:"destination"`
-	Repository                 string              `json:"repository,omitempty"`
-	Remote                     string              `json:"remote,omitempty"`
-	Command                    string              `json:"command,omitempty"`
-	Disabled                   bool                `json:"disabled"`
-	ScheduleInterval           string              `json:"schedule_interval,omitempty"`
-	ScheduleWindowStart        string              `json:"schedule_window_start,omitempty"`
-	ScheduleWindowEnd          string              `json:"schedule_window_end,omitempty"`
-	NextRunAt                  *time.Time          `json:"next_run_at,omitempty"`
-	StaleAfter                 string              `json:"stale_after,omitempty"`
-	RestoreDrillStaleAfter     string              `json:"restore_drill_stale_after,omitempty"`
-	MaxSnapshots               int                 `json:"max_snapshots,omitempty"`
-	MaxAge                     string              `json:"max_age,omitempty"`
-	RetentionPolicy            string              `json:"retention_policy,omitempty"`
-	RetentionStatus            string              `json:"retention_status"`
-	RetentionMessage           string              `json:"retention_message,omitempty"`
-	HealthStatus               string              `json:"health_status"`
-	HealthMessage              string              `json:"health_message,omitempty"`
-	RestoreDrillStatus         string              `json:"restore_drill_status"`
-	RestoreDrillMessage        string              `json:"restore_drill_message,omitempty"`
-	LastRestoreDrillReminderAt *time.Time          `json:"last_restore_drill_reminder_at,omitempty"`
-	IncludeConfig              bool                `json:"include_config"`
-	VerifyAfterBackup          bool                `json:"verify_after_backup"`
-	Exclude                    []string            `json:"exclude"`
-	Running                    bool                `json:"running"`
-	LastRun                    *RunResult          `json:"last_run,omitempty"`
-	LastSuccessfulRun          *RunResult          `json:"last_successful_run,omitempty"`
-	LastRestoreDrill           *RestoreDrillResult `json:"last_restore_drill,omitempty"`
-	LastRestore                *RestoreResult      `json:"last_restore,omitempty"`
-	RestoreHistory             []*RestoreResult    `json:"restore_history,omitempty"`
+	ID                         string                `json:"id"`
+	Name                       string                `json:"name"`
+	Type                       string                `json:"type"`
+	Source                     string                `json:"source"`
+	Destination                string                `json:"destination"`
+	Repository                 string                `json:"repository,omitempty"`
+	Remote                     string                `json:"remote,omitempty"`
+	Command                    string                `json:"command,omitempty"`
+	Disabled                   bool                  `json:"disabled"`
+	ScheduleInterval           string                `json:"schedule_interval,omitempty"`
+	ScheduleWindowStart        string                `json:"schedule_window_start,omitempty"`
+	ScheduleWindowEnd          string                `json:"schedule_window_end,omitempty"`
+	NextRunAt                  *time.Time            `json:"next_run_at,omitempty"`
+	StaleAfter                 string                `json:"stale_after,omitempty"`
+	RestoreDrillStaleAfter     string                `json:"restore_drill_stale_after,omitempty"`
+	MaxSnapshots               int                   `json:"max_snapshots,omitempty"`
+	MaxAge                     string                `json:"max_age,omitempty"`
+	RetentionPolicy            string                `json:"retention_policy,omitempty"`
+	RetentionStatus            string                `json:"retention_status"`
+	RetentionMessage           string                `json:"retention_message,omitempty"`
+	HealthStatus               string                `json:"health_status"`
+	HealthMessage              string                `json:"health_message,omitempty"`
+	RestoreDrillStatus         string                `json:"restore_drill_status"`
+	RestoreDrillMessage        string                `json:"restore_drill_message,omitempty"`
+	LastRestoreDrillReminderAt *time.Time            `json:"last_restore_drill_reminder_at,omitempty"`
+	IncludeConfig              bool                  `json:"include_config"`
+	VerifyAfterBackup          bool                  `json:"verify_after_backup"`
+	Exclude                    []string              `json:"exclude"`
+	Running                    bool                  `json:"running"`
+	LastRun                    *RunResult            `json:"last_run,omitempty"`
+	LastSuccessfulRun          *RunResult            `json:"last_successful_run,omitempty"`
+	LastRestoreDrill           *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
+	LastRestore                *RestoreResult        `json:"last_restore,omitempty"`
+	LastRestoreVerify          *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
+	RestoreHistory             []*RestoreResult      `json:"restore_history,omitempty"`
+	LastRetentionCheck         *RetentionCheckResult `json:"last_retention_check,omitempty"`
+}
+
+// RestoreReport is an exportable audit summary for one backup job.
+type RestoreReport struct {
+	GeneratedAt        time.Time             `json:"generated_at"`
+	Job                JobView               `json:"job"`
+	LastRun            *RunResult            `json:"last_run,omitempty"`
+	LastSuccessfulRun  *RunResult            `json:"last_successful_run,omitempty"`
+	LastRetentionCheck *RetentionCheckResult `json:"last_retention_check,omitempty"`
+	LastRestoreDrill   *RestoreDrillResult   `json:"last_restore_drill,omitempty"`
+	LastRestore        *RestoreResult        `json:"last_restore,omitempty"`
+	LastRestoreVerify  *RestoreVerifyResult  `json:"last_restore_verify,omitempty"`
+	RestoreHistory     []*RestoreResult      `json:"restore_history,omitempty"`
+	Findings           []string              `json:"findings,omitempty"`
 }
 
 // ScheduledRunResult describes one due job handled by the scheduler loop.
@@ -190,6 +215,7 @@ type NotificationEvent struct {
 	FileCount           int64      `json:"file_count,omitempty"`
 	TotalBytes          int64      `json:"total_bytes,omitempty"`
 	VerifiedBytes       int64      `json:"verified_bytes,omitempty"`
+	SnapshotCount       int        `json:"snapshot_count,omitempty"`
 	LastSuccessfulRunAt *time.Time `json:"last_successful_run_at,omitempty"`
 	LastRestoreDrillAt  *time.Time `json:"last_restore_drill_at,omitempty"`
 	StaleAfter          string     `json:"stale_after,omitempty"`
@@ -261,25 +287,57 @@ type RestoreVerifyOptions struct {
 	TargetPath string `json:"target_path"`
 }
 
+// RetentionCheckResult records one retention-policy inspection for a backup job.
+type RetentionCheckResult struct {
+	ID               string     `json:"id"`
+	JobID            string     `json:"job_id"`
+	Status           string     `json:"status"`
+	StartedAt        time.Time  `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	DurationMs       int64      `json:"duration_ms"`
+	Target           string     `json:"target"`
+	Policy           string     `json:"policy,omitempty"`
+	SnapshotCount    int        `json:"snapshot_count,omitempty"`
+	FileCount        int64      `json:"file_count,omitempty"`
+	TotalBytes       int64      `json:"total_bytes,omitempty"`
+	OldestSnapshotAt *time.Time `json:"oldest_snapshot_at,omitempty"`
+	LatestSnapshotAt *time.Time `json:"latest_snapshot_at,omitempty"`
+	Warning          bool       `json:"warning,omitempty"`
+	Warnings         []string   `json:"warnings,omitempty"`
+	ErrorMessage     string     `json:"error_message,omitempty"`
+}
+
+// RestorePreflightCheck describes one safety gate before an explicit restore.
+type RestorePreflightCheck struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Title  string `json:"title"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // RestorePreviewResult records a non-destructive estimate for an explicit restore.
 type RestorePreviewResult struct {
-	ID              string     `json:"id"`
-	JobID           string     `json:"job_id"`
-	Status          string     `json:"status"`
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	DurationMs      int64      `json:"duration_ms"`
-	Source          string     `json:"source"`
-	Destination     string     `json:"destination"`
-	SnapshotPath    string     `json:"snapshot_path,omitempty"`
-	ManifestPath    string     `json:"manifest_path,omitempty"`
-	TargetPath      string     `json:"target_path"`
-	FileCount       int64      `json:"file_count"`
-	TotalBytes      int64      `json:"total_bytes"`
-	ConfigAvailable bool       `json:"config_available"`
-	ConfigIncluded  bool       `json:"config_included"`
-	SamplePaths     []string   `json:"sample_paths,omitempty"`
-	ErrorMessage    string     `json:"error_message,omitempty"`
+	ID                string                  `json:"id"`
+	JobID             string                  `json:"job_id"`
+	Status            string                  `json:"status"`
+	StartedAt         time.Time               `json:"started_at"`
+	FinishedAt        *time.Time              `json:"finished_at,omitempty"`
+	DurationMs        int64                   `json:"duration_ms"`
+	Source            string                  `json:"source"`
+	Destination       string                  `json:"destination"`
+	SnapshotPath      string                  `json:"snapshot_path,omitempty"`
+	ManifestPath      string                  `json:"manifest_path,omitempty"`
+	TargetPath        string                  `json:"target_path"`
+	FileCount         int64                   `json:"file_count"`
+	TotalBytes        int64                   `json:"total_bytes"`
+	ConfigAvailable   bool                    `json:"config_available"`
+	ConfigIncluded    bool                    `json:"config_included"`
+	SamplePaths       []string                `json:"sample_paths,omitempty"`
+	PreflightChecks   []RestorePreflightCheck `json:"preflight_checks,omitempty"`
+	Warnings          []string                `json:"warnings,omitempty"`
+	CutoverChecklist  []string                `json:"cutover_checklist,omitempty"`
+	RollbackChecklist []string                `json:"rollback_checklist,omitempty"`
+	ErrorMessage      string                  `json:"error_message,omitempty"`
 }
 
 // RestoreVerifyResult records a read-only verification of an explicit restore target.
@@ -308,20 +366,24 @@ type RestoreVerifyResult struct {
 
 // RestoreResult records one explicit snapshot restore.
 type RestoreResult struct {
-	ID             string     `json:"id"`
-	JobID          string     `json:"job_id"`
-	Status         string     `json:"status"`
-	StartedAt      time.Time  `json:"started_at"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	DurationMs     int64      `json:"duration_ms"`
-	SnapshotPath   string     `json:"snapshot_path,omitempty"`
-	ManifestPath   string     `json:"manifest_path,omitempty"`
-	TargetPath     string     `json:"target_path"`
-	ConfigRestored bool       `json:"config_restored"`
-	ConfigPath     string     `json:"config_path,omitempty"`
-	FileCount      int64      `json:"file_count"`
-	VerifiedBytes  int64      `json:"verified_bytes"`
-	ErrorMessage   string     `json:"error_message,omitempty"`
+	ID                string                  `json:"id"`
+	JobID             string                  `json:"job_id"`
+	Status            string                  `json:"status"`
+	StartedAt         time.Time               `json:"started_at"`
+	FinishedAt        *time.Time              `json:"finished_at,omitempty"`
+	DurationMs        int64                   `json:"duration_ms"`
+	SnapshotPath      string                  `json:"snapshot_path,omitempty"`
+	ManifestPath      string                  `json:"manifest_path,omitempty"`
+	TargetPath        string                  `json:"target_path"`
+	ConfigRestored    bool                    `json:"config_restored"`
+	ConfigPath        string                  `json:"config_path,omitempty"`
+	FileCount         int64                   `json:"file_count"`
+	VerifiedBytes     int64                   `json:"verified_bytes"`
+	PreflightChecks   []RestorePreflightCheck `json:"preflight_checks,omitempty"`
+	Warnings          []string                `json:"warnings,omitempty"`
+	CutoverChecklist  []string                `json:"cutover_checklist,omitempty"`
+	RollbackChecklist []string                `json:"rollback_checklist,omitempty"`
+	ErrorMessage      string                  `json:"error_message,omitempty"`
 }
 
 // Manifest describes a completed local snapshot.
@@ -458,6 +520,19 @@ func (m *Manager) runJobWithTrigger(ctx context.Context, id string, trigger stri
 			result.Warnings = append(result.Warnings, warnings...)
 		}
 	}
+	if err == nil {
+		retentionCheck, checkErr := m.runRetentionCheckForJob(ctx, job, false)
+		if retentionCheck != nil && (retentionCheck.Warning || retentionCheck.Status == StatusFailed) {
+			result.Warning = true
+			if retentionCheck.ErrorMessage != "" {
+				result.Warnings = append(result.Warnings, "保留策略检测失败: "+retentionCheck.ErrorMessage)
+			}
+			result.Warnings = append(result.Warnings, retentionCheck.Warnings...)
+		} else if checkErr != nil {
+			result.Warning = true
+			result.Warnings = append(result.Warnings, "保留策略检测失败: "+checkErr.Error())
+		}
+	}
 	finishedAt := m.now().UTC()
 	result.FinishedAt = &finishedAt
 	result.DurationMs = finishedAt.Sub(result.StartedAt).Milliseconds()
@@ -579,7 +654,24 @@ func (m *Manager) RunRestoreVerify(ctx context.Context, id string, opts RestoreV
 	} else {
 		result.Status = StatusCompleted
 	}
+	if saveErr := m.updateLastRestoreVerify(result); saveErr != nil {
+		if err != nil {
+			return cloneRestoreVerifyResult(result), errors.Join(err, saveErr)
+		}
+		return cloneRestoreVerifyResult(result), saveErr
+	}
 	return cloneRestoreVerifyResult(result), err
+}
+
+// RunRetentionCheck inspects the configured retention boundary for a backup job.
+func (m *Manager) RunRetentionCheck(ctx context.Context, id string) (*RetentionCheckResult, error) {
+	job, err := m.beginJob(id)
+	if err != nil {
+		return nil, err
+	}
+	defer m.endJob(id)
+
+	return m.runRetentionCheckForJob(ctx, job, true)
 }
 
 // RunRestore restores a completed backup into a caller-chosen target directory.
@@ -602,6 +694,22 @@ func (m *Manager) RunRestore(ctx context.Context, id string, opts RestoreOptions
 		TargetPath: targetPath,
 	}
 	_ = m.updateLastRestore(result, false)
+
+	preflightErr := m.runRestorePreflight(ctx, job, opts, result)
+	if preflightErr == nil {
+		preflightErr = firstFailedRestorePreflight(result.PreflightChecks)
+	}
+	if preflightErr != nil {
+		finishedAt := m.now().UTC()
+		result.FinishedAt = &finishedAt
+		result.DurationMs = finishedAt.Sub(result.StartedAt).Milliseconds()
+		result.Status = StatusFailed
+		result.ErrorMessage = preflightErr.Error()
+		if saveErr := m.updateLastRestore(result, true); saveErr != nil {
+			return cloneRestoreResult(result), errors.Join(preflightErr, saveErr)
+		}
+		return cloneRestoreResult(result), preflightErr
+	}
 
 	err = m.runRestore(ctx, job, opts, result)
 	finishedAt := m.now().UTC()
@@ -682,6 +790,42 @@ func (m *Manager) notifyRestoreDrill(ctx context.Context, job config.BackupJobCo
 		ManifestPath:  result.ManifestPath,
 		FileCount:     result.FileCount,
 		VerifiedBytes: result.VerifiedBytes,
+		ErrorMessage:  result.ErrorMessage,
+		Timestamp:     time.Now().UTC(),
+	})
+}
+
+func (m *Manager) notifyRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) {
+	if m.notifier == nil || result == nil {
+		return
+	}
+	if result.Status != StatusFailed && !result.Warning {
+		return
+	}
+
+	level := NotificationLevelWarning
+	message := fmt.Sprintf("备份任务 %s 保留策略需要关注", job.Name)
+	if result.Status == StatusFailed {
+		level = NotificationLevelCritical
+		message = fmt.Sprintf("备份任务 %s 保留策略检测失败", job.Name)
+	}
+
+	_ = m.notifier.NotifyBackupEvent(context.WithoutCancel(ctx), NotificationEvent{
+		Type:          NotificationTypeRetention,
+		Level:         level,
+		Message:       message,
+		JobID:         job.ID,
+		JobName:       job.Name,
+		JobType:       job.Type,
+		RunID:         result.ID,
+		Status:        result.Status,
+		StartedAt:     result.StartedAt,
+		FinishedAt:    result.FinishedAt,
+		Destination:   result.Target,
+		SnapshotCount: result.SnapshotCount,
+		FileCount:     result.FileCount,
+		TotalBytes:    result.TotalBytes,
+		Warnings:      append([]string(nil), result.Warnings...),
 		ErrorMessage:  result.ErrorMessage,
 		Timestamp:     time.Now().UTC(),
 	})
@@ -823,7 +967,7 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 	nextRunAt := m.nextRunAtLocked(job, state)
 	healthStatus, healthMessage := m.healthLocked(job, state, running, m.now().UTC())
 	restoreDrillStatus, restoreDrillMessage := m.restoreDrillHealthLocked(job, state, m.now().UTC())
-	retentionStatus, retentionMessage := retentionHealth(job)
+	retentionStatus, retentionMessage := retentionHealth(job, state)
 	return JobView{
 		ID:                         job.ID,
 		Name:                       job.Name,
@@ -858,7 +1002,9 @@ func (m *Manager) jobViewLocked(id string, job config.BackupJobConfig) JobView {
 		LastSuccessfulRun:          cloneRunResult(state.LastSuccessfulRun),
 		LastRestoreDrill:           cloneRestoreDrillResult(state.LastRestoreDrill),
 		LastRestore:                cloneRestoreResult(state.LastRestore),
+		LastRestoreVerify:          cloneRestoreVerifyResult(state.LastRestoreVerify),
 		RestoreHistory:             cloneRestoreResults(state.RestoreHistory),
+		LastRetentionCheck:         cloneRetentionCheckResult(state.LastRetentionCheck),
 	}
 }
 
@@ -1107,6 +1253,7 @@ func (m *Manager) runLocalRestorePreview(ctx context.Context, job config.BackupJ
 	result.ConfigAvailable = configAvailable
 	result.ConfigIncluded = configIncluded
 	result.SamplePaths = samples
+	attachRestorePreflight(job, targetPath, result)
 	return nil
 }
 
@@ -1140,6 +1287,7 @@ func (m *Manager) runRcloneRestorePreview(ctx context.Context, job config.Backup
 	result.FileCount = fileCount
 	result.TotalBytes = totalBytes
 	result.SamplePaths = samples
+	attachRestorePreflight(job, targetPath, result)
 	return nil
 }
 
@@ -1185,6 +1333,7 @@ func (m *Manager) runResticRestorePreview(ctx context.Context, job config.Backup
 	result.FileCount = fileCount
 	result.TotalBytes = totalBytes
 	result.SamplePaths = samples
+	attachRestorePreflight(job, targetPath, result)
 	return nil
 }
 
@@ -1456,6 +1605,158 @@ func (m *Manager) runRcloneRestoreDrill(ctx context.Context, job config.BackupJo
 	return nil
 }
 
+func (m *Manager) runRetentionCheckForJob(ctx context.Context, job config.BackupJobConfig, notify bool) (*RetentionCheckResult, error) {
+	startedAt := m.now().UTC()
+	result := &RetentionCheckResult{
+		ID:        formatRunID(startedAt),
+		JobID:     job.ID,
+		Status:    StatusRunning,
+		StartedAt: startedAt,
+		Target:    backupTarget(job),
+		Policy:    job.RetentionPolicy,
+	}
+	_ = m.updateLastRetentionCheck(result)
+
+	err := m.runRetentionCheck(ctx, job, result)
+	finishedAt := m.now().UTC()
+	result.FinishedAt = &finishedAt
+	result.DurationMs = finishedAt.Sub(result.StartedAt).Milliseconds()
+	if err != nil {
+		result.Status = StatusFailed
+		result.ErrorMessage = err.Error()
+	} else {
+		result.Status = StatusCompleted
+	}
+	if len(result.Warnings) > 0 {
+		result.Warning = true
+	}
+	saveErr := m.updateLastRetentionCheck(result)
+	if notify {
+		m.notifyRetentionCheck(ctx, job, result)
+	}
+	if saveErr != nil {
+		if err != nil {
+			return cloneRetentionCheckResult(result), errors.Join(err, saveErr)
+		}
+		return cloneRetentionCheckResult(result), saveErr
+	}
+	return cloneRetentionCheckResult(result), err
+}
+
+func (m *Manager) runRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) error {
+	switch job.Type {
+	case JobTypeLocal:
+		return m.runLocalRetentionCheck(ctx, job, result)
+	case JobTypeRestic:
+		return m.runResticRetentionCheck(ctx, job, result)
+	case JobTypeRclone:
+		return m.runRcloneRetentionCheck(ctx, job, result)
+	default:
+		return ErrUnsupportedJobType
+	}
+}
+
+func (m *Manager) runLocalRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateDestination(effectiveSource(job, m.storageRoot), job.Destination, m.storageRoot); err != nil {
+		return err
+	}
+	snapshots, err := listLocalSnapshots(job)
+	if err != nil {
+		return err
+	}
+	fillRetentionSnapshotRange(result, snapshotTimes(snapshots))
+	result.SnapshotCount = len(snapshots)
+	if len(snapshots) == 0 {
+		result.Warnings = append(result.Warnings, "尚无本地快照，无法确认保留策略是否有效")
+	}
+	if job.MaxSnapshots <= 0 && job.MaxAge <= 0 {
+		result.Warnings = append(result.Warnings, "本地快照未配置 max_snapshots 或 max_age，旧快照不会自动清理")
+	}
+	if job.MaxSnapshots > 0 && len(snapshots) > job.MaxSnapshots {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("本地快照数量 %d 已超过 max_snapshots=%d", len(snapshots), job.MaxSnapshots))
+	}
+	if job.MaxAge > 0 && result.OldestSnapshotAt != nil {
+		cutoff := m.now().UTC().Add(-job.MaxAge)
+		if result.OldestSnapshotAt.Before(cutoff) {
+			result.Warnings = append(result.Warnings, "检测到超过 max_age 的本地快照，下一次成功备份后应被清理")
+		}
+	}
+	return nil
+}
+
+func (m *Manager) runResticRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) error {
+	if strings.TrimSpace(job.Repository) == "" {
+		return fmt.Errorf("%w: restic repository is empty", ErrUnsafePath)
+	}
+	if strings.TrimSpace(job.PasswordFile) == "" {
+		return fmt.Errorf("%w: restic password_file is empty", ErrUnsafePath)
+	}
+	args := []string{
+		"-r", job.Repository,
+		"--password-file", job.PasswordFile,
+		"snapshots",
+		"--json",
+		"--tag", "mnemonas",
+		"--tag", "job:" + job.ID,
+	}
+	var times []time.Time
+	err := runExternalCommandReader(ctx, backupCommand(job, JobTypeRestic), func(stdout io.Reader) error {
+		var parseErr error
+		times, parseErr = parseResticSnapshotsJSONReader(stdout)
+		return parseErr
+	}, args...)
+	if err != nil {
+		return fmt.Errorf("check restic retention: %w", err)
+	}
+
+	result.SnapshotCount = len(times)
+	fillRetentionSnapshotRange(result, times)
+	if len(times) == 0 {
+		result.Warnings = append(result.Warnings, "restic 仓库没有匹配 mnemonas/job 标签的快照")
+	}
+	if strings.TrimSpace(job.RetentionPolicy) == "" {
+		result.Warnings = append(result.Warnings, "restic 远端未配置 retention_policy，无法确认 forget/prune 策略")
+	}
+	if len(times) == 1 {
+		result.Warnings = append(result.Warnings, "restic 当前只有 1 个快照，历史回滚深度有限")
+	}
+	return nil
+}
+
+func (m *Manager) runRcloneRetentionCheck(ctx context.Context, job config.BackupJobConfig, result *RetentionCheckResult) error {
+	if strings.TrimSpace(job.Remote) == "" {
+		return fmt.Errorf("%w: rclone remote is empty", ErrUnsafePath)
+	}
+	args := append(rcloneBaseArgs(job), "lsjson", job.Remote, "--recursive", "--files-only")
+	for _, pattern := range job.Exclude {
+		args = append(args, "--exclude", pattern)
+	}
+	var latest *time.Time
+	err := runExternalCommandReader(ctx, backupCommand(job, JobTypeRclone), func(stdout io.Reader) error {
+		fileCount, totalBytes, latestAt, parseErr := parseRcloneRetentionLSJSONReader(stdout)
+		result.FileCount = fileCount
+		result.TotalBytes = totalBytes
+		latest = latestAt
+		return parseErr
+	}, args...)
+	if err != nil {
+		return fmt.Errorf("check rclone retention: %w", err)
+	}
+	if latest != nil {
+		result.LatestSnapshotAt = latest
+	}
+	if result.FileCount == 0 {
+		result.Warnings = append(result.Warnings, "rclone 远端未发现文件，无法确认可恢复内容")
+	}
+	if strings.TrimSpace(job.RetentionPolicy) == "" {
+		result.Warnings = append(result.Warnings, "rclone 远端未配置 retention_policy；MnemoNAS 只能确认当前副本，无法自动确认云端版本保留")
+	}
+	return nil
+}
+
 func (m *Manager) latestManifest(job config.BackupJobConfig) (string, string, Manifest, error) {
 	m.mu.Lock()
 	state := m.state.Jobs[job.ID]
@@ -1498,257 +1799,6 @@ func (m *Manager) latestManifest(job config.BackupJobConfig) (string, string, Ma
 		return snapshotPath, manifestPath, manifest, nil
 	}
 	return "", "", Manifest{}, ErrNoSnapshots
-}
-
-// StartScheduler starts the background interval scheduler. It is idempotent.
-func (m *Manager) StartScheduler(ctx context.Context) bool {
-	if !m.hasScheduledWork() {
-		return false
-	}
-
-	m.mu.Lock()
-	if m.schedulerStarted {
-		m.mu.Unlock()
-		return false
-	}
-	m.schedulerStarted = true
-	pollInterval := m.schedulerPoll
-	m.mu.Unlock()
-
-	go func() {
-		_ = m.RunDueJobs(ctx)
-		_ = m.SendRestoreDrillReminders(ctx)
-		ticker := time.NewTicker(pollInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = m.RunDueJobs(ctx)
-				_ = m.SendRestoreDrillReminders(ctx)
-			}
-		}
-	}()
-	return true
-}
-
-func (m *Manager) hasScheduledWork() bool {
-	return m.hasScheduledJobs() || m.hasRestoreDrillReminderJobs()
-}
-
-func (m *Manager) hasScheduledJobs() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, job := range m.jobs {
-		if !job.Disabled && job.ScheduleInterval > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *Manager) hasRestoreDrillReminderJobs() bool {
-	if m.notifier == nil {
-		return false
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, job := range m.jobs {
-		if !job.Disabled && effectiveRestoreDrillStaleAfter(job) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// RunDueJobs runs scheduled jobs that are due at the manager's current time.
-func (m *Manager) RunDueJobs(ctx context.Context) []ScheduledRunResult {
-	now := m.now()
-	dueJobs := m.dueJobs(now)
-	results := make([]ScheduledRunResult, 0, len(dueJobs))
-
-	for _, job := range dueJobs {
-		dueAt := now.UTC()
-		if nextRunAt := m.nextRunAt(job.ID); nextRunAt != nil {
-			dueAt = *nextRunAt
-		}
-		result := ScheduledRunResult{
-			JobID: job.ID,
-			DueAt: dueAt,
-		}
-		m.recordScheduledRun(job.ID, now)
-		runResult, err := m.runJobWithTrigger(ctx, job.ID, "scheduled")
-		if err != nil {
-			result.Error = err.Error()
-			result.Result = runResult
-		} else {
-			result.Result = runResult
-		}
-		results = append(results, result)
-	}
-
-	return results
-}
-
-func (m *Manager) dueJobs(now time.Time) []config.BackupJobConfig {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	ids := make([]string, 0, len(m.jobs))
-	for id := range m.jobs {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	jobs := make([]config.BackupJobConfig, 0, len(ids))
-	for _, id := range ids {
-		job := m.jobs[id]
-		if job.Disabled || job.ScheduleInterval <= 0 {
-			continue
-		}
-		if !isWithinScheduleWindow(job, now) {
-			continue
-		}
-		if _, running := m.running[id]; running {
-			continue
-		}
-		nextRunAt := m.nextRunAtLocked(job, m.state.Jobs[id])
-		if nextRunAt == nil || nextRunAt.After(now) {
-			continue
-		}
-		jobs = append(jobs, cloneJob(job))
-	}
-	return jobs
-}
-
-func (m *Manager) nextRunAt(jobID string) *time.Time {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	job, ok := m.jobs[jobID]
-	if !ok {
-		return nil
-	}
-	return m.nextRunAtLocked(job, m.state.Jobs[jobID])
-}
-
-func (m *Manager) nextRunAtLocked(job config.BackupJobConfig, state JobState) *time.Time {
-	if job.Disabled || job.ScheduleInterval <= 0 {
-		return nil
-	}
-	base := state.LastScheduledRunAt
-	if state.LastRun != nil {
-		lastRunTime := state.LastRun.StartedAt
-		if state.LastRun.FinishedAt != nil {
-			lastRunTime = *state.LastRun.FinishedAt
-		}
-		if base == nil || lastRunTime.After(*base) {
-			base = &lastRunTime
-		}
-	}
-	if base == nil {
-		now := m.now()
-		next := now.UTC()
-		return adjustNextRunForScheduleWindow(job, next, now)
-	}
-	now := m.now()
-	next := base.UTC().Add(job.ScheduleInterval)
-	return adjustNextRunForScheduleWindow(job, next, now)
-}
-
-func adjustNextRunForScheduleWindow(job config.BackupJobConfig, next time.Time, now time.Time) *time.Time {
-	if !hasScheduleWindow(job) {
-		return &next
-	}
-	if isWithinScheduleWindow(job, next) {
-		return &next
-	}
-	nowUTC := now.UTC()
-	if next.Before(nowUTC) {
-		adjusted := nextScheduleWindowStart(job, now)
-		return &adjusted
-	}
-	adjusted := nextScheduleWindowStart(job, next)
-	return &adjusted
-}
-
-func hasScheduleWindow(job config.BackupJobConfig) bool {
-	return strings.TrimSpace(job.ScheduleWindowStart) != "" && strings.TrimSpace(job.ScheduleWindowEnd) != ""
-}
-
-func isWithinScheduleWindow(job config.BackupJobConfig, when time.Time) bool {
-	start, end, ok := scheduleWindowMinutes(job)
-	if !ok {
-		return true
-	}
-	minute := minuteOfDay(when)
-	if start < end {
-		return minute >= start && minute < end
-	}
-	return minute >= start || minute < end
-}
-
-func nextScheduleWindowStart(job config.BackupJobConfig, after time.Time) time.Time {
-	start, end, ok := scheduleWindowMinutes(job)
-	if !ok {
-		return after.UTC()
-	}
-	local := after.In(time.Local)
-	minute := minuteOfDay(local)
-	startAt := time.Date(local.Year(), local.Month(), local.Day(), start/60, start%60, 0, 0, time.Local)
-	if start < end {
-		if minute < start {
-			return startAt.UTC()
-		}
-		if minute >= end {
-			return startAt.AddDate(0, 0, 1).UTC()
-		}
-		return startAt.UTC()
-	}
-	if minute >= start {
-		return startAt.UTC()
-	}
-	if minute < end {
-		return startAt.AddDate(0, 0, -1).UTC()
-	}
-	return startAt.UTC()
-}
-
-func scheduleWindowMinutes(job config.BackupJobConfig) (int, int, bool) {
-	start, ok := parseScheduleWindowClock(job.ScheduleWindowStart)
-	if !ok {
-		return 0, 0, false
-	}
-	end, ok := parseScheduleWindowClock(job.ScheduleWindowEnd)
-	if !ok || start == end {
-		return 0, 0, false
-	}
-	return start, end, true
-}
-
-func parseScheduleWindowClock(value string) (int, bool) {
-	parsed, err := time.Parse("15:04", strings.TrimSpace(value))
-	if err != nil {
-		return 0, false
-	}
-	return parsed.Hour()*60 + parsed.Minute(), true
-}
-
-func minuteOfDay(when time.Time) int {
-	local := when.In(time.Local)
-	return local.Hour()*60 + local.Minute()
-}
-
-func (m *Manager) recordScheduledRun(jobID string, when time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state := m.state.Jobs[jobID]
-	scheduledAt := when.UTC()
-	state.LastScheduledRunAt = &scheduledAt
-	m.state.Jobs[jobID] = state
-	_ = m.saveStateLocked()
 }
 
 func (m *Manager) healthLocked(job config.BackupJobConfig, state JobState, running bool, now time.Time) (string, string) {
@@ -1806,9 +1856,29 @@ func (m *Manager) restoreDrillHealthLocked(job config.BackupJobConfig, state Job
 	return "ok", "恢复演练仍在预期窗口内"
 }
 
-func retentionHealth(job config.BackupJobConfig) (string, string) {
+func retentionHealth(job config.BackupJobConfig, state JobState) (string, string) {
 	if job.Disabled {
 		return "disabled", "任务已禁用"
+	}
+	if state.LastRetentionCheck != nil {
+		check := state.LastRetentionCheck
+		if check.Status == StatusFailed {
+			return "failed", "保留策略检测失败"
+		}
+		if check.Warning {
+			if len(check.Warnings) > 0 {
+				return "warning", check.Warnings[0]
+			}
+			return "warning", "保留策略检测存在警告"
+		}
+		if check.Status == StatusCompleted {
+			switch job.Type {
+			case JobTypeLocal, JobTypeRestic:
+				return "ok", fmt.Sprintf("最近检测到 %d 个快照", check.SnapshotCount)
+			case JobTypeRclone:
+				return "ok", fmt.Sprintf("最近检测到 %d 个文件，%s", check.FileCount, formatBytesForMessage(check.TotalBytes))
+			}
+		}
 	}
 	switch job.Type {
 	case JobTypeLocal:
@@ -1868,6 +1938,22 @@ func formatDurationForAPI(duration time.Duration) string {
 		return ""
 	}
 	return duration.String()
+}
+
+func formatBytesForMessage(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	value := float64(size)
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+	for _, suffix := range units {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.2f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.2f EB", value/unit)
 }
 
 func (m *Manager) applyRetention(ctx context.Context, job config.BackupJobConfig, currentSnapshotPath string) (int, []string) {
@@ -1959,6 +2045,35 @@ func listLocalSnapshots(job config.BackupJobConfig) ([]snapshotInfo, error) {
 		})
 	}
 	return snapshots, nil
+}
+
+func snapshotTimes(snapshots []snapshotInfo) []time.Time {
+	times := make([]time.Time, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if !snapshot.CreatedAt.IsZero() {
+			times = append(times, snapshot.CreatedAt.UTC())
+		}
+	}
+	return times
+}
+
+func fillRetentionSnapshotRange(result *RetentionCheckResult, times []time.Time) {
+	if result == nil || len(times) == 0 {
+		return
+	}
+	oldest := times[0].UTC()
+	latest := times[0].UTC()
+	for _, timestamp := range times[1:] {
+		timestamp = timestamp.UTC()
+		if timestamp.Before(oldest) {
+			oldest = timestamp
+		}
+		if timestamp.After(latest) {
+			latest = timestamp
+		}
+	}
+	result.OldestSnapshotAt = &oldest
+	result.LatestSnapshotAt = &latest
 }
 
 func parseSnapshotTime(name string) time.Time {
@@ -2229,6 +2344,26 @@ func (m *Manager) updateLastRestore(result *RestoreResult, appendHistory bool) e
 	return m.saveStateLocked()
 }
 
+func (m *Manager) updateLastRestoreVerify(result *RestoreVerifyResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.state.Jobs[result.JobID]
+	state.LastRestoreVerify = cloneRestoreVerifyResult(result)
+	m.state.Jobs[result.JobID] = state
+	return m.saveStateLocked()
+}
+
+func (m *Manager) updateLastRetentionCheck(result *RetentionCheckResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.state.Jobs[result.JobID]
+	state.LastRetentionCheck = cloneRetentionCheckResult(result)
+	m.state.Jobs[result.JobID] = state
+	return m.saveStateLocked()
+}
+
 func (m *Manager) loadState() error {
 	data, err := os.ReadFile(m.statePath())
 	if err != nil {
@@ -2402,6 +2537,16 @@ func cloneRestorePreviewResult(result *RestorePreviewResult) *RestorePreviewResu
 	if len(result.SamplePaths) > 0 {
 		clone.SamplePaths = append([]string(nil), result.SamplePaths...)
 	}
+	clone.PreflightChecks = cloneRestorePreflightChecks(result.PreflightChecks)
+	if len(result.Warnings) > 0 {
+		clone.Warnings = append([]string(nil), result.Warnings...)
+	}
+	if len(result.CutoverChecklist) > 0 {
+		clone.CutoverChecklist = append([]string(nil), result.CutoverChecklist...)
+	}
+	if len(result.RollbackChecklist) > 0 {
+		clone.RollbackChecklist = append([]string(nil), result.RollbackChecklist...)
+	}
 	return &clone
 }
 
@@ -2428,6 +2573,46 @@ func cloneRestoreResult(result *RestoreResult) *RestoreResult {
 	if result.FinishedAt != nil {
 		finishedAt := *result.FinishedAt
 		clone.FinishedAt = &finishedAt
+	}
+	clone.PreflightChecks = cloneRestorePreflightChecks(result.PreflightChecks)
+	if len(result.Warnings) > 0 {
+		clone.Warnings = append([]string(nil), result.Warnings...)
+	}
+	if len(result.CutoverChecklist) > 0 {
+		clone.CutoverChecklist = append([]string(nil), result.CutoverChecklist...)
+	}
+	if len(result.RollbackChecklist) > 0 {
+		clone.RollbackChecklist = append([]string(nil), result.RollbackChecklist...)
+	}
+	return &clone
+}
+
+func cloneRestorePreflightChecks(checks []RestorePreflightCheck) []RestorePreflightCheck {
+	if len(checks) == 0 {
+		return nil
+	}
+	return append([]RestorePreflightCheck(nil), checks...)
+}
+
+func cloneRetentionCheckResult(result *RetentionCheckResult) *RetentionCheckResult {
+	if result == nil {
+		return nil
+	}
+	clone := *result
+	if result.FinishedAt != nil {
+		finishedAt := *result.FinishedAt
+		clone.FinishedAt = &finishedAt
+	}
+	if result.OldestSnapshotAt != nil {
+		oldest := *result.OldestSnapshotAt
+		clone.OldestSnapshotAt = &oldest
+	}
+	if result.LatestSnapshotAt != nil {
+		latest := *result.LatestSnapshotAt
+		clone.LatestSnapshotAt = &latest
+	}
+	if len(result.Warnings) > 0 {
+		clone.Warnings = append([]string(nil), result.Warnings...)
 	}
 	return &clone
 }
@@ -2677,6 +2862,38 @@ type resticLSJSONEntry struct {
 	Size int64  `json:"size"`
 }
 
+type resticSnapshotJSONEntry struct {
+	Time time.Time `json:"time"`
+	ID   string    `json:"id"`
+}
+
+func parseResticSnapshotsJSON(data []byte) ([]time.Time, error) {
+	return parseResticSnapshotsJSONReader(bytes.NewReader(data))
+}
+
+func parseResticSnapshotsJSONReader(reader io.Reader) ([]time.Time, error) {
+	var snapshots []resticSnapshotJSONEntry
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(&snapshots); err != nil {
+		return nil, fmt.Errorf("parse restic snapshots output: %w", err)
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("parse restic snapshots output: unexpected trailing data")
+		}
+		return nil, fmt.Errorf("parse restic snapshots output: %w", err)
+	}
+	times := make([]time.Time, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.Time.IsZero() {
+			continue
+		}
+		times = append(times, snapshot.Time.UTC())
+	}
+	return times, nil
+}
+
 func parseResticLSJSON(data []byte, source string) (int64, int64, []string, error) {
 	return parseResticLSJSONReader(bytes.NewReader(data), source)
 }
@@ -2715,10 +2932,11 @@ func parseResticLSJSONReader(reader io.Reader, source string) (int64, int64, []s
 }
 
 type rcloneLSJSONEntry struct {
-	Path  string `json:"Path"`
-	Name  string `json:"Name"`
-	Size  int64  `json:"Size"`
-	IsDir bool   `json:"IsDir"`
+	Path    string `json:"Path"`
+	Name    string `json:"Name"`
+	Size    int64  `json:"Size"`
+	IsDir   bool   `json:"IsDir"`
+	ModTime string `json:"ModTime"`
 }
 
 func parseRcloneLSJSON(data []byte) (int64, int64, []string, error) {
@@ -2762,6 +2980,67 @@ func parseRcloneLSJSONReader(reader io.Reader) (int64, int64, []string, error) {
 		return 0, 0, nil, errors.New("parse rclone preview output: expected JSON array end")
 	}
 	return fileCount, totalBytes, samples, nil
+}
+
+func parseRcloneRetentionLSJSON(data []byte) (int64, int64, *time.Time, error) {
+	return parseRcloneRetentionLSJSONReader(bytes.NewReader(data))
+}
+
+func parseRcloneRetentionLSJSONReader(reader io.Reader) (int64, int64, *time.Time, error) {
+	entries, err := decodeRcloneLSJSONEntries(reader)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	var fileCount int64
+	var totalBytes int64
+	var latest *time.Time
+	for _, entry := range entries {
+		if entry.IsDir {
+			continue
+		}
+		fileCount++
+		totalBytes += entry.Size
+		if strings.TrimSpace(entry.ModTime) == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, entry.ModTime)
+		if err != nil {
+			return 0, 0, nil, fmt.Errorf("parse rclone file timestamp: %w", err)
+		}
+		parsed = parsed.UTC()
+		if latest == nil || parsed.After(*latest) {
+			value := parsed
+			latest = &value
+		}
+	}
+	return fileCount, totalBytes, latest, nil
+}
+
+func decodeRcloneLSJSONEntries(reader io.Reader) ([]rcloneLSJSONEntry, error) {
+	decoder := json.NewDecoder(reader)
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("parse rclone preview output: %w", err)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '[' {
+		return nil, errors.New("parse rclone preview output: expected JSON array")
+	}
+	entries := make([]rcloneLSJSONEntry, 0)
+	for decoder.More() {
+		var entry rcloneLSJSONEntry
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, fmt.Errorf("parse rclone preview output: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	token, err = decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("parse rclone preview output: %w", err)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != ']' {
+		return nil, errors.New("parse rclone preview output: expected JSON array end")
+	}
+	return entries, nil
 }
 
 func relativeResticPreviewPath(source, entryPath string) string {

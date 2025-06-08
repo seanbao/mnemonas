@@ -37,10 +37,14 @@ vi.mock('@/api/files', () => ({
   downloadDiagnosticsExport: vi.fn(),
   listBackupJobs: vi.fn(),
   runBackupJob: vi.fn(),
+  checkBackupRetentionJob: vi.fn(),
   runBackupRestoreDrill: vi.fn(),
   previewBackupRestoreJob: vi.fn(),
+  previewBatchBackupRestore: vi.fn(),
   restoreBackupJob: vi.fn(),
+  runBatchBackupRestore: vi.fn(),
   verifyBackupRestoreJob: vi.fn(),
+  downloadBackupRestoreReport: vi.fn(),
 }))
 
 vi.mock('@/stores/auth', async (importOriginal) => {
@@ -58,10 +62,14 @@ import {
   downloadDiagnosticsExport,
   listBackupJobs,
   runBackupJob,
+  checkBackupRetentionJob,
   runBackupRestoreDrill,
   previewBackupRestoreJob,
+  previewBatchBackupRestore,
   restoreBackupJob,
+  runBatchBackupRestore,
   verifyBackupRestoreJob,
+  downloadBackupRestoreReport,
 } from '@/api/files'
 
 const mockGetScrubResult = getScrubResult as ReturnType<typeof vi.fn>
@@ -69,10 +77,14 @@ const mockRunScrub = runScrub as ReturnType<typeof vi.fn>
 const mockDownloadDiagnosticsExport = downloadDiagnosticsExport as ReturnType<typeof vi.fn>
 const mockListBackupJobs = listBackupJobs as ReturnType<typeof vi.fn>
 const mockRunBackupJob = runBackupJob as ReturnType<typeof vi.fn>
+const mockCheckBackupRetentionJob = checkBackupRetentionJob as ReturnType<typeof vi.fn>
 const mockRunBackupRestoreDrill = runBackupRestoreDrill as ReturnType<typeof vi.fn>
 const mockPreviewBackupRestoreJob = previewBackupRestoreJob as ReturnType<typeof vi.fn>
+const mockPreviewBatchBackupRestore = previewBatchBackupRestore as ReturnType<typeof vi.fn>
 const mockRestoreBackupJob = restoreBackupJob as ReturnType<typeof vi.fn>
+const mockRunBatchBackupRestore = runBatchBackupRestore as ReturnType<typeof vi.fn>
 const mockVerifyBackupRestoreJob = verifyBackupRestoreJob as ReturnType<typeof vi.fn>
+const mockDownloadBackupRestoreReport = downloadBackupRestoreReport as ReturnType<typeof vi.fn>
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -228,6 +240,26 @@ describe('MaintenancePage', () => {
       file_count: 12,
       verified_bytes: 4096,
     },
+    last_restore_verify: {
+      id: '20260509T040005.000000000Z',
+      job_id: 'external-disk',
+      status: 'completed',
+      started_at: '2026-05-09T04:00:05Z',
+      finished_at: '2026-05-09T04:00:06Z',
+      duration_ms: 1000,
+      source: '/srv/mnemonas',
+      destination: '/mnt/backup-drive/mnemonas',
+      target_path: '/restore/mnemonas',
+      file_count: 12,
+      verified_bytes: 4096,
+      config_found: true,
+      files_dir_found: true,
+      internal_dir_found: true,
+      index_found: true,
+      objects_dir_found: true,
+      looks_like_storage_root: true,
+      warnings: [],
+    },
     restore_history: [{
       id: '20260509T040000.000000000Z',
       job_id: 'external-disk',
@@ -243,6 +275,18 @@ describe('MaintenancePage', () => {
       file_count: 12,
       verified_bytes: 4096,
     }],
+    last_retention_check: {
+      id: '20260509T041000.000000000Z',
+      job_id: 'external-disk',
+      status: 'completed',
+      started_at: '2026-05-09T04:10:00Z',
+      finished_at: '2026-05-09T04:10:01Z',
+      duration_ms: 1000,
+      target: '/mnt/backup-drive/mnemonas',
+      snapshot_count: 3,
+      warning: false,
+      warnings: [],
+    },
   }]
 
   beforeEach(() => {
@@ -257,6 +301,7 @@ describe('MaintenancePage', () => {
     mockDownloadDiagnosticsExport.mockResolvedValue(undefined)
     mockListBackupJobs.mockResolvedValue([])
     mockRunBackupJob.mockResolvedValue(mockBackupJobs[0].last_run)
+    mockCheckBackupRetentionJob.mockResolvedValue(mockBackupJobs[0].last_retention_check)
     mockRunBackupRestoreDrill.mockResolvedValue(mockBackupJobs[0].last_restore_drill)
     mockPreviewBackupRestoreJob.mockResolvedValue({
       id: '20260509T035900.000000000Z',
@@ -275,6 +320,55 @@ describe('MaintenancePage', () => {
       config_available: true,
       config_included: true,
       sample_paths: ['docs/note.txt', '.mnemonas-restore/config.toml'],
+      preflight_checks: [{
+        id: 'target_scope',
+        status: 'passed',
+        title: '目标路径隔离',
+        detail: '目标目录位于受保护路径之外。',
+      }],
+      warnings: [],
+      cutover_checklist: ['校验恢复目录'],
+      rollback_checklist: ['指回原 storage.root'],
+    })
+    mockPreviewBatchBackupRestore.mockResolvedValue({
+      id: '20260509T035901.000000000Z',
+      status: 'completed',
+      started_at: '2026-05-09T03:59:01Z',
+      finished_at: '2026-05-09T03:59:02Z',
+      duration_ms: 1000,
+      total_files: 12,
+      total_bytes: 4096,
+      warning: false,
+      warnings: [],
+      items: [{
+        index: 0,
+        job_id: 'external-disk',
+        target_path: '/restore/batch',
+        include_config: true,
+        status: 'completed',
+        preview: {
+          id: '20260509T035900.000000000Z',
+          job_id: 'external-disk',
+          status: 'completed',
+          started_at: '2026-05-09T03:59:00Z',
+          finished_at: '2026-05-09T03:59:01Z',
+          duration_ms: 1000,
+          source: '/srv/mnemonas',
+          destination: '/mnt/backup-drive/mnemonas',
+          target_path: '/restore/batch',
+          file_count: 12,
+          total_bytes: 4096,
+          config_available: true,
+          config_included: true,
+          preflight_checks: [{
+            id: 'target_scope',
+            status: 'passed',
+            title: '目标路径隔离',
+            detail: '目标目录位于受保护路径之外。',
+          }],
+          warnings: [],
+        },
+      }],
     })
     mockRestoreBackupJob.mockResolvedValue({
       id: '20260509T040000.000000000Z',
@@ -290,7 +384,71 @@ describe('MaintenancePage', () => {
       config_path: '/restore/mnemonas/.mnemonas-restore/config.toml',
       file_count: 12,
       verified_bytes: 4096,
+      preflight_checks: [{
+        id: 'target_scope',
+        status: 'passed',
+        title: '目标路径隔离',
+        detail: '目标目录位于受保护路径之外。',
+      }],
+      warnings: [],
+      cutover_checklist: ['校验恢复目录'],
+      rollback_checklist: ['指回原 storage.root'],
     })
+    mockRunBatchBackupRestore.mockResolvedValue({
+      id: '20260509T040001.000000000Z',
+      status: 'completed',
+      started_at: '2026-05-09T04:00:01Z',
+      finished_at: '2026-05-09T04:00:02Z',
+      duration_ms: 1000,
+      total_files: 12,
+      verified_bytes: 4096,
+      warning: false,
+      warnings: [],
+      items: [{
+        index: 0,
+        job_id: 'external-disk',
+        target_path: '/restore/batch',
+        include_config: true,
+        status: 'completed',
+        restore: {
+          id: '20260509T040000.000000000Z',
+          job_id: 'external-disk',
+          status: 'completed',
+          started_at: '2026-05-09T04:00:00Z',
+          finished_at: '2026-05-09T04:00:01Z',
+          duration_ms: 1000,
+          target_path: '/restore/batch',
+          config_restored: true,
+          config_path: '/restore/batch/.mnemonas-restore/config.toml',
+          file_count: 12,
+          verified_bytes: 4096,
+          warnings: [],
+        },
+        verify: {
+          id: '20260509T040005.000000000Z',
+          job_id: 'external-disk',
+          status: 'completed',
+          started_at: '2026-05-09T04:00:05Z',
+          finished_at: '2026-05-09T04:00:06Z',
+          duration_ms: 1000,
+          source: '/srv/mnemonas',
+          destination: '/mnt/backup-drive/mnemonas',
+          target_path: '/restore/batch',
+          file_count: 12,
+          verified_bytes: 4096,
+          config_path: '/restore/batch/.mnemonas-restore/config.toml',
+          config_found: true,
+          files_dir_found: true,
+          internal_dir_found: true,
+          index_found: true,
+          objects_dir_found: true,
+          looks_like_storage_root: true,
+          warnings: [],
+        },
+        warnings: [],
+      }],
+    })
+    mockDownloadBackupRestoreReport.mockResolvedValue(undefined)
     mockVerifyBackupRestoreJob.mockResolvedValue({
       id: '20260509T040005.000000000Z',
       job_id: 'external-disk',
@@ -407,11 +565,13 @@ describe('MaintenancePage', () => {
         expect(screen.getByText('每 1 天')).toBeTruthy()
         expect(screen.getByText('自动窗口: 02:00-05:00')).toBeTruthy()
         expect(screen.getByText('最多 7 个快照 · 最长 30 天')).toBeTruthy()
+        expect(screen.getByText(/最近检测: 3 个快照/)).toBeTruthy()
         expect(screen.getByText('健康')).toBeTruthy()
         expect(screen.getAllByText(/12 个文件 · 4 KB/).length).toBeGreaterThan(0)
         expect(screen.getByText('校验 12 个文件 · 4 KB')).toBeTruthy()
         expect(screen.getByText('恢复演练仍在预期窗口内')).toBeTruthy()
         expect(screen.getByText('目标: /restore/mnemonas')).toBeTruthy()
+        expect(screen.getByText('最近检查: 检查 12 个文件 · 4 KB')).toBeTruthy()
       })
     })
 
@@ -474,8 +634,10 @@ describe('MaintenancePage', () => {
       })
 
       const runButton = screen.getByRole('button', { name: /立即备份/ }) as HTMLButtonElement
+      const retentionButton = screen.getByRole('button', { name: /检查保留/ }) as HTMLButtonElement
       const drillButton = screen.getByRole('button', { name: /恢复演练/ }) as HTMLButtonElement
       expect(runButton.disabled).toBe(true)
+      expect(retentionButton.disabled).toBe(true)
       expect(drillButton.disabled).toBe(true)
     })
 
@@ -512,6 +674,42 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(mockRunBackupRestoreDrill).toHaveBeenCalledWith('external-disk', false)
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复演练已完成' }))
+      })
+    })
+
+    it('checks retention from the task list', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /检查保留/ }))
+
+      await waitFor(() => {
+        expect(mockCheckBackupRetentionJob).toHaveBeenCalledWith('external-disk')
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '保留策略检测完成' }))
+      })
+    })
+
+    it('downloads a restore report from the task list', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /导出报告/ }))
+
+      await waitFor(() => {
+        expect(mockDownloadBackupRestoreReport).toHaveBeenCalledWith('external-disk')
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复报告导出已开始' }))
       })
     })
 
@@ -552,6 +750,53 @@ describe('MaintenancePage', () => {
       })
     })
 
+    it('previews and runs a batch restore from the backup card', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /批量恢复/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('批量恢复到独立目录')).toBeTruthy()
+      })
+
+      await user.click(screen.getAllByLabelText('选择 外置硬盘备份')[0])
+      await user.type(screen.getByLabelText('外置硬盘备份 目标目录'), '/restore/batch')
+
+      const runButton = screen.getByRole('button', { name: /开始批量恢复/ }) as HTMLButtonElement
+      expect(runButton.disabled).toBe(true)
+
+      await user.click(screen.getByRole('button', { name: /生成批量预览/ }))
+
+      await waitFor(() => {
+        expect(mockPreviewBatchBackupRestore).toHaveBeenCalledWith([{
+          job_id: 'external-disk',
+          target_path: '/restore/batch',
+          include_config: true,
+        }])
+        expect(screen.getByText('批量预览结果')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /开始批量恢复/ }))
+
+      await waitFor(() => {
+        expect(mockRunBatchBackupRestore).toHaveBeenCalledWith([{
+          job_id: 'external-disk',
+          target_path: '/restore/batch',
+          include_config: true,
+        }])
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '批量恢复已完成' }))
+        expect(screen.getByText('批量恢复已完成')).toBeTruthy()
+        expect(screen.getByText('只读校验: 检查 12 个文件 · 4 KB')).toBeTruthy()
+      })
+    })
+
     it('keeps restore disabled when preview fails', async () => {
       const user = userEvent.setup()
       mockListBackupJobs.mockResolvedValue(mockBackupJobs)
@@ -570,6 +815,51 @@ describe('MaintenancePage', () => {
       await waitFor(() => {
         expect(mockPreviewBackupRestoreJob).toHaveBeenCalledWith('external-disk', '/restore/mnemonas', true)
         expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '生成恢复预览失败' }))
+      })
+
+      expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(true)
+      expect(mockRestoreBackupJob).not.toHaveBeenCalled()
+    })
+
+    it('keeps restore disabled when preflight has failed checks', async () => {
+      const user = userEvent.setup()
+      mockListBackupJobs.mockResolvedValue(mockBackupJobs)
+      mockPreviewBackupRestoreJob.mockResolvedValueOnce({
+        id: '20260509T035900.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:00Z',
+        finished_at: '2026-05-09T03:59:01Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        target_path: '/restore/mnemonas',
+        file_count: 12,
+        total_bytes: 4096,
+        config_available: true,
+        config_included: true,
+        preflight_checks: [{
+          id: 'target_capacity',
+          status: 'failed',
+          title: '目标容量',
+          detail: '目标文件系统可用空间不足。',
+        }],
+        warnings: ['目标文件系统可用空间不足。'],
+      })
+
+      render(<Maintenance />)
+
+      await waitFor(() => {
+        expect(screen.getByText('外置硬盘备份')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: /^恢复$/ }))
+      await user.type(screen.getByLabelText('目标目录'), '/restore/mnemonas')
+      await user.click(screen.getByRole('button', { name: /生成预览/ }))
+
+      await waitFor(() => {
+        expect(screen.getByText('预检未通过，需处理失败项后重新生成预览。')).toBeTruthy()
+        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ title: '恢复预检未通过' }))
       })
 
       expect((screen.getByRole('button', { name: /开始恢复/ }) as HTMLButtonElement).disabled).toBe(true)

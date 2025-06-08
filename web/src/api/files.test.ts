@@ -26,10 +26,14 @@ import {
   runScrub,
   listBackupJobs,
   runBackupJob,
+  checkBackupRetentionJob,
   runBackupRestoreDrill,
   previewBackupRestoreJob,
+  previewBatchBackupRestore,
   restoreBackupJob,
+  runBatchBackupRestore,
   verifyBackupRestoreJob,
+  downloadBackupRestoreReport,
   uploadFile,
   downloadDiagnosticsExport,
 } from './files'
@@ -2548,6 +2552,26 @@ describe('API: files', () => {
         file_count: 12,
         verified_bytes: 4096,
       },
+      last_restore_verify: {
+        id: '20260509T040005.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:05Z',
+        finished_at: '2026-05-09T04:00:06Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        target_path: '/restore/mnemonas',
+        file_count: 12,
+        verified_bytes: 4096,
+        config_found: true,
+        files_dir_found: true,
+        internal_dir_found: true,
+        index_found: true,
+        objects_dir_found: true,
+        looks_like_storage_root: true,
+        warnings: [],
+      },
       restore_history: [{
         id: '20260509T040000.000000000Z',
         job_id: 'external-disk',
@@ -2563,6 +2587,21 @@ describe('API: files', () => {
         file_count: 12,
         verified_bytes: 4096,
       }],
+      last_retention_check: {
+        id: '20260509T041000.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T04:10:00Z',
+        finished_at: '2026-05-09T04:10:01Z',
+        duration_ms: 1000,
+        target: '/mnt/backup-drive/mnemonas',
+        policy: '',
+        snapshot_count: 3,
+        oldest_snapshot_at: '2026-05-07T02:00:00Z',
+        latest_snapshot_at: '2026-05-09T02:03:05Z',
+        warning: false,
+        warnings: [],
+      },
     }
 
     it('lists configured backup jobs', async () => {
@@ -2589,7 +2628,9 @@ describe('API: files', () => {
       expect(jobs[0].last_run?.file_count).toBe(12)
       expect(jobs[0].last_run?.pruned_snapshots).toBe(1)
       expect(jobs[0].last_restore?.target_path).toBe('/restore/mnemonas')
+      expect(jobs[0].last_restore_verify?.looks_like_storage_root).toBe(true)
       expect(jobs[0].restore_history).toHaveLength(1)
+      expect(jobs[0].last_retention_check?.snapshot_count).toBe(3)
       expectFetchCall(1, '/api/v1/maintenance/backups')
     })
 
@@ -2632,6 +2673,26 @@ describe('API: files', () => {
       })
     })
 
+    it('checks backup retention policy', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: backupJob.last_retention_check,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const result = await checkBackupRetentionJob('external-disk')
+      expect(result.status).toBe('completed')
+      expect(result.snapshot_count).toBe(3)
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/retention-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+    })
+
     it('previews a local backup restore target', async () => {
       const previewResult = {
         id: '20260509T035900.000000000Z',
@@ -2650,6 +2711,15 @@ describe('API: files', () => {
         config_available: true,
         config_included: true,
         sample_paths: ['docs/note.txt', '.mnemonas-restore/config.toml'],
+        preflight_checks: [{
+          id: 'target_scope',
+          status: 'passed',
+          title: '目标路径隔离',
+          detail: '目标目录位于受保护路径之外。',
+        }],
+        warnings: [],
+        cutover_checklist: ['校验恢复目录'],
+        rollback_checklist: ['指回原 storage.root'],
       }
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -2663,10 +2733,65 @@ describe('API: files', () => {
       const result = await previewBackupRestoreJob('external-disk', '/restore/mnemonas', true)
       expect(result.status).toBe('completed')
       expect(result.sample_paths).toContain('docs/note.txt')
+      expect(result.preflight_checks?.[0].id).toBe('target_scope')
+      expect(result.cutover_checklist).toContain('校验恢复目录')
       expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_path: '/restore/mnemonas', include_config: true }),
+      })
+    })
+
+    it('previews a batch backup restore request', async () => {
+      const batchPreview = {
+        id: '20260509T035901.000000000Z',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:01Z',
+        finished_at: '2026-05-09T03:59:02Z',
+        duration_ms: 1000,
+        items: [{
+          index: 0,
+          job_id: 'external-disk',
+          target_path: '/restore/a',
+          include_config: true,
+          status: 'completed',
+          preview: {
+            id: '20260509T035900.000000000Z',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T03:59:00Z',
+            finished_at: '2026-05-09T03:59:01Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/backup-drive/mnemonas',
+            target_path: '/restore/a',
+            file_count: 12,
+            total_bytes: 4096,
+            config_available: true,
+            config_included: true,
+          },
+        }],
+        total_files: 12,
+        total_bytes: 4096,
+        warning: false,
+        warnings: [],
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: batchPreview,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const items = [{ job_id: 'external-disk', target_path: '/restore/a', include_config: true }]
+      const result = await previewBatchBackupRestore(items)
+      expect(result.items[0].preview?.file_count).toBe(12)
+      expectFetchCall(1, '/api/v1/maintenance/backups/batch-restore-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
       })
     })
 
@@ -2685,6 +2810,15 @@ describe('API: files', () => {
         config_path: '/restore/mnemonas/.mnemonas-restore/config.toml',
         file_count: 12,
         verified_bytes: 4096,
+        preflight_checks: [{
+          id: 'target_scope',
+          status: 'passed',
+          title: '目标路径隔离',
+          detail: '目标目录位于受保护路径之外。',
+        }],
+        warnings: [],
+        cutover_checklist: ['校验恢复目录'],
+        rollback_checklist: ['指回原 storage.root'],
       }
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -2698,10 +2832,81 @@ describe('API: files', () => {
       const result = await restoreBackupJob('external-disk', '/restore/mnemonas', true)
       expect(result.status).toBe('completed')
       expect(result.target_path).toBe('/restore/mnemonas')
+      expect(result.rollback_checklist).toContain('指回原 storage.root')
       expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_path: '/restore/mnemonas', include_config: true }),
+      })
+    })
+
+    it('runs a batch backup restore request', async () => {
+      const batchRestore = {
+        id: '20260509T040001.000000000Z',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:01Z',
+        finished_at: '2026-05-09T04:00:02Z',
+        duration_ms: 1000,
+        items: [{
+          index: 0,
+          job_id: 'external-disk',
+          target_path: '/restore/a',
+          include_config: true,
+          status: 'completed',
+          restore: {
+            id: '20260509T040000.000000000Z',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:00Z',
+            finished_at: '2026-05-09T04:00:01Z',
+            duration_ms: 1000,
+            target_path: '/restore/a',
+            config_restored: true,
+            file_count: 12,
+            verified_bytes: 4096,
+          },
+          verify: {
+            id: '20260509T040005.000000000Z',
+            job_id: 'external-disk',
+            status: 'completed',
+            started_at: '2026-05-09T04:00:05Z',
+            finished_at: '2026-05-09T04:00:06Z',
+            duration_ms: 1000,
+            source: '/srv/mnemonas',
+            destination: '/mnt/backup-drive/mnemonas',
+            target_path: '/restore/a',
+            file_count: 12,
+            verified_bytes: 4096,
+            config_found: true,
+            files_dir_found: true,
+            internal_dir_found: true,
+            index_found: true,
+            objects_dir_found: true,
+            looks_like_storage_root: true,
+          },
+          warnings: [],
+        }],
+        total_files: 12,
+        verified_bytes: 4096,
+        warning: false,
+        warnings: [],
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: batchRestore,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      const items = [{ job_id: 'external-disk', target_path: '/restore/a', include_config: true }]
+      const result = await runBatchBackupRestore(items)
+      expect(result.items[0].verify?.looks_like_storage_root).toBe(true)
+      expectFetchCall(1, '/api/v1/maintenance/backups/batch-restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
       })
     })
 
@@ -2744,6 +2949,36 @@ describe('API: files', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_path: '/restore/mnemonas' }),
       })
+    })
+
+    it('downloads a backup restore report', async () => {
+      const blob = new Blob(['{}'], { type: 'application/json' })
+      let createdLink: HTMLAnchorElement | undefined
+      const originalCreateElement = document.createElement.bind(document)
+      const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+        const element = originalCreateElement(tagName)
+        if (tagName === 'a') {
+          createdLink = element as HTMLAnchorElement
+        }
+        return element
+      }) as typeof document.createElement)
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:restore-report')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'Content-Disposition': 'attachment; filename="restore-report.json"' }),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadBackupRestoreReport('external-disk')
+
+      expect(createdLink?.download).toBe('restore-report.json')
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-report')
+      createElementSpy.mockRestore()
     })
 
     it('rejects malformed backup job responses', async () => {
