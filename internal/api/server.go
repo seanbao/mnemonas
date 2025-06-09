@@ -33,6 +33,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
 	"github.com/seanbao/mnemonas/internal/versionstore"
+	"github.com/zeebo/blake3"
 )
 
 const maxObjectsCursorLength = 256
@@ -56,6 +57,8 @@ var getTrashStats = func(fs *storage.FileSystem, ctx context.Context) (int, int6
 var getFileCount = func(fs *storage.FileSystem, ctx context.Context) (int, error) {
 	return fs.GetFileCount(ctx)
 }
+
+var apiTimeNow = time.Now
 
 type prependReadCloser struct {
 	io.Reader
@@ -92,13 +95,14 @@ type Server struct {
 	favoritesHandler    *favorites.Handler
 	favoritesConfigured bool
 	// Config
-	config       *config.Config
-	configMu     sync.RWMutex
-	settingsMu   sync.Mutex
-	configPath   string
-	activeWebDAV WebDAVRuntimeConfig
-	webdavMu     sync.RWMutex
-	updateWebDAV func(WebDAVRuntimeConfig)
+	config              *config.Config
+	configMu            sync.RWMutex
+	settingsMu          sync.Mutex
+	configPath          string
+	activeWebDAV        WebDAVRuntimeConfig
+	webdavMu            sync.RWMutex
+	updateWebDAV        func(WebDAVRuntimeConfig)
+	beforeThumbnailRead func(string) error
 }
 
 type WebDAVRuntimeConfig struct {
@@ -116,13 +120,16 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 		return nil
 	}
 	cloned := *cfg
+	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
+	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
+	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
 	return &cloned
 }
 
 func (s *Server) currentConfig() *config.Config {
 	s.configMu.RLock()
 	defer s.configMu.RUnlock()
-	return s.config
+	return cloneConfigSnapshot(s.config)
 }
 
 func (s *Server) storeConfig(cfg *config.Config) {
@@ -3090,29 +3097,39 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Open original file
-	info, err := s.fs.Stat(r.Context(), filePath)
-	if err != nil {
-		s.respondReadableOpenFileError(w, "thumbnail stat file", err, "path is a directory")
-		return
-	}
-	thumbnailETag := fmt.Sprintf(`"thumb-%s-%s"`, info.ContentHash, size)
-	w.Header().Set("ETag", thumbnailETag)
-	w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
-	w.Header().Set("Cache-Control", "private, no-cache")
-	if apiETagMatch(r.Header.Get("If-None-Match"), thumbnailETag) {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
 	reader, err := s.fs.OpenFile(r.Context(), filePath)
 	if err != nil {
 		s.respondReadableOpenFileError(w, "thumbnail open file", err, "path is a directory")
 		return
 	}
 	defer reader.Close()
+	if s.beforeThumbnailRead != nil {
+		if err := s.beforeThumbnailRead(filePath); err != nil {
+			s.respondInternalError(w, "prepare thumbnail read", err)
+			return
+		}
+	}
+	info, err := reader.Stat()
+	if err != nil {
+		s.respondInternalError(w, "thumbnail stat open file", err)
+		return
+	}
+	contentHash, err := hashReadSeeker(reader)
+	if err != nil {
+		s.respondInternalError(w, "hash thumbnail source", err)
+		return
+	}
+	thumbnailETag := fmt.Sprintf(`"thumb-%s-%s"`, contentHash, size)
+	w.Header().Set("ETag", thumbnailETag)
+	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if apiETagMatch(r.Header.Get("If-None-Match"), thumbnailETag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 
 	// Generate or retrieve cached thumbnail
-	data, err := s.thumbnail.GetThumbnailVersioned(r.Context(), filePath, info.ContentHash, size, reader)
+	data, err := s.thumbnail.GetThumbnailVersioned(r.Context(), filePath, contentHash, size, reader)
 	if err != nil {
 		if errors.Is(err, thumbnail.ErrThumbnailSourceTooLarge) {
 			BadRequest(w, "source image too large to thumbnail")
@@ -3137,6 +3154,20 @@ func apiETagMatch(headerValue, currentETag string) bool {
 		}
 	}
 	return false
+}
+
+func hashReadSeeker(reader io.ReadSeeker) (string, error) {
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	hasher := blake3.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return "", err
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
 }
 
 // handleListActivity returns recent activity log entries
@@ -3264,7 +3295,8 @@ func buildActivityStats(entries []activity.Entry) map[string]any {
 
 	actionCounts := make(map[activity.ActionType]int)
 	userCounts := make(map[string]int)
-	today := time.Now().Truncate(24 * time.Hour)
+	currentTime := apiTimeNow()
+	today := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), 0, 0, 0, 0, currentTime.Location())
 	todayCount := 0
 
 	for _, entry := range entries {
@@ -3272,7 +3304,7 @@ func buildActivityStats(entries []activity.Entry) map[string]any {
 		if entry.User != "" {
 			userCounts[entry.User]++
 		}
-		if entry.Timestamp.After(today) {
+		if !entry.Timestamp.Before(today) {
 			todayCount++
 		}
 	}
@@ -3705,6 +3737,10 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	if req.Retention != nil {
 		if req.Retention.MaxVersions != nil {
+			if *req.Retention.MaxVersions < 0 {
+				BadRequest(w, "invalid retention.max_versions")
+				return
+			}
 			updatedConfig.Storage.Retention.MaxVersions = *req.Retention.MaxVersions
 		}
 		if req.Retention.MaxAge != nil {

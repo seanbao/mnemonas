@@ -6,10 +6,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -103,6 +105,15 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load config")
 	}
+	logCloser, err := applyLoggerConfig(cfg.Log)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to configure logger")
+	}
+	defer func() {
+		if logCloser != nil {
+			_ = logCloser.Close()
+		}
+	}()
 
 	// Ensure directories exist
 	if err := cfg.EnsureDirs(); err != nil {
@@ -389,6 +400,104 @@ func initLogger() {
 	).With().Timestamp().Caller().Logger()
 
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+}
+
+func applyLoggerConfig(cfg config.LogConfig) (io.Closer, error) {
+	writer, closer, noColor, err := resolveLogOutput(cfg.Output)
+	if err != nil {
+		return nil, err
+	}
+
+	level, err := resolveLogLevel(cfg.Level)
+	if err != nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		return nil, err
+	}
+
+	format := strings.ToLower(strings.TrimSpace(cfg.Format))
+	if format == "" {
+		format = "console"
+	}
+
+	if format == "json" {
+		zerolog.TimeFieldFormat = resolveJSONLogTimeFormat(cfg.TimeFormat)
+		log.Logger = zerolog.New(writer).With().Timestamp().Caller().Logger()
+	} else {
+		zerolog.TimeFieldFormat = time.RFC3339
+		log.Logger = zerolog.New(
+			zerolog.ConsoleWriter{
+				Out:        writer,
+				TimeFormat: resolveConsoleLogTimeFormat(cfg.TimeFormat),
+				NoColor:    noColor,
+			},
+		).With().Timestamp().Caller().Logger()
+	}
+
+	zerolog.SetGlobalLevel(level)
+	return closer, nil
+}
+
+func resolveLogOutput(output string) (io.Writer, io.Closer, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "", "stdout":
+		noColor := !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd())
+		return os.Stdout, nil, noColor, nil
+	case "stderr":
+		noColor := !isatty.IsTerminal(os.Stderr.Fd()) && !isatty.IsCygwinTerminal(os.Stderr.Fd())
+		return os.Stderr, nil, noColor, nil
+	default:
+		cleanPath := strings.TrimSpace(output)
+		if err := os.MkdirAll(filepath.Dir(cleanPath), 0o755); err != nil {
+			return nil, nil, true, err
+		}
+		file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return nil, nil, true, err
+		}
+		return file, file, true, nil
+	}
+}
+
+func resolveLogLevel(level string) (zerolog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "", "info":
+		return zerolog.InfoLevel, nil
+	case "debug":
+		return zerolog.DebugLevel, nil
+	case "warn":
+		return zerolog.WarnLevel, nil
+	case "error":
+		return zerolog.ErrorLevel, nil
+	default:
+		return zerolog.InfoLevel, fmt.Errorf("invalid log level %q", level)
+	}
+}
+
+func resolveConsoleLogTimeFormat(timeFormat string) string {
+	trimmed := strings.TrimSpace(timeFormat)
+	if trimmed == "" {
+		return time.RFC3339
+	}
+	return trimmed
+}
+
+func resolveJSONLogTimeFormat(timeFormat string) string {
+	switch strings.ToUpper(strings.TrimSpace(timeFormat)) {
+	case "", "RFC3339":
+		return time.RFC3339
+	case "UNIX":
+		return zerolog.TimeFormatUnix
+	case "UNIXMS":
+		return zerolog.TimeFormatUnixMs
+	case "UNIXMICRO":
+		return zerolog.TimeFormatUnixMicro
+	case "UNIXNANO":
+		return zerolog.TimeFormatUnixNano
+	default:
+		return strings.TrimSpace(timeFormat)
+	}
 }
 
 func loadConfig(path string) (*config.Config, string, error) {

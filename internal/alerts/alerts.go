@@ -69,6 +69,14 @@ func cloneStorageStats(stats *StorageStats) *StorageStats {
 	return &clone
 }
 
+func cloneConfig(cfg Config) Config {
+	clone := cfg
+	if cfg.WebhookHeaders != nil {
+		clone.WebhookHeaders = append([]string(nil), cfg.WebhookHeaders...)
+	}
+	return clone
+}
+
 // AlertPayload is the webhook payload
 type AlertPayload struct {
 	Type      string       `json:"type"`
@@ -101,7 +109,7 @@ var onAlertMonitorLoopStart = func(context.Context) {}
 // NewMonitor creates a new storage monitor
 func NewMonitor(cfg Config, dataDir string, logger zerolog.Logger) *Monitor {
 	return &Monitor{
-		cfg:     cfg,
+		cfg:     cloneConfig(cfg),
 		logger:  logger,
 		dataDir: dataDir,
 	}
@@ -114,7 +122,7 @@ func (m *Monitor) Start(ctx context.Context) {
 
 	m.mu.Lock()
 	m.baseCtx = ctx
-	cfg := m.cfg
+	cfg := cloneConfig(m.cfg)
 	m.mu.Unlock()
 
 	m.restartLocked(cfg)
@@ -140,6 +148,8 @@ func (m *Monitor) UpdateConfig(cfg Config) {
 func (m *Monitor) restartLocked(cfg Config) {
 	m.stopLoopLocked()
 	m.wg.Wait()
+
+	cfg = cloneConfig(cfg)
 
 	m.mu.Lock()
 	m.cfg = cfg
@@ -208,7 +218,7 @@ func (m *Monitor) Check() (*StorageStats, error) {
 	if err != nil {
 		return nil, err
 	}
-	stats.Level = m.determineLevel(stats)
+	stats.Level = m.determineLevel(stats, m.currentConfig())
 	return stats, nil
 }
 
@@ -219,13 +229,20 @@ func (m *Monitor) LastStats() *StorageStats {
 	return cloneStorageStats(m.lastStats)
 }
 
+func (m *Monitor) currentConfig() Config {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return cloneConfig(m.cfg)
+}
+
 func (m *Monitor) check(ctx context.Context) {
 	stats, err := m.getStats()
 	if err != nil {
 		m.logger.Error().Err(err).Msg("Failed to get storage stats")
 		return
 	}
-	stats.Level = m.determineLevel(stats)
+	cfg := m.currentConfig()
+	stats.Level = m.determineLevel(stats, cfg)
 
 	m.mu.Lock()
 	m.lastStats = cloneStorageStats(stats)
@@ -242,7 +259,7 @@ func (m *Monitor) check(ctx context.Context) {
 
 	// Check cooldown
 	m.mu.Lock()
-	shouldAlert := m.shouldSendAlert(level)
+	shouldAlert := m.shouldSendAlert(level, cfg)
 	if shouldAlert {
 		m.lastAlert = time.Now()
 		m.lastLevel = level
@@ -250,7 +267,7 @@ func (m *Monitor) check(ctx context.Context) {
 	m.mu.Unlock()
 
 	if shouldAlert {
-		m.sendAlert(ctx, stats)
+		m.sendAlert(ctx, stats, cfg)
 	}
 }
 
@@ -275,18 +292,18 @@ func (m *Monitor) getStats() (*StorageStats, error) {
 	}, nil
 }
 
-func (m *Monitor) determineLevel(stats *StorageStats) AlertLevel {
+func (m *Monitor) determineLevel(stats *StorageStats, cfg Config) AlertLevel {
 	// Check percentage thresholds
-	if stats.UsedPct >= m.cfg.CriticalPct {
+	if stats.UsedPct >= cfg.CriticalPct {
 		return AlertLevelCritical
 	}
-	if stats.UsedPct >= m.cfg.ThresholdPct {
+	if stats.UsedPct >= cfg.ThresholdPct {
 		return AlertLevelWarning
 	}
 
 	// Check absolute free space
-	if stats.FreeBytes < m.cfg.MinFreeBytes {
-		if stats.UsedPct >= m.cfg.CriticalPct-5 {
+	if stats.FreeBytes < cfg.MinFreeBytes {
+		if stats.UsedPct >= cfg.CriticalPct-5 {
 			return AlertLevelCritical
 		}
 		return AlertLevelWarning
@@ -295,21 +312,21 @@ func (m *Monitor) determineLevel(stats *StorageStats) AlertLevel {
 	return AlertLevelNone
 }
 
-func (m *Monitor) shouldSendAlert(level AlertLevel) bool {
+func (m *Monitor) shouldSendAlert(level AlertLevel, cfg Config) bool {
 	// Always alert on critical level change
 	if level == AlertLevelCritical && m.lastLevel != AlertLevelCritical {
 		return true
 	}
 
 	// Check cooldown for repeated alerts
-	if time.Since(m.lastAlert) < m.cfg.CooldownPeriod {
+	if time.Since(m.lastAlert) < cfg.CooldownPeriod {
 		return false
 	}
 
 	return true
 }
 
-func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats) {
+func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats, cfg Config) {
 	hostname, _ := os.Hostname()
 
 	var message string
@@ -328,7 +345,7 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats) {
 		Msg("Storage alert triggered")
 
 	// Send webhook if configured
-	if m.cfg.WebhookURL != "" {
+	if cfg.WebhookURL != "" {
 		payload := AlertPayload{
 			Type:      "storage_alert",
 			Level:     stats.Level,
@@ -338,24 +355,24 @@ func (m *Monitor) sendAlert(ctx context.Context, stats *StorageStats) {
 			Hostname:  hostname,
 		}
 
-		if err := m.sendWebhook(ctx, payload); err != nil {
+		if err := m.sendWebhook(ctx, payload, cfg); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to send webhook")
 		}
 	}
 }
 
-func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload) error {
+func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Config) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	method := m.cfg.WebhookMethod
+	method := cfg.WebhookMethod
 	if method == "" {
 		method = "POST"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, m.cfg.WebhookURL, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, method, cfg.WebhookURL, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -364,7 +381,7 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload) error {
 	req.Header.Set("User-Agent", "MnemoNAS-Alert/1.0")
 
 	// Add custom headers
-	for _, h := range m.cfg.WebhookHeaders {
+	for _, h := range cfg.WebhookHeaders {
 		// Parse "key:value" format
 		for i := 0; i < len(h); i++ {
 			if h[i] == ':' {
@@ -386,7 +403,7 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload) error {
 	}
 
 	m.logger.Info().
-		Str("url", m.cfg.WebhookURL).
+		Str("url", cfg.WebhookURL).
 		Int("status", resp.StatusCode).
 		Msg("Webhook sent successfully")
 

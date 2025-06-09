@@ -64,6 +64,7 @@ var activityLogWriter = writeActivityLogFile
 var syncActivityLogDir = syncActivityDir
 var activityRandomRead = rand.Read
 var activityIDGenerator = generateID
+var activityTimeNow = time.Now
 
 func copyDetails(details map[string]string) map[string]string {
 	if details == nil {
@@ -496,14 +497,19 @@ func (s *Store) Statistics() map[string]interface{} {
 	stats["by_user"] = userCounts
 
 	// Today's activity
-	today := time.Now().Truncate(24 * time.Hour)
+	today := startOfLocalDay(activityTimeNow())
 	todayCount := 0
 	for _, e := range s.entries {
-		if e.Timestamp.After(today) {
+		if !e.Timestamp.Before(today) {
 			todayCount++
 		}
 	}
 	stats["today"] = todayCount
 
 	return stats
+}
+
+func startOfLocalDay(now time.Time) time.Time {
+	year, month, day := now.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, now.Location())
 }

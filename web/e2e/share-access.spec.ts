@@ -48,6 +48,29 @@ test.describe('公开分享页面', () => {
     await expect(page.getByRole('button', { name: '下载文件' })).toBeVisible({ timeout: 5000 })
   })
 
+  test('密码保护分享验证后应允许下载文件', async ({ page }) => {
+    const shareId = readFixtureValue(PROTECTED_SHARE_ID_FILE)
+    const sharePassword = readFixtureValue(PROTECTED_SHARE_PASSWORD_FILE)
+    test.skip(!shareId || !sharePassword, 'Skipped: no seeded protected public share fixture')
+
+    await page.goto(`/s/${shareId}`, { waitUntil: 'domcontentloaded' })
+
+    await page.getByPlaceholder('请输入密码').fill(sharePassword)
+    await page.getByRole('button', { name: '验证密码' }).click()
+
+    await expect(page.getByText('e2e-protected-share-fixture.txt')).toBeVisible({ timeout: 5000 })
+
+    const responsePromise = page.waitForResponse((response) => {
+      return response.request().method() === 'GET' && response.url().includes(`/api/v1/public/shares/${shareId}/download`)
+    })
+
+    await page.getByRole('button', { name: '下载文件' }).click()
+
+    const response = await responsePromise
+    expect(response.status()).toBe(200)
+    await expect(page.getByPlaceholder('请输入密码')).toHaveCount(0)
+  })
+
   test('已禁用分享应显示失效状态', async ({ page }) => {
     const shareId = readFixtureValue(DISABLED_SHARE_ID_FILE)
     test.skip(!shareId, 'Skipped: no seeded disabled public share fixture')

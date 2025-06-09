@@ -2134,6 +2134,204 @@ func TestFileSystem_RestoreFromTrashTo_PreservesVersions(t *testing.T) {
 	}
 }
 
+func TestFileSystem_RestoreFromTrashTo_RejectsCustomPathWhenAnotherTrashItemSharesOriginalMetadata(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/restore-shared-history.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-shared-history.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-shared-history.txt"); err != nil {
+		t.Fatalf("Delete(first) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-shared-history.txt", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(v3) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/restore-shared-history.txt"); err != nil {
+		t.Fatalf("Delete(second) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 trash items for shared original path, got %d", len(items))
+	}
+	for _, item := range items {
+		if item.OriginalPath != "/restore-shared-history.txt" {
+			t.Fatalf("expected trash item original path to remain shared, got %s", item.OriginalPath)
+		}
+	}
+
+	versionsBefore, err := fs.versions.GetVersions(ctx, "/restore-shared-history.txt")
+	if err != nil {
+		t.Fatalf("versions.GetVersions() before restore error: %v", err)
+	}
+	if len(versionsBefore) == 0 {
+		t.Fatal("expected shared version metadata to exist before restore")
+	}
+
+	err = fs.RestoreFromTrashTo(ctx, items[0].ID, "/restored/restore-shared-history.txt")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("RestoreFromTrashTo() error = %v, want %v", err, ErrAlreadyExists)
+	}
+
+	if _, statErr := fs.Stat(ctx, "/restored/restore-shared-history.txt"); statErr != ErrNotFound {
+		t.Fatalf("expected custom restore target to remain absent, got %v", statErr)
+	}
+
+	itemsAfter, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after rejected restore error: %v", err)
+	}
+	if len(itemsAfter) != 2 {
+		t.Fatalf("expected both trash items to remain after rejected restore, got %d", len(itemsAfter))
+	}
+
+	versionsAfter, err := fs.versions.GetVersions(ctx, "/restore-shared-history.txt")
+	if err != nil {
+		t.Fatalf("versions.GetVersions() after rejected restore error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("expected shared version metadata count to remain %d, got %d", len(versionsBefore), len(versionsAfter))
+	}
+
+	restoredVersions, err := fs.versions.GetVersions(ctx, "/restored/restore-shared-history.txt")
+	if err != nil {
+		t.Fatalf("versions.GetVersions(restored) error: %v", err)
+	}
+	if len(restoredVersions) != 0 {
+		t.Fatalf("expected rejected restore not to move shared version metadata, got %d versions", len(restoredVersions))
+	}
+}
+
+func TestFileSystem_DeleteFromTrash_KeepsSharedVersionMetadataUntilLastTrashItem(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-shared-history.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/delete-shared-history.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/delete-shared-history.txt"); err != nil {
+		t.Fatalf("Delete(first) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/delete-shared-history.txt", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(v3) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/delete-shared-history.txt"); err != nil {
+		t.Fatalf("Delete(second) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 trash items for shared original path, got %d", len(items))
+	}
+
+	versionsBefore, err := fs.versions.GetVersions(ctx, "/delete-shared-history.txt")
+	if err != nil {
+		t.Fatalf("versions.GetVersions() before delete error: %v", err)
+	}
+	if len(versionsBefore) == 0 {
+		t.Fatal("expected shared version metadata to exist before deleting trash items")
+	}
+
+	if err := fs.DeleteFromTrash(ctx, items[0].ID); err != nil {
+		t.Fatalf("DeleteFromTrash(first) error: %v", err)
+	}
+
+	remaining, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after first delete error: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("expected one trash item to remain after first delete, got %d", len(remaining))
+	}
+
+	versionsAfterFirst, err := fs.versions.GetVersions(ctx, "/delete-shared-history.txt")
+	if err != nil {
+		t.Fatalf("versions.GetVersions() after first delete error: %v", err)
+	}
+	if len(versionsAfterFirst) != len(versionsBefore) {
+		t.Fatalf("expected shared version metadata count to remain %d after first delete, got %d", len(versionsBefore), len(versionsAfterFirst))
+	}
+
+	if err := fs.DeleteFromTrash(ctx, remaining[0].ID); err != nil {
+		t.Fatalf("DeleteFromTrash(second) error: %v", err)
+	}
+
+	remaining, err = fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after second delete error: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected no trash items to remain after deleting both, got %d", len(remaining))
+	}
+
+	versionsAfterSecond, err := fs.versions.GetVersions(ctx, "/delete-shared-history.txt")
+	if err != nil {
+		t.Fatalf("versions.GetVersions() after second delete error: %v", err)
+	}
+	if len(versionsAfterSecond) != 0 {
+		t.Fatalf("expected shared version metadata to be cleaned up after last trash item is deleted, got %d versions", len(versionsAfterSecond))
+	}
+}
+
+func TestFileSystem_DeleteFromTrash_KeepsVersionMetadataWhenOriginalPathExists(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/delete-live-history.txt", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/delete-live-history.txt", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/delete-live-history.txt"); err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/delete-live-history.txt", bytes.NewReader([]byte("v3"))); err != nil {
+		t.Fatalf("WriteFile(v3) error: %v", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 trash item, got %d", len(items))
+	}
+
+	versionsBefore, err := fs.ListVersions(ctx, "/delete-live-history.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() before deleting trash item error: %v", err)
+	}
+	if len(versionsBefore) < 2 {
+		t.Fatalf("expected recreated live file to retain historical versions before trash delete, got %d entries", len(versionsBefore))
+	}
+
+	if err := fs.DeleteFromTrash(ctx, items[0].ID); err != nil {
+		t.Fatalf("DeleteFromTrash() error: %v", err)
+	}
+
+	versionsAfter, err := fs.ListVersions(ctx, "/delete-live-history.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() after deleting trash item error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("expected live file version count to remain %d after deleting unrelated trash item, got %d", len(versionsBefore), len(versionsAfter))
+	}
+}
+
 func TestFileSystem_RestoreFromTrashTo_RollsBackWhenIndexUpdateFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -3748,6 +3946,91 @@ func TestFileSystem_RestoreVersion_RollsBackCurrentSnapshotVersionWhenIndexUpdat
 	}
 }
 
+func TestFileSystem_RestoreVersion_DoesNotDeletePreExistingCurrentSnapshotVersionOnRollback(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	firstContent := []byte("restore-existing-first-" + mustGenerateStorageID(t))
+	secondContent := []byte("restore-existing-second-" + mustGenerateStorageID(t))
+	currentHash := computeHash(firstContent)
+
+	if err := fs.WriteFile(ctx, "/restore-existing-snapshot.txt", bytes.NewReader(firstContent)); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-existing-snapshot.txt", bytes.NewReader(secondContent)); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/restore-existing-snapshot.txt", bytes.NewReader(firstContent)); err != nil {
+		t.Fatalf("WriteFile(v3) error: %v", err)
+	}
+
+	versionsBefore, err := fs.ListVersions(ctx, "/restore-existing-snapshot.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() before restore error: %v", err)
+	}
+
+	historicalHash := ""
+	historicalCurrentCount := 0
+	for _, version := range versionsBefore {
+		if version.Comment != "(current)" && version.Hash == currentHash {
+			historicalCurrentCount++
+		}
+		if version.Comment != "(current)" && version.Hash != currentHash && historicalHash == "" {
+			historicalHash = version.Hash
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected at least one different historical version")
+	}
+	if historicalCurrentCount == 0 {
+		t.Fatal("expected current snapshot hash to already exist in historical versions")
+	}
+
+	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
+		return errors.New("index update failed")
+	}
+
+	err = fs.RestoreVersion(ctx, "/restore-existing-snapshot.txt", historicalHash)
+	if err == nil {
+		t.Fatal("expected RestoreVersion() to fail when file index update fails")
+	}
+
+	versionsAfter, err := fs.ListVersions(ctx, "/restore-existing-snapshot.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() after failed restore error: %v", err)
+	}
+	if len(versionsAfter) != len(versionsBefore) {
+		t.Fatalf("expected version count to remain %d after failed restore, got %d", len(versionsBefore), len(versionsAfter))
+	}
+
+	historicalCurrentCountAfter := 0
+	for _, version := range versionsAfter {
+		if version.Comment == "before restore" {
+			t.Fatalf("expected failed restore not to leave before restore version, got %#v", version)
+		}
+		if version.Comment != "(current)" && version.Hash == currentHash {
+			historicalCurrentCountAfter++
+		}
+	}
+	if historicalCurrentCountAfter != historicalCurrentCount {
+		t.Fatalf("expected pre-existing historical snapshot count %d to remain after rollback, got %d", historicalCurrentCount, historicalCurrentCountAfter)
+	}
+
+	reader, err := fs.OpenFile(ctx, "/restore-existing-snapshot.txt")
+	if err != nil {
+		t.Fatalf("OpenFile() after failed restore error: %v", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() after failed restore error: %v", err)
+	}
+	if !bytes.Equal(data, firstContent) {
+		t.Fatalf("expected current content to remain after failed restore, got %q", string(data))
+	}
+}
+
 func TestFileSystem_WriteFile_DoesNotFailWhenCleanupVersionsObjectDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -4246,6 +4529,65 @@ func TestMovePath_RollsBackRenameWhenDirectorySyncFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected destination to be removed after rollback, got %v", statErr)
+	}
+}
+
+func TestMovePath_PreservesCopiedDirectoryWhenSourceCleanupFails(t *testing.T) {
+	tempDir := t.TempDir()
+	src := filepath.Join(tempDir, "src")
+	dst := filepath.Join(tempDir, "dst")
+
+	if err := os.MkdirAll(filepath.Join(src, "nested"), 0755); err != nil {
+		t.Fatalf("MkdirAll(src) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "nested", "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+
+	originalMovePathRename := movePathRename
+	originalMovePathRemoveAll := movePathRemoveAll
+	movePathRename = func(oldPath, newPath string) error {
+		if oldPath == src && newPath == dst {
+			return errors.New("rename failed")
+		}
+		return originalMovePathRename(oldPath, newPath)
+	}
+	movePathRemoveAll = func(target string) error {
+		if target == src {
+			nestedFile := filepath.Join(src, "nested", "file.txt")
+			if err := os.Remove(nestedFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return errors.New("source cleanup failed")
+		}
+		return originalMovePathRemoveAll(target)
+	}
+	t.Cleanup(func() {
+		movePathRename = originalMovePathRename
+		movePathRemoveAll = originalMovePathRemoveAll
+	})
+
+	err := movePath(src, dst)
+	if err == nil {
+		t.Fatal("expected movePath() to fail when copied source cleanup fails")
+	}
+	if !strings.Contains(err.Error(), "failed to remove copied source directory") {
+		t.Fatalf("expected copied-source cleanup failure in error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(dst, "nested", "file.txt"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(dst) error: %v", readErr)
+	}
+	if string(data) != "content" {
+		t.Fatalf("expected copied destination content to remain, got %q", string(data))
+	}
+
+	if _, statErr := os.Stat(src); statErr != nil {
+		t.Fatalf("expected partially cleaned source directory to remain for manual recovery, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(src, "nested", "file.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected simulated partial source cleanup to remove the nested file, got %v", statErr)
 	}
 }
 

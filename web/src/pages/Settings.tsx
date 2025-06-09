@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { 
   Card, 
@@ -189,7 +189,6 @@ function SettingRow({
 export function SettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedTab = normalizeSettingsTab(searchParams.get('tab'))
-  const queryClient = useQueryClient()
   const defaultSettings = {
     serverHost: '0.0.0.0',
     serverPort: '8080',
@@ -243,7 +242,7 @@ export function SettingsPage() {
   const [copiedField, setCopiedField] = useState<string | null>(null)
   
   // Fetch settings from API
-  const { data: settingsData, isLoading, error, refetch, isRefetching } = useQuery({
+  const { data: settingsData, dataUpdatedAt: settingsDataUpdatedAt, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['settings'],
     queryFn: getSettings,
   })
@@ -280,6 +279,8 @@ export function SettingsPage() {
 
   const [draftSettings, setDraftSettings] = useState(defaultSettings)
   const [isDirty, setIsDirty] = useState(false)
+  const [savedSettingsOverride, setSavedSettingsOverride] = useState<typeof defaultSettings | null>(null)
+  const [savedSettingsOverrideUpdatedAt, setSavedSettingsOverrideUpdatedAt] = useState<number | null>(null)
 
   const handleTabSelectionChange = useCallback((key: React.Key) => {
     const nextTab = normalizeSettingsTab(String(key))
@@ -342,12 +343,33 @@ export function SettingsPage() {
     }
   }, [])
 
+  useEffect(() => {
+    if (isDirty || !settingsData?.data) {
+      return
+    }
+
+    if (
+      savedSettingsOverride &&
+      savedSettingsOverrideUpdatedAt !== null &&
+      settingsDataUpdatedAt <= savedSettingsOverrideUpdatedAt
+    ) {
+      return
+    }
+
+    setDraftSettings(mapServerSettings(settingsData.data))
+    setSavedSettingsOverride(null)
+    setSavedSettingsOverrideUpdatedAt(null)
+  }, [isDirty, mapServerSettings, savedSettingsOverride, savedSettingsOverrideUpdatedAt, settingsData, settingsDataUpdatedAt])
+
   const settings = useMemo(() => {
+    if (!isDirty && savedSettingsOverride) {
+      return savedSettingsOverride
+    }
     if (!isDirty && settingsData?.data) {
       return mapServerSettings(settingsData.data)
     }
     return draftSettings
-  }, [draftSettings, isDirty, mapServerSettings, settingsData])
+  }, [draftSettings, isDirty, mapServerSettings, savedSettingsOverride, settingsData])
 
   const updateDirtySettings = (updater: (prev: typeof draftSettings) => typeof draftSettings) => {
     setIsDirty(true)
@@ -367,6 +389,8 @@ export function SettingsPage() {
     if (result.data?.data) {
       setDraftSettings(mapServerSettings(result.data.data))
     }
+    setSavedSettingsOverride(null)
+    setSavedSettingsOverrideUpdatedAt(null)
     setIsDirty(false)
 
     addToast({ title: '已恢复为服务端当前配置', color: 'success' })
@@ -385,6 +409,8 @@ export function SettingsPage() {
     if (result.data?.data) {
       setDraftSettings(mapServerSettings(result.data.data))
     }
+    setSavedSettingsOverride(null)
+    setSavedSettingsOverrideUpdatedAt(null)
     setIsDirty(false)
     addToast({ title: '设置已刷新', color: 'success' })
   }
@@ -403,9 +429,12 @@ export function SettingsPage() {
   const saveMutation = useMutation({
     mutationFn: updateSettings,
     onSuccess: () => {
+      const savedSnapshot = draftSettings
+      setSavedSettingsOverride(savedSnapshot)
+      setSavedSettingsOverrideUpdatedAt(settingsDataUpdatedAt)
       setIsDirty(false)
       addToast({ title: '设置已保存', color: 'success' })
-      queryClient.invalidateQueries({ queryKey: ['settings'] })
+      void refetch()
     },
     onError: (err: unknown) => {
       addToast(getSettingsActionErrorToast(err, {

@@ -759,6 +759,52 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('keeps saved values visible until the post-save refetch completes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      let resolveRefetch: ((value: typeof defaultSettingsResponse) => void) | undefined
+
+      mockGetSettings
+        .mockResolvedValueOnce(defaultSettingsResponse)
+        .mockReturnValueOnce(new Promise<typeof defaultSettingsResponse>((resolve) => {
+          resolveRefetch = resolve
+        }) as ReturnType<typeof getSettings>)
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('8080')).toBeTruthy()
+      })
+
+      const input = screen.getByDisplayValue('8080')
+      await user.clear(input)
+      await user.type(input, '9000')
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalled()
+        expect(mockGetSettings).toHaveBeenCalledTimes(2)
+      })
+
+      expect(screen.getByDisplayValue('9000')).toBeTruthy()
+
+      await act(async () => {
+        resolveRefetch?.({
+          data: {
+            ...defaultSettingsResponse.data,
+            server: {
+              ...defaultSettingsResponse.data.server,
+              port: 9000,
+            },
+          },
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('9000')).toBeTruthy()
+      })
+    })
+
     it('reset restores server values after local edits', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSettings.mockResolvedValue({

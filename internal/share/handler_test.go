@@ -24,11 +24,14 @@ import (
 
 type fakeShareFS struct {
 	statInfo       *storage.FileInfo
+	beforeStat     func(string) error
 	statErrByPath  map[string]error
 	dirItems       []*storage.FileInfo
 	dirItemsByPath map[string][]*storage.FileInfo
+	beforeOpenFile func(string) error
 	openByPath     map[string]FileReader
 	openErrByPath  map[string]error
+	beforeReadDir  func(string) error
 	readDirErr     error
 }
 
@@ -136,6 +139,11 @@ func (w *failPartialWriteResponseWriter) Write(p []byte) (int, error) {
 }
 
 func (f *fakeShareFS) OpenFile(ctx context.Context, filePath string) (FileReader, error) {
+	if f.beforeOpenFile != nil {
+		if err := f.beforeOpenFile(filePath); err != nil {
+			return nil, err
+		}
+	}
 	if f.openErrByPath != nil {
 		if err, ok := f.openErrByPath[filePath]; ok {
 			return nil, err
@@ -150,6 +158,11 @@ func (f *fakeShareFS) OpenFile(ctx context.Context, filePath string) (FileReader
 }
 
 func (f *fakeShareFS) Stat(ctx context.Context, filePath string) (*storage.FileInfo, error) {
+	if f.beforeStat != nil {
+		if err := f.beforeStat(filePath); err != nil {
+			return nil, err
+		}
+	}
 	if f.statErrByPath != nil {
 		if err, ok := f.statErrByPath[filePath]; ok {
 			return nil, err
@@ -162,6 +175,11 @@ func (f *fakeShareFS) Stat(ctx context.Context, filePath string) (*storage.FileI
 }
 
 func (f *fakeShareFS) ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error) {
+	if f.beforeReadDir != nil {
+		if err := f.beforeReadDir(filePath); err != nil {
+			return nil, err
+		}
+	}
 	if f.readDirErr != nil {
 		return nil, f.readDirErr
 	}
@@ -888,6 +906,107 @@ func TestUpdateShare_ReturnsUpdatedShare(t *testing.T) {
 	}
 }
 
+func TestUpdateShare_ReturnsNotFoundWhenShareDeletedAfterAuthorization(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	hookCalled := false
+	handler.beforeMutateShare = func(id string) error {
+		if hookCalled {
+			return nil
+		}
+		hookCalled = true
+		return store.Delete(id)
+	}
+
+	body := []byte(`{"enabled":false}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if !hookCalled {
+		t.Fatal("expected beforeMutateShare hook to run")
+	}
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != "SHARE_NOT_FOUND" {
+		t.Fatalf("expected SHARE_NOT_FOUND, got %+v", payload.Error)
+	}
+}
+
+func TestDeleteShare_ReturnsNotFoundWhenShareDeletedAfterAuthorization(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	hookCalled := false
+	handler.beforeMutateShare = func(id string) error {
+		if hookCalled {
+			return nil
+		}
+		hookCalled = true
+		return store.Delete(id)
+	}
+
+	req := newRouteRequest(http.MethodDelete, "/api/v1/shares/"+share.ID, share.ID, nil)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
+	recorder := httptest.NewRecorder()
+
+	handler.DeleteShare(recorder, req)
+
+	if !hookCalled {
+		t.Fatal("expected beforeMutateShare hook to run")
+	}
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != "SHARE_NOT_FOUND" {
+		t.Fatalf("expected SHARE_NOT_FOUND, got %+v", payload.Error)
+	}
+}
+
 func TestUpdateShare_InvalidPermissionReturnsBadRequest(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1183,6 +1302,54 @@ func TestAccessShare_DeletedOwnerReturnsGone(t *testing.T) {
 	}
 
 	handler := NewHandler(store, &fakeShareFS{})
+	handler.SetUserStore(userStore)
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID, share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.AccessShare(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "SHARE_DISABLED") {
+		t.Fatalf("expected SHARE_DISABLED error, got %s", recorder.Body.String())
+	}
+}
+
+func TestAccessShare_DisabledOwnerAfterAuthorizationReturnsGone(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	userStorePath := filepath.Join(tempDir, "users.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	userStore, _, err := auth.NewUserStore(userStorePath)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+	owner, err := userStore.Create("owner-info-race", "password123", "", auth.RoleUser)
+	if err != nil {
+		t.Fatalf("failed to create owner: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: owner.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		beforeStat: func(string) error {
+			owner.Disabled = true
+			return userStore.Update(owner)
+		},
+		statInfo: &storage.FileInfo{Path: share.Path, Name: "report.pdf", Size: 42, IsDir: false},
+	})
 	handler.SetUserStore(userStore)
 
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID, share.ID, nil)
@@ -1549,6 +1716,49 @@ func TestAccessShareWithPassword_IgnoresSpoofedForwardedProtoForCookie(t *testin
 	if cookies[0].Secure {
 		t.Fatal("expected spoofed forwarded proto to leave share cookie insecure")
 	}
+	if cookies[0].Path != "/" {
+		t.Fatalf("expected share access cookie path to cover public API aliases, got %q", cookies[0].Path)
+	}
+}
+
+func TestAccessShareWithPassword_SetsCookiePathForPublicAPIAlias(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		dirItems: []*storage.FileInfo{{Path: "/docs/a.txt", Name: "a.txt"}},
+	})
+	body := []byte(`{"password":"secret"}`)
+	req := newRouteRequest(http.MethodPost, "/api/v1/public/shares/"+share.ID+"/access", share.ID, body)
+	recorder := httptest.NewRecorder()
+
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+	cookies := recorder.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected one cookie, got %d", len(cookies))
+	}
+	if cookies[0].Path != "/" {
+		t.Fatalf("expected public share cookie path to include API alias routes, got %q", cookies[0].Path)
+	}
 }
 
 func TestAccessShareWithPassword_DoesNotIncrementAccessCount(t *testing.T) {
@@ -1594,6 +1804,63 @@ func TestAccessShareWithPassword_DoesNotIncrementAccessCount(t *testing.T) {
 	}
 	if current.AccessCount != 0 {
 		t.Fatalf("expected access_count 0, got %d", current.AccessCount)
+	}
+}
+
+func TestAccessShareWithPassword_DisabledOwnerAfterAuthorizationReturnsGoneWithoutCookie(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	userStorePath := filepath.Join(tempDir, "users.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	userStore, _, err := auth.NewUserStore(userStorePath)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+	owner, err := userStore.Create("owner-access-race", "password123", "", auth.RoleUser)
+	if err != nil {
+		t.Fatalf("failed to create owner: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: owner.ID,
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		beforeReadDir: func(string) error {
+			owner.Disabled = true
+			return userStore.Update(owner)
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/a.txt", Name: "a.txt", Size: 1, IsDir: false},
+			},
+		},
+	})
+	handler.SetUserStore(userStore)
+
+	body := []byte(`{"password":"secret"}`)
+	req := newRouteRequest(http.MethodPost, "/api/v1/public/shares/"+share.ID+"/access", share.ID, body)
+	recorder := httptest.NewRecorder()
+	handler.AccessShareWithPassword(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "SHARE_DISABLED") {
+		t.Fatalf("expected SHARE_DISABLED error, got %s", recorder.Body.String())
+	}
+	if len(recorder.Result().Cookies()) != 0 {
+		t.Fatalf("expected no access cookie when owner is disabled mid-request, got %d cookies", len(recorder.Result().Cookies()))
 	}
 }
 
@@ -1961,6 +2228,65 @@ func TestListShareItems_UsesCookieAccess(t *testing.T) {
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+}
+
+func TestListShareItems_DisabledOwnerAfterAuthorizationReturnsGone(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	userStorePath := filepath.Join(tempDir, "users.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	userStore, _, err := auth.NewUserStore(userStorePath)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+	owner, err := userStore.Create("owner-race-list", "password123", "", auth.RoleUser)
+	if err != nil {
+		t.Fatalf("failed to create owner: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: owner.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		beforeReadDir: func(string) error {
+			owner.Disabled = true
+			return userStore.Update(owner)
+		},
+		dirItemsByPath: map[string][]*storage.FileInfo{
+			"/docs": {
+				{Path: "/docs/a.txt", Name: "a.txt", Size: 1, IsDir: false},
+			},
+		},
+	})
+	handler.SetUserStore(userStore)
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items", share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.ListShareItems(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "SHARE_DISABLED") {
+		t.Fatalf("expected SHARE_DISABLED error, got %s", recorder.Body.String())
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected disabled-owner list race not to consume access count, got %d", current.AccessCount)
 	}
 }
 
@@ -2437,7 +2763,7 @@ func TestDownloadShare_FirstResponseWriteFailureDoesNotConsumeAccessCountWhenRol
 	}
 }
 
-func TestDownloadShare_PartialStreamFailureRollsBackAccessWithoutAppendingError(t *testing.T) {
+func TestDownloadShare_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -2450,6 +2776,7 @@ func TestDownloadShare_PartialStreamFailureRollsBackAccessWithoutAppendingError(
 		Path:      "/docs/report.pdf",
 		Type:      ShareTypeFile,
 		CreatedBy: "user1",
+		MaxAccess: 1,
 	})
 	if err != nil {
 		t.Fatalf("failed to create share: %v", err)
@@ -2475,8 +2802,14 @@ func TestDownloadShare_PartialStreamFailureRollsBackAccessWithoutAppendingError(
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected partial stream failure not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected partial stream failure after response start to consume access count, got %d", current.AccessCount)
+	}
+
+	secondRecorder := httptest.NewRecorder()
+	handler.DownloadShare(secondRecorder, req)
+	if secondRecorder.Code != http.StatusGone {
+		t.Fatalf("expected retry after partial stream failure to hit max access limit, got %d", secondRecorder.Code)
 	}
 }
 
@@ -2564,6 +2897,63 @@ func TestDownloadShare_ExpiredProtectedShareReturnsGoneWithoutCookie(t *testing.
 	}
 	if errorPayload["code"] != "SHARE_EXPIRED" {
 		t.Fatalf("expected SHARE_EXPIRED code, got %v", errorPayload["code"])
+	}
+}
+
+func TestDownloadShare_DisabledOwnerAfterAuthorizationReturnsGone(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+	userStorePath := filepath.Join(tempDir, "users.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	userStore, _, err := auth.NewUserStore(userStorePath)
+	if err != nil {
+		t.Fatalf("failed to create user store: %v", err)
+	}
+	owner, err := userStore.Create("owner-race-download", "password123", "", auth.RoleUser)
+	if err != nil {
+		t.Fatalf("failed to create owner: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: owner.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{
+		beforeOpenFile: func(string) error {
+			owner.Disabled = true
+			return userStore.Update(owner)
+		},
+		openByPath: map[string]FileReader{
+			share.Path: io.NopCloser(strings.NewReader("download body")),
+		},
+	})
+	handler.SetUserStore(userStore)
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
+	recorder := httptest.NewRecorder()
+	handler.DownloadShare(recorder, req)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("expected status 410, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "SHARE_DISABLED") {
+		t.Fatalf("expected SHARE_DISABLED error, got %s", recorder.Body.String())
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if current.AccessCount != 0 {
+		t.Fatalf("expected disabled-owner download race not to consume access count, got %d", current.AccessCount)
 	}
 }
 
@@ -2789,6 +3179,58 @@ func TestDownloadShareFile_FirstResponseWriteFailureReturnsInternalError(t *test
 	}
 	if current.AccessCount != 0 {
 		t.Fatalf("expected first response write failure not to consume access count, got %d", current.AccessCount)
+	}
+}
+
+func TestDownloadShareFile_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs",
+		Type:      ShareTypeFolder,
+		CreatedBy: "user1",
+		MaxAccess: 1,
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	targetPath := "/docs/report.pdf"
+	handler := NewHandler(store, &fakeShareFS{
+		openByPath: map[string]FileReader{
+			targetPath: &partialFailingReadCloser{reader: io.MultiReader(strings.NewReader("partial"), &failingReadCloser{err: errors.New("stream failed")})},
+		},
+	})
+
+	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report.pdf", share.ID, nil)
+	recorder := httptest.NewRecorder()
+
+	handler.DownloadShareFile(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected started folder download to keep 200 status, got %d", recorder.Code)
+	}
+	if recorder.Body.String() != "partial" {
+		t.Fatalf("expected partial body without appended error payload, got %q", recorder.Body.String())
+	}
+	current, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("expected partial folder download after response start to consume access count, got %d", current.AccessCount)
+	}
+
+	secondRecorder := httptest.NewRecorder()
+	handler.DownloadShareFile(secondRecorder, req)
+	if secondRecorder.Code != http.StatusGone {
+		t.Fatalf("expected retry after partial folder download failure to hit max access limit, got %d", secondRecorder.Code)
 	}
 }
 
@@ -3455,7 +3897,7 @@ func TestListShareItems_FirstResponseWriteFailureDoesNotConsumeAccessCount(t *te
 	}
 }
 
-func TestListShareItems_PartialResponseWriteFailureDoesNotConsumeAccessCount(t *testing.T) {
+func TestListShareItems_PartialResponseWriteFailureConsumesAccessAndBlocksRetry(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -3500,8 +3942,14 @@ func TestListShareItems_PartialResponseWriteFailureDoesNotConsumeAccessCount(t *
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 0 {
-		t.Fatalf("expected partial response write failure not to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 1 {
+		t.Fatalf("expected partial response write failure after response start to consume access count, got %d", current.AccessCount)
+	}
+
+	secondWriter := httptest.NewRecorder()
+	handler.ListShareItems(secondWriter, req)
+	if secondWriter.Code != http.StatusGone {
+		t.Fatalf("expected retry after partial response write failure to hit max access limit, got %d", secondWriter.Code)
 	}
 }
 

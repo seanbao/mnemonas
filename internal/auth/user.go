@@ -139,10 +139,33 @@ func (s *UserStore) load() error {
 		return fmt.Errorf("failed to parse users file: %w", err)
 	}
 
-	for _, u := range users {
-		s.users[u.ID] = u
-		s.byName[normalizeUsername(u.Username)] = u
+	loadedUsers := make(map[string]*User, len(users))
+	loadedByName := make(map[string]*User, len(users))
+	for i, u := range users {
+		if u == nil {
+			return fmt.Errorf("users file contains null entry at index %d", i)
+		}
+		if u.ID == "" {
+			return fmt.Errorf("users file contains user with empty id at index %d", i)
+		}
+		normalizedUsername := normalizeUsername(u.Username)
+		if normalizedUsername == "" {
+			return fmt.Errorf("users file contains user with empty username at index %d", i)
+		}
+		if _, exists := loadedUsers[u.ID]; exists {
+			return fmt.Errorf("users file contains duplicate user id %q", u.ID)
+		}
+		if existing, exists := loadedByName[normalizedUsername]; exists {
+			return fmt.Errorf("users file contains duplicate username %q conflicting with %q", u.Username, existing.Username)
+		}
+
+		loaded := cloneUser(u)
+		loadedUsers[loaded.ID] = loaded
+		loadedByName[normalizedUsername] = loaded
 	}
+
+	s.users = loadedUsers
+	s.byName = loadedByName
 
 	return nil
 }
@@ -530,7 +553,7 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 		snapshot.byName[normalizedUsername] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
-			authenticatedUser = cloneUser(user)
+			authenticatedUser = cloneUser(updated)
 			break
 		}
 		if s.commitSnapshot(snapshot) {

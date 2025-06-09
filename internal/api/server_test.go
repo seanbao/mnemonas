@@ -5375,6 +5375,67 @@ func TestServer_Thumbnail_RefreshesAfterFileContentChanges(t *testing.T) {
 	}
 }
 
+func TestServer_Thumbnail_BindsETagAndContentToOpenedFile(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	server.thumbnail = thumbService
+
+	initialContent := createGIFThumbnailSource(24, 24)
+	updatedContent := createPNGThumbnailSourceWithAlpha(24, 24)
+	if err := fs.WriteFile(ctx, "/racy.png", bytes.NewReader(initialContent)); err != nil {
+		t.Fatalf("WriteFile(initial racy.png) error: %v", err)
+	}
+	initialInfo, err := fs.Stat(ctx, "/racy.png")
+	if err != nil {
+		t.Fatalf("Stat(initial racy.png) error: %v", err)
+	}
+	server.beforeThumbnailRead = func(filePath string) error {
+		server.beforeThumbnailRead = nil
+		return fs.WriteFile(ctx, filePath, bytes.NewReader(updatedContent))
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/thumbnails/racy.png", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("thumbnail status with in-flight replacement = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("thumbnail Content-Type with in-flight replacement = %q, want %q", w.Header().Get("Content-Type"), "image/jpeg")
+	}
+	if w.Header().Get("ETag") != fmt.Sprintf(`"thumb-%s-medium"`, initialInfo.ContentHash) {
+		t.Fatalf("thumbnail ETag with in-flight replacement = %q, want %q", w.Header().Get("ETag"), fmt.Sprintf(`"thumb-%s-medium"`, initialInfo.ContentHash))
+	}
+
+	updatedInfo, err := fs.Stat(ctx, "/racy.png")
+	if err != nil {
+		t.Fatalf("Stat(updated racy.png) error: %v", err)
+	}
+	if updatedInfo.ContentHash == initialInfo.ContentHash {
+		t.Fatal("expected updated file content hash to differ from initial hash")
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/thumbnails/racy.png", nil)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("thumbnail status after replacement = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("thumbnail Content-Type after replacement = %q, want %q", w.Header().Get("Content-Type"), "image/png")
+	}
+	if w.Header().Get("ETag") != fmt.Sprintf(`"thumb-%s-medium"`, updatedInfo.ContentHash) {
+		t.Fatalf("thumbnail ETag after replacement = %q, want %q", w.Header().Get("ETag"), fmt.Sprintf(`"thumb-%s-medium"`, updatedInfo.ContentHash))
+	}
+}
+
 func TestServer_Thumbnail_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
@@ -5783,6 +5844,130 @@ func TestServer_GetShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.
 	}
 }
 
+func TestServer_UpdateShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	allowedShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create own-home share error: %v", err)
+	}
+	legacyShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/other/secret.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create outside-home share error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	legacyReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+legacyShare.ID, strings.NewReader(`{"description":"updated"}`))
+	legacyReq.Header.Set("Authorization", "Bearer "+token)
+	legacyReq.Header.Set("Content-Type", "application/json")
+	legacyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(legacyRec, legacyReq)
+
+	if legacyRec.Code != http.StatusNotFound {
+		t.Fatalf("update outside-home share status = %d, want %d", legacyRec.Code, http.StatusNotFound)
+	}
+	legacyCurrent, err := server.shareStore.Get(legacyShare.ID)
+	if err != nil {
+		t.Fatalf("Get(legacyShare) error: %v", err)
+	}
+	if legacyCurrent.Description != "" {
+		t.Fatalf("expected outside-home share description to remain unchanged, got %q", legacyCurrent.Description)
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+allowedShare.ID, strings.NewReader(`{"description":"updated"}`))
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedReq.Header.Set("Content-Type", "application/json")
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("update own-home share status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+	allowedCurrent, err := server.shareStore.Get(allowedShare.ID)
+	if err != nil {
+		t.Fatalf("Get(allowedShare) error: %v", err)
+	}
+	if allowedCurrent.Description != "updated" {
+		t.Fatalf("expected own-home share description to update, got %q", allowedCurrent.Description)
+	}
+}
+
+func TestServer_DeleteShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/other/secret.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	allowedShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create own-home share error: %v", err)
+	}
+	legacyShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/other/secret.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create outside-home share error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	legacyReq := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+legacyShare.ID, nil)
+	legacyReq.Header.Set("Authorization", "Bearer "+token)
+	legacyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(legacyRec, legacyReq)
+
+	if legacyRec.Code != http.StatusNotFound {
+		t.Fatalf("delete outside-home share status = %d, want %d", legacyRec.Code, http.StatusNotFound)
+	}
+	if _, err := server.shareStore.Get(legacyShare.ID); err != nil {
+		t.Fatalf("expected outside-home share to remain after rejected delete, got %v", err)
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+allowedShare.ID, nil)
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("delete own-home share status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+	if _, err := server.shareStore.Get(allowedShare.ID); err != share.ErrShareNotFound {
+		t.Fatalf("expected own-home share to be deleted, got %v", err)
+	}
+}
+
 func TestServer_ListShares_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
@@ -6000,6 +6185,96 @@ func TestServer_ListFavorites_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 	if strings.Contains(body, "/other/secret.txt") {
 		t.Fatalf("expected outside-home favorite to be filtered, got %s", body)
+	}
+}
+
+func TestServer_RemoveFavorite_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/tester/own.txt", "own"); err != nil {
+		t.Fatalf("Add own-home favorite error: %v", err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/other/secret.txt", "secret"); err != nil {
+		t.Fatalf("Add outside-home favorite error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	legacyReq := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/other/secret.txt", nil)
+	legacyReq.Header.Set("Authorization", "Bearer "+token)
+	legacyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(legacyRec, legacyReq)
+
+	if legacyRec.Code != http.StatusForbidden {
+		t.Fatalf("remove outside-home favorite status = %d, want %d", legacyRec.Code, http.StatusForbidden)
+	}
+	if !server.favoritesStore.IsFavorite(user.ID, "/other/secret.txt") {
+		t.Fatal("expected outside-home favorite to remain after rejected remove")
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/tester/own.txt", nil)
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("remove own-home favorite status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+	if server.favoritesStore.IsFavorite(user.ID, "/tester/own.txt") {
+		t.Fatal("expected own-home favorite to be removed")
+	}
+}
+
+func TestServer_UpdateFavoriteNote_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/tester/own.txt", "own"); err != nil {
+		t.Fatalf("Add own-home favorite error: %v", err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/other/secret.txt", "secret"); err != nil {
+		t.Fatalf("Add outside-home favorite error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	legacyReq := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/other/secret.txt", strings.NewReader(`{"note":"updated"}`))
+	legacyReq.Header.Set("Authorization", "Bearer "+token)
+	legacyReq.Header.Set("Content-Type", "application/json")
+	legacyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(legacyRec, legacyReq)
+
+	if legacyRec.Code != http.StatusForbidden {
+		t.Fatalf("update outside-home favorite note status = %d, want %d", legacyRec.Code, http.StatusForbidden)
+	}
+	legacyFavorites := server.favoritesStore.List(user.ID)
+	for _, favorite := range legacyFavorites {
+		if favorite.Path == "/other/secret.txt" && favorite.Note != "secret" {
+			t.Fatalf("expected outside-home favorite note to remain unchanged, got %q", favorite.Note)
+		}
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/tester/own.txt", strings.NewReader(`{"note":"updated"}`))
+	allowedReq.Header.Set("Authorization", "Bearer "+token)
+	allowedReq.Header.Set("Content-Type", "application/json")
+	allowedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(allowedRec, allowedReq)
+
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("update own-home favorite note status = %d, want %d", allowedRec.Code, http.StatusOK)
+	}
+	allowedFavorites := server.favoritesStore.List(user.ID)
+	for _, favorite := range allowedFavorites {
+		if favorite.Path == "/tester/own.txt" && favorite.Note != "updated" {
+			t.Fatalf("expected own-home favorite note to update, got %q", favorite.Note)
+		}
 	}
 }
 
@@ -6363,6 +6638,29 @@ func TestServer_UpdateSettings_NormalizesWebDAVPrefix(t *testing.T) {
 	}
 }
 
+func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalAuthType := server.config.WebDAV.AuthType
+
+	body := `{"webdav":{"auth_type":"token"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid webdav auth type status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration message, got %s", w.Body.String())
+	}
+	if server.config.WebDAV.AuthType != originalAuthType {
+		t.Fatalf("expected invalid webdav auth type update to leave config unchanged")
+	}
+}
+
 func TestServer_UpdateSettings_SerializesConcurrentRuntimeApply(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -6700,6 +6998,29 @@ func TestServer_UpdateSettings_NegativeMaxAgeRejected(t *testing.T) {
 	}
 	if server.config.Storage.Retention.MaxAge != originalMaxAge {
 		t.Fatalf("expected negative max_age to leave in-memory config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_NegativeMaxVersionsRejected(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalMaxVersions := server.config.Storage.Retention.MaxVersions
+
+	body := `{"retention":{"max_versions":-1}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings negative max_versions status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid retention.max_versions") {
+		t.Fatalf("expected invalid retention.max_versions message, got %s", w.Body.String())
+	}
+	if server.config.Storage.Retention.MaxVersions != originalMaxVersions {
+		t.Fatalf("expected negative max_versions to leave in-memory config unchanged")
 	}
 }
 
@@ -7402,6 +7723,61 @@ func TestServer_StoreConfig_ReplacesSnapshotWithoutMutatingPreviousReaders(t *te
 	}
 }
 
+func TestServer_CurrentConfig_ReturnsIsolatedSlices(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	baseline := server.currentConfig()
+	if baseline == nil {
+		t.Fatal("expected server config")
+	}
+
+	if len(baseline.Storage.Versioning.AutoVersionedExtensions) == 0 {
+		t.Fatal("expected default auto-versioned extensions")
+	}
+
+	baseline.Storage.Versioning.AutoVersionedExtensions[0] = ".mutated"
+
+	current := server.currentConfig()
+	if current == nil {
+		t.Fatal("expected server config")
+	}
+	if current.Storage.Versioning.AutoVersionedExtensions[0] == ".mutated" {
+		t.Fatal("expected currentConfig to return an isolated copy of versioning slices")
+	}
+}
+
+func TestServer_StoreConfig_ClonesSliceFields(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	updated := server.currentConfig()
+	if updated == nil {
+		t.Fatal("expected server config")
+	}
+	updated.Storage.Versioning.AutoVersionedExtensions = []string{".md", ".txt"}
+	updated.Storage.Versioning.AutoVersionedFilenames = []string{"README", "Dockerfile"}
+	updated.Alerts.WebhookHeaders = []string{"Authorization: Bearer token"}
+
+	server.storeConfig(updated)
+
+	updated.Storage.Versioning.AutoVersionedExtensions[0] = ".mutated"
+	updated.Storage.Versioning.AutoVersionedFilenames[0] = "MUTATED"
+	updated.Alerts.WebhookHeaders[0] = "Authorization: Bearer changed"
+
+	current := server.currentConfig()
+	if current == nil {
+		t.Fatal("expected stored config")
+	}
+	if current.Storage.Versioning.AutoVersionedExtensions[0] != ".md" {
+		t.Fatalf("expected stored extension slice to remain isolated, got %v", current.Storage.Versioning.AutoVersionedExtensions)
+	}
+	if current.Storage.Versioning.AutoVersionedFilenames[0] != "README" {
+		t.Fatalf("expected stored filename slice to remain isolated, got %v", current.Storage.Versioning.AutoVersionedFilenames)
+	}
+	if current.Alerts.WebhookHeaders[0] != "Authorization: Bearer token" {
+		t.Fatalf("expected stored webhook headers to remain isolated, got %v", current.Alerts.WebhookHeaders)
+	}
+}
+
 func TestServer_StoreActiveWebDAV_ReplacesSnapshotWithoutMutatingPreviousReaders(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	server.storeActiveWebDAV(WebDAVRuntimeConfig{
@@ -7860,6 +8236,36 @@ func TestServer_ActivityStats_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("activity stats with invalid home_dir status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+func TestBuildActivityStats_UsesLocalCalendarDayBoundary(t *testing.T) {
+	loc := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, time.April, 7, 10, 0, 0, 0, loc)
+	originalNow := apiTimeNow
+	apiTimeNow = func() time.Time { return now }
+	defer func() {
+		apiTimeNow = originalNow
+	}()
+
+	stats := buildActivityStats([]activity.Entry{
+		{Action: activity.ActionUpload, User: "admin", Timestamp: time.Date(2026, time.April, 7, 0, 0, 0, 0, loc)},
+		{Action: activity.ActionDelete, User: "admin", Timestamp: time.Date(2026, time.April, 6, 23, 59, 59, 0, loc)},
+	})
+
+	today, ok := stats["today"].(int)
+	if !ok {
+		t.Fatalf("today type assertion failed: %#v", stats["today"])
+	}
+	if today != 1 {
+		t.Fatalf("expected exactly one entry in today's local calendar bucket, got %d", today)
+	}
+	byAction, ok := stats["by_action"].(map[activity.ActionType]int)
+	if !ok {
+		t.Fatal("by_action type assertion failed")
+	}
+	if byAction[activity.ActionUpload] != 1 || byAction[activity.ActionDelete] != 1 {
+		t.Fatalf("expected both actions to remain counted in total stats, got %#v", byAction)
 	}
 }
 

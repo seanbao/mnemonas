@@ -64,6 +64,7 @@ type Handler struct {
 	passwordFailureWindow time.Duration
 	passwordFailureDelay  time.Duration
 	passwordLockDuration  time.Duration
+	beforeMutateShare     func(id string) error
 }
 
 type shareOwnerStore interface {
@@ -480,6 +481,12 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
+	if h.beforeMutateShare != nil {
+		if err := h.beforeMutateShare(id); err != nil {
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
+			return
+		}
+	}
 
 	var updatedShare *Share
 	err = h.store.Update(id, func(s *Share) error {
@@ -525,6 +532,10 @@ func (h *Handler) UpdateShare(w http.ResponseWriter, r *http.Request) {
 			writeShareError(w, http.StatusBadRequest, "invalid permission", "INVALID_PERMISSION")
 			return
 		}
+		if errors.Is(err, ErrShareNotFound) {
+			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "UPDATE_SHARE_FAILED")
 		return
 	}
@@ -559,8 +570,18 @@ func (h *Handler) DeleteShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusForbidden, "forbidden", "FORBIDDEN")
 		return
 	}
+	if h.beforeMutateShare != nil {
+		if err := h.beforeMutateShare(id); err != nil {
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "DELETE_SHARE_FAILED")
+			return
+		}
+	}
 
 	if err := h.store.Delete(id); err != nil {
+		if errors.Is(err, ErrShareNotFound) {
+			writeShareError(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
+			return
+		}
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DELETE_SHARE_FAILED")
 		return
 	}
@@ -645,6 +666,10 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 				h.writePublicShareInfoError(w, share, err)
 				return
 			}
+			if err := h.ensureShareOwnerActive(share); err != nil {
+				writePublicShareAccessError(w, err)
+				return
+			}
 
 			if !writePublicShareInfo(w, info) {
 				return
@@ -685,6 +710,10 @@ func (h *Handler) AccessShare(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.enrichPublicShareInfo(r.Context(), info, share); err != nil {
 		h.writePublicShareInfoError(w, share, err)
+		return
+	}
+	if err := h.ensureShareOwnerActive(share); err != nil {
+		writePublicShareAccessError(w, err)
 		return
 	}
 
@@ -755,6 +784,10 @@ func (h *Handler) AccessShareWithPassword(w http.ResponseWriter, r *http.Request
 	}
 	if err := h.enrichPublicShareInfo(r.Context(), info, share); err != nil {
 		h.writePublicShareInfoError(w, share, err)
+		return
+	}
+	if err := h.ensureShareOwnerActive(share); err != nil {
+		writePublicShareAccessError(w, err)
 		return
 	}
 	payload, err := marshalShareJSON(info)
@@ -831,7 +864,7 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
-	_, accessReservation, err := h.store.reserveAuthorizedAccess(id)
+	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -841,10 +874,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", shareDownloadContentType(share.Path))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
-		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if streamResponseStarted(err) {
 			return
 		}
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -922,7 +955,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
-	_, accessReservation, err := h.store.reserveAuthorizedAccess(id)
+	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -932,10 +965,10 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", shareDownloadContentType(fullPath))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
-		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if streamResponseStarted(err) {
 			return
 		}
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -1093,7 +1126,7 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		Items: items,
 	}
 
-	_, accessReservation, err := h.store.reserveAuthorizedAccess(id)
+	accessReservation, err := h.reserveAuthorizedAccessForShare(share)
 	if err != nil {
 		writePublicShareAccessError(w, err)
 		return
@@ -1102,10 +1135,11 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	trackingWriter := &responseStartTrackingWriter{ResponseWriter: w}
 	if err := json.NewEncoder(trackingWriter).Encode(resp); err != nil {
-		_ = h.store.rollbackAuthorizedAccess(accessReservation)
-		if !trackingWriter.started {
-			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
+		if trackingWriter.started {
+			return
 		}
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
+		writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 		return
 	}
 }
@@ -1206,6 +1240,25 @@ func (h *Handler) ensureShareOwnerActive(share *Share) error {
 	return nil
 }
 
+func (h *Handler) reserveAuthorizedAccessForShare(share *Share) (*authorizedAccessReservation, error) {
+	if share == nil {
+		return nil, ErrShareNotFound
+	}
+
+	_, reservation, err := h.store.reserveAuthorizedAccess(share.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.ensureShareOwnerActive(share); err != nil {
+		if rollbackErr := h.store.rollbackAuthorizedAccess(reservation); rollbackErr != nil {
+			return nil, errors.Join(err, rollbackErr)
+		}
+		return nil, err
+	}
+
+	return reservation, nil
+}
+
 func (h *Handler) hasShareAccess(r *http.Request, share *Share) bool {
 	if share == nil || !share.HasPassword() {
 		return true
@@ -1228,7 +1281,7 @@ func (h *Handler) setShareAccessCookie(w http.ResponseWriter, r *http.Request, s
 	cookie := &http.Cookie{
 		Name:     shareAccessCookieName(share.ID),
 		Value:    h.shareAccessToken(share),
-		Path:     "/s/" + share.ID,
+		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   requestIsHTTPS(r),
