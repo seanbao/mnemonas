@@ -148,19 +148,21 @@ type Server struct {
 }
 
 type WebDAVRuntimeConfig struct {
-	Enabled             bool
-	Prefix              string
-	ReadOnly            bool
-	AuthType            string
-	Username            string
-	Password            string
-	PasswordIsGenerated bool
-	UserStore           *auth.UserStore
-	DirectoryQuotas     []config.DirectoryQuotaConfig
+	Enabled              bool
+	Prefix               string
+	ReadOnly             bool
+	AuthType             string
+	Username             string
+	Password             string
+	PasswordIsGenerated  bool
+	UserStore            *auth.UserStore
+	DirectoryQuotas      []config.DirectoryQuotaConfig
+	DirectoryAccessRules []config.DirectoryAccessRuleConfig
 }
 
 func cloneWebDAVRuntimeConfig(cfg WebDAVRuntimeConfig) WebDAVRuntimeConfig {
 	cfg.DirectoryQuotas = append([]config.DirectoryQuotaConfig(nil), cfg.DirectoryQuotas...)
+	cfg.DirectoryAccessRules = cloneDirectoryAccessRules(cfg.DirectoryAccessRules)
 	return cfg
 }
 
@@ -170,7 +172,7 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 	}
 	cloned := *cfg
 	cloned.Storage.DirectoryQuotas = append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...)
-	cloned.Storage.DirectoryAccessRules = append([]config.DirectoryAccessRuleConfig(nil), cfg.Storage.DirectoryAccessRules...)
+	cloned.Storage.DirectoryAccessRules = cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
 	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
 	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
 	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
@@ -181,6 +183,23 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 		cloned.Backup.Jobs[i].Exclude = append([]string(nil), cfg.Backup.Jobs[i].Exclude...)
 	}
 	return &cloned
+}
+
+func cloneDirectoryAccessRules(rules []config.DirectoryAccessRuleConfig) []config.DirectoryAccessRuleConfig {
+	if len(rules) == 0 {
+		return nil
+	}
+	cloned := make([]config.DirectoryAccessRuleConfig, len(rules))
+	for i, rule := range rules {
+		cloned[i] = rule
+		cloned[i].ReadUsers = append([]string(nil), rule.ReadUsers...)
+		cloned[i].WriteUsers = append([]string(nil), rule.WriteUsers...)
+		cloned[i].ReadGroups = append([]string(nil), rule.ReadGroups...)
+		cloned[i].WriteGroups = append([]string(nil), rule.WriteGroups...)
+		cloned[i].ReadRoles = append([]string(nil), rule.ReadRoles...)
+		cloned[i].WriteRoles = append([]string(nil), rule.WriteRoles...)
+	}
+	return cloned
 }
 
 func (s *Server) currentConfig() *config.Config {
@@ -1081,14 +1100,15 @@ func requestHasBody(r *http.Request) (bool, error) {
 
 func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConfig {
 	runtimeCfg := WebDAVRuntimeConfig{
-		Enabled:         cfg.WebDAV.Enabled,
-		Prefix:          cfg.WebDAV.Prefix,
-		ReadOnly:        cfg.WebDAV.ReadOnly,
-		AuthType:        cfg.WebDAV.AuthType,
-		Username:        cfg.WebDAV.Username,
-		Password:        cfg.WebDAV.Password,
-		UserStore:       s.userStore,
-		DirectoryQuotas: append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
+		Enabled:              cfg.WebDAV.Enabled,
+		Prefix:               cfg.WebDAV.Prefix,
+		ReadOnly:             cfg.WebDAV.ReadOnly,
+		AuthType:             cfg.WebDAV.AuthType,
+		Username:             cfg.WebDAV.Username,
+		Password:             cfg.WebDAV.Password,
+		UserStore:            s.userStore,
+		DirectoryQuotas:      append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
+		DirectoryAccessRules: cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
 	}
 
 	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
@@ -1128,13 +1148,14 @@ func loadGeneratedWebDAVPassword(dataRoot string) (string, error) {
 
 func prepareWebDAVRuntimeConfig(cfg config.Config) (*WebDAVRuntimeConfig, error) {
 	runtimeCfg := WebDAVRuntimeConfig{
-		Enabled:         cfg.WebDAV.Enabled,
-		Prefix:          cfg.WebDAV.Prefix,
-		ReadOnly:        cfg.WebDAV.ReadOnly,
-		AuthType:        cfg.WebDAV.AuthType,
-		Username:        cfg.WebDAV.Username,
-		Password:        cfg.WebDAV.Password,
-		DirectoryQuotas: append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
+		Enabled:              cfg.WebDAV.Enabled,
+		Prefix:               cfg.WebDAV.Prefix,
+		ReadOnly:             cfg.WebDAV.ReadOnly,
+		AuthType:             cfg.WebDAV.AuthType,
+		Username:             cfg.WebDAV.Username,
+		Password:             cfg.WebDAV.Password,
+		DirectoryQuotas:      append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
+		DirectoryAccessRules: cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
 	}
 
 	if !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") {
@@ -1880,6 +1901,13 @@ func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*st
 	if !s.authEnabled || auth.IsAdmin(ctx) {
 		return results, nil
 	}
+	_, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return results, nil
+	}
 
 	filtered := make([]*storage.SearchResult, 0, len(results))
 	for _, result := range results {
@@ -1894,6 +1922,13 @@ func (s *Server) filterTrashItemsByHomeDir(ctx context.Context, items []*storage
 	if !s.authEnabled || auth.IsAdmin(ctx) {
 		return items, nil
 	}
+	_, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return items, nil
+	}
 
 	filtered := make([]*storage.TrashItem, 0, len(items))
 	for _, item := range items {
@@ -1906,6 +1941,13 @@ func (s *Server) filterTrashItemsByHomeDir(ctx context.Context, items []*storage
 
 func (s *Server) filterFavoritesByHomeDir(ctx context.Context, items []*favorites.Favorite) ([]*favorites.Favorite, error) {
 	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return items, nil
+	}
+	_, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
 		return items, nil
 	}
 
@@ -1979,6 +2021,13 @@ func paginateActivityEntries(entries []activity.Entry, limit, offset int) []acti
 
 func (s *Server) filterSharesByHomeDir(ctx context.Context, items []*share.Share) ([]*share.Share, error) {
 	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return items, nil
+	}
+	_, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
 		return items, nil
 	}
 
@@ -5790,7 +5839,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"storage": map[string]interface{}{
 			"root":                   cfg.Storage.Root,
 			"directory_quotas":       append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
-			"directory_access_rules": append([]config.DirectoryAccessRuleConfig(nil), cfg.Storage.DirectoryAccessRules...),
+			"directory_access_rules": cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules),
 		},
 		"trash": map[string]interface{}{
 			"enabled":        cfg.Storage.Trash.Enabled,

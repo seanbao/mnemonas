@@ -128,4 +128,3 @@ func (s *Server) hasDirectoryAccessRules() bool {
 	cfg := s.currentConfig()
 	return cfg != nil && len(cfg.Storage.DirectoryAccessRules) > 0
 }
-

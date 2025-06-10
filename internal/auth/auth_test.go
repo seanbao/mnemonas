@@ -506,6 +506,34 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("create with groups normalizes memberships", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users3-groups.json"))
+		user, err := store.CreateWithGroups("groupuser", "password123", "", RoleUser, []string{"Family", "editors", "family", " qa-team "})
+		if err != nil {
+			t.Fatalf("CreateWithGroups() error: %v", err)
+		}
+		if got, want := strings.Join(user.Groups, ","), "editors,family,qa-team"; got != want {
+			t.Fatalf("groups = %q, want %q", got, want)
+		}
+		fresh, err := store.GetByUsername("groupuser")
+		if err != nil {
+			t.Fatalf("GetByUsername(groupuser) error: %v", err)
+		}
+		if got, want := strings.Join(fresh.Groups, ","), "editors,family,qa-team"; got != want {
+			t.Fatalf("stored groups = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("create rejects invalid groups", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users3-invalid-groups.json"))
+		if _, err := store.CreateWithGroups("badgroups", "password123", "", RoleUser, []string{"family/team"}); !errors.Is(err, errInvalidUserGroups) {
+			t.Fatalf("expected invalid groups error, got %v", err)
+		}
+		if _, lookupErr := store.GetByUsername("badgroups"); !errors.Is(lookupErr, ErrUserNotFound) {
+			t.Fatalf("expected invalid groups create to leave no persisted user, got %v", lookupErr)
+		}
+	})
+
 	t.Run("invalid stored home dir", func(t *testing.T) {
 		usersPath := filepath.Join(dir, "users-invalid-home-dir.json")
 		content := `[
@@ -679,6 +707,28 @@ func TestUserStore(t *testing.T) {
 		}
 		if fresh.HomeDir != "/homefix/docs" {
 			t.Fatalf("expected stored home_dir to remain /homefix/docs, got %s", fresh.HomeDir)
+		}
+	})
+
+	t.Run("update validates and normalizes groups", func(t *testing.T) {
+		store, _, _ := NewUserStore(filepath.Join(dir, "users5-groups.json"))
+		user, _ := store.Create("groupfix", "password123", "", RoleUser)
+
+		user.Groups = []string{"Family", "editors", "family"}
+		if err := store.Update(user); err != nil {
+			t.Fatalf("Update(groups) error: %v", err)
+		}
+		fresh, err := store.GetByUsername("groupfix")
+		if err != nil {
+			t.Fatalf("GetByUsername(groupfix) error: %v", err)
+		}
+		if got, want := strings.Join(fresh.Groups, ","), "editors,family"; got != want {
+			t.Fatalf("stored groups = %q, want %q", got, want)
+		}
+
+		fresh.Groups = []string{""}
+		if err := store.Update(fresh); !errors.Is(err, errInvalidUserGroups) {
+			t.Fatalf("expected invalid groups error, got %v", err)
 		}
 	})
 
@@ -3494,6 +3544,46 @@ func TestAuthHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("admin create user with groups", func(t *testing.T) {
+		body := `{"username":"newgroupuser","password":"newpass123","email":"groups@test.com","role":"user","groups":["Family","editors","family"]}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+		}
+		created, err := store.GetByUsername("newgroupuser")
+		if err != nil {
+			t.Fatalf("GetByUsername(newgroupuser) error: %v", err)
+		}
+		if got, want := strings.Join(created.Groups, ","), "editors,family"; got != want {
+			t.Fatalf("created groups = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("admin create user rejects invalid groups", func(t *testing.T) {
+		body := `{"username":"invalidgroups","password":"newpass123","role":"user","groups":["family/team"]}`
+		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleCreateUser(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal create error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_GROUPS" {
+			t.Fatalf("expected INVALID_GROUPS error, got %+v", envelope.Error)
+		}
+	})
+
 	t.Run("admin create user rejects unknown fields", func(t *testing.T) {
 		body := `{"username":"unknownfielduser","password":"newpass123","email":"new@test.com","role":"user","unexpected":true}`
 		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
@@ -3572,7 +3662,7 @@ func TestAuthHandler(t *testing.T) {
 			t.Fatalf("failed to create editable user: %v", err)
 		}
 
-		body := `{"email":"new@test.com","role":"guest","home_dir":"/guests/editableuser","quota_bytes":1048576}`
+		body := `{"email":"new@test.com","role":"guest","groups":["Family","editors"],"home_dir":"/guests/editableuser","quota_bytes":1048576}`
 		req := httptest.NewRequest("PUT", "/api/v1/admin/users/"+user.ID, bytes.NewBufferString(body))
 		admin, _ := store.GetByUsername("handleradmin")
 		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
@@ -3589,6 +3679,33 @@ func TestAuthHandler(t *testing.T) {
 		}
 		if updated.Email != "new@test.com" || updated.Role != RoleGuest || updated.HomeDir != "/guests/editableuser" || updated.QuotaBytes != 1048576 {
 			t.Fatalf("unexpected updated user: %+v", updated)
+		}
+		if got, want := strings.Join(updated.Groups, ","), "editors,family"; got != want {
+			t.Fatalf("updated groups = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("admin update user rejects invalid groups", func(t *testing.T) {
+		user, err := store.Create("badupdategroups", "password123", "", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create bad groups user: %v", err)
+		}
+
+		req := httptest.NewRequest("PUT", "/api/v1/admin/users/"+user.ID, bytes.NewBufferString(`{"groups":["bad/group"]}`))
+		admin, _ := store.GetByUsername("handleradmin")
+		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+		rec := httptest.NewRecorder()
+		h.HandleUpdateUser(rec, req, user.ID)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var envelope authEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal update error envelope: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "INVALID_GROUPS" {
+			t.Fatalf("expected INVALID_GROUPS error, got %+v", envelope.Error)
 		}
 	})
 

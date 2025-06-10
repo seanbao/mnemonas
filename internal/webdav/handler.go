@@ -65,11 +65,14 @@ var webdavRandomRead = rand.Read
 type webDAVScopeContextKey struct{}
 
 type requestScope struct {
-	username   string
-	homeDir    string
-	scoped     bool
-	readOnly   bool
-	quotaBytes int64
+	username    string
+	role        string
+	groups      []string
+	homeDir     string
+	scoped      bool
+	readOnly    bool
+	quotaBytes  int64
+	accessRules []DirectoryAccessRule
 }
 
 // DirectoryQuota limits logical current-file bytes under a MnemoNAS path.
@@ -77,6 +80,24 @@ type DirectoryQuota struct {
 	Path       string
 	QuotaBytes int64
 }
+
+// DirectoryAccessRule grants read/write access under a logical MnemoNAS path.
+type DirectoryAccessRule struct {
+	Path        string
+	ReadUsers   []string
+	WriteUsers  []string
+	ReadGroups  []string
+	WriteGroups []string
+	ReadRoles   []string
+	WriteRoles  []string
+}
+
+type accessMode string
+
+const (
+	accessRead  accessMode = "read"
+	accessWrite accessMode = "write"
+)
 
 func scopeFromContext(ctx context.Context) requestScope {
 	if ctx == nil {
@@ -101,6 +122,11 @@ func (s requestScope) storagePath(clientPath string) (string, bool) {
 
 	if strings.TrimSpace(s.homeDir) == "" {
 		return "", false
+	}
+	if s.hasAccessRules() {
+		if _, ok := s.matchAccessRule(cleanPath); ok {
+			return cleanPath, true
+		}
 	}
 	if cleanPath == "/" {
 		return s.homeDir, true
@@ -138,12 +164,86 @@ func (s requestScope) clientPath(storagePath string) (string, bool) {
 		}
 		return clientPath, true
 	}
+	if s.hasAccessRules() {
+		if _, ok := s.matchAccessRule(cleanPath); ok && s.canAccess(cleanPath, accessRead) {
+			return cleanPath, true
+		}
+	}
 	return "", false
 }
 
 func (s requestScope) isClientRoot(storagePath string) bool {
 	clientPath, ok := s.clientPath(storagePath)
 	return ok && clientPath == "/"
+}
+
+func (s requestScope) hasAccessRules() bool {
+	return len(s.accessRules) > 0
+}
+
+func (s requestScope) canAccess(targetPath string, mode accessMode) bool {
+	if !s.scoped {
+		return true
+	}
+	targetPath = path.Clean(targetPath)
+	if rule, ok := s.matchAccessRule(targetPath); ok {
+		return accessRuleAllowsScope(rule, s, mode)
+	}
+	return strings.TrimSpace(s.homeDir) != "" && pathMatchesOrDescendant(path.Clean(s.homeDir), targetPath)
+}
+
+func (s requestScope) matchAccessRule(targetPath string) (DirectoryAccessRule, bool) {
+	targetPath = path.Clean(targetPath)
+	bestIndex := -1
+	bestLength := -1
+	for i, rule := range s.accessRules {
+		if strings.TrimSpace(rule.Path) == "" || !pathMatchesOrDescendant(rule.Path, targetPath) {
+			continue
+		}
+		if len(rule.Path) > bestLength {
+			bestIndex = i
+			bestLength = len(rule.Path)
+		}
+	}
+	if bestIndex < 0 {
+		return DirectoryAccessRule{}, false
+	}
+	return s.accessRules[bestIndex], true
+}
+
+func accessRuleAllowsScope(rule DirectoryAccessRule, scope requestScope, mode accessMode) bool {
+	username := strings.ToLower(strings.TrimSpace(scope.username))
+	role := strings.ToLower(strings.TrimSpace(scope.role))
+	groups := make([]string, 0, len(scope.groups))
+	for _, group := range scope.groups {
+		group = strings.ToLower(strings.TrimSpace(group))
+		if group != "" {
+			groups = append(groups, group)
+		}
+	}
+
+	users := rule.ReadUsers
+	roles := rule.ReadRoles
+	groupsAllowed := rule.ReadGroups
+	if mode == accessWrite {
+		users = rule.WriteUsers
+		roles = rule.WriteRoles
+		groupsAllowed = rule.WriteGroups
+	} else {
+		users = append(append([]string(nil), rule.ReadUsers...), rule.WriteUsers...)
+		roles = append(append([]string(nil), rule.ReadRoles...), rule.WriteRoles...)
+		groupsAllowed = append(append([]string(nil), rule.ReadGroups...), rule.WriteGroups...)
+	}
+
+	if slices.Contains(users, username) || slices.Contains(roles, role) {
+		return true
+	}
+	for _, group := range groups {
+		if slices.Contains(groupsAllowed, group) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeScopedHomeDir(homeDir string) (string, bool) {
@@ -161,6 +261,7 @@ func normalizeScopedHomeDir(homeDir string) (string, bool) {
 type UserIdentity struct {
 	Username   string
 	Role       string
+	Groups     []string
 	HomeDir    string
 	QuotaBytes int64
 }
@@ -210,6 +311,7 @@ type Handler struct {
 	userAuthenticator UserAuthenticator
 	quotaMu           sync.Mutex
 	directoryQuotas   []DirectoryQuota
+	directoryAccess   []DirectoryAccessRule
 	beforeCopyFile    func(srcPath, dstPath string) error
 }
 
@@ -224,6 +326,7 @@ type Config struct {
 	Password          string
 	UserAuthenticator UserAuthenticator
 	DirectoryQuotas   []DirectoryQuota
+	DirectoryAccess   []DirectoryAccessRule
 }
 
 // NewHandler creates a WebDAV handler
@@ -245,6 +348,7 @@ func NewHandler(cfg Config) *Handler {
 		password:            cfg.Password,
 		userAuthenticator:   cfg.UserAuthenticator,
 		directoryQuotas:     cloneWebDAVDirectoryQuotas(cfg.DirectoryQuotas),
+		directoryAccess:     cloneWebDAVDirectoryAccessRules(cfg.DirectoryAccess),
 	}
 }
 
@@ -253,6 +357,23 @@ func cloneWebDAVDirectoryQuotas(quotas []DirectoryQuota) []DirectoryQuota {
 		return nil
 	}
 	return append([]DirectoryQuota(nil), quotas...)
+}
+
+func cloneWebDAVDirectoryAccessRules(rules []DirectoryAccessRule) []DirectoryAccessRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	cloned := make([]DirectoryAccessRule, len(rules))
+	for i, rule := range rules {
+		cloned[i] = rule
+		cloned[i].ReadUsers = append([]string(nil), rule.ReadUsers...)
+		cloned[i].WriteUsers = append([]string(nil), rule.WriteUsers...)
+		cloned[i].ReadGroups = append([]string(nil), rule.ReadGroups...)
+		cloned[i].WriteGroups = append([]string(nil), rule.WriteGroups...)
+		cloned[i].ReadRoles = append([]string(nil), rule.ReadRoles...)
+		cloned[i].WriteRoles = append([]string(nil), rule.WriteRoles...)
+	}
+	return cloned
 }
 
 // Close stops background resources owned by the handler.
@@ -361,6 +482,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := contextWithScope(r.Context(), scope)
 	r = r.WithContext(ctx)
 
+	if mode, ok := accessModeForMethod(r.Method); ok && !authorizeScopePath(w, scope, filePath, mode) {
+		return
+	}
+
 	// Check read-only mode
 	if (h.readOnly || scope.readOnly) && !isReadMethod(r.Method) {
 		http.Error(w, "read-only mode", http.StatusForbidden)
@@ -393,6 +518,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not supported", http.StatusMethodNotAllowed)
 	}
+}
+
+func accessModeForMethod(method string) (accessMode, bool) {
+	switch method {
+	case "OPTIONS":
+		return accessRead, false
+	case http.MethodGet, http.MethodHead, "PROPFIND", "COPY":
+		return accessRead, true
+	default:
+		return accessWrite, true
+	}
+}
+
+func authorizeScopePath(w http.ResponseWriter, scope requestScope, targetPath string, mode accessMode) bool {
+	if scope.canAccess(targetPath, mode) {
+		return true
+	}
+	http.Error(w, "path access denied", http.StatusForbidden)
+	return false
 }
 
 func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
@@ -531,6 +675,9 @@ func (h *Handler) serveDirectory(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	for _, child := range children {
+		if !scope.canAccess(child.Path, accessRead) {
+			continue
+		}
 		name := path.Base(child.Path)
 		if child.IsDir {
 			name += "/"
@@ -826,6 +973,9 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "source and destination must differ", http.StatusForbidden)
 		return
 	}
+	if !authorizeScopePath(w, scopeFromContext(ctx), dst, accessWrite) {
+		return
+	}
 
 	releaseLocks := h.acquireHierarchyLocks(
 		hierarchyLockSpec{path: srcPath, write: false},
@@ -1004,7 +1154,11 @@ func (h *Handler) copyResource(ctx context.Context, srcPath, dstPath, depth stri
 			return h.rollbackCopiedDirectory(dstPath, err)
 		}
 
+		scope := scopeFromContext(ctx)
 		for _, child := range children {
+			if !scope.canAccess(child.Path, accessRead) {
+				continue
+			}
 			childName := path.Base(child.Path)
 			if err := h.copyResource(ctx, child.Path, path.Join(dstPath, childName), "infinity", false); err != nil {
 				if isVisibleMutationWarning(err) {
@@ -1386,6 +1540,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		http.Error(w, "source and destination must differ", http.StatusForbidden)
 		return
 	}
+	if !authorizeScopePath(w, scopeFromContext(ctx), dst, accessWrite) {
+		return
+	}
 
 	releaseLocks := h.acquireHierarchyLocks(
 		hierarchyLockSpec{path: srcPath, write: true},
@@ -1729,6 +1886,9 @@ func (h *Handler) appendPropfindChildren(ctx context.Context, filePath string, i
 	}
 
 	for _, child := range children {
+		if !scopeFromContext(ctx).canAccess(child.Path, accessRead) {
+			continue
+		}
 		*responses = append(*responses, h.propResponse(ctx, child.Path, child))
 		if depth == "infinity" {
 			if err := h.appendPropfindChildren(ctx, child.Path, child, depth, currentDepth+1, responses); err != nil {
@@ -2718,7 +2878,12 @@ func (h *Handler) scopeForIdentity(identity *UserIdentity) (requestScope, error)
 
 	role := strings.ToLower(strings.TrimSpace(identity.Role))
 	if role == webDAVRoleAdmin {
-		return requestScope{username: identity.Username, quotaBytes: identity.QuotaBytes}, nil
+		return requestScope{
+			username:   identity.Username,
+			role:       role,
+			groups:     append([]string(nil), identity.Groups...),
+			quotaBytes: identity.QuotaBytes,
+		}, nil
 	}
 
 	homeDir, ok := normalizeScopedHomeDir(identity.HomeDir)
@@ -2726,11 +2891,14 @@ func (h *Handler) scopeForIdentity(identity *UserIdentity) (requestScope, error)
 		return requestScope{}, errors.New("invalid user home directory")
 	}
 	return requestScope{
-		username:   identity.Username,
-		homeDir:    homeDir,
-		scoped:     true,
-		readOnly:   role == webDAVRoleGuest,
-		quotaBytes: identity.QuotaBytes,
+		username:    identity.Username,
+		role:        role,
+		groups:      append([]string(nil), identity.Groups...),
+		homeDir:     homeDir,
+		scoped:      true,
+		readOnly:    role == webDAVRoleGuest,
+		quotaBytes:  identity.QuotaBytes,
+		accessRules: cloneWebDAVDirectoryAccessRules(h.directoryAccess),
 	}, nil
 }
 

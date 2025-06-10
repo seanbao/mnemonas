@@ -68,6 +68,27 @@ describe('Users API', () => {
     expect(result.user.username).toBe('admin')
   })
 
+  it('accepts groups in user responses and requests', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => null },
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'editor', email: '', role: 'user', groups: ['editors', 'family'], disabled: false, home_dir: '/editor', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+        },
+      }),
+    })
+
+    const result = await createUser({ username: 'editor', password: 'password123', groups: ['family', 'editors'] })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/admin/users/', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ username: 'editor', password: 'password123', groups: ['family', 'editors'] }),
+    }))
+    expect(result.user.groups).toEqual(['editors', 'family'])
+  })
+
   it('unwraps wrapped update user responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,

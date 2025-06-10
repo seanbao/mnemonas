@@ -69,6 +69,35 @@ describe('Settings API', () => {
     expect(result.data.storage.directory_quotas?.[0]).toEqual({ path: '/team', quota_bytes: 1048576 })
   })
 
+  it('accepts directory access rules in settings responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: createSettings({
+          storage: {
+            root: '~/.mnemonas',
+            directory_access_rules: [{
+              path: '/team',
+              read_groups: ['family'],
+              write_groups: ['editors'],
+              read_roles: ['user'],
+            }],
+          },
+        }),
+      }),
+    })
+
+    const result = await getSettings()
+
+    expect(result.data.storage.directory_access_rules?.[0]).toEqual({
+      path: '/team',
+      read_groups: ['family'],
+      write_groups: ['editors'],
+      read_roles: ['user'],
+    })
+  })
+
   it('accepts favorites runtime availability in settings responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -322,6 +351,36 @@ describe('Settings API', () => {
     body: JSON.stringify({ server: { trusted_proxy_hops: 3 } }),
 	  }))
 	  })
+
+  it('sends directory access rules in update payloads', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+    })
+
+    await updateSettings({
+      storage: {
+        directory_access_rules: [{
+          path: '/team',
+          read_groups: ['family'],
+          write_groups: ['editors'],
+        }],
+      },
+    })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({
+        storage: {
+          directory_access_rules: [{
+            path: '/team',
+            read_groups: ['family'],
+            write_groups: ['editors'],
+          }],
+        },
+      }),
+    }))
+  })
 
   it('uses structured api error message when update settings fails', async () => {
     mockAuthFetch.mockResolvedValueOnce({

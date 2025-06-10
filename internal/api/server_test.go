@@ -803,6 +803,30 @@ func setDirectoryQuotasForTest(t *testing.T, server *Server, quotas []config.Dir
 	server.storeConfig(cfg)
 }
 
+func setDirectoryAccessRulesForTest(t *testing.T, server *Server, rules []config.DirectoryAccessRuleConfig) {
+	t.Helper()
+
+	cfg := server.currentConfig()
+	if cfg == nil {
+		t.Fatal("server config is nil")
+	}
+	cfg.Storage.DirectoryAccessRules = config.NormalizeDirectoryAccessRules(rules)
+	server.storeConfig(cfg)
+}
+
+func setUserGroupsForTest(t *testing.T, server *Server, username string, groups []string) {
+	t.Helper()
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	user.Groups = append([]string(nil), groups...)
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(%s) groups error: %v", username, err)
+	}
+}
+
 func newActivityOnlyAuthServer(t *testing.T) *Server {
 	t.Helper()
 
@@ -6028,6 +6052,71 @@ func TestServer_ListFiles_EnforcesHomeDirForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_DirectoryAccessRulesGrantSharedPaths(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserGroupsForTest(t, server, username, []string{"family"})
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/uploads", WriteGroups: []string{"family"}},
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/uploads"); err != nil {
+		t.Fatalf("Mkdir(/team/uploads) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/readme.txt", bytes.NewReader([]byte("shared"))); err != nil {
+		t.Fatalf("WriteFile(/team/readme.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	doRequest := func(method, target, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		server.Router().ServeHTTP(rec, req)
+		return rec
+	}
+
+	listRec := doRequest(http.MethodGet, "/api/v1/files/team", "")
+	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), "/team/readme.txt") {
+		t.Fatalf("shared list status/body = %d %s, want 200 with shared file", listRec.Code, listRec.Body.String())
+	}
+
+	downloadRec := doRequest(http.MethodGet, "/api/v1/download/team/readme.txt", "")
+	if downloadRec.Code != http.StatusOK || downloadRec.Body.String() != "shared" {
+		t.Fatalf("shared download status/body = %d %q, want 200 shared", downloadRec.Code, downloadRec.Body.String())
+	}
+
+	deniedWriteRec := doRequest(http.MethodPost, "/api/v1/files/team/blocked.txt", "blocked")
+	if deniedWriteRec.Code != http.StatusForbidden {
+		t.Fatalf("read-only shared upload status = %d, want %d; body=%s", deniedWriteRec.Code, http.StatusForbidden, deniedWriteRec.Body.String())
+	}
+	if !strings.Contains(deniedWriteRec.Body.String(), "directory access rule") {
+		t.Fatalf("expected ACL denial message, got %s", deniedWriteRec.Body.String())
+	}
+
+	allowedWriteRec := doRequest(http.MethodPost, "/api/v1/files/team/uploads/ok.txt", "ok")
+	if allowedWriteRec.Code != http.StatusCreated {
+		t.Fatalf("write-granted upload status = %d, want %d; body=%s", allowedWriteRec.Code, http.StatusCreated, allowedWriteRec.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/uploads/ok.txt"); err != nil {
+		t.Fatalf("expected write-granted upload to create file: %v", err)
+	}
+
+	outsideRec := doRequest(http.MethodGet, "/api/v1/files/other", "")
+	if outsideRec.Code != http.StatusForbidden {
+		t.Fatalf("outside unmatched path status = %d, want %d", outsideRec.Code, http.StatusForbidden)
+	}
+}
+
 func TestServer_ListFiles_EmptyUserHomeDirReturnsForbidden(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 
@@ -10907,6 +10996,52 @@ func TestServer_CreateShare_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_CreateShare_AllowsDirectoryAccessRulePathForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setUserGroupsForTest(t, server, username, []string{"family"})
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/shared.txt", bytes.NewReader([]byte("shared"))); err != nil {
+		t.Fatalf("WriteFile(/team/shared.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/team/shared.txt","type":"file"}`))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("ACL share create status = %d, want %d; body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+
+	var payload struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode share create response error: %v", err)
+	}
+	if payload.Data.ID == "" {
+		t.Fatalf("expected created share id, body=%s", createRec.Body.String())
+	}
+
+	publicReq := httptest.NewRequest(http.MethodGet, "/s/"+payload.Data.ID+"/download", nil)
+	publicRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(publicRec, publicReq)
+	if publicRec.Code != http.StatusOK || publicRec.Body.String() != "shared" {
+		t.Fatalf("public ACL share download status/body = %d %q, want 200 shared", publicRec.Code, publicRec.Body.String())
+	}
+}
+
 func TestServer_CreateShare_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
@@ -12359,7 +12494,7 @@ func TestServer_WebDAVCredentials_UpdatesRunningConfigAfterSettingsUpdate(t *tes
 	}
 }
 
-func TestServer_UpdateSettings_UpdatesDirectoryQuotasAndWebDAVRuntime(t *testing.T) {
+func TestServer_UpdateSettings_UpdatesDirectoryStorageControlsAndWebDAVRuntime(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
 	server.config.WebDAV.Enabled = true
@@ -12371,7 +12506,7 @@ func TestServer_UpdateSettings_UpdatesDirectoryQuotasAndWebDAVRuntime(t *testing
 	webdavUpdater := &fakeWebDAVUpdater{}
 	server.updateWebDAV = webdavUpdater.UpdateConfig
 
-	body := `{"storage":{"directory_quotas":[{"path":"/team/","quota_bytes":1048576}]}}`
+	body := `{"storage":{"directory_quotas":[{"path":"/team/","quota_bytes":1048576}],"directory_access_rules":[{"path":"/team/","read_groups":["Family"],"write_groups":["Editors"]}]}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -12392,6 +12527,12 @@ func TestServer_UpdateSettings_UpdatesDirectoryQuotasAndWebDAVRuntime(t *testing
 	if len(webdavUpdater.lastConfig.DirectoryQuotas) != 1 || webdavUpdater.lastConfig.DirectoryQuotas[0].Path != "/team" {
 		t.Fatalf("webdav runtime directory quotas = %+v", webdavUpdater.lastConfig.DirectoryQuotas)
 	}
+	if len(webdavUpdater.lastConfig.DirectoryAccessRules) != 1 || webdavUpdater.lastConfig.DirectoryAccessRules[0].Path != "/team" {
+		t.Fatalf("webdav runtime directory access rules = %+v", webdavUpdater.lastConfig.DirectoryAccessRules)
+	}
+	if got, want := strings.Join(webdavUpdater.lastConfig.DirectoryAccessRules[0].ReadGroups, ","), "family"; got != want {
+		t.Fatalf("webdav runtime read groups = %q, want %q", got, want)
+	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
 	getW := httptest.NewRecorder()
@@ -12402,7 +12543,8 @@ func TestServer_UpdateSettings_UpdatesDirectoryQuotasAndWebDAVRuntime(t *testing
 	var payload struct {
 		Data struct {
 			Storage struct {
-				DirectoryQuotas []config.DirectoryQuotaConfig `json:"directory_quotas"`
+				DirectoryQuotas      []config.DirectoryQuotaConfig      `json:"directory_quotas"`
+				DirectoryAccessRules []config.DirectoryAccessRuleConfig `json:"directory_access_rules"`
 			} `json:"storage"`
 		} `json:"data"`
 	}
@@ -12411,6 +12553,9 @@ func TestServer_UpdateSettings_UpdatesDirectoryQuotasAndWebDAVRuntime(t *testing
 	}
 	if len(payload.Data.Storage.DirectoryQuotas) != 1 || payload.Data.Storage.DirectoryQuotas[0].Path != "/team" {
 		t.Fatalf("settings directory quotas = %+v", payload.Data.Storage.DirectoryQuotas)
+	}
+	if len(payload.Data.Storage.DirectoryAccessRules) != 1 || payload.Data.Storage.DirectoryAccessRules[0].Path != "/team" {
+		t.Fatalf("settings directory access rules = %+v", payload.Data.Storage.DirectoryAccessRules)
 	}
 }
 

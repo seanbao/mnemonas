@@ -13,7 +13,7 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 | **用户名** | `auth_type = "users"` 时使用 MnemoNAS 用户名；`basic` 模式按 WebDAV 配置 |
 | **密码** | `auth_type = "users"` 时使用 MnemoNAS 用户密码；`basic` 模式使用配置密码或首次启动生成的 WebDAV 密码 |
 
-> 推荐在设置页选择 `auth_type = "users"`，让挂载遵守 MnemoNAS 用户角色、`home_dir` 和配额边界。默认配置仍启用全局 Basic Auth 以兼容旧部署；该模式下 WebDAV 凭据与 Web UI 管理员账号不同，可从服务器端 `<storage.root>/secrets.json` 或管理员登录后的设置接口查看当前 WebDAV 凭据，参见 [配置说明](configuration.md)。
+> 推荐在设置页选择 `auth_type = "users"`，让挂载遵守 MnemoNAS 用户角色、用户组、`home_dir`、目录授权和配额边界。默认配置仍启用全局 Basic Auth 以兼容旧部署；该模式下 WebDAV 凭据与 Web UI 管理员账号不同，可从服务器端 `<storage.root>/secrets.json` 或管理员登录后的设置接口查看当前 WebDAV 凭据，参见 [配置说明](configuration.md)。
 
 ---
 

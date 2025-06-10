@@ -257,9 +257,9 @@ Regular maintenance:
 
 ### Multi-User Boundary
 
-MnemoNAS supports users and roles. Non-admin users are limited by `home_dir` for files, search, favorites, shares, trash, and activity log views. Admins can set `quota_bytes`; non-admin Web/API uploads, copies, trash restores, and WebDAV PUT/COPY writes in `webdav.auth_type = "users"` are checked against the current logical size of that user's `home_dir`.
+MnemoNAS supports users, roles, groups, and directory access rules. Non-admin users are limited by `home_dir` unless a matching `storage.directory_access_rules` entry grants read or write access; files, search, favorites, shares, trash, activity log views, and WebDAV `users` mode use the same path decision. Admins can set `quota_bytes`; non-admin Web/API uploads, copies, trash restores, and WebDAV PUT/COPY writes in `webdav.auth_type = "users"` are checked against the current logical size of that user's `home_dir`.
 
-WebDAV `users` mode carries application user identity and enforces role/`home_dir` boundaries. WebDAV `basic` mode remains a global service credential compatibility mode.
+WebDAV `users` mode carries application user identity and enforces role, group, `home_dir`, and directory access-rule boundaries. WebDAV `basic` mode remains a global service credential compatibility mode.
 
 ### Rate Limiting
 
@@ -310,7 +310,7 @@ Five failed password attempts for the same share and client address lock access 
 
 | Status | Capability |
 | --- | --- |
-| Supported | Web UI login, users and roles, user root-directory isolation, WebDAV user auth/global Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
+| Supported | Web UI login, users/roles/groups, user root-directory isolation, directory access rules, WebDAV user auth/global Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
 | Add through reverse proxy | HTTPS certificate renewal, finer rate limits, public access controls |
 | Planned | OAuth/OIDC integration, finer application-level access policies |
 

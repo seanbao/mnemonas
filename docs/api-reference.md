@@ -292,6 +292,7 @@ GET /api/v1/admin/users
         "id": "user-123",
         "username": "admin",
         "role": "admin",
+        "groups": ["family"],
         "disabled": false,
         "home_dir": "/",
         "quota_bytes": 0,
@@ -308,7 +309,7 @@ GET /api/v1/admin/users
 POST /api/v1/admin/users
 ```
 
-用户名最多 255 个字符，不能包含 `/`、`\`、控制字符或 `.` / `..`；密码长度必须为 8 到 72 字节。
+用户名最多 255 个字符，不能包含 `/`、`\`、控制字符或 `.` / `..`；密码长度必须为 8 到 72 字节。用户组名称会归一化为小写，只能包含字母、数字、`.`、`_` 和 `-`。
 
 **更新用户资料、角色、主目录或配额**:
 ```
@@ -320,6 +321,7 @@ PUT /api/v1/admin/users/{id}
 {
   "email": "user@example.com",
   "role": "user",
+  "groups": ["family", "editors"],
   "home_dir": "/alice",
   "quota_bytes": 10737418240
 }
@@ -328,6 +330,7 @@ PUT /api/v1/admin/users/{id}
 - `quota_bytes = 0` 表示不限额；大于 0 时，非管理员用户的 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前逻辑大小执行硬限制。
 - 超出配额返回 `507 Insufficient Storage`，错误码为 `QUOTA_EXCEEDED`，`details` 包含 `used_bytes`、`quota_bytes`、`required_bytes` 和 `available_bytes`。如果已启用告警通道，Web/API 的上传、复制和回收站恢复超限会发送 `quota_exceeded` warning 事件，事件详情包含用户、主目录、操作类型、目标路径和配额字节数。
 - `storage.directory_quotas` 可配置目录级硬限制。命中的 Web/API 上传、复制、移动、回收站恢复、版本恢复，以及 WebDAV PUT/COPY/MOVE 会返回同样的 `QUOTA_EXCEEDED`，并在 `details` 中额外包含 `quota_type="directory"` 和 `quota_path`。Web/API 目录配额拒绝同样会发送 `quota_exceeded` 告警事件。
+- `storage.directory_access_rules` 可配置目录读写授权。非管理员访问命中规则时按最具体路径规则判断用户、用户组或角色；写授权同时包含读权限。未命中规则的路径继续按 `home_dir` 边界处理。
 - `webdav.auth_type = "basic"` 仍是全局服务凭据兼容模式，不携带应用层 `home_dir` 用户身份。
 - 不允许把当前登录管理员自身角色改为非管理员，错误码为 `SELF_ROLE_CHANGE`；不允许移除最后一个启用管理员，错误码为 `LAST_ADMIN`。
 
@@ -1639,6 +1642,9 @@ GET /api/v1/settings
       "root": "~/.mnemonas",
       "directory_quotas": [
         { "path": "/team", "quota_bytes": 1099511627776 }
+      ],
+      "directory_access_rules": [
+        { "path": "/team", "read_groups": ["family"], "write_groups": ["editors"] }
       ]
     },
     "retention": {
@@ -1795,7 +1801,7 @@ PUT /api/v1/settings
 
 **说明**:
 - `storage.root` 路径为只读配置，需修改配置文件并重启服务
-- `storage.directory_quotas` 可通过设置 API 热更新，并同步到 WebDAV 运行态
+- `storage.directory_quotas` 和 `storage.directory_access_rules` 可通过设置 API 热更新，并同步到 Web/API 与 WebDAV 运行态
 
 **请求体**:
 ```json
@@ -1816,6 +1822,9 @@ PUT /api/v1/settings
   "storage": {
     "directory_quotas": [
       { "path": "/team", "quota_bytes": 1099511627776 }
+    ],
+    "directory_access_rules": [
+      { "path": "/team", "read_groups": ["family"], "write_groups": ["editors"] }
     ]
   },
   "retention": {
@@ -1923,6 +1932,7 @@ PUT /api/v1/settings
 - `versioning` 支持更新 `auto_versioned_extensions`、`auto_versioned_filenames`、`max_versioned_size`；保存后会立即更新运行中的自动版本策略
 - `share` 支持更新 `enabled`、`base_url`；`enabled` 会立即影响公开分享访问和新分享创建，`base_url` 会立即影响后续新生成的分享链接，非空时必须是完整的 `http` 或 `https` URL
 - `favorites` 支持更新 `enabled`；保存后会立即影响收藏接口的可用性
+- `storage.directory_access_rules` 每项必须使用干净的 MnemoNAS 绝对路径，并至少包含一个 `read_users`、`write_users`、`read_groups`、`write_groups`、`read_roles` 或 `write_roles` 授权；角色只能是 `admin`、`user`、`guest`
 - `alerts` 支持更新 `enabled`、`check_interval`、`threshold_pct`、`critical_pct`、`min_free_bytes`、`cooldown_period`、`webhook_url`、`webhook_method`、`webhook_headers`、`telegram_enabled`、`telegram_bot_token`、`telegram_chat_id`、`email_enabled`、`smtp_host`、`smtp_port`、`smtp_username`、`smtp_password`、`smtp_from`、`smtp_to`；保存后会立即更新运行中的告警监控
 - `disk_health` 支持更新 `enabled`、`check_interval`、`probe_timeout`、`cooldown_period`、`command`、温度阈值、介质磨损阈值和 `devices`；保存后会立即更新运行中的磁盘健康监控
 - `maintenance.scrub` 支持更新 `enabled`、`schedule_interval`、`retry_interval`、`max_retries`；保存后会立即更新运行中的周期 Scrub 调度，关闭时会取消后台调度
