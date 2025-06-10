@@ -189,6 +189,7 @@ For public deployments, a reverse proxy such as Caddy or Nginx is usually prefer
 | --- | --- | --- | --- |
 | `root` | string | `~/.mnemonas` | Storage root; user files live under `root/files` |
 | `directory_quotas` | array | `[]` | Directory quota entries with `path` and `quota_bytes` |
+| `directory_access_rules` | array | `[]` | Directory read/write grants for users, groups, and roles |
 
 Rules:
 
@@ -196,6 +197,7 @@ Rules:
 - Startup tightens permissions on `root`, `files`, and internal directories.
 - Move the full storage root when migrating data.
 - `directory_quotas` use MnemoNAS logical paths such as `/team`. Uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check current logical bytes before writing. Use `/` for a global hard limit. Admins can view current usage, remaining bytes, and status for each directory quota on the storage page.
+- `directory_access_rules` use clean absolute MnemoNAS paths such as `/team`. Each rule can grant `read_users`, `write_users`, `read_groups`, `write_groups`, `read_roles`, and `write_roles`. The most specific matching rule wins. Write grants also allow reads; write operations require an explicit write grant. Non-admin Web/API, WebDAV `users` mode, search, shares, favorites, trash, and activity views use the same decision path. Paths without a matching rule fall back to the user's `home_dir` boundary.
 
 Example:
 
@@ -204,6 +206,10 @@ Example:
 root = "~/.mnemonas"
 directory_quotas = [
   { path = "/team", quota_bytes = 1099511627776 }, # 1 TiB
+]
+directory_access_rules = [
+  { path = "/team", read_groups = ["family"], write_groups = ["editors"] },
+  { path = "/team/public", read_roles = ["user"], write_users = ["alice"] },
 ]
 ```
 

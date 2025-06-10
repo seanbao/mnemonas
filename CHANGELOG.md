@@ -107,6 +107,7 @@
   - 用户 CRUD
   - 用户级容量配额，非管理员 Web/API 上传、复制和回收站恢复超限时返回 `QUOTA_EXCEEDED`，并可通过 Webhook/Telegram/SMTP 发送 `quota_exceeded` 告警事件
   - `storage.directory_quotas` 目录级硬限制和存储页目录配额用量展示，Web/API 上传、复制、移动、回收站恢复、版本恢复以及 WebDAV PUT/COPY/MOVE 会在写入前检查命中的目录配额
+  - 用户组和 `storage.directory_access_rules` 目录读写授权，可按用户、用户组或角色授予共享目录权限；Web/API、WebDAV 用户模式、搜索、分享、收藏、回收站和活动过滤使用同一权限判定
   - WebDAV 支持 `auth_type = "users"`，客户端可使用 MnemoNAS 用户账号挂载；非管理员挂载根目录映射到自己的 `home_dir`，guest 只读，PUT/COPY 写入遵守用户配额
   - 密码重置
   - 状态切换

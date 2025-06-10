@@ -666,6 +666,7 @@ export function UsersPage() {
     setNewPassword('')
     setNewEmail('')
     setNewRole('user')
+    setNewGroups('')
   }, [])
 
   const handleOpenCreateModal = useCallback(() => {
@@ -693,23 +694,30 @@ export function UsersPage() {
       addToast({ title: `密码最多 ${maxPasswordBytes} 字节`, color: 'warning' })
       return
     }
+    const parsedGroups = parseGroupNames(newGroups)
+    if (parsedGroups.error) {
+      addToast({ title: '用户组无效', description: parsedGroups.error, color: 'warning' })
+      return
+    }
     createMutation.mutate({
       request: {
         username: newUsername.trim(),
         password: newPassword,
         email: newEmail.trim() || undefined,
         role: newRole,
+        groups: parsedGroups.groups,
       },
       submittedDraft: { ...createDraftRef.current },
       createSession: createSessionRef.current,
     })
-  }, [newUsername, newPassword, newEmail, newRole, createMutation])
+  }, [newUsername, newPassword, newEmail, newGroups, newRole, createMutation])
 
   const handleOpenEditModal = useCallback((user: User) => {
     const quota = quotaBytesToFormValue(user.quota_bytes)
     setEditTarget(user)
     setEditEmail(user.email ?? '')
     setEditRole(user.role)
+    setEditGroups(formatGroupNames(user.groups))
     setEditHomeDir(user.home_dir)
     setEditQuotaValue(quota.value)
     setEditQuotaUnit(quota.unit)
@@ -734,15 +742,21 @@ export function UsersPage() {
       addToast({ title: '配额无效', description: '请输入非负数字，0 表示不限额。', color: 'warning' })
       return
     }
+    const parsedGroups = parseGroupNames(editGroups)
+    if (parsedGroups.error) {
+      addToast({ title: '用户组无效', description: parsedGroups.error, color: 'warning' })
+      return
+    }
 
     updateMutation.mutate({
       userId: editTarget.id,
       email: editEmail.trim(),
       role: editRole,
+      groups: parsedGroups.groups,
       homeDir,
       quotaBytes,
     })
-  }, [editEmail, editHomeDir, editQuotaUnit, editQuotaValue, editRole, editTarget, updateMutation])
+  }, [editEmail, editGroups, editHomeDir, editQuotaUnit, editQuotaValue, editRole, editTarget, updateMutation])
 
   const handleDelete = useCallback(() => {
     if (!deleteTarget) return
@@ -1010,6 +1024,23 @@ export function UsersPage() {
                 </SelectItem>
               </Select>
             </div>
+            <div>
+              <Input
+                label="用户组（可选）"
+                aria-label="用户组"
+                placeholder="family, editors"
+                value={newGroups}
+                onValueChange={setNewGroups}
+                size="lg"
+                variant="bordered"
+                labelPlacement="outside"
+                startContent={<Tags size={16} className="text-default-400" />}
+                classNames={{
+                  inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                  input: "text-sm placeholder:text-default-400",
+                }}
+              />
+            </div>
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
             <Button
@@ -1100,6 +1131,22 @@ export function UsersPage() {
                 </SelectItem>
               </Select>
             </div>
+
+            <Input
+              label="用户组"
+              aria-label="用户组"
+              placeholder="family, editors"
+              value={editGroups}
+              onValueChange={setEditGroups}
+              size="lg"
+              variant="bordered"
+              labelPlacement="outside"
+              startContent={<Tags size={16} className="text-default-400" />}
+              classNames={{
+                inputWrapper: "bg-default-50 border-default-200 hover:border-default-300 data-[focus=true]:!border-accent-primary",
+                input: "text-sm placeholder:text-default-400",
+              }}
+            />
 
             <Input
               label="主目录"

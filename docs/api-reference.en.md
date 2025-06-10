@@ -24,7 +24,7 @@ Authorization: Bearer <access_token>
 
 Login and refresh set `mnemonas_access` and `mnemonas_refresh` cookies. Browser clients can send `X-MnemoNAS-Session-Mode: cookie`; in that mode the JSON response omits bearer tokens and returns only user/session metadata.
 
-WebDAV `auth_type = "users"` accepts MnemoNAS user credentials over HTTP Basic and applies role, `home_dir`, and quota boundaries. WebDAV `auth_type = "basic"` remains a separate global service credential mode.
+WebDAV `auth_type = "users"` accepts MnemoNAS user credentials over HTTP Basic and applies role, group, `home_dir`, directory access-rule, and quota boundaries. WebDAV `auth_type = "basic"` remains a separate global service credential mode.
 
 ## Response Formats
 
@@ -134,6 +134,7 @@ Login response for API clients:
       "id": "user-123",
       "username": "admin",
       "role": "admin",
+      "groups": ["family"],
       "home_dir": "/"
     }
   }
@@ -161,9 +162,10 @@ Admin role required.
 | `POST` | `/api/v1/admin/users/{id}/reset-password` | Reset user password |
 | `PUT` | `/api/v1/admin/users/{id}/status` | Enable or disable user |
 
-User roles are `admin`, `user`, and `guest`. Non-admin users are scoped by `home_dir`. User responses include `quota_bytes` and `used_bytes`.
+User roles are `admin`, `user`, and `guest`. Non-admin users are scoped by `home_dir` and any matching directory access rules. User responses include `groups`, `quota_bytes`, and `used_bytes`.
 
 Usernames are limited to 255 characters and must not contain `/`, `\`, control characters, `.`, or `..`. Passwords must be 8 to 72 bytes.
+Group names are normalized to lowercase and may contain only letters, digits, `.`, `_`, and `-`.
 
 `PUT /api/v1/admin/users/{id}` accepts at least one of:
 
@@ -171,6 +173,7 @@ Usernames are limited to 255 characters and must not contain `/`, `\`, control c
 {
   "email": "user@example.com",
   "role": "user",
+  "groups": ["family", "editors"],
   "home_dir": "/alice",
   "quota_bytes": 10737418240
 }
@@ -179,6 +182,8 @@ Usernames are limited to 255 characters and must not contain `/`, `\`, control c
 `quota_bytes = 0` means unlimited. When it is greater than zero, server-side quota checks apply to non-admin Web/API uploads, copies, trash restores, and WebDAV PUT/COPY writes when `webdav.auth_type = "users"`. Checks use the current logical size under the user's `home_dir`. Exceeding quota returns `507 Insufficient Storage` with code `QUOTA_EXCEEDED` and details containing `used_bytes`, `quota_bytes`, `required_bytes`, and `available_bytes`. When alert channels are enabled, Web/API upload, copy, and trash-restore quota denials also send a `quota_exceeded` warning event with user, home directory, operation, target path, and quota byte details.
 
 `storage.directory_quotas` can define hard limits for MnemoNAS logical directories. Matching Web/API uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations return the same `QUOTA_EXCEEDED` code and add `quota_type="directory"` plus `quota_path` to `details`. Web/API directory quota denials also emit `quota_exceeded` alert events.
+
+`storage.directory_access_rules` can grant shared-directory read/write access by user, group, or role. For non-admin users, a matching rule uses the most specific path and overrides the fallback `home_dir` boundary for that path. Write grants also allow reads; write operations require a write grant.
 
 `webdav.auth_type = "basic"` remains a global service credential compatibility mode and does not carry an application `home_dir` user identity.
 
@@ -352,9 +357,9 @@ Activity visibility follows user scope. Admins can see all activity. System even
 | `PUT` | `/api/v1/settings` | Update settings |
 | `GET` | `/api/v1/settings/webdav-credentials` | Get current WebDAV credential status |
 
-Settings updates can change directory quotas, WebDAV prefix, read-only mode, auth mode, share configuration, favorite configuration, alert configuration, disk-health monitoring, scheduled Scrub maintenance, dataplane connection settings, and retention/versioning policies at runtime. Alert updates include Webhook, Telegram, and SMTP email notification settings; disk-health updates include temperature and media-wear thresholds. Scheduled Scrub updates immediately replace the running background scheduler. Directory quota updates are hot-applied to the Web/API and WebDAV runtime. Server listener/TLS changes and CDC chunk-size changes are saved but require restarting the affected service before they take effect.
+Settings updates can change directory quotas, directory access rules, WebDAV prefix, read-only mode, auth mode, share configuration, favorite configuration, alert configuration, disk-health monitoring, scheduled Scrub maintenance, dataplane connection settings, and retention/versioning policies at runtime. Alert updates include Webhook, Telegram, and SMTP email notification settings; disk-health updates include temperature and media-wear thresholds. Scheduled Scrub updates immediately replace the running background scheduler. Directory quota and access-rule updates are hot-applied to the Web/API and WebDAV runtime. Server listener/TLS changes and CDC chunk-size changes are saved but require restarting the affected service before they take effect.
 
-`server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters; set the port through `server.port`. `server.trusted_proxy_hops` controls whether forwarded headers from trusted reverse proxies are honored when evaluating HTTPS request semantics. `storage.root` remains read-only through the settings API, but `storage.directory_quotas` accepts entries with a clean absolute MnemoNAS path and positive `quota_bytes`. `webdav.auth_type` supports `users`, `basic`, and `none`; `users` requires app auth to remain enabled. `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`. Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `"Key: Value"` strings with valid HTTP token names and values without newlines or control characters. When `alerts.telegram_enabled` is true, `telegram_bot_token` and `telegram_chat_id` are required; the bot token cannot contain whitespace, `/`, `?`, or `#` and is never returned by settings or diagnostics responses. When `alerts.email_enabled` is true, `smtp_host`, `smtp_from`, and at least one `smtp_to` recipient are required, `smtp_port` must be 1-65535, and sender/recipient values must be valid email addresses. `disk_health.command` must be a single executable name or absolute path, `disk_health.media_wear_critical_percent` must not be lower than `disk_health.media_wear_warning_percent`, and each `disk_health.devices[].path` must be absolute. `maintenance.scrub.schedule_interval` and `maintenance.scrub.retry_interval` must be positive duration strings, and `maintenance.scrub.max_retries` must be zero or greater. `dataplane.grpc_address` must be a valid `host:port` address with port 1-65535 and no whitespace or control characters. CDC chunk sizes must satisfy `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`. Invalid settings return `400 Bad Request` without mutating the running config.
+`server.host` must be empty, `*`, a valid hostname, IPv4, or IPv6 literal, without a port, whitespace, or control characters; set the port through `server.port`. `server.trusted_proxy_hops` controls whether forwarded headers from trusted reverse proxies are honored when evaluating HTTPS request semantics. `storage.root` remains read-only through the settings API, but `storage.directory_quotas` accepts entries with a clean absolute MnemoNAS path and positive `quota_bytes`. `storage.directory_access_rules` accepts clean absolute MnemoNAS paths plus read/write grants for `*_users`, `*_groups`, and `*_roles`; the most specific matching rule wins, and write grants also allow reads. `webdav.auth_type` supports `users`, `basic`, and `none`; `users` requires app auth to remain enabled. `webdav.prefix` is normalized to a `/`-prefixed URL path, must not contain backslash, `?`, `#`, or control characters, and when enabled must not overlap `/`, `/api`, `/s`, or `/health`. Non-empty `share.base_url` and `alerts.webhook_url` values must be absolute `http` or `https` URLs. Alert `webhook_method` supports `GET` and `POST`; custom webhook headers use `"Key: Value"` strings with valid HTTP token names and values without newlines or control characters. When `alerts.telegram_enabled` is true, `telegram_bot_token` and `telegram_chat_id` are required; the bot token cannot contain whitespace, `/`, `?`, or `#` and is never returned by settings or diagnostics responses. When `alerts.email_enabled` is true, `smtp_host`, `smtp_from`, and at least one `smtp_to` recipient are required, `smtp_port` must be 1-65535, and sender/recipient values must be valid email addresses. `disk_health.command` must be a single executable name or absolute path, `disk_health.media_wear_critical_percent` must not be lower than `disk_health.media_wear_warning_percent`, and each `disk_health.devices[].path` must be absolute. `maintenance.scrub.schedule_interval` and `maintenance.scrub.retry_interval` must be positive duration strings, and `maintenance.scrub.max_retries` must be zero or greater. `dataplane.grpc_address` must be a valid `host:port` address with port 1-65535 and no whitespace or control characters. CDC chunk sizes must satisfy `65536 <= min_chunk_size < avg_chunk_size < max_chunk_size <= 67108864`. Invalid settings return `400 Bad Request` without mutating the running config.
 
 ### Public-Access Security Self-Check
 

@@ -46,6 +46,8 @@ import {
   getSettings,
   getWebDAVCredentials,
   updateSettings,
+  type DirectoryAccessRule,
+  type DirectoryAccessRole,
   type DirectoryQuota,
   type SecurityCheckData,
   type SecurityCheckItem,
@@ -438,6 +440,141 @@ function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; er
   return { quotas }
 }
 
+const accessRulePrincipalPattern = /^[A-Za-z0-9._-]+$/
+const accessRuleKeys = new Set([
+  'read_users',
+  'write_users',
+  'read_groups',
+  'write_groups',
+  'read_roles',
+  'write_roles',
+])
+
+function formatAccessRuleList(label: string, values: string[] | undefined): string {
+  return values && values.length > 0 ? `${label}=${values.join(',')}` : ''
+}
+
+function formatDirectoryAccessRuleLines(rules: DirectoryAccessRule[] | undefined): string {
+  return (rules ?? [])
+    .map((rule) => [
+      rule.path,
+      formatAccessRuleList('read_users', rule.read_users),
+      formatAccessRuleList('write_users', rule.write_users),
+      formatAccessRuleList('read_groups', rule.read_groups),
+      formatAccessRuleList('write_groups', rule.write_groups),
+      formatAccessRuleList('read_roles', rule.read_roles),
+      formatAccessRuleList('write_roles', rule.write_roles),
+    ].filter(Boolean).join(' '))
+    .join('\n')
+}
+
+function parseAccessRuleValues(value: string, lineNumber: number, field: string): { values: string[]; error?: string } {
+  const values = value
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  if (values.length === 0) {
+    return { values: [], error: `第 ${lineNumber} 行 ${field} 不能为空` }
+  }
+
+  for (const item of values) {
+    if (field.endsWith('_roles')) {
+      if (item !== 'admin' && item !== 'user' && item !== 'guest') {
+        return { values: [], error: `第 ${lineNumber} 行角色只能是 admin、user 或 guest` }
+      }
+    } else if (!accessRulePrincipalPattern.test(item)) {
+      return { values: [], error: `第 ${lineNumber} 行主体只能包含字母、数字、点、短横线和下划线` }
+    }
+    if (!seen.has(item)) {
+      seen.add(item)
+      normalized.push(item)
+    }
+  }
+
+  normalized.sort()
+  return { values: normalized }
+}
+
+function parseDirectoryAccessRuleLines(value: string): { rules: DirectoryAccessRule[]; error?: string } {
+  const lines = value.split('\n')
+  const rules: DirectoryAccessRule[] = []
+  const seenPaths = new Set<string>()
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineNumber = index + 1
+    const line = lines[index].trim()
+    if (!line) {
+      continue
+    }
+
+    const parts = line.split(/\s+/)
+    const rulePath = normalizeDirectoryQuotaPathInput(parts[0])
+    if (!rulePath) {
+      return { rules: [], error: `第 ${lineNumber} 行路径无效` }
+    }
+    if (seenPaths.has(rulePath)) {
+      return { rules: [], error: `第 ${lineNumber} 行路径重复` }
+    }
+
+    const rule: DirectoryAccessRule = { path: rulePath }
+    for (const token of parts.slice(1)) {
+      const separator = token.indexOf('=')
+      if (separator <= 0 || separator === token.length - 1) {
+        return { rules: [], error: `第 ${lineNumber} 行规则格式无效` }
+      }
+      const key = token.slice(0, separator)
+      const rawValue = token.slice(separator + 1)
+      if (!accessRuleKeys.has(key)) {
+        return { rules: [], error: `第 ${lineNumber} 行字段 ${key} 不支持` }
+      }
+      const parsed = parseAccessRuleValues(rawValue, lineNumber, key)
+      if (parsed.error) {
+        return { rules: [], error: parsed.error }
+      }
+      switch (key) {
+        case 'read_users':
+          rule.read_users = parsed.values
+          break
+        case 'write_users':
+          rule.write_users = parsed.values
+          break
+        case 'read_groups':
+          rule.read_groups = parsed.values
+          break
+        case 'write_groups':
+          rule.write_groups = parsed.values
+          break
+        case 'read_roles':
+          rule.read_roles = parsed.values as DirectoryAccessRole[]
+          break
+        case 'write_roles':
+          rule.write_roles = parsed.values as DirectoryAccessRole[]
+          break
+      }
+    }
+
+    const hasPrincipals = Boolean(
+      rule.read_users?.length ||
+      rule.write_users?.length ||
+      rule.read_groups?.length ||
+      rule.write_groups?.length ||
+      rule.read_roles?.length ||
+      rule.write_roles?.length,
+    )
+    if (!hasPrincipals) {
+      return { rules: [], error: `第 ${lineNumber} 行至少需要一个 read 或 write 主体` }
+    }
+
+    seenPaths.add(rulePath)
+    rules.push(rule)
+  }
+
+  return { rules }
+}
+
 // Setting row component
 function SettingRow({ 
   label, 
@@ -816,6 +953,7 @@ export function SettingsPage() {
     tlsCertDir: '',
     storageRoot: '',
     directoryQuotas: '',
+    directoryAccessRules: '',
     trashEnabled: true,
     trashRetentionDays: '30',
     trashMaxSize: '10 GB',
@@ -959,6 +1097,7 @@ export function SettingsPage() {
       tlsCertDir: data.server.tls?.cert_dir ?? '',
       storageRoot: data.storage.root,
       directoryQuotas: formatDirectoryQuotaLines(data.storage.directory_quotas),
+      directoryAccessRules: formatDirectoryAccessRuleLines(data.storage.directory_access_rules),
       trashEnabled: data.trash?.enabled ?? true,
       trashRetentionDays: String(data.trash?.retention_days ?? 30),
       trashMaxSize: formatBytes(data.trash?.max_size ?? 10737418240),
@@ -1277,6 +1416,15 @@ export function SettingsPage() {
       addToast({
         title: '目录配额格式无效',
         description: parsedDirectoryQuotas.error,
+        color: 'danger',
+      })
+      return
+    }
+    const parsedDirectoryAccessRules = parseDirectoryAccessRuleLines(settings.directoryAccessRules)
+    if (parsedDirectoryAccessRules.error) {
+      addToast({
+        title: '目录权限格式无效',
+        description: parsedDirectoryAccessRules.error,
         color: 'danger',
       })
       return
@@ -1617,6 +1765,7 @@ export function SettingsPage() {
       },
       storage: {
         directory_quotas: parsedDirectoryQuotas.quotas,
+        directory_access_rules: parsedDirectoryAccessRules.rules,
       },
       retention: {
         max_versions: parsedMaxVersions,
@@ -2156,6 +2305,31 @@ export function SettingsPage() {
                     </div>
                     <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
                       命中上传、复制、移动、回收站恢复、版本恢复和 WebDAV 写入
+                    </div>
+                  </div>
+                </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="目录权限"
+                description="为共享目录授予读写权限；最具体路径规则优先于父目录规则"
+                icon={Shield}
+              >
+                <div className="space-y-3">
+                  <textarea
+                    aria-label="目录权限"
+                    value={settings.directoryAccessRules}
+                    onChange={(event) => updateDirtySettings(s => ({ ...s, directoryAccessRules: event.target.value }))}
+                    rows={5}
+                    placeholder="/team read_groups=family write_groups=editors"
+                    className="input-shell w-full rounded-medium border border-transparent bg-transparent px-3 py-2 font-mono text-sm outline-none focus:border-accent-primary"
+                  />
+                  <div className="grid gap-2 text-xs text-default-500 sm:grid-cols-2">
+                    <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+                      可用字段：<span className="font-mono text-foreground">read_users</span>、<span className="font-mono text-foreground">write_users</span>、<span className="font-mono text-foreground">read_groups</span>、<span className="font-mono text-foreground">write_groups</span>
+                    </div>
+                    <div className="rounded-lg border border-divider bg-content2/40 px-3 py-2">
+                      角色字段：<span className="font-mono text-foreground">read_roles</span>、<span className="font-mono text-foreground">write_roles</span>；多个值用英文逗号分隔
                     </div>
                   </div>
                 </div>

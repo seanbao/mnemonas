@@ -30,6 +30,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Authentication APIs for JWT login, logout, refresh, password changes, and current-user lookup.
 - User management APIs, including user-level quotas. Non-admin Web/API uploads, copies, and trash restores return `QUOTA_EXCEEDED` when they exceed the configured quota and can emit `quota_exceeded` Webhook/Telegram/SMTP alert events.
 - `storage.directory_quotas` directory hard limits and storage-page directory quota usage summaries. Web/API uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check matching directory quotas before writing.
+- User groups and `storage.directory_access_rules` for shared-directory read/write grants by user, group, or role. Web/API, WebDAV users mode, search, shares, favorites, trash, and activity filtering use the same path authorization decision.
 - WebDAV supports `auth_type = "users"` so clients can mount with MnemoNAS user accounts; non-admin mounts are rooted at the user's `home_dir`, guest accounts are read-only, and PUT/COPY writes honor user quotas.
 - Share-link APIs including public access and password checks.
 - Activity log APIs, including scrub system events.
@@ -118,7 +119,7 @@ First public release target.
 ### Known Limitations
 - `LOCK` / `UNLOCK` are virtual; clients editing the same file concurrently should account for that.
 - Windows WebClient requires registry changes for HTTP connections; HTTPS is preferred.
-- Users, roles, and per-user root boundaries are supported, but fine-grained per-file ACLs are not.
+- Users, roles, groups, per-user root boundaries, and directory access rules are supported, but inherited ACL policies and per-file ACLs are not.
 - Direct public exposure without HTTPS reverse proxy or VPN is not recommended.
 
 ### Compatibility
