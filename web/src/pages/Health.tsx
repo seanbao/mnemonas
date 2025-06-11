@@ -121,7 +121,7 @@ export function HealthPage() {
 
   const handleRefresh = async () => {
     const [diagResult, statsResult] = await Promise.all([refetchDiag(), refetchStats()])
-    const refreshErrors = [diagResult.error, statsResult.error].filter((error): error is unknown => Boolean(error))
+    const refreshErrors = [diagResult.error, statsResult.error].filter((error): error is Error => Boolean(error))
 
     if (refreshErrors.length > 0) {
       addToast(getHealthRefreshErrorToast(refreshErrors))
@@ -132,8 +132,10 @@ export function HealthPage() {
   }
 
   // Calculate dedup savings
-  const dedupSavings = stats && stats.totalSize > 0 && stats.uniqueSize > 0
-    ? ((stats.totalSize - stats.uniqueSize) / stats.totalSize * 100).toFixed(1)
+  const totalSize = stats?.totalSize ?? 0
+  const uniqueSize = stats?.uniqueSize ?? 0
+  const dedupSavings = totalSize > 0 && uniqueSize > 0
+    ? ((totalSize - uniqueSize) / totalSize * 100).toFixed(1)
     : '0'
 
   const statsCards = [

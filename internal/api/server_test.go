@@ -2343,6 +2343,53 @@ func TestServer_DownloadVersion_UsesPrivateRevalidationCacheHeaders(t *testing.T
 	}
 }
 
+func TestServer_DownloadVersion_SupportsRangeRequests(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/versions/range.txt", bytes.NewReader([]byte("abcdef"))); err != nil {
+		t.Fatalf("WriteFile(v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/versions/range.txt", bytes.NewReader([]byte("ghijkl"))); err != nil {
+		t.Fatalf("WriteFile(v2) error: %v", err)
+	}
+
+	versions, err := fs.ListVersions(ctx, "/versions/range.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() error: %v", err)
+	}
+
+	var historicalHash string
+	for _, version := range versions {
+		if version.Comment != "(current)" {
+			historicalHash = version.Hash
+			break
+		}
+	}
+	if historicalHash == "" {
+		t.Fatal("expected historical version hash")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/download/versions/range.txt?version="+historicalHash, nil)
+	req.Header.Set("Range", "bytes=1-3")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("version range status = %d, want %d", w.Code, http.StatusPartialContent)
+	}
+	if acceptRanges := w.Header().Get("Accept-Ranges"); acceptRanges != "bytes" {
+		t.Fatalf("version range Accept-Ranges = %q, want %q", acceptRanges, "bytes")
+	}
+	if contentRange := w.Header().Get("Content-Range"); contentRange != "bytes 1-3/6" {
+		t.Fatalf("version range Content-Range = %q, want %q", contentRange, "bytes 1-3/6")
+	}
+	if body := w.Body.String(); body != "bcd" {
+		t.Fatalf("version range body = %q, want %q", body, "bcd")
+	}
+}
+
 func TestServer_DownloadVersion_LogsDownloadActivityWithHash(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()

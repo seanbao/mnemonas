@@ -5,7 +5,16 @@ async function waitForAppReady(page: Page): Promise<void> {
   // Vite HMR and app-level polling keep background requests alive, so networkidle is not a stable readiness signal.
   await page.waitForLoadState('domcontentloaded')
   await page.locator('body').waitFor({ state: 'visible' })
-  await page.waitForTimeout(300)
+
+  const routeFallback = page.getByText('加载中...')
+  await routeFallback.waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
+
+  await Promise.any([
+    page.getByRole('navigation', { name: '主导航' }).waitFor({ state: 'visible', timeout: 10_000 }),
+    page.getByRole('button', { name: /登录|sign in|login/i }).waitFor({ state: 'visible', timeout: 10_000 }),
+  ]).catch(() => {})
+
+  await page.waitForTimeout(100)
 }
 
 /**

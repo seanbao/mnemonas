@@ -877,13 +877,38 @@ func (w *Workspace) Copy(ctx context.Context, srcName, dstName string) error {
 		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
 	}
 
-	if err := w.rootHandle.Rename(tmpPath, dstRootName); err != nil {
+	if err := w.rootHandle.Link(tmpPath, dstRootName); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, ErrAlreadyExists)
+		}
 		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
 			return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
 		}
 		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
 	}
+	if err := w.rootHandle.Remove(tmpPath); err != nil {
+		rollbackErr := w.rootHandle.Remove(dstRootName)
+		if rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+			return errors.Join(
+				fmt.Errorf("failed to finalize copied file: %w", err),
+				fmt.Errorf("failed to rollback copied file: %w", rollbackErr),
+			)
+		}
+		return cleanupWorkspaceTempPath(w.rootHandle, tmpPath, fmt.Errorf("failed to finalize copied file: %w", err))
+	}
 	if err := syncWorkspaceDir(filepath.Dir(dstPath)); err != nil {
+		if rollbackErr := w.rootHandle.Remove(dstRootName); rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync parent directory: %w", err),
+				fmt.Errorf("failed to rollback copied file: %w", rollbackErr),
+			)
+		}
+		if rollbackSyncErr := syncWorkspaceDir(filepath.Dir(dstPath)); rollbackSyncErr != nil {
+			return errors.Join(
+				fmt.Errorf("sync parent directory: %w", err),
+				fmt.Errorf("failed to sync rollback copy removal: %w", rollbackSyncErr),
+			)
+		}
 		return fmt.Errorf("sync parent directory: %w", err)
 	}
 

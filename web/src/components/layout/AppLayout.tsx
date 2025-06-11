@@ -18,6 +18,7 @@ export function AppLayout() {
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
         <div 
+          data-testid="mobile-sidebar-overlay"
           className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
@@ -28,8 +29,10 @@ export function AppLayout() {
         fixed inset-y-0 left-0 z-50 lg:static lg:z-auto
         transform transition-transform duration-300 ease-in-out
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
-      `}>
-        <Sidebar />
+      `}
+        data-testid="app-sidebar-shell"
+      >
+        <Sidebar onClose={() => setSidebarOpen(false)} />
       </div>
 
       {/* Main content */}
