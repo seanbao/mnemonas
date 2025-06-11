@@ -55,6 +55,20 @@ type webdavLock struct {
 	expiresAt time.Time
 }
 
+func (h *Handler) invalidatePropCache(paths ...string) {
+	seen := make(map[string]struct{}, len(paths))
+	for _, cachePath := range paths {
+		if cachePath == "" {
+			continue
+		}
+		if _, ok := seen[cachePath]; ok {
+			continue
+		}
+		seen[cachePath] = struct{}{}
+		h.propCache.Invalidate(cachePath)
+	}
+}
+
 // Handler is the WebDAV request handler
 type Handler struct {
 	fs                   *storage.FileSystem
@@ -433,15 +447,16 @@ func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.
 		}
 	}
 
+	affectedPaths := []string{parent, filePath}
+	h.invalidatePropCache(affectedPaths...)
+
 	err := h.fs.WriteFile(ctx, filePath, r.Body)
 	if err != nil {
 		h.handleError(w, err)
 		return
 	}
 
-	// Invalidate cache for parent directory
-	h.propCache.Invalidate(parent)
-	h.propCache.Invalidate(filePath)
+	h.invalidatePropCache(affectedPaths...)
 
 	// Return new ETag
 	newInfo, _ := h.fs.Stat(ctx, filePath)
@@ -490,15 +505,16 @@ func (h *Handler) handleDelete(ctx context.Context, w http.ResponseWriter, r *ht
 		}
 	}
 
+	affectedPaths := []string{path.Dir(filePath), filePath}
+	h.invalidatePropCache(affectedPaths...)
+
 	if err := h.fs.Delete(ctx, filePath); err != nil {
 		h.handleError(w, err)
 		return
 	}
 	h.clearLocksUnderPath(filePath)
 
-	// Invalidate cache for parent directory
-	h.propCache.Invalidate(path.Dir(filePath))
-	h.propCache.Invalidate(filePath)
+	h.invalidatePropCache(affectedPaths...)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -524,6 +540,9 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 		return
 	}
 
+	affectedPaths := []string{path.Dir(filePath), filePath}
+	h.invalidatePropCache(affectedPaths...)
+
 	if err := h.fs.Mkdir(ctx, filePath); err != nil {
 		if errors.Is(err, storage.ErrAlreadyExists) {
 			http.Error(w, "resource already exists", http.StatusMethodNotAllowed)
@@ -537,9 +556,7 @@ func (h *Handler) handleMkcol(ctx context.Context, w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Invalidate cache for parent directory
-	h.propCache.Invalidate(path.Dir(filePath))
-	h.propCache.Invalidate(filePath)
+	h.invalidatePropCache(affectedPaths...)
 
 	w.WriteHeader(http.StatusCreated)
 }
@@ -644,6 +661,9 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	affectedPaths := []string{path.Dir(dst), dst}
+	h.invalidatePropCache(affectedPaths...)
+
 	if err := h.copyResource(ctx, srcPath, dst, copyDepth); err != nil {
 		if h.writeParentNotDirectoryConflict(w, err) {
 			return
@@ -652,9 +672,7 @@ func (h *Handler) handleCopy(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
-	// Invalidate cache for destination parent and destination path.
-	h.propCache.Invalidate(path.Dir(dst))
-	h.propCache.Invalidate(dst)
+	h.invalidatePropCache(affectedPaths...)
 
 	if dstExists {
 		w.WriteHeader(http.StatusNoContent)
@@ -785,6 +803,9 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 
+	affectedPaths := []string{path.Dir(srcPath), srcPath, path.Dir(dst), dst}
+	h.invalidatePropCache(affectedPaths...)
+
 	if dstExists {
 		backupPath, err := h.allocateMoveBackupPath(ctx, dst)
 		if err != nil {
@@ -827,11 +848,7 @@ func (h *Handler) handleMove(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	h.moveLocksUnderPath(srcPath, dst)
 
-	// Invalidate cache for both source and destination parents
-	h.propCache.Invalidate(path.Dir(srcPath))
-	h.propCache.Invalidate(srcPath)
-	h.propCache.Invalidate(path.Dir(dst))
-	h.propCache.Invalidate(dst)
+	h.invalidatePropCache(affectedPaths...)
 
 	if dstExists {
 		w.WriteHeader(http.StatusNoContent)

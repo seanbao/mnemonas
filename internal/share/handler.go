@@ -775,6 +775,14 @@ func clientIdentifier(r *http.Request) string {
 	return requestip.ClientIP(r)
 }
 
+func shareDownloadContentType(filePath string) string {
+	contentType := mime.TypeByExtension(strings.ToLower(path.Ext(filePath)))
+	if contentType == "" {
+		return "application/octet-stream"
+	}
+	return contentType
+}
+
 // DownloadShare handles file download for shares
 func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -831,7 +839,7 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 
 	filename := path.Base(share.Path)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Type", shareDownloadContentType(share.Path))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if streamResponseStarted(err) {
@@ -922,7 +930,7 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 
 	filename := path.Base(fullPath)
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Type", shareDownloadContentType(fullPath))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
 		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if streamResponseStarted(err) {
