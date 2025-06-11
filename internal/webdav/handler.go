@@ -352,6 +352,14 @@ func escapeDirectoryHref(rawPath string) string {
 	return (&url.URL{Path: rawPath}).EscapedPath()
 }
 
+func (h *Handler) webdavHref(filePath string, isDir bool) string {
+	rawHref := path.Join(h.prefix, filePath)
+	if isDir && !strings.HasSuffix(rawHref, "/") {
+		rawHref += "/"
+	}
+	return escapeDirectoryHref(rawHref)
+}
+
 func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
 	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
 	defer releaseLocks()
@@ -1059,10 +1067,7 @@ func (h *Handler) writePropfindResponse(w http.ResponseWriter, responses []propf
 }
 
 func (h *Handler) propResponse(filePath string, info *storage.FileInfo) propfindResponse {
-	href := path.Join(h.prefix, filePath)
-	if info.IsDir && !strings.HasSuffix(href, "/") {
-		href += "/"
-	}
+	href := h.webdavHref(filePath, info.IsDir)
 
 	props := propstat{
 		Status: "HTTP/1.1 200 OK",
@@ -1092,14 +1097,17 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
 		return
 	}
 
-	if _, err := h.fs.Stat(ctx, filePath); err != nil {
+	info, err := h.fs.Stat(ctx, filePath)
+	if err != nil {
 		h.handleError(w, err)
 		return
 	}
 
 	// Simple implementation: ignore property modification requests
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusMultiStatus)
 	fmt.Fprint(w, xml.Header)
+	escapedHref := h.webdavHref(filePath, info.IsDir)
 	fmt.Fprintf(w, `<D:multistatus xmlns:D="DAV:">
   <D:response>
     <D:href>%s</D:href>
@@ -1107,7 +1115,7 @@ func (h *Handler) handleProppatch(ctx context.Context, w http.ResponseWriter, r 
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
   </D:response>
-</D:multistatus>`, path.Join(h.prefix, filePath))
+</D:multistatus>`, escapedHref)
 }
 
 func (h *Handler) handleLock(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {

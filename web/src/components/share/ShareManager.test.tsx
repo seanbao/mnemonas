@@ -41,6 +41,16 @@ const mockShares = [
   },
 ]
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 describe('ShareManager', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -93,6 +103,24 @@ describe('ShareManager', () => {
     expect(screen.getByText('分享功能已关闭')).toBeInTheDocument()
     expect(screen.getByText('当前服务已关闭分享功能。启用后可在此管理已创建的分享链接。')).toBeInTheDocument()
     expect(shareApi.listShares).not.toHaveBeenCalled()
+  })
+
+  it('ignores stale share loads after the feature is disabled', async () => {
+    const pendingLoad = createDeferred<typeof mockShares>()
+    vi.mocked(shareApi.listShares).mockReturnValueOnce(pendingLoad.promise)
+
+    const { rerender } = render(<ShareManager featureEnabled={true} />)
+
+    rerender(<ShareManager featureEnabled={false} />)
+
+    pendingLoad.resolve(mockShares)
+
+    await waitFor(() => {
+      expect(screen.getByText('分享功能已关闭')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('我的分享 (1)')).not.toBeInTheDocument()
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
   })
 
   it('retries loading from the error state', async () => {

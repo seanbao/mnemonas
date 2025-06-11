@@ -1357,7 +1357,7 @@ export function FilesPage() {
 
     let successCount = 0
     let errorCount = rejectedEntries.length
-  const uploadErrors: unknown[] = []
+    const uploadErrors: unknown[] = []
     
     for (const { item, index } of uploadableEntries) {
       const file = item.file
@@ -1374,7 +1374,7 @@ export function FilesPage() {
           const targetDir = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
           await ensureDirectoryExists(targetDir)
         }
-        
+
         // Calculate the target path for the file
         let targetPath = currentPath
         if (relativePath && relativePath.includes('/')) {
