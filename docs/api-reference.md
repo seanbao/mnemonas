@@ -1718,6 +1718,25 @@ GET /api/v1/settings
 - `webdav.runtime_enabled` 表示当前进程中的 WebDAV 服务是否处于运行状态；当 `webdav.enabled = true` 但自动生成凭据不可用时，该值为 `false`
 - `favorites.runtime_available` 表示当前进程中的收藏接口是否可用；当 `favorites.enabled = true` 但收藏存储初始化失败或运行态依赖缺失时，该值为 `false`
 
+### 检查有效目录权限
+
+```
+POST /api/v1/settings/access-check
+```
+
+**需要管理员权限**
+
+请求体：
+
+```json
+{
+  "username": "alice",
+  "path": "/team/report.pdf"
+}
+```
+
+响应会同时返回 `read` 和 `write` 判定。每个判定包含 `allowed`、`source`、可选 `message`，以及由目录授权决定时的 `matched_rule`。`source` 可能是 `admin`、`home_dir`、`directory_access_rule`、`invalid_home_dir`、`user_disabled`、`user_not_found` 或 `auth_disabled`。
+
 ### 公网访问安全自检
 
 ```
