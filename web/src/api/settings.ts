@@ -118,6 +118,39 @@ export interface DirectoryAccessRule {
   write_roles?: DirectoryAccessRole[]
 }
 
+export type DirectoryAccessDecisionSource =
+  | 'auth_disabled'
+  | 'admin'
+  | 'user_disabled'
+  | 'user_not_found'
+  | 'directory_access_rule'
+  | 'home_dir'
+  | 'invalid_home_dir'
+
+export interface DirectoryAccessDecision {
+  mode: 'read' | 'write'
+  allowed: boolean
+  source: DirectoryAccessDecisionSource
+  message?: string
+  matched_rule?: DirectoryAccessRule
+}
+
+export interface DirectoryAccessCheckData {
+  username: string
+  user_id: string
+  role: DirectoryAccessRole
+  groups?: string[]
+  home_dir: string
+  path: string
+  read: DirectoryAccessDecision
+  write: DirectoryAccessDecision
+}
+
+export interface DirectoryAccessCheckRequest {
+  username: string
+  path: string
+}
+
 export interface SettingsResponse {
   success: boolean
   data: SettingsData
@@ -308,6 +341,16 @@ function isDirectoryAccessRole(value: unknown): value is DirectoryAccessRole {
   return value === 'admin' || value === 'user' || value === 'guest'
 }
 
+function isDirectoryAccessDecisionSource(value: unknown): value is DirectoryAccessDecisionSource {
+  return value === 'auth_disabled'
+    || value === 'admin'
+    || value === 'user_disabled'
+    || value === 'user_not_found'
+    || value === 'directory_access_rule'
+    || value === 'home_dir'
+    || value === 'invalid_home_dir'
+}
+
 function isDirectoryAccessRule(value: unknown): value is DirectoryAccessRule {
   return isRecord(value)
     && typeof value.path === 'string'
@@ -317,6 +360,27 @@ function isDirectoryAccessRule(value: unknown): value is DirectoryAccessRule {
     && (value.write_groups === undefined || isStringArray(value.write_groups))
     && (value.read_roles === undefined || (Array.isArray(value.read_roles) && value.read_roles.every(isDirectoryAccessRole)))
     && (value.write_roles === undefined || (Array.isArray(value.write_roles) && value.write_roles.every(isDirectoryAccessRole)))
+}
+
+function isDirectoryAccessDecision(value: unknown): value is DirectoryAccessDecision {
+  return isRecord(value)
+    && (value.mode === 'read' || value.mode === 'write')
+    && typeof value.allowed === 'boolean'
+    && isDirectoryAccessDecisionSource(value.source)
+    && (value.message === undefined || typeof value.message === 'string')
+    && (value.matched_rule === undefined || isDirectoryAccessRule(value.matched_rule))
+}
+
+function isDirectoryAccessCheckData(value: unknown): value is DirectoryAccessCheckData {
+  return isRecord(value)
+    && typeof value.username === 'string'
+    && typeof value.user_id === 'string'
+    && isDirectoryAccessRole(value.role)
+    && (value.groups === undefined || isStringArray(value.groups))
+    && typeof value.home_dir === 'string'
+    && typeof value.path === 'string'
+    && isDirectoryAccessDecision(value.read)
+    && isDirectoryAccessDecision(value.write)
 }
 
 function isSecurityCheckStatus(value: unknown): value is SecurityCheckStatus {
@@ -544,6 +608,26 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
     success: true,
     message: body.message || '',
   }
+}
+
+export async function checkDirectoryAccess(data: DirectoryAccessCheckRequest): Promise<DirectoryAccessCheckData> {
+  const response = await authFetch(`${API_BASE}/access-check`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+  })
+
+  if (!response.ok) {
+    throw await parseSettingsError(response, 'Failed to check directory access')
+  }
+
+  const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access check response')
+  if (!isDirectoryAccessCheckData(body.data)) {
+    throw new Error('Invalid directory access check response')
+  }
+  return body.data
 }
 
 /**

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { getSecurityCheck, getSettings, getWebDAVCredentials, SettingsError, updateSettings, type SettingsData } from './settings'
+import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, SettingsError, updateSettings, type SettingsData } from './settings'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -380,6 +380,81 @@ describe('Settings API', () => {
         },
       }),
     }))
+  })
+
+  it('checks directory access and unwraps decisions', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          username: 'alice',
+          user_id: 'u1',
+          role: 'user',
+          groups: ['family'],
+          home_dir: '/users/alice',
+          path: '/team/readme.txt',
+          read: {
+            mode: 'read',
+            allowed: true,
+            source: 'directory_access_rule',
+            message: 'directory access rule grants read',
+            matched_rule: { path: '/team', read_groups: ['family'] },
+          },
+          write: {
+            mode: 'write',
+            allowed: false,
+            source: 'directory_access_rule',
+            message: 'directory access rule does not grant write',
+            matched_rule: { path: '/team', read_groups: ['family'] },
+          },
+        },
+      }),
+    })
+
+    const result = await checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })
+
+    expect(result.read.allowed).toBe(true)
+    expect(result.write.allowed).toBe(false)
+    expect(result.read.matched_rule?.path).toBe('/team')
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-check', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ username: 'alice', path: '/team/readme.txt' }),
+    }))
+  })
+
+  it('rejects malformed directory access check responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          username: 'alice',
+          user_id: 'u1',
+          role: 'owner',
+          home_dir: '/users/alice',
+          path: '/team/readme.txt',
+          read: { mode: 'read', allowed: true, source: 'home_dir' },
+          write: { mode: 'write', allowed: true, source: 'home_dir' },
+        },
+      }),
+    })
+
+    await expect(checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })).rejects.toThrow('Invalid directory access check response')
+  })
+
+  it('uses structured api error message when directory access check fails', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({ success: false, error: { code: 'NOT_FOUND', message: 'user not found' } }),
+    })
+
+    await expect(checkDirectoryAccess({ username: 'missing', path: '/' })).rejects.toMatchObject({
+      message: 'user not found',
+      status: 404,
+      code: 'NOT_FOUND',
+    })
   })
 
   it('uses structured api error message when update settings fails', async () => {

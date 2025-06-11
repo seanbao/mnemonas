@@ -42,10 +42,13 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { useAuthStore, useUser } from '@/stores/auth'
 import {
   SettingsError,
+  checkDirectoryAccess,
   getSecurityCheck,
   getSettings,
   getWebDAVCredentials,
   updateSettings,
+  type DirectoryAccessCheckData,
+  type DirectoryAccessDecision,
   type DirectoryAccessRule,
   type DirectoryAccessRole,
   type DirectoryQuota,
@@ -575,6 +578,71 @@ function parseDirectoryAccessRuleLines(value: string): { rules: DirectoryAccessR
   return { rules }
 }
 
+function directoryAccessSourceLabel(source: DirectoryAccessDecision['source']): string {
+  switch (source) {
+    case 'admin':
+      return '管理员'
+    case 'auth_disabled':
+      return '未启用认证'
+    case 'directory_access_rule':
+      return '目录规则'
+    case 'home_dir':
+      return '主目录'
+    case 'invalid_home_dir':
+      return '主目录无效'
+    case 'user_disabled':
+      return '账号已停用'
+    case 'user_not_found':
+      return '用户不存在'
+    default:
+      return source
+  }
+}
+
+function DirectoryAccessDecisionLine({ label, decision }: { label: string; decision: DirectoryAccessDecision }) {
+  const allowedClassName = decision.allowed
+    ? 'border-success/30 bg-success/5 text-success'
+    : 'border-danger/30 bg-danger/5 text-danger'
+  const Icon = decision.allowed ? CheckCircle2 : AlertCircle
+
+  return (
+    <div className={cn('rounded-lg border px-3 py-2', allowedClassName)}>
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <span className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+          <Icon size={16} className="shrink-0" />
+          {label}
+        </span>
+        <span className="shrink-0 rounded-full bg-background/70 px-2 py-0.5 text-xs font-medium text-foreground">
+          {decision.allowed ? '允许' : '拒绝'}
+        </span>
+      </div>
+      <div className="mt-1 text-xs text-foreground/70">
+        {directoryAccessSourceLabel(decision.source)}
+        {decision.matched_rule?.path ? ` · ${decision.matched_rule.path}` : ''}
+      </div>
+      {decision.message && (
+        <div className="mt-1 break-anywhere text-xs text-foreground/60">{decision.message}</div>
+      )}
+    </div>
+  )
+}
+
+function DirectoryAccessCheckResult({ result }: { result: DirectoryAccessCheckData }) {
+  return (
+    <div className="rounded-lg border border-divider bg-content2/40 p-3">
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-default-500">
+        <span className="rounded-full bg-content1 px-2 py-1 font-mono text-foreground">{result.username}</span>
+        <span className="rounded-full bg-content1 px-2 py-1">{result.role}</span>
+        <span className="rounded-full bg-content1 px-2 py-1 font-mono text-foreground">{result.path}</span>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <DirectoryAccessDecisionLine label="读取" decision={result.read} />
+        <DirectoryAccessDecisionLine label="写入" decision={result.write} />
+      </div>
+    </div>
+  )
+}
+
 // Setting row component
 function SettingRow({ 
   label, 
@@ -1050,6 +1118,32 @@ export function SettingsPage() {
   const webdavUrl = useMemo(() => {
     return formatWebDAVUrl(window.location.origin, webdavCredentials?.url ?? '')
   }, [webdavCredentials?.url])
+
+  const [accessCheckUsername, setAccessCheckUsername] = useState('')
+  const [accessCheckPath, setAccessCheckPath] = useState('/')
+  const accessCheckMutation = useMutation({
+    mutationFn: checkDirectoryAccess,
+    onError: (err) => {
+      addToast(getSettingsActionErrorToast(err, {
+        unavailable: '权限检查不可用',
+        failure: '权限检查失败',
+      }))
+    },
+  })
+
+  const handleCheckDirectoryAccess = () => {
+    const username = accessCheckUsername.trim()
+    const targetPath = accessCheckPath.trim()
+    if (!username || !targetPath) {
+      addToast({
+        title: '权限检查信息不完整',
+        description: '请输入用户名和路径。',
+        color: 'warning',
+      })
+      return
+    }
+    accessCheckMutation.mutate({ username, path: targetPath })
+  }
 
   const handleCopy = async (field: string, value: string) => {
     try {
@@ -2332,6 +2426,36 @@ export function SettingsPage() {
                       角色字段：<span className="font-mono text-foreground">read_roles</span>、<span className="font-mono text-foreground">write_roles</span>；多个值用英文逗号分隔
                     </div>
                   </div>
+                  <div className="rounded-lg border border-divider bg-content1/60 p-3">
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                      <Input
+                        label="检查用户"
+                        value={accessCheckUsername}
+                        onValueChange={setAccessCheckUsername}
+                        placeholder="alice"
+                        className="input-shell"
+                      />
+                      <Input
+                        label="检查路径"
+                        value={accessCheckPath}
+                        onValueChange={setAccessCheckPath}
+                        placeholder="/team/readme.txt"
+                        className="input-shell"
+                      />
+                      <Button
+                        color="primary"
+                        className="self-end rounded-lg"
+                        onPress={handleCheckDirectoryAccess}
+                        isLoading={accessCheckMutation.isPending}
+                      >
+                        检查权限
+                      </Button>
+                    </div>
+                    <div className="mt-2 text-xs text-default-500">结果基于已保存的目录权限配置。</div>
+                  </div>
+                  {accessCheckMutation.data && (
+                    <DirectoryAccessCheckResult result={accessCheckMutation.data} />
+                  )}
                 </div>
               </SettingsSection>
 
