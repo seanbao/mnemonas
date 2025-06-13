@@ -17,12 +17,14 @@ import { updateSettings } from '@/api/settings'
 import { getWebDAVCredentials } from '@/api/settings'
 import { getSecurityCheck } from '@/api/settings'
 import { checkDirectoryAccess } from '@/api/settings'
+import { reportDirectoryAccess } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
 const mockUpdateSettings = vi.mocked(updateSettings)
 const mockGetWebDAVCredentials = vi.mocked(getWebDAVCredentials)
 const mockGetSecurityCheck = vi.mocked(getSecurityCheck)
 const mockCheckDirectoryAccess = vi.mocked(checkDirectoryAccess)
+const mockReportDirectoryAccess = vi.mocked(reportDirectoryAccess)
 
 const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() => ({
   defaultSettingsResponse: {
@@ -153,6 +155,44 @@ vi.mock('@/api/settings', () => ({
     read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
     write: { mode: 'write', allowed: false, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
   }),
+  reportDirectoryAccess: vi.fn().mockResolvedValue({
+    path: '/team/readme.txt',
+    summary: { users: 2, read_allowed: 1, read_denied: 1, write_allowed: 1, write_denied: 1, related_shares: 1, active_related_shares: 1, password_protected_shares: 1 },
+    users: [
+      {
+        username: 'alice',
+        user_id: 'u1',
+        role: 'user',
+        groups: ['family'],
+        home_dir: '/users/alice',
+        path: '/team/readme.txt',
+        read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+        write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_groups: ['family'] } },
+      },
+      {
+        username: 'bob',
+        user_id: 'u2',
+        role: 'user',
+        home_dir: '/users/bob',
+        path: '/team/readme.txt',
+        read: { mode: 'read', allowed: false, source: 'home_dir' },
+        write: { mode: 'write', allowed: false, source: 'home_dir' },
+      },
+    ],
+    shares: [{
+      id: 'share-1',
+      path: '/team',
+      type: 'folder',
+      created_by: 'u1',
+      relation: 'covers_path',
+      enabled: true,
+      active: true,
+      has_password: true,
+      access_count: 0,
+      max_access: 0,
+      url: '/s/share-1',
+    }],
+  }),
   getWebDAVCredentials: vi.fn().mockResolvedValue({
     success: true,
     enabled: true,
@@ -190,6 +230,44 @@ describe('SettingsPage', () => {
       path: '/team/readme.txt',
       read: { mode: 'read', allowed: true, source: 'directory_access_rule', message: 'directory access rule grants read', matched_rule: { path: '/team', read_groups: ['family'] } },
       write: { mode: 'write', allowed: false, source: 'directory_access_rule', message: 'directory access rule does not grant write', matched_rule: { path: '/team', read_groups: ['family'] } },
+    })
+    mockReportDirectoryAccess.mockResolvedValue({
+      path: '/team/readme.txt',
+      summary: { users: 2, read_allowed: 1, read_denied: 1, write_allowed: 1, write_denied: 1, related_shares: 1, active_related_shares: 1, password_protected_shares: 1 },
+      users: [
+        {
+          username: 'alice',
+          user_id: 'u1',
+          role: 'user',
+          groups: ['family'],
+          home_dir: '/users/alice',
+          path: '/team/readme.txt',
+          read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+          write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_groups: ['family'] } },
+        },
+        {
+          username: 'bob',
+          user_id: 'u2',
+          role: 'user',
+          home_dir: '/users/bob',
+          path: '/team/readme.txt',
+          read: { mode: 'read', allowed: false, source: 'home_dir' },
+          write: { mode: 'write', allowed: false, source: 'home_dir' },
+        },
+      ],
+      shares: [{
+        id: 'share-1',
+        path: '/team',
+        type: 'folder',
+        created_by: 'u1',
+        relation: 'covers_path',
+        enabled: true,
+        active: true,
+        has_password: true,
+        access_count: 0,
+        max_access: 0,
+        url: '/s/share-1',
+      }],
     })
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
   })
@@ -1064,11 +1142,19 @@ describe('SettingsPage', () => {
 
       await openTab(user, '版本保留')
 
-      const accessInput = await screen.findByLabelText('目录权限')
-      expect(accessInput).toHaveValue('/team read_groups=family write_groups=editors')
+      const pathInput = await screen.findByLabelText('目录权限路径 1')
+      const readGroupsInput = screen.getByLabelText('读组 1')
+      const writeGroupsInput = screen.getByLabelText('写组 1')
+      expect(pathInput).toHaveValue('/team')
+      expect(readGroupsInput).toHaveValue('family')
+      expect(writeGroupsInput).toHaveValue('editors')
 
-      await user.clear(accessInput)
-      await user.type(accessInput, '/media read_users=alice,bob write_roles=admin')
+      await user.clear(pathInput)
+      await user.type(pathInput, '/media')
+      await user.clear(readGroupsInput)
+      await user.clear(writeGroupsInput)
+      await user.type(screen.getByLabelText('读用户 1'), 'alice,bob')
+      await user.type(screen.getByLabelText('写角色 1'), 'admin')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -1076,6 +1162,39 @@ describe('SettingsPage', () => {
           storage: expect.objectContaining({
             directory_access_rules: [
               { path: '/media', read_users: ['alice', 'bob'], write_roles: ['admin'] },
+            ],
+          }),
+        }))
+      })
+    })
+
+    it('adds directory access rule rows', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          storage: {
+            root: '~/.mnemonas',
+            directory_access_rules: [{ path: '/team', read_groups: ['family'] }],
+          },
+        },
+      } as ReturnType<typeof getSettings>)
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await user.click(await screen.findByRole('button', { name: '添加规则' }))
+      await user.type(screen.getByLabelText('目录权限路径 2'), '/shared')
+      await user.type(screen.getByLabelText('读角色 2'), 'user')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          storage: expect.objectContaining({
+            directory_access_rules: [
+              { path: '/team', read_groups: ['family'] },
+              { path: '/shared', read_roles: ['user'] },
             ],
           }),
         }))
@@ -1103,6 +1222,34 @@ describe('SettingsPage', () => {
       expect(screen.getByText('允许')).toBeTruthy()
       expect(screen.getByText('拒绝')).toBeTruthy()
       expect(screen.getAllByText(/目录规则/).length).toBeGreaterThanOrEqual(2)
+    })
+
+    it('builds directory access user matrix', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const pathInput = await screen.findByLabelText('检查路径')
+      await user.clear(pathInput)
+      await user.type(pathInput, '/team/readme.txt')
+      await user.click(screen.getByRole('button', { name: '用户矩阵' }))
+
+      await waitFor(() => {
+        expect(mockReportDirectoryAccess).toHaveBeenCalled()
+      })
+      expect(mockReportDirectoryAccess.mock.calls[0]?.[0]).toEqual({ path: '/team/readme.txt' })
+      expect(await screen.findByLabelText('目录权限用户矩阵')).toBeTruthy()
+      expect(screen.getByText('用户 2')).toBeTruthy()
+      expect(screen.getByText('可读 1')).toBeTruthy()
+      expect(screen.getByText('可写 1')).toBeTruthy()
+      expect(screen.getByText('相关分享 1')).toBeTruthy()
+      expect(screen.getByText('活跃分享 1')).toBeTruthy()
+      expect(screen.getByText('密码分享 1')).toBeTruthy()
+      expect(screen.getByText('alice')).toBeTruthy()
+      expect(screen.getByText('bob')).toBeTruthy()
+      expect(screen.getByText('/team')).toBeTruthy()
+      expect(screen.getByText('可访问')).toBeTruthy()
     })
   })
 

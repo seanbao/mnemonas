@@ -6185,6 +6185,7 @@ func TestServer_CheckPathAccess_RejectsInvalidRequests(t *testing.T) {
 		"missing username": {body: `{"path":"/"}`, wantStatus: http.StatusBadRequest},
 		"invalid path":     {body: `{"username":"admin","path":"../escape"}`, wantStatus: http.StatusBadRequest},
 		"missing user":     {body: `{"username":"missing","path":"/"}`, wantStatus: http.StatusNotFound},
+		"unknown field":    {body: `{"username":"admin","path":"/","extra":true}`, wantStatus: http.StatusBadRequest},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-check", strings.NewReader(tt.body))
@@ -6193,6 +6194,114 @@ func TestServer_CheckPathAccess_RejectsInvalidRequests(t *testing.T) {
 			server.Router().ServeHTTP(rec, req)
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d, body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestServer_ReportPathAccess_SummarizesAllUsers(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+	alice, err := server.userStore.CreateWithGroups("alice", "password123", "", auth.RoleUser, []string{"family"})
+	if err != nil {
+		t.Fatalf("CreateWithGroups(alice) error: %v", err)
+	}
+	alice.HomeDir = "/users/alice"
+	if err := server.userStore.Update(alice); err != nil {
+		t.Fatalf("Update(alice home_dir) error: %v", err)
+	}
+	bob, err := server.userStore.CreateWithGroups("bob", "password123", "", auth.RoleUser, []string{"visitors"})
+	if err != nil {
+		t.Fatalf("CreateWithGroups(bob) error: %v", err)
+	}
+	bob.HomeDir = "/users/bob"
+	if err := server.userStore.Update(bob); err != nil {
+		t.Fatalf("Update(bob home_dir) error: %v", err)
+	}
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/uploads", WriteGroups: []string{"family"}},
+	})
+	if _, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/team",
+		Type:      share.ShareTypeFolder,
+		CreatedBy: alice.ID,
+	}); err != nil {
+		t.Fatalf("Create parent share error: %v", err)
+	}
+	if _, err := server.shareStore.Create(share.CreateShareOptions{
+		Path:      "/team/uploads/file.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: alice.ID,
+		Password:  "secret",
+	}); err != nil {
+		t.Fatalf("Create exact share error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-report", strings.NewReader(`{"path":"/team/uploads/file.txt"}`))
+	req.Header.Set("Authorization", "Bearer "+session.accessToken)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("access-report status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Data pathAccessReportResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode access-report response: %v", err)
+	}
+	if payload.Data.Path != "/team/uploads/file.txt" {
+		t.Fatalf("report path = %q, want cleaned target path", payload.Data.Path)
+	}
+	if payload.Data.Summary.Users != 3 || payload.Data.Summary.ReadAllowed != 2 || payload.Data.Summary.WriteAllowed != 2 {
+		t.Fatalf("unexpected summary: %+v", payload.Data.Summary)
+	}
+	if payload.Data.Summary.RelatedShares != 2 || payload.Data.Summary.ActiveRelatedShares != 2 || payload.Data.Summary.PasswordProtectedShares != 1 {
+		t.Fatalf("unexpected share summary: %+v", payload.Data.Summary)
+	}
+
+	byUser := make(map[string]pathAccessCheckResult, len(payload.Data.Users))
+	for _, result := range payload.Data.Users {
+		byUser[result.Username] = result
+	}
+	if !byUser["admin"].Read.Allowed || !byUser["admin"].Write.Allowed || byUser["admin"].Read.Source != "admin" {
+		t.Fatalf("admin report = %+v", byUser["admin"])
+	}
+	if !byUser["alice"].Read.Allowed || !byUser["alice"].Write.Allowed || byUser["alice"].Write.MatchedRule == nil || byUser["alice"].Write.MatchedRule.Path != "/team/uploads" {
+		t.Fatalf("alice report = %+v", byUser["alice"])
+	}
+	if byUser["bob"].Read.Allowed || byUser["bob"].Write.Allowed || byUser["bob"].Read.Source != "directory_access_rule" {
+		t.Fatalf("bob report = %+v", byUser["bob"])
+	}
+
+	byRelation := make(map[string]pathAccessShareImpact, len(payload.Data.Shares))
+	for _, item := range payload.Data.Shares {
+		byRelation[item.Relation] = item
+	}
+	if byRelation["covers_path"].Path != "/team" || !byRelation["covers_path"].Active {
+		t.Fatalf("parent share impact = %+v", byRelation["covers_path"])
+	}
+	if byRelation["exact"].Path != "/team/uploads/file.txt" || !byRelation["exact"].HasPassword {
+		t.Fatalf("exact share impact = %+v", byRelation["exact"])
+	}
+}
+
+func TestServer_ReportPathAccess_RejectsInvalidRequests(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+
+	for name, body := range map[string]string{
+		"invalid path":  `{"path":"../escape"}`,
+		"unknown field": `{"path":"/","extra":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-report", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+session.accessToken)
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("access-report invalid request status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 			}
 		})
 	}

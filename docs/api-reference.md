@@ -1737,6 +1737,72 @@ POST /api/v1/settings/access-check
 
 响应会同时返回 `read` 和 `write` 判定。每个判定包含 `allowed`、`source`、可选 `message`，以及由目录授权决定时的 `matched_rule`。`source` 可能是 `admin`、`home_dir`、`directory_access_rule`、`invalid_home_dir`、`user_disabled`、`user_not_found` 或 `auth_disabled`。
 
+### 目录权限用户矩阵
+
+```
+POST /api/v1/settings/access-report
+```
+
+**需要管理员权限**
+
+请求体：
+
+```json
+{
+  "path": "/team/report.pdf"
+}
+```
+
+响应会对所有用户生成同一路径下的读写判定，并返回 `summary` 汇总：
+
+```json
+{
+  "success": true,
+  "data": {
+    "path": "/team/report.pdf",
+    "summary": {
+      "users": 2,
+      "read_allowed": 1,
+      "read_denied": 1,
+      "write_allowed": 1,
+      "write_denied": 1,
+      "related_shares": 1,
+      "active_related_shares": 1,
+      "password_protected_shares": 1
+    },
+    "users": [
+      {
+        "username": "alice",
+        "user_id": "u1",
+        "role": "user",
+        "groups": ["family"],
+        "home_dir": "/users/alice",
+        "path": "/team/report.pdf",
+        "read": { "mode": "read", "allowed": true, "source": "directory_access_rule" },
+        "write": { "mode": "write", "allowed": true, "source": "directory_access_rule" }
+      }
+    ],
+    "shares": [
+      {
+        "id": "share-id",
+        "path": "/team",
+        "type": "folder",
+        "created_by": "u1",
+        "relation": "covers_path",
+        "enabled": true,
+        "active": true,
+        "has_password": true,
+        "access_count": 0,
+        "max_access": 0,
+        "url": "/s/share-id"
+      }
+    ]
+  }
+}
+```
+
+`shares[].relation` 说明分享与检查路径的关系：`exact` 表示直接分享该路径，`covers_path` 表示父级分享会覆盖该路径，`inside_path` 表示被检查目录下存在子级分享。
+
 ### 公网访问安全自检
 
 ```
