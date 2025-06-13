@@ -146,8 +146,47 @@ export interface DirectoryAccessCheckData {
   write: DirectoryAccessDecision
 }
 
+export interface DirectoryAccessReportSummary {
+  users: number
+  read_allowed: number
+  read_denied: number
+  write_allowed: number
+  write_denied: number
+  related_shares: number
+  active_related_shares: number
+  password_protected_shares: number
+}
+
+export type DirectoryAccessShareRelation = 'exact' | 'covers_path' | 'inside_path'
+
+export interface DirectoryAccessShareImpact {
+  id: string
+  path: string
+  type: 'file' | 'folder'
+  created_by: string
+  relation: DirectoryAccessShareRelation
+  enabled: boolean
+  active: boolean
+  has_password: boolean
+  access_count: number
+  max_access: number
+  expires_at?: string
+  url?: string
+}
+
+export interface DirectoryAccessReportData {
+  path: string
+  summary: DirectoryAccessReportSummary
+  users: DirectoryAccessCheckData[]
+  shares?: DirectoryAccessShareImpact[]
+}
+
 export interface DirectoryAccessCheckRequest {
   username: string
+  path: string
+}
+
+export interface DirectoryAccessReportRequest {
   path: string
 }
 
@@ -381,6 +420,47 @@ function isDirectoryAccessCheckData(value: unknown): value is DirectoryAccessChe
     && typeof value.path === 'string'
     && isDirectoryAccessDecision(value.read)
     && isDirectoryAccessDecision(value.write)
+}
+
+function isDirectoryAccessReportSummary(value: unknown): value is DirectoryAccessReportSummary {
+  return isRecord(value)
+    && typeof value.users === 'number'
+    && typeof value.read_allowed === 'number'
+    && typeof value.read_denied === 'number'
+    && typeof value.write_allowed === 'number'
+    && typeof value.write_denied === 'number'
+    && typeof value.related_shares === 'number'
+    && typeof value.active_related_shares === 'number'
+    && typeof value.password_protected_shares === 'number'
+}
+
+function isDirectoryAccessShareRelation(value: unknown): value is DirectoryAccessShareRelation {
+  return value === 'exact' || value === 'covers_path' || value === 'inside_path'
+}
+
+function isDirectoryAccessShareImpact(value: unknown): value is DirectoryAccessShareImpact {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.path === 'string'
+    && (value.type === 'file' || value.type === 'folder')
+    && typeof value.created_by === 'string'
+    && isDirectoryAccessShareRelation(value.relation)
+    && typeof value.enabled === 'boolean'
+    && typeof value.active === 'boolean'
+    && typeof value.has_password === 'boolean'
+    && typeof value.access_count === 'number'
+    && typeof value.max_access === 'number'
+    && (value.expires_at === undefined || typeof value.expires_at === 'string')
+    && (value.url === undefined || typeof value.url === 'string')
+}
+
+function isDirectoryAccessReportData(value: unknown): value is DirectoryAccessReportData {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && isDirectoryAccessReportSummary(value.summary)
+    && Array.isArray(value.users)
+    && value.users.every(isDirectoryAccessCheckData)
+    && (value.shares === undefined || (Array.isArray(value.shares) && value.shares.every(isDirectoryAccessShareImpact)))
 }
 
 function isSecurityCheckStatus(value: unknown): value is SecurityCheckStatus {
@@ -626,6 +706,26 @@ export async function checkDirectoryAccess(data: DirectoryAccessCheckRequest): P
   const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access check response')
   if (!isDirectoryAccessCheckData(body.data)) {
     throw new Error('Invalid directory access check response')
+  }
+  return body.data
+}
+
+export async function reportDirectoryAccess(data: DirectoryAccessReportRequest): Promise<DirectoryAccessReportData> {
+  const response = await authFetch(`${API_BASE}/access-report`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+  })
+
+  if (!response.ok) {
+    throw await parseSettingsError(response, 'Failed to build directory access report')
+  }
+
+  const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access report response')
+  if (!isDirectoryAccessReportData(body.data)) {
+    throw new Error('Invalid directory access report response')
   }
   return body.data
 }

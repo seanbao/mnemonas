@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, SettingsError, updateSettings, type SettingsData } from './settings'
+import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, reportDirectoryAccess, SettingsError, updateSettings, type SettingsData } from './settings'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -455,6 +455,89 @@ describe('Settings API', () => {
       status: 404,
       code: 'NOT_FOUND',
     })
+  })
+
+  it('reports directory access for all users', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: '/team/readme.txt',
+          summary: {
+            users: 2,
+            read_allowed: 1,
+            read_denied: 1,
+            write_allowed: 1,
+            write_denied: 1,
+            related_shares: 1,
+            active_related_shares: 1,
+            password_protected_shares: 1,
+          },
+          users: [
+            {
+              username: 'alice',
+              user_id: 'u1',
+              role: 'user',
+              groups: ['family'],
+              home_dir: '/users/alice',
+              path: '/team/readme.txt',
+              read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+              write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_groups: ['family'] } },
+            },
+            {
+              username: 'bob',
+              user_id: 'u2',
+              role: 'user',
+              home_dir: '/users/bob',
+              path: '/team/readme.txt',
+              read: { mode: 'read', allowed: false, source: 'home_dir' },
+              write: { mode: 'write', allowed: false, source: 'home_dir' },
+            },
+          ],
+          shares: [{
+            id: 'share-1',
+            path: '/team',
+            type: 'folder',
+            created_by: 'u1',
+            relation: 'covers_path',
+            enabled: true,
+            active: true,
+            has_password: true,
+            access_count: 0,
+            max_access: 0,
+            url: '/s/share-1',
+          }],
+        },
+      }),
+    })
+
+    const result = await reportDirectoryAccess({ path: '/team/readme.txt' })
+
+    expect(result.summary.read_allowed).toBe(1)
+    expect(result.summary.related_shares).toBe(1)
+    expect(result.shares?.[0]?.relation).toBe('covers_path')
+    expect(result.users.map((entry) => entry.username)).toEqual(['alice', 'bob'])
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-report', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ path: '/team/readme.txt' }),
+    }))
+  })
+
+  it('rejects malformed directory access report responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: '/team/readme.txt',
+          summary: { users: 1, read_allowed: 1, read_denied: 0, write_allowed: 1, write_denied: 0, related_shares: 0, active_related_shares: 0, password_protected_shares: 0 },
+          users: [{ username: 'alice' }],
+        },
+      }),
+    })
+
+    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow('Invalid directory access report response')
   })
 
   it('uses structured api error message when update settings fails', async () => {

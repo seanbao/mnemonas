@@ -220,6 +220,8 @@ func routeSmokeRequestBody(contract string, session routeSmokeSession) string {
 		return `{}`
 	case "POST /api/v1/settings/access-check":
 		return `{"username":"admin","path":"/"}`
+	case "POST /api/v1/settings/access-report":
+		return `{"path":"/"}`
 	case "POST /api/v1/shares/":
 		return `{"path":"/missing.txt","type":"file"}`
 	case "PUT /api/v1/shares/{id}":

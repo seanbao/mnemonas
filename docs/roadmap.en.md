@@ -65,7 +65,7 @@ Goal: make multi-user collaboration more controllable and auditable.
 
 | Capability | Gap | Suggested implementation | Acceptance criteria |
 | --- | --- | --- | --- |
-| Folder-level permissions | Basic directory ACLs, groups, and effective access checks exist; inheritance, policy presets, and broader admin reports are still missing | Add inheritance/policy previews, share-permission impact checks, and audit reports | Web, API, WebDAV, and shares use the same permission decision, and admins can review effective access |
+| Folder-level permissions | Basic directory ACLs, groups, single-user effective access checks, per-path user matrix reports, and related-share impact checks exist; inheritance, policy presets, and richer audit reports are still missing | Add inheritance/policy previews and richer audit reports | Web, API, WebDAV, and shares use the same permission decision, and admins can review effective access |
 | Share governance | Share links exist | Add share policies, default expiry, download limits, and audit reports | Admins can inspect, search, and disable all shares |
 | Audit reports | Activity logs exist | Add reports by user, directory, share, and suspicious action | Audit data can be exported and filtered by time range and action type |
 | Admin recovery tools | Versions, trash, and backup batch restore preflight exist | Add cross-directory restore, permission-impact preview, and clearer conflict descriptions | Restore preview shows conflicts, overwrite impact, and permission impact |
