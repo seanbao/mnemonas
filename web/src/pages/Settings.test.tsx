@@ -904,6 +904,10 @@ describe('SettingsPage', () => {
       await user.click(screen.getByRole('switch'))
       const baseUrlInput = screen.getByPlaceholderText('https://nas.example.com')
       await user.type(baseUrlInput, 'https://share.example.com')
+      await user.clear(screen.getByPlaceholderText('168h'))
+      await user.type(screen.getByPlaceholderText('168h'), '24h')
+      await user.clear(screen.getByPlaceholderText('0'))
+      await user.type(screen.getByPlaceholderText('0'), '3')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -911,6 +915,112 @@ describe('SettingsPage', () => {
           share: expect.objectContaining({
             enabled: true,
             base_url: 'https://share.example.com',
+            default_expires_in: '24h',
+            default_max_access: 3,
+            policy_rules: [],
+          }),
+        }))
+      })
+    })
+
+    it('allows editing share path policy rules and saves them', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享管理')
+
+      await user.click(screen.getByRole('switch'))
+      await user.type(
+        screen.getByPlaceholderText(/\/Family require_password/),
+        '/Family require_password max_expires_in=24h max_access=20',
+      )
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            policy_rules: [{
+              path: '/Family',
+              require_password: true,
+              max_expires_in: '24h',
+              max_access: 20,
+            }],
+          }),
+        }))
+      })
+    })
+
+    it('rejects invalid share default policy values before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享管理')
+
+      await user.click(screen.getByRole('switch'))
+      await user.clear(screen.getByPlaceholderText('168h'))
+      await user.type(screen.getByPlaceholderText('168h'), '7d')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '分享默认有效期无效',
+          description: '默认有效期必须为空、0，或使用 168h / 30m 这类 Go duration 格式',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+
+      await user.clear(screen.getByPlaceholderText('168h'))
+      await user.type(screen.getByPlaceholderText('168h'), '24h')
+      await user.clear(screen.getByPlaceholderText('0'))
+      await user.type(screen.getByPlaceholderText('0'), '-1')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '分享默认访问次数无效',
+          description: '默认访问次数必须是 0 或正整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects invalid share path policy rules before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享管理')
+
+      await user.click(screen.getByRole('switch'))
+      await user.type(screen.getByPlaceholderText(/\/Family require_password/), '/Family')
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '分享路径策略格式无效',
+          description: '第 1 行至少需要一个约束',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('applies share policy presets before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享管理')
+
+      await user.click(screen.getByRole('switch'))
+      await user.click(screen.getByRole('button', { name: /临时协作/ }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            default_expires_in: '72h',
+            default_max_access: 20,
           }),
         }))
       })

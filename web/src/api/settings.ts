@@ -55,6 +55,9 @@ export interface SettingsData {
   share: {
     enabled: boolean
     base_url: string
+    default_expires_in?: string
+    default_max_access?: number
+    policy_rules?: SharePolicyRule[]
   }
   favorites?: {
     enabled: boolean
@@ -116,6 +119,13 @@ export interface DirectoryAccessRule {
   write_groups?: string[]
   read_roles?: DirectoryAccessRole[]
   write_roles?: DirectoryAccessRole[]
+}
+
+export interface SharePolicyRule {
+  path: string
+  require_password?: boolean
+  max_expires_in?: string
+  max_access?: number
 }
 
 export type DirectoryAccessDecisionSource =
@@ -300,6 +310,9 @@ export interface UpdateSettingsRequest {
   share?: {
     enabled?: boolean
     base_url?: string
+    default_expires_in?: string
+    default_max_access?: number
+    policy_rules?: SharePolicyRule[]
   }
   favorites?: {
     enabled?: boolean
@@ -404,6 +417,14 @@ function isDirectoryAccessRule(value: unknown): value is DirectoryAccessRule {
     && (value.write_groups === undefined || isStringArray(value.write_groups))
     && (value.read_roles === undefined || (Array.isArray(value.read_roles) && value.read_roles.every(isDirectoryAccessRole)))
     && (value.write_roles === undefined || (Array.isArray(value.write_roles) && value.write_roles.every(isDirectoryAccessRole)))
+}
+
+function isSharePolicyRule(value: unknown): value is SharePolicyRule {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && (value.require_password === undefined || typeof value.require_password === 'boolean')
+    && (value.max_expires_in === undefined || typeof value.max_expires_in === 'string')
+    && (value.max_access === undefined || typeof value.max_access === 'number')
 }
 
 function isDirectoryAccessDecision(value: unknown): value is DirectoryAccessDecision {
@@ -527,6 +548,9 @@ function isValidSettingsData(value: unknown): value is SettingsData {
     || !isRecord(value.share)
     || typeof value.share.enabled !== 'boolean'
     || typeof value.share.base_url !== 'string'
+    || (value.share.default_expires_in !== undefined && typeof value.share.default_expires_in !== 'string')
+    || (value.share.default_max_access !== undefined && typeof value.share.default_max_access !== 'number')
+    || (value.share.policy_rules !== undefined && (!Array.isArray(value.share.policy_rules) || !value.share.policy_rules.every(isSharePolicyRule)))
     || !isRecord(value.dataplane)
     || typeof value.dataplane.grpc_address !== 'string'
     || typeof value.dataplane.timeout !== 'string'

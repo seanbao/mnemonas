@@ -22,6 +22,34 @@ export interface Share {
   max_access?: number
   description?: string
   url: string
+  risk?: ShareRisk
+}
+
+export type ShareRiskLevel = 'none' | 'low' | 'medium' | 'high'
+
+export interface ShareRiskReason {
+  code: string
+  level: ShareRiskLevel
+  message: string
+  resolved?: boolean
+}
+
+export interface ShareRisk {
+  level: ShareRiskLevel
+  reasons?: ShareRiskReason[]
+}
+
+export interface SharePolicy {
+  default_expires_in: string
+  default_max_access: number
+  policy_rules?: SharePolicyRule[]
+}
+
+export interface SharePolicyRule {
+  path: string
+  require_password?: boolean
+  max_expires_in?: string
+  max_access?: number
 }
 
 export interface CreateShareRequest {
@@ -113,6 +141,10 @@ export class ShareError extends Error {
     return this.code === 'SHARE_FEATURE_DISABLED'
   }
 
+  get isPolicyPasswordRequired(): boolean {
+    return this.code === 'SHARE_POLICY_PASSWORD_REQUIRED'
+  }
+
   get isUnavailable(): boolean {
     return this.status === 503 && !this.isFeatureDisabled
   }
@@ -138,6 +170,51 @@ function isPermission(value: unknown): value is Permission {
   return value === 'read'
 }
 
+function isShareRiskLevel(value: unknown): value is ShareRiskLevel {
+  return value === 'none' || value === 'low' || value === 'medium' || value === 'high'
+}
+
+function isShareRiskReason(value: unknown): value is ShareRiskReason {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const reason = value as Partial<ShareRiskReason>
+  return typeof reason.code === 'string'
+    && isShareRiskLevel(reason.level)
+    && typeof reason.message === 'string'
+    && (reason.resolved === undefined || typeof reason.resolved === 'boolean')
+}
+
+function isShareRisk(value: unknown): value is ShareRisk {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const risk = value as Partial<ShareRisk>
+  return isShareRiskLevel(risk.level)
+    && (risk.reasons === undefined || (Array.isArray(risk.reasons) && risk.reasons.every(isShareRiskReason)))
+}
+
+function isSharePolicy(value: unknown): value is SharePolicy {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const policy = value as Partial<SharePolicy>
+  return typeof policy.default_expires_in === 'string'
+    && typeof policy.default_max_access === 'number'
+    && (policy.policy_rules === undefined || (Array.isArray(policy.policy_rules) && policy.policy_rules.every(isSharePolicyRule)))
+}
+
+function isSharePolicyRule(value: unknown): value is SharePolicyRule {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const rule = value as Partial<SharePolicyRule>
+  return typeof rule.path === 'string'
+    && (rule.require_password === undefined || typeof rule.require_password === 'boolean')
+    && (rule.max_expires_in === undefined || typeof rule.max_expires_in === 'string')
+    && (rule.max_access === undefined || typeof rule.max_access === 'number')
+}
+
 function isValidShare(value: unknown): value is Share {
   if (!value || typeof value !== 'object') {
     return false
@@ -157,7 +234,8 @@ function isValidShare(value: unknown): value is Share {
     typeof share.url === 'string' &&
     (share.expires_at === undefined || typeof share.expires_at === 'string') &&
     (share.max_access === undefined || typeof share.max_access === 'number') &&
-    (share.description === undefined || typeof share.description === 'string')
+    (share.description === undefined || typeof share.description === 'string') &&
+    (share.risk === undefined || isShareRisk(share.risk))
   )
 }
 
@@ -320,6 +398,20 @@ export async function listShares(all = false): Promise<Share[]> {
   const body = await parseWrappedShareSuccess<ShareApiResponse<unknown>>(response, '获取分享列表响应无效')
   if (!Array.isArray(body.data) || !body.data.every(isValidShare)) {
     throw new ShareError('获取分享列表响应无效', response.status)
+  }
+  return body.data
+}
+
+export async function getSharePolicy(): Promise<SharePolicy> {
+  const response = await authFetch(`${API_BASE}/shares/policy`)
+
+  if (!response.ok) {
+    throw await readShareApiError(response, '获取分享默认策略失败')
+  }
+
+  const body = await parseWrappedShareSuccess<ShareApiResponse<unknown>>(response, '获取分享默认策略响应无效')
+  if (!isSharePolicy(body.data)) {
+    throw new ShareError('获取分享默认策略响应无效', response.status)
   }
   return body.data
 }
