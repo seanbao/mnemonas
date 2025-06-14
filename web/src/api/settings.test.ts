@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, reportDirectoryAccess, SettingsError, updateSettings, type SettingsData } from './settings'
+import { checkDirectoryAccess, getSecurityCheck, getSettings, getWebDAVCredentials, previewDirectoryAccess, reportDirectoryAccess, SettingsError, updateSettings, type SettingsData } from './settings'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -538,6 +538,39 @@ describe('Settings API', () => {
     })
 
     await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow('Invalid directory access report response')
+  })
+
+  it('previews directory access rules without saving settings', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          path: '/team/readme.txt',
+          preview: true,
+          summary: { users: 1, read_allowed: 1, read_denied: 0, write_allowed: 0, write_denied: 1, related_shares: 0, active_related_shares: 0, password_protected_shares: 0 },
+          users: [{
+            username: 'alice',
+            user_id: 'u1',
+            role: 'user',
+            home_dir: '/users/alice',
+            path: '/team/readme.txt',
+            read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+            write: { mode: 'write', allowed: false, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+          }],
+        },
+      }),
+    })
+
+    const rules = [{ path: '/team', read_groups: ['family'] }]
+    const result = await previewDirectoryAccess({ path: '/team/readme.txt', directory_access_rules: rules })
+
+    expect(result.preview).toBe(true)
+    expect(result.users[0]?.read.allowed).toBe(true)
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-preview', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ path: '/team/readme.txt', directory_access_rules: rules }),
+    }))
   })
 
   it('uses structured api error message when update settings fails', async () => {

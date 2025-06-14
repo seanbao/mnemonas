@@ -87,10 +87,18 @@ func (s *Server) matchDirectoryAccessRule(targetPath string) (config.DirectoryAc
 		return config.DirectoryAccessRuleConfig{}, false
 	}
 
+	return matchDirectoryAccessRuleIn(cfg.Storage.DirectoryAccessRules, targetPath)
+}
+
+func matchDirectoryAccessRuleIn(rules []config.DirectoryAccessRuleConfig, targetPath string) (config.DirectoryAccessRuleConfig, bool) {
+	if len(rules) == 0 {
+		return config.DirectoryAccessRuleConfig{}, false
+	}
+
 	targetPath = path.Clean(targetPath)
 	bestIndex := -1
 	bestLength := -1
-	for i, rule := range cfg.Storage.DirectoryAccessRules {
+	for i, rule := range rules {
 		if strings.TrimSpace(rule.Path) == "" {
 			continue
 		}
@@ -105,7 +113,7 @@ func (s *Server) matchDirectoryAccessRule(targetPath string) (config.DirectoryAc
 	if bestIndex < 0 {
 		return config.DirectoryAccessRuleConfig{}, false
 	}
-	return cfg.Storage.DirectoryAccessRules[bestIndex], true
+	return rules[bestIndex], true
 }
 
 func directoryAccessRuleAllowsUser(rule config.DirectoryAccessRuleConfig, user *auth.User, mode pathAccessMode) bool {
@@ -149,6 +157,15 @@ func (s *Server) hasDirectoryAccessRules() bool {
 }
 
 func (s *Server) evaluateUserPathAccess(user *auth.User, targetPath string) pathAccessCheckResult {
+	cfg := s.currentConfig()
+	var rules []config.DirectoryAccessRuleConfig
+	if cfg != nil {
+		rules = cfg.Storage.DirectoryAccessRules
+	}
+	return s.evaluateUserPathAccessWithRules(user, targetPath, rules)
+}
+
+func (s *Server) evaluateUserPathAccessWithRules(user *auth.User, targetPath string, rules []config.DirectoryAccessRuleConfig) pathAccessCheckResult {
 	targetPath = path.Clean(targetPath)
 	result := pathAccessCheckResult{
 		Path: targetPath,
@@ -160,12 +177,21 @@ func (s *Server) evaluateUserPathAccess(user *auth.User, targetPath string) path
 		result.Groups = append([]string(nil), user.Groups...)
 		result.HomeDir = user.HomeDir
 	}
-	result.Read = s.evaluateUserPathAccessMode(user, targetPath, pathAccessRead)
-	result.Write = s.evaluateUserPathAccessMode(user, targetPath, pathAccessWrite)
+	result.Read = s.evaluateUserPathAccessModeWithRules(user, targetPath, pathAccessRead, rules)
+	result.Write = s.evaluateUserPathAccessModeWithRules(user, targetPath, pathAccessWrite, rules)
 	return result
 }
 
 func (s *Server) evaluateUserPathAccessMode(user *auth.User, targetPath string, mode pathAccessMode) pathAccessEvaluation {
+	cfg := s.currentConfig()
+	var rules []config.DirectoryAccessRuleConfig
+	if cfg != nil {
+		rules = cfg.Storage.DirectoryAccessRules
+	}
+	return s.evaluateUserPathAccessModeWithRules(user, targetPath, mode, rules)
+}
+
+func (s *Server) evaluateUserPathAccessModeWithRules(user *auth.User, targetPath string, mode pathAccessMode, rules []config.DirectoryAccessRuleConfig) pathAccessEvaluation {
 	if !s.authEnabled {
 		return pathAccessEvaluation{
 			Mode:    mode,
@@ -199,7 +225,7 @@ func (s *Server) evaluateUserPathAccessMode(user *auth.User, targetPath string, 
 		}
 	}
 
-	if rule, ok := s.matchDirectoryAccessRule(targetPath); ok {
+	if rule, ok := matchDirectoryAccessRuleIn(rules, targetPath); ok {
 		matchedRule := rule
 		allowed := directoryAccessRuleAllowsUser(rule, user, mode)
 		message := "directory access rule does not grant " + string(mode)

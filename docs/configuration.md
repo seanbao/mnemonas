@@ -457,7 +457,7 @@ password = "very-strong-password-here"
 | `encryption_required` | bool | `false` | 预留的 SMB 加密要求 |
 | `[[smb.shares]]` | array | `[]` | 预留的共享映射；启用预览开关时至少需要一个共享 |
 
-共享路径必须是 MnemoNAS 内部绝对路径，例如 `/` 或 `/team/docs`。后续侧车会继续通过 MnemoNAS 权限、`home_dir` 和网关 API 访问文件，避免直接把 `files/` 目录交给 Samba 后绕过版本历史、回收站和审计。
+共享路径必须是 MnemoNAS 内部绝对路径，例如 `/` 或 `/team/docs`。后续侧车会继续通过 MnemoNAS 权限、`home_dir` 和网关 API 访问文件，避免直接把 `files/` 目录交给 Samba 后绕过版本历史、回收站和活动记录。
 
 ---
 

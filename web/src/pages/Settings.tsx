@@ -48,6 +48,7 @@ import {
   getSecurityCheck,
   getSettings,
   getWebDAVCredentials,
+  previewDirectoryAccess,
   reportDirectoryAccess,
   updateSettings,
   type DirectoryAccessCheckData,
@@ -660,11 +661,20 @@ function directoryAccessShareRelationLabel(relation: string): string {
   }
 }
 
-function DirectoryAccessReportResult({ report }: { report: DirectoryAccessReportData }) {
+function DirectoryAccessReportResult({
+  report,
+  title = '用户矩阵',
+  ariaLabel = '目录权限用户矩阵',
+}: {
+  report: DirectoryAccessReportData
+  title?: string
+  ariaLabel?: string
+}) {
   const shares = report.shares ?? []
 
   return (
-    <div className="rounded-lg border border-divider bg-content2/40 p-3" aria-label="目录权限用户矩阵">
+    <div className="rounded-lg border border-divider bg-content2/40 p-3" aria-label={ariaLabel}>
+      <div className="mb-2 text-sm font-semibold text-foreground">{title}</div>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-default-500">
         <span className="rounded-full bg-content1 px-2 py-1 font-mono text-foreground">{report.path}</span>
         <span className="rounded-full bg-content1 px-2 py-1">用户 {report.summary.users}</span>
@@ -1449,8 +1459,17 @@ export function SettingsPage() {
     mutationFn: reportDirectoryAccess,
     onError: (err) => {
       addToast(getSettingsActionErrorToast(err, {
-        unavailable: '权限报表不可用',
-        failure: '权限报表生成失败',
+        unavailable: '权限矩阵不可用',
+        failure: '权限矩阵生成失败',
+      }))
+    },
+  })
+  const accessPreviewMutation = useMutation({
+    mutationFn: previewDirectoryAccess,
+    onError: (err) => {
+      addToast(getSettingsActionErrorToast(err, {
+        unavailable: '权限预览不可用',
+        failure: '权限预览失败',
       }))
     },
   })
@@ -1473,13 +1492,38 @@ export function SettingsPage() {
     const targetPath = accessCheckPath.trim()
     if (!targetPath) {
       addToast({
-        title: '权限报表路径为空',
-        description: '请输入需要审计的路径。',
+        title: '权限矩阵路径为空',
+        description: '请输入需要检查的路径。',
         color: 'warning',
       })
       return
     }
     accessReportMutation.mutate({ path: targetPath })
+  }
+
+  const handlePreviewDirectoryAccess = () => {
+    const targetPath = accessCheckPath.trim()
+    if (!targetPath) {
+      addToast({
+        title: '权限预览路径为空',
+        description: '请输入需要预览的路径。',
+        color: 'warning',
+      })
+      return
+    }
+    const parsedRules = parseDirectoryAccessRuleLines(settings.directoryAccessRules)
+    if (parsedRules.error) {
+      addToast({
+        title: '目录权限格式无效',
+        description: parsedRules.error,
+        color: 'danger',
+      })
+      return
+    }
+    accessPreviewMutation.mutate({
+      path: targetPath,
+      directory_access_rules: parsedRules.rules,
+    })
   }
 
   const handleCopy = async (field: string, value: string) => {
@@ -1605,15 +1649,11 @@ export function SettingsPage() {
     }
   }, [isDirty, mapServerSettings, savedSettingsOverride, savedSettingsOverrideUpdatedAt, settingsData, settingsDataUpdatedAt])
 
-  const settings = useMemo(() => {
-    if (!isDirty && savedSettingsOverride) {
-      return savedSettingsOverride
-    }
-    if (!isDirty && settingsData?.data) {
-      return mapServerSettings(settingsData.data)
-    }
-    return draftSettings
-  }, [draftSettings, isDirty, mapServerSettings, savedSettingsOverride, settingsData])
+  const settings = !isDirty && savedSettingsOverride
+    ? savedSettingsOverride
+    : !isDirty && settingsData?.data
+      ? mapServerSettings(settingsData.data)
+      : draftSettings
   const webdavNoAuthSelected = settings.webdavEnabled && settings.webdavAuthType === 'none'
   const serverBeyondLoopback = listensBeyondLoopback(settings.serverHost)
   const normalizedWebDAVPrefixDraft = normalizeWebDAVPrefix(settings.webdavPrefix)
@@ -2760,7 +2800,7 @@ export function SettingsPage() {
                     </div>
                   </div>
                   <div className="rounded-lg border border-divider bg-content1/60 p-3">
-                    <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
+                    <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto_auto]">
                       <Input
                         label="检查用户"
                         value={accessCheckUsername}
@@ -2791,14 +2831,29 @@ export function SettingsPage() {
                       >
                         用户矩阵
                       </Button>
+                      <Button
+                        variant="bordered"
+                        className="self-end rounded-lg"
+                        onPress={handlePreviewDirectoryAccess}
+                        isLoading={accessPreviewMutation.isPending}
+                      >
+                        预览变更
+                      </Button>
                     </div>
-                    <div className="mt-2 text-xs text-default-500">结果基于已保存的目录权限配置。</div>
+                    <div className="mt-2 text-xs text-default-500">用户矩阵基于已保存配置；预览变更基于当前编辑但尚未保存的规则。</div>
                   </div>
                   {accessCheckMutation.data && (
                     <DirectoryAccessCheckResult result={accessCheckMutation.data} />
                   )}
                   {accessReportMutation.data && (
                     <DirectoryAccessReportResult report={accessReportMutation.data} />
+                  )}
+                  {accessPreviewMutation.data && (
+                    <DirectoryAccessReportResult
+                      report={accessPreviewMutation.data}
+                      title="变更预览"
+                      ariaLabel="目录权限变更预览"
+                    />
                   )}
                 </div>
               </SettingsSection>

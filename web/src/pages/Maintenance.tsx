@@ -1398,12 +1398,12 @@ export default function Maintenance() {
     setExportingRestoreReportJobId(job.id)
     try {
       await downloadBackupRestoreReport(job.id)
-      addToast({ title: '恢复报告导出已开始', description: job.name, color: 'success' })
+      addToast({ title: '恢复摘要导出已开始', description: job.name, color: 'success' })
     } catch (error) {
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
-        '导出恢复报告失败',
-        '恢复报告暂不可用',
+        '导出恢复摘要失败',
+        '恢复摘要暂不可用',
         '备份管理器当前不可用，请检查配置后重试。',
       )
       addToast({
@@ -1776,7 +1776,7 @@ export default function Maintenance() {
                               isDisabled={isExportingReport}
                               onPress={() => void handleDownloadRestoreReport(job)}
                             >
-                              导出报告
+                              导出摘要
                             </Button>
                           </div>
                         </TableCell>

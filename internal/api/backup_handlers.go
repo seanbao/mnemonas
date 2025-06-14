@@ -55,18 +55,18 @@ func (s *Server) handleDownloadBackupRestoreReport(w http.ResponseWriter, r *htt
 
 	report, err := manager.BuildRestoreReport(chi.URLParam(r, "id"))
 	if err != nil {
-		s.writeBackupError(w, "build backup restore report", err, nil)
+		s.writeBackupError(w, "build backup restore summary", err, nil)
 		return
 	}
 
-	filename := "mnemonas-restore-report-" + safeBackupReportFilenamePart(report.Job.ID) + "-" + report.GeneratedAt.Format("20060102T150405Z") + ".json"
+	filename := "mnemonas-restore-summary-" + safeBackupReportFilenamePart(report.Job.ID) + "-" + report.GeneratedAt.Format("20060102T150405Z") + ".json"
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", formatAttachmentHeader(filename))
 	w.WriteHeader(http.StatusOK)
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
-		s.logger.Error().Err(err).Str("job_id", report.Job.ID).Msg("write backup restore report failed")
+		s.logger.Error().Err(err).Str("job_id", report.Job.ID).Msg("write backup restore summary failed")
 	}
 }
 

@@ -6307,6 +6307,92 @@ func TestServer_ReportPathAccess_RejectsInvalidRequests(t *testing.T) {
 	}
 }
 
+func TestServer_PreviewPathAccess_UsesProvidedRulesWithoutSaving(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+	alice, err := server.userStore.CreateWithGroups("alice", "password123", "", auth.RoleUser, []string{"family"})
+	if err != nil {
+		t.Fatalf("CreateWithGroups(alice) error: %v", err)
+	}
+	alice.HomeDir = "/users/alice"
+	if err := server.userStore.Update(alice); err != nil {
+		t.Fatalf("Update(alice home_dir) error: %v", err)
+	}
+
+	previewBody := `{"path":"/team/readme.txt","directory_access_rules":[{"path":"/team","read_groups":["family"],"write_groups":["family"]}]}`
+	previewReq := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-preview", strings.NewReader(previewBody))
+	previewReq.Header.Set("Authorization", "Bearer "+session.accessToken)
+	previewRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(previewRec, previewReq)
+
+	if previewRec.Code != http.StatusOK {
+		t.Fatalf("access-preview status = %d, body = %s", previewRec.Code, previewRec.Body.String())
+	}
+	var previewPayload struct {
+		Data pathAccessReportResult `json:"data"`
+	}
+	if err := json.Unmarshal(previewRec.Body.Bytes(), &previewPayload); err != nil {
+		t.Fatalf("decode access-preview response: %v", err)
+	}
+	if !previewPayload.Data.Preview {
+		t.Fatalf("preview flag = false, body = %s", previewRec.Body.String())
+	}
+	var alicePreview pathAccessCheckResult
+	for _, result := range previewPayload.Data.Users {
+		if result.Username == "alice" {
+			alicePreview = result
+			break
+		}
+	}
+	if !alicePreview.Read.Allowed || !alicePreview.Write.Allowed || alicePreview.Read.Source != "directory_access_rule" {
+		t.Fatalf("alice preview = %+v", alicePreview)
+	}
+
+	reportReq := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-report", strings.NewReader(`{"path":"/team/readme.txt"}`))
+	reportReq.Header.Set("Authorization", "Bearer "+session.accessToken)
+	reportRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(reportRec, reportReq)
+	if reportRec.Code != http.StatusOK {
+		t.Fatalf("access-report status = %d, body = %s", reportRec.Code, reportRec.Body.String())
+	}
+	var reportPayload struct {
+		Data pathAccessReportResult `json:"data"`
+	}
+	if err := json.Unmarshal(reportRec.Body.Bytes(), &reportPayload); err != nil {
+		t.Fatalf("decode access-report response: %v", err)
+	}
+	var aliceSaved pathAccessCheckResult
+	for _, result := range reportPayload.Data.Users {
+		if result.Username == "alice" {
+			aliceSaved = result
+			break
+		}
+	}
+	if aliceSaved.Read.Allowed || aliceSaved.Write.Allowed || aliceSaved.Read.Source != "home_dir" {
+		t.Fatalf("saved report after preview = %+v, want unchanged home_dir denial", aliceSaved)
+	}
+}
+
+func TestServer_PreviewPathAccess_RejectsInvalidRequests(t *testing.T) {
+	server, session := newRouteSmokeServer(t)
+
+	for name, body := range map[string]string{
+		"invalid path":  `{"path":"../escape","directory_access_rules":[]}`,
+		"invalid rules": `{"path":"/","directory_access_rules":[{"path":"team","read_groups":["family"]}]}`,
+		"unknown field": `{"path":"/","directory_access_rules":[],"extra":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/access-preview", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+session.accessToken)
+			rec := httptest.NewRecorder()
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("access-preview invalid request status = %d, want %d, body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_ListFiles_EmptyUserHomeDirReturnsForbidden(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 
