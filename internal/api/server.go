@@ -1794,6 +1794,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleGetSettings)
 			r.Put("/", s.handleUpdateSettings)
 			r.Post("/access-check", s.handleCheckPathAccess)
+			r.Post("/access-preview", s.handlePreviewPathAccess)
 			r.Post("/access-report", s.handleReportPathAccess)
 			r.Get("/security-check", s.handleGetSecurityCheck)
 			r.Get("/webdav-credentials", s.handleGetWebDAVCredentials)
@@ -5940,6 +5941,11 @@ type pathAccessReportRequest struct {
 	Path string `json:"path"`
 }
 
+type pathAccessPreviewRequest struct {
+	Path                 string                             `json:"path"`
+	DirectoryAccessRules []config.DirectoryAccessRuleConfig `json:"directory_access_rules"`
+}
+
 type pathAccessReportSummary struct {
 	Users                   int `json:"users"`
 	ReadAllowed             int `json:"read_allowed"`
@@ -5953,6 +5959,7 @@ type pathAccessReportSummary struct {
 
 type pathAccessReportResult struct {
 	Path    string                  `json:"path"`
+	Preview bool                    `json:"preview,omitempty"`
 	Summary pathAccessReportSummary `json:"summary"`
 	Users   []pathAccessCheckResult `json:"users"`
 	Shares  []pathAccessShareImpact `json:"shares,omitempty"`
@@ -6028,17 +6035,55 @@ func (s *Server) handleReportPathAccess(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	cfg := s.currentConfig()
+	var rules []config.DirectoryAccessRuleConfig
+	if cfg != nil {
+		rules = cfg.Storage.DirectoryAccessRules
+	}
+
+	NewAPIResponse(s.buildPathAccessReport(targetPath, rules, false)).Write(w, http.StatusOK)
+}
+
+func (s *Server) handlePreviewPathAccess(w http.ResponseWriter, r *http.Request) {
+	if s.userStore == nil {
+		ServiceUnavailable(w, "user store not available")
+		return
+	}
+
+	var req pathAccessPreviewRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
+		return
+	}
+
+	targetPath, err := validatePath(req.Path)
+	if err != nil {
+		BadRequest(w, "invalid path")
+		return
+	}
+
+	rules := config.NormalizeDirectoryAccessRules(req.DirectoryAccessRules)
+	if err := config.ValidateDirectoryAccessRules(rules); err != nil {
+		BadRequest(w, "invalid directory access rules")
+		return
+	}
+
+	NewAPIResponse(s.buildPathAccessReport(targetPath, rules, true)).Write(w, http.StatusOK)
+}
+
+func (s *Server) buildPathAccessReport(targetPath string, rules []config.DirectoryAccessRuleConfig, preview bool) pathAccessReportResult {
 	users := s.userStore.List()
 	report := pathAccessReportResult{
-		Path:  targetPath,
-		Users: make([]pathAccessCheckResult, 0, len(users)),
+		Path:    targetPath,
+		Preview: preview,
+		Users:   make([]pathAccessCheckResult, 0, len(users)),
 	}
 
 	for _, user := range users {
 		if user == nil {
 			continue
 		}
-		result := s.evaluateUserPathAccess(user, targetPath)
+		result := s.evaluateUserPathAccessWithRules(user, targetPath, rules)
 		report.Users = append(report.Users, result)
 		report.Summary.Users++
 		if result.Read.Allowed {
@@ -6062,8 +6107,7 @@ func (s *Server) handleReportPathAccess(w http.ResponseWriter, r *http.Request) 
 			report.Summary.PasswordProtectedShares++
 		}
 	}
-
-	NewAPIResponse(report).Write(w, http.StatusOK)
+	return report
 }
 
 func (s *Server) pathAccessShareImpacts(targetPath string) []pathAccessShareImpact {

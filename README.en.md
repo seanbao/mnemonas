@@ -31,9 +31,9 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 | Trash | Soft delete, time-based browsing, restore, scheduled cleanup |
 | Album mode | Image waterfall layout, thumbnails, immersive browsing |
 | Search | Filename search with quick navigation |
-| User management | Multiple users, roles, password policy, login audit |
+| User management | Multiple users, roles, password policy, login history |
 | Share links | Public/private links, password protection, expiration, access statistics |
-| Activity log | Operation audit, filters, statistics |
+| Activity log | Key operation history, filters, and home/small-team activity review |
 | Settings | Server, storage, retention, and WebDAV configuration |
 | Maintenance | Scrub, GC, object browsing, diagnostic bundle, system metrics |
 | WebDAV | Core RFC 4918 read/write methods with Basic Auth and a maintained compatibility matrix |

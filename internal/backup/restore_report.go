@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// BuildRestoreReport returns a point-in-time restore audit report for one job.
+// BuildRestoreReport returns a point-in-time restore summary for one job.
 func (m *Manager) BuildRestoreReport(id string) (*RestoreReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

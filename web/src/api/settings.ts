@@ -176,6 +176,7 @@ export interface DirectoryAccessShareImpact {
 
 export interface DirectoryAccessReportData {
   path: string
+  preview?: boolean
   summary: DirectoryAccessReportSummary
   users: DirectoryAccessCheckData[]
   shares?: DirectoryAccessShareImpact[]
@@ -188,6 +189,10 @@ export interface DirectoryAccessCheckRequest {
 
 export interface DirectoryAccessReportRequest {
   path: string
+}
+
+export interface DirectoryAccessPreviewRequest extends DirectoryAccessReportRequest {
+  directory_access_rules: DirectoryAccessRule[]
 }
 
 export interface SettingsResponse {
@@ -457,6 +462,7 @@ function isDirectoryAccessShareImpact(value: unknown): value is DirectoryAccessS
 function isDirectoryAccessReportData(value: unknown): value is DirectoryAccessReportData {
   return isRecord(value)
     && typeof value.path === 'string'
+    && (value.preview === undefined || typeof value.preview === 'boolean')
     && isDirectoryAccessReportSummary(value.summary)
     && Array.isArray(value.users)
     && value.users.every(isDirectoryAccessCheckData)
@@ -726,6 +732,26 @@ export async function reportDirectoryAccess(data: DirectoryAccessReportRequest):
   const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access report response')
   if (!isDirectoryAccessReportData(body.data)) {
     throw new Error('Invalid directory access report response')
+  }
+  return body.data
+}
+
+export async function previewDirectoryAccess(data: DirectoryAccessPreviewRequest): Promise<DirectoryAccessReportData> {
+  const response = await authFetch(`${API_BASE}/access-preview`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+  })
+
+  if (!response.ok) {
+    throw await parseSettingsError(response, 'Failed to preview directory access')
+  }
+
+  const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access preview response')
+  if (!isDirectoryAccessReportData(body.data)) {
+    throw new Error('Invalid directory access preview response')
   }
   return body.data
 }

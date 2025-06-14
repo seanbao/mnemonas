@@ -17,6 +17,7 @@ import { updateSettings } from '@/api/settings'
 import { getWebDAVCredentials } from '@/api/settings'
 import { getSecurityCheck } from '@/api/settings'
 import { checkDirectoryAccess } from '@/api/settings'
+import { previewDirectoryAccess } from '@/api/settings'
 import { reportDirectoryAccess } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
@@ -24,6 +25,7 @@ const mockUpdateSettings = vi.mocked(updateSettings)
 const mockGetWebDAVCredentials = vi.mocked(getWebDAVCredentials)
 const mockGetSecurityCheck = vi.mocked(getSecurityCheck)
 const mockCheckDirectoryAccess = vi.mocked(checkDirectoryAccess)
+const mockPreviewDirectoryAccess = vi.mocked(previewDirectoryAccess)
 const mockReportDirectoryAccess = vi.mocked(reportDirectoryAccess)
 
 const { defaultSettingsResponse, defaultSecurityCheckResponse } = vi.hoisted(() => ({
@@ -193,6 +195,45 @@ vi.mock('@/api/settings', () => ({
       url: '/s/share-1',
     }],
   }),
+  previewDirectoryAccess: vi.fn().mockResolvedValue({
+    path: '/team/readme.txt',
+    preview: true,
+    summary: { users: 2, read_allowed: 2, read_denied: 0, write_allowed: 1, write_denied: 1, related_shares: 1, active_related_shares: 1, password_protected_shares: 1 },
+    users: [
+      {
+        username: 'alice',
+        user_id: 'u1',
+        role: 'user',
+        groups: ['family'],
+        home_dir: '/users/alice',
+        path: '/team/readme.txt',
+        read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+        write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_groups: ['family'] } },
+      },
+      {
+        username: 'bob',
+        user_id: 'u2',
+        role: 'user',
+        home_dir: '/users/bob',
+        path: '/team/readme.txt',
+        read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_roles: ['user'] } },
+        write: { mode: 'write', allowed: false, source: 'directory_access_rule', matched_rule: { path: '/team', read_roles: ['user'] } },
+      },
+    ],
+    shares: [{
+      id: 'share-1',
+      path: '/team',
+      type: 'folder',
+      created_by: 'u1',
+      relation: 'covers_path',
+      enabled: true,
+      active: true,
+      has_password: true,
+      access_count: 0,
+      max_access: 0,
+      url: '/s/share-1',
+    }],
+  }),
   getWebDAVCredentials: vi.fn().mockResolvedValue({
     success: true,
     enabled: true,
@@ -253,6 +294,45 @@ describe('SettingsPage', () => {
           path: '/team/readme.txt',
           read: { mode: 'read', allowed: false, source: 'home_dir' },
           write: { mode: 'write', allowed: false, source: 'home_dir' },
+        },
+      ],
+      shares: [{
+        id: 'share-1',
+        path: '/team',
+        type: 'folder',
+        created_by: 'u1',
+        relation: 'covers_path',
+        enabled: true,
+        active: true,
+        has_password: true,
+        access_count: 0,
+        max_access: 0,
+        url: '/s/share-1',
+      }],
+    })
+    mockPreviewDirectoryAccess.mockResolvedValue({
+      path: '/team/readme.txt',
+      preview: true,
+      summary: { users: 2, read_allowed: 2, read_denied: 0, write_allowed: 1, write_denied: 1, related_shares: 1, active_related_shares: 1, password_protected_shares: 1 },
+      users: [
+        {
+          username: 'alice',
+          user_id: 'u1',
+          role: 'user',
+          groups: ['family'],
+          home_dir: '/users/alice',
+          path: '/team/readme.txt',
+          read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_groups: ['family'] } },
+          write: { mode: 'write', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', write_groups: ['family'] } },
+        },
+        {
+          username: 'bob',
+          user_id: 'u2',
+          role: 'user',
+          home_dir: '/users/bob',
+          path: '/team/readme.txt',
+          read: { mode: 'read', allowed: true, source: 'directory_access_rule', matched_rule: { path: '/team', read_roles: ['user'] } },
+          write: { mode: 'write', allowed: false, source: 'directory_access_rule', matched_rule: { path: '/team', read_roles: ['user'] } },
         },
       ],
       shares: [{
@@ -1250,6 +1330,31 @@ describe('SettingsPage', () => {
       expect(screen.getByText('bob')).toBeTruthy()
       expect(screen.getByText('/team')).toBeTruthy()
       expect(screen.getByText('可访问')).toBeTruthy()
+    })
+
+    it('previews unsaved directory access rule changes', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await user.type(await screen.findByLabelText('目录权限路径 1'), '/team')
+      await user.type(screen.getByLabelText('读角色 1'), 'user')
+      const pathInput = screen.getByLabelText('检查路径')
+      await user.clear(pathInput)
+      await user.type(pathInput, '/team/readme.txt')
+      await user.click(screen.getByRole('button', { name: '预览变更' }))
+
+      await waitFor(() => {
+        expect(mockPreviewDirectoryAccess).toHaveBeenCalled()
+      })
+      expect(mockPreviewDirectoryAccess.mock.calls[0]?.[0]).toEqual({
+        path: '/team/readme.txt',
+        directory_access_rules: [{ path: '/team', read_roles: ['user'] }],
+      })
+      expect(await screen.findByLabelText('目录权限变更预览')).toBeTruthy()
+      expect(screen.getByText('变更预览')).toBeTruthy()
+      expect(screen.getByText('可读 2')).toBeTruthy()
     })
   })
 
