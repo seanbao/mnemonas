@@ -3911,6 +3911,264 @@ func TestServer_UpdateSettings_UpdatesRunningShareBaseURL(t *testing.T) {
 	}
 }
 
+func TestServer_GetSharePolicy_ReturnsDefaultSharePolicy(t *testing.T) {
+	server, _ := setupShareServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares/policy", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get share policy status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse policy response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected policy response data, got %s", rec.Body.String())
+	}
+	if data["default_expires_in"] != "168h" {
+		t.Fatalf("expected default_expires_in 168h, got %#v", data["default_expires_in"])
+	}
+	if data["default_max_access"] != float64(0) {
+		t.Fatalf("expected default_max_access 0, got %#v", data["default_max_access"])
+	}
+}
+
+func TestServer_CreateShare_AppliesDefaultSharePolicy(t *testing.T) {
+	server, _ := setupShareServer(t)
+
+	createBody := `{"path":"/docs/a.txt","type":"file"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	beforeCreate := time.Now()
+
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d, want %d; body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse create response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected create response data")
+	}
+	expiresAtValue, ok := data["expires_at"].(string)
+	if !ok || expiresAtValue == "" {
+		t.Fatalf("expected expires_at from default share policy, got %#v", data["expires_at"])
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtValue)
+	if err != nil {
+		t.Fatalf("failed to parse expires_at %q: %v", expiresAtValue, err)
+	}
+	if expiresAt.Before(beforeCreate.Add(167*time.Hour)) || expiresAt.After(beforeCreate.Add(169*time.Hour)) {
+		t.Fatalf("expected default expiry roughly 168h from creation, got %s", expiresAt)
+	}
+}
+
+func TestServer_CreateShare_AppliesPathSharePolicyRule(t *testing.T) {
+	server, _ := setupShareServer(t)
+	cfg := server.currentConfig()
+	cfg.Share.PolicyRules = []config.SharePolicyRuleConfig{{
+		Path:            "/docs",
+		RequirePassword: true,
+		MaxExpiresIn:    24 * time.Hour,
+		MaxAccess:       5,
+	}}
+	server.storeConfig(cfg)
+
+	blockedReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file"}`))
+	blockedReq.Header.Set("Content-Type", "application/json")
+	blockedRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(blockedRec, blockedReq)
+
+	if blockedRec.Code != http.StatusBadRequest {
+		t.Fatalf("create share without required password status = %d, want %d; body=%s", blockedRec.Code, http.StatusBadRequest, blockedRec.Body.String())
+	}
+	var blockedPayload map[string]any
+	if err := json.Unmarshal(blockedRec.Body.Bytes(), &blockedPayload); err != nil {
+		t.Fatalf("failed to parse blocked response: %v", err)
+	}
+	blockedError, ok := blockedPayload["error"].(map[string]any)
+	if !ok || blockedError["code"] != "SHARE_POLICY_PASSWORD_REQUIRED" {
+		t.Fatalf("expected password policy error, got %s", blockedRec.Body.String())
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file","password":"secret-pass","expires_in":"72h","max_access":100}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	beforeCreate := time.Now()
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share with policy status = %d, want %d; body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse create response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected create response data")
+	}
+	if data["max_access"] != float64(5) {
+		t.Fatalf("expected max_access capped to 5, got %#v", data["max_access"])
+	}
+	if data["has_password"] != true {
+		t.Fatalf("expected has_password true, got %#v", data["has_password"])
+	}
+	expiresAtValue, ok := data["expires_at"].(string)
+	if !ok || expiresAtValue == "" {
+		t.Fatalf("expected capped expires_at, got %#v", data["expires_at"])
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtValue)
+	if err != nil {
+		t.Fatalf("failed to parse expires_at %q: %v", expiresAtValue, err)
+	}
+	if expiresAt.Before(beforeCreate.Add(23*time.Hour)) || expiresAt.After(beforeCreate.Add(25*time.Hour)) {
+		t.Fatalf("expected path policy expiry roughly 24h from creation, got %s", expiresAt)
+	}
+}
+
+func TestServer_CreateShare_UsesMostSpecificPathSharePolicyRule(t *testing.T) {
+	server, _ := setupShareServer(t)
+	cfg := server.currentConfig()
+	cfg.Share.PolicyRules = []config.SharePolicyRuleConfig{
+		{Path: "/docs", MaxExpiresIn: 24 * time.Hour},
+		{Path: "/docs/sub", MaxExpiresIn: 72 * time.Hour},
+	}
+	server.storeConfig(cfg)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/sub","type":"folder","expires_in":"72h"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	beforeCreate := time.Now()
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share with specific policy status = %d, want %d; body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse create response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected create response data")
+	}
+	expiresAtValue, ok := data["expires_at"].(string)
+	if !ok || expiresAtValue == "" {
+		t.Fatalf("expected expires_at, got %#v", data["expires_at"])
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtValue)
+	if err != nil {
+		t.Fatalf("failed to parse expires_at %q: %v", expiresAtValue, err)
+	}
+	if expiresAt.Before(beforeCreate.Add(71*time.Hour)) || expiresAt.After(beforeCreate.Add(73*time.Hour)) {
+		t.Fatalf("expected most specific policy expiry roughly 72h from creation, got %s", expiresAt)
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesShareDefaultPolicy(t *testing.T) {
+	server, _ := setupShareServer(t)
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"share":{"default_expires_in":"24h","default_max_access":3}}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update share policy status = %d, want %d; body=%s", updateRec.Code, http.StatusOK, updateRec.Body.String())
+	}
+
+	policyReq := httptest.NewRequest(http.MethodGet, "/api/v1/shares/policy", nil)
+	policyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(policyRec, policyReq)
+
+	var policyPayload map[string]any
+	if err := json.Unmarshal(policyRec.Body.Bytes(), &policyPayload); err != nil {
+		t.Fatalf("failed to parse policy response: %v", err)
+	}
+	policyData, ok := policyPayload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected policy response data, got %s", policyRec.Body.String())
+	}
+	if policyData["default_expires_in"] != "24h" || policyData["default_max_access"] != float64(3) {
+		t.Fatalf("expected updated share policy, got %+v", policyData)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share with updated policy status = %d, want %d; body=%s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+	var createPayload map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &createPayload); err != nil {
+		t.Fatalf("failed to parse create response: %v", err)
+	}
+	createData, ok := createPayload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected create response data")
+	}
+	if createData["max_access"] != float64(3) {
+		t.Fatalf("expected default max_access 3, got %#v", createData["max_access"])
+	}
+	if _, ok := createData["expires_at"].(string); !ok {
+		t.Fatalf("expected default expires_at to be set, got %#v", createData["expires_at"])
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesSharePathPolicyRules(t *testing.T) {
+	server, _ := setupShareServer(t)
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"share":{"policy_rules":[{"path":"/docs/","require_password":true,"max_expires_in":"24h","max_access":5}]}}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update share policy rules status = %d, want %d; body=%s", updateRec.Code, http.StatusOK, updateRec.Body.String())
+	}
+
+	policyReq := httptest.NewRequest(http.MethodGet, "/api/v1/shares/policy", nil)
+	policyRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(policyRec, policyReq)
+
+	if policyRec.Code != http.StatusOK {
+		t.Fatalf("get share policy status = %d, want %d; body=%s", policyRec.Code, http.StatusOK, policyRec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(policyRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse policy response: %v", err)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected policy response data")
+	}
+	rules, ok := data["policy_rules"].([]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("expected one policy rule, got %#v", data["policy_rules"])
+	}
+	rule, ok := rules[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected policy rule object, got %#v", rules[0])
+	}
+	if rule["path"] != "/docs" || rule["require_password"] != true || rule["max_expires_in"] != "24h" || rule["max_access"] != float64(5) {
+		t.Fatalf("unexpected policy rule: %#v", rule)
+	}
+}
+
 func TestServer_UpdateSettings_SaveFailureDoesNotUpdateRunningShareBaseURL(t *testing.T) {
 	server, _ := setupShareServerWithBaseURL(t, "https://old.example.com/")
 	server.configPath = t.TempDir()
@@ -6766,13 +7024,14 @@ func TestReadFavoriteBodyPath_LeavesBodyReadableForDownstreamHandler(t *testing.
 	}
 }
 
-func TestReadCreateSharePath_LeavesBodyReadableForDownstreamHandler(t *testing.T) {
+func TestPrepareCreateShareRequest_LeavesBodyReadableForDownstreamHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file"}`))
 	req.Header.Set("Content-Type", "application/json")
+	server := &Server{config: config.Default()}
 
-	sharePath, err := readCreateSharePath(req)
+	sharePath, err := server.prepareCreateShareRequest(req)
 	if err != nil {
-		t.Fatalf("readCreateSharePath() error: %v", err)
+		t.Fatalf("prepareCreateShareRequest() error: %v", err)
 	}
 	if sharePath != "/docs/a.txt" {
 		t.Fatalf("expected normalized share path, got %q", sharePath)
@@ -6780,10 +7039,13 @@ func TestReadCreateSharePath_LeavesBodyReadableForDownstreamHandler(t *testing.T
 
 	var downstream share.CreateShareRequest
 	if err := decodeJSONBody(req, &downstream); err != nil {
-		t.Fatalf("decodeJSONBody() after readCreateSharePath error: %v", err)
+		t.Fatalf("decodeJSONBody() after prepareCreateShareRequest error: %v", err)
 	}
 	if downstream.Path != "/docs/a.txt" || downstream.Type != string(share.ShareTypeFile) {
 		t.Fatalf("expected downstream decode to preserve share body, got %+v", downstream)
+	}
+	if downstream.ExpiresIn != "168h" {
+		t.Fatalf("expected default share expiry to be applied, got %+v", downstream)
 	}
 }
 

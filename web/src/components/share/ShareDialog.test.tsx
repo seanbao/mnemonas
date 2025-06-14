@@ -58,7 +58,7 @@ vi.mock('@heroui/react', () => ({
     onSelectionChange?: (keys: Set<string>) => void
   }) => {
     const mapLabelToValue = (label: string) => {
-      if (label === '永不过期') return ''
+      if (label === '使用系统默认') return ''
       if (label === '1 小时') return '1h'
       if (label === '24 小时') return '24h'
       if (label === '7 天') return '7d'
@@ -100,10 +100,11 @@ vi.mock('@/api/share', async () => {
     ...actual,
     createShare: vi.fn(),
     copyShareUrl: vi.fn(),
+    getSharePolicy: vi.fn(),
   }
 })
 
-import { copyShareUrl, createShare, ShareError } from '@/api/share'
+import { copyShareUrl, createShare, getSharePolicy, ShareError } from '@/api/share'
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -118,6 +119,10 @@ function createDeferred<T>() {
 describe('ShareDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(getSharePolicy).mockResolvedValue({
+      default_expires_in: '168h',
+      default_max_access: 0,
+    })
   })
 
   it('renders when open', () => {
@@ -184,6 +189,22 @@ describe('ShareDialog', () => {
     expect(screen.getByText('有效期')).toBeInTheDocument()
   })
 
+  it('shows server default share policy in the form', async () => {
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await waitFor(() => {
+      expect(getSharePolicy).toHaveBeenCalled()
+      expect(screen.getByText('系统默认：7 天')).toBeInTheDocument()
+      expect(screen.getByText('系统默认：不限制')).toBeInTheDocument()
+    })
+  })
+
   it('renders the access limit section without crashing', () => {
     render(
       <ShareDialog
@@ -194,7 +215,7 @@ describe('ShareDialog', () => {
     )
 
     expect(screen.getByText('访问次数限制')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('不限制')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('使用系统默认')).toBeInTheDocument()
   })
 
   it('shows create button', () => {
@@ -447,7 +468,7 @@ describe('ShareDialog', () => {
 
     fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: '7 天' } })
     fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: '仅查看' } })
-    await user.type(screen.getByPlaceholderText('不限制'), '12')
+    await user.type(screen.getByPlaceholderText('使用系统默认'), '12')
     await user.type(screen.getByPlaceholderText('添加备注信息'), '  release package  ')
     await user.click(screen.getByText('创建分享链接'))
 
@@ -483,7 +504,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    await user.type(screen.getByPlaceholderText('不限制'), '0')
+    await user.type(screen.getByPlaceholderText('使用系统默认'), '0')
     await user.click(screen.getByText('创建分享链接'))
 
     expect(createShare).toHaveBeenCalledWith(expect.not.objectContaining({

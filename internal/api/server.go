@@ -173,6 +173,7 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 	cloned := *cfg
 	cloned.Storage.DirectoryQuotas = append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...)
 	cloned.Storage.DirectoryAccessRules = cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
+	cloned.Share.PolicyRules = append([]config.SharePolicyRuleConfig(nil), cfg.Share.PolicyRules...)
 	cloned.Storage.Versioning.AutoVersionedExtensions = append([]string(nil), cfg.Storage.Versioning.AutoVersionedExtensions...)
 	cloned.Storage.Versioning.AutoVersionedFilenames = append([]string(nil), cfg.Storage.Versioning.AutoVersionedFilenames...)
 	cloned.Alerts.WebhookHeaders = append([]string(nil), cfg.Alerts.WebhookHeaders...)
@@ -975,6 +976,45 @@ func formatSettingsDuration(d time.Duration) string {
 	return d.String()
 }
 
+func formatOptionalSettingsDuration(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int64(d/time.Hour))
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int64(d/time.Minute))
+	}
+	if d%time.Second == 0 {
+		return fmt.Sprintf("%ds", int64(d/time.Second))
+	}
+	return d.String()
+}
+
+type sharePolicyRuleSettingsResponse struct {
+	Path            string `json:"path"`
+	RequirePassword bool   `json:"require_password,omitempty"`
+	MaxExpiresIn    string `json:"max_expires_in,omitempty"`
+	MaxAccess       int64  `json:"max_access,omitempty"`
+}
+
+func formatSharePolicyRulesForSettings(rules []config.SharePolicyRuleConfig) []sharePolicyRuleSettingsResponse {
+	if len(rules) == 0 {
+		return []sharePolicyRuleSettingsResponse{}
+	}
+	formatted := make([]sharePolicyRuleSettingsResponse, 0, len(rules))
+	for _, rule := range rules {
+		formatted = append(formatted, sharePolicyRuleSettingsResponse{
+			Path:            rule.Path,
+			RequirePassword: rule.RequirePassword,
+			MaxExpiresIn:    formatOptionalSettingsDuration(rule.MaxExpiresIn),
+			MaxAccess:       rule.MaxAccess,
+		})
+	}
+	return formatted
+}
+
 func settingsStringSlice(values []string) []string {
 	if values == nil {
 		return []string{}
@@ -1662,6 +1702,7 @@ func (s *Server) setupRoutes() {
 		if s.shareHandler != nil {
 			r.Route("/shares", func(r chi.Router) {
 				r.Get("/", s.handleListShares)
+				r.Get("/policy", s.handleGetSharePolicy)
 				if s.authEnabled {
 					r.With(requireWriteAccess).Post("/", s.handleCreateShareWithActivity)
 				} else {
@@ -1899,6 +1940,8 @@ func pathContainsDescendant(basePath, targetPath string) bool {
 var errPathOutsideHomeDir = errors.New("path outside user home directory")
 var errWebDAVUsernameMatchesNonAdmin = errors.New("webdav.username must not match a non-admin user when auth is enabled")
 var errInvalidPath = errors.New("invalid path")
+var errSharePolicyPasswordRequired = errors.New("share policy requires password")
+var errSharePolicyInvalidExpiresIn = errors.New("invalid share expires_in")
 
 func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*storage.SearchResult) ([]*storage.SearchResult, error) {
 	if !s.authEnabled || auth.IsAdmin(ctx) {
@@ -5869,8 +5912,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"username":        cfg.WebDAV.Username,
 		},
 		"share": map[string]interface{}{
-			"enabled":  cfg.Share.Enabled,
-			"base_url": cfg.Share.BaseURL,
+			"enabled":            cfg.Share.Enabled,
+			"base_url":           cfg.Share.BaseURL,
+			"default_expires_in": formatOptionalSettingsDuration(cfg.Share.DefaultExpiresIn),
+			"default_max_access": cfg.Share.DefaultMaxAccess,
+			"policy_rules":       formatSharePolicyRulesForSettings(cfg.Share.PolicyRules),
 		},
 		"favorites": map[string]interface{}{
 			"enabled":           cfg.Favorites.Enabled,
@@ -6226,8 +6272,50 @@ type DataPlaneSettingsUpdate struct {
 }
 
 type ShareSettingsUpdate struct {
-	Enabled *bool   `json:"enabled,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
+	Enabled          *bool                            `json:"enabled,omitempty"`
+	BaseURL          *string                          `json:"base_url,omitempty"`
+	DefaultExpiresIn *string                          `json:"default_expires_in,omitempty"`
+	DefaultMaxAccess *int64                           `json:"default_max_access,omitempty"`
+	PolicyRules      *[]SharePolicyRuleSettingsUpdate `json:"policy_rules,omitempty"`
+}
+
+type SharePolicyRuleSettingsUpdate struct {
+	Path            string `json:"path"`
+	RequirePassword bool   `json:"require_password,omitempty"`
+	MaxExpiresIn    string `json:"max_expires_in,omitempty"`
+	MaxAccess       int64  `json:"max_access,omitempty"`
+}
+
+func parseSharePolicyRuleSettingsUpdates(rules []SharePolicyRuleSettingsUpdate) ([]config.SharePolicyRuleConfig, error) {
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	parsed := make([]config.SharePolicyRuleConfig, 0, len(rules))
+	for i, rule := range rules {
+		maxExpiresIn, err := parseSharePolicyRuleSettingsDuration(rule.MaxExpiresIn, i)
+		if err != nil {
+			return nil, err
+		}
+		parsed = append(parsed, config.SharePolicyRuleConfig{
+			Path:            rule.Path,
+			RequirePassword: rule.RequirePassword,
+			MaxExpiresIn:    maxExpiresIn,
+			MaxAccess:       rule.MaxAccess,
+		})
+	}
+	return config.NormalizeSharePolicyRules(parsed), nil
+}
+
+func parseSharePolicyRuleSettingsDuration(value string, index int) (time.Duration, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid share.policy_rules[%d].max_expires_in", index)
+	}
+	return d, nil
 }
 
 type FavoritesSettingsUpdate struct {
@@ -6560,6 +6648,34 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Share.BaseURL != nil {
 			updatedConfig.Share.BaseURL = strings.TrimSpace(*req.Share.BaseURL)
+		}
+		if req.Share.DefaultExpiresIn != nil {
+			trimmedDefaultExpiresIn := strings.TrimSpace(*req.Share.DefaultExpiresIn)
+			if trimmedDefaultExpiresIn == "" || trimmedDefaultExpiresIn == "0" {
+				updatedConfig.Share.DefaultExpiresIn = 0
+			} else {
+				d, err := time.ParseDuration(trimmedDefaultExpiresIn)
+				if err != nil || d < 0 {
+					BadRequest(w, "invalid share.default_expires_in")
+					return
+				}
+				updatedConfig.Share.DefaultExpiresIn = d
+			}
+		}
+		if req.Share.DefaultMaxAccess != nil {
+			if *req.Share.DefaultMaxAccess < 0 {
+				BadRequest(w, "invalid share.default_max_access")
+				return
+			}
+			updatedConfig.Share.DefaultMaxAccess = *req.Share.DefaultMaxAccess
+		}
+		if req.Share.PolicyRules != nil {
+			rules, err := parseSharePolicyRuleSettingsUpdates(*req.Share.PolicyRules)
+			if err != nil {
+				BadRequest(w, err.Error())
+				return
+			}
+			updatedConfig.Share.PolicyRules = rules
 		}
 	}
 
@@ -7416,6 +7532,19 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	NewAPIResponse(infos).Write(w, http.StatusOK)
 }
 
+func (s *Server) handleGetSharePolicy(w http.ResponseWriter, r *http.Request) {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		ServiceUnavailable(w, "share policy not available")
+		return
+	}
+	NewAPIResponse(map[string]any{
+		"default_expires_in": formatOptionalSettingsDuration(cfg.Share.DefaultExpiresIn),
+		"default_max_access": cfg.Share.DefaultMaxAccess,
+		"policy_rules":       formatSharePolicyRulesForSettings(cfg.Share.PolicyRules),
+	}).Write(w, http.StatusOK)
+}
+
 func (s *Server) handleGetShare(w http.ResponseWriter, r *http.Request) {
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusServiceUnavailable)
@@ -7625,10 +7754,18 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 	}
 
 	sharePath := ""
-	parsedPath, err := readCreateSharePath(r)
+	parsedPath, err := s.prepareCreateShareRequest(r)
 	if err != nil {
 		if errors.Is(err, errInvalidPath) {
 			badRequestInvalidPath(w)
+			return
+		}
+		if errors.Is(err, errSharePolicyPasswordRequired) {
+			writeShareErrorResponse(w, http.StatusBadRequest, "password required by share policy", "SHARE_POLICY_PASSWORD_REQUIRED")
+			return
+		}
+		if errors.Is(err, errSharePolicyInvalidExpiresIn) {
+			writeShareErrorResponse(w, http.StatusBadRequest, "invalid expires_in format", "INVALID_EXPIRES_IN")
 			return
 		}
 		writeLimitedJSONBodyError(w, err, DefaultJSONRequestBodyLimit)
@@ -7694,7 +7831,7 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 	rec.FlushTo(w)
 }
 
-func readCreateSharePath(r *http.Request) (string, error) {
+func (s *Server) prepareCreateShareRequest(r *http.Request) (string, error) {
 	if r.Body == nil {
 		return "", nil
 	}
@@ -7713,14 +7850,103 @@ func readCreateSharePath(r *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if cleanPath != req.Path {
-		req.Path = cleanPath
-		if err := resetJSONRequestBody(r, &req); err != nil {
+	req.Path = cleanPath
+
+	if cfg := s.currentConfig(); cfg != nil {
+		if strings.TrimSpace(req.ExpiresIn) == "" && cfg.Share.DefaultExpiresIn > 0 {
+			req.ExpiresIn = formatOptionalSettingsDuration(cfg.Share.DefaultExpiresIn)
+		}
+		if req.MaxAccess == nil && cfg.Share.DefaultMaxAccess > 0 {
+			defaultMaxAccess := cfg.Share.DefaultMaxAccess
+			req.MaxAccess = &defaultMaxAccess
+		}
+		if err := applySharePolicyRuleToCreateRequest(&req, cleanPath, cfg.Share.PolicyRules); err != nil {
 			return "", err
 		}
 	}
 
+	if err := resetJSONRequestBody(r, &req); err != nil {
+		return "", err
+	}
+
 	return cleanPath, nil
+}
+
+func applySharePolicyRuleToCreateRequest(req *share.CreateShareRequest, cleanPath string, rules []config.SharePolicyRuleConfig) error {
+	rule, ok := matchSharePolicyRule(rules, cleanPath)
+	if !ok {
+		return nil
+	}
+
+	if rule.RequirePassword && strings.TrimSpace(req.Password) == "" {
+		return errSharePolicyPasswordRequired
+	}
+	if rule.MaxExpiresIn > 0 {
+		currentExpiresIn := strings.TrimSpace(req.ExpiresIn)
+		if currentExpiresIn == "" {
+			req.ExpiresIn = formatOptionalSettingsDuration(rule.MaxExpiresIn)
+		} else {
+			duration, err := parseShareCreateDurationForPolicy(currentExpiresIn)
+			if err != nil {
+				return errSharePolicyInvalidExpiresIn
+			}
+			if duration > rule.MaxExpiresIn {
+				req.ExpiresIn = formatOptionalSettingsDuration(rule.MaxExpiresIn)
+			}
+		}
+	}
+	if rule.MaxAccess > 0 {
+		if req.MaxAccess == nil || *req.MaxAccess <= 0 || *req.MaxAccess > rule.MaxAccess {
+			maxAccess := rule.MaxAccess
+			req.MaxAccess = &maxAccess
+		}
+	}
+	return nil
+}
+
+func matchSharePolicyRule(rules []config.SharePolicyRuleConfig, targetPath string) (config.SharePolicyRuleConfig, bool) {
+	if len(rules) == 0 {
+		return config.SharePolicyRuleConfig{}, false
+	}
+	targetPath = path.Clean(targetPath)
+	bestIndex := -1
+	bestLength := -1
+	for i, rule := range rules {
+		rulePath := strings.TrimSpace(rule.Path)
+		if rulePath == "" {
+			continue
+		}
+		if !pathWithinBase(path.Clean(rulePath), targetPath) {
+			continue
+		}
+		if len(rulePath) > bestLength {
+			bestIndex = i
+			bestLength = len(rulePath)
+		}
+	}
+	if bestIndex < 0 {
+		return config.SharePolicyRuleConfig{}, false
+	}
+	return rules[bestIndex], true
+}
+
+func parseShareCreateDurationForPolicy(value string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, nil
+	}
+	if strings.HasSuffix(trimmed, "d") {
+		days, err := strconv.ParseInt(strings.TrimSuffix(trimmed, "d"), 10, 64)
+		if err != nil || days <= 0 {
+			return 0, errSharePolicyInvalidExpiresIn
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	duration, err := time.ParseDuration(trimmed)
+	if err != nil || duration <= 0 {
+		return 0, errSharePolicyInvalidExpiresIn
+	}
+	return duration, nil
 }
 
 func readFavoriteBodyPath(r *http.Request) (string, error) {

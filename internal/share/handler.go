@@ -214,7 +214,7 @@ type CreateShareRequest struct {
 	ExpiresIn   string `json:"expires_in,omitempty"`
 	Password    string `json:"password,omitempty"`
 	Permission  string `json:"permission,omitempty"`
-	MaxAccess   int64  `json:"max_access,omitempty"`
+	MaxAccess   *int64 `json:"max_access,omitempty"`
 	Description string `json:"description,omitempty"`
 }
 
@@ -343,7 +343,7 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		writeShareError(w, http.StatusBadRequest, "invalid path", "INVALID_PATH")
 		return
 	}
-	if req.MaxAccess < 0 {
+	if req.MaxAccess != nil && *req.MaxAccess < 0 {
 		writeShareError(w, http.StatusBadRequest, "invalid max_access", "INVALID_MAX_ACCESS")
 		return
 	}
@@ -354,8 +354,10 @@ func (h *Handler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		Path:        cleanPath,
 		CreatedBy:   userID,
 		Password:    req.Password,
-		MaxAccess:   req.MaxAccess,
 		Description: req.Description,
+	}
+	if req.MaxAccess != nil {
+		opts.MaxAccess = *req.MaxAccess
 	}
 
 	switch req.Type {

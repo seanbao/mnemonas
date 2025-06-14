@@ -90,6 +90,30 @@ func normalizePermission(permission Permission) Permission {
 	return permission
 }
 
+// ShareRiskLevel describes the current safety risk of an enabled share.
+type ShareRiskLevel string
+
+const (
+	ShareRiskLevelNone   ShareRiskLevel = "none"
+	ShareRiskLevelLow    ShareRiskLevel = "low"
+	ShareRiskLevelMedium ShareRiskLevel = "medium"
+	ShareRiskLevelHigh   ShareRiskLevel = "high"
+)
+
+// ShareRiskReason explains one concrete share-safety concern.
+type ShareRiskReason struct {
+	Code     string         `json:"code"`
+	Level    ShareRiskLevel `json:"level"`
+	Message  string         `json:"message"`
+	Resolved bool           `json:"resolved,omitempty"`
+}
+
+// ShareRisk summarizes share-safety concerns for list/detail responses.
+type ShareRisk struct {
+	Level   ShareRiskLevel    `json:"level"`
+	Reasons []ShareRiskReason `json:"reasons,omitempty"`
+}
+
 // Share represents a shared file or folder
 type Share struct {
 	ID           string     `json:"id"`
@@ -149,6 +173,93 @@ func (s *Share) CanAccess() error {
 		return ErrShareAccessLimit
 	}
 	return nil
+}
+
+func (s *Share) IsActive(now time.Time) bool {
+	if s == nil || !s.Enabled {
+		return false
+	}
+	if s.ExpiresAt != nil && now.After(*s.ExpiresAt) {
+		return false
+	}
+	if s.MaxAccess > 0 && s.AccessCount >= s.MaxAccess {
+		return false
+	}
+	return true
+}
+
+// Risk summarizes safety concerns for currently active shares.
+func (s *Share) Risk(now time.Time) ShareRisk {
+	if !s.IsActive(now) {
+		return ShareRisk{Level: ShareRiskLevelNone}
+	}
+
+	reasons := make([]ShareRiskReason, 0, 5)
+	addReason := func(code string, level ShareRiskLevel, message string) {
+		reasons = append(reasons, ShareRiskReason{
+			Code:    code,
+			Level:   level,
+			Message: message,
+		})
+	}
+
+	if s.Type == ShareTypeFolder && path.Clean(s.Path) == "/" {
+		addReason("root_folder", ShareRiskLevelHigh, "分享根目录会公开整个文件空间")
+	} else if s.Type == ShareTypeFolder && sharePathDepth(s.Path) <= 1 {
+		addReason("broad_folder", ShareRiskLevelMedium, "分享顶层文件夹可能覆盖较多内容")
+	}
+	if !s.HasPassword() {
+		addReason("no_password", ShareRiskLevelHigh, "未设置密码，拿到链接的人都能访问")
+	}
+	if s.ExpiresAt == nil {
+		addReason("no_expiration", ShareRiskLevelMedium, "未设置过期时间，链接会长期有效")
+	} else if expiresIn := s.ExpiresAt.Sub(now); expiresIn > 0 && expiresIn <= 72*time.Hour {
+		addReason("expiring_soon", ShareRiskLevelLow, "分享即将到期，建议确认是否需要延长或关闭")
+	}
+	if s.MaxAccess == 0 {
+		addReason("unlimited_access", ShareRiskLevelMedium, "未设置访问次数上限")
+	}
+	if s.LastAccess == nil && !s.CreatedAt.IsZero() && now.Sub(s.CreatedAt) >= 30*24*time.Hour {
+		addReason("unused_enabled", ShareRiskLevelLow, "该分享长期未被访问但仍处于启用状态")
+	} else if s.LastAccess != nil && now.Sub(*s.LastAccess) >= 90*24*time.Hour {
+		addReason("stale_enabled", ShareRiskLevelLow, "该分享最近访问时间较久，建议确认是否仍需保留")
+	}
+
+	return ShareRisk{
+		Level:   highestShareRiskLevel(reasons),
+		Reasons: reasons,
+	}
+}
+
+func sharePathDepth(rawPath string) int {
+	cleaned := path.Clean(rawPath)
+	if cleaned == "/" {
+		return 0
+	}
+	return len(strings.Split(strings.Trim(cleaned, "/"), "/"))
+}
+
+func highestShareRiskLevel(reasons []ShareRiskReason) ShareRiskLevel {
+	level := ShareRiskLevelNone
+	for _, reason := range reasons {
+		if shareRiskLevelRank(reason.Level) > shareRiskLevelRank(level) {
+			level = reason.Level
+		}
+	}
+	return level
+}
+
+func shareRiskLevelRank(level ShareRiskLevel) int {
+	switch level {
+	case ShareRiskLevelHigh:
+		return 3
+	case ShareRiskLevelMedium:
+		return 2
+	case ShareRiskLevelLow:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // ShareStore manages share persistence
@@ -1647,10 +1758,12 @@ type ShareInfo struct {
 	LastAccess  *time.Time `json:"last_access"`
 	Description string     `json:"description"`
 	URL         string     `json:"url,omitempty"`
+	Risk        ShareRisk  `json:"risk"`
 }
 
 // ToInfo converts a Share to ShareInfo
 func (s *Share) ToInfo() *ShareInfo {
+	now := time.Now()
 	return &ShareInfo{
 		ID:          s.ID,
 		Path:        s.Path,
@@ -1665,5 +1778,6 @@ func (s *Share) ToInfo() *ShareInfo {
 		MaxAccess:   s.MaxAccess,
 		LastAccess:  s.LastAccess,
 		Description: s.Description,
+		Risk:        s.Risk(now),
 	}
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { accessShareWithPassword, copyShareUrl, createShare, deleteShare, downloadShare, formatDuration, formatExpiration, formatShareUrl, getPublicShare, getPublicShareItems, getShare, listShares, getShareDownloadUrl, getShareFileDownloadUrl, ShareError, updateShare, type Share } from './share'
+import { accessShareWithPassword, copyShareUrl, createShare, deleteShare, downloadShare, formatDuration, formatExpiration, formatShareUrl, getPublicShare, getPublicShareItems, getShare, getShareDownloadUrl, getShareFileDownloadUrl, getSharePolicy, listShares, ShareError, updateShare, type Share } from './share'
 
 const mockCopyTextToClipboard = vi.fn()
 
@@ -450,6 +450,74 @@ describe('Share API', () => {
 
       expect(result).toHaveLength(1)
       expect(result[0].id).toBe('share-1')
+    })
+
+    it('accepts share risk metadata in authenticated share responses', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: [createValidShare({
+            risk: {
+              level: 'high',
+              reasons: [
+                { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+              ],
+            },
+          })],
+        }),
+      })
+
+      await expect(listShares()).resolves.toMatchObject([
+        {
+          risk: {
+            level: 'high',
+            reasons: [
+              { code: 'no_password', level: 'high' },
+            ],
+          },
+        },
+      ])
+    })
+
+    it('rejects malformed share risk metadata', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: [createValidShare({
+            risk: {
+              level: 'critical' as never,
+            },
+          })],
+        }),
+      })
+
+      await expect(listShares()).rejects.toMatchObject({
+        message: '获取分享列表响应无效',
+        status: 200,
+      })
+    })
+
+    it('loads share default policy', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            default_expires_in: '168h',
+            default_max_access: 25,
+          },
+        }),
+      })
+
+      await expect(getSharePolicy()).resolves.toEqual({
+        default_expires_in: '168h',
+        default_max_access: 25,
+      })
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/policy', expect.anything())
     })
 
     it('unwraps share detail responses', async () => {

@@ -15,6 +15,7 @@ import {
 } from '@heroui/react'
 import {
   Link2,
+  AlertCircle,
   Copy,
   Lock,
   Clock,
@@ -22,7 +23,17 @@ import {
   Users,
   CheckCircle,
 } from 'lucide-react'
-import { createShare, copyShareUrl, formatShareUrl, ShareError, type ShareCreateResult, type CreateShareRequest } from '@/api/share'
+import {
+  createShare,
+  copyShareUrl,
+  formatDuration,
+  formatShareUrl,
+  getSharePolicy,
+  ShareError,
+  type ShareCreateResult,
+  type CreateShareRequest,
+  type SharePolicy,
+} from '@/api/share'
 
 interface ShareDialogProps {
   isOpen: boolean
@@ -35,7 +46,7 @@ interface ShareDialogProps {
 }
 
 const EXPIRATION_OPTIONS = [
-  { value: '', label: '永不过期' },
+  { value: '', label: '使用系统默认' },
   { value: '1h', label: '1 小时' },
   { value: '24h', label: '24 小时' },
   { value: '7d', label: '7 天' },
@@ -48,6 +59,34 @@ const PERMISSION_OPTIONS = [
 ]
 
 const maxSharePasswordBytes = 72
+
+function formatPolicyDuration(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed === '0') {
+    return '不过期'
+  }
+  const hoursMatch = /^(\d+)h(?:0m)?(?:0s)?$/.exec(trimmed)
+  if (hoursMatch) {
+    const hours = Number(hoursMatch[1])
+    if (Number.isInteger(hours) && hours > 0 && hours % 24 === 0) {
+      return `${hours / 24} 天`
+    }
+    return `${hours} 小时`
+  }
+  const minutesMatch = /^(\d+)m(?:0s)?$/.exec(trimmed)
+  if (minutesMatch) {
+    return `${Number(minutesMatch[1])} 分钟`
+  }
+  return formatDuration(trimmed)
+}
+
+function getSharePathDepth(rawPath: string): number {
+  const trimmed = rawPath.trim().replace(/^\/+|\/+$/g, '')
+  if (!trimmed) {
+    return 0
+  }
+  return trimmed.split('/').filter(Boolean).length
+}
 
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
@@ -70,6 +109,14 @@ function getShareDialogActionErrorToast(error: unknown): {
     if (error.isFeatureDisabled) {
       return {
         title: '分享功能已关闭',
+        color: 'warning',
+      }
+    }
+
+    if (error.isPolicyPasswordRequired) {
+      return {
+        title: '该路径要求设置分享密码',
+        description: '请启用密码保护后再创建分享链接。',
         color: 'warning',
       }
     }
@@ -102,6 +149,8 @@ export function ShareDialog({
   const [isLoading, setIsLoading] = useState(false)
   const [createdShare, setCreatedShare] = useState<ShareCreateResult | null>(null)
   const [featureDisabled, setFeatureDisabled] = useState(false)
+  const [sharePolicy, setSharePolicy] = useState<SharePolicy | null>(null)
+  const [isPolicyLoading, setIsPolicyLoading] = useState(false)
   const createSessionRef = useRef(0)
   const currentFilePathRef = useRef(filePath)
   const currentOpenRef = useRef(isOpen)
@@ -136,6 +185,8 @@ export function ShareDialog({
     setDescription('')
     setCreatedShare(null)
     setFeatureDisabled(false)
+    setSharePolicy(null)
+    setIsPolicyLoading(false)
   }, [])
 
   const handleClose = useCallback(() => {
@@ -172,6 +223,72 @@ export function ShareDialog({
       cancelled = true
     }
   }, [filePath, isOpen, resetForm])
+
+  useEffect(() => {
+    if (!isOpen || !featureEnabled || featureDisabled) {
+      return
+    }
+
+    const sessionId = createSessionRef.current
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled && currentOpenRef.current && createSessionRef.current === sessionId) {
+        setIsPolicyLoading(true)
+      }
+    })
+    getSharePolicy()
+      .then((policy) => {
+        if (!cancelled && currentOpenRef.current && createSessionRef.current === sessionId) {
+          setSharePolicy(policy)
+        }
+      })
+      .catch(() => {
+        if (!cancelled && currentOpenRef.current && createSessionRef.current === sessionId) {
+          setSharePolicy(null)
+        }
+      })
+      .finally(() => {
+        if (!cancelled && currentOpenRef.current && createSessionRef.current === sessionId) {
+          setIsPolicyLoading(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [featureDisabled, featureEnabled, filePath, isOpen])
+
+  const effectivePolicyText = useMemo(() => {
+    if (isPolicyLoading && !sharePolicy) {
+      return {
+        expiresIn: '读取中',
+        maxAccess: '读取中',
+      }
+    }
+    return {
+      expiresIn: formatPolicyDuration(sharePolicy?.default_expires_in ?? ''),
+      maxAccess: sharePolicy && sharePolicy.default_max_access > 0
+        ? `${sharePolicy.default_max_access} 次`
+        : '不限制',
+    }
+  }, [isPolicyLoading, sharePolicy])
+
+  const riskWarnings = useMemo(() => {
+    const warnings: string[] = []
+    if (!usePassword) {
+      warnings.push('未设置密码，拿到链接的人都能访问。')
+    }
+    if (expiresIn === '' && sharePolicy && !sharePolicy.default_expires_in) {
+      warnings.push('系统默认不设置过期时间。')
+    }
+    if (maxAccess === '' && sharePolicy && sharePolicy.default_max_access === 0) {
+      warnings.push('系统默认不限制访问次数。')
+    }
+    if (isFolder && getSharePathDepth(filePath) <= 1) {
+      warnings.push(filePath.trim() === '/' ? '根目录分享会公开整个文件空间。' : '顶层文件夹分享可能覆盖较多内容。')
+    }
+    return warnings
+  }, [expiresIn, filePath, isFolder, maxAccess, sharePolicy, usePassword])
 
   const handleCreate = async () => {
     if (featureDisabled || !featureEnabled) return
@@ -396,6 +513,9 @@ export function ShareDialog({
                     <SelectItem key={opt.value}>{opt.label}</SelectItem>
                   ))}
                 </Select>
+                <p className="text-xs text-default-500">
+                  系统默认：{effectivePolicyText.expiresIn}
+                </p>
               </div>
 
               {/* Permission */}
@@ -427,7 +547,7 @@ export function ShareDialog({
                 </div>
                 <Input
                   type="number"
-                  placeholder="不限制"
+                  placeholder="使用系统默认"
                   min="1"
                   value={maxAccess}
                   onValueChange={setMaxAccess}
@@ -435,7 +555,24 @@ export function ShareDialog({
                     inputWrapper: "bg-content2 border-divider",
                   }}
                 />
+                <p className="text-xs text-default-500">
+                  系统默认：{effectivePolicyText.maxAccess}
+                </p>
               </div>
+
+              {riskWarnings.length > 0 && (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-default-700">
+                  <div className="mb-2 flex items-center gap-2 font-medium text-warning">
+                    <AlertCircle size={16} />
+                    <span>分享安全提醒</span>
+                  </div>
+                  <ul className="space-y-1">
+                    {riskWarnings.map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {/* Description */}
               <div className="space-y-3">

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, userEvent } from '@/test/utils'
 import { ShareManager } from './ShareManager'
 import * as shareApi from '@/api/share'
-import { ShareError } from '@/api/share'
+import { ShareError, type Share } from '@/api/share'
 
 const mockAddToast = vi.fn()
 const successActionResult = { warning: false, message: undefined } as const
@@ -26,34 +26,35 @@ vi.mock('@/api/share', async () => {
   }
 })
 
-const mockShares = [
+const mockShares: Share[] = [
   {
     id: 'share-1',
     path: '/docs/report.pdf',
     type: 'file' as const,
+    created_by: 'u1',
+    created_at: '2026-03-27T00:00:00Z',
+    permission: 'read' as const,
     enabled: true,
     has_password: false,
-    expires_at: null,
     access_count: 3,
     max_access: 0,
     url: '/s/share-1',
-    created_at: '2026-03-27T00:00:00Z',
-    updated_at: '2026-03-27T00:00:00Z',
   },
 ]
 
-const disabledExpiredFolderShare = {
+const disabledExpiredFolderShare: Share = {
   id: 'share-folder',
   path: '/archive/photos',
   type: 'folder' as const,
+  created_by: 'u1',
+  created_at: '2026-03-27T00:00:00Z',
+  permission: 'read' as const,
   enabled: false,
   has_password: true,
   expires_at: '2020-01-01T00:00:00Z',
   access_count: 5,
   max_access: 10,
   url: '/s/share-folder',
-  created_at: '2026-03-27T00:00:00Z',
-  updated_at: '2026-03-27T00:00:00Z',
 }
 
 function createDeferred<T>() {
@@ -193,6 +194,140 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(screen.getByText('我的分享 (1)')).toBeInTheDocument()
       expect(screen.getAllByText('/').length).toBeGreaterThanOrEqual(2)
+    })
+  })
+
+  it('renders share risk markers and reason details', async () => {
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+            { code: 'unlimited_access', level: 'medium', message: '未设置访问次数上限' },
+          ],
+        },
+      },
+    ])
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('风险 1')).toBeInTheDocument()
+      expect(screen.getByText('高风险')).toBeInTheDocument()
+      expect(screen.getByText('未设置密码，拿到链接的人都能访问')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '需复核 (1)' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '停用高风险 (1)' })).toBeInTheDocument()
+    })
+  })
+
+  it('filters the share list to risky shares only', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-safe',
+        path: '/docs/safe.pdf',
+      },
+      {
+        ...mockShares[0],
+        id: 'share-risk',
+        path: '/docs/risky.pdf',
+        risk: {
+          level: 'medium',
+          reasons: [
+            { code: 'no_expiration', level: 'medium', message: '未设置过期时间，链接会长期有效' },
+          ],
+        },
+      },
+    ])
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('safe.pdf')).toBeInTheDocument()
+      expect(screen.getByText('risky.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '需复核 (1)' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('safe.pdf')).not.toBeInTheDocument()
+      expect(screen.getByText('risky.pdf')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '全部' })).toBeInTheDocument()
+    })
+  })
+
+  it('filters the share list to links that are expiring soon', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-normal',
+        path: '/docs/normal.pdf',
+      },
+      {
+        ...mockShares[0],
+        id: 'share-expiring',
+        path: '/docs/soon.pdf',
+        risk: {
+          level: 'low',
+          reasons: [
+            { code: 'expiring_soon', level: 'low', message: '分享即将到期，建议确认是否需要延长或关闭' },
+          ],
+        },
+      },
+    ])
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('normal.pdf')).toBeInTheDocument()
+      expect(screen.getByText('soon.pdf')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '即将到期 (1)' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '即将到期 (1)' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('normal.pdf')).not.toBeInTheDocument()
+      expect(screen.getByText('soon.pdf')).toBeInTheDocument()
+    })
+  })
+
+  it('disables all currently high-risk shares from the header action', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+    ])
+    vi.mocked(shareApi.updateShare).mockResolvedValueOnce({
+      ...mockShares[0],
+      enabled: false,
+      risk: { level: 'none' },
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '停用高风险 (1)' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '停用高风险 (1)' }))
+
+    await waitFor(() => {
+      expect(shareApi.updateShare).toHaveBeenCalledWith('share-1', { enabled: false })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '已停用 1 个高风险分享', color: 'success' })
+      expect(screen.getByText('已禁用')).toBeInTheDocument()
+      expect(screen.queryByText('高风险')).not.toBeInTheDocument()
     })
   })
 
