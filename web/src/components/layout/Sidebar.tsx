@@ -40,29 +40,29 @@ interface NavSection {
 
 const navSections: NavSection[] = [
   {
-    title: '浏览',
+    title: '日常',
     items: [
       { icon: Folder, label: '文件', path: '/files' },
       { icon: Search, label: '搜索', path: '/search' },
       { icon: Image, label: '相册', path: '/album' },
       { icon: Star, label: '收藏', path: '/favorites' },
-      { icon: History, label: '版本历史', path: '/versions' },
     ]
   },
   {
-    title: '管理',
+    title: '找回',
     items: [
+      { icon: History, label: '版本', path: '/versions' },
       { icon: Trash2, label: '回收站', path: '/trash' },
-      { icon: HardDrive, label: '存储', path: '/storage', adminOnly: true },
-      { icon: ShieldCheck, label: '守护', path: '/maintenance', adminOnly: true },
-      { icon: Users, label: '用户', path: '/users', adminOnly: true },
     ]
   },
   {
-    title: '系统',
+    title: '照看',
     items: [
-      { icon: Activity, label: '健康', path: '/system-health', adminOnly: true },
-      { icon: FileText, label: '活动', path: '/activity' },
+      { icon: HardDrive, label: '空间', path: '/storage', adminOnly: true },
+      { icon: ShieldCheck, label: '备份与维护', path: '/maintenance', adminOnly: true },
+      { icon: Activity, label: '设备状态', path: '/system-health', adminOnly: true },
+      { icon: FileText, label: '最近操作', path: '/activity' },
+      { icon: Users, label: '用户', path: '/users', adminOnly: true },
       { icon: Settings, label: '设置', path: '/settings', adminOnly: true },
     ]
   }

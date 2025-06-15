@@ -56,7 +56,7 @@ function getMaintenanceLoadErrorPresentation(error: unknown): { title: string; d
   if (error instanceof ApiError && error.isUnavailable) {
     return {
       title: '校验结果暂不可用',
-      description: '维护历史或数据面当前不可用，请检查系统状态或稍后重试。',
+      description: '维护历史或数据面当前不可用，请检查设备状态或稍后重试。',
     }
   }
 
@@ -993,7 +993,7 @@ export default function Maintenance() {
         result.error,
         '刷新失败',
         '校验结果暂不可用',
-        '维护历史或数据面当前不可用，请检查系统状态或稍后重试。',
+        '维护历史或数据面当前不可用，请检查设备状态或稍后重试。',
       )
       addToast({
         title: errorPresentation.title,
@@ -1142,7 +1142,7 @@ export default function Maintenance() {
         error,
         '启动校验失败',
         '数据校验暂不可用',
-        '数据面或维护服务当前不可用，请检查系统状态后重试。',
+        '数据面或维护服务当前不可用，请检查设备状态后重试。',
       )
       addToast({
         title: errorPresentation.title,
@@ -1380,9 +1380,9 @@ export default function Maintenance() {
     } catch (error) {
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,
-        '导出诊断信息失败',
-        '诊断导出暂不可用',
-        '诊断导出服务当前不可用，请检查系统状态后重试。',
+        '下载诊断包失败',
+        '诊断包暂不可用',
+        '诊断包服务当前不可用，请检查设备状态后重试。',
       )
       addToast({
         title: errorPresentation.title,
@@ -1433,8 +1433,8 @@ export default function Maintenance() {
     <div className="h-full overflow-auto custom-scrollbar">
       <div className="space-y-6 p-4 sm:p-6">
       <PageHeader
-        title="系统维护"
-        subtitle="数据校验、备份与诊断工具"
+        title="备份与维护"
+        subtitle="检查数据完整性，执行备份和恢复演练"
         icon={ShieldCheck}
         actions={
           <Button
@@ -1443,7 +1443,7 @@ export default function Maintenance() {
             isLoading={isExporting}
             onPress={handleExport}
           >
-            导出诊断信息
+            下载诊断包
           </Button>
         }
       />
@@ -1457,7 +1457,7 @@ export default function Maintenance() {
             </div>
             <div>
               <h3 className="font-semibold">数据完整性校验</h3>
-              <p className="text-xs text-default-500">验证所有存储对象的 BLAKE3 哈希值</p>
+              <p className="text-xs text-default-500">检查已存数据是否仍可正确读取</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1581,7 +1581,7 @@ export default function Maintenance() {
             </div>
             <div>
               <h3 className="font-semibold">备份任务与恢复演练</h3>
-              <p className="text-xs text-default-500">执行本地快照或远端备份任务，并校验恢复路径</p>
+              <p className="text-xs text-default-500">执行外置盘或远端备份，并定期确认能恢复</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">

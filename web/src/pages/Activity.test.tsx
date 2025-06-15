@@ -151,7 +151,7 @@ describe('ActivityPage', () => {
 
       await waitFor(() => {
         expect(screen.getAllByText('主目录配置无效').length).toBeGreaterThan(0)
-        expect(screen.getByText('当前账户未配置有效的主目录，无法查看活动日志。请联系管理员修复账户 home_dir。')).toBeTruthy()
+        expect(screen.getByText('当前账户未配置有效的主目录，无法查看最近操作。请联系管理员修复账户 home_dir。')).toBeTruthy()
       })
 
       expect(mockListActivity).not.toHaveBeenCalled()
@@ -161,7 +161,7 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('活动日志')).toBeTruthy()
+        expect(screen.getByText('最近操作')).toBeTruthy()
       })
     })
 
@@ -377,7 +377,7 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
       
       await waitFor(() => {
-        expect(screen.getByText('暂无活动记录')).toBeTruthy()
+        expect(screen.getByText('暂无最近操作')).toBeTruthy()
       })
     })
 
@@ -387,7 +387,7 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('加载活动日志失败')).toBeTruthy()
+        expect(screen.getByText('加载最近操作失败')).toBeTruthy()
         expect(screen.getByText('Network error')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
@@ -399,8 +399,8 @@ describe('ActivityPage', () => {
       render(<ActivityPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('活动日志暂不可用')).toBeTruthy()
-        expect(screen.getByText('活动日志存储当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('最近操作暂不可用')).toBeTruthy()
+        expect(screen.getByText('操作记录当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
       })
     })
 
@@ -501,7 +501,7 @@ describe('ActivityPage', () => {
 
       await waitFor(() => {
         expect(mockListActivity).toHaveBeenCalledTimes(1)
-        expect(mockAddToast).toHaveBeenCalledWith({ title: '活动日志已刷新', color: 'success' })
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '最近操作已刷新', color: 'success' })
       })
     })
 
@@ -519,8 +519,8 @@ describe('ActivityPage', () => {
 
         await waitFor(() => {
           expect(mockAddToast).toHaveBeenCalledWith({
-            title: '活动日志暂不可用',
-            description: '活动日志存储当前不可用，请检查系统健康状态或稍后重试。',
+            title: '最近操作暂不可用',
+            description: '操作记录当前不可用，请检查设备状态或稍后重试。',
             color: 'warning',
           })
         })

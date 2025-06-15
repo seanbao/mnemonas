@@ -202,7 +202,7 @@ describe('ShareAccessPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('分享内容暂不可用')).toBeInTheDocument()
-      expect(screen.getByText('分享内容当前不可访问，请检查系统状态或稍后重试。')).toBeInTheDocument()
+      expect(screen.getByText('分享内容当前不可访问，请检查设备状态或稍后重试。')).toBeInTheDocument()
     })
   })
 
@@ -250,7 +250,7 @@ describe('ShareAccessPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '分享内容暂不可用',
-        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+        description: '分享内容当前不可访问，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -317,7 +317,7 @@ describe('ShareAccessPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '验证暂不可用',
-        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+        description: '分享内容当前不可访问，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -690,7 +690,7 @@ describe('ShareAccessPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('文件夹内容暂不可用')).toBeInTheDocument()
-      expect(screen.getByText('分享目录当前不可访问，请检查系统状态或稍后重试。')).toBeInTheDocument()
+      expect(screen.getByText('分享目录当前不可访问，请检查设备状态或稍后重试。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument()
     })
   })
@@ -785,7 +785,7 @@ describe('ShareAccessPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '下载暂不可用',
-        description: '分享内容当前不可访问，请检查系统状态或稍后重试。',
+        description: '分享内容当前不可访问，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })

@@ -57,7 +57,7 @@ interface TreeNodeData {
   isLoaded: boolean
 }
 
-const directoryPickerUnavailableDescription = '文件系统当前不可用，请检查系统健康状态或稍后重试。'
+const directoryPickerUnavailableDescription = '文件系统当前不可用，请检查设备状态或稍后重试。'
 
 function getDirectoryPickerErrorPresentation(
   error: unknown,

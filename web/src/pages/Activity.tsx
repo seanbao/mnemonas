@@ -143,8 +143,8 @@ function getActivityErrorState(error: unknown): 'unavailable' | null {
 function getActivityRefreshErrorToast(error: unknown): { title: string; description: string; color: 'warning' | 'danger' } {
   if (error instanceof ApiError && error.isUnavailable) {
     return {
-      title: '活动日志暂不可用',
-      description: '活动日志存储当前不可用，请检查系统健康状态或稍后重试。',
+      title: '最近操作暂不可用',
+      description: '操作记录当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }
@@ -205,14 +205,14 @@ export function ActivityPage() {
       addToast(getActivityRefreshErrorToast(result.error))
       return
     }
-    addToast({ title: '活动日志已刷新', color: 'success' })
+    addToast({ title: '最近操作已刷新', color: 'success' })
   }
 
   if (hasInvalidHomeDir) {
     return (
       <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
-          title="活动日志"
+          title="最近操作"
           subtitle={invalidHomeDirTitle}
           icon={Activity}
         />
@@ -221,7 +221,7 @@ export function ActivityPage() {
           <EmptyState
             icon={AlertCircle}
             title={invalidHomeDirTitle}
-            description={getInvalidHomeDirDescription('查看活动日志')}
+            description={getInvalidHomeDirDescription('查看最近操作')}
           />
         </div>
       </div>
@@ -233,7 +233,7 @@ export function ActivityPage() {
       <div className="flex h-full items-center justify-center p-6 lg:p-8">
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-default-500">加载活动日志...</p>
+          <p className="text-default-500">加载最近操作...</p>
         </div>
       </div>
     )
@@ -244,7 +244,7 @@ export function ActivityPage() {
       return (
         <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
           <PageHeader
-            title="活动日志"
+            title="最近操作"
             subtitle="暂不可用"
             icon={Activity}
             actions={
@@ -263,8 +263,8 @@ export function ActivityPage() {
           <div className="flex flex-1 items-center justify-center">
             <EmptyState
               icon={Activity}
-              title="活动日志暂不可用"
-              description="活动日志存储当前不可用，请检查系统健康状态或稍后重试。"
+              title="最近操作暂不可用"
+              description="操作记录当前不可用，请检查设备状态或稍后重试。"
               action={
                 <Button variant="bordered" className="rounded-lg" onPress={handleRefresh}>
                   重新加载
@@ -279,7 +279,7 @@ export function ActivityPage() {
     return (
       <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
         <PageHeader
-          title="活动日志"
+          title="最近操作"
           subtitle="加载失败"
           icon={Activity}
           actions={
@@ -298,7 +298,7 @@ export function ActivityPage() {
         <div className="flex flex-1 items-center justify-center">
           <EmptyState
             icon={Activity}
-            title="加载活动日志失败"
+            title="加载最近操作失败"
             description={(error as Error).message || '请稍后重试'}
             action={
               <Button variant="bordered" className="rounded-lg" onPress={handleRefresh}>
@@ -318,7 +318,7 @@ export function ActivityPage() {
     <div className="flex h-full min-h-0 flex-col space-y-4 overflow-auto p-4 custom-scrollbar sm:p-6">
       {/* Header */}
       <PageHeader
-        title="活动日志"
+        title="最近操作"
         subtitle={`共 ${totalEntries} 条记录`}
         icon={Activity}
         actions={
@@ -384,8 +384,8 @@ export function ActivityPage() {
           <div className="flex items-center justify-center h-64">
             <EmptyState
               icon={Activity}
-              title="暂无活动记录"
-              description="文件操作将在这里显示"
+              title="暂无最近操作"
+              description="上传、下载、分享和恢复记录会显示在这里"
             />
           </div>
         )}

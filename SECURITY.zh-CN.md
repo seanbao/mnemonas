@@ -105,9 +105,9 @@ make security-check NPM_AUDIT=1
 - [ ] 双因素认证
 - [ ] 外部身份提供商集成
 
-## 安全审计
+## 安全评审
 
-MnemoNAS 尚未进行正式安全审计。
+MnemoNAS 尚未进行正式安全评审。
 
 ## 致谢
 

@@ -252,7 +252,7 @@ describe('FavoritesPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('收藏功能已关闭')).toBeInTheDocument()
-      expect(screen.getByText('当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。')).toBeInTheDocument()
+      expect(screen.getByText('当前服务已关闭收藏功能。如需使用，请在设置中重新启用。')).toBeInTheDocument()
     })
 
     expect(screen.queryByText('加载收藏列表失败')).not.toBeInTheDocument()
@@ -387,7 +387,7 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '收藏功能暂不可用',
-        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -410,7 +410,7 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '收藏功能已关闭',
-        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        description: '当前服务已关闭收藏功能。如需使用，请在设置中重新启用。',
         color: 'warning',
       })
     })
@@ -627,7 +627,7 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '收藏功能暂不可用',
-        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -654,7 +654,7 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '收藏功能已关闭',
-        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        description: '当前服务已关闭收藏功能。如需使用，请在设置中重新启用。',
         color: 'warning',
       })
       expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
@@ -682,7 +682,7 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '收藏功能暂不可用',
-        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
         color: 'warning',
       })
       expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).toBeInTheDocument()
@@ -890,7 +890,7 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '收藏功能已关闭',
-        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        description: '当前服务已关闭收藏功能。如需使用，请在设置中重新启用。',
         color: 'warning',
       })
     })

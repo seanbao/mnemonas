@@ -12,7 +12,7 @@ describe('fileActionErrors', () => {
   it('returns a warning toast for unavailable filesystem downloads', () => {
     expect(getFileDownloadErrorToast({ status: 503 })).toEqual({
       title: '下载暂不可用',
-      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     })
   })

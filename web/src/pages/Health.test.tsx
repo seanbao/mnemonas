@@ -154,7 +154,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('系统健康')).toBeTruthy()
+        expect(screen.getByText('设备状态')).toBeTruthy()
       })
     })
 
@@ -162,7 +162,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('监控系统状态和性能指标')).toBeTruthy()
+        expect(screen.getByText('磁盘、存储和后台服务是否正常')).toBeTruthy()
       })
     })
 
@@ -202,7 +202,7 @@ describe('HealthPage', () => {
     await user.click(screen.getByText('刷新'))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({ title: '健康数据已刷新', color: 'success' })
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '设备状态已刷新', color: 'success' })
     })
     })
 
@@ -226,7 +226,7 @@ describe('HealthPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '刷新暂不可用',
-        description: '健康数据服务当前不可用，请检查系统状态或稍后重试。',
+        description: '状态数据当前不可用，请检查服务状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -305,7 +305,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('系统状态')).toBeTruthy()
+        expect(screen.getByText('运行状态')).toBeTruthy()
       })
     })
 
@@ -385,7 +385,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('活动日志')).toBeTruthy()
+        expect(screen.getByText('最近操作')).toBeTruthy()
       })
     })
 
@@ -476,7 +476,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警处于提醒级别')).toBeTruthy()
+        expect(screen.getByText('可用空间偏紧')).toBeTruthy()
         expect(screen.getByText(/使用率 87\.5%/)).toBeTruthy()
       })
     })
@@ -494,7 +494,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警未启用')).toBeTruthy()
+        expect(screen.getByText('空间提醒未启用')).toBeTruthy()
       })
     })
 
@@ -511,7 +511,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警运行态不可用')).toBeTruthy()
+        expect(screen.getByText('空间提醒暂不可用')).toBeTruthy()
       })
     })
 
@@ -532,7 +532,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警处于严重级别')).toBeTruthy()
+        expect(screen.getByText('可用空间严重不足')).toBeTruthy()
         expect(screen.getByText(/使用率 95\.5%/)).toBeTruthy()
         expect(screen.getByText(/剩余 1 KB/)).toBeTruthy()
       })
@@ -551,7 +551,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警已启用，未配置通知通道')).toBeTruthy()
+        expect(screen.getByText('空间提醒已启用，未配置通知通道')).toBeTruthy()
         expect(screen.getByText(/等待首次检查/)).toBeTruthy()
       })
     })
@@ -571,7 +571,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('存储告警已启用')).toBeTruthy()
+        expect(screen.getByText('空间提醒已启用')).toBeTruthy()
         expect(screen.getByText(/通知通道已配置/)).toBeTruthy()
       })
     })
@@ -828,8 +828,8 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('系统健康')).toBeTruthy()
-        expect(screen.getByText('部分健康数据加载失败')).toBeTruthy()
+        expect(screen.getByText('设备状态')).toBeTruthy()
+        expect(screen.getByText('部分状态数据加载失败')).toBeTruthy()
         expect(screen.getByText('当前页面展示的是可用数据，部分指标可能不是最新状态。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
@@ -844,7 +844,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('加载系统健康信息失败')).toBeTruthy()
+        expect(screen.getByText('加载设备状态失败')).toBeTruthy()
         expect(screen.getByText('Network error')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
@@ -859,7 +859,7 @@ describe('HealthPage', () => {
       render(<HealthPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('系统健康')).toBeTruthy()
+        expect(screen.getByText('设备状态')).toBeTruthy()
         expect(screen.getAllByText('--').length).toBeGreaterThan(0)
         expect(screen.getByText('未知')).toBeTruthy()
       })

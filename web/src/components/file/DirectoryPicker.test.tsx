@@ -466,7 +466,7 @@ describe('DirectoryPicker', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '目录暂不可用',
-        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        description: '文件系统当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -479,7 +479,7 @@ describe('DirectoryPicker', () => {
 
     await waitFor(() => {
       expect(screen.getByText('目录暂不可用')).toBeTruthy()
-      expect(screen.getByText('文件系统当前不可用，请检查系统健康状态或稍后重试。')).toBeTruthy()
+      expect(screen.getByText('文件系统当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
       expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
     })
   })
@@ -501,7 +501,7 @@ describe('DirectoryPicker', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '创建目录暂不可用',
-        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        description: '文件系统当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })
@@ -551,7 +551,7 @@ describe('DirectoryPicker', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '目录暂不可用',
-        description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+        description: '文件系统当前不可用，请检查设备状态或稍后重试。',
         color: 'warning',
       })
     })

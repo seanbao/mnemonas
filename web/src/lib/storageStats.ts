@@ -137,7 +137,7 @@ export function getDiskSpaceStatus(stats: DiskStorageStatsLike | undefined): Dis
     return {
       level: 'warning',
       title: '存储空间偏紧',
-      description: '剩余空间低于推荐余量，建议开启告警并安排清理或扩容。',
+      description: '剩余空间低于推荐余量，建议开启提醒并安排清理或扩容。',
       label: '偏紧',
     }
   }
