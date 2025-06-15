@@ -79,7 +79,7 @@ sudo mnemonas-public-setup --proxy nginx nas.example.com admin@example.com
 
 如需 Traefik 或 Cloudflare Tunnel，请从 `deploy/public-access/traefik/` 或 `deploy/public-access/cloudflare-tunnel/config.yml` 模板开始，并参考 [反向代理配置](reverse-proxy-setup.md)。
 
-如果已经登录 Web UI，也可以打开 `系统设置 -> 常规 -> 公网访问向导`：
+如果已经登录 Web UI，也可以打开 `设置 -> 常规 -> 公网访问向导`：
 
 - 填写公网域名；
 - 选择 Caddy 或 Nginx；

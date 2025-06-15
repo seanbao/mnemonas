@@ -197,7 +197,7 @@ export async function listActivity(options?: {
     total?: number
     limit?: number
     offset?: number
-  }>>(response, '获取活动日志失败')
+  }>>(response, '获取最近操作失败')
 
   if (
     (result.data.items !== undefined && (!Array.isArray(result.data.items) || result.data.items.some((item) => !isValidActivityEntry(item))))
@@ -243,10 +243,10 @@ export async function clearActivity(): Promise<ActivityActionResult> {
     method: 'DELETE',
   })
   if (!response.ok) {
-    await handleResponse(response, '清除活动日志失败')
+    await handleResponse(response, '清除最近操作失败')
   }
 
-  const result = await handleResponse<ApiResponseWrapper<{ message?: string }>>(response, '清除活动日志失败')
+  const result = await handleResponse<ApiResponseWrapper<{ message?: string }>>(response, '清除最近操作失败')
 
   if (result.data.message !== undefined && typeof result.data.message !== 'string') {
     throw new Error('服务器返回了无效的数据')

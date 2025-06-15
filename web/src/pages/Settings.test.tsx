@@ -375,7 +375,7 @@ describe('SettingsPage', () => {
 
       render(<SettingsPage />)
 
-      expect(screen.getByRole('heading', { name: '系统设置' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy()
       expect(screen.getByRole('button', { name: '重置' })).toBeTruthy()
       expect(screen.getByRole('button', { name: '保存设置' })).toBeTruthy()
       expect(screen.getByText('加载设置...')).toBeTruthy()
@@ -384,8 +384,8 @@ describe('SettingsPage', () => {
     it('renders page header', async () => {
       render(<SettingsPage />)
       await waitFor(() => {
-        expect(screen.getByText('系统设置')).toBeTruthy()
-        expect(screen.getByText('配置 MnemoNAS 系统参数')).toBeTruthy()
+        expect(screen.getByText('设置')).toBeTruthy()
+        expect(screen.getByText('调整网络、访问和数据保留')).toBeTruthy()
       })
     })
 
@@ -623,7 +623,7 @@ describe('SettingsPage', () => {
       const alertsWebhookInput = await screen.findByPlaceholderText('https://hooks.example.com/alert')
       expect(alertsWebhookInput).toHaveAttribute('type', 'url')
 
-      await openTab(user, '分享管理')
+      await openTab(user, '分享')
 
       const shareBaseUrlInput = await screen.findByPlaceholderText('https://nas.example.com')
       expect(shareBaseUrlInput).toHaveAttribute('type', 'url')
@@ -641,8 +641,8 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       expect(await screen.findByPlaceholderText('30s')).toBeTruthy()
-      expect(screen.getByLabelText('告警检查间隔')).toHaveAttribute('placeholder', '1h')
-      expect(screen.getByLabelText('告警冷却时间')).toHaveAttribute('placeholder', '4h')
+      expect(screen.getByLabelText('提醒检查间隔')).toHaveAttribute('placeholder', '1h')
+      expect(screen.getByLabelText('提醒冷却时间')).toHaveAttribute('placeholder', '4h')
     })
 
     it('opens the tab selected in the query string on first render', async () => {
@@ -651,7 +651,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('CDC 分块参数')).toBeTruthy()
-        expect(screen.getByText('系统告警')).toBeTruthy()
+        expect(screen.getByText('提醒通知')).toBeTruthy()
       })
     })
   })
@@ -895,7 +895,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await openTab(user, '分享管理')
+      await openTab(user, '分享')
 
       await waitFor(() => {
         expect(screen.getByText('分享功能配置')).toBeTruthy()
@@ -927,7 +927,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await openTab(user, '分享管理')
+      await openTab(user, '分享')
 
       await user.click(screen.getByRole('switch'))
       await user.click(screen.getByRole('button', { name: '添加路径策略' }))
@@ -955,7 +955,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await openTab(user, '分享管理')
+      await openTab(user, '分享')
 
       await user.click(screen.getByRole('switch'))
       await user.clear(screen.getByPlaceholderText('168h'))
@@ -991,7 +991,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await openTab(user, '分享管理')
+      await openTab(user, '分享')
 
       await user.click(screen.getByRole('switch'))
       await user.click(screen.getByRole('button', { name: '添加路径策略' }))
@@ -1014,7 +1014,7 @@ describe('SettingsPage', () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
 
-      await openTab(user, '分享管理')
+      await openTab(user, '分享')
 
       await user.click(screen.getByRole('switch'))
       await user.click(screen.getByRole('button', { name: /临时协作/ }))
@@ -1080,12 +1080,12 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByText('系统告警')).toBeTruthy()
+        expect(screen.getByText('提醒通知')).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('switch', { name: '启用告警' }))
+      await user.click(screen.getByRole('switch', { name: '启用提醒' }))
 
-      const checkIntervalInput = screen.getByLabelText('告警检查间隔')
+      const checkIntervalInput = screen.getByLabelText('提醒检查间隔')
       fireEvent.change(checkIntervalInput, { target: { value: '30m' } })
 
       const thresholdInput = screen.getByDisplayValue('90')
@@ -1097,7 +1097,7 @@ describe('SettingsPage', () => {
       const minFreeInput = screen.getByDisplayValue('10 GB')
       fireEvent.change(minFreeInput, { target: { value: '20GB' } })
 
-      const cooldownInput = screen.getByLabelText('告警冷却时间')
+      const cooldownInput = screen.getByLabelText('提醒冷却时间')
       fireEvent.change(cooldownInput, { target: { value: '2h' } })
 
       const webhookInput = screen.getByPlaceholderText('https://hooks.example.com/alert')
@@ -1177,10 +1177,10 @@ describe('SettingsPage', () => {
       await openTab(user, '高级')
 
       await waitFor(() => {
-        expect(screen.getByText('系统告警')).toBeTruthy()
+        expect(screen.getByText('提醒通知')).toBeTruthy()
       })
 
-      await user.click(screen.getByRole('switch', { name: '启用告警' }))
+      await user.click(screen.getByRole('switch', { name: '启用提醒' }))
       const headersInput = screen.getByLabelText('Webhook 自定义 Header')
       fireEvent.change(headersInput, { target: { value: 'Bad Header: value' } })
 
@@ -2243,7 +2243,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('WebDAV 凭据暂不可用')).toBeTruthy()
-        expect(screen.getByText('当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('当前无法读取运行中的 WebDAV 凭据，请检查设备状态或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载凭据' })).toBeTruthy()
       })
     })
@@ -2266,7 +2266,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: 'WebDAV 凭据暂不可用',
-          description: '当前无法读取运行中的 WebDAV 凭据，请检查系统状态或稍后重试。',
+          description: '当前无法读取运行中的 WebDAV 凭据，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -2688,14 +2688,14 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
     fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '120' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '告警阈值格式无效',
-        description: '告警阈值必须在 0 到 100 之间',
+        title: '提醒阈值格式无效',
+        description: '提醒阈值必须在 0 到 100 之间',
         color: 'danger',
       })
     })
@@ -2708,13 +2708,13 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
-    fireEvent.change(screen.getByLabelText('告警检查间隔'), { target: { value: '' } })
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
+    fireEvent.change(screen.getByLabelText('提醒检查间隔'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '告警检查间隔格式无效',
+        title: '提醒检查间隔格式无效',
         description: '检查间隔不能为空',
         color: 'danger',
       })
@@ -2728,13 +2728,13 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
     fireEvent.change(screen.getByDisplayValue('4h'), { target: { value: '' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '告警冷却时间格式无效',
+        title: '提醒冷却时间格式无效',
         description: '冷却时间不能为空',
         color: 'danger',
       })
@@ -2748,14 +2748,14 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
     fireEvent.change(screen.getByDisplayValue('95'), { target: { value: '120' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '严重告警阈值格式无效',
-        description: '严重告警阈值必须在 0 到 100 之间',
+        title: '严重提醒阈值格式无效',
+        description: '严重提醒阈值必须在 0 到 100 之间',
         color: 'danger',
       })
     })
@@ -2768,14 +2768,14 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
     fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '96' } })
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '告警阈值关系无效',
-        description: '严重告警阈值不能小于普通告警阈值',
+        title: '提醒阈值关系无效',
+        description: '严重提醒阈值不能小于普通提醒阈值',
         color: 'danger',
       })
     })
@@ -2786,7 +2786,7 @@ describe('SettingsPage', () => {
     const user = userEvent.setup({ writeToClipboard: false })
     render(<SettingsPage />)
 
-    await openTab(user, '分享管理')
+    await openTab(user, '分享')
 
     await user.click(await screen.findByRole('switch'))
     fireEvent.change(screen.getByPlaceholderText('https://nas.example.com'), { target: { value: 'https://nas.example.com/base path' } })
@@ -2808,7 +2808,7 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
     fireEvent.change(screen.getByPlaceholderText('https://hooks.example.com/alert'), { target: { value: 'ftp://hooks.example.com/storage' } })
     await user.click(screen.getByText('保存设置'))
 
@@ -2882,7 +2882,7 @@ describe('SettingsPage', () => {
 
     await openTab(user, '高级')
 
-    await user.click(await screen.findByRole('switch', { name: '启用告警' }))
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
     fireEvent.change(screen.getByLabelText('Webhook 自定义 Header'), { target: { value: 'BrokenHeader' } })
     await user.click(screen.getByText('保存设置'))
 
@@ -2984,7 +2984,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '重置暂不可用',
-          description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+          description: '设置当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -3004,7 +3004,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '保存设置暂不可用',
-          description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+          description: '设置当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -3042,7 +3042,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('设置服务暂不可用')).toBeTruthy()
-        expect(screen.getByText('系统设置当前不可用，请检查服务健康状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('设置当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -3088,7 +3088,7 @@ describe('SettingsPage', () => {
       await user.click(screen.getByRole('button', { name: '重新加载' }))
 
       await waitFor(() => {
-        expect(screen.getByText('系统设置')).toBeTruthy()
+        expect(screen.getByText('设置')).toBeTruthy()
         expect(mockAddToast).toHaveBeenCalledWith({ title: '设置已刷新', color: 'success' })
       })
     })
@@ -3110,7 +3110,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '设置服务暂不可用',
-          description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+          description: '设置当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })

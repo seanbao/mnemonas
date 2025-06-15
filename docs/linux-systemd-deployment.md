@@ -134,7 +134,7 @@ sudo systemctl restart mnemonas-dataplane
 sudo mnemonas-doctor
 ```
 
-`mnemonas-doctor` 会检查服务状态、Web UI、目录权限、存储挂载类型和剩余磁盘空间。Web UI 的“系统健康”和“存储管理”页也会显示底层文件系统类型、ZFS/Btrfs 原生校验提示，以及存储告警运行态。默认低于 10GB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
+`mnemonas-doctor` 会检查服务状态、Web UI、目录权限、存储挂载类型和剩余磁盘空间。Web UI 的“设备状态”和“空间与存储”页也会显示底层文件系统类型、ZFS/Btrfs 原生校验提示，以及空间提醒运行态。默认低于 10GB 可用空间时给出警告，可用 `MIN_FREE_BYTES=<bytes> sudo mnemonas-doctor` 调整阈值。
 
 如果系统安装了 UFW，`mnemonas-doctor` 也会检查防火墙是否启用，并提示不要放行 dataplane 的 `9090/9091` 端口。
 

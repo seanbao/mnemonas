@@ -510,7 +510,7 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '恢复版本暂不可用',
-          description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+          description: '版本存储当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -658,7 +658,7 @@ describe('VersionsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '下载版本暂不可用',
-          description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+          description: '版本存储当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
       })
@@ -770,7 +770,7 @@ describe('VersionsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('版本历史暂不可用')).toBeTruthy()
-        expect(screen.getByText('版本存储当前不可用，请检查系统状态或稍后重试。')).toBeTruthy()
+        expect(screen.getByText('版本存储当前不可用，请检查设备状态或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -831,7 +831,7 @@ describe('VersionsPage', () => {
 	  await waitFor(() => {
 	    expect(mockAddToast).toHaveBeenCalledWith({
 	      title: '版本历史暂不可用',
-	      description: '版本存储当前不可用，请检查系统状态或稍后重试。',
+	      description: '版本存储当前不可用，请检查设备状态或稍后重试。',
 	      color: 'warning',
 	    })
       })

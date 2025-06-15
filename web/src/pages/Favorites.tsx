@@ -66,7 +66,7 @@ function getFavoritesActionErrorPresentation(error: unknown): {
     if (error.isFeatureDisabled) {
       return {
         title: '收藏功能已关闭',
-        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        description: '当前服务已关闭收藏功能。如需使用，请在设置中重新启用。',
         color: 'warning',
       }
     }
@@ -74,7 +74,7 @@ function getFavoritesActionErrorPresentation(error: unknown): {
     if (error.isUnavailable) {
       return {
         title: '收藏功能暂不可用',
-        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
         color: 'warning',
       }
     }
@@ -112,7 +112,7 @@ function getFavoritesRefreshErrorPresentation(error: unknown): {
     if (error.isFeatureDisabled) {
       return {
         title: '收藏功能已关闭',
-        description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+        description: '当前服务已关闭收藏功能。如需使用，请在设置中重新启用。',
         color: 'warning',
       }
     }
@@ -120,7 +120,7 @@ function getFavoritesRefreshErrorPresentation(error: unknown): {
     if (error.isUnavailable) {
       return {
         title: '收藏功能暂不可用',
-        description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+        description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
         color: 'warning',
       }
     }
@@ -141,7 +141,7 @@ function getFavoritesBatchActionToast(result: BatchOperationResult) {
   if (result.failedErrors.every((error) => error instanceof FavoritesError && error.isFeatureDisabled)) {
     return {
       title: '收藏功能已关闭',
-      description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
+      description: '当前服务已关闭收藏功能。如需使用，请在设置中重新启用。',
       color: 'warning' as const,
     }
   }
@@ -149,7 +149,7 @@ function getFavoritesBatchActionToast(result: BatchOperationResult) {
   if (result.failedErrors.every((error) => error instanceof FavoritesError && error.isUnavailable)) {
     return {
       title: '收藏功能暂不可用',
-      description: '收藏存储未成功初始化，请检查系统健康状态或稍后重试。',
+      description: '收藏存储未成功初始化，请检查设备状态或稍后重试。',
       color: 'warning' as const,
     }
   }
@@ -571,7 +571,7 @@ export function FavoritesPage() {
             <EmptyState
               icon={Star}
               title="收藏功能已关闭"
-              description="当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。"
+              description="当前服务已关闭收藏功能。如需使用，请在设置中重新启用。"
             />
           </div>
         </div>
@@ -590,7 +590,7 @@ export function FavoritesPage() {
             <EmptyState
               icon={AlertCircle}
               title="收藏功能暂不可用"
-              description="收藏存储未成功初始化，请检查系统健康状态或稍后重试。"
+              description="收藏存储未成功初始化，请检查设备状态或稍后重试。"
               action={
                 <Button variant="bordered" className="rounded-lg" onPress={handleRefreshFavorites}>
                   重新加载

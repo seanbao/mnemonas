@@ -236,7 +236,7 @@ describe('FilesPage sharing behavior', () => {
     await user.click(screen.getByText('disable share feature'))
 
     expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
-    expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
+    expect(screen.getByText('当前服务已关闭分享功能。请在设置中重新启用后再创建分享链接。')).toBeInTheDocument()
   })
 
   it('disables share entry points when the initial share availability check reports the feature is off', async () => {
@@ -248,7 +248,7 @@ describe('FilesPage sharing behavior', () => {
     })
 
     expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
-    expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
+    expect(screen.getByText('当前服务已关闭分享功能。请在设置中重新启用后再创建分享链接。')).toBeInTheDocument()
   })
 
   it('does not request shares when setup reports that sharing is off', async () => {
@@ -261,7 +261,7 @@ describe('FilesPage sharing behavior', () => {
 
     expect(mockListShares).not.toHaveBeenCalled()
     expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
-    expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
+    expect(screen.getByText('当前服务已关闭分享功能。请在设置中重新启用后再创建分享链接。')).toBeInTheDocument()
   })
 
   it('disables share entry points with an unavailable label when the initial share availability check is temporarily unavailable', async () => {
@@ -273,6 +273,6 @@ describe('FilesPage sharing behavior', () => {
     })
 
     expect((await screen.findAllByText('分享功能暂不可用')).length).toBeGreaterThan(0)
-    expect(screen.getByText('分享服务当前不可用，请检查系统健康状态或稍后重试。')).toBeInTheDocument()
+    expect(screen.getByText('分享服务当前不可用，请检查设备状态或稍后重试。')).toBeInTheDocument()
   })
 })

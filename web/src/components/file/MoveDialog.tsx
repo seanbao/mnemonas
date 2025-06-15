@@ -58,7 +58,7 @@ function getMoveDialogFailureToast(
   if (successCount === 0 && errors.length > 0 && errors.every((error) => error instanceof ApiError && error.isUnavailable)) {
     return {
       title: `批量${actionText}暂不可用`,
-      description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
+      description: '文件系统当前不可用，请检查设备状态或稍后重试。',
       color: 'warning',
     }
   }
