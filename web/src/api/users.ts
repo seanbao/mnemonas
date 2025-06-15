@@ -291,6 +291,29 @@ export async function resetUserPassword(
 }
 
 /**
+ * Revoke a user's active sessions (admin only)
+ */
+export async function revokeUserSessions(userId: string): Promise<UsersActionResult> {
+  const response = await authFetch(`${API_BASE}/${userId}/revoke-sessions`, {
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    throw await parseUsersError(response, 'Failed to revoke user sessions')
+  }
+
+  const body = await parseUsersSuccess<{ revoked: boolean; warning?: boolean }>(response, 'Invalid revoke sessions response')
+  if (!body.data || typeof body.data.revoked !== 'boolean') {
+    throw new Error('Invalid revoke sessions response')
+  }
+  return {
+    success: body.success,
+    warning: hasUsersWarning(response, body.data),
+    message: body.message,
+  }
+}
+
+/**
  * Toggle user enabled/disabled status (admin only)
  */
 export async function toggleUserStatus(
