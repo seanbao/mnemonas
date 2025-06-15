@@ -205,6 +205,66 @@ describe('ShareDialog', () => {
     })
   })
 
+  it('shows matched path policy and requires a password before creating', async () => {
+    const user = userEvent.setup()
+    vi.mocked(getSharePolicy).mockResolvedValueOnce({
+      default_expires_in: '168h',
+      default_max_access: 0,
+      policy_rules: [{
+        path: '/Family',
+        require_password: true,
+        max_expires_in: '24h',
+        max_access: 5,
+      }],
+    })
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/Family/report.pdf',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: true,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      max_access: 5,
+      description: '',
+      url: '/s/share-1',
+      warning: false,
+      message: undefined,
+    } as never)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/Family/report.pdf"
+      />
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('当前路径分享规则')).toBeInTheDocument()
+      expect(screen.getByText('此路径要求设置分享密码。')).toBeInTheDocument()
+      expect(screen.getByText('有效期最多 1 天。')).toBeInTheDocument()
+      expect(screen.getByText('访问次数最多 5 次。')).toBeInTheDocument()
+    })
+
+    const createButton = screen.getByText('创建分享链接')
+    expect(createButton).toBeDisabled()
+    expect(screen.getByText('当前路径要求设置分享密码')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('设置访问密码（最多 72 字节）'), 'family-secret')
+    expect(createButton).not.toBeDisabled()
+    await user.click(createButton)
+
+    await waitFor(() => {
+      expect(createShare).toHaveBeenCalledWith(expect.objectContaining({
+        path: '/Family/report.pdf',
+        password: 'family-secret',
+      }))
+    })
+  })
+
   it('renders the access limit section without crashing', () => {
     render(
       <ShareDialog

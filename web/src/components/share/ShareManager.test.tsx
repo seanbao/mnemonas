@@ -296,6 +296,57 @@ describe('ShareManager', () => {
     })
   })
 
+  it('filters the share list to passwordless and broad folder shares', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-passwordless',
+        path: '/docs/open.pdf',
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+      {
+        ...mockShares[0],
+        id: 'share-broad',
+        path: '/Photos',
+        type: 'folder',
+        has_password: true,
+        risk: {
+          level: 'medium',
+          reasons: [
+            { code: 'broad_folder', level: 'medium', message: '分享顶层文件夹可能覆盖较多内容' },
+          ],
+        },
+      },
+    ])
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('open.pdf')).toBeInTheDocument()
+      expect(screen.getByText('Photos')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '无密码 (1)' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '覆盖较大 (1)' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '无密码 (1)' }))
+    await waitFor(() => {
+      expect(screen.getByText('open.pdf')).toBeInTheDocument()
+      expect(screen.queryByText('Photos')).not.toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '覆盖较大 (1)' }))
+    await waitFor(() => {
+      expect(screen.queryByText('open.pdf')).not.toBeInTheDocument()
+      expect(screen.getByText('Photos')).toBeInTheDocument()
+    })
+  })
+
   it('disables all currently high-risk shares from the header action', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.listShares).mockResolvedValueOnce([
