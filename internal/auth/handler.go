@@ -1055,6 +1055,39 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 	writeSuccess(w, http.StatusOK, nil, "password reset successfully")
 }
 
+// HandleRevokeUserSessions handles POST /api/v1/admin/users/{id}/revoke-sessions
+func (h *Handler) HandleRevokeUserSessions(w http.ResponseWriter, r *http.Request, userID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "METHOD_NOT_ALLOWED")
+		return
+	}
+
+	if !IsAdmin(r.Context()) {
+		writeError(w, http.StatusForbidden, "admin access required", "FORBIDDEN")
+		return
+	}
+
+	if _, err := h.userStore.GetByID(userID); err != nil {
+		writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
+		return
+	}
+
+	if err := h.tokenManager.RevokeByUser(userID); err != nil {
+		if isAuthPersistenceWarning(err) {
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{
+				"revoked": true,
+				"warning": true,
+			}, "user sessions revoked with persistence warning")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error", "REVOKE_SESSIONS_ERROR")
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, map[string]interface{}{"revoked": true}, "user sessions revoked successfully")
+}
+
 // HandleToggleUserStatus handles PUT /api/v1/admin/users/{id}/status
 func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request, userID string) {
 	if r.Method != http.MethodPut {

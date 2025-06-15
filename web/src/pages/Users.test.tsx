@@ -27,6 +27,7 @@ vi.mock('@/api/users', async (importOriginal) => {
     createUser: vi.fn(),
     deleteUser: vi.fn(),
     resetUserPassword: vi.fn(),
+    revokeUserSessions: vi.fn(),
     toggleUserStatus: vi.fn(),
   }
 })
@@ -665,6 +666,75 @@ describe('UsersPage', () => {
       })
     })
 
+    it('revokes another user sessions from the action menu', async () => {
+      vi.mocked(usersApi.revokeUserSessions).mockResolvedValue({ success: true })
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('让现有登录失效')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('让现有登录失效'))
+
+      await waitFor(() => {
+        expect(usersApi.revokeUserSessions).toHaveBeenCalledWith('user-2')
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '现有登录已失效', color: 'success' })
+      })
+    })
+
+    it('removes a stale user when session revoke hits not found', async () => {
+      vi.mocked(usersApi.revokeUserSessions).mockRejectedValueOnce(new UsersError('user not found', 404, 'USER_NOT_FOUND'))
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+        expect(screen.getByText('guest')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getByText('让现有登录失效'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已不存在，已同步更新', color: 'warning' })
+      })
+
+      expect(screen.queryByText('testuser')).not.toBeInTheDocument()
+      expect(screen.getByText('guest')).toBeInTheDocument()
+    })
+
+    it('shows a localized warning when session revoke succeeds with a persistence warning', async () => {
+      vi.mocked(usersApi.revokeUserSessions).mockResolvedValueOnce({
+        success: true,
+        warning: true,
+        message: 'user sessions revoked with persistence warning',
+      })
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getByText('让现有登录失效'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '登录已失效，但保存存在提醒',
+          description: '操作已提交，但用户配置保存存在提醒，请检查设备状态。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('exposes accessible user action menu labels', async () => {
       renderUsersPage()
 
@@ -1194,6 +1264,33 @@ describe('UsersPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '状态更新暂不可用',
+          description: '用户配置当前不可用，请检查系统配置状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows unavailable toast when revoking sessions is temporarily unavailable', async () => {
+      const user = userEvent.setup()
+      vi.mocked(usersApi.revokeUserSessions).mockRejectedValue(new UsersError('configuration not available', 503))
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+
+      await waitFor(() => {
+        expect(screen.getByText('让现有登录失效')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByText('让现有登录失效'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '吊销登录暂不可用',
           description: '用户配置当前不可用，请检查系统配置状态或稍后重试。',
           color: 'warning',
         })

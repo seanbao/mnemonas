@@ -296,7 +296,7 @@ For public deployments:
 - Avoid injecting third-party scripts under the same origin.
 - Sign out on shared computers.
 
-Signing out, changing a user's password, deleting the user, or disabling the user revokes or clears the relevant sessions.
+Signing out, changing a user's password, deleting the user, disabling the user, or manually revoking that user's active sessions clears the relevant sessions.
 
 ### Public Share Passwords
 
@@ -310,7 +310,7 @@ Five failed password attempts for the same share and client address lock access 
 
 | Status | Capability |
 | --- | --- |
-| Supported | Web UI login, users/roles/groups, user root-directory isolation, directory access rules, WebDAV user auth/global Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
+| Supported | Web UI login, users/roles/groups, user root-directory isolation, directory access rules, user session revocation, WebDAV user auth/global Basic Auth, path traversal protection, WebDAV read-only mode, share password validation and lockout |
 | Add through reverse proxy | HTTPS certificate renewal, finer rate limits, public access controls |
 | Planned | OAuth/OIDC integration, finer application-level access policies |
 
