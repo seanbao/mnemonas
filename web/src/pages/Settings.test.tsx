@@ -930,10 +930,11 @@ describe('SettingsPage', () => {
       await openTab(user, '分享管理')
 
       await user.click(screen.getByRole('switch'))
-      await user.type(
-        screen.getByPlaceholderText(/\/Family require_password/),
-        '/Family require_password max_expires_in=24h max_access=20',
-      )
+      await user.click(screen.getByRole('button', { name: '添加路径策略' }))
+      await user.clear(screen.getByLabelText('分享策略路径 1'))
+      await user.type(screen.getByLabelText('分享策略路径 1'), '/Family')
+      await user.type(screen.getByLabelText('分享策略最长有效期 1'), '24h')
+      await user.type(screen.getByLabelText('分享策略最多访问次数 1'), '20')
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {
@@ -993,7 +994,10 @@ describe('SettingsPage', () => {
       await openTab(user, '分享管理')
 
       await user.click(screen.getByRole('switch'))
-      await user.type(screen.getByPlaceholderText(/\/Family require_password/), '/Family')
+      await user.click(screen.getByRole('button', { name: '添加路径策略' }))
+      await user.clear(screen.getByLabelText('分享策略路径 1'))
+      await user.type(screen.getByLabelText('分享策略路径 1'), '/Family')
+      await user.click(screen.getByLabelText('分享策略必须设置密码 1'))
       await user.click(screen.getByText('保存设置'))
 
       await waitFor(() => {

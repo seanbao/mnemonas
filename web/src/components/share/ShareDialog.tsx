@@ -33,6 +33,7 @@ import {
   type ShareCreateResult,
   type CreateShareRequest,
   type SharePolicy,
+  type SharePolicyRule,
 } from '@/api/share'
 
 interface ShareDialogProps {
@@ -86,6 +87,40 @@ function getSharePathDepth(rawPath: string): number {
     return 0
   }
   return trimmed.split('/').filter(Boolean).length
+}
+
+function normalizeSharePolicyPath(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return '/'
+  }
+  const withLeadingSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  return withLeadingSlash === '/' ? '/' : withLeadingSlash.replace(/\/+$/, '')
+}
+
+function sharePathWithinBase(basePath: string, targetPath: string): boolean {
+  const normalizedBase = normalizeSharePolicyPath(basePath)
+  const normalizedTarget = normalizeSharePolicyPath(targetPath)
+  if (normalizedBase === '/') {
+    return normalizedTarget.startsWith('/')
+  }
+  return normalizedTarget === normalizedBase || normalizedTarget.startsWith(`${normalizedBase}/`)
+}
+
+function matchSharePolicyRule(rules: SharePolicyRule[] | undefined, targetPath: string): SharePolicyRule | null {
+  if (!rules || rules.length === 0) {
+    return null
+  }
+  let matched: SharePolicyRule | null = null
+  for (const rule of rules) {
+    if (!rule.path || !sharePathWithinBase(rule.path, targetPath)) {
+      continue
+    }
+    if (!matched || normalizeSharePolicyPath(rule.path).length > normalizeSharePolicyPath(matched.path).length) {
+      matched = rule
+    }
+  }
+  return matched
 }
 
 function utf8ByteLength(value: string): number {
@@ -163,10 +198,17 @@ export function ShareDialog({
   const [maxAccess, setMaxAccess] = useState('')
   const [description, setDescription] = useState('')
 
-  const passwordRequiredButEmpty = usePassword && password.trim() === ''
-  const passwordTooLong = usePassword && utf8ByteLength(password) > maxSharePasswordBytes
+  const matchedPolicyRule = useMemo(() => (
+    matchSharePolicyRule(sharePolicy?.policy_rules, filePath)
+  ), [filePath, sharePolicy?.policy_rules])
+  const policyRequiresPassword = Boolean(matchedPolicyRule?.require_password)
+  const passwordRequired = usePassword || policyRequiresPassword
+  const passwordRequiredButEmpty = passwordRequired && password.trim() === ''
+  const passwordTooLong = passwordRequired && utf8ByteLength(password) > maxSharePasswordBytes
   const passwordErrorMessage = passwordRequiredButEmpty
-    ? '启用密码保护后必须输入密码'
+    ? policyRequiresPassword
+      ? '当前路径要求设置分享密码'
+      : '启用密码保护后必须输入密码'
     : passwordTooLong
       ? '分享密码最多 72 字节'
       : undefined
@@ -275,7 +317,7 @@ export function ShareDialog({
 
   const riskWarnings = useMemo(() => {
     const warnings: string[] = []
-    if (!usePassword) {
+    if (!passwordRequired) {
       warnings.push('未设置密码，拿到链接的人都能访问。')
     }
     if (expiresIn === '' && sharePolicy && !sharePolicy.default_expires_in) {
@@ -288,14 +330,31 @@ export function ShareDialog({
       warnings.push(filePath.trim() === '/' ? '根目录分享会公开整个文件空间。' : '顶层文件夹分享可能覆盖较多内容。')
     }
     return warnings
-  }, [expiresIn, filePath, isFolder, maxAccess, sharePolicy, usePassword])
+  }, [expiresIn, filePath, isFolder, maxAccess, passwordRequired, sharePolicy])
+
+  const matchedPolicyDescriptions = useMemo(() => {
+    if (!matchedPolicyRule) {
+      return []
+    }
+    const descriptions: string[] = []
+    if (matchedPolicyRule.require_password) {
+      descriptions.push('此路径要求设置分享密码。')
+    }
+    if (matchedPolicyRule.max_expires_in) {
+      descriptions.push(`有效期最多 ${formatPolicyDuration(matchedPolicyRule.max_expires_in)}。`)
+    }
+    if (matchedPolicyRule.max_access && matchedPolicyRule.max_access > 0) {
+      descriptions.push(`访问次数最多 ${matchedPolicyRule.max_access} 次。`)
+    }
+    return descriptions
+  }, [matchedPolicyRule])
 
   const handleCreate = async () => {
     if (featureDisabled || !featureEnabled) return
     if (passwordRequiredButEmpty) {
       addToast({
-        title: '请输入分享密码',
-        description: '启用密码保护后，必须设置访问密码。',
+        title: policyRequiresPassword ? '该路径要求设置分享密码' : '请输入分享密码',
+        description: policyRequiresPassword ? '当前目录的分享策略要求设置访问密码。' : '启用密码保护后，必须设置访问密码。',
         color: 'warning',
       })
       return
@@ -320,7 +379,7 @@ export function ShareDialog({
         permission,
       }
       
-      if (usePassword && password) {
+      if (passwordRequired && password) {
         req.password = password
       }
       if (expiresIn) {
@@ -465,6 +524,20 @@ export function ShareDialog({
           ) : (
             /* Share form */
             <div className="space-y-6">
+              {matchedPolicyDescriptions.length > 0 && (
+                <div className="rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm text-default-700">
+                  <div className="mb-2 flex items-center gap-2 font-medium text-primary">
+                    <AlertCircle size={16} />
+                    <span>当前路径分享规则</span>
+                  </div>
+                  <ul className="space-y-1">
+                    {matchedPolicyDescriptions.map((description) => (
+                      <li key={description}>{description}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {/* Password protection */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -473,12 +546,13 @@ export function ShareDialog({
                     <span className="text-sm font-medium">密码保护</span>
                   </div>
                   <Switch
-                    isSelected={usePassword}
+                    isSelected={usePassword || policyRequiresPassword}
+                    isDisabled={policyRequiresPassword}
                     onValueChange={setUsePassword}
                     size="sm"
                   />
                 </div>
-                {usePassword && (
+                {(usePassword || policyRequiresPassword) && (
                   <div className="space-y-2">
                     <Input
                       type="password"

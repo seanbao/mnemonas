@@ -7,7 +7,6 @@ import {
   CardHeader,
   Button,
   Input,
-  Textarea,
   Switch,
   Divider,
   Tabs,
@@ -170,13 +169,20 @@ function getWebDAVCredentialsRefreshErrorToast(error: unknown): {
   }
 }
 
-function shallowEqualSettingsDraft<T extends Record<string, string | boolean>>(left: T, right: T): boolean {
+function settingsDraftValueEqual(left: unknown, right: unknown): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return JSON.stringify(left) === JSON.stringify(right)
+  }
+  return left === right
+}
+
+function shallowEqualSettingsDraft<T extends Record<string, unknown>>(left: T, right: T): boolean {
   const leftKeys = Object.keys(left)
   if (leftKeys.length !== Object.keys(right).length) {
     return false
   }
 
-  return leftKeys.every((key) => left[key] === right[key])
+  return leftKeys.every((key) => settingsDraftValueEqual(left[key], right[key]))
 }
 
 function getSettingsActionErrorToast(
@@ -617,31 +623,14 @@ function parseDirectoryAccessRuleLines(value: string): { rules: DirectoryAccessR
   return { rules }
 }
 
-function formatSharePolicyRuleLines(rules: SharePolicyRule[] | undefined): string {
-  return (rules ?? [])
-    .map((rule) => [
-      rule.path,
-      rule.require_password ? 'require_password' : '',
-      rule.max_expires_in ? `max_expires_in=${rule.max_expires_in}` : '',
-      rule.max_access && rule.max_access > 0 ? `max_access=${rule.max_access}` : '',
-    ].filter(Boolean).join(' '))
-    .join('\n')
-}
-
-function parseSharePolicyRuleLines(value: string): { rules: SharePolicyRule[]; error?: string } {
-  const lines = value.split('\n')
+function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRule[]): { rules: SharePolicyRule[]; error?: string } {
   const rules: SharePolicyRule[] = []
   const seenPaths = new Set<string>()
 
-  for (let index = 0; index < lines.length; index += 1) {
+  for (let index = 0; index < inputRules.length; index += 1) {
     const lineNumber = index + 1
-    const line = lines[index].trim()
-    if (!line) {
-      continue
-    }
-
-    const parts = line.split(/\s+/)
-    const rulePath = normalizeDirectoryQuotaPathInput(parts[0])
+    const inputRule = inputRules[index]
+    const rulePath = normalizeDirectoryQuotaPathInput(inputRule.path)
     if (!rulePath) {
       return { rules: [], error: `第 ${lineNumber} 行路径无效` }
     }
@@ -649,45 +638,27 @@ function parseSharePolicyRuleLines(value: string): { rules: SharePolicyRule[]; e
       return { rules: [], error: `第 ${lineNumber} 行路径重复` }
     }
 
-    const rule: SharePolicyRule = { path: rulePath }
-    for (const token of parts.slice(1)) {
-      if (token === 'require_password' || token === 'password') {
-        rule.require_password = true
-        continue
-      }
-
-      const separator = token.indexOf('=')
-      if (separator <= 0 || separator === token.length - 1) {
-        return { rules: [], error: `第 ${lineNumber} 行策略格式无效` }
-      }
-      const key = token.slice(0, separator)
-      const rawValue = token.slice(separator + 1).trim()
-      if (key === 'max_expires_in') {
-        if (rawValue !== '0' && !isValidDurationString(rawValue)) {
-          return { rules: [], error: `第 ${lineNumber} 行有效期上限格式无效` }
-        }
-        if (rawValue !== '0') {
-          rule.max_expires_in = rawValue
-        }
-      } else if (key === 'max_access') {
-        const maxAccess = Number(rawValue)
-        if (!/^\d+$/.test(rawValue) || !Number.isInteger(maxAccess) || maxAccess < 0) {
-          return { rules: [], error: `第 ${lineNumber} 行访问次数上限必须是 0 或正整数` }
-        }
-        if (maxAccess > 0) {
-          rule.max_access = maxAccess
-        }
-      } else {
-        return { rules: [], error: `第 ${lineNumber} 行字段 ${key} 不支持` }
-      }
+    const maxExpiresIn = inputRule.max_expires_in?.trim() ?? ''
+    if (maxExpiresIn && maxExpiresIn !== '0' && !isValidDurationString(maxExpiresIn)) {
+      return { rules: [], error: `第 ${lineNumber} 行有效期上限格式无效` }
     }
 
-    if (!rule.require_password && !rule.max_expires_in && !rule.max_access) {
+    const maxAccess = inputRule.max_access ?? 0
+    if (!Number.isInteger(maxAccess) || maxAccess < 0) {
+      return { rules: [], error: `第 ${lineNumber} 行访问次数上限必须是 0 或正整数` }
+    }
+
+    if (!inputRule.require_password && !maxExpiresIn && maxAccess === 0) {
       return { rules: [], error: `第 ${lineNumber} 行至少需要一个约束` }
     }
 
     seenPaths.add(rulePath)
-    rules.push(rule)
+    rules.push({
+      path: rulePath,
+      require_password: inputRule.require_password || undefined,
+      max_expires_in: maxExpiresIn && maxExpiresIn !== '0' ? maxExpiresIn : undefined,
+      max_access: maxAccess > 0 ? maxAccess : undefined,
+    })
   }
 
   return { rules }
@@ -1103,6 +1074,148 @@ function SettingRow({
   )
 }
 
+function sharePolicyRuleHasConstraint(rule: SharePolicyRule): boolean {
+  return Boolean(rule.require_password || rule.max_expires_in || (rule.max_access && rule.max_access > 0))
+}
+
+function SharePolicyRuleEditor({
+  rules,
+  isDisabled,
+  onChange,
+}: {
+  rules: SharePolicyRule[]
+  isDisabled?: boolean
+  onChange: (rules: SharePolicyRule[]) => void
+}) {
+  const commitRules = (nextRules: SharePolicyRule[]) => {
+    onChange(nextRules)
+  }
+
+  const updateRule = (index: number, patch: Partial<SharePolicyRule>) => {
+    const nextRules = rules.map((rule, ruleIndex) => (
+      ruleIndex === index
+        ? { ...rule, ...patch }
+        : rule
+    ))
+    commitRules(nextRules)
+  }
+
+  const addRule = () => {
+    commitRules([
+      ...rules,
+      { path: '', require_password: true },
+    ])
+  }
+
+  const removeRule = (index: number) => {
+    commitRules(rules.filter((_, ruleIndex) => ruleIndex !== index))
+  }
+
+  return (
+    <div className="w-full space-y-3 sm:w-[42rem]">
+      {rules.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-divider bg-content2/40 px-4 py-4 text-sm text-default-500">
+          暂无路径策略。需要保护某个目录时，添加一条规则即可。
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {rules.map((rule, index) => {
+            const hasConstraint = sharePolicyRuleHasConstraint(rule)
+            return (
+              <div key={index} className="rounded-lg border border-divider bg-content2/40 p-3">
+                <div className="grid gap-3 lg:grid-cols-[minmax(10rem,1.2fr)_auto_minmax(8rem,0.8fr)_minmax(8rem,0.8fr)_2.5rem] lg:items-center">
+                  <Input
+                    aria-label={`分享策略路径 ${index + 1}`}
+                    label="路径"
+                    labelPlacement="outside"
+                    value={rule.path}
+                    onValueChange={(nextPath) => updateRule(index, { path: nextPath })}
+                    placeholder="/Family"
+                    isDisabled={isDisabled}
+                    classNames={{
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                    }}
+                  />
+                  <Switch
+                    aria-label={`分享策略必须设置密码 ${index + 1}`}
+                    isSelected={Boolean(rule.require_password)}
+                    isDisabled={isDisabled}
+                    onValueChange={(selected) => updateRule(index, { require_password: selected || undefined })}
+                    classNames={{
+                      wrapper: cn(
+                        "group-data-[selected=true]:bg-accent-primary",
+                        "bg-content2"
+                      ),
+                    }}
+                  >
+                    <span className="text-sm">必须设置密码</span>
+                  </Switch>
+                  <Input
+                    aria-label={`分享策略最长有效期 ${index + 1}`}
+                    label="最长有效期"
+                    labelPlacement="outside"
+                    value={rule.max_expires_in ?? ''}
+                    onValueChange={(nextValue) => updateRule(index, { max_expires_in: nextValue.trim() || undefined })}
+                    placeholder="例如 24h"
+                    isDisabled={isDisabled}
+                    classNames={{
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                    }}
+                  />
+                  <Input
+                    aria-label={`分享策略最多访问次数 ${index + 1}`}
+                    label="最多访问次数"
+                    labelPlacement="outside"
+                    type="number"
+                    min="0"
+                    value={rule.max_access ? String(rule.max_access) : ''}
+                    onValueChange={(nextValue) => {
+                      const trimmed = nextValue.trim()
+                      updateRule(index, { max_access: trimmed ? Number(trimmed) : undefined })
+                    }}
+                    placeholder="不限制"
+                    isDisabled={isDisabled}
+                    classNames={{
+                      inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                    }}
+                  />
+                  <Button
+                    isIconOnly
+                    variant="flat"
+                    color="danger"
+                    aria-label={`删除分享策略 ${index + 1}`}
+                    className="rounded-lg lg:self-end"
+                    isDisabled={isDisabled}
+                    onPress={() => removeRule(index)}
+                  >
+                    <Trash2 size={16} />
+                  </Button>
+                </div>
+                {!hasConstraint && (
+                  <div className="mt-2 text-xs text-warning">
+                    至少选择一个限制条件，保存时才会生效。
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      <Button
+        variant="flat"
+        size="sm"
+        startContent={<Plus size={16} />}
+        className="rounded-lg"
+        isDisabled={isDisabled}
+        onPress={addRule}
+      >
+        添加路径策略
+      </Button>
+    </div>
+  )
+}
+
 function getSecurityStatusMeta(status: SecurityCheckStatus): {
   label: string
   tone: string
@@ -1477,7 +1590,7 @@ export function SettingsPage() {
     shareBaseURL: '',
     shareDefaultExpiresIn: '168h',
     shareDefaultMaxAccess: '0',
-    sharePolicyRules: '',
+    sharePolicyRules: [] as SharePolicyRule[],
     favoritesEnabled: true,
     alertsEnabled: false,
     alertsCheckInterval: '1h',
@@ -1706,7 +1819,7 @@ export function SettingsPage() {
       shareBaseURL: data.share.base_url,
       shareDefaultExpiresIn: data.share.default_expires_in ?? '168h',
       shareDefaultMaxAccess: String(data.share.default_max_access ?? 0),
-      sharePolicyRules: formatSharePolicyRuleLines(data.share.policy_rules),
+      sharePolicyRules: (data.share.policy_rules ?? []).map((rule) => ({ ...rule })),
       favoritesEnabled: data.favorites?.enabled ?? true,
       alertsEnabled: data.alerts?.enabled ?? false,
       alertsCheckInterval: data.alerts?.check_interval ?? '1h',
@@ -2019,7 +2132,7 @@ export function SettingsPage() {
       })
       return
     }
-    const parsedSharePolicyRules = parseSharePolicyRuleLines(settings.sharePolicyRules)
+    const parsedSharePolicyRules = normalizeSharePolicyRulesForSave(settings.sharePolicyRules)
     if (parsedSharePolicyRules.error) {
       addToast({
         title: '分享路径策略格式无效',
@@ -3987,17 +4100,10 @@ export function SettingsPage() {
                     label="路径分享策略"
                     description="为指定目录设置更严格的分享约束；更深的路径优先生效"
                   >
-                    <Textarea
-                      value={settings.sharePolicyRules}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, sharePolicyRules: v }))}
-                      placeholder={'/Family require_password max_expires_in=24h max_access=20\n/Projects/Client require_password max_expires_in=72h'}
-                      minRows={4}
+                    <SharePolicyRuleEditor
+                      rules={settings.sharePolicyRules}
                       isDisabled={!settings.shareEnabled}
-                      className="w-full sm:w-[34rem]"
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
-                        input: "font-mono text-xs",
-                      }}
+                      onChange={(nextRules) => updateDirtySettings(s => ({ ...s, sharePolicyRules: nextRules }))}
                     />
                   </SettingRow>
                 </div>

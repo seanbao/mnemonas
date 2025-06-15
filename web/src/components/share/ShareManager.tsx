@@ -146,7 +146,7 @@ interface ShareManagerProps {
   featureEnabled?: boolean
 }
 
-type ShareReviewFilter = 'all' | 'review' | 'high' | 'expiring'
+type ShareReviewFilter = 'all' | 'review' | 'expiring' | 'passwordless' | 'broad'
 
 export function ShareManager({ showAllShares = false, featureEnabled = true }: ShareManagerProps) {
   const [shares, setShares] = useState<Share[]>([])
@@ -227,6 +227,10 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   const riskyShares = useMemo(() => shares.filter(isRiskyShare), [shares])
   const highRiskShares = useMemo(() => shares.filter(isHighRiskShare), [shares])
   const expiringSoonShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'expiring_soon')), [shares])
+  const passwordlessShares = useMemo(() => shares.filter(share => shareHasRiskCode(share, 'no_password')), [shares])
+  const broadFolderShares = useMemo(() => shares.filter(share => (
+    shareHasRiskCode(share, 'root_folder') || shareHasRiskCode(share, 'broad_folder')
+  )), [shares])
   const staleShares = useMemo(() => shares.filter(share => (
     shareHasRiskCode(share, 'unused_enabled') || shareHasRiskCode(share, 'stale_enabled')
   )), [shares])
@@ -234,14 +238,16 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     switch (reviewFilter) {
     case 'review':
       return riskyShares
-    case 'high':
-      return highRiskShares
     case 'expiring':
       return expiringSoonShares
+    case 'passwordless':
+      return passwordlessShares
+    case 'broad':
+      return broadFolderShares
     default:
       return shares
     }
-  }, [expiringSoonShares, highRiskShares, reviewFilter, riskyShares, shares])
+  }, [broadFolderShares, expiringSoonShares, passwordlessShares, reviewFilter, riskyShares, shares])
 
   if (!featureEnabled) {
     return (
@@ -467,15 +473,6 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
             需复核 ({riskyShares.length})
           </Button>
           <Button
-            variant={reviewFilter === 'high' ? 'solid' : 'flat'}
-            size="sm"
-            onPress={() => setReviewFilter('high')}
-            className="rounded-lg"
-            isDisabled={highRiskShares.length === 0}
-          >
-            高风险 ({highRiskShares.length})
-          </Button>
-          <Button
             variant={reviewFilter === 'expiring' ? 'solid' : 'flat'}
             size="sm"
             onPress={() => setReviewFilter('expiring')}
@@ -483,6 +480,24 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
             isDisabled={expiringSoonShares.length === 0}
           >
             即将到期 ({expiringSoonShares.length})
+          </Button>
+          <Button
+            variant={reviewFilter === 'passwordless' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('passwordless')}
+            className="rounded-lg"
+            isDisabled={passwordlessShares.length === 0}
+          >
+            无密码 ({passwordlessShares.length})
+          </Button>
+          <Button
+            variant={reviewFilter === 'broad' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('broad')}
+            className="rounded-lg"
+            isDisabled={broadFolderShares.length === 0}
+          >
+            覆盖较大 ({broadFolderShares.length})
           </Button>
           {highRiskShares.length > 0 && (
             <Button
@@ -535,8 +550,9 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         <div className="rounded-lg border border-divider bg-content1 px-4 py-3 text-sm text-default-600">
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
             <span>复核：{riskyShares.length}</span>
-            <span>高风险：{highRiskShares.length}</span>
             <span>即将到期：{expiringSoonShares.length}</span>
+            <span>无密码：{passwordlessShares.length}</span>
+            <span>覆盖较大：{broadFolderShares.length}</span>
             <span>长期未访问：{staleShares.length}</span>
           </div>
         </div>
