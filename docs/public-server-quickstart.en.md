@@ -155,10 +155,13 @@ sudo systemctl restart mnemonas
 ## 5. Go-Live Checklist
 
 - [ ] The initial administrator password has been changed, and `initial-password.txt` is gone or no longer needed.
+- [ ] At least two enabled administrator accounts exist, so one lost password does not lock out maintenance.
+- [ ] The Web UI security self-check has no `block` items; all `warning` items are fixed or explicitly accepted.
 - [ ] `https://nas.example.com/health` works.
 - [ ] Public `8080/9090/9091` are unreachable.
 - [ ] `/etc/mnemonas/config.toml` has `server.host = "127.0.0.1"`.
 - [ ] `/etc/mnemonas/config.toml` has `trusted_proxy_hops = 1`.
+- [ ] `/etc/mnemonas/config.toml` has `security.allow_unsafe_no_auth = false`.
 - [ ] Cloud security group exposes only `80/443`, with SSH limited to trusted sources.
 - [ ] External backups exist; this public server is not the only copy of important data.
 

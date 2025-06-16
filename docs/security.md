@@ -137,7 +137,7 @@ sudo firewall-cmd --reload
 
 1. 在服务器上运行 `sudo mnemonas-public-setup --proxy caddy <domain> <email>` 或 `sudo mnemonas-public-setup --proxy nginx <domain> <email>`，生成并安装反向代理配置。
 2. 登录 Web UI 后打开 `设置 -> 常规 -> 公网访问向导`，根据部署方式应用 `server.host`、`trusted_proxy_hops`、分享域名等配置。
-3. 在 Web UI 运行“安全自检”，确认认证、HTTPS 请求语义、受信代理、监听地址、WebDAV 认证、分享 Base URL 和初始密码文件状态。
+3. 在 Web UI 运行“安全自检”，确认认证、HTTPS 请求语义、受信代理、监听地址、dataplane 端口、WebDAV 认证、分享 Base URL、初始密码文件和管理员账号备用状态。
 4. 在服务器上运行 `sudo mnemonas-doctor --public-domain <domain>`，复核公网域名、反向代理和本机端口暴露情况。
 
 Web UI 向导只负责 MnemoNAS 应用配置和操作提示；证书签发、防火墙、云安全组和反向代理安装仍应在服务器或云控制台完成。安全自检只能检查 MnemoNAS 进程能观察到的运行态和当前请求语义，不能替代云厂商安全组、真实公网端口和证书链检查。
@@ -237,7 +237,7 @@ cloudflared tunnel run mnemonas
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
-- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`
+- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、反向代理 header、dataplane `9090/9091` 和备用管理员提醒
 - [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
