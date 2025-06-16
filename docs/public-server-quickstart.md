@@ -155,10 +155,13 @@ sudo systemctl restart mnemonas
 ## 5. 上线前清单
 
 - [ ] 管理员初始密码已修改，`initial-password.txt` 已删除或不再存在。
+- [ ] 至少保留两个启用中的管理员账号，避免唯一管理员丢失密码后无法维护。
+- [ ] Web UI “安全自检”没有 `block` 项；`warning` 项已逐条处理或确认。
 - [ ] `https://nas.example.com/health` 正常返回。
 - [ ] 公网 `8080/9090/9091` 不可访问。
 - [ ] `/etc/mnemonas/config.toml` 中 `server.host = "127.0.0.1"`。
 - [ ] `/etc/mnemonas/config.toml` 中 `trusted_proxy_hops = 1`。
+- [ ] `/etc/mnemonas/config.toml` 中 `security.allow_unsafe_no_auth = false`。
 - [ ] 云安全组只开放 `80/443`，SSH 只允许可信来源。
 - [ ] 已配置外部备份，不把这台公网服务器当作唯一数据副本。
 
