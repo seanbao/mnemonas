@@ -6,7 +6,7 @@ This document records the main design choices behind MnemoNAS and the practical 
 
 ## Positioning
 
-MnemoNAS is a private NAS for self-hosted deployments. It prioritizes data ownership, recoverability, and a polished daily-use Web experience over a large enterprise feature checklist.
+MnemoNAS is a private NAS for self-hosted deployments. It prioritizes data ownership, recoverability, and a polished daily-use Web experience over a large appliance feature checklist.
 
 Why MnemoNAS:
 

@@ -117,6 +117,8 @@ sudo ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
 sudo ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
 ```
 
+If you changed the Web backend port or dataplane ports, replace `8080/9090/9091` with the actual ports, and keep dataplane ports closed to public and untrusted networks.
+
 ### Public Access
 
 Do not expose MnemoNAS directly to the public internet. Put it behind HTTPS using Caddy, Nginx, Traefik, Cloudflare Tunnel, or another trusted reverse proxy.
@@ -219,7 +221,7 @@ cloudflared tunnel run mnemonas
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
-- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, reverse-proxy headers, dataplane `9090/9091`, and backup-administrator warnings.
+- [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, reverse-proxy headers, dataplane ports, and spare-administrator warnings.
 - [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP-to-HTTPS redirect behavior, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
@@ -237,6 +239,7 @@ curl -I https://<domain>/health
 
 curl --connect-timeout 3 http://<domain>:8080/health
 # expected: failed connection or timeout
+# If you use custom backend ports, check that those ports also fail or time out.
 
 curl https://<domain>/dav/
 # expected: 401 Unauthorized when WebDAV authentication is enabled

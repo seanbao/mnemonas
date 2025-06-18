@@ -152,7 +152,7 @@ docker run --rm --user "$(id -u):$(id -g)" -p 8080:8080 -v "$HOME/.mnemonas:/dat
 
 Only `8080` needs to be published.
 
-Build base images can be overridden for enterprise caches or regional mirrors:
+Build base images can be overridden for private caches or regional mirrors:
 
 ```bash
 docker build -t mnemonas:local \

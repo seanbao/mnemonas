@@ -269,7 +269,7 @@ make help
 | Rust 数据面 gRPC | 9090 | CAS 存储服务 |
 | 前端开发服务器 | 5173 | Vite dev server |
 
-Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 dataplane 端口，应保持在容器内或 `127.0.0.1`，不要发布到公网或不可信局域网。
+Docker 和 systemd 部署默认只对外提供 `8080`；`9090/9091` 是内部 dataplane 端口，应保持在容器内或 `127.0.0.1`。如果修改过 Web 或 dataplane 端口，也不要把对应的自定义后端端口发布到公网或不可信局域网。
 
 详见 [开发指南](docs/development.md)。
 

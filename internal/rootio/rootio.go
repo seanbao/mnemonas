@@ -25,6 +25,12 @@ func splitRelativeName(name string) ([]string, error) {
 		return nil, errEscape
 	}
 
+	for _, part := range strings.Split(name, string(filepath.Separator)) {
+		if part == ".." {
+			return nil, errEscape
+		}
+	}
+
 	cleanName := filepath.Clean(name)
 	parts := strings.Split(cleanName, string(filepath.Separator))
 	for _, part := range parts {

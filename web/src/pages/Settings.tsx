@@ -1965,7 +1965,7 @@ export function SettingsPage() {
       case 'dataplane_http_listen':
         addToast({
           title: '需要调整启动环境',
-          description: '将 DATAPLANE_HTTP_ADDR 设为 127.0.0.1:9091 后重启 dataplane 或 MnemoNAS 服务。',
+          description: '将 DATAPLANE_HTTP_ADDR 设为 127.0.0.1:9091 后重启 dataplane 和 MnemoNAS 服务。',
           color: 'warning',
         })
         return

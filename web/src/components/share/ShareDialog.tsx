@@ -457,7 +457,7 @@ export function ShareDialog({
       <ModalContent>
         <ModalHeader className="flex items-center gap-2">
           <Link2 size={20} className="text-accent-primary" />
-          <span>分享 {isFolder ? '文件夹' : '文件'}</span>
+          <span>{isFolder ? '分享文件夹' : '分享文件'}</span>
         </ModalHeader>
         
         <ModalBody className="py-6">

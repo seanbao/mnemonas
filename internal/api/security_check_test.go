@@ -26,6 +26,22 @@ func securityCheckByID(t *testing.T, checks []securityCheckItem, id string) secu
 	return securityCheckItem{}
 }
 
+func TestSecurityTCPAddressHost_ParsesBracketedIPv6Loopback(t *testing.T) {
+	host := securityTCPAddressHost("[::1]:9091")
+	if host != "::1" {
+		t.Fatalf("securityTCPAddressHost() = %q, want %q", host, "::1")
+	}
+	if !securityListenHostIsLoopback(host) {
+		t.Fatalf("expected %q to be treated as loopback", host)
+	}
+}
+
+func TestSecurityTCPAddressHost_RejectsBareHostWithoutPort(t *testing.T) {
+	if host := securityTCPAddressHost("127.0.0.1"); host != "" {
+		t.Fatalf("securityTCPAddressHost() = %q, want empty host for malformed TCP address", host)
+	}
+}
+
 func TestServer_GetSettingsSecurityCheck_ReportsPublicDeploymentRisks(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.Default()

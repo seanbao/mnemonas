@@ -1945,8 +1945,11 @@ GET /api/v1/settings/security-check
       "tls_enabled": false,
       "trusted_proxy_hops": 0,
       "dataplane_grpc_addr": "127.0.0.1:9090",
+      "dataplane_http_addr": "127.0.0.1:9091",
       "webdav_enabled": true,
       "webdav_auth_type": "basic",
+      "smb_enabled": false,
+      "allow_unsafe_no_auth": false,
       "share_enabled": false
     }
   }
@@ -1956,7 +1959,7 @@ GET /api/v1/settings/security-check
 **字段说明**:
 - `data.status` 是整体状态，取值为 `pass`、`warning`、`block`
 - `checks[].status` 是单项状态，取值同上；存在任一 `block` 时整体为 `block`，否则存在任一 `warning` 时整体为 `warning`
-- `checks[].id` 当前包含 `auth_enabled`、`https_request`、`trusted_proxy_or_tls`、`server_listen`、`dataplane_listen`、`webdav_auth`、`smb_preview`、`share_base_url`、`initial_password_file`
+- `checks[].id` 当前包含 `auth_enabled`、`unsafe_no_auth_override`、`https_request`、`public_http_exposure`、`trusted_proxy_or_tls`、`forwarded_proto_trust`、`server_listen`、`admin_accounts`、`dataplane_listen`、`dataplane_http_listen`、`webdav_auth`、`smb_preview`、`share_base_url`、`initial_password_file`
 - `request` 描述当前请求如何被服务端识别，例如是否 HTTPS、是否来自受信转发源、`X-Forwarded-Proto` 是否被采纳
 - `config` 描述自检使用的关键运行配置
 

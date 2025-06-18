@@ -653,6 +653,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
 Environment=MNEMONAS_WEB_DIR=$WEB_DIR
+Environment=DATAPLANE_HTTP_ADDR=$DATAPLANE_HTTP_ADDR
 ExecStart=$BIN_DIR/nasd --config $CONFIG_PATH
 Restart=on-failure
 RestartSec=5

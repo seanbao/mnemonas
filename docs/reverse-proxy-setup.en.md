@@ -18,7 +18,7 @@ After systemd deployment, use the helper to create the public HTTPS entry and re
 sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 ```
 
-The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091`.
+The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091` or any custom backend ports.
 
 For Traefik or Cloudflare Tunnel, start from the repository templates instead of assembling commands ad hoc:
 
@@ -40,7 +40,7 @@ Use `1` for a single Caddy, Nginx, or Traefik proxy. For multiple hops, set the 
 
 Without this setting, MnemoNAS still works behind a proxy, but Secure-cookie detection and client-IP-based rate limiting use the direct peer address instead of the real client address.
 
-Only expose `80/443` publicly. `8080` is the direct Web/API/WebDAV port. If the reverse proxy and MnemoNAS run on the same host, prefer `[server].host = "127.0.0.1"` or firewall `8080` to trusted sources. Dataplane `9090/9091` must not be exposed.
+Only expose `80/443` publicly. `8080` is the default direct Web/API/WebDAV port. If the reverse proxy and MnemoNAS run on the same host, prefer `[server].host = "127.0.0.1"` or firewall the direct backend port to trusted sources. Dataplane `9090/9091`, or your custom dataplane ports, must not be exposed.
 
 ## Option 1: Caddy
 
@@ -175,7 +175,7 @@ cd ./mnemonas-traefik
 docker compose up -d
 ```
 
-The template uses `network_mode: host` so Traefik can reach the host's `127.0.0.1:8080` MnemoNAS listener. Expose only `80/443` publicly; do not add port mappings or security-group rules for `8080/9090/9091`.
+The template uses `network_mode: host` so Traefik can reach the host's `127.0.0.1:8080` MnemoNAS listener. Expose only `80/443` publicly; do not add port mappings or security-group rules for `8080/9090/9091` or custom backend ports.
 
 ### Docker Compose All-in-One Example
 
@@ -234,7 +234,7 @@ cp deploy/public-access/cloudflare-tunnel/config.yml ./cloudflared-config.yml
 cloudflared tunnel run --config ./cloudflared-config.yml
 ```
 
-The tunnel template forwards the public HTTPS hostname to local `http://127.0.0.1:8080` and ends with `http_status:404` for unmatched hosts. Even with a tunnel, keep dataplane `9090/9091` loopback-only or private-network-only.
+The tunnel template forwards the public HTTPS hostname to local `http://127.0.0.1:8080` and ends with `http_status:404` for unmatched hosts. Even with a tunnel, keep dataplane `9090/9091`, or your custom dataplane ports, loopback-only or private-network-only.
 
 ## Hardening
 

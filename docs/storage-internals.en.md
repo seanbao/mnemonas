@@ -301,10 +301,10 @@ max_age = "2160h"
 | --- | --- |
 | Is a specific filesystem required? | No. ext4 is enough to run. |
 | What is recommended? | ZFS mirror for stronger reliability. |
-| Can it meet serious NAS safety expectations? | Yes, when combined with mirror/RAID and backups. |
+| Can it meet common NAS reliability expectations? | Yes, when combined with mirror/RAID and backups. |
 | Can data migrate to another machine? | Yes, move the full storage root. Current files remain readable; versions require MnemoNAS metadata. |
 
-Key principle: MnemoNAS adds application-level versioning, deduplication, verification, and recovery. Filesystem redundancy and independent backups remain the user's responsibility.
+Key principle: MnemoNAS adds application-level versioning, whole-object version deduplication, verification, and recovery. Filesystem redundancy and independent backups remain the user's responsibility.
 
 ## Related Documents
 
