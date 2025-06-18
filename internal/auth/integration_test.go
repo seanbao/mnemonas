@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestConfigMatrix_AuthInitialization tests authentication behavior under different configurations
@@ -393,6 +395,69 @@ func TestNewUserStore_ReturnsErrorWhenCorruptUsersBackupSyncFails(t *testing.T) 
 		if strings.HasPrefix(entry.Name(), "users.json.corrupt.") {
 			t.Fatalf("expected no corrupt backup after rollback, found %s", entry.Name())
 		}
+	}
+}
+
+func TestNewUserStore_RejectsNullUserEntry(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+	if err := os.WriteFile(usersFile, []byte("[null]"), 0600); err != nil {
+		t.Fatalf("WriteFile(users.json) error: %v", err)
+	}
+
+	if _, _, err := NewUserStore(usersFile); err == nil {
+		t.Fatal("expected NewUserStore() to reject null user entries")
+	} else if !strings.Contains(err.Error(), "null entry") {
+		t.Fatalf("expected null entry error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(passwordFile); !os.IsNotExist(statErr) {
+		t.Fatal("expected no password file when users file contains null entries")
+	}
+}
+
+func TestNewUserStore_RejectsDuplicateNormalizedUsername(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+	now := time.Now()
+	users := []*User{
+		{
+			ID:           "user-1",
+			Username:     "Admin",
+			PasswordHash: "hash-1",
+			Role:         RoleAdmin,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			HomeDir:      "/",
+		},
+		{
+			ID:           "user-2",
+			Username:     "admin",
+			PasswordHash: "hash-2",
+			Role:         RoleUser,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			HomeDir:      "/admin",
+		},
+	}
+	data, err := json.Marshal(users)
+	if err != nil {
+		t.Fatalf("Marshal(users) error: %v", err)
+	}
+	if err := os.WriteFile(usersFile, data, 0600); err != nil {
+		t.Fatalf("WriteFile(users.json) error: %v", err)
+	}
+
+	if _, _, err := NewUserStore(usersFile); err == nil {
+		t.Fatal("expected NewUserStore() to reject duplicate normalized usernames")
+	} else if !strings.Contains(err.Error(), "duplicate username") {
+		t.Fatalf("expected duplicate username error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(passwordFile); !os.IsNotExist(statErr) {
+		t.Fatal("expected no password file when users file contains duplicate usernames")
 	}
 }
 

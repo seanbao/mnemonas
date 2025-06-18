@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -73,6 +75,13 @@ pub struct CasStore {
     index: DashMap<String, u64>,
     /// Statistics
     stats: CasStats,
+    #[cfg(test)]
+    fail_put_after: AtomicUsize,
+}
+
+pub struct PutResult {
+    pub hash: String,
+    pub deduplicated: bool,
 }
 
 /// Storage statistics
@@ -131,6 +140,8 @@ impl CasStore {
             config,
             index: DashMap::new(),
             stats: CasStats::default(),
+            #[cfg(test)]
+            fail_put_after: AtomicUsize::new(usize::MAX),
         };
 
         // Rebuild index (background task)
@@ -142,6 +153,12 @@ impl CasStore {
     /// Store data chunk, returns hash
     #[instrument(skip(self, data), fields(size = data.len()))]
     pub async fn put(&self, data: &[u8]) -> Result<String> {
+        self.put_with_status(data).await.map(|result| result.hash)
+    }
+
+    /// Store data chunk, returning both the hash and whether it was deduplicated.
+    #[instrument(skip(self, data), fields(size = data.len()))]
+    pub async fn put_with_status(&self, data: &[u8]) -> Result<PutResult> {
         let hash = compute_hash(data);
         let original_size = data.len() as u64;
         self.stats
@@ -155,9 +172,15 @@ impl CasStore {
                 // Already exists - deduplication hit
                 debug!(hash = %hash, "dedup hit");
                 self.stats.hit_count.fetch_add(1, Ordering::Relaxed);
-                return Ok(hash);
+                return Ok(PutResult {
+                    hash,
+                    deduplicated: true,
+                });
             }
             Entry::Vacant(entry) => {
+                #[cfg(test)]
+                self.maybe_fail_put()?;
+
                 // Determine if we should compress
                 let should_compress =
                     self.config.compression_enabled && data.len() >= self.config.min_compress_size;
@@ -210,9 +233,34 @@ impl CasStore {
                     compressed = path.extension().map(|e| e == "zst").unwrap_or(false),
                     "stored successfully"
                 );
-                Ok(hash)
+                Ok(PutResult {
+                    hash,
+                    deduplicated: false,
+                })
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_put_after(&self, remaining_successes: usize) {
+        self.fail_put_after
+            .store(remaining_successes, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn maybe_fail_put(&self) -> Result<()> {
+        let remaining = self.fail_put_after.load(Ordering::Relaxed);
+        if remaining == usize::MAX {
+            return Ok(());
+        }
+        if remaining == 0 {
+            return Err(CasError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "test put failure",
+            )));
+        }
+        self.fail_put_after.store(remaining - 1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Read data chunk
@@ -267,12 +315,13 @@ impl CasStore {
         let base_path = self.hash_to_path(hash);
         let compressed_path = base_path.with_extension("zst");
 
-        if let Some((_, original_size)) = self.index.remove(hash) {
+        if let Some(original_size) = self.index.get(hash).map(|r| *r) {
             // Try to delete both possible files
             let deleted_compressed = fs::remove_file(&compressed_path).await.is_ok();
             let deleted_plain = fs::remove_file(&base_path).await.is_ok();
 
             if deleted_compressed || deleted_plain {
+                self.index.remove(hash);
                 self.stats.total_chunks.fetch_sub(1, Ordering::Relaxed);
                 self.stats
                     .total_size
@@ -631,6 +680,8 @@ fn duration_to_unix_timestamp(duration: Duration) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -745,6 +796,44 @@ mod tests {
         // Verify retrieval
         let retrieved = store.get(&hash).await.unwrap();
         assert_eq!(retrieved, data);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_delete_keeps_index_when_filesystem_removal_fails() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        let store = CasStore::new(config).await.unwrap();
+        let data = b"delete consistency";
+        let hash = store.put(data).await.unwrap();
+        let object_path = store.hash_to_path(&hash);
+        let parent = object_path.parent().unwrap();
+
+        let original_permissions = std::fs::metadata(parent).unwrap().permissions();
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_mode(0o500);
+        std::fs::set_permissions(parent, read_only_permissions).unwrap();
+
+        let delete_result = store.delete(&hash).await.unwrap();
+
+        std::fs::set_permissions(parent, original_permissions).unwrap();
+
+        assert!(!delete_result);
+        assert!(store.has(&hash));
+        assert_eq!(store.size(&hash), Some(data.len() as u64));
+
+        let (chunks, logical_size, unique_size, _, _, _) = store.stats();
+        assert_eq!(chunks, 1);
+        assert_eq!(logical_size, data.len() as u64);
+        assert_eq!(unique_size, data.len() as u64);
+
+        assert!(store.delete(&hash).await.unwrap());
+        assert!(!store.has(&hash));
     }
 
     #[test]

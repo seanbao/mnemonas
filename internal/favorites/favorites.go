@@ -104,18 +104,35 @@ func (s *Store) load() error {
 	}
 
 	s.data = make(map[string]map[string]*Favorite)
-	for _, fav := range favorites {
+	needsRewrite := false
+	for i, fav := range favorites {
+		if fav == nil {
+			return fmt.Errorf("favorites file contains null entry at index %d", i)
+		}
 		cleanPath, err := normalizeStoredFavoritePath(fav.Path)
 		if err != nil {
+			needsRewrite = true
 			continue
 		}
 
 		normalized := copyFavorite(fav)
+		if normalized.Path != cleanPath {
+			needsRewrite = true
+		}
 		normalized.Path = cleanPath
 		if s.data[normalized.UserID] == nil {
 			s.data[normalized.UserID] = make(map[string]*Favorite)
 		}
+		if _, exists := s.data[normalized.UserID][normalized.Path]; exists {
+			needsRewrite = true
+		}
 		s.data[normalized.UserID][normalized.Path] = normalized
+	}
+
+	if needsRewrite {
+		if err := saveFavoritesState(s.filePath, s.data); err != nil {
+			return fmt.Errorf("persist normalized favorites: %w", err)
+		}
 	}
 
 	return nil
@@ -581,6 +598,12 @@ func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
 	for {
 		snapshot := s.snapshotState()
 		changed := false
+		type pendingFavoriteRewrite struct {
+			userID      string
+			currentPath string
+			updated     *Favorite
+		}
+		pendingRewrites := make([]pendingFavoriteRewrite, 0)
 
 		for userID, userFavs := range snapshot.data {
 			for currentPath, fav := range userFavs {
@@ -591,10 +614,18 @@ func (s *Store) UpdatePathReferences(oldPath, newPath string) error {
 
 				updated := copyFavorite(fav)
 				updated.Path = updatedPath
-				delete(snapshot.data[userID], currentPath)
-				snapshot.data[userID][updatedPath] = updated
+				pendingRewrites = append(pendingRewrites, pendingFavoriteRewrite{
+					userID:      userID,
+					currentPath: currentPath,
+					updated:     updated,
+				})
 				changed = true
 			}
+		}
+
+		for _, rewrite := range pendingRewrites {
+			delete(snapshot.data[rewrite.userID], rewrite.currentPath)
+			snapshot.data[rewrite.userID][rewrite.updated.Path] = rewrite.updated
 		}
 
 		if !changed {

@@ -281,6 +281,51 @@ function isPathActionShape(value: unknown): value is { path: string } {
   return isRecord(value) && typeof value.path === 'string'
 }
 
+function isFileItemShape(value: unknown): value is FileItem {
+  return isRecord(value)
+    && typeof value.name === 'string'
+    && typeof value.path === 'string'
+    && typeof value.isDir === 'boolean'
+    && typeof value.size === 'number'
+    && typeof value.modTime === 'string'
+    && isStringOrUndefined(value.etag)
+}
+
+function isFileListResponseShape(value: unknown): value is FileListResponse {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && Array.isArray(value.files)
+    && value.files.every(isFileItemShape)
+}
+
+function isVersionInfoShape(value: unknown): value is VersionInfo {
+  return isRecord(value)
+    && typeof value.version === 'number'
+    && typeof value.hash === 'string'
+    && typeof value.size === 'number'
+    && typeof value.timestamp === 'string'
+}
+
+function isVersionsResponseShape(value: unknown): value is { path: string, versions: VersionInfo[] } {
+  return isRecord(value)
+    && typeof value.path === 'string'
+    && Array.isArray(value.versions)
+    && value.versions.every(isVersionInfoShape)
+}
+
+function isStorageStatsShape(value: unknown): value is {
+  total_size?: number
+  total_chunks?: number
+  unique_size?: number
+  dedup_ratio?: number
+} {
+  return isRecord(value)
+    && isNumberOrUndefined(value.total_size)
+    && isNumberOrUndefined(value.total_chunks)
+    && isNumberOrUndefined(value.unique_size)
+    && isNumberOrUndefined(value.dedup_ratio)
+}
+
 function isMoveCopyActionShape(value: unknown): value is { from: string; to: string } {
   return isRecord(value) && typeof value.from === 'string' && typeof value.to === 'string'
 }
@@ -295,6 +340,60 @@ function isRestoreTrashActionShape(value: unknown): value is { id: string; resto
 
 function isDeleteTrashActionShape(value: unknown): value is { id: string; deleted: boolean } {
   return isRecord(value) && typeof value.id === 'string' && typeof value.deleted === 'boolean'
+}
+
+function isTrashItemShape(value: unknown): value is {
+  id: string
+  originalPath: string
+  deletedAt: string
+  name: string
+  isDir: boolean
+  size: number
+  hash?: string
+  hadVersions?: boolean
+} {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.originalPath === 'string'
+    && typeof value.deletedAt === 'string'
+    && typeof value.name === 'string'
+    && typeof value.isDir === 'boolean'
+    && typeof value.size === 'number'
+    && isStringOrUndefined(value.hash)
+    && isBooleanOrUndefined(value.hadVersions)
+}
+
+function isTrashListResponseShape(value: unknown): value is {
+  items: Array<{
+    id: string
+    originalPath: string
+    deletedAt: string
+    name: string
+    isDir: boolean
+    size: number
+    hash?: string
+    hadVersions?: boolean
+  }>
+  count?: number
+  totalSize?: number
+  retentionDays?: number
+  retentionEnabled?: boolean
+  retentionMaxSize?: number
+} {
+  return isRecord(value)
+    && Array.isArray(value.items)
+    && value.items.every(isTrashItemShape)
+    && isNumberOrUndefined(value.count)
+    && isNumberOrUndefined(value.totalSize)
+    && isNumberOrUndefined(value.retentionDays)
+    && isBooleanOrUndefined(value.retentionEnabled)
+    && isNumberOrUndefined(value.retentionMaxSize)
+}
+
+function isEmptyTrashResultShape(value: unknown): value is { deleted_count: number; partial?: boolean } {
+  return isRecord(value)
+    && typeof value.deleted_count === 'number'
+    && isBooleanOrUndefined(value.partial)
 }
 
 function isHealthShape(value: unknown): value is HealthStatus {
@@ -503,7 +602,11 @@ export async function listFiles(path: string): Promise<FileListResponse> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/files${encodedPath}`)
-  return handleWrappedResponse<FileListResponse>(response, '获取文件列表失败')
+  const data = await handleWrappedResponse<unknown>(response, '获取文件列表失败')
+  if (!isFileListResponseShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
+  return data
 }
 
 // Get file versions
@@ -511,7 +614,10 @@ export async function getVersions(path: string): Promise<VersionInfo[]> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/versions${encodedPath}`)
-  const data = await handleWrappedResponse<{path: string, versions: VersionInfo[]}>(response, '获取版本历史失败')
+  const data = await handleWrappedResponse<unknown>(response, '获取版本历史失败')
+  if (!isVersionsResponseShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
   return data.versions
 }
 
@@ -528,12 +634,10 @@ export async function deleteFile(path: string): Promise<void> {
 // Get storage stats (direct response, not wrapped)
 export async function getStorageStats(): Promise<StorageStats> {
   const response = await authFetch(`${API_BASE}/stats`)
-  const data = await handleWrappedResponse<{
-    total_size?: number
-    total_chunks?: number
-    unique_size?: number
-    dedup_ratio?: number
-  }>(response, '获取存储统计失败')
+  const data = await handleWrappedResponse<unknown>(response, '获取存储统计失败')
+  if (!isStorageStatsShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
   return {
     totalSize: data.total_size,
     totalObjects: data.total_chunks,
@@ -863,26 +967,12 @@ export interface TrashListResponse {
 // List trash items
 export async function listTrash(): Promise<TrashListResponse> {
   const response = await authFetch(`${API_BASE}/trash/`)
-  const data = await handleWrappedResponse<{
-    items?: Array<{
-      id: string
-      originalPath: string
-      deletedAt: string
-      name: string
-      isDir: boolean
-      size: number
-      hash?: string
-      hadVersions?: boolean
-    }>
-    count?: number
-    totalSize?: number
-    retentionDays?: number
-    retentionEnabled?: boolean
-    retentionMaxSize?: number
-  }>(response, '获取回收站列表失败')
+  const data = await handleWrappedResponse<unknown>(response, '获取回收站列表失败')
+  if (!isTrashListResponseShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
 
-  const items = Array.isArray(data.items)
-    ? data.items.map(item => ({
+  const items = data.items.map(item => ({
       id: item.id,
       originalPath: item.originalPath,
       deletedAt: item.deletedAt,
@@ -892,7 +982,6 @@ export async function listTrash(): Promise<TrashListResponse> {
       hash: item.hash,
       versions: item.hadVersions ? 1 : 0,
     }))
-    : []
   
   return {
     items,
@@ -929,7 +1018,10 @@ export async function emptyTrash(): Promise<EmptyTrashResult> {
   const response = await authFetch(`${API_BASE}/trash/`, {
     method: 'DELETE',
   })
-  const data = await handleWrappedResponse<{deleted_count: number, partial?: boolean}>(response, '清空回收站失败')
+  const data = await handleWrappedResponse<unknown>(response, '清空回收站失败')
+  if (!isEmptyTrashResultShape(data)) {
+    throw new Error('服务器返回了无效的数据')
+  }
   return {
     deletedCount: data.deleted_count,
     partial: !!data.partial,

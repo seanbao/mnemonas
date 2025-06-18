@@ -151,6 +151,35 @@ func TestNewStore_LoadNormalizesAndDropsInvalidPaths(t *testing.T) {
 	if len(listed) != 1 || listed[0].Path != "/docs/report.pdf" {
 		t.Fatalf("expected normalized favorite path in list output, got %+v", listed)
 	}
+
+	data, err = os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile(favorites.json) error: %v", err)
+	}
+	var persisted []Favorite
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(persisted favorites) error: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected normalized favorites file to contain one entry, got %d", len(persisted))
+	}
+	if persisted[0].Path != "/docs/report.pdf" {
+		t.Fatalf("expected normalized favorite path to be persisted, got %q", persisted[0].Path)
+	}
+}
+
+func TestNewStore_RejectsNullFavoriteEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+	if err := os.WriteFile(storePath, []byte("[null]"), 0600); err != nil {
+		t.Fatalf("WriteFile(favorites.json) error: %v", err)
+	}
+
+	if _, err := NewStore(storePath); err == nil {
+		t.Fatal("expected NewStore() to reject null favorite entries")
+	} else if !strings.Contains(err.Error(), "null entry") {
+		t.Fatalf("expected null entry error, got %v", err)
+	}
 }
 
 func TestNewStore_ReturnsErrorWhenCorruptFavoritesBackupSyncFails(t *testing.T) {
@@ -605,6 +634,65 @@ func TestStore_UpdatePathReferences_RenamesDescendantFavorites(t *testing.T) {
 	}
 	if !store.IsFavorite("user2", "/archive/docs/sub/b.txt") {
 		t.Fatal("expected descendant favorite for second user to be updated")
+	}
+}
+
+func TestStore_UpdatePathReferences_PreservesAllDescendantsForSingleUser(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	paths := []string{
+		"/docs",
+		"/docs/a.txt",
+		"/docs/b.txt",
+		"/docs/sub/c.txt",
+		"/docs/sub/deeper/d.txt",
+	}
+	for _, favoritePath := range paths {
+		if _, err := store.Add("user1", favoritePath, favoritePath); err != nil {
+			t.Fatalf("Add(%s) error: %v", favoritePath, err)
+		}
+	}
+
+	if err := store.UpdatePathReferences("/docs", "/archive/docs"); err != nil {
+		t.Fatalf("UpdatePathReferences() error: %v", err)
+	}
+
+	if store.Count("user1") != len(paths) {
+		t.Fatalf("expected %d favorites after rename, got %d", len(paths), store.Count("user1"))
+	}
+
+	expected := []string{
+		"/archive/docs",
+		"/archive/docs/a.txt",
+		"/archive/docs/b.txt",
+		"/archive/docs/sub/c.txt",
+		"/archive/docs/sub/deeper/d.txt",
+	}
+	for _, favoritePath := range expected {
+		if !store.IsFavorite("user1", favoritePath) {
+			t.Fatalf("expected favorite path %s to be updated", favoritePath)
+		}
+	}
+	for _, oldPath := range paths {
+		if store.IsFavorite("user1", oldPath) {
+			t.Fatalf("expected old favorite path %s to be removed", oldPath)
+		}
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	for _, favoritePath := range expected {
+		if !reloaded.IsFavorite("user1", favoritePath) {
+			t.Fatalf("expected reloaded favorite path %s to be updated", favoritePath)
+		}
 	}
 }
 

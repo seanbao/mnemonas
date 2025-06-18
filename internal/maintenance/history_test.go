@@ -1,6 +1,7 @@
 package maintenance
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -463,6 +464,21 @@ func TestNewHistoryStore_RecoverInterruptedRunningScrub(t *testing.T) {
 	}
 	if !result.StartTime.IsZero() && result.EndTime.Before(result.StartTime) {
 		t.Fatalf("expected recovered scrub end time %v to be >= start time %v", result.EndTime, result.StartTime)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "failed" {
+		t.Fatalf("expected recovered scrub status to be persisted as failed, got %q", persisted.Status)
+	}
+	if persisted.ErrorMessage != interruptedScrubErrorMessage {
+		t.Fatalf("expected recovered scrub error message to persist as %q, got %q", interruptedScrubErrorMessage, persisted.ErrorMessage)
 	}
 }
 

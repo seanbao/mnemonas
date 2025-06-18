@@ -100,6 +100,21 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "Negative retention max versions",
+			modify:  func(c *Config) { c.Storage.Retention.MaxVersions = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "Negative retention max age",
+			modify:  func(c *Config) { c.Storage.Retention.MaxAge = -1 * time.Hour },
+			wantErr: true,
+		},
+		{
+			name:    "Negative retention gc interval",
+			modify:  func(c *Config) { c.Storage.Retention.GCInterval = -1 * time.Hour },
+			wantErr: true,
+		},
+		{
 			name:    "Invalid trash max size",
 			modify:  func(c *Config) { c.Storage.Trash.MaxSize = 0 },
 			wantErr: true,
@@ -107,6 +122,21 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Invalid versioning max size",
 			modify:  func(c *Config) { c.Storage.Versioning.MaxVersionedSize = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid WebDAV auth type",
+			modify:  func(c *Config) { c.WebDAV.AuthType = "token" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid auth access token ttl",
+			modify:  func(c *Config) { c.Auth.AccessTokenTTL = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid auth refresh token ttl",
+			modify:  func(c *Config) { c.Auth.RefreshTokenTTL = 0 },
 			wantErr: true,
 		},
 		{
@@ -126,6 +156,16 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name:    "Empty gRPC address",
 			modify:  func(c *Config) { c.DataPlane.GRPCAddress = "" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid dataplane timeout",
+			modify:  func(c *Config) { c.DataPlane.Timeout = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "Negative dataplane max retries",
+			modify:  func(c *Config) { c.DataPlane.MaxRetries = -1 },
 			wantErr: true,
 		},
 		{
@@ -164,6 +204,21 @@ func TestConfig_Validate(t *testing.T) {
 				c.Alerts.ThresholdPct = 90
 				c.Alerts.CriticalPct = 80
 			},
+			wantErr: true,
+		},
+		{
+			name:    "Invalid log level",
+			modify:  func(c *Config) { c.Log.Level = "trace" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid log format",
+			modify:  func(c *Config) { c.Log.Format = "text" },
+			wantErr: true,
+		},
+		{
+			name:    "Invalid empty log output",
+			modify:  func(c *Config) { c.Log.Output = "   " },
 			wantErr: true,
 		},
 	}

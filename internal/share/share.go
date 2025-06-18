@@ -176,15 +176,34 @@ func (s *ShareStore) load() error {
 
 	s.shares = make(map[string]*Share)
 	s.pathIdx = make(map[string][]string)
+	needsRewrite := false
 
-	for _, share := range shares {
+	for i, share := range shares {
+		if share == nil {
+			return fmt.Errorf("shares file contains null entry at index %d", i)
+		}
 		normalized := copyShare(share)
+		originalPath := normalized.Path
+		originalPermission := normalized.Permission
 		normalized.Permission = normalizePermission(normalized.Permission)
 		if err := validateShareInvariants(normalized); err != nil {
+			needsRewrite = true
 			continue
+		}
+		if normalized.Path != originalPath || normalized.Permission != originalPermission {
+			needsRewrite = true
+		}
+		if _, exists := s.shares[normalized.ID]; exists {
+			needsRewrite = true
 		}
 		s.shares[normalized.ID] = normalized
 		s.pathIdx[normalized.Path] = append(s.pathIdx[normalized.Path], normalized.ID)
+	}
+
+	if needsRewrite {
+		if err := saveShareState(s.filePath, s.shares); err != nil {
+			return fmt.Errorf("persist normalized shares: %w", err)
+		}
 	}
 
 	return nil
@@ -572,7 +591,7 @@ func (s *ShareStore) Create(opts CreateShareOptions) (*Share, error) {
 	for {
 		snapshot := s.snapshotState()
 		snapshot.shares[id] = copyShare(share)
-		snapshot.pathIdx[opts.Path] = append(snapshot.pathIdx[opts.Path], id)
+		snapshot.pathIdx[share.Path] = append(snapshot.pathIdx[share.Path], id)
 
 		if err := saveShareState(snapshot.filePath, snapshot.shares); err != nil {
 			return nil, err
@@ -598,10 +617,15 @@ func (s *ShareStore) Get(id string) (*Share, error) {
 
 // GetByPath retrieves all shares for a path
 func (s *ShareStore) GetByPath(path string) []*Share {
+	normalizedPath, err := normalizeStoredSharePath(path)
+	if err != nil {
+		return nil
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	ids := s.pathIdx[path]
+	ids := s.pathIdx[normalizedPath]
 	shares := make([]*Share, 0, len(ids))
 
 	for _, id := range ids {
@@ -720,8 +744,15 @@ func (s *ShareStore) Delete(id string) error {
 
 // UpdatePathReferences rewrites share paths when a filesystem path is renamed.
 func (s *ShareStore) UpdatePathReferences(oldPath, newPath string) error {
-	oldPath = path.Clean(oldPath)
-	newPath = path.Clean(newPath)
+	var err error
+	oldPath, err = normalizeStoredSharePath(oldPath)
+	if err != nil {
+		return err
+	}
+	newPath, err = normalizeStoredSharePath(newPath)
+	if err != nil {
+		return err
+	}
 	if oldPath == newPath {
 		return nil
 	}
@@ -766,7 +797,11 @@ func (s *ShareStore) DisableSharesUnderPath(targetPath string) error {
 // DisableSharesUnderPathWithRestore disables shares under a path and returns
 // the prior share states needed to restore the change if a later step fails.
 func (s *ShareStore) DisableSharesUnderPathWithRestore(targetPath string) ([]*Share, error) {
-	targetPath = path.Clean(targetPath)
+	var err error
+	targetPath, err = normalizeStoredSharePath(targetPath)
+	if err != nil {
+		return nil, err
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 

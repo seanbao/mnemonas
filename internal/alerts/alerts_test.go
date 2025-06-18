@@ -255,3 +255,61 @@ func TestUpdateConfig_SerializesConcurrentRestarts(t *testing.T) {
 		t.Fatalf("expected concurrent UpdateConfig calls to keep only one alert monitor loop active at a time, got max %d", got)
 	}
 }
+
+func TestCheck_ConcurrentConfigUpdates(t *testing.T) {
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	monitor := NewMonitor(Config{
+		Enabled:        true,
+		CheckInterval:  time.Hour,
+		ThresholdPct:   99.9,
+		CriticalPct:    99.99,
+		MinFreeBytes:   1,
+		CooldownPeriod: time.Second,
+		WebhookURL:     "https://example.invalid/alerts",
+		WebhookMethod:  "POST",
+		WebhookHeaders: []string{"X-Test: value"},
+	}, "/tmp", logger)
+
+	errCh := make(chan error, 32)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 100; i++ {
+			if _, err := monitor.Check(); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 100; i++ {
+			monitor.UpdateConfig(Config{
+				Enabled:        true,
+				CheckInterval:  time.Hour,
+				ThresholdPct:   80 + float64(i%10),
+				CriticalPct:    90 + float64(i%10),
+				MinFreeBytes:   uint64(i + 1),
+				CooldownPeriod: time.Second,
+				WebhookURL:     "https://example.invalid/alerts",
+				WebhookMethod:  "POST",
+				WebhookHeaders: []string{"X-Test: value"},
+			})
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatalf("unexpected concurrent Check()/UpdateConfig() error: %v", err)
+	}
+}
