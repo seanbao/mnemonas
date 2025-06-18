@@ -102,6 +102,7 @@ run_fresh_install_test() {
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "CapabilityBoundingSet="
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
   assert_file_contains "$install_dir/systemd/mnemonas.service" "MNEMONAS_WEB_DIR=$install_dir/share/mnemonas/web"
+  assert_file_contains "$install_dir/systemd/mnemonas.service" "Environment=DATAPLANE_HTTP_ADDR=127.0.0.1:9091"
   assert_file_contains "$install_dir/systemd/mnemonas.service" "RequiresMountsFor=$storage_dir"
   assert_file_contains "$install_dir/systemd/mnemonas.service" "CapabilityBoundingSet="
   assert_file_contains "$install_dir/systemd/mnemonas.service" "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
@@ -214,6 +215,7 @@ EOF
   assert_file_contains "$case_dir/install.log" "Open Web UI: http://127.0.0.1:18080"
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_GRPC_ADDR=127.0.0.1:19090"
   assert_file_contains "$install_dir/systemd/mnemonas-dataplane.service" "Environment=DATAPLANE_DATA_DIR=$storage_dir/.mnemonas/objects"
+  assert_file_contains "$install_dir/systemd/mnemonas.service" "Environment=DATAPLANE_HTTP_ADDR=127.0.0.1:9091"
   assert_file_contains "$install_dir/systemd/mnemonas.service" "ReadWritePaths=$storage_dir $install_dir/etc/mnemonas"
 
   write_executable "$case_dir/capture-dataplane" \
@@ -698,7 +700,8 @@ run_doctor_config_test() {
   local web_dir="$case_dir/web"
   local storage_dir="$case_dir/storage"
   local backup_dir="$case_dir/backup"
-  mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/.mnemonas" "$backup_dir"
+  local systemd_dir="$case_dir/systemd"
+  mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/.mnemonas" "$backup_dir" "$systemd_dir"
   chmod 0750 "$storage_dir"
   chmod 0700 "$storage_dir/.mnemonas"
 
@@ -750,11 +753,16 @@ root = "$storage_dir"
 grpc_address = "127.0.0.1:19090"
 EOF
 
+  cat > "$systemd_dir/mnemonas-dataplane.service" <<EOF
+[Service]
+Environment="DATAPLANE_HTTP_ADDR=127.0.0.1:19091" "OTHER=value"
+EOF
+
   PATH="$fake_path:$PATH" \
     BIN_DIR="$bin_dir" \
     WEB_DIR="$web_dir" \
     CONFIG_PATH="$case_dir/config.toml" \
-    DATAPLANE_HTTP_PORT=19091 \
+    SYSTEMD_DIR="$systemd_dir" \
     BACKUP_ROOT="$backup_dir" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor.log"
 
@@ -783,7 +791,7 @@ EOF
     BIN_DIR="$bin_dir" \
     WEB_DIR="$web_dir" \
     CONFIG_PATH="$case_dir/config.toml" \
-    DATAPLANE_HTTP_PORT=19091 \
+    SYSTEMD_DIR="$systemd_dir" \
     BACKUP_ROOT="$backup_dir" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-unsafe.log"
 
@@ -865,21 +873,21 @@ run_doctor_public_domain_test() {
   cat > "$case_dir/config.toml" <<EOF
 [server]
 host = "127.0.0.1"
-port = 18080
+port = 018080
 trusted_proxy_hops = 1
 
 [storage]
 root = "$storage_dir"
 
 [dataplane]
-grpc_address = "127.0.0.1:19090"
+grpc_address = "127.0.0.1:019090"
 EOF
 
   PATH="$fake_path:$PATH" \
     BIN_DIR="$bin_dir" \
     WEB_DIR="$web_dir" \
     CONFIG_PATH="$case_dir/config.toml" \
-    DATAPLANE_HTTP_PORT=19091 \
+    DATAPLANE_HTTP_PORT=019091 \
     BACKUP_ROOT="$backup_dir" \
     "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public.log"
 

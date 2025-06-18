@@ -5547,9 +5547,6 @@ func securityTCPAddressHost(address string) string {
 	if err == nil {
 		return strings.Trim(host, "[]")
 	}
-	if strings.Count(trimmed, ":") == 0 {
-		return trimmed
-	}
 	return ""
 }
 
@@ -5903,7 +5900,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			ID:      "dataplane_http_listen",
 			Status:  securityCheckBlock,
 			Title:   "数据面 HTTP 不应暴露外网",
-			Message: "请将 DATAPLANE_HTTP_ADDR 绑定到 127.0.0.1:9091 或 ::1:9091，并通过 Web 控制面查看健康状态。",
+			Message: "请将 DATAPLANE_HTTP_ADDR 绑定到 127.0.0.1:9091 或 [::1]:9091，并通过 Web 控制面查看健康状态。",
 			Details: map[string]interface{}{
 				"http_address": dataplaneHTTPAddress,
 			},

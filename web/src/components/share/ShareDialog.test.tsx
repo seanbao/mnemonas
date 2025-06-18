@@ -136,7 +136,7 @@ describe('ShareDialog', () => {
     )
 
     expect(screen.getByTestId('modal')).toBeInTheDocument()
-    expect(screen.getByText('分享 文件')).toBeInTheDocument()
+    expect(screen.getByText('分享文件')).toBeInTheDocument()
     expect(screen.getByText('/test/file.txt')).toBeInTheDocument()
   })
 
@@ -162,7 +162,7 @@ describe('ShareDialog', () => {
       />
     )
 
-    expect(screen.getByText('分享 文件夹')).toBeInTheDocument()
+    expect(screen.getByText('分享文件夹')).toBeInTheDocument()
   })
 
   it('has password protection toggle', () => {

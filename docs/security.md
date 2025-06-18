@@ -129,6 +129,8 @@ sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="192.168.0.
 sudo firewall-cmd --reload
 ```
 
+如果修改过 Web 直连端口或 dataplane 端口，请把示例中的 `8080/9090/9091` 替换为实际端口，并保持 dataplane 端口不对公网或不可信局域网开放。
+
 ### 场景三：公网访问（不推荐直接暴露）
 
 **强烈建议**使用反向代理 + HTTPS，而不是直接暴露 MnemoNAS。
@@ -237,7 +239,7 @@ cloudflared tunnel run mnemonas
 - [ ] `auth_type` 不是 `none`（除非仅本地访问）
 - [ ] 公网部署时 `server.host = "127.0.0.1"`，只通过 HTTPS 反向代理访问
 - [ ] dataplane gRPC/HTTP 端口保持在 `127.0.0.1` 或受信私有网络内，没有直接暴露到公网
-- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、反向代理 header、dataplane `9090/9091` 和备用管理员提醒
+- [ ] Web UI “安全自检”没有 `block` 项；公网部署前应处理所有 `warning`，尤其是 `allow_unsafe_no_auth`、反向代理 header、dataplane 端口和备用管理员提醒
 - [ ] systemd 部署已运行 `sudo mnemonas-doctor --public-domain <domain>`，并确认 HTTP 会跳转到 HTTPS、HTTPS 证书 hostname 匹配、30 天内不过期，续期路径已验证，且没有 Web 后端直连、dataplane 端口暴露或 UFW 放行警告
 - [ ] 已按 [公网云防火墙复核清单](cloud-firewall-checklist.md) 确认云安全组或防火墙公网入口只开放 `80/443`；管理端口、Web 后端端口和 dataplane 端口不对公网开放
 - [ ] 生产环境使用 HTTPS
@@ -258,6 +260,7 @@ curl -I https://<domain>/health
 
 # 公网直连后端端口应失败或超时
 curl --connect-timeout 3 http://<domain>:8080/health
+# 如果使用自定义后端端口，也要检查对应端口公网不可达
 
 # 检查认证是否生效
 curl https://<domain>/dav/

@@ -15,13 +15,13 @@
 | `9090` | TCP | 无公网来源 | dataplane gRPC 内部端口 | 不开放 |
 | `9091` | TCP | 无公网来源 | dataplane HTTP 内部端口 | 不开放 |
 
-如果使用 Cloudflare Tunnel、Tailscale、Headscale 或其他隧道/VPN，并且不需要公网直接入站，可以不开放 `80/443`；但仍不要开放 `8080/9090/9091`。
+如果你修改了 MnemoNAS 直连端口或 dataplane 端口，把自定义端口也按上表的“不开放”处理。使用 Cloudflare Tunnel、Tailscale、Headscale 或其他隧道/VPN，并且不需要公网直接入站时，可以不开放 `80/443`；但仍不要开放 `8080/9090/9091` 或自定义后端端口。
 
 ## 云厂商对照
 
 | 云厂商或平台 | 常见规则位置 | 需要确认 |
 | --- | --- | --- |
-| AWS EC2 | Security Group inbound rules、Network ACL | 实例绑定的所有 Security Group 都没有放行 `8080/9090/9091`；`22` 仅限可信来源 |
+| AWS EC2 | Security Group inbound rules、Network ACL | 实例绑定的所有 Security Group 都没有放行 `8080/9090/9091` 或自定义后端端口；`22` 仅限可信来源 |
 | Azure VM | Network Security Group inbound rules | NIC 和子网级 NSG 都要检查；高优先级规则不能放行后端端口 |
 | Google Cloud VM | VPC firewall rules、instance network tags | 匹配实例 tag/service account 的规则不能放行后端端口 |
 | Oracle Cloud | Security Lists、Network Security Groups | 子网 Security List 和实例 NSG 都要检查 |
@@ -53,12 +53,12 @@ curl --connect-timeout 3 http://nas.example.com:9091/health
 - `http://nas.example.com:8080/health` 失败或超时。
 - `http://nas.example.com:9090/` 失败或超时。
 - `http://nas.example.com:9091/health` 失败或超时。
+- 如果使用自定义后端端口，对应端口也应失败或超时。
 
 ## 常见错误
 
-- 开放了 `8080` 用来“临时测试”，上线后忘记删除。
+- 开放了 `8080` 或自定义后端端口用来“临时测试”，上线后忘记删除。
 - 云安全组限制了 `8080`，但本机 UFW 或路由器仍转发了该端口。
-- dataplane `9090/9091` 在 Docker Compose、路由器或云安全组里被误映射到公网。
+- dataplane `9090/9091` 或自定义 dataplane 端口在 Docker Compose、路由器或云安全组里被误映射到公网。
 - SSH `22` 对 `0.0.0.0/0` 开放，且没有额外限速、密钥策略或堡垒机。
 - IPv4 规则正确，但 IPv6 `::/0` 中仍开放了后端端口。
-

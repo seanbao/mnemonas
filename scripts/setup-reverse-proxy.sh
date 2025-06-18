@@ -20,6 +20,9 @@ RESTART_MNEMONAS="${MNEMONAS_RESTART_MNEMONAS:-1}"
 TRUSTED_PROXY_HOPS="${MNEMONAS_TRUSTED_PROXY_HOPS:-1}"
 UPSTREAM_HOST="${MNEMONAS_UPSTREAM_HOST:-127.0.0.1}"
 UPSTREAM_PORT="${MNEMONAS_UPSTREAM_PORT:-}"
+SYSTEMD_DIR="${MNEMONAS_SYSTEMD_DIR:-/etc/systemd/system}"
+DATAPLANE_GRPC_PORT="${MNEMONAS_DATAPLANE_GRPC_PORT:-}"
+DATAPLANE_HTTP_PORT="${MNEMONAS_DATAPLANE_HTTP_PORT:-}"
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -46,6 +49,8 @@ usage() {
   MNEMONAS_UPSTREAM_HOST       代理后端主机，默认 127.0.0.1
   MNEMONAS_UPSTREAM_PORT       代理后端端口，默认读取 config.toml 的 server.port，否则 8080
   MNEMONAS_TRUSTED_PROXY_HOPS  写入 server.trusted_proxy_hops 的值，默认 1
+  MNEMONAS_DATAPLANE_GRPC_PORT 数据面 gRPC 端口，默认读取 config.toml，否则 9090
+  MNEMONAS_DATAPLANE_HTTP_PORT 数据面 HTTP 端口，默认读取 systemd 单元，否则 9091
 
 示例:
   sudo $0 --proxy caddy nas.example.com admin@example.com
@@ -114,6 +119,12 @@ require_safe_port() {
 
     [[ "$value" =~ ^[0-9]+$ ]] || fail "$label 必须是数字端口: $value"
     (( 10#$value >= 1 && 10#$value <= 65535 )) || fail "$label 必须在 1-65535 之间: $value"
+}
+
+normalize_port() {
+    local value="$1"
+
+    printf '%s\n' "$((10#$value))"
 }
 
 toml_value() {
@@ -187,6 +198,43 @@ toml_value() {
             exit
         }
     ' "$file"
+}
+
+systemd_env_value() {
+    local key="$1"
+    local file="$2"
+
+    [[ -f "$file" ]] || return 0
+    awk -v key="$key" '
+        /^[[:space:]]*Environment=/ {
+            line = $0
+            sub(/^[[:space:]]*Environment=/, "", line)
+            count = split(line, parts, /[[:space:]]+/)
+            for (i = 1; i <= count; i++) {
+                item = parts[i]
+                gsub(/^"|"$/, "", item)
+                if (substr(item, 1, length(key) + 1) == key "=") {
+                    sub("^" key "=", "", item)
+                    print item
+                    exit
+                }
+            }
+        }
+    ' "$file"
+}
+
+tcp_addr_port() {
+    local value="$1"
+
+    if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    if [[ "$value" =~ ^[^:]+:([0-9]+)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
 }
 
 sed_replacement_escape() {
@@ -280,6 +328,56 @@ resolve_upstream_port() {
     fi
     UPSTREAM_PORT="${UPSTREAM_PORT:-${configured_port:-8080}}"
     require_safe_port "$UPSTREAM_PORT" "MNEMONAS_UPSTREAM_PORT"
+    UPSTREAM_PORT="$(normalize_port "$UPSTREAM_PORT")"
+}
+
+resolve_dataplane_ports() {
+    local configured_grpc_address=""
+    local configured_http_address=""
+    local configured_grpc_port=""
+    local configured_http_port=""
+
+    if [[ -f "$CONFIG_PATH" ]]; then
+        configured_grpc_address="$(toml_value dataplane grpc_address "$CONFIG_PATH" || true)"
+    fi
+    if [[ -n "$configured_grpc_address" ]]; then
+        configured_grpc_port="$(tcp_addr_port "$configured_grpc_address" || true)"
+        [[ -n "$configured_grpc_port" ]] || fail "dataplane.grpc_address 不是 host:port: $configured_grpc_address"
+    fi
+
+    configured_http_address="$(systemd_env_value DATAPLANE_HTTP_ADDR "$SYSTEMD_DIR/mnemonas-dataplane.service")"
+    if [[ -n "$configured_http_address" ]]; then
+        configured_http_port="$(tcp_addr_port "$configured_http_address" || true)"
+        [[ -n "$configured_http_port" ]] || fail "DATAPLANE_HTTP_ADDR 不是 host:port: $configured_http_address"
+    fi
+
+    DATAPLANE_GRPC_PORT="${DATAPLANE_GRPC_PORT:-${configured_grpc_port:-9090}}"
+    DATAPLANE_HTTP_PORT="${DATAPLANE_HTTP_PORT:-${configured_http_port:-9091}}"
+    require_safe_port "$DATAPLANE_GRPC_PORT" "MNEMONAS_DATAPLANE_GRPC_PORT"
+    require_safe_port "$DATAPLANE_HTTP_PORT" "MNEMONAS_DATAPLANE_HTTP_PORT"
+    DATAPLANE_GRPC_PORT="$(normalize_port "$DATAPLANE_GRPC_PORT")"
+    DATAPLANE_HTTP_PORT="$(normalize_port "$DATAPLANE_HTTP_PORT")"
+}
+
+validate_public_setup_ports() {
+    case "$UPSTREAM_PORT" in
+        80|443)
+            fail "MNEMONAS_UPSTREAM_PORT 不能是 80 或 443；这些端口需要留给公网 HTTPS 反向代理"
+            ;;
+    esac
+    case "$DATAPLANE_GRPC_PORT" in
+        80|443)
+            fail "MNEMONAS_DATAPLANE_GRPC_PORT 不能是 80 或 443；dataplane 端口必须保持内部访问"
+            ;;
+    esac
+    case "$DATAPLANE_HTTP_PORT" in
+        80|443)
+            fail "MNEMONAS_DATAPLANE_HTTP_PORT 不能是 80 或 443；dataplane 端口必须保持内部访问"
+            ;;
+    esac
+    [[ "$UPSTREAM_PORT" != "$DATAPLANE_GRPC_PORT" ]] || fail "MNEMONAS_UPSTREAM_PORT 不能和 MNEMONAS_DATAPLANE_GRPC_PORT 相同"
+    [[ "$UPSTREAM_PORT" != "$DATAPLANE_HTTP_PORT" ]] || fail "MNEMONAS_UPSTREAM_PORT 不能和 MNEMONAS_DATAPLANE_HTTP_PORT 相同"
+    [[ "$DATAPLANE_GRPC_PORT" != "$DATAPLANE_HTTP_PORT" ]] || fail "MNEMONAS_DATAPLANE_GRPC_PORT 不能和 MNEMONAS_DATAPLANE_HTTP_PORT 相同"
 }
 
 require_root() {
@@ -668,9 +766,9 @@ configure_firewall() {
         if [[ "$UPSTREAM_PORT" != "80" && "$UPSTREAM_PORT" != "443" ]]; then
             ufw deny "$UPSTREAM_PORT/tcp" comment "MnemoNAS direct HTTP"
         fi
-        ufw deny 9090/tcp comment "MnemoNAS dataplane gRPC"
-        ufw deny 9091/tcp comment "MnemoNAS dataplane HTTP"
-        log_info "已允许 80/443，并限制 $UPSTREAM_PORT/9090/9091"
+        ufw deny "$DATAPLANE_GRPC_PORT/tcp" comment "MnemoNAS dataplane gRPC"
+        ufw deny "$DATAPLANE_HTTP_PORT/tcp" comment "MnemoNAS dataplane HTTP"
+        log_info "已允许 80/443，并限制 $UPSTREAM_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT"
     else
         log_warn "未检测到 ufw；请在云安全组或系统防火墙中只开放 80/443"
     fi
@@ -738,8 +836,8 @@ run_post_setup_checks() {
     log_info "运行公网入口检查..."
 
     check_loopback_only_port "$UPSTREAM_PORT" "MnemoNAS Web/API/WebDAV"
-    check_loopback_only_port 9090 "MnemoNAS dataplane gRPC"
-    check_loopback_only_port 9091 "MnemoNAS dataplane HTTP"
+    check_loopback_only_port "$DATAPLANE_GRPC_PORT" "MnemoNAS dataplane gRPC"
+    check_loopback_only_port "$DATAPLANE_HTTP_PORT" "MnemoNAS dataplane HTTP"
 
     if command -v curl >/dev/null 2>&1; then
         if curl -fsSI "https://$DOMAIN/health" >/dev/null 2>&1; then
@@ -750,7 +848,7 @@ run_post_setup_checks() {
     fi
 
     if command -v mnemonas-doctor >/dev/null 2>&1; then
-        if SERVER_URL="http://127.0.0.1:$UPSTREAM_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
+        if SERVER_URL="http://127.0.0.1:$UPSTREAM_PORT" DATAPLANE_GRPC_PORT="$DATAPLANE_GRPC_PORT" DATAPLANE_HTTP_PORT="$DATAPLANE_HTTP_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
             log_info "mnemonas-doctor 检查通过"
         else
             log_warn "mnemonas-doctor 存在失败或警告，请按输出处理后再开放给真实用户"
@@ -773,7 +871,7 @@ print_summary() {
     echo "已处理:"
     echo "  - 反向代理: $PROXY_TYPE"
     echo "  - MnemoNAS 配置: server.host = \"$UPSTREAM_HOST\", trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
-    echo "  - 本机防火墙: 允许 80/443，限制直接访问 $UPSTREAM_PORT/9090/9091"
+    echo "  - 本机防火墙: 允许 80/443，限制直接访问 $UPSTREAM_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT"
     echo ""
     echo "仍需人工确认:"
     echo "  - 云厂商安全组只开放 80/443；SSH 限制到可信 IP 或私有网络"
@@ -830,19 +928,37 @@ EOF
     grep -Fq '[server]' "$config" || fail "self-test failed: server section was not appended"
     grep -Fq 'host = "127.0.0.1"' "$config" || fail "self-test failed: appended host missing"
 
+    [[ "$(tcp_addr_port '127.0.0.1:19090')" == "19090" ]] || fail "self-test failed: IPv4 port parsing"
+    [[ "$(tcp_addr_port '[::1]:19091')" == "19091" ]] || fail "self-test failed: IPv6 port parsing"
+    [[ "$(normalize_port '0443')" == "443" ]] || fail "self-test failed: port normalization"
+
+    cat > "$tmp/mnemonas-dataplane.service" <<'EOF'
+[Service]
+Environment=DATAPLANE_HTTP_ADDR=127.0.0.1:19091
+EOF
+    [[ "$(systemd_env_value DATAPLANE_HTTP_ADDR "$tmp/mnemonas-dataplane.service")" == "127.0.0.1:19091" ]] || fail "self-test failed: systemd environment parsing"
+
+    cat > "$tmp/mnemonas-dataplane-quoted.service" <<'EOF'
+[Service]
+Environment="DATAPLANE_HTTP_ADDR=[::1]:19092" "OTHER=value"
+EOF
+    [[ "$(systemd_env_value DATAPLANE_HTTP_ADDR "$tmp/mnemonas-dataplane-quoted.service")" == "[::1]:19092" ]] || fail "self-test failed: quoted systemd environment parsing"
+
     printf '[reverse-proxy-self-test] all checks passed\n'
 }
 
 main() {
     parse_args "$@"
     validate_inputs_before_root
+    resolve_upstream_port
+    resolve_dataplane_ports
+    validate_public_setup_ports
     require_root
     require_command apt-get
     require_command awk
     require_command sed
     require_command systemctl
     warn_if_not_ubuntu
-    resolve_upstream_port
     select_proxy
 
     echo ""
