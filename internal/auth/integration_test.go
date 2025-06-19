@@ -8,7 +8,38 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
+
+func parseBootstrapCredentials(t *testing.T, passwordFile string) (string, string) {
+	t.Helper()
+
+	content, err := os.ReadFile(passwordFile)
+	if err != nil {
+		t.Fatalf("failed to read password file: %v", err)
+	}
+
+	var username string
+	var password string
+	for _, line := range strings.Split(string(content), "\n") {
+		switch {
+		case strings.HasPrefix(line, "Username: "):
+			username = strings.TrimPrefix(line, "Username: ")
+		case strings.HasPrefix(line, "Password: "):
+			password = strings.TrimPrefix(line, "Password: ")
+		}
+	}
+
+	if username == "" {
+		t.Fatal("could not extract username from password file")
+	}
+	if password == "" {
+		t.Fatal("could not extract password from password file")
+	}
+
+	return username, password
+}
 
 // TestConfigMatrix_AuthInitialization tests authentication behavior under different configurations
 func TestConfigMatrix_AuthInitialization(t *testing.T) {
@@ -313,6 +344,294 @@ func TestReloadPreservesNoPasswordFile(t *testing.T) {
 
 	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
 		t.Error("password file should NOT be created on reload of existing users")
+	}
+}
+
+func TestNewUserStore_BootstrapsRecoveryAdminWhenNoEnabledAdminExists(t *testing.T) {
+	cases := []struct {
+		name         string
+		existingUser *User
+	}{
+		{
+			name: "only regular user exists",
+			existingUser: &User{
+				ID:           "user-1",
+				Username:     "member",
+				PasswordHash: "hash-1",
+				Role:         RoleUser,
+				CreatedAt:    time.Now(),
+				UpdatedAt:    time.Now(),
+				HomeDir:      "/member",
+			},
+		},
+		{
+			name: "only disabled admin exists",
+			existingUser: &User{
+				ID:           "user-2",
+				Username:     "disabled-admin",
+				PasswordHash: "hash-2",
+				Role:         RoleAdmin,
+				Disabled:     true,
+				CreatedAt:    time.Now(),
+				UpdatedAt:    time.Now(),
+				HomeDir:      "/",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			usersFile := filepath.Join(dir, "users.json")
+			passwordFile := filepath.Join(dir, "initial-password.txt")
+
+			data, err := json.Marshal([]*User{tc.existingUser})
+			if err != nil {
+				t.Fatalf("Marshal(users) error: %v", err)
+			}
+			if err := os.WriteFile(usersFile, data, 0600); err != nil {
+				t.Fatalf("WriteFile(users.json) error: %v", err)
+			}
+
+			store, password, err := NewUserStore(usersFile)
+			if err != nil {
+				t.Fatalf("NewUserStore() error: %v", err)
+			}
+			if password == "" {
+				t.Fatal("expected recovery admin password")
+			}
+
+			bootstrapUsername, bootstrapPassword := parseBootstrapCredentials(t, passwordFile)
+			if bootstrapPassword != password {
+				t.Fatalf("returned bootstrap password mismatch: got %q from file, %q from NewUserStore", bootstrapPassword, password)
+			}
+
+			users := store.List()
+			if len(users) != 2 {
+				t.Fatalf("expected 2 users after recovery bootstrap, got %d", len(users))
+			}
+
+			existing, err := store.GetByUsername(tc.existingUser.Username)
+			if err != nil {
+				t.Fatalf("GetByUsername(%s) error: %v", tc.existingUser.Username, err)
+			}
+			if existing.Role != tc.existingUser.Role || existing.Disabled != tc.existingUser.Disabled {
+				t.Fatalf("expected existing user to remain unchanged, got %+v", existing)
+			}
+
+			bootstrapAdmin, err := store.GetByUsername(bootstrapUsername)
+			if err != nil {
+				t.Fatalf("GetByUsername(%s) error: %v", bootstrapUsername, err)
+			}
+			if bootstrapAdmin.Role != RoleAdmin {
+				t.Fatalf("expected recovery user role admin, got %s", bootstrapAdmin.Role)
+			}
+			if bootstrapAdmin.Disabled {
+				t.Fatal("expected recovery admin to be enabled")
+			}
+
+			authenticated, err := store.Authenticate(bootstrapUsername, bootstrapPassword)
+			if err != nil {
+				t.Fatalf("Authenticate(%s) error: %v", bootstrapUsername, err)
+			}
+			if authenticated == nil || authenticated.Role != RoleAdmin {
+				t.Fatalf("expected authenticated recovery admin, got %+v", authenticated)
+			}
+
+			if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
+				t.Fatal("password file should be deleted after successful recovery admin login")
+			}
+		})
+	}
+}
+
+func TestNewUserStore_BootstrapsUniqueRecoveryAdminWhenAdminUsernameOccupied(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+	users := []*User{
+		{
+			ID:           "user-1",
+			Username:     "admin",
+			PasswordHash: "hash-1",
+			Role:         RoleUser,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+			HomeDir:      "/admin",
+		},
+	}
+	data, err := json.Marshal(users)
+	if err != nil {
+		t.Fatalf("Marshal(users) error: %v", err)
+	}
+	if err := os.WriteFile(usersFile, data, 0600); err != nil {
+		t.Fatalf("WriteFile(users.json) error: %v", err)
+	}
+
+	store, password, err := NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+	if password == "" {
+		t.Fatal("expected recovery admin password")
+	}
+
+	bootstrapUsername, bootstrapPassword := parseBootstrapCredentials(t, passwordFile)
+	if bootstrapUsername != "admin-recovery" {
+		t.Fatalf("expected unique recovery username admin-recovery, got %q", bootstrapUsername)
+	}
+	if bootstrapPassword != password {
+		t.Fatalf("returned bootstrap password mismatch: got %q from file, %q from NewUserStore", bootstrapPassword, password)
+	}
+
+	existing, err := store.GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("GetByUsername(admin) error: %v", err)
+	}
+	if existing.Role != RoleUser {
+		t.Fatalf("expected existing admin-named user to remain non-admin, got %s", existing.Role)
+	}
+
+	recoveryAdmin, err := store.GetByUsername("admin-recovery")
+	if err != nil {
+		t.Fatalf("GetByUsername(admin-recovery) error: %v", err)
+	}
+	if recoveryAdmin.Role != RoleAdmin {
+		t.Fatalf("expected recovery admin role admin, got %s", recoveryAdmin.Role)
+	}
+
+	authenticated, err := store.Authenticate(bootstrapUsername, bootstrapPassword)
+	if err != nil {
+		t.Fatalf("Authenticate(%s) error: %v", bootstrapUsername, err)
+	}
+	if authenticated == nil || authenticated.Username != "admin-recovery" {
+		t.Fatalf("expected authenticated recovery admin, got %+v", authenticated)
+	}
+}
+
+func TestAuthenticate_NonBootstrapUserDoesNotDeleteRecoveryPasswordFile(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+
+	memberHash, err := bcrypt.GenerateFromPassword([]byte("memberpass123"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword() error: %v", err)
+	}
+	users := []*User{
+		{
+			ID:           "user-1",
+			Username:     "member",
+			PasswordHash: string(memberHash),
+			Role:         RoleUser,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+			HomeDir:      "/member",
+		},
+	}
+	data, err := json.Marshal(users)
+	if err != nil {
+		t.Fatalf("Marshal(users) error: %v", err)
+	}
+	if err := os.WriteFile(usersFile, data, 0600); err != nil {
+		t.Fatalf("WriteFile(users.json) error: %v", err)
+	}
+
+	store, _, err := NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+
+	bootstrapUsername, bootstrapPassword := parseBootstrapCredentials(t, passwordFile)
+	if bootstrapUsername != "admin" {
+		t.Fatalf("expected bootstrap username admin, got %q", bootstrapUsername)
+	}
+
+	member, err := store.Authenticate("member", "memberpass123")
+	if err != nil {
+		t.Fatalf("Authenticate(member) error: %v", err)
+	}
+	if member == nil || member.Username != "member" {
+		t.Fatalf("expected authenticated member user, got %+v", member)
+	}
+
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("expected recovery password file to survive non-bootstrap login, got %v", err)
+	}
+
+	recoveryAdmin, err := store.Authenticate(bootstrapUsername, bootstrapPassword)
+	if err != nil {
+		t.Fatalf("Authenticate(%s) error: %v", bootstrapUsername, err)
+	}
+	if recoveryAdmin == nil || recoveryAdmin.Username != bootstrapUsername {
+		t.Fatalf("expected authenticated bootstrap admin, got %+v", recoveryAdmin)
+	}
+
+	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
+		t.Fatal("expected recovery password file to be deleted after bootstrap admin login")
+	}
+}
+
+func TestAuthenticate_PrefixUsernameDoesNotDeleteRecoveryPasswordFile(t *testing.T) {
+	dir := t.TempDir()
+	usersFile := filepath.Join(dir, "users.json")
+	passwordFile := filepath.Join(dir, "initial-password.txt")
+
+	adminHash, err := bcrypt.GenerateFromPassword([]byte("adminpass123"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword() error: %v", err)
+	}
+	users := []*User{
+		{
+			ID:           "user-1",
+			Username:     "admin",
+			PasswordHash: string(adminHash),
+			Role:         RoleUser,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+			HomeDir:      "/admin",
+		},
+	}
+	data, err := json.Marshal(users)
+	if err != nil {
+		t.Fatalf("Marshal(users) error: %v", err)
+	}
+	if err := os.WriteFile(usersFile, data, 0600); err != nil {
+		t.Fatalf("WriteFile(users.json) error: %v", err)
+	}
+
+	store, _, err := NewUserStore(usersFile)
+	if err != nil {
+		t.Fatalf("NewUserStore() error: %v", err)
+	}
+
+	bootstrapUsername, bootstrapPassword := parseBootstrapCredentials(t, passwordFile)
+	if bootstrapUsername != "admin-recovery" {
+		t.Fatalf("expected bootstrap username admin-recovery, got %q", bootstrapUsername)
+	}
+
+	user, err := store.Authenticate("admin", "adminpass123")
+	if err != nil {
+		t.Fatalf("Authenticate(admin) error: %v", err)
+	}
+	if user == nil || user.Username != "admin" {
+		t.Fatalf("expected authenticated existing admin-named user, got %+v", user)
+	}
+
+	if _, err := os.Stat(passwordFile); err != nil {
+		t.Fatalf("expected recovery password file to survive prefix username login, got %v", err)
+	}
+
+	recoveryAdmin, err := store.Authenticate(bootstrapUsername, bootstrapPassword)
+	if err != nil {
+		t.Fatalf("Authenticate(%s) error: %v", bootstrapUsername, err)
+	}
+	if recoveryAdmin == nil || recoveryAdmin.Username != bootstrapUsername {
+		t.Fatalf("expected authenticated recovery admin, got %+v", recoveryAdmin)
+	}
+
+	if _, err := os.Stat(passwordFile); !os.IsNotExist(err) {
+		t.Fatal("expected recovery password file to be deleted after recovery admin login")
 	}
 }
 

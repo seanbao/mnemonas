@@ -93,6 +93,24 @@ test.describe('设置表单交互', () => {
     await ensureAuthenticatedAt(page, '/settings')
   })
 
+  test('点击保存设置应提交成功并显示提示', async ({ page }) => {
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+
+    const saveButton = page.getByRole('button', { name: /保存|保存设置/i })
+    await expect(saveButton).toBeVisible({ timeout: 5000 })
+
+    const saveResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === 'PUT'
+      && response.url().includes('/api/v1/settings')
+    ))
+
+    await saveButton.click()
+
+    const saveResponse = await saveResponsePromise
+    expect(saveResponse.status()).toBe(200)
+    await expect(page.getByText('设置已保存')).toBeVisible({ timeout: 5000 })
+  })
+
   test('服务器地址输入框应可编辑', async ({ page }) => {
     const hostInput = page.getByLabel(/监听地址/i)
     if (await hostInput.isVisible({ timeout: 2000 }).catch(() => false)) {

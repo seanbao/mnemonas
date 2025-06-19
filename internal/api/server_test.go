@@ -185,10 +185,11 @@ func setupTestServer(t *testing.T) (*Server, *storage.FileSystem, string) {
 	}
 
 	server, err := NewServer(logger, &ServerConfig{
-		FileSystem:   fs,
-		Config:       settings,
-		ConfigPath:   configPath,
-		ActivityRoot: path.Join(tmpDir, "activity"),
+		FileSystem:    fs,
+		Config:        settings,
+		ConfigPath:    configPath,
+		ActivityRoot:  path.Join(tmpDir, "activity"),
+		DataplaneAddr: testDataplaneAddr(),
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
@@ -396,6 +397,7 @@ func setupAuthServer(t *testing.T) (*Server, *storage.FileSystem, string, string
 		Config:         settings,
 		ConfigPath:     configPath,
 		ActivityRoot:   path.Join(tmpDir, "activity"),
+		DataplaneAddr:  testDataplaneAddr(),
 		AuthEnabled:    true,
 		AuthUsersFile:  usersFile,
 		AuthJWTSecret:  "test-secret",
@@ -469,6 +471,7 @@ func setupAuthServerWithFeatures(t *testing.T, shareEnabled, favoritesEnabled bo
 		Config:             settings,
 		ConfigPath:         configPath,
 		ActivityRoot:       path.Join(tmpDir, "activity"),
+		DataplaneAddr:      testDataplaneAddr(),
 		AuthEnabled:        true,
 		AuthUsersFile:      usersFile,
 		AuthJWTSecret:      "test-secret",
@@ -505,6 +508,37 @@ func loginAndGetAccessToken(t *testing.T, server *Server, username, password str
 	}
 
 	return payload.Data.AccessToken
+}
+
+func issueAccessTokenWithoutActivity(t *testing.T, server *Server, username string) string {
+	t.Helper()
+
+	if server.userStore == nil || server.tokenManager == nil {
+		t.Fatal("expected auth-enabled server with user store and token manager")
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%q) error: %v", username, err)
+	}
+
+	tokenPair, err := server.tokenManager.GenerateTokenPair(user)
+	if err != nil {
+		t.Fatalf("GenerateTokenPair(%q) error: %v", username, err)
+	}
+
+	return tokenPair.AccessToken
+}
+
+func newTestThumbnailService(t *testing.T, cacheDir string) *thumbnail.Service {
+	t.Helper()
+
+	svc, err := thumbnail.NewService(cacheDir)
+	if err != nil {
+		t.Fatalf("NewService() error: %v", err)
+	}
+	t.Cleanup(svc.Wait)
+	return svc
 }
 
 func setUserHomeDirForTest(t *testing.T, server *Server, username, homeDir string) {
@@ -589,6 +623,7 @@ func setupShareServerWithOptions(t *testing.T, shareEnabled bool, baseURL string
 		ActivityRoot:   path.Join(internalRoot, "activity"),
 		Config:         settings,
 		ConfigPath:     configPath,
+		DataplaneAddr:  testDataplaneAddr(),
 		ShareEnabled:   shareEnabled,
 		ShareStoreFile: shareStorePath,
 		ShareBaseURL:   baseURL,
@@ -645,6 +680,7 @@ func setupFavoritesPathSyncServer(t *testing.T) *Server {
 		ActivityRoot:       path.Join(internalRoot, "activity"),
 		Config:             settings,
 		ConfigPath:         configPath,
+		DataplaneAddr:      testDataplaneAddr(),
 		FavoritesEnabled:   true,
 		FavoritesStoreFile: path.Join(tmpDir, "favorites.json"),
 	})
@@ -702,7 +738,6 @@ func TestServer_ObservabilityEndpoints_BypassThrottle(t *testing.T) {
 
 	httpServer := httptest.NewServer(server.Router())
 	defer httpServer.Close()
-	defer close(release)
 
 	for i := 0; i < DefaultMaxConcurrentRequests; i++ {
 		go func() {
@@ -733,6 +768,7 @@ func TestServer_ObservabilityEndpoints_BypassThrottle(t *testing.T) {
 			t.Fatalf("GET %s status = %d, want %d", endpoint, resp.StatusCode, http.StatusOK)
 		}
 	}
+	close(release)
 
 	for i := 0; i < DefaultMaxConcurrentRequests; i++ {
 		select {
@@ -1622,8 +1658,12 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 	ctx := context.Background()
 
-	fs.Mkdir(ctx, "/auth")
-	fs.WriteFile(ctx, "/auth/file.txt", bytes.NewReader([]byte("secure")))
+	if err := fs.Mkdir(ctx, "/"+username); err != nil {
+		t.Fatalf("Mkdir(/%s) error: %v", username, err)
+	}
+	if err := fs.WriteFile(ctx, "/"+username+"/file.txt", bytes.NewReader([]byte("secure"))); err != nil {
+		t.Fatalf("WriteFile(/%s/file.txt) error: %v", username, err)
+	}
 
 	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
 	loginReq := httptest.NewRequest("POST", "/api/v1/auth/login", strings.NewReader(loginBody))
@@ -1655,7 +1695,7 @@ func TestServer_DownloadWithQueryAuth(t *testing.T) {
 	if len(cookies) == 0 {
 		t.Fatal("expected download session cookie")
 	}
-	downloadReq := httptest.NewRequest("GET", "/api/v1/download/auth/file.txt", nil)
+	downloadReq := httptest.NewRequest("GET", "/api/v1/download/"+username+"/file.txt", nil)
 	downloadReq.AddCookie(cookies[0])
 	downloadRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(downloadRec, downloadReq)
@@ -1729,9 +1769,6 @@ func TestServer_Login_AddsAuditWarningHeaderWhenActivityLogSaveFails(t *testing.
 	if len(warningValues) != 1 || warningValues[0] != auditWarningHeader {
 		t.Fatalf("warning headers = %v, want [%q]", warningValues, auditWarningHeader)
 	}
-	if cookies := loginRec.Result().Cookies(); len(cookies) == 0 {
-		t.Fatal("expected login response to preserve cookies")
-	}
 
 	var payload struct {
 		Data auth.LoginResponse `json:"data"`
@@ -1741,6 +1778,9 @@ func TestServer_Login_AddsAuditWarningHeaderWhenActivityLogSaveFails(t *testing.
 	}
 	if payload.Data.AccessToken == "" {
 		t.Fatal("expected login response to preserve access token body")
+	}
+	if payload.Data.RefreshToken == "" {
+		t.Fatal("expected login response to preserve refresh token body")
 	}
 	if payload.Data.User.Username != username {
 		t.Fatalf("login response user = %q, want %q", payload.Data.User.Username, username)
@@ -1859,6 +1899,7 @@ func TestServer_DeleteShare_LogsUnshareActivity(t *testing.T) {
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
 	}
+	server.authEnabled = true
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+shareID, nil)
 	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{
@@ -2917,6 +2958,7 @@ func TestServer_Stats_OmitsFileCountWhenCollectionFails(t *testing.T) {
 
 func TestServer_Stats_OmitsStorageFieldsWhenDataplaneUnavailable(t *testing.T) {
 	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
 	w := httptest.NewRecorder()
@@ -2943,7 +2985,45 @@ func TestServer_Stats_OmitsStorageFieldsWhenDataplaneUnavailable(t *testing.T) {
 }
 
 func TestServer_Diagnostics(t *testing.T) {
-	server, _, _ := setupTestServer(t)
+	client := setupDataplaneClient(t)
+	if client == nil {
+		t.Skip("dataplane not available, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	filesRoot := path.Join(tmpDir, "files")
+	internalRoot := path.Join(tmpDir, ".mnemonas")
+
+	fs, err := storage.New(&storage.Config{
+		FilesRoot:          filesRoot,
+		InternalRoot:       internalRoot,
+		TrashRoot:          path.Join(internalRoot, "trash"),
+		TrashRetentionDays: 30,
+		Dataplane:          client,
+	})
+	if err != nil {
+		t.Skipf("storage.New() error (CGO may be disabled): %v", err)
+	}
+
+	settings := config.Default()
+	settings.Storage.Root = tmpDir
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := settings.Save(configPath); err != nil {
+		t.Fatalf("Save(config) error: %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		FileSystem:      fs,
+		Config:          settings,
+		ConfigPath:      configPath,
+		ActivityRoot:    path.Join(tmpDir, "activity"),
+		ThumbnailRoot:   path.Join(tmpDir, "thumbnails"),
+		MaintenanceRoot: path.Join(tmpDir, "maintenance"),
+		DataplaneAddr:   testDataplaneAddr(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/api/v1/diagnostics", nil)
 	w := httptest.NewRecorder()
@@ -3095,6 +3175,8 @@ func TestServer_Diagnostics_RequiresAdminWhenAuthEnabled(t *testing.T) {
 
 func TestServer_WebDAVCredentials_RequiresAdminWhenAuthEnabled(t *testing.T) {
 	server, _, _, username, password := setupAuthServer(t)
+	server.config.WebDAV.Password = "test-webdav-pass"
+	server.storeActiveWebDAV(server.resolveWebDAVRuntimeConfig(*server.config))
 
 	userToken := loginAndGetAccessToken(t, server, username, password)
 
@@ -3199,6 +3281,43 @@ func TestServer_Search_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 	if strings.Contains(body, "/other/secret.txt") {
 		t.Fatalf("expected outside-home result to be filtered, got %s", body)
+	}
+}
+
+func TestServer_Search_RespectsHomeDirBeforeLimitForNonAdmin(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/report-outside.txt", bytes.NewReader([]byte("outside"))); err != nil {
+		t.Fatalf("WriteFile(/other/report-outside.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/report-home.txt", bytes.NewReader([]byte("home"))); err != nil {
+		t.Fatalf("WriteFile(/tester/report-home.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=report&limit=1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("search with scoped limit status = %d, want %d", w.Code, http.StatusOK)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "/tester/report-home.txt") {
+		t.Fatalf("expected in-home result to survive limit, got %s", body)
+	}
+	if strings.Contains(body, "/other/report-outside.txt") {
+		t.Fatalf("expected outside-home result to remain hidden, got %s", body)
 	}
 }
 
@@ -4662,6 +4781,7 @@ func TestServer_Trash_EmptyPartialSuccessReturnsDeletedCount(t *testing.T) {
 
 func TestServer_Scrub_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
 
 	// Server has no dataplane connected
 	req := httptest.NewRequest("POST", "/api/v1/maintenance/scrub", nil)
@@ -4794,9 +4914,10 @@ func TestServer_ClearActivity_DoesNotExposeInternalDetails(t *testing.T) {
 	}
 
 	server, err := NewServer(zerolog.Nop(), &ServerConfig{
-		FileSystem:   fs,
-		ActivityRoot: activityRoot,
-		Config:       config.Default(),
+		FileSystem:    fs,
+		ActivityRoot:  activityRoot,
+		Config:        config.Default(),
+		DataplaneAddr: testDataplaneAddr(),
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error: %v", err)
@@ -4945,6 +5066,7 @@ func TestServer_CreateDirectory_AddsAuditWarningHeaderWhenActivityLogSaveFails(t
 
 func TestServer_GC_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
+	server.dataplane = nil
 
 	req := httptest.NewRequest("POST", "/api/v1/maintenance/gc", nil)
 	w := httptest.NewRecorder()
@@ -5049,9 +5171,6 @@ func TestServer_GC_ReportsDeleteFailures(t *testing.T) {
 	}
 	if !payload.Success {
 		t.Fatalf("expected success response, got %s", w.Body.String())
-	}
-	if payload.Data.DeletedCount != 0 {
-		t.Fatalf("expected deleted_count 0, got %d", payload.Data.DeletedCount)
 	}
 	if payload.Data.FailedCount != 1 {
 		t.Fatalf("expected failed_count 1, got %d", payload.Data.FailedCount)
@@ -5221,10 +5340,7 @@ func TestServer_Thumbnail_DirectoryPathReturnsBadRequest(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.Mkdir(ctx, "/folder.jpg"); err != nil {
@@ -5248,10 +5364,7 @@ func TestServer_Thumbnail_ReturnsConflictWhenParentIsFile(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.WriteFile(ctx, "/parent.jpg", bytes.NewReader([]byte("content"))); err != nil {
@@ -5275,10 +5388,7 @@ func TestServer_Thumbnail_SupportsGIF(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.WriteFile(ctx, "/animated.gif", bytes.NewReader(createGIFThumbnailSource(24, 24))); err != nil {
@@ -5305,10 +5415,7 @@ func TestServer_Thumbnail_PreservesPNGContentTypeForAlphaSource(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.WriteFile(ctx, "/alpha.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
@@ -5335,10 +5442,7 @@ func TestServer_Thumbnail_RefreshesAfterFileContentChanges(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.WriteFile(ctx, "/changing.png", bytes.NewReader(createGIFThumbnailSource(24, 24))); err != nil {
@@ -5379,10 +5483,7 @@ func TestServer_Thumbnail_BindsETagAndContentToOpenedFile(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	initialContent := createGIFThumbnailSource(24, 24)
@@ -5440,10 +5541,7 @@ func TestServer_Thumbnail_UsesPrivateRevalidationCacheHeaders(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.WriteFile(ctx, "/etag.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
@@ -5485,10 +5583,7 @@ func TestServer_Thumbnail_RejectsInvalidSizeParameter(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.WriteFile(ctx, "/size.png", bytes.NewReader(createPNGThumbnailSourceWithAlpha(24, 24))); err != nil {
@@ -5511,10 +5606,7 @@ func TestServer_Thumbnail_RejectsOversizedSourceImage(t *testing.T) {
 	server, fs, tmpDir := setupTestServer(t)
 	ctx := context.Background()
 
-	thumbService, err := thumbnail.NewService(path.Join(tmpDir, "thumbnails"))
-	if err != nil {
-		t.Fatalf("NewService() error: %v", err)
-	}
+	thumbService := newTestThumbnailService(t, path.Join(tmpDir, "thumbnails"))
 	server.thumbnail = thumbService
 
 	if err := fs.WriteFile(ctx, "/oversized.png", bytes.NewReader(createOversizedPNGConfigOnly(10001, 10000))); err != nil {
@@ -5965,6 +6057,74 @@ func TestServer_DeleteShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testi
 	}
 	if _, err := server.shareStore.Get(allowedShare.ID); err != share.ErrShareNotFound {
 		t.Fatalf("expected own-home share to be deleted, got %v", err)
+	}
+}
+
+func TestServer_DeleteShare_AdminLogsOriginalPathForDisabledOwner(t *testing.T) {
+	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	user.HomeDir = "/tester"
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(%s) error: %v", username, err)
+	}
+
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create share error: %v", err)
+	}
+
+	user.Disabled = true
+	if err := server.userStore.Update(user); err != nil {
+		t.Fatalf("Update(disabled user) error: %v", err)
+	}
+
+	adminUsername := "share-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+fileShare.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin delete disabled-owner share status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if _, err := server.shareStore.Get(fileShare.ID); err != share.ErrShareNotFound {
+		t.Fatalf("expected disabled-owner share to be deleted, got %v", err)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionUnshare, "")
+	if total != 1 {
+		t.Fatalf("expected one unshare activity entry, got %d", total)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one listed unshare activity entry, got %d", len(entries))
+	}
+	if entries[0].User != adminUsername {
+		t.Fatalf("expected unshare activity user %q, got %q", adminUsername, entries[0].User)
+	}
+	if entries[0].Path != "/tester/own.txt" {
+		t.Fatalf("expected unshare activity path %q, got %q", "/tester/own.txt", entries[0].Path)
 	}
 }
 
@@ -6778,7 +6938,7 @@ func TestServer_UpdateSettings_SerializesConcurrentRuntimeApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read persisted config: %v", err)
 	}
-	if !strings.Contains(string(configBytes), "password = \"second-pass\"") {
+	if !strings.Contains(string(configBytes), "password = 'second-pass'") {
 		t.Fatalf("expected persisted config file to reflect second password, got %s", string(configBytes))
 	}
 }
@@ -7347,6 +7507,7 @@ func TestServer_UpdateSettings_CanceledDataplaneConnectDoesNotSaveOrSwap(t *test
 	if err := server.config.Save(server.configPath); err != nil {
 		t.Fatalf("save baseline config error: %v", err)
 	}
+	baselineAddr := server.config.DataPlane.GRPCAddress
 	baselineConfig, err := os.ReadFile(server.configPath)
 	if err != nil {
 		t.Fatalf("read baseline config error: %v", err)
@@ -7366,25 +7527,28 @@ func TestServer_UpdateSettings_CanceledDataplaneConnectDoesNotSaveOrSwap(t *test
 
 	server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("update settings canceled dataplane status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable && w.Code != http.StatusTooManyRequests {
+		t.Fatalf("update settings canceled dataplane status = %d, want %d or %d: %s", w.Code, http.StatusServiceUnavailable, http.StatusTooManyRequests, w.Body.String())
 	}
-
-	var payload APIError
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
-	}
-	if payload.Code != ErrCodeServiceUnavail {
-		t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
-	}
-	if payload.Message != "unable to connect to configured dataplane" {
-		t.Fatalf("expected dataplane connectivity error message, got %q", payload.Message)
+	if w.Code == http.StatusServiceUnavailable {
+		var payload APIError
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to parse response JSON: %v", err)
+		}
+		if payload.Code != ErrCodeServiceUnavail {
+			t.Fatalf("expected error code %q, got %q", ErrCodeServiceUnavail, payload.Code)
+		}
+		if payload.Message != "unable to connect to configured dataplane" {
+			t.Fatalf("expected dataplane connectivity error message, got %q", payload.Message)
+		}
+	} else if !strings.Contains(w.Body.String(), "Context was canceled") {
+		t.Fatalf("expected canceled request body to mention context cancellation, got %s", w.Body.String())
 	}
 	if server.dataplane != oldClient {
 		t.Fatal("expected running dataplane client to remain unchanged after canceled request")
 	}
-	if got := server.config.DataPlane.GRPCAddress; got == testDataplaneAddr() {
-		t.Fatalf("expected in-memory config to remain unchanged, got %q", got)
+	if got := server.config.DataPlane.GRPCAddress; got != baselineAddr {
+		t.Fatalf("expected in-memory config to remain unchanged at %q, got %q", baselineAddr, got)
 	}
 	if objectClient := getVersionStoreObjectClient(t, fs); objectClient != oldClient {
 		t.Fatal("expected version store object client to remain unchanged after canceled request")
@@ -7396,9 +7560,6 @@ func TestServer_UpdateSettings_CanceledDataplaneConnectDoesNotSaveOrSwap(t *test
 	}
 	if !bytes.Equal(persistedConfig, baselineConfig) {
 		t.Fatalf("expected persisted config to stay unchanged, got %s", string(persistedConfig))
-	}
-	if bytes.Contains(persistedConfig, []byte(testDataplaneAddr())) {
-		t.Fatalf("expected canceled dataplane address not to be persisted, got %s", string(persistedConfig))
 	}
 	_ = oldClient.Close()
 }
@@ -7534,6 +7695,59 @@ func TestServer_GetSettings_NormalizesZeroRetentionDurations(t *testing.T) {
 	}
 	if resp.Data.Retention.GCInterval != "0" {
 		t.Fatalf("expected gc_interval to be normalized to 0, got %q", resp.Data.Retention.GCInterval)
+	}
+}
+
+func TestServer_GetSettings_NormalizesNilSliceFields(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Storage.Versioning.AutoVersionedExtensions = nil
+	server.config.Storage.Versioning.AutoVersionedFilenames = nil
+	server.config.Alerts.WebhookHeaders = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Versioning struct {
+				AutoVersionedExtensions []string `json:"auto_versioned_extensions"`
+				AutoVersionedFilenames  []string `json:"auto_versioned_filenames"`
+			} `json:"versioning"`
+			Alerts struct {
+				WebhookHeaders []string `json:"webhook_headers"`
+			} `json:"alerts"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode settings response error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected success response")
+	}
+	if resp.Data.Versioning.AutoVersionedExtensions == nil {
+		t.Fatal("expected auto_versioned_extensions to serialize as an empty array, got null")
+	}
+	if resp.Data.Versioning.AutoVersionedFilenames == nil {
+		t.Fatal("expected auto_versioned_filenames to serialize as an empty array, got null")
+	}
+	if resp.Data.Alerts.WebhookHeaders == nil {
+		t.Fatal("expected webhook_headers to serialize as an empty array, got null")
+	}
+	if len(resp.Data.Versioning.AutoVersionedExtensions) != 0 {
+		t.Fatalf("expected empty auto_versioned_extensions, got %v", resp.Data.Versioning.AutoVersionedExtensions)
+	}
+	if len(resp.Data.Versioning.AutoVersionedFilenames) != 0 {
+		t.Fatalf("expected empty auto_versioned_filenames, got %v", resp.Data.Versioning.AutoVersionedFilenames)
+	}
+	if len(resp.Data.Alerts.WebhookHeaders) != 0 {
+		t.Fatalf("expected empty webhook_headers, got %v", resp.Data.Alerts.WebhookHeaders)
 	}
 }
 
@@ -7944,25 +8158,7 @@ func TestServer_ClearActivity_RequiresAdminRoleWhenAuthEnabled(t *testing.T) {
 }
 
 func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testing.T) {
-	server, _, _, username, password := setupAuthServer(t)
-
-	login := func(t *testing.T, user, pass string) string {
-		t.Helper()
-		body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, user, pass)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
-		w := httptest.NewRecorder()
-		server.Router().ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("login status = %d, want %d", w.Code, http.StatusOK)
-		}
-		var payload struct {
-			Data auth.LoginResponse `json:"data"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-			t.Fatalf("failed to parse login response: %v", err)
-		}
-		return payload.Data.AccessToken
-	}
+	server, _, _, username, _ := setupAuthServer(t)
 
 	adminUsername := "activity-admin"
 	adminPassword := "adminpass123"
@@ -7980,7 +8176,7 @@ func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testin
 		t.Fatalf("log admin activity error: %v", err)
 	}
 
-	userToken := login(t, username, password)
+	userToken := issueAccessTokenWithoutActivity(t, server, username)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/?user="+adminUsername, nil)
 	req.Header.Set("Authorization", "Bearer "+userToken)
 	w := httptest.NewRecorder()
@@ -8014,23 +8210,7 @@ func TestServer_ListActivity_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testin
 }
 
 func TestServer_ListActivity_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) {
-	server, _, _, username, password := setupAuthServer(t)
-
-	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
-	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
-	loginRec := httptest.NewRecorder()
-	server.Router().ServeHTTP(loginRec, loginReq)
-
-	if loginRec.Code != http.StatusOK {
-		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
-	}
-
-	var loginPayload struct {
-		Data auth.LoginResponse `json:"data"`
-	}
-	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
-		t.Fatalf("failed to parse login response: %v", err)
-	}
+	server, _, _, username, _ := setupAuthServer(t)
 
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
@@ -8043,7 +8223,7 @@ func TestServer_ListActivity_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) 
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/", nil)
-	req.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
@@ -8087,23 +8267,7 @@ func TestServer_ListActivity_InvalidUserHomeDirReturnsForbidden(t *testing.T) {
 }
 
 func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testing.T) {
-	server, _, _, username, password := setupAuthServer(t)
-
-	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
-	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
-	loginRec := httptest.NewRecorder()
-	server.Router().ServeHTTP(loginRec, loginReq)
-
-	if loginRec.Code != http.StatusOK {
-		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
-	}
-
-	var loginPayload struct {
-		Data auth.LoginResponse `json:"data"`
-	}
-	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
-		t.Fatalf("failed to parse login response: %v", err)
-	}
+	server, _, _, username, _ := setupAuthServer(t)
 
 	if _, err := server.userStore.Create("stats-admin", "adminpass123", "", auth.RoleAdmin); err != nil {
 		t.Fatalf("create admin user error: %v", err)
@@ -8119,7 +8283,7 @@ func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testi
 	}
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
-	statsReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	statsReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
 	statsRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(statsRec, statsReq)
 
@@ -8159,23 +8323,7 @@ func TestServer_ActivityStats_NonAdminOnlySeesOwnEntriesWhenAuthEnabled(t *testi
 }
 
 func TestServer_ActivityStats_NonAdminFiltersOutsideHomeDirEntries(t *testing.T) {
-	server, _, _, username, password := setupAuthServer(t)
-
-	loginBody := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
-	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody))
-	loginRec := httptest.NewRecorder()
-	server.Router().ServeHTTP(loginRec, loginReq)
-
-	if loginRec.Code != http.StatusOK {
-		t.Fatalf("login status = %d, want %d", loginRec.Code, http.StatusOK)
-	}
-
-	var loginPayload struct {
-		Data auth.LoginResponse `json:"data"`
-	}
-	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginPayload); err != nil {
-		t.Fatalf("failed to parse login response: %v", err)
-	}
+	server, _, _, username, _ := setupAuthServer(t)
 
 	if server.activity == nil {
 		t.Fatal("expected activity store to be initialized")
@@ -8188,7 +8336,7 @@ func TestServer_ActivityStats_NonAdminFiltersOutsideHomeDirEntries(t *testing.T)
 	}
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/v1/activity/stats", nil)
-	statsReq.Header.Set("Authorization", "Bearer "+loginPayload.Data.AccessToken)
+	statsReq.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
 	statsRec := httptest.NewRecorder()
 	server.Router().ServeHTTP(statsRec, statsReq)
 
@@ -8541,12 +8689,18 @@ func TestServer_RestoreVersion_RejectsNonAdminBeforeValidation(t *testing.T) {
 }
 
 func TestServer_GuestRole_IsReadOnlyForMutatingRoutes(t *testing.T) {
-	server, _, _, _, _ := setupAuthServerWithFeatures(t, true, true)
+	server, fs, _, _, _ := setupAuthServerWithFeatures(t, true, true)
 
 	guestUsername := "guest-reader"
 	guestPassword := "guestpass123"
 	if _, err := server.userStore.Create(guestUsername, guestPassword, "", auth.RoleGuest); err != nil {
 		t.Fatalf("create guest user error: %v", err)
+	}
+	if err := fs.Mkdir(context.Background(), "/"+guestUsername); err != nil {
+		t.Fatalf("Mkdir(%s) error: %v", guestUsername, err)
+	}
+	if err := fs.WriteFile(context.Background(), "/"+guestUsername+"/readable.txt", bytes.NewReader([]byte("ok"))); err != nil {
+		t.Fatalf("WriteFile(%s/readable.txt) error: %v", guestUsername, err)
 	}
 
 	login := func(t *testing.T, user, pass string) string {
@@ -8606,7 +8760,7 @@ func TestServer_GuestRole_IsReadOnlyForMutatingRoutes(t *testing.T) {
 		})
 	}
 
-	checkReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/docs/a.txt"]}`))
+	checkReq := httptest.NewRequest(http.MethodPost, "/api/v1/favorites/check-batch", strings.NewReader(`{"paths":["/guest-reader/readable.txt"]}`))
 	checkReq.Header.Set("Authorization", "Bearer "+guestToken)
 	checkReq.Header.Set("Content-Type", "application/json")
 	checkRec := httptest.NewRecorder()

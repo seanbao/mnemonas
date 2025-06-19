@@ -2001,6 +2001,44 @@ func TestAuthHandler(t *testing.T) {
 			t.Fatal("expected missing disabled field to leave user disabled")
 		}
 	})
+
+	t.Run("delete user revokes outstanding refresh tokens", func(t *testing.T) {
+		admin, _ := store.GetByUsername("handleradmin")
+		deleteUser, err := store.Create("delete-revoke", "password123", "delete-revoke@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create delete user: %v", err)
+		}
+
+		tokenPair, err := tm.GenerateTokenPair(deleteUser)
+		if err != nil {
+			t.Fatalf("GenerateTokenPair() error: %v", err)
+		}
+
+		deleteReq := httptest.NewRequest("DELETE", "/api/v1/admin/users/"+deleteUser.ID, nil)
+		deleteReq = deleteReq.WithContext(context.WithValue(deleteReq.Context(), ContextKeyUser, admin))
+		deleteRec := httptest.NewRecorder()
+		h.HandleDeleteUser(deleteRec, deleteReq, deleteUser.ID)
+
+		if deleteRec.Code != http.StatusOK {
+			t.Fatalf("expected delete status 200, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+		}
+
+		refreshReq := httptest.NewRequest("POST", "/api/v1/auth/refresh", bytes.NewBufferString(`{"refresh_token":"`+tokenPair.RefreshToken+`"}`))
+		refreshRec := httptest.NewRecorder()
+		h.HandleRefresh(refreshRec, refreshReq)
+
+		if refreshRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected refresh status 401, got %d: %s", refreshRec.Code, refreshRec.Body.String())
+		}
+
+		var envelope authEnvelope
+		if err := json.Unmarshal(refreshRec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("unmarshal refresh envelope error: %v", err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != "TOKEN_REVOKED" {
+			t.Fatalf("expected TOKEN_REVOKED after deleting user, got %+v", envelope.Error)
+		}
+	})
 }
 
 func TestWriteSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
@@ -2015,6 +2053,24 @@ func TestWriteSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T) {
 	}
 	if rec.Body.String() != "Internal Server Error\n" {
 		t.Fatalf("expected internal server error body, got %q", rec.Body.String())
+	}
+}
+
+func TestWriteSuccess_IncludesNullDataForNilPayload(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	writeSuccess(rec, http.StatusOK, nil, "ok")
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	data, ok := payload["data"]
+	if !ok {
+		t.Fatalf("expected response to include data field, got %s", rec.Body.String())
+	}
+	if string(data) != "null" {
+		t.Fatalf("expected data field to be null, got %s", string(data))
 	}
 }
 

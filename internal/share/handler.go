@@ -1352,6 +1352,9 @@ func writePublicShareInfo(w http.ResponseWriter, info *PublicShareInfo) bool {
 }
 
 func writeShareSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	if data == nil {
+		data = json.RawMessage("null")
+	}
 	writeShareJSON(w, status, responseEnvelope{
 		Success: true,
 		Data:    data,

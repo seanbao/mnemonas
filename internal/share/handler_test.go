@@ -1679,6 +1679,24 @@ func TestWriteShareSuccess_InvalidPayloadReturnsInternalServerError(t *testing.T
 	}
 }
 
+func TestWriteShareSuccess_IncludesNullDataForNilPayload(t *testing.T) {
+	recorder := httptest.NewRecorder()
+
+	writeShareSuccess(recorder, http.StatusOK, nil, "ok")
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	data, ok := payload["data"]
+	if !ok {
+		t.Fatalf("expected response to include data field, got %s", recorder.Body.String())
+	}
+	if string(data) != "null" {
+		t.Fatalf("expected data field to be null, got %s", string(data))
+	}
+}
+
 func TestAccessShareWithPassword_IgnoresSpoofedForwardedProtoForCookie(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
