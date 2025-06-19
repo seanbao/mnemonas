@@ -49,19 +49,18 @@ export interface MoveDialogProps {
   mode: 'move' | 'copy'
 }
 
-export function MoveDialog({
-  isOpen,
+function MoveDialogContent({
   onClose,
   files,
   currentPath,
   mode,
-}: MoveDialogProps) {
+}: Omit<MoveDialogProps, 'isOpen'>) {
   const queryClient = useQueryClient()
   const [isPickerOpen, setIsPickerOpen] = useState(false)
   const [targetPath, setTargetPath] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [pendingFiles, setPendingFiles] = useState(files)
-  const dialogSessionRef = useRef(0)
+  const isActiveRef = useRef(true)
 
   const title = mode === 'move' ? '移动到' : '复制到'
   const actionText = mode === 'move' ? '移动' : '复制'
@@ -70,18 +69,11 @@ export function MoveDialog({
   // Exclude paths that cannot be moved into (self and descendants)
   const excludePaths = pendingFiles.map(f => f.path)
 
-  const resetState = useCallback((nextFiles: typeof files) => {
-    setPendingFiles(nextFiles)
-    setTargetPath(null)
-    setIsPickerOpen(false)
-    setIsProcessing(false)
-  }, [])
-
   useEffect(() => {
-    if (!isOpen) return
-    dialogSessionRef.current += 1
-    resetState(files)
-  }, [files, isOpen, resetState])
+    return () => {
+      isActiveRef.current = false
+    }
+  }, [])
 
   const handleSelectTarget = useCallback((path: string) => {
     setTargetPath(path)
@@ -91,7 +83,6 @@ export function MoveDialog({
   const handleConfirm = useCallback(async () => {
     if (!targetPath) return
 
-    const sessionId = dialogSessionRef.current
     const filesToProcess = pendingFiles
     const sourcePath = currentPath
     const destinationPath = targetPath
@@ -126,8 +117,7 @@ export function MoveDialog({
 
     // Show result
     if (errorCount === 0) {
-      if (dialogSessionRef.current === sessionId) {
-        resetState(files)
+      if (isActiveRef.current) {
         onClose()
       }
       addToast({
@@ -137,7 +127,7 @@ export function MoveDialog({
       return
     }
 
-    if (dialogSessionRef.current === sessionId) {
+    if (isActiveRef.current) {
       setPendingFiles(failedFiles)
       setIsProcessing(false)
     }
@@ -151,17 +141,19 @@ export function MoveDialog({
     } else {
       addToast(getMoveDialogFailureToast(mode, successCount, errorCount, failedErrors))
     }
-  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText, files, resetState])
+  }, [targetPath, pendingFiles, mode, currentPath, queryClient, onClose, actionText])
 
   const handleClose = useCallback(() => {
-    resetState(files)
+    if (isProcessing) {
+      return
+    }
     onClose()
-  }, [files, onClose, resetState])
+  }, [isProcessing, onClose])
 
   return (
     <>
       <Modal
-        isOpen={isOpen && !isPickerOpen}
+        isOpen={!isPickerOpen}
         onClose={handleClose}
         placement="center"
         size="md"
@@ -235,7 +227,7 @@ export function MoveDialog({
           </ModalBody>
 
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={handleClose} className="text-default-600 rounded-xl">
+            <Button variant="flat" onPress={handleClose} isDisabled={isProcessing} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button
@@ -262,6 +254,30 @@ export function MoveDialog({
         initialPath={currentPath}
       />
     </>
+  )
+}
+
+export function MoveDialog({
+  isOpen,
+  onClose,
+  files,
+  currentPath,
+  mode,
+}: MoveDialogProps) {
+  if (!isOpen) {
+    return null
+  }
+
+  const dialogKey = `${mode}:${currentPath}:${files.map((file) => `${file.path}:${file.isDir ? 'dir' : 'file'}`).join('|')}`
+
+  return (
+    <MoveDialogContent
+      key={dialogKey}
+      onClose={onClose}
+      files={files}
+      currentPath={currentPath}
+      mode={mode}
+    />
   )
 }
 

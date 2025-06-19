@@ -23,7 +23,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/storage"
 )
 
-func setDeleteVersionObjectHook(t *testing.T, fs *storage.FileSystem, fn func(string) error) {
+func setDeleteVersionObjectHook(t *testing.T, fs *storage.FileSystem, fn func(context.Context, string) error) {
 	t.Helper()
 	field := reflect.ValueOf(fs).Elem().FieldByName("deleteVersionObject")
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(fn))
@@ -2034,7 +2034,7 @@ func TestHandler_MOVE_OverwriteCleanupFailureStillReturnsNoContent(t *testing.T)
 		t.Fatalf("WriteFile(existing v2) error: %v", err)
 	}
 
-	setDeleteVersionObjectHook(t, fs, func(hash string) error {
+	setDeleteVersionObjectHook(t, fs, func(_ context.Context, hash string) error {
 		return errors.New("delete version object failed")
 	})
 
@@ -2589,6 +2589,43 @@ func TestHandler_PROPFIND_InvalidatesDeletedDirectoryCache(t *testing.T) {
 
 	if secondW.Code != http.StatusNotFound {
 		t.Fatalf("second PROPFIND status = %d, want %d", secondW.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandler_DELETE_NonEmptyDirectoryMovesWholeTreeToTrash(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
+		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report"))); err != nil {
+		t.Fatalf("WriteFile(report) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/readme.md", bytes.NewReader([]byte("readme"))); err != nil {
+		t.Fatalf("WriteFile(readme) error: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/dav/docs", nil)
+	req.Header.Set("Depth", "infinity")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE non-empty directory status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if _, err := fs.Stat(ctx, "/docs"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected deleted directory to be absent, got %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || !items[0].IsDir {
+		t.Fatalf("expected one directory trash item, got %+v", items)
 	}
 }
 
@@ -3416,7 +3453,11 @@ func TestHandler_LockedCollectionBlocksDescendantWritesWithoutMatchingToken(t *t
 	})
 
 	t.Run("CopyIntoLockedCollectionWithIfHeaderTokenSucceeds", func(t *testing.T) {
-		req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+		if err := fs.WriteFile(ctx, "/src/copy-file.txt", bytes.NewReader([]byte("copy me too"))); err != nil {
+			t.Fatalf("WriteFile(src/copy-file.txt) error: %v", err)
+		}
+
+		req := httptest.NewRequest("COPY", "/dav/src/copy-file.txt", nil)
 		req.Header.Set("Destination", "http://example.com/dav/locked-dir/copied-if.txt")
 		req.Header.Set("If", "</dav/locked-dir> (<"+strings.Trim(lockToken, "<>")+">)")
 		w := httptest.NewRecorder()

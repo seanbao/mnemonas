@@ -1355,6 +1355,58 @@ func TestShareStore_DisableSharesUnderPathWithRestore_RestoresDisabledShares(t *
 	}
 }
 
+func TestShareStore_RestoreShares_RewritesPathsFromRestoreState(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	createdShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	disabled, err := store.DisableSharesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabled) != 1 {
+		t.Fatalf("expected one disabled share in restore state, got %d", len(disabled))
+	}
+
+	relocated := copyShare(disabled[0])
+	relocated.Path = "/restored/a.txt"
+	if err := store.RestoreShares([]*Share{relocated}); err != nil {
+		t.Fatalf("RestoreShares() error: %v", err)
+	}
+
+	restoredShare, err := store.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected restored share to be enabled")
+	}
+	if restoredShare.Path != "/restored/a.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/restored/a.txt", restoredShare.Path)
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloaded.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if reloadedShare.Path != "/restored/a.txt" {
+		t.Fatalf("expected reloaded share path %q, got %q", "/restored/a.txt", reloadedShare.Path)
+	}
+}
+
 func TestShareStore_DisableSharesUnderPath_NormalizesInputPath(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")

@@ -17,102 +17,6 @@ pub mod proto {
     include!("proto/mnemonas.dataplane.v1.rs");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::proto::data_plane_client::DataPlaneClient;
-    use super::proto::put_file_request::Payload;
-    use super::proto::{FileMetadata, PutFileRequest};
-    use super::*;
-    use tempfile::tempdir;
-    use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
-    use tokio_stream::iter;
-    use tokio_stream::wrappers::TcpListenerStream;
-    use tonic::transport::{Channel, Server};
-    use tonic::Code;
-
-    async fn setup_test_client(
-        service: DataPlaneService,
-    ) -> (DataPlaneClient<Channel>, oneshot::Sender<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("local addr");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        tokio::spawn(async move {
-            let incoming = TcpListenerStream::new(listener);
-            Server::builder()
-                .add_service(service.into_server())
-                .serve_with_incoming_shutdown(incoming, async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("server run");
-        });
-
-        let endpoint = format!("http://{}", addr);
-        let client = DataPlaneClient::connect(endpoint)
-            .await
-            .expect("connect client");
-
-        (client, shutdown_tx)
-    }
-
-    #[tokio::test]
-    async fn test_put_file_rolls_back_created_chunks_on_store_failure() {
-        let temp = tempdir().expect("tempdir");
-        let cas = Arc::new(
-            CasStore::new(CasConfig {
-                root: temp.path().join("cas"),
-                compression_enabled: false,
-                ..Default::default()
-            })
-            .await
-            .expect("cas init"),
-        );
-        cas.set_fail_put_after(2);
-
-        let service = DataPlaneService::with_cas(
-            Arc::clone(&cas),
-            ChunkerConfig {
-                min_size: 1024,
-                avg_size: 2048,
-                max_size: 4096,
-            },
-        );
-        let (mut client, shutdown_tx) = setup_test_client(service).await;
-
-        let data: Vec<u8> = (0..(16 * 1024)).map(|i| (i % 251) as u8).collect();
-        let requests = vec![
-            PutFileRequest {
-                payload: Some(Payload::Metadata(FileMetadata {
-                    path: "/docs/fail.bin".to_string(),
-                    content_type: None,
-                })),
-            },
-            PutFileRequest {
-                payload: Some(Payload::Chunk(data)),
-            },
-        ];
-
-        let err = client
-            .put_file(iter(requests))
-            .await
-            .expect_err("put_file should fail after the injected CAS write error");
-
-        assert_eq!(err.code(), Code::Internal);
-        assert!(
-            cas.list_hashes().is_empty(),
-            "expected failed put_file upload to leave no orphaned chunks"
-        );
-        let (chunks, logical_size, unique_size, _, _, _) = cas.stats();
-        assert_eq!(chunks, 0, "expected failed upload not to leave chunk stats behind");
-        assert_eq!(logical_size, 0, "expected failed upload not to inflate logical size");
-        assert_eq!(unique_size, 0, "expected failed upload not to inflate unique size");
-
-        let _ = shutdown_tx.send(());
-    }
-}
-
 use proto::data_plane_server::{DataPlane, DataPlaneServer};
 use proto::*;
 
@@ -685,5 +589,101 @@ impl DataPlane for DataPlaneService {
             objects,
             next_cursor,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proto::data_plane_client::DataPlaneClient;
+    use super::proto::put_file_request::Payload;
+    use super::proto::{FileMetadata, PutFileRequest};
+    use super::*;
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_stream::iter;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::{Channel, Server};
+    use tonic::Code;
+
+    async fn setup_test_client(
+        service: DataPlaneService,
+    ) -> (DataPlaneClient<Channel>, oneshot::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let incoming = TcpListenerStream::new(listener);
+            Server::builder()
+                .add_service(service.into_server())
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("server run");
+        });
+
+        let endpoint = format!("http://{}", addr);
+        let client = DataPlaneClient::connect(endpoint)
+            .await
+            .expect("connect client");
+
+        (client, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn test_put_file_rolls_back_created_chunks_on_store_failure() {
+        let temp = tempdir().expect("tempdir");
+        let cas = Arc::new(
+            CasStore::new(CasConfig {
+                root: temp.path().join("cas"),
+                compression_enabled: false,
+                ..Default::default()
+            })
+            .await
+            .expect("cas init"),
+        );
+        cas.set_fail_put_after(2);
+
+        let service = DataPlaneService::with_cas(
+            Arc::clone(&cas),
+            ChunkerConfig {
+                min_size: 1024,
+                avg_size: 2048,
+                max_size: 4096,
+            },
+        );
+        let (mut client, shutdown_tx) = setup_test_client(service).await;
+
+        let data: Vec<u8> = (0..(16 * 1024)).map(|i| (i % 251) as u8).collect();
+        let requests = vec![
+            PutFileRequest {
+                payload: Some(Payload::Metadata(FileMetadata {
+                    path: "/docs/fail.bin".to_string(),
+                    content_type: None,
+                })),
+            },
+            PutFileRequest {
+                payload: Some(Payload::Chunk(data)),
+            },
+        ];
+
+        let err = client
+            .put_file(iter(requests))
+            .await
+            .expect_err("put_file should fail after the injected CAS write error");
+
+        assert_eq!(err.code(), Code::Internal);
+        assert!(
+            cas.list_hashes().is_empty(),
+            "expected failed put_file upload to leave no orphaned chunks"
+        );
+        let (chunks, logical_size, unique_size, _, _, _) = cas.stats();
+        assert_eq!(chunks, 0, "expected failed upload not to leave chunk stats behind");
+        assert_eq!(logical_size, 0, "expected failed upload not to inflate logical size");
+        assert_eq!(unique_size, 0, "expected failed upload not to inflate unique size");
+
+        let _ = shutdown_tx.send(());
     }
 }

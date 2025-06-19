@@ -291,7 +291,7 @@ describe('UsersPage', () => {
       })
     })
 
-    it('keeps a newer create form open when an older create request resolves', async () => {
+    it('keeps the create modal open while a pending create request is in flight', async () => {
       const user = userEvent.setup()
       const pendingCreate = createDeferred<{ success: boolean }>()
       vi.mocked(usersApi.createUser).mockImplementationOnce(() => pendingCreate.promise)
@@ -313,20 +313,61 @@ describe('UsersPage', () => {
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
-      await user.click(screen.getByRole('button', { name: /添加用户/i }))
-      await user.type(screen.getByLabelText(/用户名/i), 'bob')
-      await user.type(screen.getByLabelText(/密码/i), 'password456')
-      await user.type(screen.getByLabelText(/邮箱/i), 'bob@example.com')
+
+      expect(screen.getByRole('heading', { name: '添加用户' })).toBeInTheDocument()
+      expect(screen.getByLabelText(/用户名/i)).toHaveValue('alice')
+      expect(screen.getByLabelText(/邮箱/i)).toHaveValue('alice@example.com')
 
       await act(async () => {
         pendingCreate.resolve({ success: true })
       })
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '创建' })).toBeInTheDocument()
-        expect(screen.getByLabelText(/用户名/i)).toHaveValue('bob')
-        expect(screen.getByLabelText(/邮箱/i)).toHaveValue('bob@example.com')
+        expect(screen.queryByLabelText(/用户名/i)).not.toBeInTheDocument()
       })
+    })
+
+    it('keeps the create form open when a pending create request later fails', async () => {
+      const user = userEvent.setup()
+      const pendingCreate = createDeferred<{ success: boolean }>()
+      vi.mocked(usersApi.createUser).mockImplementationOnce(() => pendingCreate.promise)
+
+      renderUsersPage()
+
+      await user.click(screen.getByRole('button', { name: /添加用户/i }))
+      await user.type(screen.getByLabelText(/用户名/i), 'alice')
+      await user.type(screen.getByLabelText(/密码/i), 'password123')
+      await user.type(screen.getByLabelText(/邮箱/i), 'alice@example.com')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(vi.mocked(usersApi.createUser).mock.calls[0]?.[0]).toMatchObject({
+          username: 'alice',
+          password: 'password123',
+          email: 'alice@example.com',
+        })
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByRole('button', { name: /创建/ })).toBeInTheDocument()
+      expect(screen.getByLabelText(/用户名/i)).toHaveValue('alice')
+      expect(screen.getByLabelText(/邮箱/i)).toHaveValue('alice@example.com')
+
+      await act(async () => {
+        pendingCreate.reject(new Error('create failed'))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '创建失败',
+          description: 'create failed',
+          color: 'danger',
+        })
+      })
+
+      expect(screen.getByRole('button', { name: /创建/ })).toBeInTheDocument()
+      expect(screen.getByLabelText(/用户名/i)).toHaveValue('alice')
     })
   })
 
@@ -391,7 +432,51 @@ describe('UsersPage', () => {
       })
     })
 
-    it('keeps reset-password modal target after an older delete request resolves', async () => {
+    it('keeps the delete modal open when a pending delete request later fails', async () => {
+      const user = userEvent.setup()
+      const pendingDelete = createDeferred<{ success: boolean }>()
+      vi.mocked(usersApi.deleteUser).mockImplementationOnce(() => pendingDelete.promise)
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: '删除' }))
+
+      await waitFor(() => {
+        expect(vi.mocked(usersApi.deleteUser).mock.calls[0]?.[0]).toBe('user-2')
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByRole('heading', { name: '确认删除' })).toBeInTheDocument()
+      expect(screen.getAllByText('testuser').length).toBeGreaterThan(0)
+
+      await act(async () => {
+        pendingDelete.reject(new Error('delete failed'))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '删除失败',
+          description: 'delete failed',
+          color: 'danger',
+        })
+      })
+
+      expect(screen.getByRole('heading', { name: '确认删除' })).toBeInTheDocument()
+    })
+
+    it('keeps the delete modal open while a pending delete is in flight', async () => {
       const user = userEvent.setup()
       const pendingDelete = createDeferred<{ success: boolean }>()
       vi.mocked(usersApi.deleteUser).mockImplementationOnce(() => pendingDelete.promise)
@@ -417,24 +502,18 @@ describe('UsersPage', () => {
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
-      await user.click(screen.getByRole('button', { name: 'guest 用户操作' }))
-      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
-        expect(screen.getByText('guest')).toBeInTheDocument()
+        expect(screen.getByRole('heading', { name: '确认删除' })).toBeInTheDocument()
+        expect(screen.getAllByText('testuser').length).toBeGreaterThan(0)
       })
-
-      await user.type(screen.getByLabelText('新密码'), 'guestpass123')
 
       await act(async () => {
         pendingDelete.resolve({ success: true })
       })
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
-        expect(screen.getByText('guest')).toBeInTheDocument()
-        expect(screen.getByLabelText('新密码')).toHaveValue('guestpass123')
+        expect(screen.queryByText('确认删除')).not.toBeInTheDocument()
       })
     })
   })
@@ -457,6 +536,55 @@ describe('UsersPage', () => {
 
     it('resetUserPassword API function is defined', () => {
       expect(usersApi.resetUserPassword).toBeDefined()
+    })
+
+    it('keeps the reset password modal open when a pending reset later fails', async () => {
+      const user = userEvent.setup()
+      const pendingReset = createDeferred<{ success: boolean }>()
+      vi.mocked(usersApi.resetUserPassword).mockImplementationOnce(() => pendingReset.promise)
+
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('重置密码'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '确认重置' })).toBeInTheDocument()
+      })
+
+      await user.type(screen.getByLabelText('新密码'), 'password123')
+      await user.click(screen.getByRole('button', { name: '确认重置' }))
+
+      await waitFor(() => {
+        expect(vi.mocked(usersApi.resetUserPassword).mock.calls[0]).toEqual([
+          'user-2',
+          { new_password: 'password123' },
+        ])
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消' }))
+
+      expect(screen.getByRole('button', { name: /确认重置/ })).toBeInTheDocument()
+      expect(screen.getByLabelText('新密码')).toHaveValue('password123')
+
+      await act(async () => {
+        pendingReset.reject(new Error('reset failed'))
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '重置失败',
+          description: 'reset failed',
+          color: 'danger',
+        })
+      })
+
+      expect(screen.getByRole('button', { name: /确认重置/ })).toBeInTheDocument()
+      expect(screen.getByLabelText('新密码')).toHaveValue('password123')
     })
   })
 

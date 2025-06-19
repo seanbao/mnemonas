@@ -4558,6 +4558,163 @@ func TestServer_Trash_Restore(t *testing.T) {
 	})
 }
 
+func TestServer_Trash_Restore_RestoresLinkedSharesAndFavorites(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-linked-shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(tmpDir, "trash-restore-linked-favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := fs.Mkdir(ctx, "/trash-restore-linked"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-linked/report.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/trash-restore-linked/report.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/trash-restore-linked/report.txt", "file"); err != nil {
+		t.Fatalf("AddFavorite() error: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-linked/report.txt", nil)
+	deleteRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("Delete status = %d, want %d, body: %s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+
+	disabledShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(disabled share) error: %v", err)
+	}
+	if disabledShare.Enabled {
+		t.Fatal("expected share to be disabled after delete")
+	}
+	if favoritesStore.IsFavorite("tester", "/trash-restore-linked/report.txt") {
+		t.Fatal("expected favorite to be removed after delete")
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	}
+
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restored share) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected share to be re-enabled after restore")
+	}
+	if restoredShare.Path != "/trash-restore-linked/report.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-linked/report.txt", restoredShare.Path)
+	}
+	if !favoritesStore.IsFavorite("tester", "/trash-restore-linked/report.txt") {
+		t.Fatal("expected favorite to be restored after restore")
+	}
+}
+
+func TestServer_Trash_RestoreToCustomPath_RewritesLinkedSharesAndFavorites(t *testing.T) {
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	shareStore, err := share.NewShareStore(filepath.Join(tmpDir, "trash-restore-custom-shares.json"))
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(filepath.Join(tmpDir, "trash-restore-custom-favorites.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := fs.Mkdir(ctx, "/trash-restore-custom"); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/trash-restore-target"); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-custom/notes.txt", bytes.NewReader([]byte("restore elsewhere"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/trash-restore-custom/notes.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/trash-restore-custom/notes.txt", "file"); err != nil {
+		t.Fatalf("AddFavorite() error: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-custom/notes.txt", nil)
+	deleteRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("Delete status = %d, want %d, body: %s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=/trash-restore-target/restored.txt", nil)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("RestoreFromTrash custom path status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	}
+
+	restoredShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restored share) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected share to be re-enabled after custom restore")
+	}
+	if restoredShare.Path != "/trash-restore-target/restored.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/trash-restore-target/restored.txt", restoredShare.Path)
+	}
+	if favoritesStore.IsFavorite("tester", "/trash-restore-custom/notes.txt") {
+		t.Fatal("expected original favorite path to stay removed after custom restore")
+	}
+	if !favoritesStore.IsFavorite("tester", "/trash-restore-target/restored.txt") {
+		t.Fatal("expected favorite to be restored at the custom path")
+	}
+}
+
 func TestServer_Trash_Delete(t *testing.T) {
 	server, fs, _ := setupTestServer(t)
 	ctx := context.Background()
@@ -8852,7 +9009,7 @@ func TestServer_DeleteFile_ErrorCases(t *testing.T) {
 		}
 	})
 
-	t.Run("DeleteNonEmptyDirectoryReturnsConflict", func(t *testing.T) {
+	t.Run("DeleteNonEmptyDirectoryMovesTreeToTrash", func(t *testing.T) {
 		ctx := context.Background()
 		if err := fs.Mkdir(ctx, "/non-empty-dir"); err != nil {
 			t.Fatalf("Mkdir() error: %v", err)
@@ -8866,11 +9023,18 @@ func TestServer_DeleteFile_ErrorCases(t *testing.T) {
 
 		server.Router().ServeHTTP(w, req)
 
-		if w.Code != http.StatusConflict {
-			t.Fatalf("Delete non-empty directory status = %d, want %d", w.Code, http.StatusConflict)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Delete non-empty directory status = %d, want %d", w.Code, http.StatusOK)
 		}
-		if !strings.Contains(w.Body.String(), "directory not empty") {
-			t.Fatalf("expected directory not empty conflict message, got %s", w.Body.String())
+		if _, err := fs.Stat(ctx, "/non-empty-dir"); err != storage.ErrNotFound {
+			t.Fatalf("expected directory to be removed from workspace, got %v", err)
+		}
+		items, err := fs.ListTrash(ctx)
+		if err != nil {
+			t.Fatalf("ListTrash() error: %v", err)
+		}
+		if len(items) != 1 || !items[0].IsDir {
+			t.Fatalf("expected deleted directory tree to be stored as one trash directory item, got %+v", items)
 		}
 	})
 }

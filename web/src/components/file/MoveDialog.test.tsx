@@ -207,20 +207,14 @@ describe('MoveDialog', () => {
     })
   })
 
-  it('keeps a newer dialog open when an older move request resolves', async () => {
+  it('keeps the dialog open while a pending move request is in flight', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
     const firstMove = createDeferred<void>()
     const firstFiles = [{ path: '/source/a.txt', name: 'a.txt', isDir: false }]
-    const secondFiles = [{ path: '/source/c.txt', name: 'c.txt', isDir: false }]
-    mockMoveFile.mockImplementation((from) => {
-      if (from === '/source/a.txt') {
-        return firstMove.promise
-      }
-      return Promise.resolve(undefined)
-    })
+    mockMoveFile.mockImplementationOnce(() => firstMove.promise)
 
-    const view = renderDialog({ onClose, files: firstFiles })
+    renderDialog({ onClose, files: firstFiles })
 
     await user.click(screen.getByText('点击选择目标文件夹'))
     await waitFor(() => {
@@ -235,23 +229,8 @@ describe('MoveDialog', () => {
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
-    expect(onClose).toHaveBeenCalledTimes(1)
-
-    view.rerender(
-      <QueryClientProvider client={view.queryClient}>
-        <MoveDialog isOpen={false} onClose={onClose} files={firstFiles} currentPath="/source" mode="move" />
-      </QueryClientProvider>,
-    )
-
-    view.rerender(
-      <QueryClientProvider client={view.queryClient}>
-        <MoveDialog isOpen={true} onClose={onClose} files={secondFiles} currentPath="/source" mode="move" />
-      </QueryClientProvider>,
-    )
-
-    await waitFor(() => {
-      expect(screen.getAllByText('c.txt').length).toBeGreaterThan(0)
-    })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getAllByText('a.txt').length).toBeGreaterThan(0)
 
     await act(async () => {
       firstMove.resolve(undefined)
@@ -259,8 +238,48 @@ describe('MoveDialog', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getAllByText('c.txt').length).toBeGreaterThan(0)
       expect(onClose).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('keeps the dialog open when a pending move request later fails', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    const firstMove = createDeferred<void>()
+    const firstFiles = [{ path: '/source/a.txt', name: 'a.txt', isDir: false }]
+    mockMoveFile.mockImplementationOnce(() => firstMove.promise)
+
+    renderDialog({ onClose, files: firstFiles })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    await waitFor(() => {
+      expect(mockMoveFile).toHaveBeenCalledWith('/source/a.txt', '/a.txt')
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getAllByText('a.txt').length).toBeGreaterThan(0)
+
+    await act(async () => {
+      firstMove.reject(new Error('move failed'))
+    })
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '批量移动失败',
+        description: '共 1 个项目失败',
+        color: 'danger',
+      })
+    })
+
+    expect(screen.getAllByText('a.txt').length).toBeGreaterThan(0)
+    expect(onClose).not.toHaveBeenCalled()
   })
 })

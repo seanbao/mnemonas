@@ -4,6 +4,19 @@ import userEvent from '@testing-library/user-event'
 import { ActivityPage } from './Activity'
 import * as HeroUI from '@heroui/react'
 
+vi.mock('@heroui/react', async () => {
+  const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
+  return {
+    ...actual,
+    Pagination: ({ total, page, onChange }: { total: number; page: number; onChange: (page: number) => void }) => (
+      <div>
+        <span>{`page ${page} of ${total}`}</span>
+        {total > 1 ? <button onClick={() => onChange(2)}>转到第 2 页</button> : null}
+      </div>
+    ),
+  }
+})
+
 const mockAddToast = vi.fn()
 
 // Mock activity API
@@ -275,6 +288,61 @@ describe('ActivityPage', () => {
           offset: 0,
           action: undefined,
         })
+      })
+    })
+
+    it('returns to the last available page when refreshed data shrinks the total page count', async () => {
+      mockListActivity.mockImplementation(({ offset = 0 }: { offset?: number }) => {
+        if (offset === 20) {
+          return Promise.resolve({
+            items: [],
+            total: 3,
+            limit: 20,
+            offset: 20,
+          })
+        }
+
+        return Promise.resolve({
+          items: [
+            {
+              id: '1',
+              timestamp: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
+              action: 'upload',
+              path: '/documents/report.pdf',
+              user: 'admin',
+            },
+          ],
+          total: 21,
+          limit: 20,
+          offset,
+        })
+      })
+
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('/documents/report.pdf')).toBeTruthy()
+        expect(screen.getByText('转到第 2 页')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('转到第 2 页'))
+
+      await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalledWith({
+          limit: 20,
+          offset: 20,
+          action: undefined,
+        })
+      })
+
+      await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalledWith({
+          limit: 20,
+          offset: 0,
+          action: undefined,
+        })
+        expect(screen.getByText('/documents/report.pdf')).toBeTruthy()
       })
     })
   })

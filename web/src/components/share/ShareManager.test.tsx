@@ -41,20 +41,6 @@ const mockShares = [
   },
 ]
 
-const additionalShare = {
-  id: 'share-2',
-  path: '/docs/notes.txt',
-  type: 'file' as const,
-  enabled: true,
-  has_password: false,
-  expires_at: null,
-  access_count: 1,
-  max_access: 0,
-  url: '/s/share-2',
-  created_at: '2026-03-27T00:00:00Z',
-  updated_at: '2026-03-27T00:00:00Z',
-}
-
 function createDeferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -265,17 +251,15 @@ describe('ShareManager', () => {
     })
   })
 
-  it('keeps a newer delete modal open when an older delete request resolves', async () => {
+  it('keeps the delete modal open while a pending delete is in flight', async () => {
     const user = userEvent.setup()
     const firstDelete = createDeferred<void>()
-    vi.mocked(shareApi.listShares).mockResolvedValueOnce([...mockShares, additionalShare])
     vi.mocked(shareApi.deleteShare).mockImplementationOnce(() => firstDelete.promise)
 
     render(<ShareManager />)
 
     await waitFor(() => {
       expect(screen.getByText('report.pdf')).toBeInTheDocument()
-      expect(screen.getByText('notes.txt')).toBeInTheDocument()
     })
 
     await user.click(screen.getByLabelText('report.pdf 分享操作'))
@@ -297,23 +281,66 @@ describe('ShareManager', () => {
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
-    await user.click(screen.getByLabelText('notes.txt 分享操作'))
-
-    const visibleDeleteAction = screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('删除分享'))
-    expect(visibleDeleteAction).toBeTruthy()
-    await user.click(visibleDeleteAction!)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
-      expect(screen.getByText('/docs/notes.txt')).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: '删除分享' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /删除/ })).toBeInTheDocument()
+      expect(screen.getByText('/docs/report.pdf', { selector: 'span' })).toBeInTheDocument()
     })
 
     firstDelete.resolve(undefined)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
-      expect(screen.getByText('/docs/notes.txt')).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: '删除分享' })).not.toBeInTheDocument()
       expect(screen.queryByLabelText('report.pdf 分享操作')).not.toBeInTheDocument()
     })
+  })
+
+  it('keeps the delete modal open when a pending delete later fails', async () => {
+    const user = userEvent.setup()
+    const firstDelete = createDeferred<void>()
+    vi.mocked(shareApi.deleteShare).mockImplementationOnce(() => firstDelete.promise)
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+
+    await waitFor(() => {
+      expect(screen.getByText('删除分享')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('删除分享'))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '删除' }))
+
+    await waitFor(() => {
+      expect(shareApi.deleteShare).toHaveBeenCalledWith('share-1')
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+
+    expect(screen.getByRole('heading', { name: '删除分享' })).toBeInTheDocument()
+    expect(screen.getByText('/docs/report.pdf', { selector: 'span' })).toBeInTheDocument()
+
+    firstDelete.reject(new Error('delete failed'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '删除失败',
+        description: 'delete failed',
+        color: 'danger',
+      })
+    })
+
+    expect(screen.getByRole('heading', { name: '删除分享' })).toBeInTheDocument()
+    expect(screen.getByText('/docs/report.pdf', { selector: 'span' })).toBeInTheDocument()
   })
 })

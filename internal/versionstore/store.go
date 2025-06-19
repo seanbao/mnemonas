@@ -55,6 +55,7 @@ type TrashItem struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	IsDir        bool      `json:"is_dir"`
 	HadVersions  bool      `json:"had_versions"`
+	RestoreData  []byte    `json:"-"`
 }
 
 // Version represents a file version
@@ -260,7 +261,8 @@ func createTables(db *sql.DB) error {
 		deleted_at INTEGER NOT NULL,
 		expires_at INTEGER NOT NULL,
 		is_dir BOOLEAN NOT NULL,
-		had_versions BOOLEAN NOT NULL
+		had_versions BOOLEAN NOT NULL,
+		restore_data BLOB NOT NULL DEFAULT x''
 	);
 	CREATE INDEX IF NOT EXISTS idx_trash_expires ON trash(expires_at);
 
@@ -279,7 +281,43 @@ func createTables(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureTrashTableSchema(db); err != nil {
+		return err
+	}
 	return ensureFileLocksTableSchema(db)
+}
+
+func ensureTrashTableSchema(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(trash)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	hasRestoreData := false
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "restore_data" {
+			hasRestoreData = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasRestoreData {
+		return nil
+	}
+
+	_, err = db.Exec(`ALTER TABLE trash ADD COLUMN restore_data BLOB NOT NULL DEFAULT x''`)
+	return err
 }
 
 func ensureFileLocksTableSchema(db *sql.DB) error {
@@ -739,12 +777,27 @@ func (s *Store) AddToTrash(ctx context.Context, item *TrashItem) error {
 		return err
 	}
 	item.OriginalPath = cleanOriginalPath
+	if item.RestoreData == nil {
+		item.RestoreData = []byte{}
+	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions) 
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data) 
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.OriginalPath, item.Size, item.DeletedAt.Unix(),
-		item.ExpiresAt.Unix(), item.IsDir, item.HadVersions)
+		item.ExpiresAt.Unix(), item.IsDir, item.HadVersions, item.RestoreData)
 	return err
+}
+
+func (s *Store) UpdateTrashRestoreData(ctx context.Context, id string, restoreData []byte) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE trash SET restore_data = ? WHERE id = ?`, restoreData, id)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetTrashItem returns a trash item by ID
@@ -753,10 +806,10 @@ func (s *Store) GetTrashItem(ctx context.Context, id string) (*TrashItem, error)
 	var deletedAt, expiresAt int64
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, original_path, size, deleted_at, expires_at, is_dir, had_versions 
+		`SELECT id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data 
 		 FROM trash WHERE id = ?`, id).Scan(
 		&item.ID, &item.OriginalPath, &item.Size, &deletedAt, &expiresAt,
-		&item.IsDir, &item.HadVersions)
+		&item.IsDir, &item.HadVersions, &item.RestoreData)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -772,7 +825,7 @@ func (s *Store) GetTrashItem(ctx context.Context, id string) (*TrashItem, error)
 // ListTrash returns all trash items, newest first
 func (s *Store) ListTrash(ctx context.Context) ([]TrashItem, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, original_path, size, deleted_at, expires_at, is_dir, had_versions 
+		`SELECT id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data 
 		 FROM trash ORDER BY deleted_at DESC`)
 	if err != nil {
 		return nil, err
@@ -784,7 +837,7 @@ func (s *Store) ListTrash(ctx context.Context) ([]TrashItem, error) {
 		var item TrashItem
 		var deletedAt, expiresAt int64
 		if err := rows.Scan(&item.ID, &item.OriginalPath, &item.Size, &deletedAt,
-			&expiresAt, &item.IsDir, &item.HadVersions); err != nil {
+			&expiresAt, &item.IsDir, &item.HadVersions, &item.RestoreData); err != nil {
 			return nil, err
 		}
 		item.DeletedAt = time.Unix(deletedAt, 0)
@@ -1028,6 +1081,23 @@ func (s *Store) DeleteFileIndex(ctx context.Context, path string) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path)
+	return err
+}
+
+// DeleteFileIndexPrefix removes all indexed files at or under a path.
+func (s *Store) DeleteFileIndexPrefix(ctx context.Context, path string) error {
+	path, err := normalizeVersionStorePath(path)
+	if err != nil {
+		return err
+	}
+
+	prefix := path + "/"
+	_, err = s.db.ExecContext(ctx,
+		`DELETE FROM files WHERE path = ? OR (path >= ? AND path < ?)`,
+		path,
+		prefix,
+		prefix+"\uffff",
+	)
 	return err
 }
 
