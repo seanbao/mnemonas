@@ -1306,6 +1306,7 @@ PUT /api/v1/shares/{id}
 
 **说明**:
 - 更新分享不会改变 `id`；响应中的 `url` 会根据当前运行时 `share.base_url` 重新生成
+- 命中 `share.policy_rules` 的分享在更新后仍必须满足路径策略；`require_password` 会拒绝会使分享保持或变为无密码的更新，显式清空或超过上限的 `expires_in` 和 `max_access` 会被压到策略上限
 
 **响应示例**:
 ```json

@@ -392,7 +392,7 @@ max_expires_in = "24h"
 max_access = 20
 ```
 
-`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs. Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless requests are rejected if required, and expiration or access-count values above the configured limits are capped.
+`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs. Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, including explicit update requests that clear those limits, are capped.
 
 ## `[security]`
 
