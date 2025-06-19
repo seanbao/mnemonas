@@ -779,6 +779,56 @@ func TestStore_RemoveFavoritesUnderPathWithRestore_RestoresRemovedFavorites(t *t
 	}
 }
 
+func TestStore_RestoreFavoritesIfMissing_PreservesRecreatedFavorite(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "favorites.json")
+
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	if _, err := store.Add("user1", "/docs/a.txt", "original"); err != nil {
+		t.Fatalf("Add(original) error: %v", err)
+	}
+
+	removed, err := store.RemoveFavoritesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("RemoveFavoritesUnderPathWithRestore() error: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected one removed favorite in rollback state, got %d", len(removed))
+	}
+
+	if _, err := store.Add("user1", "/docs/a.txt", "newer"); err != nil {
+		t.Fatalf("Add(newer) error: %v", err)
+	}
+
+	if err := store.RestoreFavoritesIfMissing(removed); err != nil {
+		t.Fatalf("RestoreFavoritesIfMissing() error: %v", err)
+	}
+
+	loaded := store.List("user1")
+	if len(loaded) != 1 {
+		t.Fatalf("expected one favorite after rollback restore, got %d", len(loaded))
+	}
+	if loaded[0].Note != "newer" {
+		t.Fatalf("expected newer favorite note to be preserved, got %q", loaded[0].Note)
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("NewStore(reload) error: %v", err)
+	}
+	reloadedFavorites := reloaded.List("user1")
+	if len(reloadedFavorites) != 1 {
+		t.Fatalf("expected one persisted favorite after reload, got %d", len(reloadedFavorites))
+	}
+	if reloadedFavorites[0].Note != "newer" {
+		t.Fatalf("expected persisted newer favorite note to be preserved, got %q", reloadedFavorites[0].Note)
+	}
+}
+
 func TestStore_ListDoesNotBlockWhileAddPersists(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "favorites.json")

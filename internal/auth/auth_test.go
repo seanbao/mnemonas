@@ -609,6 +609,102 @@ func TestUserStore(t *testing.T) {
 		}
 	})
 
+	t.Run("directory sync warnings keep mutations committed", func(t *testing.T) {
+		storeDir := t.TempDir()
+		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to create user store: %v", err)
+		}
+
+		originalSyncAuthFileDir := syncAuthFileDir
+		syncAuthFileDir = func(dir string) error {
+			return errors.New("directory fsync failed")
+		}
+		defer func() {
+			syncAuthFileDir = originalSyncAuthFileDir
+		}()
+
+		created, err := store.Create("warncreate", "password123", "warncreate@example.com", RoleUser)
+		if !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected create warning error, got %v", err)
+		}
+		if created == nil {
+			t.Fatal("expected create to return user on persistence warning")
+		}
+		if _, err := store.GetByUsername("warncreate"); err != nil {
+			t.Fatalf("expected create warning to commit in-memory user, got %v", err)
+		}
+
+		created.Disabled = true
+		if err := store.Update(created); !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected update warning error, got %v", err)
+		}
+		freshCreated, err := store.GetByID(created.ID)
+		if err != nil {
+			t.Fatalf("failed to reload updated user: %v", err)
+		}
+		if !freshCreated.Disabled {
+			t.Fatal("expected update warning to commit disabled flag in memory")
+		}
+
+		changeUser, err := store.Create("warnchange", "password123", "warnchange@example.com", RoleUser)
+		if !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected change fixture create warning error, got %v", err)
+		}
+		if err := store.ChangePassword(changeUser.ID, "password123", "newpassword456"); !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected change password warning error, got %v", err)
+		}
+		if _, err := store.Authenticate("warnchange", "newpassword456"); err != nil {
+			t.Fatalf("expected new password to be usable after warning commit, got %v", err)
+		}
+
+		resetUser, err := store.Create("warnreset", "password123", "warnreset@example.com", RoleUser)
+		if !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected reset fixture create warning error, got %v", err)
+		}
+		if err := store.ResetPassword(resetUser.ID, "resetpass456"); !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected reset password warning error, got %v", err)
+		}
+		if _, err := store.Authenticate("warnreset", "resetpass456"); err != nil {
+			t.Fatalf("expected reset password to be usable after warning commit, got %v", err)
+		}
+
+		deleteUser, err := store.Create("warndelete", "password123", "warndelete@example.com", RoleUser)
+		if !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected delete fixture create warning error, got %v", err)
+		}
+		if err := store.Delete(deleteUser.ID); !isAuthPersistenceWarning(err) {
+			t.Fatalf("expected delete warning error, got %v", err)
+		}
+		if _, err := store.GetByID(deleteUser.ID); err != ErrUserNotFound {
+			t.Fatalf("expected delete warning to remove user from memory, got %v", err)
+		}
+
+		reloaded, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to reload user store after warnings: %v", err)
+		}
+		if _, err := reloaded.GetByUsername("warncreate"); err != nil {
+			t.Fatalf("expected warning-created user on disk, got %v", err)
+		}
+		reloadedCreated, err := reloaded.GetByUsername("warncreate")
+		if err != nil {
+			t.Fatalf("failed to reload updated warning user: %v", err)
+		}
+		if !reloadedCreated.Disabled {
+			t.Fatal("expected warning-updated disabled flag on disk")
+		}
+		if _, err := reloaded.Authenticate("warnchange", "newpassword456"); err != nil {
+			t.Fatalf("expected warning-changed password on disk, got %v", err)
+		}
+		if _, err := reloaded.Authenticate("warnreset", "resetpass456"); err != nil {
+			t.Fatalf("expected warning-reset password on disk, got %v", err)
+		}
+		if _, err := reloaded.GetByID(deleteUser.ID); err != ErrUserNotFound {
+			t.Fatalf("expected warning-deleted user to stay deleted on disk, got %v", err)
+		}
+	})
+
 	t.Run("concurrent writes serialize persistence", func(t *testing.T) {
 		storeDir := t.TempDir()
 		store, _, err := NewUserStore(filepath.Join(storeDir, "users.json"))
@@ -2089,6 +2185,130 @@ func TestAuthHandler(t *testing.T) {
 		toggleRec := httptest.NewRecorder()
 		brokenHandler.HandleToggleUserStatus(toggleRec, toggleReq, toggleUser.ID)
 		assertInternalError(t, toggleRec, "UPDATE_ERROR")
+	})
+
+	t.Run("admin mutations return warning when only auth persistence fsync fails", func(t *testing.T) {
+		warningStoreDir := t.TempDir()
+		warningStore, _, err := NewUserStore(filepath.Join(warningStoreDir, "users.json"))
+		if err != nil {
+			t.Fatalf("failed to create warning store fixture: %v", err)
+		}
+		warningTM := NewTokenManager("warning-secret", 15*time.Minute, 24*time.Hour)
+		warningHandler := NewHandler(warningStore, warningTM)
+
+		admin, err := warningStore.GetByUsername("admin")
+		if err != nil {
+			t.Fatalf("failed to get admin user: %v", err)
+		}
+		changeUser, err := warningStore.Create("warning-change", "password123", "warning-change@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create change user: %v", err)
+		}
+		deleteUser, err := warningStore.Create("warning-delete", "password123", "warning-delete@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create delete user: %v", err)
+		}
+		resetUser, err := warningStore.Create("warning-reset", "password123", "warning-reset@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create reset user: %v", err)
+		}
+		toggleUser, err := warningStore.Create("warning-toggle", "password123", "warning-toggle@test.com", RoleUser)
+		if err != nil {
+			t.Fatalf("failed to create toggle user: %v", err)
+		}
+
+		originalSyncAuthFileDir := syncAuthFileDir
+		syncAuthFileDir = func(dir string) error {
+			return errors.New("directory fsync failed")
+		}
+		defer func() {
+			syncAuthFileDir = originalSyncAuthFileDir
+		}()
+
+		assertWarningSuccess := func(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantMessage string) map[string]interface{} {
+			t.Helper()
+			if rec.Code != wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", wantStatus, rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Warning"); got != authPersistenceWarningHeader {
+				t.Fatalf("warning header = %q, want %q", got, authPersistenceWarningHeader)
+			}
+			var envelope authEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("unmarshal warning envelope error: %v", err)
+			}
+			if !envelope.Success {
+				t.Fatalf("expected success payload, got %s", rec.Body.String())
+			}
+			if envelope.Message != wantMessage {
+				t.Fatalf("message = %q, want %q", envelope.Message, wantMessage)
+			}
+			var data map[string]interface{}
+			if err := json.Unmarshal(envelope.Data, &data); err != nil {
+				t.Fatalf("unmarshal warning data error: %v", err)
+			}
+			warning, ok := data["warning"].(bool)
+			if !ok || !warning {
+				t.Fatalf("expected warning flag in payload, got %+v", data)
+			}
+			return data
+		}
+
+		createReq := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(`{"username":"warningcreate","password":"password123","email":"warningcreate@test.com","role":"user"}`))
+		createReq = createReq.WithContext(context.WithValue(createReq.Context(), ContextKeyUser, admin))
+		createRec := httptest.NewRecorder()
+		warningHandler.HandleCreateUser(createRec, createReq)
+		createData := assertWarningSuccess(t, createRec, http.StatusCreated, "user created with persistence warning")
+		if _, ok := createData["user"].(map[string]interface{}); !ok {
+			t.Fatalf("expected user payload for create warning, got %+v", createData)
+		}
+		if _, err := warningStore.GetByUsername("warningcreate"); err != nil {
+			t.Fatalf("expected warned create to commit user, got %v", err)
+		}
+
+		changeReq := httptest.NewRequest("POST", "/api/v1/auth/password", bytes.NewBufferString(`{"old_password":"password123","new_password":"newpassword456"}`))
+		changeReq = changeReq.WithContext(context.WithValue(changeReq.Context(), ContextKeyUser, changeUser))
+		changeRec := httptest.NewRecorder()
+		warningHandler.HandleChangePassword(changeRec, changeReq)
+		assertWarningSuccess(t, changeRec, http.StatusOK, "password changed with persistence warning")
+		if _, err := warningStore.Authenticate("warning-change", "newpassword456"); err != nil {
+			t.Fatalf("expected warned password change to commit, got %v", err)
+		}
+
+		deleteReq := httptest.NewRequest("DELETE", "/api/v1/admin/users/"+deleteUser.ID, nil)
+		deleteReq = deleteReq.WithContext(context.WithValue(deleteReq.Context(), ContextKeyUser, admin))
+		deleteRec := httptest.NewRecorder()
+		warningHandler.HandleDeleteUser(deleteRec, deleteReq, deleteUser.ID)
+		assertWarningSuccess(t, deleteRec, http.StatusOK, "user deleted with persistence warning")
+		if _, err := warningStore.GetByID(deleteUser.ID); err != ErrUserNotFound {
+			t.Fatalf("expected warned delete to remove user, got %v", err)
+		}
+
+		resetReq := httptest.NewRequest("POST", "/api/v1/admin/users/"+resetUser.ID+"/reset-password", bytes.NewBufferString(`{"new_password":"resetpass123"}`))
+		resetReq = resetReq.WithContext(context.WithValue(resetReq.Context(), ContextKeyUser, admin))
+		resetRec := httptest.NewRecorder()
+		warningHandler.HandleResetUserPassword(resetRec, resetReq, resetUser.ID)
+		assertWarningSuccess(t, resetRec, http.StatusOK, "password reset with persistence warning")
+		if _, err := warningStore.Authenticate("warning-reset", "resetpass123"); err != nil {
+			t.Fatalf("expected warned reset password to commit, got %v", err)
+		}
+
+		toggleReq := httptest.NewRequest("PUT", "/api/v1/admin/users/"+toggleUser.ID+"/status", bytes.NewBufferString(`{"disabled":true}`))
+		toggleReq = toggleReq.WithContext(context.WithValue(toggleReq.Context(), ContextKeyUser, admin))
+		toggleRec := httptest.NewRecorder()
+		warningHandler.HandleToggleUserStatus(toggleRec, toggleReq, toggleUser.ID)
+		toggleData := assertWarningSuccess(t, toggleRec, http.StatusOK, "user status updated with persistence warning")
+		disabled, ok := toggleData["disabled"].(bool)
+		if !ok || !disabled {
+			t.Fatalf("expected disabled=true in toggle warning payload, got %+v", toggleData)
+		}
+		refreshedToggle, err := warningStore.GetByID(toggleUser.ID)
+		if err != nil {
+			t.Fatalf("failed to reload warned toggle user: %v", err)
+		}
+		if !refreshedToggle.Disabled {
+			t.Fatal("expected warned toggle to commit disabled state")
+		}
 	})
 
 	t.Run("toggle user status requires disabled field", func(t *testing.T) {

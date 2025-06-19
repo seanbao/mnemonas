@@ -874,10 +874,10 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", shareDownloadContentType(share.Path))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if streamResponseStarted(err) {
 			return
 		}
-		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -965,10 +965,10 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(filename))
 	w.Header().Set("Content-Type", shareDownloadContentType(fullPath))
 	if err := streamDownload(w, reader, firstChunk, exhausted); err != nil {
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if streamResponseStarted(err) {
 			return
 		}
-		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "DOWNLOAD_SHARE_FAILED")
 		return
 	}
@@ -1135,10 +1135,10 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	trackingWriter := &responseStartTrackingWriter{ResponseWriter: w}
 	if err := json.NewEncoder(trackingWriter).Encode(resp); err != nil {
+		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		if trackingWriter.started {
 			return
 		}
-		_ = h.store.rollbackAuthorizedAccess(accessReservation)
 		writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 		return
 	}

@@ -2874,7 +2874,7 @@ func TestDownloadShare_FirstResponseWriteFailureDoesNotConsumeAccessCountWhenRol
 	}
 }
 
-func TestDownloadShare_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testing.T) {
+func TestDownloadShare_PartialStreamFailureRollsBackAccessAndAllowsRetry(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -2893,11 +2893,12 @@ func TestDownloadShare_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testi
 		t.Fatalf("failed to create share: %v", err)
 	}
 
-	handler := NewHandler(store, &fakeShareFS{
+	shareFS := &fakeShareFS{
 		openByPath: map[string]FileReader{
 			"/docs/report.pdf": &partialFailingReadCloser{reader: io.MultiReader(strings.NewReader("partial"), &failingReadCloser{err: errors.New("stream failed")})},
 		},
-	})
+	}
+	handler := NewHandler(store, shareFS)
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download", share.ID, nil)
 	recorder := httptest.NewRecorder()
 
@@ -2913,14 +2914,32 @@ func TestDownloadShare_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testi
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 1 {
-		t.Fatalf("expected partial stream failure after response start to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 0 {
+		t.Fatalf("expected partial stream failure after response start to rollback access count, got %d", current.AccessCount)
 	}
 
+	shareFS.openByPath["/docs/report.pdf"] = io.NopCloser(strings.NewReader("complete body"))
 	secondRecorder := httptest.NewRecorder()
 	handler.DownloadShare(secondRecorder, req)
-	if secondRecorder.Code != http.StatusGone {
-		t.Fatalf("expected retry after partial stream failure to hit max access limit, got %d", secondRecorder.Code)
+	if secondRecorder.Code != http.StatusOK {
+		t.Fatalf("expected retry after partial stream failure to succeed, got %d", secondRecorder.Code)
+	}
+	if secondRecorder.Body.String() != "complete body" {
+		t.Fatalf("expected successful retry body, got %q", secondRecorder.Body.String())
+	}
+	current, err = store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share after successful retry: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("expected successful retry to consume access count, got %d", current.AccessCount)
+	}
+
+	shareFS.openByPath["/docs/report.pdf"] = io.NopCloser(strings.NewReader("blocked"))
+	thirdRecorder := httptest.NewRecorder()
+	handler.DownloadShare(thirdRecorder, req)
+	if thirdRecorder.Code != http.StatusGone {
+		t.Fatalf("expected third attempt after successful retry to hit max access limit, got %d", thirdRecorder.Code)
 	}
 }
 
@@ -3293,7 +3312,7 @@ func TestDownloadShareFile_FirstResponseWriteFailureReturnsInternalError(t *test
 	}
 }
 
-func TestDownloadShareFile_PartialStreamFailureConsumesAccessAndBlocksRetry(t *testing.T) {
+func TestDownloadShareFile_PartialStreamFailureRollsBackAccessAndAllowsRetry(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -3313,11 +3332,12 @@ func TestDownloadShareFile_PartialStreamFailureConsumesAccessAndBlocksRetry(t *t
 	}
 
 	targetPath := "/docs/report.pdf"
-	handler := NewHandler(store, &fakeShareFS{
+	shareFS := &fakeShareFS{
 		openByPath: map[string]FileReader{
 			targetPath: &partialFailingReadCloser{reader: io.MultiReader(strings.NewReader("partial"), &failingReadCloser{err: errors.New("stream failed")})},
 		},
-	})
+	}
+	handler := NewHandler(store, shareFS)
 
 	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/download/report.pdf", share.ID, nil)
 	recorder := httptest.NewRecorder()
@@ -3334,14 +3354,32 @@ func TestDownloadShareFile_PartialStreamFailureConsumesAccessAndBlocksRetry(t *t
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 1 {
-		t.Fatalf("expected partial folder download after response start to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 0 {
+		t.Fatalf("expected partial folder download after response start to rollback access count, got %d", current.AccessCount)
 	}
 
+	shareFS.openByPath[targetPath] = io.NopCloser(strings.NewReader("complete body"))
 	secondRecorder := httptest.NewRecorder()
 	handler.DownloadShareFile(secondRecorder, req)
-	if secondRecorder.Code != http.StatusGone {
-		t.Fatalf("expected retry after partial folder download failure to hit max access limit, got %d", secondRecorder.Code)
+	if secondRecorder.Code != http.StatusOK {
+		t.Fatalf("expected retry after partial folder download failure to succeed, got %d", secondRecorder.Code)
+	}
+	if secondRecorder.Body.String() != "complete body" {
+		t.Fatalf("expected successful folder retry body, got %q", secondRecorder.Body.String())
+	}
+	current, err = store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share after successful folder retry: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("expected successful folder retry to consume access count, got %d", current.AccessCount)
+	}
+
+	shareFS.openByPath[targetPath] = io.NopCloser(strings.NewReader("blocked"))
+	thirdRecorder := httptest.NewRecorder()
+	handler.DownloadShareFile(thirdRecorder, req)
+	if thirdRecorder.Code != http.StatusGone {
+		t.Fatalf("expected third attempt after successful folder retry to hit max access limit, got %d", thirdRecorder.Code)
 	}
 }
 
@@ -4008,7 +4046,7 @@ func TestListShareItems_FirstResponseWriteFailureDoesNotConsumeAccessCount(t *te
 	}
 }
 
-func TestListShareItems_PartialResponseWriteFailureConsumesAccessAndBlocksRetry(t *testing.T) {
+func TestListShareItems_PartialResponseWriteFailureRollsBackAccessAndAllowsRetry(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -4053,14 +4091,27 @@ func TestListShareItems_PartialResponseWriteFailureConsumesAccessAndBlocksRetry(
 	if err != nil {
 		t.Fatalf("failed to load share: %v", err)
 	}
-	if current.AccessCount != 1 {
-		t.Fatalf("expected partial response write failure after response start to consume access count, got %d", current.AccessCount)
+	if current.AccessCount != 0 {
+		t.Fatalf("expected partial response write failure after response start to rollback access count, got %d", current.AccessCount)
 	}
 
 	secondWriter := httptest.NewRecorder()
 	handler.ListShareItems(secondWriter, req)
-	if secondWriter.Code != http.StatusGone {
-		t.Fatalf("expected retry after partial response write failure to hit max access limit, got %d", secondWriter.Code)
+	if secondWriter.Code != http.StatusOK {
+		t.Fatalf("expected retry after partial response write failure to succeed, got %d", secondWriter.Code)
+	}
+	current, err = store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to load share after successful retry: %v", err)
+	}
+	if current.AccessCount != 1 {
+		t.Fatalf("expected successful retry to consume access count, got %d", current.AccessCount)
+	}
+
+	thirdWriter := httptest.NewRecorder()
+	handler.ListShareItems(thirdWriter, req)
+	if thirdWriter.Code != http.StatusGone {
+		t.Fatalf("expected third attempt after successful retry to hit max access limit, got %d", thirdWriter.Code)
 	}
 }
 

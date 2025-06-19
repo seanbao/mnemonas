@@ -86,4 +86,36 @@ describe('useBatchOperation', () => {
       color: 'warning',
     })
   })
+
+  it('uses a warning toast when successful operations return warnings', async () => {
+    const operation = vi.fn(async () => ({
+      warning: true,
+      message: 'file restored with metadata warning',
+    }))
+
+    const { result } = renderHook(() => useBatchOperation({
+      operation,
+      messages: {
+        success: '{count} 项成功',
+        failure: '{count} 项失败',
+        partial: '{succeeded} 项成功，{failed} 项失败',
+      },
+    }))
+
+    let batchResult: Awaited<ReturnType<typeof result.current.execute>> | undefined
+    await act(async () => {
+      batchResult = await result.current.execute(['a'])
+    })
+
+    expect(batchResult).toMatchObject({
+      succeeded: 1,
+      failed: 0,
+      warningCount: 1,
+      warningMessages: ['file restored with metadata warning'],
+    })
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: 'file restored with metadata warning',
+      color: 'warning',
+    })
+  })
 })

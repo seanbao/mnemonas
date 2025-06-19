@@ -144,6 +144,36 @@ var (
 	errWorkspaceRootSymlink = errors.New("workspace root must not be a symlink")
 )
 
+// VisibleMutationWarningError reports that a workspace mutation is already
+// externally visible, but the final directory fsync did not complete.
+type VisibleMutationWarningError struct {
+	err error
+}
+
+func (e *VisibleMutationWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e *VisibleMutationWarningError) Unwrap() error {
+	return e.err
+}
+
+func WrapVisibleMutationWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	var warningErr *VisibleMutationWarningError
+	if errors.As(err, &warningErr) {
+		return err
+	}
+	return &VisibleMutationWarningError{err: err}
+}
+
+func IsVisibleMutationWarning(err error) bool {
+	var warningErr *VisibleMutationWarningError
+	return errors.As(err, &warningErr)
+}
+
 // FileInfo represents file metadata
 type FileInfo struct {
 	Path    string
@@ -667,7 +697,7 @@ func (w *Workspace) Mkdir(ctx context.Context, name string) error {
 		return w.mapWorkspaceCreatePathError(fullPath, err)
 	}
 	if err := syncCreatedWorkspaceDirs(createdDirs); err != nil {
-		return fmt.Errorf("failed to sync directory: %w", err)
+		return WrapVisibleMutationWarning(fmt.Errorf("failed to sync directory: %w", err))
 	}
 
 	return nil
@@ -698,7 +728,7 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 			return mapWorkspaceRootPathError(err)
 		}
 		if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
-			return fmt.Errorf("failed to sync directory: %w", err)
+			return WrapVisibleMutationWarning(fmt.Errorf("failed to sync directory: %w", err))
 		}
 		return nil
 	}
@@ -707,7 +737,7 @@ func (w *Workspace) Delete(ctx context.Context, name string) error {
 		return mapWorkspaceRootPathError(err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
-		return fmt.Errorf("failed to sync directory: %w", err)
+		return WrapVisibleMutationWarning(fmt.Errorf("failed to sync directory: %w", err))
 	}
 	return nil
 }
@@ -736,7 +766,7 @@ func (w *Workspace) DeleteAll(ctx context.Context, name string) error {
 		return mapWorkspaceRootPathError(err)
 	}
 	if err := syncWorkspaceDir(filepath.Dir(fullPath)); err != nil {
-		return fmt.Errorf("failed to sync directory: %w", err)
+		return WrapVisibleMutationWarning(fmt.Errorf("failed to sync directory: %w", err))
 	}
 	return nil
 }

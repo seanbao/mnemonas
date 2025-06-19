@@ -95,6 +95,16 @@ Authorization: Bearer <access_token>
 | 413 | 文件过大 |
 | 500 | 服务器内部错误 |
 
+### Warning 响应头
+
+部分写接口在变更已经对外可见、但后续持久化或清理步骤失败时，仍返回成功状态码，并附带 HTTP `Warning` 响应头。当前使用的 warning 文案包括：
+
+- `199 MnemoNAS "workspace mutation persistence incomplete"`
+- `199 MnemoNAS "delete cleanup incomplete"`
+- `199 MnemoNAS "trash delete cleanup incomplete"`
+
+这类响应的 JSON body 可能包含 `warning: true`，`message` 会说明成功已提交但存在后置 warning，例如 `resource copied with persistence warning`、`version restored with persistence warning`。
+
 ---
 
 ## 认证端点
@@ -559,6 +569,8 @@ POST /api/v1/files/{path}
 DELETE /api/v1/files/{path}
 ```
 
+说明：当删除已经生效、但后续目录持久化或历史对象清理失败时，接口仍返回成功状态码，并附带 `Warning` 响应头；`message` 会区分 persistence warning 与 cleanup warning。
+
 **响应示例**:
 ```json
 {
@@ -605,6 +617,8 @@ POST /api/v1/files-copy
 ```
 
 说明：该 REST 端点支持复制单个文件或递归复制目录。目标路径必须不存在；如需 `Overwrite: T/F` 语义，请使用 WebDAV `COPY`。
+
+说明：当复制已经完成、仅最后的目录持久化失败时，接口返回 `201 Created` 并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `resource copied with persistence warning`。
 
 **请求体**:
 ```json
@@ -754,6 +768,8 @@ POST /api/v1/versions/{hash}/restore
 **请求参数**:
 - `path`: 文件路径（必填）
 
+说明：当版本内容已经恢复成功、仅最后的工作区持久化失败时，接口仍返回 `200 OK`，并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `version restored with persistence warning`。
+
 **响应示例**:
 ```json
 {
@@ -821,6 +837,8 @@ GET /api/v1/trash/{id}
 POST /api/v1/trash/{id}/restore
 ```
 
+说明：当文件内容已经恢复成功、但 share/favorite 等关联 metadata 恢复失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `file restored with metadata warning`。
+
 **响应示例**:
 ```json
 {
@@ -841,6 +859,8 @@ POST /api/v1/trash/{id}/restore
 ```
 DELETE /api/v1/trash/{id}
 ```
+
+说明：当回收站条目已经删除成功、但后续历史对象 cleanup 失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `item permanently deleted with cleanup warning`。
 
 ### 清空回收站
 

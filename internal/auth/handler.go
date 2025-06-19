@@ -41,6 +41,7 @@ const (
 	defaultLoginLockDuration     = 5 * time.Minute
 	defaultLoginRateLimitMessage = "too many login attempts, try later"
 	defaultJSONRequestBodyLimit  = 1 * 1024 * 1024
+	authPersistenceWarningHeader = `199 MnemoNAS "auth state persistence incomplete"`
 )
 
 func newLoginAttemptTracker() *loginAttemptTracker {
@@ -480,6 +481,12 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.userStore.ChangePassword(user.ID, req.OldPassword, req.NewPassword); err != nil {
+		if isAuthPersistenceWarning(err) {
+			h.tokenManager.RevokeByUser(user.ID)
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
+			return
+		}
 		switch err {
 		case ErrInvalidCredentials:
 			writeError(w, http.StatusUnauthorized, "current password is incorrect", "INVALID_PASSWORD")
@@ -590,6 +597,20 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.userStore.Create(req.Username, req.Password, req.Email, role)
 	if err != nil {
+		if isAuthPersistenceWarning(err) && user != nil {
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusCreated, map[string]interface{}{
+				"user": UserInfo{
+					ID:       user.ID,
+					Username: user.Username,
+					Email:    user.Email,
+					Role:     user.Role,
+					HomeDir:  user.HomeDir,
+				},
+				"warning": true,
+			}, "user created with persistence warning")
+			return
+		}
 		switch err {
 		case ErrUserExists:
 			writeError(w, http.StatusConflict, "user already exists", "USER_EXISTS")
@@ -632,6 +653,12 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 	}
 
 	if err := h.userStore.Delete(userID); err != nil {
+		if isAuthPersistenceWarning(err) {
+			h.tokenManager.RevokeByUser(userID)
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "user deleted with persistence warning")
+			return
+		}
 		switch err {
 		case ErrUserNotFound:
 			writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
@@ -674,6 +701,12 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := h.userStore.ResetPassword(userID, req.NewPassword); err != nil {
+		if isAuthPersistenceWarning(err) {
+			h.tokenManager.RevokeByUser(userID)
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password reset with persistence warning")
+			return
+		}
 		switch err {
 		case ErrUserNotFound:
 			writeError(w, http.StatusNotFound, "user not found", "USER_NOT_FOUND")
@@ -745,6 +778,17 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 
 	user.Disabled = *req.Disabled
 	if err := h.userStore.Update(user); err != nil {
+		if isAuthPersistenceWarning(err) {
+			if *req.Disabled {
+				h.tokenManager.RevokeByUser(userID)
+			}
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{
+				"disabled": req.Disabled,
+				"warning":  true,
+			}, "user status updated with persistence warning")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
 		return
 	}
@@ -778,6 +822,19 @@ func writeSuccess(w http.ResponseWriter, status int, data interface{}, message s
 		Data:    data,
 		Message: message,
 	})
+}
+
+func markAuthPersistenceWarningHeaders(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == authPersistenceWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", authPersistenceWarningHeader)
 }
 
 func writeEnvelope(w http.ResponseWriter, status int, envelope ResponseEnvelope) {
