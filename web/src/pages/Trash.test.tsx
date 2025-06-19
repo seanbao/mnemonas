@@ -317,6 +317,59 @@ describe('TrashPage', () => {
         expect(screen.getByText(/自动清理设置未知/)).toBeTruthy()
       })
     })
+
+    it('shows immediate expiry copy when retention is enabled with zero days', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 0,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/立即过期，等待清理/)).toBeTruthy()
+        expect(screen.getByText('已过期，等待清理')).toBeTruthy()
+      })
+      expect(screen.queryByText('自动清理未启用')).toBeNull()
+    })
+
+    it('shows expired cleanup badge instead of zero-day countdown', async () => {
+      mockListTrash.mockResolvedValue({
+        items: [
+          {
+            id: 'item1',
+            originalPath: '/deleted-file.txt',
+            deletedAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+            name: 'deleted-file.txt',
+            isDir: false,
+            size: 1024,
+          },
+        ],
+        count: 1,
+        totalSize: 1024,
+        retentionEnabled: true,
+        retentionDays: 7,
+      })
+
+      render(<TrashPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('已过期，等待清理')).toBeTruthy()
+      })
+      expect(screen.queryByText('0 天后自动删除')).toBeNull()
+    })
   })
 
   describe('restore functionality', () => {

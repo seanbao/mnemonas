@@ -103,7 +103,6 @@ Test<Module>_<Scenario>_<ExpectedBehavior>
 ### 2.1 组件交互测试
 
 测试多个模块协作的场景：
-
 ```go
 // internal/auth/integration_test.go
 func TestAuthIntegration_FullLoginFlow(t *testing.T) {
@@ -251,8 +250,10 @@ interactions:
       status: 200
       body:
         success: true
-        access_token: !!regexp ^eyJ.*
-        token_type: "Bearer"
+        data:
+          access_token: !!regexp ^eyJ.*
+          refresh_token: !!regexp ^eyJ.*
+          token_type: "Bearer"
 
   - description: "Login with invalid credentials"
     request:
@@ -332,41 +333,191 @@ go test -fuzz=FuzzPasswordValidation ./internal/auth/
 ### 6.1 GitHub Actions 工作流
 
 ```yaml
-# .github/workflows/test.yml
-name: Tests
+# .github/workflows/ci.yml
+name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: '1.22'
+  RUST_VERSION: '1.75'
+  NODE_VERSION: '20'
 
 jobs:
-  unit-tests:
+  go:
+    name: Go
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-      - uses: dtolnay/rust-toolchain@stable
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.75'
-      - name: Run unit tests
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.x'
+
+      - name: Install protoc-gen-go
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+      - name: Generate protobuf
+        run: |
+          protoc --go_out=. --go_opt=paths=source_relative \
+            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+            proto/dataplane.proto
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Test
         run: CGO_ENABLED=1 bash ./scripts/with-test-dataplane.sh go test -v -race -coverprofile=coverage.out ./...
+
       - name: Upload coverage
         uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          flags: go
+          fail_ci_if_error: false
 
-  e2e-tests:
+  rust:
+    name: Rust
     runs-on: ubuntu-latest
-    needs: unit-tests
+    defaults:
+      run:
+        working-directory: dataplane
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dataplane
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.x'
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
       - name: Build
-        run: make build
-      - name: Start services
+        run: cargo build --release
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm run test:coverage
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: web/coverage/coverage-final.json
+          flags: frontend
+          fail_ci_if_error: false
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: mnemonas:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test container
         run: |
-          ./bin/dataplane &
-          ./bin/nasd &
-          sleep 3
-      - name: Run E2E tests
-        run: ./scripts/e2e-test.sh --quick
+          set -euo pipefail
+
+          docker run -d --name mnemonas-smoke -p 18080:8080 mnemonas:test >/dev/null
+          cleanup() {
+            status=$?
+            if [ $status -ne 0 ]; then
+              docker logs mnemonas-smoke || true
+            fi
+            docker rm -f mnemonas-smoke >/dev/null 2>&1 || true
+            exit $status
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              exit 0
+            fi
+
+            if ! docker ps --format '{{.Names}}' | grep -qx 'mnemonas-smoke'; then
+              echo "mnemonas smoke container exited before becoming healthy" >&2
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          echo "timed out waiting for mnemonas smoke container health endpoint" >&2
+          exit 1
 ```
 
 ### 6.2 测试覆盖率门槛

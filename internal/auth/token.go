@@ -20,6 +20,7 @@ func init() {
 }
 
 var tokenRandomRead = rand.Read
+var afterRevokeTokenCleanup = func() {}
 
 // TokenManager handles JWT token generation and validation
 type TokenManager struct {
@@ -225,23 +226,25 @@ func (tm *TokenManager) ValidateRefreshToken(tokenString string) (string, error)
 
 // RevokeToken revokes a token by ID
 func (tm *TokenManager) RevokeToken(tokenID string) {
-	tm.CleanupRevokedTokens()
-
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
+	now := time.Now()
+	tm.cleanupRevokedTokensLocked(now)
+	afterRevokeTokenCleanup()
+
 	// Store with expiry time for cleanup
-	tm.revokedTokens[tokenID] = time.Now().Add(tm.refreshExpiry)
+	tm.revokedTokens[tokenID] = now.Add(tm.refreshExpiry)
 }
 
 // RevokeByUser revokes all tokens for a user (used when password changed)
 func (tm *TokenManager) RevokeByUser(userID string) {
-	tm.CleanupRevokedTokens()
-
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	tm.userRevokedAt[userID] = jwtTimestamp(time.Now())
+	now := time.Now()
+	tm.cleanupRevokedTokensLocked(now)
+	tm.userRevokedAt[userID] = jwtTimestamp(now)
 }
 
 // isRevoked checks if a token is revoked
@@ -270,8 +273,10 @@ func (tm *TokenManager) isRevoked(tokenID string) bool {
 func (tm *TokenManager) CleanupRevokedTokens() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	tm.cleanupRevokedTokensLocked(time.Now())
+}
 
-	now := time.Now()
+func (tm *TokenManager) cleanupRevokedTokensLocked(now time.Time) {
 	for id, expiry := range tm.revokedTokens {
 		if now.After(expiry) {
 			delete(tm.revokedTokens, id)

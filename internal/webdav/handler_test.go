@@ -2377,6 +2377,26 @@ func TestHandler_PROPFIND(t *testing.T) {
 		}
 	})
 
+	t.Run("Depth0WithWhitespace", func(t *testing.T) {
+		req := httptest.NewRequest("PROPFIND", "/dav/proptest", nil)
+		req.Header.Set("Depth", " 0 ")
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusMultiStatus {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
+		}
+
+		body := w.Body.String()
+		if !strings.Contains(body, "proptest") {
+			t.Fatal("Response should contain directory name")
+		}
+		if strings.Contains(body, "a.txt") || strings.Contains(body, "b.txt") || strings.Contains(body, "c.txt") {
+			t.Fatal("Depth 0 should not contain child resources when header has surrounding whitespace")
+		}
+	})
+
 	t.Run("DepthInfinity", func(t *testing.T) {
 		req := httptest.NewRequest("PROPFIND", "/dav/proptest", nil)
 		req.Header.Set("Depth", "infinity")

@@ -20,6 +20,7 @@ var ErrScrubAlreadyRunning = errors.New("scrub already running")
 const interruptedScrubErrorMessage = "scrub interrupted before completion"
 
 var syncHistoryFileDir = syncHistoryDir
+var writeHistoryStoreFile = writeHistoryFile
 
 // gcRunning tracks whether GC is currently running (atomic for thread-safety)
 var gcRunning atomic.Bool
@@ -94,7 +95,11 @@ func (s *HistoryStore) SaveScrubResult(result *ScrubResult) error {
 	stored := cloneScrubResult(result)
 	s.scrubResult = stored
 	if err := s.persistScrubResult(stored); err != nil {
-		if !shouldPreserveTerminalScrubState(previous, stored) {
+		if shouldPreserveTerminalScrubState(previous, stored) {
+			if fallbackErr := s.persistScrubTerminalFallback(stored); fallbackErr != nil {
+				return errors.Join(err, fmt.Errorf("persist scrub terminal fallback: %w", fallbackErr))
+			}
+		} else {
 			s.scrubResult = previous
 		}
 		return err
@@ -153,24 +158,26 @@ func (s *HistoryStore) StartScrub() (*ScrubResult, error) {
 }
 
 func (s *HistoryStore) loadLastScrubResult() error {
-	path := s.lastScrubPath()
-	if err := validateHistoryFilePath(path); err != nil {
-		return err
-	}
-	data, err := os.ReadFile(path)
+	result, err := loadScrubResultFile(s.lastScrubPath())
 	if err != nil {
 		return err
 	}
-	var result ScrubResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		return err
+
+	if fallback, fallbackErr := s.loadScrubTerminalFallback(result); fallbackErr != nil {
+		if !os.IsNotExist(fallbackErr) {
+			return fmt.Errorf("load scrub terminal fallback: %w", fallbackErr)
+		}
+	} else if fallback != nil {
+		result = fallback
+		_ = s.persistScrubResult(result)
 	}
-	if recoverInterruptedScrubResult(&result, time.Now()) {
-		if err := s.persistScrubResult(&result); err != nil {
+
+	if recoverInterruptedScrubResult(result, time.Now()) {
+		if err := s.persistScrubResult(result); err != nil {
 			return fmt.Errorf("persist recovered scrub result: %w", err)
 		}
 	}
-	s.scrubResult = cloneScrubResult(&result)
+	s.scrubResult = cloneScrubResult(result)
 	return nil
 }
 
@@ -245,12 +252,64 @@ func (s *HistoryStore) lastScrubPath() string {
 	return filepath.Join(s.dataDir, "last_scrub.json")
 }
 
+func (s *HistoryStore) lastScrubTerminalFallbackPath() string {
+	return filepath.Join(s.dataDir, "last_scrub.terminal.json")
+}
+
 func (s *HistoryStore) persistScrubResult(result *ScrubResult) error {
+	return s.persistScrubResultToPath(s.lastScrubPath(), result)
+}
+
+func (s *HistoryStore) persistScrubTerminalFallback(result *ScrubResult) error {
+	return s.persistScrubResultToPath(s.lastScrubTerminalFallbackPath(), result)
+}
+
+func (s *HistoryStore) persistScrubResultToPath(path string, result *ScrubResult) error {
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeHistoryFile(s.lastScrubPath(), data)
+	return writeHistoryStoreFile(path, data)
+}
+
+func loadScrubResultFile(path string) (*ScrubResult, error) {
+	if err := validateHistoryFilePath(path); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var result ScrubResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (s *HistoryStore) loadScrubTerminalFallback(current *ScrubResult) (*ScrubResult, error) {
+	if current == nil || current.Status != "running" {
+		return nil, nil
+	}
+
+	fallback, err := loadScrubResultFile(s.lastScrubTerminalFallbackPath())
+	if err != nil {
+		return nil, err
+	}
+	if !sameScrubExecution(current, fallback) || fallback.Status == "running" {
+		return nil, nil
+	}
+	return fallback, nil
+}
+
+func sameScrubExecution(current, fallback *ScrubResult) bool {
+	if current == nil || fallback == nil {
+		return false
+	}
+	if current.ID == "" || current.ID != fallback.ID {
+		return false
+	}
+	return current.StartTime.Equal(fallback.StartTime)
 }
 
 func validateHistoryFilePath(path string) error {
@@ -368,7 +427,7 @@ func collectMissingHistoryDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedHistoryDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncHistoryFileDir(filepath.Dir(createdDirs[i])); err != nil {
 			return fmt.Errorf("failed to sync maintenance history directory tree: %w", err)
 		}

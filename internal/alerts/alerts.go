@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -382,13 +383,15 @@ func (m *Monitor) sendWebhook(ctx context.Context, payload AlertPayload, cfg Con
 
 	// Add custom headers
 	for _, h := range cfg.WebhookHeaders {
-		// Parse "key:value" format
-		for i := 0; i < len(h); i++ {
-			if h[i] == ':' {
-				req.Header.Set(h[:i], h[i+1:])
-				break
-			}
+		key, value, ok := strings.Cut(h, ":")
+		if !ok {
+			continue
 		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		req.Header.Set(key, strings.TrimSpace(value))
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,30 @@ func TestNewHistoryStore_ReturnsErrorWhenDirectoryTreeSyncFails(t *testing.T) {
 
 	if _, statErr := os.Stat(filepath.Join(nestedDir, "last_scrub.json")); !os.IsNotExist(statErr) {
 		t.Fatalf("expected no history file to be created, got %v", statErr)
+	}
+}
+
+func TestEnsureHistoryDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	nestedDir := filepath.Join(tmpDir, "nested", "dir")
+
+	originalSyncHistoryFileDir := syncHistoryFileDir
+	var synced []string
+	syncHistoryFileDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncHistoryFileDir = originalSyncHistoryFileDir
+	}()
+
+	if err := ensureHistoryDir(nestedDir, 0755); err != nil {
+		t.Fatalf("ensureHistoryDir() error: %v", err)
+	}
+
+	expected := []string{filepath.Join(tmpDir, "nested"), tmpDir}
+	if !reflect.DeepEqual(synced, expected) {
+		t.Fatalf("syncHistoryFileDir() order = %#v, want %#v", synced, expected)
 	}
 }
 
@@ -527,6 +552,110 @@ func TestHistoryStore_SaveScrubResultFailureKeepsTerminalStateInMemory(t *testin
 	}
 	if result.EndTime.IsZero() {
 		t.Fatal("expected in-memory scrub result to retain end time")
+	}
+}
+
+func TestNewHistoryStore_RestoresTerminalFallbackAfterFailedFinalPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
+	}
+
+	originalWriteHistoryStoreFile := writeHistoryStoreFile
+	mainWriteCount := 0
+	writeHistoryStoreFile = func(path string, data []byte) error {
+		if filepath.Base(path) == "last_scrub.json" {
+			mainWriteCount++
+			if mainWriteCount == 1 {
+				return errors.New("disk offline")
+			}
+		}
+		return originalWriteHistoryStoreFile(path, data)
+	}
+	defer func() {
+		writeHistoryStoreFile = originalWriteHistoryStoreFile
+	}()
+
+	started.Status = "completed"
+	started.EndTime = time.Now()
+	started.TotalObjects = 5
+
+	err = store.SaveScrubResult(started)
+	if err == nil || !strings.Contains(err.Error(), "disk offline") {
+		t.Fatalf("expected disk offline error on final save, got %v", err)
+	}
+
+	current := store.GetLastScrubResult()
+	if current == nil {
+		t.Fatal("expected in-memory scrub result after failed final save")
+	}
+	if current.Status != "completed" {
+		t.Fatalf("expected in-memory scrub status completed, got %q", current.Status)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "running" {
+		t.Fatalf("expected canonical scrub status to remain running before reload, got %q", persisted.Status)
+	}
+
+	fallbackData, err := os.ReadFile(filepath.Join(tmpDir, "last_scrub.terminal.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.terminal.json) error: %v", err)
+	}
+	var fallback ScrubResult
+	if err := json.Unmarshal(fallbackData, &fallback); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.terminal.json) error: %v", err)
+	}
+	if fallback.Status != "completed" {
+		t.Fatalf("expected terminal fallback status completed, got %q", fallback.Status)
+	}
+	if fallback.TotalObjects != 5 {
+		t.Fatalf("expected terminal fallback total_objects 5, got %d", fallback.TotalObjects)
+	}
+
+	writeHistoryStoreFile = originalWriteHistoryStoreFile
+
+	reloaded, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore(reload) failed: %v", err)
+	}
+	if reloaded.ScrubIsRunning() {
+		t.Fatal("expected restored terminal fallback scrub not to remain running after reload")
+	}
+
+	restored := reloaded.GetLastScrubResult()
+	if restored == nil {
+		t.Fatal("expected restored scrub result after reload")
+	}
+	if restored.Status != "completed" {
+		t.Fatalf("expected restored scrub status completed, got %q", restored.Status)
+	}
+	if restored.TotalObjects != 5 {
+		t.Fatalf("expected restored scrub total_objects 5, got %d", restored.TotalObjects)
+	}
+
+	data, err = os.ReadFile(filepath.Join(tmpDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) after reload error: %v", err)
+	}
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) after reload error: %v", err)
+	}
+	if persisted.Status != "completed" {
+		t.Fatalf("expected canonical scrub status completed after reload repair, got %q", persisted.Status)
 	}
 }
 

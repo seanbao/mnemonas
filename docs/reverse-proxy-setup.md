@@ -75,7 +75,9 @@ sudo systemctl status caddy
 curl -I https://nas.example.com/health
 
 # 测试 WebDAV
-curl -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
+WEBDAV_USER="family"
+WEBDAV_PASS="your-webdav-password"
+curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ -H "Depth: 0"
 ```
 
 ---
@@ -318,9 +320,10 @@ ss -tlnp | grep -E '80|443|8080'
 
 ```bash
 # 测试 PROPFIND
-curl -X PROPFIND https://nas.example.com/dav/ \
+WEBDAV_USER="family"
+WEBDAV_PASS="your-webdav-password"
+curl -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND https://nas.example.com/dav/ \
   -H "Depth: 1" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
   -v
 
 # 检查后端日志

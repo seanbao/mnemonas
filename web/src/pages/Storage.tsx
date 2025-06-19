@@ -125,6 +125,7 @@ export function StoragePage() {
   const { data: stats, isLoading, error, refetch } = useQuery({
     queryKey: ['stats'],
     queryFn: getStorageStats,
+    refetchInterval: 30000,
   })
   const storageErrorPresentation = error ? getStorageErrorPresentation(error) : null
 
