@@ -120,6 +120,11 @@ const mockDownloadFile = vi.mocked(downloadFile)
 const mockCheckFavorites = vi.mocked(checkFavorites)
 const mockToggleFavorite = vi.mocked(toggleFavorite)
 const mockListShares = vi.mocked(listShares)
+const successActionResult = { warning: false, message: undefined } as const
+
+function warningActionResult(message: string) {
+  return { warning: true, message } as const
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -129,6 +134,10 @@ function createDeferred<T>() {
     reject = rej
   })
   return { promise, resolve, reject }
+}
+
+function pendingFilesRefetch() {
+  return new Promise<Awaited<ReturnType<typeof listFiles>>>(() => {})
 }
 
 describe('FilesPage', () => {
@@ -369,7 +378,7 @@ describe('FilesPage', () => {
 
     it('creates folder on confirm', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockCreateDirectory.mockResolvedValue(undefined)
+      mockCreateDirectory.mockResolvedValue(successActionResult)
       
       render(<FilesPage />)
       
@@ -397,7 +406,7 @@ describe('FilesPage', () => {
 
     it('trims folder name before creating a folder', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockCreateDirectory.mockResolvedValue(undefined)
+      mockCreateDirectory.mockResolvedValue(successActionResult)
 
       render(<FilesPage />)
 
@@ -422,12 +431,12 @@ describe('FilesPage', () => {
 
     it('keeps the create folder modal open while a pending request is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const firstCreate = createDeferred<void>()
+      const firstCreate = createDeferred<typeof successActionResult>()
       mockCreateDirectory.mockImplementation((path) => {
         if (path === '/first-folder') {
           return firstCreate.promise
         }
-        return Promise.resolve(undefined)
+        return Promise.resolve(successActionResult)
       })
 
       render(<FilesPage />)
@@ -451,7 +460,7 @@ describe('FilesPage', () => {
       expect(screen.getByText('新建文件夹')).toBeTruthy()
       expect(screen.getByDisplayValue('first-folder')).toBeTruthy()
 
-      firstCreate.resolve(undefined)
+      firstCreate.resolve(successActionResult)
 
       await waitFor(() => {
         expect(screen.queryByText('新建文件夹')).toBeFalsy()
@@ -460,7 +469,7 @@ describe('FilesPage', () => {
 
     it('keeps the create folder modal open when a pending request later fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const firstCreate = createDeferred<void>()
+      const firstCreate = createDeferred<typeof successActionResult>()
       mockCreateDirectory.mockImplementationOnce(() => firstCreate.promise)
 
       render(<FilesPage />)
@@ -519,6 +528,28 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(screen.queryByText('新建文件夹')).toBeFalsy()
+      })
+    })
+
+    it('shows warning toast when folder creation succeeds with a persistence warning', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockCreateDirectory.mockResolvedValueOnce(warningActionResult('directory created with persistence warning'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('新建空间')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('新建空间'))
+      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'warn-folder')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'directory created with persistence warning',
+          color: 'warning',
+        })
       })
     })
   })
@@ -636,13 +667,13 @@ describe('FilesPage', () => {
 
   describe('file operations', () => {
     it('deleteFile API is available', async () => {
-      mockDeleteFile.mockResolvedValue(undefined)
+      mockDeleteFile.mockResolvedValue(successActionResult)
       await mockDeleteFile('/photo.jpg')
       expect(mockDeleteFile).toHaveBeenCalledWith('/photo.jpg')
     })
 
     it('moveFile API is available', async () => {
-      mockMoveFile.mockResolvedValue(undefined)
+      mockMoveFile.mockResolvedValue(successActionResult)
       await mockMoveFile('/photo.jpg', '/documents/photo.jpg')
       expect(mockMoveFile).toHaveBeenCalledWith('/photo.jpg', '/documents/photo.jpg')
     })
@@ -735,11 +766,47 @@ describe('FilesPage', () => {
       })
     })
 
+    it('removes a stale file and closes the modal when single delete hits not found', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockDeleteFile.mockRejectedValue(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      mockListFiles.mockImplementation(() => pendingFilesRefetch())
+
+      await user.click(screen.getAllByRole('button', { name: '删除' })[1])
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '确认删除' })).toBeTruthy()
+      })
+
+      const deleteButtons = screen.getAllByRole('button', { name: '删除' })
+      await user.click(deleteButtons[deleteButtons.length - 1])
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '文件或文件夹已不存在，已同步更新',
+          color: 'warning',
+        })
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '确认删除' })).toBeFalsy()
+        expect(screen.queryByText('photo.jpg')).toBeFalsy()
+        expect(screen.getByText('video.mp4')).toBeTruthy()
+      })
+    })
+
     it('keeps failed items selected after partial batch delete failure', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
       mockDeleteFile
-        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(successActionResult)
         .mockRejectedValueOnce(new Error('delete failed'))
 
       render(<FilesPage />)
@@ -836,9 +903,52 @@ describe('FilesPage', () => {
       })
     })
 
+    it('treats batch delete not-found results as already synchronized and clears selection', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.viewMode = 'grid'
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDeleteFile.mockRejectedValue(new ApiError('file not found', 404, 'FILE_NOT_FOUND'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      mockListFiles.mockImplementation(() => pendingFilesRefetch())
+
+      mockFilesStoreState.clearSelection.mockClear()
+      mockFilesStoreState.setSelection.mockClear()
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockFilesStoreState.clearSelection).toHaveBeenCalled()
+      })
+
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledWith([])
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '文件或文件夹已不存在，已同步更新',
+        color: 'warning',
+      })
+
+      await waitFor(() => {
+        expect(screen.queryByRole('heading', { name: '批量删除' })).toBeFalsy()
+        expect(screen.queryByText('photo.jpg')).toBeFalsy()
+        expect(screen.queryByText('video.mp4')).toBeFalsy()
+        expect(screen.getByText('documents')).toBeTruthy()
+      })
+    })
+
     it('keeps the batch delete modal open while a pending batch delete is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const pendingDelete = createDeferred<void>()
+      const pendingDelete = createDeferred<typeof successActionResult>()
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
       mockDeleteFile.mockImplementationOnce(() => pendingDelete.promise)
 
@@ -866,7 +976,7 @@ describe('FilesPage', () => {
       expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
 
       await act(async () => {
-        pendingDelete.resolve(undefined)
+        pendingDelete.resolve(successActionResult)
         await pendingDelete.promise
       })
 
@@ -996,7 +1106,7 @@ describe('FilesPage', () => {
       mockClipboardState.sourcePath = '/source'
       mockClipboardState.hasPaths.mockReturnValue(true)
       mockMoveFile
-        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(successActionResult)
         .mockRejectedValueOnce(new Error('move failed'))
 
       render(<FilesPage />)
@@ -1017,6 +1127,28 @@ describe('FilesPage', () => {
         title: '批量移动部分完成',
         description: '成功 1 个，失败 1 个',
         color: 'warning',
+      })
+    })
+
+    it('shows warning toast when batch delete succeeds with cleanup warnings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockDeleteFile.mockResolvedValueOnce(warningActionResult('file deleted with persistence warning'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量删除'))
+      await user.click(await screen.findByText('删除全部'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'file deleted with persistence warning',
+          color: 'warning',
+        })
       })
     })
 
@@ -1044,15 +1176,63 @@ describe('FilesPage', () => {
       })
     })
 
+    it('shows warning toast when copy paste fully succeeds with warnings', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
+      mockClipboardState.operation = 'copy'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockCopyFile
+        .mockResolvedValueOnce(warningActionResult('resource copied with persistence warning'))
+        .mockResolvedValueOnce(successActionResult)
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'resource copied with persistence warning',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows warning toast when cut paste fully succeeds with warnings', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockMoveFile.mockResolvedValueOnce(warningActionResult('resource moved with persistence warning'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'resource moved with persistence warning',
+          color: 'warning',
+        })
+      })
+    })
+
     it('keeps the rename modal open while a pending rename is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const firstRename = createDeferred<void>()
+      const firstRename = createDeferred<typeof successActionResult>()
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
       mockMoveFile.mockImplementation((from) => {
         if (from === '/photo.jpg') {
           return firstRename.promise
         }
-        return Promise.resolve(undefined)
+        return Promise.resolve(successActionResult)
       })
 
       render(<FilesPage />)
@@ -1080,7 +1260,7 @@ describe('FilesPage', () => {
       expect(screen.getByDisplayValue('photo-renamed.jpg')).toBeTruthy()
 
       await act(async () => {
-        firstRename.resolve(undefined)
+        firstRename.resolve(successActionResult)
         await firstRename.promise
       })
 
@@ -1091,7 +1271,7 @@ describe('FilesPage', () => {
 
     it('keeps the rename modal open when a pending rename later fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const firstRename = createDeferred<void>()
+      const firstRename = createDeferred<typeof successActionResult>()
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
       mockMoveFile.mockImplementationOnce(() => firstRename.promise)
 
@@ -1133,6 +1313,34 @@ describe('FilesPage', () => {
 
       expect(screen.getByText('重命名')).toBeTruthy()
       expect(screen.getByDisplayValue('photo-failed.jpg')).toBeTruthy()
+    })
+
+    it('shows warning toast when rename succeeds with a persistence warning', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockMoveFile.mockResolvedValueOnce(warningActionResult('resource moved with persistence warning'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, 'photo-warning.jpg')
+      await user.click(screen.getByRole('button', { name: '确定' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'resource moved with persistence warning',
+          color: 'warning',
+        })
+      })
     })
   })
 
@@ -1325,6 +1533,113 @@ describe('FilesPage', () => {
     await waitFor(() => {
       expect(screen.getByText('收藏功能已关闭')).toBeTruthy()
       expect(screen.getByText('当前服务已关闭收藏功能。启用后重新加载即可恢复收藏状态与相关操作。')).toBeTruthy()
+    })
+  })
+
+  it('uses the specific unavailable label when favorites are temporarily unavailable', async () => {
+    mockCheckFavorites.mockRejectedValueOnce(Object.assign(new Error('favorites unavailable'), {
+      status: 503,
+      code: 'FAVORITES_UNAVAILABLE',
+    }))
+
+    render(<FilesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('收藏功能暂不可用')).toBeTruthy()
+      expect(screen.getByText('收藏存储未成功初始化，请检查系统健康状态或稍后重试。')).toBeTruthy()
+      expect(screen.queryByText('收藏状态不可用')).toBeNull()
+    })
+  })
+
+  it('treats add-favorite conflict as already favorited and syncs the status', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockCheckFavorites
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': false,
+        '/video.mp4': false,
+      })
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': true,
+        '/video.mp4': false,
+      })
+    mockToggleFavorite.mockRejectedValueOnce(Object.assign(new Error('favorite already exists'), {
+      status: 409,
+      code: 'FAVORITE_ALREADY_EXISTS',
+    }))
+
+    render(<FilesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('photo.jpg')).toBeTruthy()
+    })
+
+    await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+
+    await waitFor(() => {
+      expect(screen.getAllByText('添加收藏').length).toBeGreaterThan(0)
+    })
+
+    await user.click(screen.getAllByText('添加收藏')[0])
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已在收藏夹中',
+        description: '该文件已被其他操作加入收藏，状态已同步。',
+        color: 'warning',
+      })
+    })
+
+    await waitFor(() => {
+      expect(mockCheckFavorites).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it('treats remove-favorite not found as already removed and syncs the status', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockFilesStoreState.viewMode = 'grid'
+    mockCheckFavorites
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': true,
+        '/video.mp4': false,
+      })
+      .mockResolvedValueOnce({
+        '/documents': false,
+        '/photo.jpg': false,
+        '/video.mp4': false,
+      })
+    mockToggleFavorite.mockRejectedValueOnce(Object.assign(new Error('favorite not found'), {
+      status: 404,
+      code: 'FAVORITE_NOT_FOUND',
+    }))
+
+    render(<FilesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('photo.jpg')).toBeTruthy()
+    })
+
+    await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+
+    await waitFor(() => {
+      expect(screen.getAllByText('取消收藏').length).toBeGreaterThan(0)
+    })
+
+    await user.click(screen.getAllByText('取消收藏')[0])
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '收藏已移除',
+        description: '该文件已不在收藏夹中，状态已同步。',
+        color: 'warning',
+      })
+    })
+
+    await waitFor(() => {
+      expect(mockCheckFavorites).toHaveBeenCalledTimes(2)
     })
   })
   })

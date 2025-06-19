@@ -42,6 +42,11 @@ import { ApiError, downloadFile, getVersions, restoreVersion } from '@/api/files
 const mockGetVersions = vi.mocked(getVersions)
 const mockDownloadFile = vi.mocked(downloadFile)
 const mockRestoreVersion = vi.mocked(restoreVersion)
+const successActionResult = { warning: false, message: undefined } as const
+
+function warningActionResult(message: string) {
+  return { warning: true, message } as const
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -274,7 +279,7 @@ describe('VersionsPage', () => {
 
   describe('restore functionality', () => {
     it('restore API is available and can be called', async () => {
-      mockRestoreVersion.mockResolvedValue(undefined)
+      mockRestoreVersion.mockResolvedValue(successActionResult)
       
       // Test that restore function exists and is mockable
       expect(mockRestoreVersion).toBeDefined()
@@ -331,7 +336,7 @@ describe('VersionsPage', () => {
     })
 
     it('calls restore API on confirm', async () => {
-      mockRestoreVersion.mockResolvedValue(undefined)
+      mockRestoreVersion.mockResolvedValue(successActionResult)
       const user = userEvent.setup({ writeToClipboard: false })
       render(<VersionsPage />)
 
@@ -352,6 +357,34 @@ describe('VersionsPage', () => {
 
       await waitFor(() => {
         expect(mockRestoreVersion).toHaveBeenCalled()
+      })
+    })
+
+    it('shows warning toast when restore succeeds with a persistence warning', async () => {
+      mockRestoreVersion.mockResolvedValueOnce(warningActionResult('version restored with persistence warning'))
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<VersionsPage />)
+
+      const input = screen.getByPlaceholderText(/输入文件路径/)
+      await user.type(input, '/test.txt{enter}')
+
+      await waitFor(() => {
+        expect(screen.queryAllByTitle('恢复到此版本').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByTitle('恢复到此版本')[0])
+
+      await waitFor(() => {
+        expect(screen.getByText('确认恢复')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('确认恢复'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'version restored with persistence warning',
+          color: 'warning',
+        })
       })
     })
 
@@ -386,7 +419,7 @@ describe('VersionsPage', () => {
 
     it('keeps the restore modal open while a pending restore is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const firstRestore = createDeferred<void>()
+      const firstRestore = createDeferred<typeof successActionResult>()
       mockRestoreVersion.mockImplementationOnce(() => firstRestore.promise)
 
       render(<VersionsPage />)
@@ -411,7 +444,7 @@ describe('VersionsPage', () => {
       expect(screen.getByText('确定要将文件恢复到以下版本吗？')).toBeTruthy()
 
       await act(async () => {
-        firstRestore.resolve(undefined)
+        firstRestore.resolve(successActionResult)
         await firstRestore.promise
       })
 
@@ -422,7 +455,7 @@ describe('VersionsPage', () => {
 
     it('keeps the restore modal open when a pending restore later fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const firstRestore = createDeferred<void>()
+      const firstRestore = createDeferred<typeof successActionResult>()
       mockRestoreVersion.mockImplementationOnce(() => firstRestore.promise)
 
       render(<VersionsPage />)

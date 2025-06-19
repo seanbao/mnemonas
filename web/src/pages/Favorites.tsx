@@ -140,6 +140,18 @@ function getFavoritesBatchActionToast(result: BatchOperationResult) {
   return undefined
 }
 
+function getMissingFavoriteToast(): {
+  title: string
+  description: string
+  color: 'warning'
+} {
+  return {
+    title: '收藏已不存在',
+    description: '该收藏可能已被其他操作移除，列表已同步更新。',
+    color: 'warning',
+  }
+}
+
 // Get parent directory from path
 function getParentPath(path: string): string {
   const parts = path.split('/')
@@ -356,7 +368,14 @@ export function FavoritesPage() {
       queryClient.invalidateQueries({ queryKey: ['favorites'] })
       addToast({ title: '已取消收藏', color: 'success' })
     },
-    onError: (error) => {
+    onError: (error, path) => {
+      if (error instanceof FavoritesError && error.isNotFound) {
+        removeFavoritesFromCache([path])
+        removeSelectedPaths([path])
+        addToast(getMissingFavoriteToast())
+        return
+      }
+
       addToast(getFavoritesActionErrorPresentation(error))
     },
   })
@@ -377,7 +396,18 @@ export function FavoritesPage() {
         setEditingItem(null)
       }
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (error instanceof FavoritesError && error.isNotFound) {
+        removeFavoritesFromCache([variables.path])
+        removeSelectedPaths([variables.path])
+        if (editingItemRef.current?.path === variables.path) {
+          onEditClose()
+          setEditingItem(null)
+        }
+        addToast(getMissingFavoriteToast())
+        return
+      }
+
       addToast(getFavoritesActionErrorPresentation(error))
     },
   })
@@ -391,9 +421,24 @@ export function FavoritesPage() {
     }
   }, [canWrite, favoriteItems, visibleSelectedItems.size])
 
+  const batchRemoveFavorite = useCallback(async (path: string) => {
+    try {
+      await removeFavorite(path)
+    } catch (error) {
+      if (error instanceof FavoritesError && error.isNotFound) {
+        return {
+          warning: true,
+          message: '收藏已不存在，已同步更新',
+        }
+      }
+
+      throw error
+    }
+  }, [])
+
   // Batch remove using custom hook
   const { execute: executeBatchRemove, isLoading: isBatchRemoving } = useBatchOperation({
-    operation: removeFavorite,
+    operation: batchRemoveFavorite,
     messages: {
       success: '{count} 项已取消收藏',
       failure: '{count} 项取消收藏失败',

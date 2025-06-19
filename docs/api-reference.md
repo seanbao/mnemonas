@@ -369,6 +369,8 @@ GET /api/v1/stats
 {
   "success": true,
   "data": {
+    "total_files_available": true,
+    "storage_stats_available": true,
     "total_files": 0,
     "total_size": 5368709120,
     "unique_size": 2147483648,
@@ -381,6 +383,8 @@ GET /api/v1/stats
 
 **说明**:
 - `total_files` 统计文件索引中的文件数量，不包含目录。
+- `total_chunks` 统计数据面中的存储对象（chunk）数量，不等同于用户文件数。
+- `total_files_available` 表示文件计数是否可用；`storage_stats_available` 表示数据面统计是否可用。
 - 当文件计数或数据面统计暂不可用时，对应字段会被省略，而不是回填误导性的 `0`。
 
 ### 诊断信息
@@ -420,6 +424,7 @@ GET /api/v1/diagnostics
     },
     "goroutines": 25,
     "filesystem": {
+      "trash_stats_available": true,
       "trash_items": 5,
       "trash_size": 52428800
     },
@@ -440,7 +445,8 @@ GET /api/v1/diagnostics
 ```
 
 **说明**:
-- 当回收站统计暂不可用时，`filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
+- `filesystem.trash_stats_available` 表示回收站统计是否可用。
+- 当回收站统计暂不可用时，`filesystem.trash_stats_available` 为 `false`，并且 `filesystem.trash_items` 和 `filesystem.trash_size` 会被省略，而不是回填 `0`。
 
 ### 指标信息
 
@@ -571,6 +577,8 @@ DELETE /api/v1/files/{path}
 
 说明：当删除已经生效、但后续目录持久化或历史对象清理失败时，接口仍返回成功状态码，并附带 `Warning` 响应头；`message` 会区分 persistence warning 与 cleanup warning。
 
+常见 `message` 包括：`file deleted with persistence warning`、`file deleted with cleanup warning`、`file deleted with trash cleanup warning`。
+
 **响应示例**:
 ```json
 {
@@ -674,6 +682,8 @@ GET /api/v1/download/{path}
 ```
 POST /api/v1/directories/{path}
 ```
+
+说明：当目录已经创建成功、仅最后的工作区持久化失败时，接口返回 `201 Created` 并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `directory created with persistence warning`。
 
 **响应示例**:
 ```json
@@ -869,6 +879,8 @@ DELETE /api/v1/trash/{id}
 ```
 DELETE /api/v1/trash
 ```
+
+说明：当回收站已经清空、但部分历史对象 cleanup 仅部分完成时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `trash emptied with cleanup warning`。
 
 ---
 
@@ -1082,9 +1094,10 @@ POST /api/v1/public/shares/{share_id}/access
 
 **说明**:
 - 当分享不需要密码，或已通过密码验证后，会返回 `file_name` / `file_size` / `folder_items`
-- 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`
+- 当 `max_access > 0` 且 `access_count` 达到上限时，返回 `410 Gone`，错误码为 `SHARE_ACCESS_LIMIT_REACHED`
+- 当分享已过期时，返回 `410 Gone`，错误码为 `SHARE_EXPIRED`
 - 当创建该分享的用户被禁用或删除后，公开访问、下载和文件夹列表都会返回 `410 Gone`，错误码为 `SHARE_DISABLED`
-- `access_count` 在下载与文件夹列表请求时递增；`POST /s/{share_id}` 验证密码不会计数
+- `access_count` 在下载与文件夹列表请求时递增；`POST /api/v1/public/shares/{share_id}/access` 与兼容路径 `POST /s/{share_id}` 的密码验证不会计数
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
 - 口令失败限流默认按 share ID 与直连客户端地址组合统计；只有当请求直接来自 loopback 或私有网段代理时，才采信 `X-Forwarded-For` / `X-Real-IP`
@@ -1641,6 +1654,7 @@ POST /api/v1/maintenance/scrub
 **说明**:
 - 此接口为同步执行，不会先返回 `running` 再异步完成
 - 成功响应直接返回本次校验结果摘要；最近一次完整结果可通过 `GET /api/v1/maintenance/scrub` 再次读取
+- 当校验已完成、但结果持久化失败时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `scrub completed with persistence warning`
 
 **响应示例**:
 ```json

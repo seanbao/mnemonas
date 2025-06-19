@@ -81,9 +81,17 @@ export class ShareError extends Error {
   get isNotFound(): boolean {
     return this.status === 404
   }
+
+  get isDisabled(): boolean {
+    return this.code === 'SHARE_DISABLED'
+  }
+
+  get isAccessLimitReached(): boolean {
+    return this.code === 'SHARE_ACCESS_LIMIT_REACHED'
+  }
   
   get isExpired(): boolean {
-    return this.status === 410
+    return this.code === 'SHARE_EXPIRED' || (this.status === 410 && !this.code)
   }
   
   get isUnauthorized(): boolean {

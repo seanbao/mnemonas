@@ -33,7 +33,7 @@ import {
   AlertCircle,
   Sparkles
 } from 'lucide-react'
-import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type VersionInfo } from '@/api/files'
+import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type ActionResult, type VersionInfo } from '@/api/files'
 import { useIsAdmin, useUser } from '@/stores/auth'
 import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
@@ -112,6 +112,23 @@ function getVersionsActionErrorToast(
     title: titles.failure,
     description: error instanceof Error ? error.message : '请稍后重试',
     color: 'danger',
+  }
+}
+
+function getVersionsActionSuccessToast(result: ActionResult): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  if (result.warning) {
+    return {
+      title: result.message ?? '恢复版本完成，但存在警告',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '恢复版本成功',
+    color: 'success',
   }
 }
 
@@ -289,12 +306,13 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
 
   const restoreMutation = useMutation({
     mutationFn: async ({ path, hash }: { path: string; hash: string; sessionId: number }) => {
-      await restoreVersion(path, hash)
+      return restoreVersion(path, hash)
     },
     retry: false,
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['versions', variables.path] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
+      addToast(getVersionsActionSuccessToast(result))
       if (
         restoreSessionRef.current === variables.sessionId
         && currentSelectedPathRef.current === variables.path

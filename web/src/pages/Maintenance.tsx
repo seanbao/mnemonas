@@ -55,8 +55,16 @@ function getMaintenanceActionErrorPresentation(
 }
 
 // Status chip component
-function StatusChip({ status }: { status?: string }) {
+function StatusChip({ status, warning }: { status?: string; warning?: boolean }) {
   if (!status) return null
+
+  if (status === 'completed' && warning) {
+    return (
+      <Chip size="sm" color="warning" variant="flat" startContent={<FileWarning size={14} />}>
+        校验完成（有警告）
+      </Chip>
+    )
+  }
   
   const configs: Record<string, { color: 'success' | 'warning' | 'danger' | 'default'; icon: React.ReactNode; label: string }> = {
     completed: { color: 'success', icon: <CheckCircle size={14} />, label: '校验完成' },
@@ -209,8 +217,10 @@ export default function Maintenance() {
         setIsAwaitingRunningState(false)
       }
 
-      const title = result.status === 'running' ? '数据校验已启动' : '数据校验已完成'
-      addToast({ title, color: 'success' })
+      const title = result.warning
+        ? (result.message ?? '数据校验完成，但存在警告')
+        : (result.status === 'running' ? '数据校验已启动' : '数据校验已完成')
+      addToast({ title, color: result.warning ? 'warning' : 'success' })
     },
     onError: (error: unknown) => {
       setIsAwaitingRunningState(false)
@@ -288,7 +298,7 @@ export default function Maintenance() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {scrubResult && <StatusChip status={scrubResult.status} />}
+            {scrubResult && <StatusChip status={scrubResult.status} warning={scrubResult.warning} />}
             <Button
               className="btn-primary shadow-md rounded-xl"
               startContent={isRunning ? <RefreshCw size={18} className="animate-spin" /> : <Play size={18} />}
@@ -364,6 +374,20 @@ export default function Maintenance() {
               
               {/* Result summary */}
               <ResultSummary result={scrubResult} />
+
+              {scrubResult.warning && scrubResult.status !== 'running' && (
+                <div className="mt-4 p-3 bg-warning/10 rounded-lg border border-warning/20">
+                  <div className="flex items-start gap-2">
+                    <FileWarning size={16} className="mt-0.5 text-warning" />
+                    <div>
+                      <p className="text-sm text-warning">本次校验完成，但存在警告</p>
+                      {scrubResult.message && (
+                        <p className="text-sm text-warning mt-1">{scrubResult.message}</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
               
               {/* Error message */}
               {scrubResult.error_message && (

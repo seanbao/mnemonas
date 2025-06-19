@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { LoginPage } from './Login'
 
-const { mockAddToast } = vi.hoisted(() => ({
+const { mockAddToast, mockGetSetupStatus } = vi.hoisted(() => ({
   mockAddToast: vi.fn(),
+  mockGetSetupStatus: vi.fn(),
 }))
 
 // Mock the auth store
@@ -20,6 +21,10 @@ vi.mock('@/stores/auth', () => ({
     clearError: mockClearError,
   })),
   useIsAuthenticated: vi.fn(() => false),
+}))
+
+vi.mock('@/api/setup', () => ({
+  getSetupStatus: (...args: unknown[]) => mockGetSetupStatus(...args),
 }))
 
 // Mock react-router-dom navigate
@@ -45,6 +50,13 @@ vi.mock('@heroui/react', async () => {
 describe('LoginPage', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
+    mockGetSetupStatus.mockResolvedValue({
+      success: true,
+      is_first_run: false,
+      auth_enabled: true,
+      webdav_enabled: true,
+      webdav_auth_type: 'basic',
+    })
 
     const { useAuthStore } = await import('@/stores/auth')
     vi.mocked(useAuthStore).mockReturnValue({
@@ -63,9 +75,16 @@ describe('LoginPage', () => {
     )
   }
 
+  const waitForSetupStatusLoad = async () => {
+    await waitFor(() => {
+      expect(mockGetSetupStatus).toHaveBeenCalled()
+    })
+  }
+
   describe('rendering', () => {
-    it('renders login form', () => {
+    it('renders login form', async () => {
       renderLogin()
+      await waitForSetupStatusLoad()
       
       // Multiple MnemoNAS text elements exist (header, footer, etc.)
       expect(screen.getAllByText(/MnemoNAS/i).length).toBeGreaterThan(0)
@@ -75,16 +94,41 @@ describe('LoginPage', () => {
       expect(screen.getByRole('button', { name: /登录/i })).toBeInTheDocument()
     })
 
-    it('renders help text for first-time users', () => {
+    it('renders generic login guidance after setup is already completed', async () => {
       renderLogin()
-      
-      expect(screen.getByText(/首次运行时默认管理员账号为/i)).toBeInTheDocument()
-      expect(screen.getByText(/初始密码请查看服务器启动日志，浏览器界面不显示初始密码/i)).toBeInTheDocument()
+
+      expect(await screen.findByText(/使用已配置的管理员或用户账户登录/i)).toBeInTheDocument()
+      expect(screen.getByText(/首次启动时生成的初始密码不会在浏览器界面再次显示/i)).toBeInTheDocument()
       expect(screen.getByText(/当前版本未提供浏览器内密码重置入口/i)).toBeInTheDocument()
     })
 
-    it('does not initialize auth directly on mount', () => {
+    it('renders first-run guidance when setup status reports first run', async () => {
+      mockGetSetupStatus.mockResolvedValueOnce({
+        success: true,
+        is_first_run: true,
+        auth_enabled: true,
+        webdav_enabled: true,
+        webdav_auth_type: 'basic',
+      })
+
       renderLogin()
+
+      expect(await screen.findByText(/首次运行时默认管理员账号为/i)).toBeInTheDocument()
+      expect(screen.getByText(/初始密码请查看服务器启动日志，浏览器界面不显示初始密码/i)).toBeInTheDocument()
+    })
+
+    it('falls back to neutral guidance when setup status cannot be loaded', async () => {
+      mockGetSetupStatus.mockRejectedValueOnce(new Error('setup status unavailable'))
+
+      renderLogin()
+
+      expect(await screen.findByText(/使用管理员或已有账户登录/i)).toBeInTheDocument()
+      expect(screen.getByText(/首次启动凭据仅记录在服务端日志中，浏览器界面不显示初始密码/i)).toBeInTheDocument()
+    })
+
+    it('does not initialize auth directly on mount', async () => {
+      renderLogin()
+      await waitForSetupStatusLoad()
       expect(mockLogin).not.toHaveBeenCalled()
     })
 
@@ -98,6 +142,7 @@ describe('LoginPage', () => {
       })
 
       renderLogin()
+  await waitForSetupStatusLoad()
 
       expect(screen.getByRole('alert')).toHaveTextContent('用户名或密码错误')
       expect(mockAddToast).not.toHaveBeenCalled()
@@ -211,6 +256,7 @@ describe('LoginPage', () => {
       })
       
       renderLogin()
+      await waitForSetupStatusLoad()
       
       expect(screen.getByLabelText(/用户名/i, { selector: 'input' })).toBeDisabled()
       expect(screen.getByLabelText(/密码/i, { selector: 'input' })).toBeDisabled()

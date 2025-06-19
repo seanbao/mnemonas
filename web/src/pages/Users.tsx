@@ -91,6 +91,32 @@ function getUsersActionErrorPresentation(
     }
   }
 
+  if (error instanceof UsersError) {
+    if (error.code === 'USER_EXISTS') {
+      return {
+        title: '用户名已存在',
+        description: '该用户名已被占用，请使用其他用户名。',
+        color: 'warning',
+      }
+    }
+
+    if (error.code === 'SELF_DISABLE') {
+      return {
+        title: '不能禁用当前用户',
+        description: '当前登录用户不能禁用自身账号。',
+        color: 'warning',
+      }
+    }
+
+    if (error.code === 'LAST_ADMIN') {
+      return {
+        title: '不能禁用最后一个管理员',
+        description: '系统至少需要保留一个启用中的管理员账号。',
+        color: 'warning',
+      }
+    }
+  }
+
   return {
     title: titles.failure,
     description: error instanceof Error ? error.message : '请稍后重试',

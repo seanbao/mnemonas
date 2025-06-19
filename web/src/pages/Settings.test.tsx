@@ -1318,7 +1318,6 @@ describe('SettingsPage', () => {
       mockUpdateSettings.mockRejectedValueOnce(new SettingsError('settings not available', 503, 'SERVICE_UNAVAILABLE'))
 
       render(<SettingsPage />)
-
       await waitFor(() => {
         expect(screen.getByText('保存设置')).toBeTruthy()
       })
@@ -1329,6 +1328,29 @@ describe('SettingsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '保存设置暂不可用',
           description: '系统设置当前不可用，请检查服务健康状态或稍后重试。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('shows a validation warning when WebDAV username conflicts with a non-admin user', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUpdateSettings.mockRejectedValueOnce(
+        new SettingsError('webdav.username must not match a non-admin user when auth is enabled', 400)
+      )
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('保存设置')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'WebDAV 用户名不可用',
+          description: '当前 WebDAV 用户名与现有非管理员账号冲突，请改用管理员账号或其他专用用户名。',
           color: 'warning',
         })
       })
