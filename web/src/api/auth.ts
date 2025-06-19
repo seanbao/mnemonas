@@ -1,5 +1,7 @@
 const API_BASE = '/api/v1'
 
+import { normalizeUserHomeDir } from '@/lib/utils'
+
 export interface User {
   id: string
   username: string
@@ -252,12 +254,14 @@ function normalizeUser(user: ApiUser): User {
     throw new Error('invalid user payload')
   }
 
+  const normalizedHomeDir = normalizeUserHomeDir(homeDir)
+
   return {
     id: user.id,
     username: user.username,
     email: user.email,
     role: user.role,
-    homeDir,
+    homeDir: normalizedHomeDir,
   }
 }
 

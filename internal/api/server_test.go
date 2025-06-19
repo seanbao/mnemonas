@@ -4001,6 +4001,100 @@ func TestServer_MoveFile_RollsBackWhenFavoritePathSyncFails(t *testing.T) {
 	}
 }
 
+func TestServer_MoveFile_RollbackDoesNotMoveUnrelatedDestinationSharesWhenFavoriteSyncFails(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("symlink-backed save failure test requires unix-like symlink behavior")
+	}
+
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/archive"); err != nil {
+		t.Fatalf("Mkdir(/archive) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/archive/docs"); err != nil {
+		t.Fatalf("Mkdir(/archive/docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/report.txt", bytes.NewReader([]byte("report"))); err != nil {
+		t.Fatalf("WriteFile(/docs/report.txt) error: %v", err)
+	}
+
+	shareFilePath := filepath.Join(tmpDir, "move-share-rollback-unrelated.json")
+	favoritesFilePath := filepath.Join(tmpDir, "move-favorites-rollback-unrelated.json")
+
+	shareStore, err := share.NewShareStore(shareFilePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	movedShare, err := shareStore.Create(share.CreateShareOptions{Path: "/docs/report.txt", Type: share.ShareTypeFile, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(moved share) error: %v", err)
+	}
+	unrelatedShare, err := shareStore.Create(share.CreateShareOptions{Path: "/archive/docs/report.txt", Type: share.ShareTypeFile, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("Create(unrelated share) error: %v", err)
+	}
+
+	favoritesStore, err := favorites.NewStore(favoritesFilePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/docs/report.txt", "file"); err != nil {
+		t.Fatalf("AddFavorite() error: %v", err)
+	}
+
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := os.Remove(favoritesFilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove(favorites file) error: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmpDir, "favorites-move-save-target"), favoritesFilePath); err != nil {
+		t.Fatalf("Symlink(favorites file) error: %v", err)
+	}
+
+	body := `{"from":"/docs/report.txt","to":"/archive/docs/report.txt"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("move with favorites sync failure status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if _, err := fs.Stat(ctx, "/docs/report.txt"); err != nil {
+		t.Fatalf("expected original file path to remain after rollback, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/archive/docs/report.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination file to be absent after rollback, got %v", err)
+	}
+
+	loadedMovedShare, err := server.shareStore.Get(movedShare.ID)
+	if err != nil {
+		t.Fatalf("Get(moved share) error: %v", err)
+	}
+	if loadedMovedShare.Path != "/docs/report.txt" {
+		t.Fatalf("expected moved share path rollback to /docs/report.txt, got %q", loadedMovedShare.Path)
+	}
+	loadedUnrelatedShare, err := server.shareStore.Get(unrelatedShare.ID)
+	if err != nil {
+		t.Fatalf("Get(unrelated share) error: %v", err)
+	}
+	if loadedUnrelatedShare.Path != "/archive/docs/report.txt" {
+		t.Fatalf("expected unrelated destination share to remain on /archive/docs/report.txt, got %q", loadedUnrelatedShare.Path)
+	}
+	if shares := server.shareStore.GetByPath("/docs/report.txt"); len(shares) != 1 || shares[0].ID != movedShare.ID {
+		t.Fatalf("expected original path index to contain only moved share after rollback, got %+v", shares)
+	}
+	if shares := server.shareStore.GetByPath("/archive/docs/report.txt"); len(shares) != 1 || shares[0].ID != unrelatedShare.ID {
+		t.Fatalf("expected destination path index to contain only unrelated share after rollback, got %+v", shares)
+	}
+}
+
 func TestServer_MoveFile_RejectsOversizedRequestBody(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -4782,6 +4876,102 @@ func TestServer_Trash_Restore_RestoresLinkedSharesAndFavorites(t *testing.T) {
 	}
 	if !favoritesStore.IsFavorite("tester", "/trash-restore-linked/report.txt") {
 		t.Fatal("expected favorite to be restored after restore")
+	}
+}
+
+func TestServer_Trash_Restore_RollsBackLinkedSharesWhenFavoriteRestoreFails(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("symlink-backed save failure test requires unix-like symlink behavior")
+	}
+
+	server, fs, tmpDir := setupTestServer(t)
+	ctx := context.Background()
+
+	shareFilePath := filepath.Join(tmpDir, "trash-restore-rollback-shares.json")
+	favoritesFilePath := filepath.Join(tmpDir, "trash-restore-rollback-favorites.json")
+
+	shareStore, err := share.NewShareStore(shareFilePath)
+	if err != nil {
+		t.Fatalf("NewShareStore() error: %v", err)
+	}
+	favoritesStore, err := favorites.NewStore(favoritesFilePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	server.shareStore = shareStore
+	server.favoritesStore = favoritesStore
+
+	if err := fs.Mkdir(ctx, "/trash-restore-rollback"); err != nil {
+		t.Fatalf("Mkdir() error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-restore-rollback/report.txt", bytes.NewReader([]byte("restore me"))); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	createdShare, err := shareStore.Create(share.CreateShareOptions{
+		Path:      "/trash-restore-rollback/report.txt",
+		Type:      share.ShareTypeFile,
+		CreatedBy: "tester",
+	})
+	if err != nil {
+		t.Fatalf("CreateShare() error: %v", err)
+	}
+	if _, err := favoritesStore.Add("tester", "/trash-restore-rollback/report.txt", "file"); err != nil {
+		t.Fatalf("AddFavorite() error: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/files/trash-restore-rollback/report.txt", nil)
+	deleteRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("Delete status = %d, want %d, body: %s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	if err := os.Remove(favoritesFilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove(favorites file) error: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmpDir, "favorites-save-target"), favoritesFilePath); err != nil {
+		t.Fatalf("Symlink(favorites file) error: %v", err)
+	}
+
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore", nil)
+	restoreRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(restoreRec, restoreReq)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("RestoreFromTrash status = %d, want %d, body: %s", restoreRec.Code, http.StatusOK, restoreRec.Body.String())
+	}
+
+	warningValues := restoreRec.Header().Values("Warning")
+	if len(warningValues) == 0 || warningValues[0] != trashRestoreMetadataWarningHeader {
+		t.Fatalf("warning headers = %v, want first value %q", warningValues, trashRestoreMetadataWarningHeader)
+	}
+
+	if _, err := fs.Stat(ctx, "/trash-restore-rollback/report.txt"); err != nil {
+		t.Fatalf("Stat(restored file) error: %v", err)
+	}
+
+	rolledBackShare, err := shareStore.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(rolled back share) error: %v", err)
+	}
+	if rolledBackShare.Enabled {
+		t.Fatal("expected share to remain disabled when favorite restore fails")
+	}
+	if rolledBackShare.Path != "/trash-restore-rollback/report.txt" {
+		t.Fatalf("expected rolled back share path %q, got %q", "/trash-restore-rollback/report.txt", rolledBackShare.Path)
+	}
+	if favoritesStore.IsFavorite("tester", "/trash-restore-rollback/report.txt") {
+		t.Fatal("expected favorite to remain absent when restore metadata reconciliation fails")
+	}
+	if body := restoreRec.Body.String(); !strings.Contains(body, `"restored":true`) {
+		t.Fatalf("expected restore success body, got %s", body)
 	}
 }
 

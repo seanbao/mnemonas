@@ -484,6 +484,77 @@ func TestFileSystem_WriteFile_RollsBackVersionMetadataWhenIndexUpdateFails(t *te
 	}
 }
 
+func TestFileSystem_WriteFile_KeepsHistoricalObjectWhenVersionMetadataRollbackFails(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	originalContent := []byte("old content")
+	path := "/rollback-version-delete-fail.md"
+	originalHash := computeHash(originalContent)
+
+	if err := fs.WriteFile(ctx, path, bytes.NewReader(originalContent)); err != nil {
+		t.Fatalf("Initial WriteFile() error: %v", err)
+	}
+
+	deleteVersionCalled := false
+	fs.updateFileIndex = func(ctx context.Context, path string, size int64, modTime time.Time, hash string) error {
+		return errors.New("index update failed")
+	}
+	fs.deleteFileVersion = func(ctx context.Context, versionPath, hash string) error {
+		deleteVersionCalled = true
+		if versionPath != path {
+			t.Fatalf("deleteFileVersion() path = %q, want %q", versionPath, path)
+		}
+		if hash != originalHash {
+			t.Fatalf("deleteFileVersion() hash = %q, want %q", hash, originalHash)
+		}
+		return errors.New("delete version metadata failed")
+	}
+
+	err := fs.WriteFile(ctx, path, bytes.NewReader([]byte("new content")))
+	if err == nil {
+		t.Fatal("Expected WriteFile() overwrite to fail when version metadata rollback fails")
+	}
+	if !strings.Contains(err.Error(), "failed to rollback version metadata") {
+		t.Fatalf("expected rollback version metadata failure in error, got %v", err)
+	}
+	if !deleteVersionCalled {
+		t.Fatal("expected rollback to attempt deleting version metadata")
+	}
+
+	versions, versionErr := fs.versions.GetVersions(ctx, path)
+	if versionErr != nil {
+		t.Fatalf("GetVersions() after rollback error: %v", versionErr)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("expected historical version metadata to remain when rollback delete fails, got %d entries", len(versions))
+	}
+	if versions[0].Hash != originalHash {
+		t.Fatalf("expected remaining historical version hash %q, got %q", originalHash, versions[0].Hash)
+	}
+
+	hasObject, objectErr := fs.hasVersionObject(ctx, originalHash)
+	if objectErr != nil {
+		t.Fatalf("hasVersionObject() error: %v", objectErr)
+	}
+	if !hasObject {
+		t.Fatal("expected historical version object to remain when metadata rollback fails")
+	}
+
+	f, openErr := fs.OpenFile(ctx, path)
+	if openErr != nil {
+		t.Fatalf("OpenFile() after rollback error: %v", openErr)
+	}
+	defer f.Close()
+
+	data, readErr := io.ReadAll(f)
+	if readErr != nil {
+		t.Fatalf("ReadAll() after rollback error: %v", readErr)
+	}
+	if string(data) != string(originalContent) {
+		t.Fatalf("Expected original content after rollback, got %q", string(data))
+	}
+}
+
 func TestFileSystem_WriteFile_RollsBackNewFileWhenDirectorySyncFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -2690,7 +2761,7 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackOnMetadataConflict(t *testing.T)
 	}
 }
 
-func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenTrashMetadataRemovalAndMetadataRollbackFail(t *testing.T) {
+func TestFileSystem_RestoreFromTrashTo_DoesNotMoveMetadataBeforeTrashMetadataRemovalSucceeds(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -2713,8 +2784,10 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenTrashMetadataRemovalA
 	}
 
 	newPath := "/restored/restore-remove-fail.md"
+	rollbackRenameCalled := false
 	fs.renameMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
 		if oldName == newPath && updatedPath == "/restore-remove-fail.md" {
+			rollbackRenameCalled = true
 			return errors.New("metadata rollback failed")
 		}
 		return fs.versions.RenamePath(ctx, oldName, updatedPath)
@@ -2727,8 +2800,8 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenTrashMetadataRemovalA
 	if err == nil {
 		t.Fatal("Expected RestoreFromTrashTo() to fail when trash metadata removal fails")
 	}
-	if !strings.Contains(err.Error(), "failed to rollback version metadata") {
-		t.Fatalf("Expected version metadata rollback failure in error, got %v", err)
+	if rollbackRenameCalled {
+		t.Fatal("expected metadata rename rollback not to be needed before trash metadata removal succeeds")
 	}
 
 	if _, statErr := fs.Stat(ctx, newPath); statErr != ErrNotFound {
@@ -2745,9 +2818,23 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenTrashMetadataRemovalA
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); statErr != nil {
 		t.Fatalf("Expected trash content to remain after rollback, got %v", statErr)
 	}
+	originalVersions, versionsErr := fs.versions.GetVersions(ctx, "/restore-remove-fail.md")
+	if versionsErr != nil {
+		t.Fatalf("GetVersions(original) error: %v", versionsErr)
+	}
+	if len(originalVersions) != 1 {
+		t.Fatalf("expected original historical version metadata to remain after rollback, got %d versions", len(originalVersions))
+	}
+	newVersions, versionsErr := fs.versions.GetVersions(ctx, newPath)
+	if versionsErr != nil {
+		t.Fatalf("GetVersions(new path) error: %v", versionsErr)
+	}
+	if len(newVersions) != 0 {
+		t.Fatalf("expected no version metadata under restored path after rollback, got %d versions", len(newVersions))
+	}
 }
 
-func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenIndexUpdateAndMetadataRollbackFail(t *testing.T) {
+func TestFileSystem_RestoreFromTrashTo_DoesNotMoveMetadataBeforeIndexUpdateSucceeds(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
 
@@ -2770,8 +2857,10 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenIndexUpdateAndMetadat
 	}
 
 	newPath := "/restored/restore-index-rollback-fail.md"
+	rollbackRenameCalled := false
 	fs.renameMetadataPath = func(ctx context.Context, oldName, updatedPath string) error {
 		if oldName == newPath && updatedPath == "/restore-index-rollback-fail.md" {
+			rollbackRenameCalled = true
 			return errors.New("metadata rollback failed")
 		}
 		return fs.versions.RenamePath(ctx, oldName, updatedPath)
@@ -2784,8 +2873,8 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenIndexUpdateAndMetadat
 	if err == nil {
 		t.Fatal("Expected RestoreFromTrashTo() to fail when file index update fails")
 	}
-	if !strings.Contains(err.Error(), "failed to rollback version metadata") {
-		t.Fatalf("Expected version metadata rollback failure in error, got %v", err)
+	if rollbackRenameCalled {
+		t.Fatal("expected metadata rename rollback not to be needed before file index update succeeds")
 	}
 
 	if _, statErr := fs.Stat(ctx, newPath); statErr != ErrNotFound {
@@ -2801,6 +2890,20 @@ func TestFileSystem_RestoreFromTrashTo_RollsBackContentWhenIndexUpdateAndMetadat
 	}
 	if _, statErr := os.Stat(filepath.Join(fs.trashRoot, items[0].ID, "content")); statErr != nil {
 		t.Fatalf("Expected trash content to remain after rollback, got %v", statErr)
+	}
+	originalVersions, versionsErr := fs.versions.GetVersions(ctx, "/restore-index-rollback-fail.md")
+	if versionsErr != nil {
+		t.Fatalf("GetVersions(original) error: %v", versionsErr)
+	}
+	if len(originalVersions) != 1 {
+		t.Fatalf("expected original historical version metadata to remain after rollback, got %d versions", len(originalVersions))
+	}
+	newVersions, versionsErr := fs.versions.GetVersions(ctx, newPath)
+	if versionsErr != nil {
+		t.Fatalf("GetVersions(new path) error: %v", versionsErr)
+	}
+	if len(newVersions) != 0 {
+		t.Fatalf("expected no version metadata under restored path after rollback, got %d versions", len(newVersions))
 	}
 }
 

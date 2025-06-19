@@ -36,6 +36,7 @@ import {
 import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type VersionInfo } from '@/api/files'
 import { useIsAdmin, useUser } from '@/stores/auth'
 import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 
@@ -203,14 +204,16 @@ export function VersionsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const initialPath = (searchParams.get('path') || '').trim()
   const normalizedInitialPath = initialPath ? (initialPath.startsWith('/') ? initialPath : `/${initialPath}`) : ''
-  const scopedHomeDir = !isAdmin && user?.homeDir && user.homeDir !== '/' ? normalizePath(user.homeDir) : ''
+  const { scopedHomeDir, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const effectiveScopedHomeDir = !isAdmin && scopedHomeDir ? scopedHomeDir : ''
 
   return (
     <VersionsPageContent
-      key={`${scopedHomeDir}:${normalizedInitialPath || '__empty__'}`}
+      key={`${hasInvalidHomeDir ? 'invalid' : effectiveScopedHomeDir}:${normalizedInitialPath || '__empty__'}`}
       initialPath={normalizedInitialPath}
       isAdmin={isAdmin}
-      scopedHomeDir={scopedHomeDir}
+      scopedHomeDir={effectiveScopedHomeDir}
+      hasInvalidHomeDir={hasInvalidHomeDir && !isAdmin}
       setSearchParams={setSearchParams}
     />
   )
@@ -220,11 +223,14 @@ interface VersionsPageContentProps {
   initialPath: string
   isAdmin: boolean
   scopedHomeDir: string
+  hasInvalidHomeDir: boolean
   setSearchParams: SetURLSearchParams
 }
 
-function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchParams }: VersionsPageContentProps) {
-  const initialState = getVersionQueryState(initialPath, scopedHomeDir)
+function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHomeDir, setSearchParams }: VersionsPageContentProps) {
+  const initialState = hasInvalidHomeDir
+    ? { searchPath: '', selectedPath: null, isBlocked: false }
+    : getVersionQueryState(initialPath, scopedHomeDir)
   const [searchPath, setSearchPath] = useState(initialState.searchPath)
   const [selectedPath, setSelectedPath] = useState<string | null>(initialState.selectedPath)
   const [selectedVersion, setSelectedVersion] = useState<VersionInfo | null>(null)
@@ -233,7 +239,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
   const restoreSessionRef = useRef(0)
   const currentSelectedPathRef = useRef<string | null>(initialState.selectedPath)
   const currentSelectedVersionRef = useRef<VersionInfo | null>(null)
-  const selectedPathAllowed = !selectedPath || !scopedHomeDir || pathWithinBase(scopedHomeDir, selectedPath)
+  const selectedPathAllowed = !hasInvalidHomeDir && (!selectedPath || !scopedHomeDir || pathWithinBase(scopedHomeDir, selectedPath))
 
   useEffect(() => {
     currentSelectedPathRef.current = selectedPath
@@ -244,6 +250,13 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
   }, [selectedVersion])
 
   useEffect(() => {
+    if (hasInvalidHomeDir) {
+      setSearchPath('')
+      setSelectedPath(null)
+      setSelectedVersion(null)
+      setSearchParams({})
+      return
+    }
     if (!initialState.isBlocked) {
       return
     }
@@ -253,7 +266,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
       color: 'warning',
     })
     setSearchParams({})
-  }, [initialState.isBlocked, setSearchParams])
+  }, [hasInvalidHomeDir, initialState.isBlocked, setSearchParams])
 
   const { data: versions, isLoading, error, refetch } = useQuery({
     queryKey: ['versions', selectedPath],
@@ -299,6 +312,9 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
   })
 
   const handleSearch = () => {
+    if (hasInvalidHomeDir) {
+      return
+    }
     const trimmedPath = searchPath.trim()
     if (trimmedPath) {
       let normalizedPath: string
@@ -372,11 +388,20 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
       {/* Header */}
       <PageHeader
         title="版本历史"
-        subtitle={isAdmin ? '查看和恢复文件历史版本' : '查看文件历史版本'}
+        subtitle={hasInvalidHomeDir ? '主目录配置无效' : isAdmin ? '查看和恢复文件历史版本' : '查看文件历史版本'}
         icon={History}
       />
 
+      {hasInvalidHomeDir && (
+        <EmptyState
+          icon={AlertCircle}
+          title={invalidHomeDirTitle}
+          description={getInvalidHomeDirDescription('查看版本历史')}
+        />
+      )}
+
       {/* Search */}
+      {!hasInvalidHomeDir && (
       <div className="card-meridian rounded-xl p-4">
         <div className="flex items-center gap-4">
           <Input
@@ -400,9 +425,10 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
           </Button>
         </div>
       </div>
+      )}
 
       {/* Version List */}
-      {selectedPath && (
+      {!hasInvalidHomeDir && selectedPath && (
         <div className="card-meridian rounded-xl p-6 space-y-4">
           <div className="flex items-center gap-2 text-default-400">
             <History size={18} />
@@ -473,7 +499,7 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
       )}
 
       {/* Empty State */}
-      {!selectedPath && (
+      {!hasInvalidHomeDir && !selectedPath && (
         <EmptyState
           icon={Sparkles}
           title="查看文件版本历史"

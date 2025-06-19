@@ -69,6 +69,7 @@ import {
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 import { listShares, ShareError } from '@/api/share'
 import { copyTextToClipboard, formatBytes, formatDate, cn, normalizePath } from '@/lib/utils'
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 
 function isDirectoryAlreadyExistsError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409
@@ -837,7 +838,7 @@ export function FilesPage() {
   const clipboard = useClipboardStore()
   const canWrite = useCanWrite()
   const user = useUser()
-  const scopedHomeDir = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : null
+  const { scopedHomeDir, hasInvalidHomeDir } = resolveUserHomeScope(user)
   
   // Track focused file index for keyboard navigation
   const [focusedIndex, setFocusedIndex] = useState<number>(-1)
@@ -901,6 +902,7 @@ export function FilesPage() {
   } = useFilesStore()
 
   useEffect(() => {
+    if (hasInvalidHomeDir) return
     if (!location.pathname.startsWith('/files')) return
     const routePath = location.pathname.replace(/^\/files/, '')
     let finalPath = '/'
@@ -933,23 +935,35 @@ export function FilesPage() {
     if (finalPath !== currentPath) {
       setCurrentPath(finalPath)
     }
-  }, [location.pathname, currentPath, navigate, scopedHomeDir, setCurrentPath])
+  }, [hasInvalidHomeDir, location.pathname, currentPath, navigate, scopedHomeDir, setCurrentPath])
 
   useEffect(() => {
+    if (!hasInvalidHomeDir) return
+    if (currentPath !== '/') {
+      setCurrentPath('/')
+    }
+    if (location.pathname !== '/files') {
+      navigate('/files', { replace: true })
+    }
+  }, [hasInvalidHomeDir, currentPath, location.pathname, navigate, setCurrentPath])
+
+  useEffect(() => {
+    if (hasInvalidHomeDir) return
     if (!user || user.role === 'admin' || !scopedHomeDir || scopedHomeDir === '/') return
     if (location.pathname !== '/files' || currentPath !== '/') return
     setCurrentPath(scopedHomeDir)
-  }, [user, location.pathname, currentPath, scopedHomeDir, setCurrentPath])
+  }, [hasInvalidHomeDir, user, location.pathname, currentPath, scopedHomeDir, setCurrentPath])
 
-  const currentPathAllowed = !scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath)
+  const currentPathAllowed = !hasInvalidHomeDir && (!scopedHomeDir || pathWithinBase(scopedHomeDir, currentPath))
 
   useEffect(() => {
+    if (hasInvalidHomeDir) return
     const encodedPath = currentPath === '/' ? '' : encodeURI(currentPath)
     const targetPath = `/files${encodedPath}`
     if (location.pathname !== targetPath) {
       navigate(targetPath, { replace: true })
     }
-  }, [currentPath, location.pathname, navigate])
+  }, [hasInvalidHomeDir, currentPath, location.pathname, navigate])
 
   useEffect(() => {
     lastSelectedIndexRef.current = null
@@ -1117,7 +1131,7 @@ export function FilesPage() {
   } = useQuery({
     queryKey: ['favorites-check', filePaths],
     queryFn: () => checkFavorites(filePaths),
-    enabled: filePaths.length > 0,
+    enabled: !hasInvalidHomeDir && filePaths.length > 0,
     staleTime: 30000, // Cache for 30 seconds
   })
   const { error: shareAvailabilityError } = useQuery({
@@ -2013,6 +2027,24 @@ export function FilesPage() {
         <div className="text-center">
           <div className="w-12 h-12 border-3 border-accent-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-default-500">加载记忆中...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (hasInvalidHomeDir) {
+    return (
+      <div className="h-full flex overflow-hidden relative">
+        <div className="flex-1 flex flex-col min-w-0 p-7">
+          <Breadcrumbs path="/" onNavigate={setCurrentPath} />
+          <div className="flex-1 flex items-center justify-center surface-card">
+            <EmptyState
+              icon={AlertCircle}
+              title={invalidHomeDirTitle}
+              description={getInvalidHomeDirDescription('浏览文件')}
+              className="max-w-md"
+            />
+          </div>
         </div>
       </div>
     )
