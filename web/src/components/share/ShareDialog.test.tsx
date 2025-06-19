@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ShareDialog } from './ShareDialog'
 
@@ -80,6 +80,16 @@ vi.mock('@/api/share', async () => {
 })
 
 import { createShare, ShareError } from '@/api/share'
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 describe('ShareDialog', () => {
   beforeEach(() => {
@@ -276,5 +286,92 @@ describe('ShareDialog', () => {
         password: 'secret-123',
       })
     )
+  })
+
+  it('keeps a reopened dialog focused on the new file when an older create request resolves', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const pendingShare = createDeferred<Awaited<ReturnType<typeof createShare>>>()
+    vi.mocked(createShare).mockImplementation((request) => {
+      if (request.path === '/test/file.txt') {
+        return pendingShare.promise as ReturnType<typeof createShare>
+      }
+      return Promise.resolve({
+        id: 'share-2',
+        path: '/test/other.txt',
+        type: 'file',
+        created_by: 'user-1',
+        created_at: new Date().toISOString(),
+        has_password: false,
+        permission: 'read',
+        enabled: true,
+        access_count: 0,
+        max_access: 0,
+        description: '',
+        url: '/s/share-2',
+      } as never)
+    })
+
+    const view = render(
+      <ShareDialog
+        isOpen={true}
+        onClose={onClose}
+        filePath="/test/file.txt"
+      />,
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(createShare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/test/file.txt',
+        type: 'file',
+      }),
+    )
+
+    await user.click(screen.getByText('取消'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    view.rerender(
+      <ShareDialog
+        isOpen={false}
+        onClose={onClose}
+        filePath="/test/file.txt"
+      />,
+    )
+
+    view.rerender(
+      <ShareDialog
+        isOpen={true}
+        onClose={onClose}
+        filePath="/test/other.txt"
+      />,
+    )
+
+    expect(screen.getByText('/test/other.txt')).toBeInTheDocument()
+    expect(screen.getByText('创建分享链接')).toBeInTheDocument()
+
+    await act(async () => {
+      pendingShare.resolve({
+        id: 'share-1',
+        path: '/test/file.txt',
+        type: 'file',
+        created_by: 'user-1',
+        created_at: new Date().toISOString(),
+        has_password: false,
+        permission: 'read',
+        enabled: true,
+        access_count: 0,
+        max_access: 0,
+        description: '',
+        url: '/s/share-1',
+      } as never)
+      await pendingShare.promise
+    })
+
+    expect(screen.getByText('/test/other.txt')).toBeInTheDocument()
+    expect(screen.getByText('创建分享链接')).toBeInTheDocument()
+    expect(screen.queryAllByText('分享链接已创建')).toHaveLength(0)
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })

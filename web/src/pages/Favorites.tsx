@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -265,6 +265,11 @@ export function FavoritesPage() {
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const [editingItem, setEditingItem] = useState<Favorite | null>(null)
   const [noteValue, setNoteValue] = useState('')
+  const editSessionRef = useRef(0)
+  const editingItemRef = useRef(editingItem)
+  const noteValueRef = useRef(noteValue)
+  editingItemRef.current = editingItem
+  noteValueRef.current = noteValue
 
   const { isOpen: isEditOpen, onOpen: onEditOpen, onClose: onEditClose } = useDisclosure()
 
@@ -352,13 +357,19 @@ export function FavoritesPage() {
 
   // Update note mutation
   const updateNoteMutation = useMutation({
-    mutationFn: ({ path, note }: { path: string; note: string }) => 
+    mutationFn: ({ path, note }: { path: string; note: string; editSession: number }) => 
       updateFavoriteNote(path, note),
-    onSuccess: () => {
+    onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['favorites'] })
       addToast({ title: '备注已更新', color: 'success' })
-      onEditClose()
-      setEditingItem(null)
+      if (
+        editSessionRef.current === variables.editSession
+        && editingItemRef.current?.path === variables.path
+        && noteValueRef.current === variables.note
+      ) {
+        onEditClose()
+        setEditingItem(null)
+      }
     },
     onError: (error) => {
       addToast(getFavoritesActionErrorPresentation(error))
@@ -408,21 +419,28 @@ export function FavoritesPage() {
     } else {
       // Go to the parent folder and highlight the file
       const parentPath = getParentPath(path)
-      navigate(`/files${encodeURI(parentPath || '/')}`)
+      navigate(`/files${encodeURI(parentPath || '/')}`, { state: { highlightPath: path } })
     }
   }, [navigate])
 
   const handleEditNote = useCallback((item: Favorite) => {
     if (!canWrite) return
+    editSessionRef.current += 1
     setEditingItem(item)
     setNoteValue(item.note || '')
     onEditOpen()
   }, [canWrite, onEditOpen])
 
+  const handleCloseEditModal = useCallback(() => {
+    editSessionRef.current += 1
+    onEditClose()
+    setEditingItem(null)
+  }, [onEditClose])
+
   const handleSaveNote = useCallback(() => {
     if (!canWrite) return
     if (editingItem) {
-      updateNoteMutation.mutate({ path: editingItem.path, note: noteValue })
+      updateNoteMutation.mutate({ path: editingItem.path, note: noteValue, editSession: editSessionRef.current })
     }
   }, [canWrite, editingItem, noteValue, updateNoteMutation])
 
@@ -611,7 +629,7 @@ export function FavoritesPage() {
       {/* Edit Note Modal */}
       <Modal 
         isOpen={isEditOpen} 
-        onClose={onEditClose}
+        onClose={handleCloseEditModal}
         placement="center"
         size="md"
         classNames={{
@@ -645,7 +663,7 @@ export function FavoritesPage() {
             />
           </ModalBody>
           <ModalFooter className="px-6 pb-6 pt-2 gap-2">
-            <Button variant="flat" onPress={onEditClose} className="text-default-600 rounded-xl">
+            <Button variant="flat" onPress={handleCloseEditModal} className="text-default-600 rounded-xl">
               取消
             </Button>
             <Button

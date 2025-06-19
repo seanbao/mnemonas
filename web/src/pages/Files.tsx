@@ -821,6 +821,13 @@ export function FilesPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const location = useLocation()
+  const highlightedPathFromState =
+    typeof location.state === 'object' &&
+    location.state !== null &&
+    'highlightPath' in location.state &&
+    typeof location.state.highlightPath === 'string'
+      ? location.state.highlightPath
+      : null
   
   // Context menu state
   const contextMenu = useContextMenu()
@@ -855,7 +862,13 @@ export function FilesPage() {
   const [newFolderName, setNewFolderName] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const [actionFile, setActionFile] = useState<FileItem | null>(null)
+  const newFolderSessionRef = useRef(0)
+  const currentNewFolderNameRef = useRef('')
+  const renameSessionRef = useRef(0)
+  const currentRenameValueRef = useRef('')
+  const currentRenameFileRef = useRef<FileItem | null>(null)
   const lastSelectedIndexRef = useRef<number | null>(null)
+  const appliedHighlightedPathRef = useRef<string | null>(null)
   const [multiSelectHintVisible, setMultiSelectHintVisible] = useState(false)
   const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   
@@ -868,6 +881,7 @@ export function FilesPage() {
   const [isUploading, setIsUploading] = useState(false)
   const [showUploadPanel, setShowUploadPanel] = useState(false)
   const uploadClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const uploadSessionRef = useRef(0)
   const [shareFeatureDisabled, setShareFeatureDisabled] = useState(false)
   
   const { 
@@ -942,6 +956,18 @@ export function FilesPage() {
     setFocusedIndex(-1)
   }, [currentPath, clearSelection])
 
+  useEffect(() => {
+    currentNewFolderNameRef.current = newFolderName
+  }, [newFolderName])
+
+  useEffect(() => {
+    currentRenameValueRef.current = renameValue
+  }, [renameValue])
+
+  useEffect(() => {
+    currentRenameFileRef.current = actionFile
+  }, [actionFile])
+
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['files', currentPath],
     queryFn: () => listFiles(currentPath),
@@ -964,11 +990,16 @@ export function FilesPage() {
   })
   
   const createFolderMutation = useMutation({
-    mutationFn: createDirectory,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-      onNewFolderClose()
-      setNewFolderName('')
+    mutationFn: ({ path }: { path: string; directoryPath: string; folderName: string; sessionId: number }) => createDirectory(path),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
+      if (
+        newFolderSessionRef.current === variables.sessionId
+        && currentNewFolderNameRef.current.trim() === variables.folderName
+      ) {
+        onNewFolderClose()
+        setNewFolderName('')
+      }
       addToast({ title: '文件夹创建成功', color: 'success' })
     },
     onError: (error) => {
@@ -980,11 +1011,17 @@ export function FilesPage() {
   })
   
   const renameMutation = useMutation({
-    mutationFn: ({ from, to }: { from: string; to: string }) => moveFile(from, to),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
-      onRenameClose()
-      setActionFile(null)
+    mutationFn: ({ from, to }: { from: string; to: string; directoryPath: string; targetPath: string; submittedName: string; sessionId: number }) => moveFile(from, to),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
+      if (
+        renameSessionRef.current === variables.sessionId
+        && currentRenameFileRef.current?.path === variables.targetPath
+        && currentRenameValueRef.current.trim() === variables.submittedName
+      ) {
+        onRenameClose()
+        setActionFile(null)
+      }
       addToast({ title: '重命名成功', color: 'success' })
     },
     onError: (error) => {
@@ -1042,6 +1079,30 @@ export function FilesPage() {
       }
     }
   }, [sortedFiles, selectedFiles, setSelection])
+
+  useEffect(() => {
+    if (!highlightedPathFromState) {
+      appliedHighlightedPathRef.current = null
+      return
+    }
+    if (isLoading || appliedHighlightedPathRef.current === highlightedPathFromState) {
+      return
+    }
+
+    appliedHighlightedPathRef.current = highlightedPathFromState
+
+    const targetIndex = sortedFiles.findIndex(
+      (file) => !file.isDir && file.path === highlightedPathFromState
+    )
+    if (targetIndex >= 0) {
+      setSelection([highlightedPathFromState])
+      setActiveFilePath(highlightedPathFromState)
+      setFocusedIndex(targetIndex)
+      lastSelectedIndexRef.current = targetIndex
+    }
+
+    navigate(`${location.pathname}${location.search ?? ''}`, { replace: true, state: null })
+  }, [highlightedPathFromState, isLoading, location.pathname, location.search, navigate, setSelection, sortedFiles])
 
   // Favorites query
   const filePaths = useMemo(() => sortedFiles.map(f => f.path), [sortedFiles])
@@ -1161,7 +1222,12 @@ export function FilesPage() {
     const trimmedFolderName = newFolderName.trim()
     if (!trimmedFolderName) return
     const path = currentPath === '/' ? `/${trimmedFolderName}` : `${currentPath}/${trimmedFolderName}`
-    createFolderMutation.mutate(path)
+    createFolderMutation.mutate({
+      path,
+      directoryPath: currentPath,
+      folderName: trimmedFolderName,
+      sessionId: newFolderSessionRef.current,
+    })
   }, [canWrite, newFolderName, currentPath, createFolderMutation])
 
   const handleRename = useCallback(() => {
@@ -1171,7 +1237,14 @@ export function FilesPage() {
     if (trimmedRenameValue === actionFile.name) return
     const parentPath = actionFile.path.substring(0, actionFile.path.lastIndexOf('/')) || '/'
     const newPath = parentPath === '/' ? `/${trimmedRenameValue}` : `${parentPath}/${trimmedRenameValue}`
-    renameMutation.mutate({ from: actionFile.path, to: newPath })
+    renameMutation.mutate({
+      from: actionFile.path,
+      to: newPath,
+      directoryPath: currentPath,
+      targetPath: actionFile.path,
+      submittedName: trimmedRenameValue,
+      sessionId: renameSessionRef.current,
+    })
   }, [canWrite, actionFile, renameValue, renameMutation])
 
   const handleDelete = useCallback(() => {
@@ -1182,9 +1255,15 @@ export function FilesPage() {
     setActionFile(null)
   }, [canWrite, actionFile, deleteMutation, onDeleteClose])
 
+  const handleOpenNewFolderModal = useCallback(() => {
+    newFolderSessionRef.current += 1
+    onNewFolderOpen()
+  }, [onNewFolderOpen])
+
   // Action handlers for context menu
   const handleOpenRenameModal = useCallback((file: FileItem) => {
     if (!canWrite) return
+    renameSessionRef.current += 1
     setActionFile(file)
     setRenameValue(file.name)
     onRenameOpen()
@@ -1305,6 +1384,10 @@ export function FilesPage() {
     if (!canWrite) return
     if (!files || files.length === 0) return
 
+    const uploadSession = uploadSessionRef.current + 1
+    uploadSessionRef.current = uploadSession
+    const isCurrentUploadSession = () => uploadSessionRef.current === uploadSession
+
     if (uploadClearTimeoutRef.current) {
       clearTimeout(uploadClearTimeoutRef.current)
       uploadClearTimeoutRef.current = null
@@ -1361,9 +1444,11 @@ export function FilesPage() {
       const file = item.file
       const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
       
-      setUploadQueue(prev => prev.map((item, j) => 
-        j === index ? { ...item, status: 'uploading' as const } : item
-      ))
+      if (isCurrentUploadSession()) {
+        setUploadQueue(prev => prev.map((item, j) => 
+          j === index ? { ...item, status: 'uploading' as const } : item
+        ))
+      }
       
       try {
         // For folder uploads, create parent directories first
@@ -1381,25 +1466,37 @@ export function FilesPage() {
         }
         
         await uploadFile(targetPath, file, (progress) => {
+          if (!isCurrentUploadSession()) {
+            return
+          }
           setUploadQueue(prev => prev.map((item, j) => 
             j === index ? { ...item, progress } : item
           ))
         })
         successCount++
-        setUploadQueue(prev => prev.map((item, j) => 
-          j === index ? { ...item, status: 'done' as const, progress: 100 } : item
-        ))
+        if (isCurrentUploadSession()) {
+          setUploadQueue(prev => prev.map((item, j) => 
+            j === index ? { ...item, status: 'done' as const, progress: 100 } : item
+          ))
+        }
       } catch (error) {
         errorCount++
         uploadErrors.push(error)
-        setUploadQueue(prev => prev.map((item, j) => 
-          j === index ? { ...item, status: 'error' as const, error: getUploadQueueErrorMessage(error) } : item
-        ))
+        if (isCurrentUploadSession()) {
+          setUploadQueue(prev => prev.map((item, j) => 
+            j === index ? { ...item, status: 'error' as const, error: getUploadQueueErrorMessage(error) } : item
+          ))
+        }
       }
     }
-    
-    setIsUploading(false)
+
     queryClient.invalidateQueries({ queryKey: ['files', currentPath] })
+
+    if (!isCurrentUploadSession()) {
+      return
+    }
+
+    setIsUploading(false)
     
     // Show summary toast for folder upload
     if (isFolderUpload) {
@@ -1743,7 +1840,7 @@ export function FilesPage() {
     onArrowDown: handleKeyboardArrowDown,
     onArrowUp: handleKeyboardArrowUp,
     onRefresh: handleKeyboardRefresh,
-    onNewFolder: canWrite ? onNewFolderOpen : undefined,
+    onNewFolder: canWrite ? handleOpenNewFolderModal : undefined,
   })
 
   // Determine active file for preview (prioritize activeFilePath, then single selection)
@@ -2150,7 +2247,7 @@ export function FilesPage() {
                       variant="bordered" 
                       className="btn-secondary btn-md rounded-xl"
                       startContent={<FolderPlus size={16} />}
-                      onPress={onNewFolderOpen}
+                      onPress={handleOpenNewFolderModal}
                     >
                       新建空间
                     </Button>

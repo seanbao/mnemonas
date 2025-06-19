@@ -160,7 +160,7 @@ describe('authStore', () => {
     expect(state.error).toBe('账户已被禁用，请联系管理员')
   })
 
-  it('fails closed when current user validation throws even if a cached user exists', async () => {
+  it('preserves cached auth state when current user validation is temporarily unavailable', async () => {
     getStoredTokenMock.mockReturnValue('access-1')
     getStoredUserMock.mockReturnValue({
       id: 'cached-1',
@@ -174,8 +174,14 @@ describe('authStore', () => {
     await expect(useAuthStore.getState().initialize()).resolves.toBeUndefined()
 
     const state = useAuthStore.getState()
-    expect(state.user).toBeNull()
-    expect(state.isAuthenticated).toBe(false)
+    expect(state.user).toEqual({
+      id: 'cached-1',
+      username: 'cached-admin',
+      role: 'admin',
+      email: '',
+      homeDir: '/',
+    })
+    expect(state.isAuthenticated).toBe(true)
     expect(state.isLoading).toBe(false)
   })
 

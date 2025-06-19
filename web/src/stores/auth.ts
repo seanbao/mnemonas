@@ -6,6 +6,7 @@ import {
   logout as apiLogout, 
   getCurrentUser,
   getStoredToken,
+  getStoredUser,
 } from '@/api/auth'
 import { acknowledgeSetup, getSetupStatus } from '@/api/setup'
 
@@ -78,6 +79,8 @@ export const useAuthStore = create<AuthState>((set) => ({
       }
       return
     }
+
+    const storedUser = getStoredUser()
     
     // Try to get current user (validates token)
     try {
@@ -97,8 +100,13 @@ export const useAuthStore = create<AuthState>((set) => ({
         return
       }
 
-      // Fail closed when token validation cannot complete.
-      // Using a cached user here would let stale auth state bypass ProtectedRoute.
+      // Terminal auth failures clear local state inside the auth API and return null above.
+      // Preserve the cached session only when validation is temporarily unavailable.
+      if (storedUser && getStoredToken()) {
+        set({ user: storedUser, isAuthenticated: true, isLoading: false, error: null })
+        return
+      }
+
       set({ user: null, isAuthenticated: false, isLoading: false })
     }
   },

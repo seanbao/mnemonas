@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import {
   Modal,
   ModalContent,
@@ -88,6 +88,9 @@ export function ShareDialog({
   const [isLoading, setIsLoading] = useState(false)
   const [createdShare, setCreatedShare] = useState<Share | null>(null)
   const [featureDisabled, setFeatureDisabled] = useState(false)
+  const createSessionRef = useRef(0)
+  const currentFilePathRef = useRef(filePath)
+  const currentOpenRef = useRef(isOpen)
   
   // Form state
   const [usePassword, setUsePassword] = useState(false)
@@ -122,6 +125,18 @@ export function ShareDialog({
     onClose()
   }, [onClose, resetForm])
 
+  useEffect(() => {
+    currentOpenRef.current = isOpen
+    if (!isOpen) {
+      return
+    }
+
+    createSessionRef.current += 1
+    currentFilePathRef.current = filePath
+    resetForm()
+    setIsLoading(false)
+  }, [filePath, isOpen, resetForm])
+
   const handleCreate = async () => {
     if (featureDisabled || !featureEnabled) return
     if (passwordRequiredButEmpty) {
@@ -132,6 +147,9 @@ export function ShareDialog({
       })
       return
     }
+
+    const sessionId = createSessionRef.current
+    const requestPath = filePath
 
     setIsLoading(true)
     try {
@@ -156,19 +174,37 @@ export function ShareDialog({
       }
 
       const share = await createShare(req)
-      setCreatedShare(share)
+      if (
+        createSessionRef.current === sessionId
+        && currentOpenRef.current
+        && currentFilePathRef.current === requestPath
+      ) {
+        setCreatedShare(share)
+      }
       onShareCreated?.(share)
       addToast({ title: '分享链接已创建', color: 'success' })
     } catch (err) {
       if (err instanceof ShareError && err.isFeatureDisabled) {
-        setFeatureDisabled(true)
+        if (
+          createSessionRef.current === sessionId
+          && currentOpenRef.current
+          && currentFilePathRef.current === requestPath
+        ) {
+          setFeatureDisabled(true)
+        }
         onFeatureDisabled?.()
         addToast(getShareDialogActionErrorToast(err))
         return
       }
       addToast(getShareDialogActionErrorToast(err))
     } finally {
-      setIsLoading(false)
+      if (
+        createSessionRef.current === sessionId
+        && currentOpenRef.current
+        && currentFilePathRef.current === requestPath
+      ) {
+        setIsLoading(false)
+      }
     }
   }
 

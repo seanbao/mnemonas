@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, userEvent } from '@/test/utils'
+import { act, render, screen, waitFor, userEvent } from '@/test/utils'
 import { FavoritesPage } from './Favorites'
 import * as HeroUI from '@heroui/react'
 import * as favoritesApi from '@/api/favorites'
@@ -74,6 +74,16 @@ const mockFavorites = [
 
 describe('FavoritesPage', () => {
   const pendingFavoritesRefetch = () => new Promise<Awaited<ReturnType<typeof favoritesApi.listFavorites>>>(() => {})
+
+  const createDeferred = <T,>() => {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -208,7 +218,9 @@ describe('FavoritesPage', () => {
     navigateButton.focus()
     await user.keyboard('{Enter}')
 
-    expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
+    expect(mockNavigate).toHaveBeenCalledWith('/files/docs', {
+      state: { highlightPath: '/docs/report.pdf' },
+    })
   })
 
   it('keeps failed favorites selected after partial batch removal', async () => {
@@ -256,7 +268,9 @@ describe('FavoritesPage', () => {
     const navigateButton = screen.getByRole('button', { name: '打开文件 /docs/report.pdf' })
     await user.click(navigateButton)
 
-    expect(mockNavigate).toHaveBeenCalledWith('/files/docs')
+    expect(mockNavigate).toHaveBeenCalledWith('/files/docs', {
+      state: { highlightPath: '/docs/report.pdf' },
+    })
   })
 
   it('shows unavailable toast when removing a favorite is unavailable', async () => {
@@ -384,6 +398,42 @@ describe('FavoritesPage', () => {
         description: '当前服务已关闭收藏功能。如需使用，请在系统设置中重新启用。',
         color: 'warning',
       })
+    })
+  })
+
+  it('keeps a newer note editor open when an older note save resolves', async () => {
+    const user = userEvent.setup()
+    const pendingNoteSave = createDeferred<void>()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockImplementationOnce(() => pendingNoteSave.promise)
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+      expect(screen.getByText('photos')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+    await user.clear(screen.getByLabelText('备注'))
+    await user.type(screen.getByLabelText('备注'), '旧备注')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(favoritesApi.updateFavoriteNote).toHaveBeenCalledWith('/docs/report.pdf', '旧备注')
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    await user.click(screen.getByRole('button', { name: '编辑备注 /photos/' }))
+    await user.type(screen.getByLabelText('备注'), '新相册备注')
+
+    await act(async () => {
+      pendingNoteSave.resolve(undefined)
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+      expect(screen.getByLabelText('备注')).toHaveValue('新相册备注')
+      expect(screen.getAllByText('photos').length).toBeGreaterThan(1)
     })
   })
 })

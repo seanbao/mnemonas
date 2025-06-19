@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@/test/utils'
+import { act, render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MoveDialog } from './MoveDialog'
@@ -44,6 +44,16 @@ const mockCopyFile = vi.mocked(copyFile)
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 function renderDialog(props?: Partial<React.ComponentProps<typeof MoveDialog>>) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -63,11 +73,14 @@ function renderDialog(props?: Partial<React.ComponentProps<typeof MoveDialog>>) 
     mode: 'move',
   }
 
-  return render(
+  return {
+    queryClient,
+    ...render(
     <QueryClientProvider client={queryClient}>
       <MoveDialog {...defaultProps} {...props} />
     </QueryClientProvider>
-  )
+    ),
+  }
 }
 
 describe('MoveDialog', () => {
@@ -164,6 +177,90 @@ describe('MoveDialog', () => {
       title: '批量移动暂不可用',
       description: '文件系统当前不可用，请检查系统健康状态或稍后重试。',
       color: 'warning',
+    })
+  })
+
+  it('syncs the visible file list when reopened for a new selection', async () => {
+    const onClose = vi.fn()
+    const firstFiles = [{ path: '/source/a.txt', name: 'a.txt', isDir: false }]
+    const secondFiles = [{ path: '/source/c.txt', name: 'c.txt', isDir: false }]
+
+    const view = renderDialog({ onClose, files: firstFiles })
+
+    expect(screen.getAllByText('a.txt').length).toBeGreaterThan(0)
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <MoveDialog isOpen={false} onClose={onClose} files={firstFiles} currentPath="/source" mode="move" />
+      </QueryClientProvider>,
+    )
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <MoveDialog isOpen={true} onClose={onClose} files={secondFiles} currentPath="/source" mode="move" />
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() => {
+      expect(screen.queryAllByText('a.txt')).toHaveLength(0)
+      expect(screen.getAllByText('c.txt').length).toBeGreaterThan(0)
+    })
+  })
+
+  it('keeps a newer dialog open when an older move request resolves', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    const firstMove = createDeferred<void>()
+    const firstFiles = [{ path: '/source/a.txt', name: 'a.txt', isDir: false }]
+    const secondFiles = [{ path: '/source/c.txt', name: 'c.txt', isDir: false }]
+    mockMoveFile.mockImplementation((from) => {
+      if (from === '/source/a.txt') {
+        return firstMove.promise
+      }
+      return Promise.resolve(undefined)
+    })
+
+    const view = renderDialog({ onClose, files: firstFiles })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    await waitFor(() => {
+      expect(mockMoveFile).toHaveBeenCalledWith('/source/a.txt', '/a.txt')
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <MoveDialog isOpen={false} onClose={onClose} files={firstFiles} currentPath="/source" mode="move" />
+      </QueryClientProvider>,
+    )
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <MoveDialog isOpen={true} onClose={onClose} files={secondFiles} currentPath="/source" mode="move" />
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getAllByText('c.txt').length).toBeGreaterThan(0)
+    })
+
+    await act(async () => {
+      firstMove.resolve(undefined)
+      await firstMove.promise
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByText('c.txt').length).toBeGreaterThan(0)
+      expect(onClose).toHaveBeenCalledTimes(1)
     })
   })
 })

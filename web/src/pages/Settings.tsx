@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { 
@@ -119,6 +119,15 @@ function getWebDAVCredentialsRefreshErrorToast(error: unknown): {
   }
 }
 
+function shallowEqualSettingsDraft<T extends Record<string, string | boolean>>(left: T, right: T): boolean {
+  const leftKeys = Object.keys(left)
+  if (leftKeys.length !== Object.keys(right).length) {
+    return false
+  }
+
+  return leftKeys.every((key) => left[key] === right[key])
+}
+
 function getSettingsActionErrorToast(
   error: unknown,
   titles: {
@@ -236,6 +245,12 @@ export function SettingsPage() {
     avgChunkSize: '1MB',
     maxChunkSize: '4MB',
   }
+  type SettingsDraft = typeof defaultSettings
+  type SaveSettingsVariables = {
+    request: UpdateSettingsRequest
+    submittedSettings: SettingsDraft
+    baseSettingsUpdatedAt: number
+  }
   
   // WebDAV credentials state
   const [showWebDAVPassword, setShowWebDAVPassword] = useState(false)
@@ -281,6 +296,8 @@ export function SettingsPage() {
   const [isDirty, setIsDirty] = useState(false)
   const [savedSettingsOverride, setSavedSettingsOverride] = useState<typeof defaultSettings | null>(null)
   const [savedSettingsOverrideUpdatedAt, setSavedSettingsOverrideUpdatedAt] = useState<number | null>(null)
+  const draftSettingsRef = useRef(draftSettings)
+  draftSettingsRef.current = draftSettings
 
   const handleTabSelectionChange = useCallback((key: React.Key) => {
     const nextTab = normalizeSettingsTab(String(key))
@@ -427,12 +444,15 @@ export function SettingsPage() {
 
   // Save mutation
   const saveMutation = useMutation({
-    mutationFn: updateSettings,
-    onSuccess: () => {
-      const savedSnapshot = draftSettings
-      setSavedSettingsOverride(savedSnapshot)
-      setSavedSettingsOverrideUpdatedAt(settingsDataUpdatedAt)
-      setIsDirty(false)
+    mutationFn: ({ request }: SaveSettingsVariables) => updateSettings(request),
+    onSuccess: (_, variables) => {
+      setSavedSettingsOverride(variables.submittedSettings)
+      setSavedSettingsOverrideUpdatedAt(variables.baseSettingsUpdatedAt)
+
+      if (shallowEqualSettingsDraft(draftSettingsRef.current, variables.submittedSettings)) {
+        setIsDirty(false)
+      }
+
       addToast({ title: '设置已保存', color: 'success' })
       void refetch()
     },
@@ -707,7 +727,11 @@ export function SettingsPage() {
         ...(settings.webdavPassword && { password: settings.webdavPassword }),
       },
     }
-    saveMutation.mutate(req)
+    saveMutation.mutate({
+      request: req,
+      submittedSettings: { ...settings },
+      baseSettingsUpdatedAt: settingsDataUpdatedAt,
+    })
   }
 
   if (isLoading) {
