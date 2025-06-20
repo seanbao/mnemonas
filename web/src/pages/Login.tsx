@@ -95,9 +95,11 @@ export function LoginPage() {
 
     try {
       setFormError(null)
-      await login(trimmedUsername, password)
+      const result = await login(trimmedUsername, password)
       clearError()
-      addToast({ title: '登录成功', color: 'success' })
+      addToast(result.warning
+        ? { title: result.message ?? '登录成功，但活动日志写入失败', color: 'warning' }
+        : { title: '登录成功', color: 'success' })
       const from = (location.state as { from?: string })?.from || '/'
       navigate(from, { replace: true })
     } catch {

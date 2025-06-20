@@ -251,9 +251,11 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     const target = deleteTarget
     setIsDeleting(true)
     try {
-      await deleteShare(target.id)
+      const result = await deleteShare(target.id)
       setShares(prev => prev.filter(s => s.id !== target.id))
-      addToast({ title: '分享已删除', color: 'success' })
+      addToast(result.warning
+        ? { title: result.message ?? '分享已删除，但存在警告', color: 'warning' }
+        : { title: '分享已删除', color: 'success' })
       setDeleteTarget(current => (current?.id === target.id ? null : current))
     } catch (err) {
       if (err instanceof ShareError && err.isNotFound) {

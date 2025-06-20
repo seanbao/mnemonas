@@ -67,6 +67,13 @@ export interface PublicShareItemsResponse {
   items: PublicShareItem[]
 }
 
+export interface ShareActionResult {
+  warning: boolean
+  message?: string
+}
+
+export type ShareCreateResult = Share & ShareActionResult
+
 export class ShareError extends Error {
   status: number
   code?: string
@@ -272,6 +279,14 @@ async function parseWrappedShareSuccess<T>(response: Response, invalidMessage: s
   return body as T
 }
 
+function getShareActionResult(response: Response, body: ShareApiResponse<unknown>): ShareActionResult {
+  return {
+    warning: response.headers?.get?.('Warning') != null
+      || (!!body.data && typeof body.data === 'object' && 'warning' in body.data && body.data.warning === true),
+    message: typeof body.message === 'string' && body.message ? body.message : undefined,
+  }
+}
+
 async function parsePublicShareSuccess<T>(response: Response, invalidMessage: string): Promise<T> {
   let body: unknown
   try {
@@ -311,7 +326,7 @@ export async function listShares(all = false): Promise<Share[]> {
 /**
  * Create a new share
  */
-export async function createShare(req: CreateShareRequest): Promise<Share> {
+export async function createShare(req: CreateShareRequest): Promise<ShareCreateResult> {
   const response = await authFetch(`${API_BASE}/shares`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -326,7 +341,10 @@ export async function createShare(req: CreateShareRequest): Promise<Share> {
   if (!isValidShare(body.data)) {
     throw new ShareError('创建分享响应无效', response.status)
   }
-  return body.data
+  return {
+    ...body.data,
+    ...getShareActionResult(response, body),
+  }
 }
 
 /**
@@ -370,7 +388,7 @@ export async function updateShare(id: string, req: UpdateShareRequest): Promise<
 /**
  * Delete share
  */
-export async function deleteShare(id: string): Promise<void> {
+export async function deleteShare(id: string): Promise<ShareActionResult> {
   const response = await authFetch(`${API_BASE}/shares/${id}`, {
     method: 'DELETE',
   })
@@ -379,7 +397,8 @@ export async function deleteShare(id: string): Promise<void> {
     throw await readShareApiError(response, '删除分享失败')
   }
 
-  await parseWrappedShareSuccess<ShareApiResponse<null>>(response, '删除分享响应无效')
+  const body = await parseWrappedShareSuccess<ShareApiResponse<null>>(response, '删除分享响应无效')
+  return getShareActionResult(response, body)
 }
 
 // === Public Share APIs ===

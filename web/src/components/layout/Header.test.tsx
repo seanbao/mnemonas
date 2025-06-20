@@ -1,21 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act, fireEvent } from '@testing-library/react'
+import { render, screen, act, fireEvent, waitFor } from '@testing-library/react'
 import React from 'react'
 import { Header } from './Header'
 
-const invalidateQueries = vi.fn().mockResolvedValue(undefined)
+const refetchQueries = vi.fn().mockResolvedValue(undefined)
 const useIsAdminMock = vi.fn(() => true)
 const mockAddToast = vi.fn()
 const openUrlInNewTabMock = vi.fn(() => true)
 const navigateMock = vi.fn()
+const logoutMock = vi.fn()
 let locationPathname = '/'
 
 vi.mock('@tanstack/react-query', () => ({
-  useQueryClient: () => ({ invalidateQueries }),
+  useQueryClient: () => ({ refetchQueries }),
 }))
 
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: () => ({ logout: vi.fn().mockResolvedValue(undefined) }),
+  useAuthStore: (selector?: (state: { logout: typeof logoutMock }) => unknown) => {
+    const state = { logout: logoutMock }
+    return selector ? selector(state) : state
+  },
   useUser: () => ({ username: 'admin', email: 'admin@local' }),
   useIsAdmin: () => useIsAdminMock(),
 }))
@@ -44,8 +48,37 @@ vi.mock('@heroui/react', () => ({
   Avatar: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   Dropdown: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   DropdownTrigger: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  DropdownMenu: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  DropdownItem: ({ children, onPress }: { children: React.ReactNode; onPress?: () => void }) => <button onClick={onPress}>{children}</button>,
+  DropdownMenu: ({ children, onAction }: { children: React.ReactNode; onAction?: (key: string) => void }) => (
+    <div>
+      {React.Children.map(children, (child) => {
+        if (!React.isValidElement(child)) {
+          return child
+        }
+
+        const rawKey = child.key == null ? undefined : String(child.key)
+        const actionKey = rawKey?.startsWith('.$') ? rawKey.slice(2) : rawKey
+        return React.cloneElement(child, { __menuActionKey: actionKey, __menuOnAction: onAction })
+      })}
+    </div>
+  ),
+  DropdownItem: ({
+    children,
+    onPress,
+    __menuActionKey,
+    __menuOnAction,
+  }: {
+    children: React.ReactNode
+    onPress?: () => void
+    __menuActionKey?: string
+    __menuOnAction?: (key: string) => void
+  }) => (
+    <button onClick={() => {
+      onPress?.()
+      if (__menuActionKey) {
+        __menuOnAction?.(__menuActionKey)
+      }
+    }}>{children}</button>
+  ),
   addToast: (...args: unknown[]) => mockAddToast(...args),
 }))
 
@@ -54,10 +87,11 @@ describe('Header', () => {
     vi.clearAllMocks()
     useIsAdminMock.mockReturnValue(true)
     openUrlInNewTabMock.mockReturnValue(true)
+    logoutMock.mockResolvedValue({ warning: false, message: undefined })
     locationPathname = '/'
   })
 
-  it('triggers refresh invalidation', async () => {
+  it('refetches active queries when refreshing data', async () => {
     render(<Header />)
 
     const refreshButton = screen.getByLabelText('刷新数据')
@@ -66,12 +100,12 @@ describe('Header', () => {
       await Promise.resolve()
     })
 
-    expect(invalidateQueries).toHaveBeenCalled()
+    expect(refetchQueries).toHaveBeenCalledWith({ type: 'active' }, { throwOnError: true })
     expect(mockAddToast).toHaveBeenCalledWith({ title: '数据已刷新', color: 'success' })
   })
 
-  it('shows a danger toast when refresh invalidation fails', async () => {
-    invalidateQueries.mockRejectedValueOnce(new Error('refresh failed'))
+  it('shows a danger toast when active query refetch fails', async () => {
+    refetchQueries.mockRejectedValueOnce(new Error('refresh failed'))
     render(<Header />)
 
     const refreshButton = screen.getByLabelText('刷新数据')
@@ -145,5 +179,22 @@ describe('Header', () => {
       title: '浏览器拦截了新标签页，请允许弹窗后重试',
       color: 'warning',
     })
+  })
+
+  it('shows a warning toast when logout succeeds with backend warning metadata', async () => {
+    logoutMock.mockResolvedValueOnce({ warning: true, message: undefined })
+    render(<Header />)
+
+    await act(async () => {
+      screen.getByText('退出登录').click()
+    })
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '已退出登录，但活动日志写入失败',
+        color: 'warning',
+      })
+    })
+    expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true })
   })
 })

@@ -193,7 +193,9 @@ export function ShareDialog({
         setCreatedShare(share)
       }
       onShareCreated?.(share)
-      addToast({ title: '分享链接已创建', color: 'success' })
+      addToast(share.warning
+        ? { title: share.message ?? '分享链接已创建，但存在警告', color: 'warning' }
+        : { title: '分享链接已创建', color: 'success' })
     } catch (err) {
       if (err instanceof ShareError && err.isFeatureDisabled) {
         if (
@@ -259,10 +261,16 @@ export function ShareDialog({
           {createdShare ? (
             /* Share created - show link */
             <div className="space-y-4">
-              <div className="flex items-center gap-2 text-status-success">
+              <div className={`flex items-center gap-2 ${createdShare.warning ? 'text-status-warning' : 'text-status-success'}`}>
                 <CheckCircle size={20} />
-                <span className="font-medium">分享链接已创建</span>
+                <span className="font-medium">{createdShare.warning ? '分享链接已创建，但存在警告' : '分享链接已创建'}</span>
               </div>
+
+              {createdShare.warning && createdShare.message && (
+                <div className="p-3 bg-status-warning/10 border border-status-warning/30 rounded-lg text-sm text-status-warning">
+                  {createdShare.message}
+                </div>
+              )}
               
               <Snippet 
                 symbol="" 
