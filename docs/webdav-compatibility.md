@@ -18,7 +18,7 @@
 | `PROPFIND` | ✅ 完整 | 支持 Depth: 0, 1, infinity |
 | `GET` | ✅ 完整 | 支持 Range 请求、ETag、条件请求 |
 | `HEAD` | ✅ 完整 | 返回文件元信息 |
-| `PUT` | ✅ 完整 | 支持 If-Match 条件写入 |
+| `PUT` | ✅ 完整 | 支持 If-Match 条件写入；仅接受完整覆盖写入，`Content-Range` partial PUT 返回 `400 Bad Request` |
 | `DELETE` | ✅ 完整 | 删除进入回收站（软删除）；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理） |
 | `MKCOL` | ✅ 完整 | 创建目录 |
 | `MOVE` | ✅ 完整 | 移动/重命名，支持 `Overwrite: T/F`；集合资源仅接受 `Depth: infinity`（省略时按 `infinity` 处理）；覆盖目标已提交后若 backup cleanup 失败，返回 `204 + Warning` |

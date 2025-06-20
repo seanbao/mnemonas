@@ -223,7 +223,12 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := h.userStore.Authenticate(req.Username, req.Password)
+	loginWarning := false
 	if err != nil {
+		if isAuthPersistenceWarning(err) && user != nil {
+			markAuthPersistenceWarningHeaders(w)
+			loginWarning = true
+		} else {
 		switch err {
 		case ErrInvalidCredentials:
 			if h.loginAttempts != nil {
@@ -245,6 +250,7 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal server error", "AUTH_ERROR")
 		}
 		return
+		}
 	}
 	if h.loginAttempts != nil {
 		h.loginAttempts.reset(attemptKey)
@@ -270,7 +276,11 @@ func (h *Handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	writeSuccess(w, http.StatusOK, resp, "")
+	message := ""
+	if loginWarning {
+		message = "login succeeded with persistence warning"
+	}
+	writeSuccess(w, http.StatusOK, resp, message)
 }
 
 func loginAttemptKey(r *http.Request, username string) string {
@@ -327,7 +337,16 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rotate refresh tokens: once a refresh token is used successfully, it must not be reusable.
-	h.tokenManager.RevokeToken(claims.ID)
+	revocationWarning := false
+	if err := h.tokenManager.RevokeToken(claims.ID); err != nil {
+		if isAuthPersistenceWarning(err) {
+			markAuthPersistenceWarningHeaders(w)
+			revocationWarning = true
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+			return
+		}
+	}
 
 	resp := LoginResponse{
 		AccessToken:  tokenPair.AccessToken,
@@ -343,7 +362,11 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	writeSuccess(w, http.StatusOK, resp, "")
+	message := ""
+	if revocationWarning {
+		message = "refresh token rotated with persistence warning"
+	}
+	writeSuccess(w, http.StatusOK, resp, message)
 }
 
 // HandleLogout handles POST /api/v1/auth/logout
@@ -355,7 +378,16 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 
 	claims := GetClaimsFromContext(r.Context())
 	if claims != nil {
-		h.tokenManager.RevokeToken(claims.TokenID)
+		if err := h.tokenManager.RevokeToken(claims.TokenID); err != nil {
+			clearDownloadSessionCookie(w, r)
+			if isAuthPersistenceWarning(err) {
+				markAuthPersistenceWarningHeaders(w)
+				writeSuccess(w, http.StatusOK, nil, "logged out with persistence warning")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+			return
+		}
 	}
 	clearDownloadSessionCookie(w, r)
 
@@ -482,7 +514,10 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.userStore.ChangePassword(user.ID, req.OldPassword, req.NewPassword); err != nil {
 		if isAuthPersistenceWarning(err) {
-			h.tokenManager.RevokeByUser(user.ID)
+			if revokeErr := h.tokenManager.RevokeByUser(user.ID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
+				writeError(w, http.StatusInternalServerError, "internal server error", "PASSWORD_ERROR")
+				return
+			}
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
 			return
@@ -499,7 +534,15 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Revoke all tokens for this user
-	h.tokenManager.RevokeByUser(user.ID)
+	if err := h.tokenManager.RevokeByUser(user.ID); err != nil {
+		if isAuthPersistenceWarning(err) {
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password changed with persistence warning")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error", "PASSWORD_ERROR")
+		return
+	}
 
 	writeSuccess(w, http.StatusOK, nil, "password changed successfully")
 }
@@ -654,7 +697,10 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 
 	if err := h.userStore.Delete(userID); err != nil {
 		if isAuthPersistenceWarning(err) {
-			h.tokenManager.RevokeByUser(userID)
+			if revokeErr := h.tokenManager.RevokeByUser(userID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
+				writeError(w, http.StatusInternalServerError, "internal server error", "DELETE_ERROR")
+				return
+			}
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "user deleted with persistence warning")
 			return
@@ -670,7 +716,15 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
-	h.tokenManager.RevokeByUser(userID)
+	if err := h.tokenManager.RevokeByUser(userID); err != nil {
+		if isAuthPersistenceWarning(err) {
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "user deleted with persistence warning")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error", "DELETE_ERROR")
+		return
+	}
 
 	writeSuccess(w, http.StatusOK, nil, "user deleted successfully")
 }
@@ -702,7 +756,10 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 
 	if err := h.userStore.ResetPassword(userID, req.NewPassword); err != nil {
 		if isAuthPersistenceWarning(err) {
-			h.tokenManager.RevokeByUser(userID)
+			if revokeErr := h.tokenManager.RevokeByUser(userID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
+				writeError(w, http.StatusInternalServerError, "internal server error", "RESET_ERROR")
+				return
+			}
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password reset with persistence warning")
 			return
@@ -719,7 +776,15 @@ func (h *Handler) HandleResetUserPassword(w http.ResponseWriter, r *http.Request
 	}
 
 	// Revoke all tokens for this user
-	h.tokenManager.RevokeByUser(userID)
+	if err := h.tokenManager.RevokeByUser(userID); err != nil {
+		if isAuthPersistenceWarning(err) {
+			markAuthPersistenceWarningHeaders(w)
+			writeSuccess(w, http.StatusOK, map[string]interface{}{"warning": true}, "password reset with persistence warning")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error", "RESET_ERROR")
+		return
+	}
 
 	writeSuccess(w, http.StatusOK, nil, "password reset successfully")
 }
@@ -780,7 +845,10 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 	if err := h.userStore.Update(user); err != nil {
 		if isAuthPersistenceWarning(err) {
 			if *req.Disabled {
-				h.tokenManager.RevokeByUser(userID)
+				if revokeErr := h.tokenManager.RevokeByUser(userID); revokeErr != nil && !isAuthPersistenceWarning(revokeErr) {
+					writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
+					return
+				}
 			}
 			markAuthPersistenceWarningHeaders(w)
 			writeSuccess(w, http.StatusOK, map[string]interface{}{
@@ -795,7 +863,18 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 
 	// If disabling, revoke all tokens
 	if *req.Disabled {
-		h.tokenManager.RevokeByUser(userID)
+		if err := h.tokenManager.RevokeByUser(userID); err != nil {
+			if isAuthPersistenceWarning(err) {
+				markAuthPersistenceWarningHeaders(w)
+				writeSuccess(w, http.StatusOK, map[string]interface{}{
+					"disabled": req.Disabled,
+					"warning":  true,
+				}, "user status updated with persistence warning")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
+			return
+		}
 	}
 
 	writeSuccess(w, http.StatusOK, map[string]interface{}{

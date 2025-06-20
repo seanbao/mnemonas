@@ -17,6 +17,14 @@ import (
 
 var errActivityLogSymlink = errors.New("activity log path must not be a symlink")
 
+var syncActivityLogRootDir = syncActivityRootDir
+var afterValidateActivityLogPath = func() {}
+
+var activityLogDirRootsMu sync.RWMutex
+var activityLogDirRoots = map[string]*os.Root{}
+
+const activityRootEscapeError = "path escapes from parent"
+
 const maxActivityIDAttempts = 4
 
 // ActionType represents the type of activity
@@ -33,6 +41,9 @@ const (
 	ActionRestore      ActionType = "restore"
 	ActionShare        ActionType = "share"
 	ActionUnshare      ActionType = "unshare"
+	ActionFavorite     ActionType = "favorite"
+	ActionUnfavorite   ActionType = "unfavorite"
+	ActionFavoriteNote ActionType = "favorite_note_update"
 	ActionLogin        ActionType = "login"
 	ActionLogout       ActionType = "logout"
 	ActionTrashRestore ActionType = "trash_restore"
@@ -85,12 +96,13 @@ func copyEntry(entry Entry) Entry {
 
 // NewStore creates a new activity store
 func NewStore(root string) (*Store, error) {
-	if err := ensureActivityDir(root, 0750); err != nil {
-		return nil, fmt.Errorf("create activity dir: %w", err)
+	normalizedLogPath, err := ensureActivityLogDirRoot(filepath.Join(root, "activity.json"), true)
+	if err != nil {
+		return nil, err
 	}
 
 	s := &Store{
-		root:    root,
+		root:    filepath.Dir(normalizedLogPath),
 		entries: make([]Entry, 0),
 		maxSize: 10000, // Keep last 10000 entries in memory
 	}
@@ -115,10 +127,7 @@ func (s *Store) logFilePath() string {
 
 // load reads entries from disk
 func (s *Store) load() error {
-	if err := validateActivityLogPath(s.logFilePath()); err != nil {
-		return err
-	}
-	data, err := os.ReadFile(s.logFilePath())
+	data, err := readRegisteredActivityLogFile(s.logFilePath())
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -140,19 +149,18 @@ func (s *Store) recoverCorruptLog(loadErr error) error {
 		return loadErr
 	}
 
-	dir := filepath.Dir(s.logFilePath())
 	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.logFilePath(), time.Now().UnixNano())
-	if err := os.Rename(s.logFilePath(), corruptPath); err != nil {
+	if err := renameRegisteredActivityLogFile(s.logFilePath(), corruptPath); err != nil {
 		return fmt.Errorf("backup corrupt activity log: %w", err)
 	}
-	if err := syncActivityLogDir(dir); err != nil {
-		if rollbackErr := os.Rename(corruptPath, s.logFilePath()); rollbackErr != nil {
+	if err := syncRegisteredActivityLogDir(s.logFilePath()); err != nil {
+		if rollbackErr := renameRegisteredActivityLogFile(corruptPath, s.logFilePath()); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt activity log directory: %w", err),
 				fmt.Errorf("rollback corrupt activity log backup: %w", rollbackErr),
 			)
 		}
-		if rollbackSyncErr := syncActivityLogDir(dir); rollbackSyncErr != nil {
+		if rollbackSyncErr := syncRegisteredActivityLogDir(s.logFilePath()); rollbackSyncErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt activity log directory: %w", err),
 				fmt.Errorf("sync corrupt activity log rollback: %w", rollbackSyncErr),
@@ -216,13 +224,9 @@ func (s *Store) updateEntries(mutator func([]Entry) ([]Entry, error)) error {
 }
 
 func validateActivityLogPath(path string) error {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		absPath, err := filepath.Abs(cleaned)
-		if err != nil {
-			return fmt.Errorf("failed to resolve activity log path: %w", err)
-		}
-		cleaned = absPath
+	cleaned, err := normalizeActivityLogPath(path)
+	if err != nil {
+		return err
 	}
 
 	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
@@ -261,16 +265,257 @@ func validateActivityLogPath(path string) error {
 	return nil
 }
 
-func writeActivityLogFile(path string, data []byte) error {
+func normalizeActivityLogPath(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve activity log path: %w", err)
+	}
+	return absPath, nil
+}
+
+func ensureActivityLogDirRoot(path string, create bool) (string, error) {
+	normalizedPath, err := normalizeActivityLogPath(path)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(normalizedPath)
+
+	activityLogDirRootsMu.RLock()
+	root := activityLogDirRoots[dir]
+	activityLogDirRootsMu.RUnlock()
+	if root != nil {
+		return normalizedPath, nil
+	}
+
+	if err := validateActivityLogPath(normalizedPath); err != nil {
+		return "", err
+	}
+
+	if create {
+		if err := ensureActivityDir(dir, 0750); err != nil {
+			return "", err
+		}
+	} else if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return normalizedPath, nil
+		}
+		return "", err
+	}
+
+	root, err = os.OpenRoot(dir)
+	if err != nil {
+		return "", err
+	}
+
+	activityLogDirRootsMu.Lock()
+	if existing := activityLogDirRoots[dir]; existing != nil {
+		activityLogDirRootsMu.Unlock()
+		_ = root.Close()
+		return normalizedPath, nil
+	}
+	activityLogDirRoots[dir] = root
+	activityLogDirRootsMu.Unlock()
+
+	return normalizedPath, nil
+}
+
+func registeredActivityLogDirRoot(path string) (*os.Root, string, bool, error) {
+	normalizedPath, err := normalizeActivityLogPath(path)
+	if err != nil {
+		return nil, "", false, err
+	}
+	dir := filepath.Dir(normalizedPath)
+	activityLogDirRootsMu.RLock()
+	root := activityLogDirRoots[dir]
+	activityLogDirRootsMu.RUnlock()
+	return root, normalizedPath, root != nil, nil
+}
+
+func readRegisteredActivityLogFile(path string) ([]byte, error) {
+	root, normalizedPath, ok, err := registeredActivityLogDirRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if err := validateActivityLogPath(normalizedPath); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(normalizedPath)
+	}
+	return readActivityLogFileWithRoot(root, normalizedPath)
+}
+
+func writeRegisteredActivityLogFileAtomically(path string, data []byte) error {
+	root, normalizedPath, ok, err := registeredActivityLogDirRoot(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return writeActivityLogFileAtomically(normalizedPath, data)
+	}
+	return writeActivityLogFileAtomicallyWithRoot(root, normalizedPath, data)
+}
+
+func renameRegisteredActivityLogFile(oldPath, newPath string) error {
+	root, normalizedOldPath, ok, err := registeredActivityLogDirRoot(oldPath)
+	if err != nil {
+		return err
+	}
+	normalizedNewPath, err := normalizeActivityLogPath(newPath)
+	if err != nil {
+		return err
+	}
+	if ok && filepath.Dir(normalizedOldPath) == filepath.Dir(normalizedNewPath) {
+		afterValidateActivityLogPath()
+		if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+			return mapActivityRootPathError(err)
+		}
+		return nil
+	}
+	if err := validateActivityLogPath(normalizedOldPath); err != nil {
+		return err
+	}
+	if err := validateActivityLogPath(normalizedNewPath); err != nil {
+		return err
+	}
+	afterValidateActivityLogPath()
+	return os.Rename(normalizedOldPath, normalizedNewPath)
+}
+
+func syncRegisteredActivityLogDir(path string) error {
+	root, normalizedPath, ok, err := registeredActivityLogDirRoot(path)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return syncActivityLogRootDir(root)
+	}
+	return syncActivityLogDir(filepath.Dir(normalizedPath))
+}
+
+func readActivityLogFileWithRoot(root *os.Root, path string) ([]byte, error) {
+	afterValidateActivityLogPath()
+
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return nil, mapActivityRootPathError(err)
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func writeActivityLogFileAtomicallyWithRoot(root *os.Root, path string, data []byte) error {
+	afterValidateActivityLogPath()
+
+	tmpFile, tmpName, err := createActivityTempFile(root, ".activity-*.tmp")
+	if err != nil {
+		return err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = root.Remove(tmpName)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0640); err != nil {
+		_ = tmpFile.Close()
+		return cleanupActivityTempPath(root, tmpName, err)
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return cleanupActivityTempPath(root, tmpName, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return cleanupActivityTempPath(root, tmpName, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return cleanupActivityTempPath(root, tmpName, err)
+	}
+	if err := root.Rename(tmpName, filepath.Base(path)); err != nil {
+		return cleanupActivityTempPath(root, tmpName, mapActivityRootPathError(err))
+	}
+	cleanup = false
+	if err := syncRegisteredActivityLogDir(path); err != nil {
+		return fmt.Errorf("failed to sync activity log directory: %w", err)
+	}
+	return nil
+}
+
+func newActivityTempName(pattern string) (string, error) {
+	randomPart, err := generateID()
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(pattern, "*") {
+		return strings.Replace(pattern, "*", randomPart, 1), nil
+	}
+	return pattern + randomPart, nil
+}
+
+func createActivityTempFile(root *os.Root, pattern string) (*os.File, string, error) {
+	for range 32 {
+		tmpName, err := newActivityTempName(pattern)
+		if err != nil {
+			return nil, "", err
+		}
+		tmpFile, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0640)
+		if err == nil {
+			return tmpFile, tmpName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapActivityRootPathError(err)
+	}
+
+	return nil, "", errors.New("failed to allocate unique activity temp file")
+}
+
+func cleanupActivityTempPath(root *os.Root, tmpPath string, operationErr error) error {
+	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return errors.Join(operationErr, fmt.Errorf("cleanup temp activity file %s: %w", tmpPath, removeErr))
+	}
+	return operationErr
+}
+
+func syncActivityRootDir(root *os.Root) error {
+	dirHandle, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
+}
+
+func isActivityRootEscapeError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), activityRootEscapeError)
+}
+
+func mapActivityRootPathError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, os.ErrPermission) || isActivityRootEscapeError(err) {
+		return errActivityLogSymlink
+	}
+	return err
+}
+
+func writeActivityLogFileAtomically(path string, data []byte) error {
 	if err := validateActivityLogPath(path); err != nil {
 		return err
 	}
+	afterValidateActivityLogPath()
 
 	dir := filepath.Dir(path)
-	if err := ensureActivityDir(dir, 0750); err != nil {
-		return err
-	}
-
 	f, err := os.CreateTemp(dir, ".activity-*.tmp")
 	if err != nil {
 		return err
@@ -307,6 +552,14 @@ func writeActivityLogFile(path string, data []byte) error {
 		return fmt.Errorf("failed to sync activity log directory: %w", err)
 	}
 	return nil
+}
+
+func writeActivityLogFile(path string, data []byte) error {
+	normalizedPath, err := ensureActivityLogDirRoot(path, true)
+	if err != nil {
+		return err
+	}
+	return writeRegisteredActivityLogFileAtomically(normalizedPath, data)
 }
 
 func collectMissingActivityDirs(dir string) ([]string, error) {
@@ -396,7 +649,7 @@ func (s *Store) Log(action ActionType, path, user, ip string, details map[string
 		}
 		entry := Entry{
 			ID:        id,
-			Timestamp: time.Now(),
+			Timestamp: activityTimeNow(),
 			Action:    action,
 			Path:      path,
 			User:      user,

@@ -57,10 +57,16 @@ type UserStore struct {
 }
 
 var userStoreWriter = func(path string, data []byte) error {
-	return writeAuthFileAtomically(path, data, errUserStoreSymlink, ".users-*.tmp", "users")
+	return writeRegisteredAuthFileAtomically(path, data, errUserStoreSymlink, ".users-*.tmp", "users")
 }
 var syncAuthFileDir = syncAuthDir
+var syncAuthRootDir = syncManagedAuthDir
 var userRandomRead = rand.Read
+var authFileRandomRead = rand.Read
+var afterValidateAuthFilePath = func() {}
+
+var authDirRootsMu sync.RWMutex
+var authDirRoots = make(map[string]*os.Root)
 
 type authPersistenceWarningError struct {
 	err error
@@ -119,13 +125,20 @@ var (
 	errPasswordFileSymlink = errors.New("initial password file path must not be a symlink")
 )
 
+const authRootEscapeError = "path escapes from parent"
+
 // NewUserStore creates a new user store
 // Returns the store, the initial admin password (if newly created), and any error
 func NewUserStore(filePath string) (*UserStore, string, error) {
+	normalizedPath, err := ensureAuthDirRoot(filePath, errUserStoreSymlink, "users")
+	if err != nil {
+		return nil, "", err
+	}
+
 	store := &UserStore{
 		users:    make(map[string]*User),
 		byName:   make(map[string]*User),
-		filePath: filePath,
+		filePath: normalizedPath,
 	}
 
 	if err := store.load(); err != nil {
@@ -149,10 +162,7 @@ func NewUserStore(filePath string) (*UserStore, string, error) {
 }
 
 func (s *UserStore) load() error {
-	if err := validateAuthFilePath(s.filePath, errUserStoreSymlink); err != nil {
-		return err
-	}
-	data, err := os.ReadFile(s.filePath)
+	data, err := readRegisteredAuthFile(s.filePath, errUserStoreSymlink)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -206,19 +216,18 @@ func (s *UserStore) recoverCorruptUsers(loadErr error) error {
 		return loadErr
 	}
 
-	dir := filepath.Dir(s.filePath)
 	corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().UnixNano())
-	if err := os.Rename(s.filePath, corruptPath); err != nil {
+	if err := renameRegisteredAuthFile(s.filePath, corruptPath, errUserStoreSymlink); err != nil {
 		return fmt.Errorf("backup corrupt users file: %w", err)
 	}
-	if err := syncAuthFileDir(dir); err != nil {
-		if rollbackErr := os.Rename(corruptPath, s.filePath); rollbackErr != nil {
+	if err := syncRegisteredAuthDir(s.filePath); err != nil {
+		if rollbackErr := renameRegisteredAuthFile(corruptPath, s.filePath, errUserStoreSymlink); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt users directory: %w", err),
 				fmt.Errorf("rollback corrupt users backup: %w", rollbackErr),
 			)
 		}
-		if rollbackSyncErr := syncAuthFileDir(dir); rollbackSyncErr != nil {
+		if rollbackSyncErr := syncRegisteredAuthDir(s.filePath); rollbackSyncErr != nil {
 			return errors.Join(
 				fmt.Errorf("sync corrupt users directory: %w", err),
 				fmt.Errorf("sync corrupt users rollback: %w", rollbackSyncErr),
@@ -319,13 +328,9 @@ func (s *UserStore) commitSnapshotOnPersistenceWarning(snapshot userStoreSnapsho
 }
 
 func validateAuthFilePath(path string, symlinkErr error) error {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		absPath, err := filepath.Abs(cleaned)
-		if err != nil {
-			return fmt.Errorf("failed to resolve secure file path: %w", err)
-		}
-		cleaned = absPath
+	cleaned, err := normalizeAuthFilePath(path)
+	if err != nil {
+		return err
 	}
 
 	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
@@ -364,10 +369,279 @@ func validateAuthFilePath(path string, symlinkErr error) error {
 	return nil
 }
 
+func normalizeAuthFilePath(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve secure file path: %w", err)
+	}
+	return absPath, nil
+}
+
+func ensureAuthDirRoot(path string, symlinkErr error, label string) (string, error) {
+	normalizedPath, err := normalizeAuthFilePath(path)
+	if err != nil {
+		return "", err
+	}
+	if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
+		return "", err
+	}
+
+	dir := filepath.Dir(normalizedPath)
+	authDirRootsMu.RLock()
+	root := authDirRoots[dir]
+	authDirRootsMu.RUnlock()
+	if root != nil {
+		return normalizedPath, nil
+	}
+
+	if err := ensureAuthDir(dir, 0755, label); err != nil {
+		return "", fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	root, err = os.OpenRoot(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to open %s directory root: %w", label, err)
+	}
+
+	authDirRootsMu.Lock()
+	if existing := authDirRoots[dir]; existing != nil {
+		authDirRootsMu.Unlock()
+		_ = root.Close()
+		return normalizedPath, nil
+	}
+	authDirRoots[dir] = root
+	authDirRootsMu.Unlock()
+
+	return normalizedPath, nil
+}
+
+func registeredAuthDirRoot(path string) (*os.Root, string, bool, error) {
+	normalizedPath, err := normalizeAuthFilePath(path)
+	if err != nil {
+		return nil, "", false, err
+	}
+	dir := filepath.Dir(normalizedPath)
+	authDirRootsMu.RLock()
+	root := authDirRoots[dir]
+	authDirRootsMu.RUnlock()
+	return root, normalizedPath, root != nil, nil
+}
+
+func readRegisteredAuthFile(path string, symlinkErr error) ([]byte, error) {
+	root, normalizedPath, ok, err := registeredAuthDirRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(normalizedPath)
+	}
+	return readAuthFileWithRoot(root, normalizedPath, symlinkErr)
+}
+
+func writeRegisteredAuthFileAtomically(path string, data []byte, symlinkErr error, pattern, label string) error {
+	root, normalizedPath, ok, err := registeredAuthDirRoot(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return writeAuthFileAtomically(normalizedPath, data, symlinkErr, pattern, label)
+	}
+	return writeAuthFileAtomicallyWithRoot(root, normalizedPath, data, symlinkErr, pattern, label)
+}
+
+func renameRegisteredAuthFile(oldPath, newPath string, symlinkErr error) error {
+	root, normalizedOldPath, ok, err := registeredAuthDirRoot(oldPath)
+	if err != nil {
+		return err
+	}
+	normalizedNewPath, err := normalizeAuthFilePath(newPath)
+	if err != nil {
+		return err
+	}
+	if err := validateAuthFilePath(normalizedOldPath, symlinkErr); err != nil {
+		return err
+	}
+	if err := validateAuthFilePath(normalizedNewPath, symlinkErr); err != nil {
+		return err
+	}
+	afterValidateAuthFilePath()
+	if !ok || filepath.Dir(normalizedOldPath) != filepath.Dir(normalizedNewPath) {
+		return os.Rename(normalizedOldPath, normalizedNewPath)
+	}
+	if err := root.Rename(filepath.Base(normalizedOldPath), filepath.Base(normalizedNewPath)); err != nil {
+		return mapAuthRootPathError(err, symlinkErr)
+	}
+	return nil
+}
+
+func removeRegisteredAuthFile(path string, symlinkErr error) error {
+	root, normalizedPath, ok, err := registeredAuthDirRoot(path)
+	if err != nil {
+		return err
+	}
+	if err := validateAuthFilePath(normalizedPath, symlinkErr); err != nil {
+		return err
+	}
+	afterValidateAuthFilePath()
+	if !ok {
+		if err := os.Remove(normalizedPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := root.Remove(filepath.Base(normalizedPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return mapAuthRootPathError(err, symlinkErr)
+	}
+	return nil
+}
+
+func syncRegisteredAuthDir(path string) error {
+	root, normalizedPath, ok, err := registeredAuthDirRoot(path)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return syncAuthRootDir(root)
+	}
+	return syncAuthFileDir(filepath.Dir(normalizedPath))
+}
+
+func readAuthFileWithRoot(root *os.Root, path string, symlinkErr error) ([]byte, error) {
+	if err := validateAuthFilePath(path, symlinkErr); err != nil {
+		return nil, err
+	}
+	afterValidateAuthFilePath()
+
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return nil, mapAuthRootPathError(err, symlinkErr)
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func writeAuthFileAtomicallyWithRoot(root *os.Root, path string, data []byte, symlinkErr error, pattern, label string) error {
+	if err := validateAuthFilePath(path, symlinkErr); err != nil {
+		return err
+	}
+	afterValidateAuthFilePath()
+
+	tmpFile, tmpName, err := createAuthTempFile(root, pattern, symlinkErr)
+	if err != nil {
+		return fmt.Errorf("failed to create temp %s file: %w", label, err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = root.Remove(tmpName)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return cleanupAuthTempPath(root, tmpName, fmt.Errorf("failed to set temp %s permissions: %w", label, err))
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return cleanupAuthTempPath(root, tmpName, fmt.Errorf("failed to write %s file: %w", label, err))
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return cleanupAuthTempPath(root, tmpName, fmt.Errorf("failed to sync %s file: %w", label, err))
+	}
+	if err := tmpFile.Close(); err != nil {
+		return cleanupAuthTempPath(root, tmpName, fmt.Errorf("failed to close temp %s file: %w", label, err))
+	}
+	if err := root.Rename(tmpName, filepath.Base(path)); err != nil {
+		return cleanupAuthTempPath(root, tmpName, fmt.Errorf("failed to replace %s file: %w", label, mapAuthRootPathError(err, symlinkErr)))
+	}
+	cleanup = false
+	if err := syncAuthRootDir(root); err != nil {
+		return wrapAuthPersistenceWarning(fmt.Errorf("failed to sync %s directory: %w", label, err))
+	}
+
+	return nil
+}
+
+func newAuthTempName(pattern string) (string, error) {
+	var suffix [8]byte
+	if _, err := authFileRandomRead(suffix[:]); err != nil {
+		return "", err
+	}
+	randomPart := hex.EncodeToString(suffix[:])
+	if strings.Contains(pattern, "*") {
+		return strings.Replace(pattern, "*", randomPart, 1), nil
+	}
+	return pattern + randomPart, nil
+}
+
+func createAuthTempFile(root *os.Root, pattern string, symlinkErr error) (*os.File, string, error) {
+	for range 32 {
+		tmpName, err := newAuthTempName(pattern)
+		if err != nil {
+			return nil, "", err
+		}
+		tmpFile, err := root.OpenFile(tmpName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			return tmpFile, tmpName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapAuthRootPathError(err, symlinkErr)
+	}
+
+	return nil, "", errors.New("failed to allocate unique temp file")
+}
+
+func cleanupAuthTempPath(root *os.Root, tmpPath string, operationErr error) error {
+	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
+	}
+	return operationErr
+}
+
+func syncManagedAuthDir(root *os.Root) error {
+	dirHandle, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
+}
+
+func isAuthRootEscapeError(err error) bool {
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		return false
+	}
+	return pathErr.Err != nil && pathErr.Err.Error() == authRootEscapeError
+}
+
+func mapAuthRootPathError(err error, symlinkErr error) error {
+	if err == nil {
+		return nil
+	}
+	if isAuthRootEscapeError(err) {
+		return symlinkErr
+	}
+	return err
+}
+
 func writeAuthFileAtomically(path string, data []byte, symlinkErr error, pattern, label string) error {
 	if err := validateAuthFilePath(path, symlinkErr); err != nil {
 		return err
 	}
+	afterValidateAuthFilePath()
 
 	dir := filepath.Dir(path)
 	if err := ensureAuthDir(dir, 0755, label); err != nil {
@@ -525,7 +799,7 @@ Please change this password after first login!
 This file will be automatically deleted after you login.
 `, username, password)
 
-	if err := writeAuthFileAtomically(passwordFile, []byte(passwordContent), errPasswordFileSymlink, ".initial-password-*.tmp", "initial password"); err != nil {
+	if err := writeRegisteredAuthFileAtomically(passwordFile, []byte(passwordContent), errPasswordFileSymlink, ".initial-password-*.tmp", "initial password"); err != nil {
 		return "", fmt.Errorf("failed to write initial password file: %w", err)
 	}
 
@@ -535,7 +809,7 @@ This file will be automatically deleted after you login.
 	if err := s.save(); err != nil {
 		delete(s.users, admin.ID)
 		delete(s.byName, normalizeUsername(admin.Username))
-		if removeErr := os.Remove(passwordFile); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := removeRegisteredAuthFile(passwordFile, errPasswordFileSymlink); removeErr != nil {
 			return "", fmt.Errorf("failed to save default admin: %w (also failed to remove initial password file: %v)", err, removeErr)
 		}
 		return "", err
@@ -617,9 +891,10 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 		snapshot.byName[normalizedUsername] = updated
 
 		if err := saveUserState(snapshot.filePath, snapshot.users); err != nil {
-			_ = s.commitSnapshotOnPersistenceWarning(snapshot, err)
-			authenticatedUser = cloneUser(updated)
-			break
+			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
+				return cloneUser(updated), err
+			}
+			return nil, err
 		}
 		if s.commitSnapshot(snapshot) {
 			authenticatedUser = cloneUser(updated)
@@ -632,7 +907,7 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 
 func removeInitialPasswordFileForUser(usersFilePath, username string) error {
 	passwordFile := filepath.Join(filepath.Dir(usersFilePath), "initial-password.txt")
-	content, err := os.ReadFile(passwordFile)
+	content, err := readRegisteredAuthFile(passwordFile, errPasswordFileSymlink)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -651,7 +926,7 @@ func removeInitialPasswordFileForUser(usersFilePath, username string) error {
 		return nil
 	}
 
-	if err := os.Remove(passwordFile); err != nil && !os.IsNotExist(err) {
+	if err := removeRegisteredAuthFile(passwordFile, errPasswordFileSymlink); err != nil {
 		return err
 	}
 	return nil

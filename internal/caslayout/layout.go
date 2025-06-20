@@ -3,18 +3,25 @@
 package caslayout
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 var errCASPathSymlink = errors.New("CAS storage path must not traverse a symlink")
 
 var syncDir = syncCASDirectory
+var syncRootDir = syncCASRootDirectory
+var casRandomRead = rand.Read
+var afterValidateCASPath = func() {}
+
+const casRootEscapeError = "path escapes from parent"
 
 // Layout defines the directory layout strategy for CAS storage
 type Layout interface {
@@ -92,9 +99,12 @@ func (l *ShardedLayout) FullPath(root, hash string) string {
 
 // Store is the CAS storage implementation
 type Store struct {
-	root   string
-	layout Layout
+	root       string
+	layout     Layout
+	rootHandle *os.Root
 }
+
+type casWalkFunc func(relPath string, info os.FileInfo) error
 
 // NewStore creates a CAS store
 func NewStore(root string, layout Layout) (*Store, error) {
@@ -102,68 +112,73 @@ func NewStore(root string, layout Layout) (*Store, error) {
 		layout = NewShardedLayout(2, 2) // default 2 levels, 2 chars each
 	}
 
-	if err := validateCASPath(root, root); err != nil {
+	normalizedRoot, rootHandle, err := ensureCASRoot(root)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := ensureCASDir(root, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create storage directory: %w", err)
-	}
-
 	return &Store{
-		root:   root,
-		layout: layout,
+		root:       normalizedRoot,
+		layout:     layout,
+		rootHandle: rootHandle,
 	}, nil
 }
 
 // Put stores data, returns path
 func (s *Store) Put(hash string, data []byte) error {
-	path := s.layout.FullPath(s.root, hash)
-	dir := filepath.Dir(path)
+	relPath := filepath.Clean(s.layout.HashToPath(hash))
+	path := filepath.Join(s.root, relPath)
+	relDir := filepath.Dir(relPath)
 	if err := validateCASPath(s.root, path); err != nil {
 		return err
 	}
 
-	if err := ensureCASDir(dir, 0755); err != nil {
+	if err := ensureCASDirWithRoot(s.rootHandle, relDir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
-	if err := validateCASPath(s.root, dir); err != nil {
+	if err := validateCASPath(s.root, filepath.Join(s.root, relDir)); err != nil {
 		return err
 	}
+	afterValidateCASPath()
 
 	// I1 fix: Atomic write with proper fsync
 	// Step 1: Write to temp file
-	f, err := os.CreateTemp(dir, ".cas-*.tmp")
+	f, tmpPath, err := createCASTempFile(s.rootHandle, relDir)
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return errCASPathSymlink
+		}
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	tmpPath := f.Name()
 
 	_, writeErr := f.Write(data)
 	syncErr := f.Sync() // fsync data before rename
 	closeErr := f.Close()
 
 	if writeErr != nil {
-		os.Remove(tmpPath)
+		cleanupCASTempPath(s.rootHandle, tmpPath)
 		return fmt.Errorf("failed to write temp file: %w", writeErr)
 	}
 	if syncErr != nil {
-		os.Remove(tmpPath)
+		cleanupCASTempPath(s.rootHandle, tmpPath)
 		return fmt.Errorf("failed to sync temp file: %w", syncErr)
 	}
 	if closeErr != nil {
-		os.Remove(tmpPath)
+		cleanupCASTempPath(s.rootHandle, tmpPath)
 		return fmt.Errorf("failed to close temp file: %w", closeErr)
 	}
 
 	// Step 2: Atomic rename
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+	if err := s.rootHandle.Rename(tmpPath, relPath); err != nil {
+		cleanupCASTempPath(s.rootHandle, tmpPath)
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return errCASPathSymlink
+		}
 		return fmt.Errorf("failed to rename file: %w", err)
 	}
 
 	// Step 3: fsync directory to ensure rename is persisted
-	if err := syncDir(dir); err != nil {
+	if err := syncRootDir(s.rootHandle, relDir); err != nil {
 		return fmt.Errorf("failed to sync directory: %w", err)
 	}
 
@@ -200,6 +215,54 @@ func syncCreatedCASDirs(createdDirs []string) error {
 	return nil
 }
 
+func normalizeCASRootPath(root string) (string, error) {
+	cleaned := filepath.Clean(root)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve CAS root path: %w", err)
+	}
+	return absPath, nil
+}
+
+func rejectCASRootPathSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat CAS path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errCASPathSymlink
+	}
+	return nil
+}
+
+func validateCASRootPath(root string) error {
+	current := filepath.VolumeName(root) + string(filepath.Separator)
+	trimmed := strings.TrimPrefix(root, current)
+	if trimmed == "" {
+		return rejectCASRootPathSymlink(root)
+	}
+
+	if err := rejectCASRootPathSymlink(current); err != nil {
+		return err
+	}
+	for _, part := range strings.Split(trimmed, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		if err := rejectCASRootPathSymlink(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func ensureCASDir(dir string, perm os.FileMode) error {
 	createdDirs, err := collectMissingCASDirs(dir)
 	if err != nil {
@@ -209,6 +272,80 @@ func ensureCASDir(dir string, perm os.FileMode) error {
 		return err
 	}
 	return syncCreatedCASDirs(createdDirs)
+}
+
+func ensureCASRoot(root string) (string, *os.Root, error) {
+	normalizedRoot, err := normalizeCASRootPath(root)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := validateCASRootPath(normalizedRoot); err != nil {
+		return "", nil, err
+	}
+	if err := ensureCASDir(normalizedRoot, 0755); err != nil {
+		return "", nil, fmt.Errorf("failed to create storage directory: %w", err)
+	}
+	if err := validateCASRootPath(normalizedRoot); err != nil {
+		return "", nil, err
+	}
+
+	rootHandle, err := os.OpenRoot(normalizedRoot)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to open storage root: %w", err)
+	}
+	return normalizedRoot, rootHandle, nil
+}
+
+func collectMissingCASDirsWithRoot(root *os.Root, dir string) ([]string, error) {
+	if dir == "." {
+		return nil, nil
+	}
+
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := root.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current || parent == "." {
+			if parent == "." {
+				missing = append(missing, parent)
+			}
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedCASDirsWithRoot(root *os.Root, createdDirs []string) error {
+	for i := 0; i < len(createdDirs); i++ {
+		if err := syncRootDir(root, filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureCASDirWithRoot(root *os.Root, dir string, perm os.FileMode) error {
+	if dir == "." {
+		return nil
+	}
+
+	createdDirs, err := collectMissingCASDirsWithRoot(root, dir)
+	if err != nil {
+		return err
+	}
+	if err := root.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	return syncCreatedCASDirsWithRoot(root, createdDirs)
 }
 
 func syncCASDirectory(dir string) error {
@@ -225,16 +362,76 @@ func syncCASDirectory(dir string) error {
 	return parentDir.Close()
 }
 
+func syncCASRootDirectory(root *os.Root, dir string) error {
+	parentDir, err := root.Open(dir)
+	if err != nil {
+		return err
+	}
+
+	if err := parentDir.Sync(); err != nil {
+		_ = parentDir.Close()
+		return err
+	}
+
+	return parentDir.Close()
+}
+
+func readCASFileWithRoot(root *os.Root, path string) ([]byte, error) {
+	file, err := root.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func createCASTempFile(root *os.Root, dir string) (*os.File, string, error) {
+	tmpName, err := newCASTempName()
+	if err != nil {
+		return nil, "", err
+	}
+
+	tmpPath := filepath.Join(dir, tmpName)
+	file, err := root.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return file, tmpPath, nil
+}
+
+func newCASTempName() (string, error) {
+	random := make([]byte, 8)
+	if _, err := casRandomRead(random); err != nil {
+		return "", err
+	}
+	return ".cas-" + hex.EncodeToString(random) + ".tmp", nil
+}
+
+func cleanupCASTempPath(root *os.Root, path string) {
+	_ = root.Remove(path)
+}
+
+func isCASRootEscapeError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), casRootEscapeError)
+}
+
 // Get reads data
 func (s *Store) Get(hash string) ([]byte, error) {
-	path := s.layout.FullPath(s.root, hash)
+	relPath := filepath.Clean(s.layout.HashToPath(hash))
+	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	afterValidateCASPath()
+	data, err := readCASFileWithRoot(s.rootHandle, relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
+		}
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return nil, errCASPathSymlink
 		}
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -243,27 +440,34 @@ func (s *Store) Get(hash string) ([]byte, error) {
 
 // Has checks if data exists
 func (s *Store) Has(hash string) bool {
-	path := s.layout.FullPath(s.root, hash)
+	relPath := filepath.Clean(s.layout.HashToPath(hash))
+	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
 		return false
 	}
-	_, err := os.Stat(path)
+	afterValidateCASPath()
+	_, err := s.rootHandle.Stat(relPath)
 	return err == nil
 }
 
 // Delete removes data
 func (s *Store) Delete(hash string) error {
-	path := s.layout.FullPath(s.root, hash)
+	relPath := filepath.Clean(s.layout.HashToPath(hash))
+	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	err := os.Remove(path)
+	afterValidateCASPath()
+	relDir := filepath.Dir(relPath)
+	err := s.rootHandle.Remove(relPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return errCASPathSymlink
+		}
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
 	if err == nil {
-		if err := syncDir(dir); err != nil {
+		if err := syncRootDir(s.rootHandle, relDir); err != nil {
 			return fmt.Errorf("failed to sync directory: %w", err)
 		}
 	}
@@ -272,14 +476,19 @@ func (s *Store) Delete(hash string) error {
 
 // Size gets data size
 func (s *Store) Size(hash string) (int64, error) {
-	path := s.layout.FullPath(s.root, hash)
+	relPath := filepath.Clean(s.layout.HashToPath(hash))
+	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
 		return 0, err
 	}
-	info, err := os.Stat(path)
+	afterValidateCASPath()
+	info, err := s.rootHandle.Stat(relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, ErrNotFound
+		}
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return 0, errCASPathSymlink
 		}
 		return 0, fmt.Errorf("failed to get file info: %w", err)
 	}
@@ -294,14 +503,19 @@ type ReadSeekCloser interface {
 
 // Reader returns a data reader with seek support for Range requests
 func (s *Store) Reader(hash string) (ReadSeekCloser, error) {
-	path := s.layout.FullPath(s.root, hash)
+	relPath := filepath.Clean(s.layout.HashToPath(hash))
+	path := filepath.Join(s.root, relPath)
 	if err := validateCASPath(s.root, path); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(path)
+	afterValidateCASPath()
+	f, err := s.rootHandle.Open(relPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
+		}
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return nil, errCASPathSymlink
 		}
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
@@ -349,15 +563,84 @@ func rejectCASPathSymlink(path string) error {
 	return nil
 }
 
-// Walk iterates over all stored hashes
-func (s *Store) Walk(fn func(hash string) error) error {
-	return filepath.WalkDir(s.root, func(path string, d fs.DirEntry, err error) error {
+func casChildRelativePath(parent, child string) string {
+	if parent == "." {
+		return child
+	}
+	return filepath.Join(parent, child)
+}
+
+func (s *Store) casFullPath(relPath string) string {
+	if relPath == "." {
+		return s.root
+	}
+	return filepath.Join(s.root, relPath)
+}
+
+func (s *Store) walkWithRoot(fn casWalkFunc) error {
+	afterValidateCASPath()
+	rootInfo, err := s.rootHandle.Lstat(".")
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return errCASPathSymlink
+		}
+		return err
+	}
+	return s.walkRootEntry(".", rootInfo, fn)
+}
+
+func (s *Store) walkRootEntry(relPath string, info os.FileInfo, fn casWalkFunc) error {
+	if err := fn(relPath, info); err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	dirHandle, err := s.rootHandle.Open(relPath)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return errCASPathSymlink
+		}
+		return err
+	}
+	defer dirHandle.Close()
+
+	entries, err := dirHandle.ReadDir(-1)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+			return errCASPathSymlink
+		}
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		childRelPath := casChildRelativePath(relPath, entry.Name())
+		childInfo, err := s.rootHandle.Lstat(childRelPath)
 		if err != nil {
+			if errors.Is(err, os.ErrPermission) || isCASRootEscapeError(err) {
+				return errCASPathSymlink
+			}
 			return err
 		}
-		if d.IsDir() {
+		if err := s.walkRootEntry(childRelPath, childInfo, fn); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Walk iterates over all stored hashes
+func (s *Store) Walk(fn func(hash string) error) error {
+	return s.walkWithRoot(func(relPath string, info os.FileInfo) error {
+		if info.IsDir() {
 			return nil
 		}
+		path := s.casFullPath(relPath)
 		// Skip temp files
 		if strings.HasSuffix(path, ".tmp") {
 			return nil
@@ -385,21 +668,14 @@ type Stats struct {
 func (s *Store) Stats() (*Stats, error) {
 	stats := &Stats{}
 
-	err := filepath.WalkDir(s.root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || strings.HasSuffix(path, ".tmp") {
+	err := s.walkWithRoot(func(relPath string, info os.FileInfo) error {
+		path := s.casFullPath(relPath)
+		if info.IsDir() || strings.HasSuffix(path, ".tmp") {
 			return nil
 		}
 
 		if !s.matchesLayoutPath(path) {
 			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return nil // ignore files that cannot be read
 		}
 
 		stats.TotalObjects++
@@ -444,26 +720,21 @@ func (s *Store) matchesLayoutPath(path string) bool {
 // CleanupStaging removes incomplete staging files (.tmp files)
 // Returns the number of files cleaned and total size freed
 func (s *Store) CleanupStaging() (count int, size int64, err error) {
-	err = filepath.WalkDir(s.root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
+	err = s.walkWithRoot(func(relPath string, info os.FileInfo) error {
+		if info.IsDir() {
 			return nil
 		}
+		path := s.casFullPath(relPath)
 		if !strings.HasSuffix(path, ".tmp") {
 			return nil
 		}
 
-		// Get file size before deletion
-		info, infoErr := d.Info()
-		if infoErr == nil {
-			size += info.Size()
-		}
-
 		// Remove staging file
-		if removeErr := os.Remove(path); removeErr == nil {
+		if removeErr := s.rootHandle.Remove(relPath); removeErr == nil {
 			count++
+			size += info.Size()
+		} else if errors.Is(removeErr, os.ErrPermission) || isCASRootEscapeError(removeErr) {
+			return errCASPathSymlink
 		}
 		return nil
 	})

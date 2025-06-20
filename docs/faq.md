@@ -218,7 +218,7 @@ curl http://localhost:8080/health
 性能指标：
 
 ```bash
-curl -H "Authorization: Bearer <access-token>" http://localhost:8080/api/v1/metrics
+curl -H "Authorization: Bearer <admin-access-token>" http://localhost:8080/api/v1/metrics
 # 返回请求统计、延迟、吞吐量等
 ```
 

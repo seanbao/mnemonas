@@ -252,7 +252,7 @@ location /api/ {
 - 文件夹浏览与文件下载依赖该 cookie，不再通过 URL 查询参数传递分享密码
 - 清除浏览器站点数据、切换浏览器或密码变更后，需要重新输入分享密码
 - 同一 share 与客户端地址组合连续 5 次口令失败后，会锁定 5 分钟并返回 `429 Too Many Requests`
-- 客户端地址默认使用直连来源；仅当请求直接来自 loopback 或私有网段代理时，才信任 `X-Forwarded-For` / `X-Real-IP` 提供的来源地址
+- 客户端地址默认按一层受信代理解析；仅当请求直接来自 loopback 或私有网段代理时，才信任转发头，并按 `server.trusted_proxy_hops` 从 `X-Forwarded-For` 右侧回溯客户端地址。多跳代理部署需要显式提高该值；设置为 `0` 时始终使用直连来源
 - `Secure` cookie 标记同样只在实际 HTTPS 或受信代理转发的 HTTPS 请求上启用
 
 ### 路线图

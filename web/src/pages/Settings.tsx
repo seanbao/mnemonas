@@ -231,6 +231,7 @@ export function SettingsPage() {
     serverReadTimeout: '30s',
     serverWriteTimeout: '60s',
     serverIdleTimeout: '120s',
+    serverTrustedProxyHops: '1',
     tlsEnabled: false,
     tlsCertFile: '',
     tlsKeyFile: '',
@@ -347,6 +348,7 @@ export function SettingsPage() {
       serverReadTimeout: data.server.read_timeout,
       serverWriteTimeout: data.server.write_timeout,
       serverIdleTimeout: data.server.idle_timeout,
+      serverTrustedProxyHops: String(data.server.trusted_proxy_hops ?? 1),
       tlsEnabled: data.server.tls?.enabled ?? false,
       tlsCertFile: data.server.tls?.cert_file ?? '',
       tlsKeyFile: data.server.tls?.key_file ?? '',
@@ -523,6 +525,8 @@ export function SettingsPage() {
     const trimmedReadTimeout = settings.serverReadTimeout.trim()
     const trimmedWriteTimeout = settings.serverWriteTimeout.trim()
     const trimmedIdleTimeout = settings.serverIdleTimeout.trim()
+    const trimmedTrustedProxyHops = settings.serverTrustedProxyHops.trim()
+    const parsedTrustedProxyHops = Number(trimmedTrustedProxyHops)
     const trimmedMaxVersions = settings.maxVersions.trim()
     const parsedMaxVersions = Number(trimmedMaxVersions)
     const trimmedTrashRetentionDays = settings.trashRetentionDays.trim()
@@ -602,6 +606,15 @@ export function SettingsPage() {
 		})
 		return
 	}
+
+  if (!/^\d+$/.test(trimmedTrustedProxyHops) || !Number.isInteger(parsedTrustedProxyHops) || parsedTrustedProxyHops < 0) {
+    addToast({
+      title: '受信代理层数格式无效',
+      description: '受信代理层数必须是 0 或正整数',
+      color: 'danger',
+    })
+    return
+  }
 
     if (!/^\d+$/.test(trimmedMaxVersions) || !Number.isInteger(parsedMaxVersions) || parsedMaxVersions < 0) {
       addToast({
@@ -712,6 +725,7 @@ export function SettingsPage() {
         read_timeout: trimmedReadTimeout,
         write_timeout: trimmedWriteTimeout,
         idle_timeout: trimmedIdleTimeout,
+        trusted_proxy_hops: parsedTrustedProxyHops,
         tls: {
           enabled: settings.tlsEnabled,
           cert_file: settings.tlsCertFile.trim(),
@@ -954,6 +968,25 @@ export function SettingsPage() {
                     />
                   </div>
                   </div>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="受信代理层数"
+                    description="按 X-Forwarded-For 从右向左回溯的代理层数；0 表示忽略转发头，1 适用于单层反向代理"
+                  >
+                    <Input
+                      placeholder="1"
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      value={settings.serverTrustedProxyHops}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, serverTrustedProxyHops: v }))}
+                      className="w-28"
+                      aria-label="受信代理层数"
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </SettingRow>
                 </div>
               </SettingsSection>
 

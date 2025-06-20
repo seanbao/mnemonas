@@ -254,7 +254,14 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 		return
 	}
 
-	etag := fmt.Sprintf(`"%s"`, info.ContentHash)
+	reader, snapshotInfo, err := h.fs.OpenFileSnapshot(ctx, filePath)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+	defer reader.Close()
+
+	etag := fmt.Sprintf(`"%s"`, snapshotInfo.ContentHash)
 
 	// Check If-Match (precondition) before cache validators.
 	if im := r.Header.Get("If-Match"); im != "" {
@@ -265,7 +272,7 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	}
 
 	if ius := r.Header.Get("If-Unmodified-Since"); ius != "" {
-		if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(info.ModTime, unmodifiedSince) {
+		if unmodifiedSince, err := http.ParseTime(ius); err == nil && isHTTPTimeAfter(snapshotInfo.ModTime, unmodifiedSince) {
 			http.Error(w, errPreconditionFailed.Error(), http.StatusPreconditionFailed)
 			return
 		}
@@ -275,26 +282,18 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
 		if h.matchETag(inm, etag) {
 			w.Header().Set("ETag", etag)
-			w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
+			w.Header().Set("Last-Modified", snapshotInfo.ModTime.UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
 	} else if ims := r.Header.Get("If-Modified-Since"); ims != "" {
-		if modifiedSince, err := http.ParseTime(ims); err == nil && !isHTTPTimeAfter(info.ModTime, modifiedSince) {
+		if modifiedSince, err := http.ParseTime(ims); err == nil && !isHTTPTimeAfter(snapshotInfo.ModTime, modifiedSince) {
 			w.Header().Set("ETag", etag)
-			w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
+			w.Header().Set("Last-Modified", snapshotInfo.ModTime.UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
 	}
-
-	// Read file
-	reader, err := h.fs.OpenFile(ctx, filePath)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-	defer reader.Close()
 
 	// Set ETag header for caching
 	w.Header().Set("ETag", etag)
@@ -304,14 +303,14 @@ func (h *Handler) handleGet(ctx context.Context, w http.ResponseWriter, r *http.
 	}
 
 	if r.Method == http.MethodHead {
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
-		w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
+		w.Header().Set("Content-Length", strconv.FormatInt(snapshotInfo.Size, 10))
+		w.Header().Set("Last-Modified", snapshotInfo.ModTime.UTC().Format(http.TimeFormat))
 		return
 	}
 
 	// Use http.ServeContent to handle Range requests automatically
 	// Pass filename from path for Content-Disposition
-	http.ServeContent(w, r, path.Base(filePath), info.ModTime, reader)
+	http.ServeContent(w, r, path.Base(filePath), snapshotInfo.ModTime, reader)
 }
 
 func fileContentType(filePath string) string {
@@ -385,6 +384,11 @@ func (h *Handler) webdavHref(filePath string, isDir bool) string {
 func (h *Handler) handlePut(ctx context.Context, w http.ResponseWriter, r *http.Request, filePath string) {
 	releaseLocks := h.acquireHierarchyLocks(hierarchyLockSpec{path: filePath, write: true})
 	defer releaseLocks()
+
+	if strings.TrimSpace(r.Header.Get("Content-Range")) != "" {
+		http.Error(w, "Content-Range is not supported for PUT", http.StatusBadRequest)
+		return
+	}
 
 	existingInfo, statErr := h.fs.Stat(ctx, filePath)
 	isCreate := false

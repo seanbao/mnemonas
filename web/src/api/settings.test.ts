@@ -20,7 +20,7 @@ describe('Settings API', () => {
       json: () => Promise.resolve({
         success: true,
         data: {
-          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s' },
+          server: { host: '0.0.0.0', port: 8080, read_timeout: '30s', write_timeout: '30s', idle_timeout: '60s', trusted_proxy_hops: 2 },
           storage: { root: '/root/.mnemonas' },
           retention: { max_versions: 10, max_age: '24h', min_free_space: 1024, gc_interval: '1h' },
           webdav: { enabled: true, prefix: '/dav', read_only: false, auth_type: 'basic', username: 'admin' },
@@ -34,6 +34,7 @@ describe('Settings API', () => {
     const result = await getSettings()
 
     expect(result.data.server.port).toBe(8080)
+    expect(result.data.server.trusted_proxy_hops).toBe(2)
   })
 
   it('rejects malformed successful settings responses', async () => {
@@ -98,6 +99,20 @@ describe('Settings API', () => {
     const result = await updateSettings({ server: { port: 8081 } })
 
     expect(result.message).toContain('require restart')
+  })
+
+  it('sends trusted_proxy_hops in update payloads', async () => {
+  mockAuthFetch.mockResolvedValueOnce({
+    ok: true,
+    json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+  })
+
+  await updateSettings({ server: { trusted_proxy_hops: 3 } })
+
+  expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
+    method: 'PUT',
+    body: JSON.stringify({ server: { trusted_proxy_hops: 3 } }),
+  }))
   })
 
   it('rejects successful update responses missing wrapped data', async () => {

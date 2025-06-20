@@ -15,17 +15,20 @@ func TestWriteHistoryFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	historyPath := filepath.Join(tmpDir, "last_scrub.json")
 
-	originalSyncHistoryFileDir := syncHistoryFileDir
-	syncHistoryFileDir = func(dir string) error {
+	originalSyncHistoryFileRootDir := syncHistoryFileRootDir
+	syncHistoryFileRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncHistoryFileDir = originalSyncHistoryFileDir
+		syncHistoryFileRootDir = originalSyncHistoryFileRootDir
 	}()
 
 	err := writeHistoryFile(historyPath, []byte("{}"))
 	if err == nil {
 		t.Fatal("expected writeHistoryFile() to fail when directory sync fails")
+	}
+	if !isHistoryPersistenceWarning(err) {
+		t.Fatalf("expected maintenance persistence warning, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "failed to sync maintenance history directory") {
 		t.Fatalf("expected directory sync error, got %v", err)
@@ -312,9 +315,9 @@ func TestNewHistoryStore_ReturnsErrorWhenCorruptBackupDirectorySyncFails(t *test
 		t.Fatalf("WriteFile(last_scrub.json) error: %v", err)
 	}
 
-	originalSyncHistoryFileDir := syncHistoryFileDir
+	originalSyncHistoryFileRootDir := syncHistoryFileRootDir
 	syncFailed := false
-	syncHistoryFileDir = func(dir string) error {
+	syncHistoryFileRootDir = func(root *os.Root) error {
 		if !syncFailed {
 			syncFailed = true
 			return errors.New("directory fsync failed")
@@ -322,7 +325,7 @@ func TestNewHistoryStore_ReturnsErrorWhenCorruptBackupDirectorySyncFails(t *test
 		return nil
 	}
 	defer func() {
-		syncHistoryFileDir = originalSyncHistoryFileDir
+		syncHistoryFileRootDir = originalSyncHistoryFileRootDir
 	}()
 
 	if _, err := NewHistoryStore(tmpDir); err == nil {
@@ -507,7 +510,7 @@ func TestNewHistoryStore_RecoverInterruptedRunningScrub(t *testing.T) {
 	}
 }
 
-func TestHistoryStore_SaveScrubResultFailureKeepsTerminalStateInMemory(t *testing.T) {
+func TestHistoryStore_SaveScrubResult_DoesNotFollowSymlinkPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewHistoryStore(tmpDir)
 	if err != nil {
@@ -533,8 +536,8 @@ func TestHistoryStore_SaveScrubResultFailureKeepsTerminalStateInMemory(t *testin
 	started.TotalObjects = 5
 
 	err = store.SaveScrubResult(started)
-	if !errors.Is(err, errHistoryFileSymlink) {
-		t.Fatalf("expected symlink rejection on final save, got %v", err)
+	if err != nil {
+		t.Fatalf("expected rooted final save to replace symlink path safely, got %v", err)
 	}
 	if store.ScrubIsRunning() {
 		t.Fatal("expected failed final persistence not to leave scrub running in memory")
@@ -552,6 +555,41 @@ func TestHistoryStore_SaveScrubResultFailureKeepsTerminalStateInMemory(t *testin
 	}
 	if result.EndTime.IsZero() {
 		t.Fatal("expected in-memory scrub result to retain end time")
+	}
+
+	targetData, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.backup.json) error: %v", err)
+	}
+	var targetPersisted ScrubResult
+	if err := json.Unmarshal(targetData, &targetPersisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.backup.json) error: %v", err)
+	}
+	if targetPersisted.Status != "running" {
+		t.Fatalf("expected symlink target scrub status to remain running, got %q", targetPersisted.Status)
+	}
+
+	info, err := os.Lstat(historyPath)
+	if err != nil {
+		t.Fatalf("Lstat(last_scrub.json) error: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("expected last_scrub.json symlink to be replaced with a regular file")
+	}
+
+	data, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "completed" {
+		t.Fatalf("expected canonical scrub status completed, got %q", persisted.Status)
+	}
+	if persisted.TotalObjects != 5 {
+		t.Fatalf("expected canonical scrub total_objects 5, got %d", persisted.TotalObjects)
 	}
 }
 
@@ -697,7 +735,27 @@ func TestNewHistoryStore_RejectsSymlinkParentDirectory(t *testing.T) {
 	}
 }
 
-func TestHistoryStore_StartScrubRejectsSymlinkHistoryFile(t *testing.T) {
+func TestNewHistoryStore_DoesNotCreateDirThroughSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) error: %v", err)
+	}
+
+	historyRoot := filepath.Join(linkedParent, "history")
+	if _, err := NewHistoryStore(historyRoot); !errors.Is(err, errHistoryFileSymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(realParent, "history")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("history root created through symlink parent, stat error = %v", err)
+	}
+}
+
+func TestHistoryStore_StartScrub_DoesNotFollowSymlinkPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewHistoryStore(tmpDir)
 	if err != nil {
@@ -714,14 +772,403 @@ func TestHistoryStore_StartScrubRejectsSymlinkHistoryFile(t *testing.T) {
 	}
 
 	started, err := store.StartScrub()
-	if !errors.Is(err, errHistoryFileSymlink) {
-		t.Fatalf("expected symlink rejection, got %v", err)
+	if err != nil {
+		t.Fatalf("expected rooted start scrub to replace symlink path safely, got %v", err)
 	}
-	if started != nil {
-		t.Fatal("expected nil result when start scrub persistence fails")
+	if started == nil || started.Status != "running" {
+		t.Fatalf("expected running scrub result, got %#v", started)
+	}
+	result := store.GetLastScrubResult()
+	if result == nil || result.Status != "running" {
+		t.Fatalf("expected in-memory running scrub result, got %#v", result)
+	}
+
+	targetData, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile(real-history.json) error: %v", err)
+	}
+	if string(targetData) != "{}" {
+		t.Fatalf("expected symlink target to remain unchanged, got %q", string(targetData))
+	}
+
+	info, err := os.Lstat(historyPath)
+	if err != nil {
+		t.Fatalf("Lstat(last_scrub.json) error: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("expected last_scrub.json symlink to be replaced with a regular file")
+	}
+
+	data, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "running" {
+		t.Fatalf("expected persisted scrub status running, got %q", persisted.Status)
+	}
+}
+
+func TestNewHistoryStore_Load_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "history")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(history) error: %v", err)
+	}
+	original := &ScrubResult{ID: "original", Status: "completed", TotalObjects: 5, StartTime: time.Unix(1, 0), EndTime: time.Unix(2, 0)}
+	originalData, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal(original) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "last_scrub.json"), originalData, 0644); err != nil {
+		t.Fatalf("WriteFile(last_scrub.json) error: %v", err)
+	}
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+	outside := &ScrubResult{ID: "outside", Status: "completed", TotalObjects: 99, StartTime: time.Unix(3, 0), EndTime: time.Unix(4, 0)}
+	outsideData, err := json.Marshal(outside)
+	if err != nil {
+		t.Fatalf("Marshal(outside) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "last_scrub.json"), outsideData, 0644); err != nil {
+		t.Fatalf("WriteFile(outside last_scrub.json) error: %v", err)
+	}
+	backupDir := dataDir + "-backup"
+
+	originalAfterValidateHistoryFilePath := afterValidateHistoryFilePath
+	afterValidateHistoryFilePath = func() {
+		if err := os.Rename(dataDir, backupDir); err != nil {
+			t.Fatalf("Rename(history) failed: %v", err)
+		}
+		if err := os.Symlink(outsideDir, dataDir); err != nil {
+			t.Fatalf("Symlink(history) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateHistoryFilePath = originalAfterValidateHistoryFilePath
+	}()
+
+	store, err := NewHistoryStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	loaded := store.GetLastScrubResult()
+	if loaded == nil || loaded.ID != "original" {
+		t.Fatalf("expected original scrub result after validation race, got %#v", loaded)
+	}
+	if loaded.TotalObjects != 5 {
+		t.Fatalf("expected original total_objects 5, got %d", loaded.TotalObjects)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outsideDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(outside last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(outside last_scrub.json) error: %v", err)
+	}
+	if persisted.ID != "outside" {
+		t.Fatalf("expected outside scrub result unchanged, got %q", persisted.ID)
+	}
+}
+
+func TestHistoryStore_StartScrub_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "history")
+	store, err := NewHistoryStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "last_scrub.json"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside last_scrub.json) error: %v", err)
+	}
+	backupDir := dataDir + "-backup"
+	swapped := false
+
+	originalAfterValidateHistoryFilePath := afterValidateHistoryFilePath
+	afterValidateHistoryFilePath = func() {
+		if swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(dataDir, backupDir); err != nil {
+			t.Fatalf("Rename(history) failed: %v", err)
+		}
+		if err := os.Symlink(outsideDir, dataDir); err != nil {
+			t.Fatalf("Symlink(history) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateHistoryFilePath = originalAfterValidateHistoryFilePath
+	}()
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("expected rooted start scrub to stay on original directory, got %v", err)
+	}
+	if started == nil || started.Status != "running" {
+		t.Fatalf("expected running scrub result, got %#v", started)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outsideDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(outside last_scrub.json) error: %v", err)
+	}
+	if string(data) != "{}" {
+		t.Fatalf("expected outside history file unchanged, got %q", string(data))
+	}
+
+	data, err = os.ReadFile(filepath.Join(backupDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(backup last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(backup last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "running" {
+		t.Fatalf("expected persisted scrub status running in original directory, got %q", persisted.Status)
+	}
+}
+
+func TestNewHistoryStore_RecoverCorruptScrub_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "history")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(history) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "last_scrub.json"), []byte("{invalid json"), 0644); err != nil {
+		t.Fatalf("WriteFile(last_scrub.json) error: %v", err)
+	}
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "last_scrub.json"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside last_scrub.json) error: %v", err)
+	}
+	backupDir := dataDir + "-backup"
+	swapped := false
+
+	originalAfterValidateHistoryFilePath := afterValidateHistoryFilePath
+	afterValidateHistoryFilePath = func() {
+		if swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(dataDir, backupDir); err != nil {
+			t.Fatalf("Rename(history) failed: %v", err)
+		}
+		if err := os.Symlink(outsideDir, dataDir); err != nil {
+			t.Fatalf("Symlink(history) failed: %v", err)
+		}
+	}
+	defer func() {
+		afterValidateHistoryFilePath = originalAfterValidateHistoryFilePath
+	}()
+
+	store, err := NewHistoryStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
 	}
 	if store.GetLastScrubResult() != nil {
-		t.Fatal("expected in-memory scrub result rollback after failed start")
+		t.Fatal("expected corrupt history recovery to clear in-memory scrub result")
+	}
+
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatalf("ReadDir(backup history) error: %v", err)
+	}
+	foundCorruptBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "last_scrub.json.corrupt.") {
+			foundCorruptBackup = true
+			break
+		}
+	}
+	if !foundCorruptBackup {
+		t.Fatal("expected corrupt history backup to remain in original directory")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outsideDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(outside last_scrub.json) error: %v", err)
+	}
+	if string(data) != "{}" {
+		t.Fatalf("expected outside history file unchanged, got %q", string(data))
+	}
+	outsideEntries, err := os.ReadDir(outsideDir)
+	if err != nil {
+		t.Fatalf("ReadDir(outside) error: %v", err)
+	}
+	for _, entry := range outsideEntries {
+		if strings.HasPrefix(entry.Name(), "last_scrub.json.corrupt.") {
+			t.Fatalf("expected no corrupt backup outside original directory, found %s", entry.Name())
+		}
+	}
+}
+
+func TestHistoryStore_StartScrubDirectorySyncWarningKeepsRunningState(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	originalSyncHistoryFileRootDir := syncHistoryFileRootDir
+	syncHistoryFileRootDir = func(*os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncHistoryFileRootDir = originalSyncHistoryFileRootDir
+	}()
+
+	started, err := store.StartScrub()
+	if err == nil {
+		t.Fatal("expected StartScrub to report directory sync warning")
+	}
+	if !isHistoryPersistenceWarning(err) {
+		t.Fatalf("expected maintenance persistence warning, got %v", err)
+	}
+	if started == nil || started.Status != "running" {
+		t.Fatalf("expected running scrub result despite warning, got %#v", started)
+	}
+	if !store.ScrubIsRunning() {
+		t.Fatal("expected scrub to remain running in memory after directory sync warning")
+	}
+
+	result := store.GetLastScrubResult()
+	if result == nil || result.Status != "running" {
+		t.Fatalf("expected running in-memory scrub result, got %#v", result)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "running" {
+		t.Fatalf("expected persisted scrub status running, got %q", persisted.Status)
+	}
+}
+
+func TestHistoryStore_SaveScrubResultDirectorySyncWarningKeepsCanonicalState(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
+	}
+
+	originalSyncHistoryFileRootDir := syncHistoryFileRootDir
+	syncHistoryFileRootDir = func(*os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncHistoryFileRootDir = originalSyncHistoryFileRootDir
+	}()
+
+	started.Status = "completed"
+	started.EndTime = time.Now()
+	started.TotalObjects = 7
+
+	err = store.SaveScrubResult(started)
+	if err == nil {
+		t.Fatal("expected SaveScrubResult to report directory sync warning")
+	}
+	if !isHistoryPersistenceWarning(err) {
+		t.Fatalf("expected maintenance persistence warning, got %v", err)
+	}
+	if store.ScrubIsRunning() {
+		t.Fatal("expected scrub to stop running in memory after completed save warning")
+	}
+
+	result := store.GetLastScrubResult()
+	if result == nil || result.Status != "completed" {
+		t.Fatalf("expected completed in-memory scrub result, got %#v", result)
+	}
+	if result.TotalObjects != 7 {
+		t.Fatalf("expected in-memory scrub total_objects 7, got %d", result.TotalObjects)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "last_scrub.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(last_scrub.json) error: %v", err)
+	}
+	var persisted ScrubResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal(last_scrub.json) error: %v", err)
+	}
+	if persisted.Status != "completed" {
+		t.Fatalf("expected persisted scrub status completed, got %q", persisted.Status)
+	}
+	if persisted.TotalObjects != 7 {
+		t.Fatalf("expected persisted scrub total_objects 7, got %d", persisted.TotalObjects)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "last_scrub.terminal.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no terminal fallback file for visible canonical save, got %v", err)
+	}
+}
+
+func TestNewHistoryStore_RecoverInterruptedScrubDirectorySyncWarningStillLoads(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("StartScrub failed: %v", err)
+	}
+	if started == nil || started.Status != "running" {
+		t.Fatalf("expected running scrub result, got %#v", started)
+	}
+
+	originalSyncHistoryFileRootDir := syncHistoryFileRootDir
+	syncHistoryFileRootDir = func(*os.Root) error {
+		return errors.New("directory fsync failed")
+	}
+	defer func() {
+		syncHistoryFileRootDir = originalSyncHistoryFileRootDir
+	}()
+
+	reloaded, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore(reload) failed: %v", err)
+	}
+	if reloaded.ScrubIsRunning() {
+		t.Fatal("expected recovered interrupted scrub not to remain running")
+	}
+
+	result := reloaded.GetLastScrubResult()
+	if result == nil {
+		t.Fatal("expected recovered scrub result after reload")
+	}
+	if result.Status != "failed" {
+		t.Fatalf("expected recovered scrub status failed, got %q", result.Status)
+	}
+	if result.ErrorMessage != interruptedScrubErrorMessage {
+		t.Fatalf("expected recovered scrub error message %q, got %q", interruptedScrubErrorMessage, result.ErrorMessage)
 	}
 }
 
