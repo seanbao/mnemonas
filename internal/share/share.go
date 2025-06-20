@@ -455,9 +455,14 @@ func normalizeShareStoreFilePath(path string) (string, error) {
 }
 
 func ensureShareStoreDirRoot(path string, create bool) (string, error) {
+	normalizedPath, _, err := ensureShareStoreDirRootWithState(path, create)
+	return normalizedPath, err
+}
+
+func ensureShareStoreDirRootWithState(path string, create bool) (string, *os.Root, error) {
 	normalizedPath, err := normalizeShareStoreFilePath(path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	dir := filepath.Dir(normalizedPath)
 
@@ -465,39 +470,51 @@ func ensureShareStoreDirRoot(path string, create bool) (string, error) {
 	root := shareStoreDirRoots[dir]
 	shareStoreDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 
 	if err := validateShareStorePath(normalizedPath); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	if create {
 		if err := ensureShareDir(dir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create directory: %w", err)
+			return "", nil, fmt.Errorf("failed to create directory: %w", err)
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil
+			return normalizedPath, nil, nil
 		}
-		return "", fmt.Errorf("failed to stat share store directory: %w", err)
+		return "", nil, fmt.Errorf("failed to stat share store directory: %w", err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", fmt.Errorf("failed to open share store directory root: %w", err)
+		return "", nil, fmt.Errorf("failed to open share store directory root: %w", err)
 	}
 
 	shareStoreDirRootsMu.Lock()
 	if existing := shareStoreDirRoots[dir]; existing != nil {
 		shareStoreDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 	shareStoreDirRoots[dir] = root
 	shareStoreDirRootsMu.Unlock()
 
-	return normalizedPath, nil
+	return normalizedPath, root, nil
+}
+
+func releaseRegisteredShareStoreDirRoot(dir string, root *os.Root) {
+	if root == nil {
+		return
+	}
+	shareStoreDirRootsMu.Lock()
+	if shareStoreDirRoots[dir] == root {
+		delete(shareStoreDirRoots, dir)
+	}
+	shareStoreDirRootsMu.Unlock()
+	_ = root.Close()
 }
 
 func registeredShareStoreDirRoot(path string) (*os.Root, string, bool, error) {
@@ -663,6 +680,17 @@ func cleanupShareTempPath(root *os.Root, tmpPath string, operationErr error) err
 	return operationErr
 }
 
+func cleanupCreatedShareDirs(createdDirs []string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		if removeErr := os.Remove(dir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created shares directory %s: %w", dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
+}
+
 func syncShareRootDir(root *os.Root) error {
 	dirHandle, err := root.Open(".")
 	if err != nil {
@@ -733,11 +761,31 @@ func writeShareStoreFileAtomically(path string, data []byte) error {
 }
 
 func writeShareStoreFile(path string, data []byte) error {
-	normalizedPath, err := ensureShareStoreDirRoot(path, true)
+	_, normalizedPath, ok, err := registeredShareStoreDirRoot(path)
 	if err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+		return err
 	}
-	return writeRegisteredShareStoreFileAtomically(normalizedPath, data)
+	if ok {
+		return writeRegisteredShareStoreFileAtomically(normalizedPath, data)
+	}
+	if err := validateShareStorePath(normalizedPath); err != nil {
+		return err
+	}
+	createdDirs, err := collectMissingShareDirs(filepath.Dir(normalizedPath))
+	if err != nil {
+		return err
+	}
+	registeredRoot := (*os.Root)(nil)
+	normalizedPath, registeredRoot, err = ensureShareStoreDirRootWithState(normalizedPath, true)
+	if err != nil {
+		releaseRegisteredShareStoreDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedShareDirs(createdDirs, fmt.Errorf("failed to create directory: %w", err))
+	}
+	if err := writeRegisteredShareStoreFileAtomically(normalizedPath, data); err != nil {
+		releaseRegisteredShareStoreDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedShareDirs(createdDirs, err)
+	}
+	return nil
 }
 
 func collectMissingShareDirs(dir string) ([]string, error) {

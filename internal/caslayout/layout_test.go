@@ -471,6 +471,57 @@ func TestStore_PutReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestStore_PutCleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	hash := "abcdef1234567890abcdef1234567890"
+	objectPath := store.layout.FullPath(store.root, hash)
+	objectDir := filepath.Dir(objectPath)
+
+	originalHook := afterValidateCASPath
+	var hookErr error
+	hookApplied := false
+	afterValidateCASPath = func() {
+		if hookApplied || hookErr != nil {
+			return
+		}
+		hookApplied = true
+		hookErr = os.Chmod(objectDir, 0500)
+	}
+	defer func() {
+		afterValidateCASPath = originalHook
+		_ = os.Chmod(objectDir, 0755)
+	}()
+
+	err = store.Put(hash, []byte("payload"))
+	if hookErr != nil {
+		t.Fatalf("afterValidateCASPath hook error: %v", hookErr)
+	}
+	if err == nil {
+		t.Fatal("expected Put() to fail when temp file creation fails")
+	}
+	if !errors.Is(err, errCASPathSymlink) {
+		t.Fatalf("expected rooted temp create failure to stay mapped as symlink rejection, got %v", err)
+	}
+	if _, statErr := os.Stat(objectPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no object to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(objectDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created shard directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Dir(objectDir)); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created parent shard directory to be removed, got %v", statErr)
+	}
+
+	afterValidateCASPath = originalHook
+	if err := store.Put(hash, []byte("payload")); err != nil {
+		t.Fatalf("expected retry after failed Put() cleanup to succeed, got %v", err)
+	}
+}
+
 func TestStore_PutReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir, nil)

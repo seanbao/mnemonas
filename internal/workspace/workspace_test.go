@@ -84,6 +84,58 @@ func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *t
 	}
 }
 
+func TestWorkspace_WriteFileFromReader_ReturnsCreatedDirectoryTreeSyncError(t *testing.T) {
+	w := setupWorkspace(t)
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	blockedDir := filepath.Join(w.Root(), "deep")
+	syncWorkspaceDir = func(dir string) error {
+		if dir == blockedDir {
+			return errors.New("directory tree fsync failed")
+		}
+		return nil
+	}
+	defer func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	}()
+
+	err := w.WriteFileFromReader(context.Background(), "/deep/path/stream.txt", strings.NewReader("streamed content"))
+	if err == nil {
+		t.Fatal("expected WriteFileFromReader() to fail when created directory tree sync fails")
+	}
+	if !IsVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "sync created directory tree") {
+		t.Fatalf("expected created directory tree sync error, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(filepath.Join(w.Root(), "deep", "path", "stream.txt"))
+	if readErr != nil {
+		t.Fatalf("expected streamed file to remain readable after directory tree sync failure, got %v", readErr)
+	}
+	if string(data) != "streamed content" {
+		t.Fatalf("expected streamed content to be preserved, got %q", string(data))
+	}
+}
+
+func TestWorkspace_WriteFileFromReader_CleansCreatedDirectoriesWhenWriteFailsBeforeRename(t *testing.T) {
+	w := setupWorkspace(t)
+
+	_, err := w.WriteFileFromReaderWithOptions(context.Background(), "/deep/path/toolarge.txt", strings.NewReader("too much data"), WriteFileOptions{MaxBytes: 4})
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("expected ErrFileTooLarge, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Root(), "deep", "path", "toolarge.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected file to remain absent after failed write, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Root(), "deep", "path")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected nested directory to be removed after failed write, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Root(), "deep")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected parent directory to be removed after failed write, got %v", statErr)
+	}
+}
+
 func TestWorkspace_Copy_RollsBackDestinationWhenDirectorySyncFails(t *testing.T) {
 	w := setupWorkspace(t)
 	if err := w.WriteFile(context.Background(), "/source.txt", []byte("copy content")); err != nil {

@@ -303,6 +303,47 @@ func TestService_SaveToCache_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestService_SaveToCache_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc, err := NewService(tmpDir)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	cachePath := filepath.Join(tmpDir, "ab", "cd", "thumb.jpg")
+	cacheDir := filepath.Dir(cachePath)
+	originalCreateThumbnailCacheTempFile := createThumbnailCacheTempFile
+	tempCreateErr := errors.New("temp create failed")
+	createThumbnailCacheTempFile = func(root *os.Root, dir string) (*os.File, string, error) {
+		return nil, "", tempCreateErr
+	}
+	defer func() {
+		createThumbnailCacheTempFile = originalCreateThumbnailCacheTempFile
+	}()
+
+	err = svc.saveToCache(cachePath, []byte("thumbnail"))
+	if err == nil {
+		t.Fatal("expected saveToCache() to fail when temp file creation fails")
+	}
+	if !errors.Is(err, tempCreateErr) {
+		t.Fatalf("expected temp create failure, got %v", err)
+	}
+	if _, statErr := os.Stat(cachePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no thumbnail cache file to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created thumbnail cache directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "ab")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created parent thumbnail cache directory to be removed, got %v", statErr)
+	}
+
+	createThumbnailCacheTempFile = originalCreateThumbnailCacheTempFile
+	if err := svc.saveToCache(cachePath, []byte("thumbnail")); err != nil {
+		t.Fatalf("expected retry after failed saveToCache() cleanup to succeed, got %v", err)
+	}
+}
+
 func TestIsSupportedImage(t *testing.T) {
 	tests := []struct {
 		filename string
