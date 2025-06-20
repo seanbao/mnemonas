@@ -14,6 +14,10 @@ import { DirectoryPicker } from './DirectoryPicker'
 import { moveFile, copyFile, ApiError } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
 
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404
+}
+
 function getMoveDialogSuccessToast(
   mode: 'move' | 'copy',
   successCount: number,
@@ -135,6 +139,12 @@ function MoveDialogContent({
         }
         successCount++
       } catch (error) {
+        if (isMissingFileError(error)) {
+          successCount++
+          warningMessages.push('文件或文件夹已不存在，已同步更新')
+          continue
+        }
+
         errorCount++
         failedFiles.push(file)
         failedErrors.push(error)

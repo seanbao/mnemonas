@@ -194,11 +194,18 @@ function getFilesActionSuccessToast(
   }
 }
 
-function getMissingFileActionResult(): ActionResult {
+type MissingFileActionResult = ActionResult & { staleMissing: true }
+
+function getMissingFileActionResult(): MissingFileActionResult {
   return {
     warning: true,
     message: '文件或文件夹已不存在，已同步更新',
+    staleMissing: true,
   }
+}
+
+function isMissingFileActionResult(result: ActionResult): result is MissingFileActionResult {
+  return !!result && typeof result === 'object' && 'staleMissing' in result && result.staleMissing === true
 }
 
 function getFavoriteActionErrorToast(error: unknown): {
@@ -1088,6 +1095,30 @@ export function FilesPage() {
     }
   }, [])
 
+  const moveFileWithMissingSync = useCallback(async (fromPath: string, toPath: string) => {
+    try {
+      return await moveFile(fromPath, toPath)
+    } catch (error) {
+      if (getErrorStatus(error) === 404) {
+        return getMissingFileActionResult()
+      }
+
+      throw error
+    }
+  }, [])
+
+  const copyFileWithMissingSync = useCallback(async (fromPath: string, toPath: string) => {
+    try {
+      return await copyFile(fromPath, toPath)
+    } catch (error) {
+      if (getErrorStatus(error) === 404) {
+        return getMissingFileActionResult()
+      }
+
+      throw error
+    }
+  }, [])
+
   // Mutations (omitted for brevity, same as before)
   const deleteMutation = useMutation({
     mutationFn: deleteFileWithMissingSync,
@@ -1134,8 +1165,11 @@ export function FilesPage() {
   })
   
   const renameMutation = useMutation({
-    mutationFn: ({ from, to }: { from: string; to: string; directoryPath: string; targetPath: string; submittedName: string; sessionId: number }) => moveFile(from, to),
+    mutationFn: ({ from, to }: { from: string; to: string; directoryPath: string; targetPath: string; submittedName: string; sessionId: number }) => moveFileWithMissingSync(from, to),
     onSuccess: (result, variables) => {
+      if (isMissingFileActionResult(result)) {
+        removeFilesFromCache([variables.from])
+      }
       queryClient.invalidateQueries({ queryKey: ['files', variables.directoryPath] })
       if (
         renameSessionRef.current === variables.sessionId
@@ -1881,6 +1915,7 @@ export function FilesPage() {
     let successCount = 0
     let errorCount = 0
     const failedPaths: string[] = []
+    const stalePaths: string[] = []
     const failedErrors: unknown[] = []
     const warningMessages: string[] = []
     
@@ -1890,12 +1925,18 @@ export function FilesPage() {
       
       try {
         if (operation === 'cut') {
-          const result = await moveFile(path, destPath)
+          const result = await moveFileWithMissingSync(path, destPath)
+          if (isMissingFileActionResult(result)) {
+            stalePaths.push(path)
+          }
           if (result.warning) {
             warningMessages.push(result.message ?? '')
           }
         } else {
-          const result = await copyFile(path, destPath)
+          const result = await copyFileWithMissingSync(path, destPath)
+          if (isMissingFileActionResult(result)) {
+            stalePaths.push(path)
+          }
           if (result.warning) {
             warningMessages.push(result.message ?? '')
           }
@@ -1913,6 +1954,14 @@ export function FilesPage() {
         clipboard.clear()
       } else {
         clipboard.cut(failedPaths, sourcePath)
+      }
+    } else if (stalePaths.length > 0) {
+      const staleSet = new Set(stalePaths)
+      const remainingPaths = paths.filter((path) => !staleSet.has(path))
+      if (remainingPaths.length === 0) {
+        clipboard.clear()
+      } else {
+        clipboard.copy(remainingPaths, sourcePath)
       }
     }
     
@@ -1947,7 +1996,7 @@ export function FilesPage() {
     }
 
     addToast({ title: `${operation === 'cut' ? '批量移动' : '批量复制'}部分完成`, description: `成功 ${successCount} 个，失败 ${errorCount} 个`, color: 'warning' })
-  }, [canWrite, clipboard, currentPath, queryClient])
+  }, [canWrite, clipboard, currentPath, moveFileWithMissingSync, copyFileWithMissingSync, queryClient])
 
   const handleKeyboardDelete = useCallback(() => {
     if (!canWrite) return

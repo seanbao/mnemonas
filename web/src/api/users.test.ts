@@ -148,9 +148,60 @@ describe('Users API', () => {
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: null, message: 'password reset successfully' }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ success: true, data: { disabled: true }, message: 'user status updated successfully' }) })
 
-    await expect(deleteUser('u1')).resolves.toEqual({ success: true })
-    await expect(resetUserPassword('u1', { new_password: 'password123' })).resolves.toEqual({ success: true })
-    await expect(toggleUserStatus('u1', true)).resolves.toEqual({ success: true })
+    await expect(deleteUser('u1')).resolves.toEqual({ success: true, warning: false, message: 'user deleted successfully' })
+    await expect(resetUserPassword('u1', { new_password: 'password123' })).resolves.toEqual({ success: true, warning: false, message: 'password reset successfully' })
+    await expect(toggleUserStatus('u1', true)).resolves.toEqual({ success: true, warning: false, message: 'user status updated successfully' })
+  })
+
+  it('preserves warning metadata for wrapped user management success responses', async () => {
+    mockAuthFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => '199 auth persistence warning' },
+        json: () => Promise.resolve({
+          success: true,
+          message: 'user created with persistence warning',
+          data: {
+            user: { id: 'u1', username: 'admin', email: '', role: 'admin', disabled: false, home_dir: '/', created_at: '2024-01-01', updated_at: '2024-01-01', quota_bytes: 0, used_bytes: 0 },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => '199 auth persistence warning' },
+        json: () => Promise.resolve({ success: true, data: null, message: 'user deleted with persistence warning' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ success: true, data: { warning: true }, message: 'password reset with persistence warning' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ success: true, data: { disabled: true, warning: true }, message: 'user status updated with persistence warning' }),
+      })
+
+    await expect(createUser({ username: 'admin', password: 'password123' })).resolves.toMatchObject({
+      success: true,
+      warning: true,
+      message: 'user created with persistence warning',
+    })
+    await expect(deleteUser('u1')).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'user deleted with persistence warning',
+    })
+    await expect(resetUserPassword('u1', { new_password: 'password123' })).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'password reset with persistence warning',
+    })
+    await expect(toggleUserStatus('u1', true)).resolves.toEqual({
+      success: true,
+      warning: true,
+      message: 'user status updated with persistence warning',
+    })
   })
 
   it('rejects malformed successful delete/reset/toggle responses instead of treating them as success', async () => {

@@ -54,6 +54,10 @@ function getMaintenanceActionErrorPresentation(
   }
 }
 
+function isScrubAlreadyRunningError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.message.includes('already running')
+}
+
 // Status chip component
 function StatusChip({ status, warning }: { status?: string; warning?: boolean }) {
   if (!status) return null
@@ -223,6 +227,18 @@ export default function Maintenance() {
       addToast({ title, color: result.warning ? 'warning' : 'success' })
     },
     onError: (error: unknown) => {
+      if (isScrubAlreadyRunningError(error)) {
+        void queryClient.refetchQueries({ queryKey: ['scrub-result'], type: 'active' }).finally(() => {
+          setIsAwaitingRunningState(false)
+        })
+        addToast({
+          title: '数据校验已在运行',
+          description: '已有校验任务正在执行，已同步最新状态。',
+          color: 'warning',
+        })
+        return
+      }
+
       setIsAwaitingRunningState(false)
       const errorPresentation = getMaintenanceActionErrorPresentation(
         error,

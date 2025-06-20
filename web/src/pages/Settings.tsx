@@ -162,6 +162,25 @@ function getSettingsActionErrorToast(
   }
 }
 
+function getSettingsSaveSuccessToast(message?: string): {
+  title: string
+  description?: string
+  color: 'success' | 'warning'
+} {
+  if (typeof message === 'string' && message.includes('require restart')) {
+    return {
+      title: '设置已保存，部分变更需要重启后生效',
+      description: '部分配置项需要重启相关服务后才会生效。',
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: '设置已保存',
+    color: 'success',
+  }
+}
+
 const SETTINGS_TABS = ['general', 'retention', 'webdav', 'advanced', 'shares'] as const
 
 type SettingsTabKey = (typeof SETTINGS_TABS)[number]
@@ -472,7 +491,7 @@ export function SettingsPage() {
   // Save mutation
   const saveMutation = useMutation({
     mutationFn: ({ request }: SaveSettingsVariables) => updateSettings(request),
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       setSavedSettingsOverride(variables.submittedSettings)
       setSavedSettingsOverrideUpdatedAt(variables.baseSettingsUpdatedAt)
 
@@ -480,7 +499,7 @@ export function SettingsPage() {
         setIsDirty(false)
       }
 
-      addToast({ title: '设置已保存', color: 'success' })
+      addToast(getSettingsSaveSuccessToast(result.message))
       void refetch()
     },
     onError: (err: unknown) => {
