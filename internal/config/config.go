@@ -82,12 +82,13 @@ type Config struct {
 
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
-	Host             string        `toml:"host"`
-	Port             int           `toml:"port"`
-	ReadTimeout      time.Duration `toml:"read_timeout"`
-	WriteTimeout     time.Duration `toml:"write_timeout"`
-	IdleTimeout      time.Duration `toml:"idle_timeout"`
-	TrustedProxyHops int           `toml:"trusted_proxy_hops"`
+	Host              string        `toml:"host"`
+	Port              int           `toml:"port"`
+	ReadTimeout       time.Duration `toml:"read_timeout"`
+	WriteTimeout      time.Duration `toml:"write_timeout"`
+	IdleTimeout       time.Duration `toml:"idle_timeout"`
+	TrustedProxyHops  int           `toml:"trusted_proxy_hops"`
+	TrustedProxyCIDRs []string      `toml:"trusted_proxy_cidrs"`
 	// TLS configuration
 	TLS TLSConfig `toml:"tls"`
 }
@@ -380,12 +381,13 @@ func Default() *Config {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Host:             "0.0.0.0",
-			Port:             8080,
-			ReadTimeout:      30 * time.Second,
-			WriteTimeout:     60 * time.Second,
-			IdleTimeout:      120 * time.Second,
-			TrustedProxyHops: 0,
+			Host:              "0.0.0.0",
+			Port:              8080,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			TrustedProxyHops:  0,
+			TrustedProxyCIDRs: []string{},
 			TLS: TLSConfig{
 				Enabled:      false,
 				AutoGenerate: true, // Auto-generate self-signed cert for easy setup
@@ -672,6 +674,10 @@ func normalizeTrimmedStringSlice(values []string) []string {
 	return normalized
 }
 
+func NormalizeTrustedProxyCIDRs(values []string) []string {
+	return normalizeTrimmedStringSlice(values)
+}
+
 func normalizeSMBShares(shares []SMBShareConfig) []SMBShareConfig {
 	if shares == nil {
 		return []SMBShareConfig{}
@@ -761,6 +767,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyStorageRootDefaults(cfg, getDefaultStorageRoot())
+	cfg.Server.TrustedProxyCIDRs = NormalizeTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs)
 	cfg.Storage.DirectoryQuotas = NormalizeDirectoryQuotas(cfg.Storage.DirectoryQuotas)
 	cfg.Storage.DirectoryAccessRules = NormalizeDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
 	cfg.WebDAV.Prefix = NormalizeWebDAVPrefix(cfg.WebDAV.Prefix)
@@ -1493,6 +1500,9 @@ func (c *Config) Validate() error {
 	if c.Server.TrustedProxyHops < 0 {
 		errs = append(errs, errors.New("server.trusted_proxy_hops cannot be negative"))
 	}
+	if err := validateTrustedProxyCIDRs(c.Server.TrustedProxyCIDRs); err != nil {
+		errs = append(errs, err)
+	}
 
 	if c.Storage.Root == "" {
 		errs = append(errs, errors.New("storage.root cannot be empty"))
@@ -1669,6 +1679,25 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func validateTrustedProxyCIDRs(values []string) error {
+	for index, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if strings.Contains(value, "/") {
+			if _, _, err := net.ParseCIDR(value); err != nil {
+				return fmt.Errorf("server.trusted_proxy_cidrs[%d] must be an IP address or CIDR", index)
+			}
+			continue
+		}
+		if net.ParseIP(value) == nil {
+			return fmt.Errorf("server.trusted_proxy_cidrs[%d] must be an IP address or CIDR", index)
+		}
+	}
+	return nil
 }
 
 func validateWebhookHeader(header string) error {

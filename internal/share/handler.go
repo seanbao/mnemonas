@@ -42,6 +42,8 @@ type FileStatProvider interface {
 	ReadDir(ctx context.Context, filePath string) ([]*storage.FileInfo, error)
 }
 
+type PathAccessAuthorizer func(ctx context.Context, share *Share, targetPath string) error
+
 type responseEnvelope struct {
 	Success bool         `json:"success"`
 	Data    interface{}  `json:"data,omitempty"`
@@ -67,6 +69,7 @@ type Handler struct {
 	passwordFailureDelay  time.Duration
 	passwordLockDuration  time.Duration
 	beforeMutateShare     func(id string) error
+	pathAccessAuthorizer  PathAccessAuthorizer
 }
 
 type shareOwnerStore interface {
@@ -187,6 +190,10 @@ func (h *Handler) SetBaseURL(baseURL string) {
 
 func (h *Handler) SetUserStore(store shareOwnerStore) {
 	h.userStore = store
+}
+
+func (h *Handler) SetPathAccessAuthorizer(authorizer PathAccessAuthorizer) {
+	h.pathAccessAuthorizer = authorizer
 }
 
 // Routes registers share routes (requires auth)
@@ -904,6 +911,11 @@ func (h *Handler) DownloadShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.authorizeSharePath(r.Context(), share, share.Path); err != nil {
+		writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
+		return
+	}
+
 	reader, err := h.fs.OpenFile(r.Context(), share.Path)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -1001,6 +1013,11 @@ func (h *Handler) DownloadShareFile(w http.ResponseWriter, r *http.Request) {
 
 	if h.fs == nil {
 		writeShareError(w, http.StatusServiceUnavailable, "filesystem not available", "FILESYSTEM_UNAVAILABLE")
+		return
+	}
+
+	if err := h.authorizeSharePath(r.Context(), share, fullPath); err != nil {
+		writePublicSharePathError(w, err, "DOWNLOAD_SHARE_FAILED")
 		return
 	}
 
@@ -1187,6 +1204,11 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.authorizeSharePath(r.Context(), share, fullPath); err != nil {
+		writePublicSharePathError(w, err, "LIST_SHARE_ITEMS_FAILED")
+		return
+	}
+
 	entries, err := statProvider.ReadDir(r.Context(), fullPath)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -1203,7 +1225,18 @@ func (h *Handler) ListShareItems(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]*PublicShareItem, 0, len(entries))
 	for _, entry := range entries {
-		relItemPath, relErr := shareRelativePath(share.Path, entry.Path)
+		entryPath := entry.Path
+		if strings.TrimSpace(entryPath) == "" {
+			entryPath = path.Join(fullPath, entry.Name)
+		}
+		if err := h.authorizeSharePath(r.Context(), share, entryPath); err != nil {
+			if errors.Is(err, ErrShareNotFound) {
+				continue
+			}
+			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
+			return
+		}
+		relItemPath, relErr := shareRelativePath(share.Path, entryPath)
 		if relErr != nil {
 			writeShareError(w, http.StatusInternalServerError, "internal server error", "LIST_SHARE_ITEMS_FAILED")
 			return
@@ -1264,6 +1297,9 @@ func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareIn
 
 	switch share.Type {
 	case ShareTypeFile:
+		if err := h.authorizeSharePath(ctx, share, share.Path); err != nil {
+			return err
+		}
 		fileInfo, err := statProvider.Stat(ctx, share.Path)
 		if err != nil {
 			return err
@@ -1273,17 +1309,76 @@ func (h *Handler) enrichPublicShareInfo(ctx context.Context, info *PublicShareIn
 		}
 		info.FileSize = fileInfo.Size
 	case ShareTypeFolder:
+		if err := h.authorizeSharePath(ctx, share, share.Path); err != nil {
+			return err
+		}
 		entries, err := statProvider.ReadDir(ctx, share.Path)
 		if err != nil {
 			return err
 		}
-		info.FolderItems = len(entries)
+		authorizedEntries, err := h.filterAuthorizedShareEntries(ctx, share, share.Path, entries)
+		if err != nil {
+			return err
+		}
+		info.FolderItems = len(authorizedEntries)
 	}
 
 	return nil
 }
 
+func (h *Handler) authorizeSharePath(ctx context.Context, share *Share, targetPath string) error {
+	if h.pathAccessAuthorizer == nil {
+		return nil
+	}
+	if share == nil {
+		return ErrShareNotFound
+	}
+
+	cleanTarget := path.Clean(targetPath)
+	if !isWithinSharePath(share.Path, cleanTarget) {
+		return ErrShareNotFound
+	}
+	return h.pathAccessAuthorizer(ctx, share, cleanTarget)
+}
+
+func (h *Handler) filterAuthorizedShareEntries(ctx context.Context, share *Share, parentPath string, entries []*storage.FileInfo) ([]*storage.FileInfo, error) {
+	if h.pathAccessAuthorizer == nil {
+		return entries, nil
+	}
+
+	filtered := make([]*storage.FileInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		entryPath := entry.Path
+		if strings.TrimSpace(entryPath) == "" {
+			entryPath = path.Join(parentPath, entry.Name)
+		}
+		if err := h.authorizeSharePath(ctx, share, entryPath); err != nil {
+			if errors.Is(err, ErrShareNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered, nil
+}
+
+func writePublicSharePathError(w http.ResponseWriter, err error, fallbackCode string) {
+	if errors.Is(err, ErrShareNotFound) {
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+		return
+	}
+	writeShareError(w, http.StatusInternalServerError, "internal server error", fallbackCode)
+}
+
 func (h *Handler) writePublicShareInfoError(w http.ResponseWriter, share *Share, err error) {
+	if errors.Is(err, ErrShareNotFound) {
+		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
+		return
+	}
 	if errors.Is(err, storage.ErrNotFound) {
 		writeShareError(w, http.StatusNotFound, "file not found", "FILE_NOT_FOUND")
 		return

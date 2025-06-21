@@ -16,6 +16,19 @@ func setTrustedProxyHopsForTest(t *testing.T, hops int) {
 	})
 }
 
+func setTrustedProxyCIDRsForTest(t *testing.T, cidrs []string) {
+	t.Helper()
+	previous := TrustedProxyCIDRs()
+	if err := SetTrustedProxyCIDRs(cidrs); err != nil {
+		t.Fatalf("SetTrustedProxyCIDRs(%v) error: %v", cidrs, err)
+	}
+	t.Cleanup(func() {
+		if err := SetTrustedProxyCIDRs(previous); err != nil {
+			t.Fatalf("restore trusted proxy CIDRs error: %v", err)
+		}
+	})
+}
+
 func TestClientIP_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "203.0.113.5:1234"
@@ -24,6 +37,19 @@ func TestClientIP_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *testing.T
 
 	if got := ClientIP(req); got != "203.0.113.5" {
 		t.Fatalf("ClientIP() = %q, want %q", got, "203.0.113.5")
+	}
+}
+
+func TestClientIP_DoesNotTrustPrivateProxyWithoutExplicitCIDR(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 1)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.2:8080"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20")
+	req.Header.Set("X-Real-IP", "198.51.100.21")
+
+	if got := ClientIP(req); got != "10.0.0.2" {
+		t.Fatalf("ClientIP() = %q, want %q", got, "10.0.0.2")
 	}
 }
 
@@ -41,6 +67,7 @@ func TestClientIP_UsesLastForwardedAddressFromTrustedProxy(t *testing.T) {
 
 func TestClientIP_FallsBackToXRealIPWhenForwardedForMissing(t *testing.T) {
 	setTrustedProxyHopsForTest(t, 1)
+	setTrustedProxyCIDRsForTest(t, []string{"10.0.0.0/8"})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.0.0.2:8080"
@@ -103,6 +130,7 @@ func TestClientIP_IgnoresSpoofedLeadingForwardedEntriesFromTrustedProxy(t *testi
 
 func TestClientIP_UsesBracketedIPv6FromTrustedProxy(t *testing.T) {
 	setTrustedProxyHopsForTest(t, 1)
+	setTrustedProxyCIDRsForTest(t, []string{"fd00::/8"})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "[fd00::1]:8080"
@@ -115,6 +143,7 @@ func TestClientIP_UsesBracketedIPv6FromTrustedProxy(t *testing.T) {
 
 func TestClientIP_UsesConfiguredTrustedProxyHops(t *testing.T) {
 	setTrustedProxyHopsForTest(t, 2)
+	setTrustedProxyCIDRsForTest(t, []string{"10.0.0.0/8"})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.0.0.2:8080"
@@ -127,6 +156,7 @@ func TestClientIP_UsesConfiguredTrustedProxyHops(t *testing.T) {
 
 func TestClientIP_ConfiguredTrustedProxyHopsStillIgnoreSpoofedLeadingEntries(t *testing.T) {
 	setTrustedProxyHopsForTest(t, 2)
+	setTrustedProxyCIDRsForTest(t, []string{"10.0.0.0/8"})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.0.0.2:8080"
@@ -147,5 +177,11 @@ func TestClientIP_TrustedProxyHopsZeroDisablesForwardedHeaders(t *testing.T) {
 
 	if got := ClientIP(req); got != "10.0.0.2" {
 		t.Fatalf("ClientIP() = %q, want %q", got, "10.0.0.2")
+	}
+}
+
+func TestSetTrustedProxyCIDRsRejectsInvalidCIDR(t *testing.T) {
+	if err := SetTrustedProxyCIDRs([]string{"not-a-cidr"}); err == nil {
+		t.Fatal("expected invalid trusted proxy CIDR error")
 	}
 }
