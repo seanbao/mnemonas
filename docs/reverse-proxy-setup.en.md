@@ -36,7 +36,7 @@ MnemoNAS does not trust `X-Forwarded-*` headers by default. When it is behind tr
 trusted_proxy_hops = 1
 ```
 
-Use `1` for a single Caddy, Nginx, or Traefik proxy. For multiple hops, set the total number of trusted proxy layers. Restart `mnemonas` after changing the value.
+Use `1` for a single Caddy, Nginx, or Traefik proxy. For multiple hops, set the total number of trusted proxy layers. Loopback direct peers need no extra setting. If the proxy reaches MnemoNAS through a Docker bridge, internal load balancer, or another non-loopback address, also set `trusted_proxy_cidrs = ["<proxy-ip-or-cidr>"]`. Restart `mnemonas` after changing the value.
 
 Without this setting, MnemoNAS still works behind a proxy, but Secure-cookie detection and client-IP-based rate limiting use the direct peer address instead of the real client address.
 

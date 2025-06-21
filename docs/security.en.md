@@ -282,7 +282,7 @@ location /api/ {
 
 File downloads, version previews, media previews, thumbnails, and external-open flows use a short-lived `HttpOnly` download-session cookie. Long-lived access tokens are not passed through URL query parameters.
 
-The `Secure` cookie flag is enabled when the request is actually HTTPS, or when `trusted_proxy_hops > 0` and a trusted private/loopback proxy forwards `X-Forwarded-Proto=https`.
+The `Secure` cookie flag is enabled when the request is actually HTTPS, or when `trusted_proxy_hops > 0` and the direct peer is loopback or a proxy address listed in `trusted_proxy_cidrs` forwarding `X-Forwarded-Proto=https`.
 
 ### Web UI Session Tokens
 

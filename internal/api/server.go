@@ -171,6 +171,7 @@ func cloneConfigSnapshot(cfg *config.Config) *config.Config {
 		return nil
 	}
 	cloned := *cfg
+	cloned.Server.TrustedProxyCIDRs = append([]string(nil), cfg.Server.TrustedProxyCIDRs...)
 	cloned.Storage.DirectoryQuotas = append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...)
 	cloned.Storage.DirectoryAccessRules = cloneDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
 	cloned.Share.PolicyRules = append([]config.SharePolicyRuleConfig(nil), cfg.Share.PolicyRules...)
@@ -215,6 +216,7 @@ func (s *Server) storeConfig(cfg *config.Config) {
 	s.config = cloneConfigSnapshot(cfg)
 	if cfg != nil {
 		requestip.SetTrustedProxyHops(cfg.Server.TrustedProxyHops)
+		_ = requestip.SetTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs)
 	}
 }
 
@@ -1297,7 +1299,9 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		appVersion: appVersion,
 		buildTime:  buildTime,
 	}
-	requestip.SetTrustedProxyHops(config.Default().Server.TrustedProxyHops)
+	defaultConfig := config.Default()
+	requestip.SetTrustedProxyHops(defaultConfig.Server.TrustedProxyHops)
+	_ = requestip.SetTrustedProxyCIDRs(defaultConfig.Server.TrustedProxyCIDRs)
 	if cfg != nil {
 		s.afterPathRenamed = cfg.AfterPathRenamed
 		s.afterPathDeleted = cfg.AfterPathDeleted
@@ -1460,6 +1464,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		if s.userStore != nil {
 			s.shareHandler.SetUserStore(s.userStore)
 		}
+		s.shareHandler.SetPathAccessAuthorizer(s.authorizeShareOwnerPath)
 		if cfg.ShareBaseURL != "" {
 			s.shareHandler.SetBaseURL(cfg.ShareBaseURL)
 		}
@@ -3022,6 +3027,10 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 			s.respondNotFound(w, "copy resource", err)
 			return
 		}
+		if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
+			respondPathAccessError(w, err)
+			return
+		}
 		s.respondInternalError(w, "copy resource", err)
 		return
 	}
@@ -3048,6 +3057,13 @@ func (s *Server) ensureCopyDestinationParent(ctx context.Context, targetPath str
 }
 
 func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) error {
+	if err := s.authorizeUserPath(ctx, srcPath); err != nil {
+		return err
+	}
+	if err := s.authorizeUserWritePath(ctx, dstPath); err != nil {
+		return err
+	}
+
 	info, err := s.fs.Stat(ctx, srcPath)
 	if err != nil {
 		return err
@@ -5710,6 +5726,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Details: map[string]interface{}{
 				"tls_enabled":           cfg.Server.TLS.Enabled,
 				"trusted_proxy_hops":    cfg.Server.TrustedProxyHops,
+				"trusted_proxy_cidrs":   cfg.Server.TrustedProxyCIDRs,
 				"trusted_remote_source": trustedForwardedSource,
 			},
 		})
@@ -5720,8 +5737,9 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Title:   "未配置 HTTPS 信任边界",
 			Message: "如果通过反向代理发布公网，请将受信代理层数设为实际代理层数；如果直接提供 HTTPS，请启用 TLS。",
 			Details: map[string]interface{}{
-				"tls_enabled":        cfg.Server.TLS.Enabled,
-				"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
+				"tls_enabled":         cfg.Server.TLS.Enabled,
+				"trusted_proxy_hops":  cfg.Server.TrustedProxyHops,
+				"trusted_proxy_cidrs": cfg.Server.TrustedProxyCIDRs,
 			},
 		})
 	}
@@ -5734,9 +5752,10 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Title:   "反向代理未声明 HTTPS",
 			Message: "已配置受信代理层数，但当前请求没有 X-Forwarded-Proto=https。请确认代理会转发该 header，否则 Secure cookie 判断可能不符合预期。",
 			Details: map[string]interface{}{
-				"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
-				"forwarded_proto":    forwardedProto,
-				"remote_ip":          remoteIP,
+				"trusted_proxy_hops":  cfg.Server.TrustedProxyHops,
+				"trusted_proxy_cidrs": cfg.Server.TrustedProxyCIDRs,
+				"forwarded_proto":     forwardedProto,
+				"remote_ip":           remoteIP,
 			},
 		})
 	case forwardedProto != "" && cfg.Server.TrustedProxyHops == 0:
@@ -5746,9 +5765,10 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Title:   "反向代理 header 未启用信任",
 			Message: "检测到 X-Forwarded-Proto，但 trusted_proxy_hops 为 0。若正在通过反向代理访问，请设置受信代理层数；若不是，请移除上游伪造 header。",
 			Details: map[string]interface{}{
-				"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
-				"forwarded_proto":    forwardedProto,
-				"remote_ip":          remoteIP,
+				"trusted_proxy_hops":  cfg.Server.TrustedProxyHops,
+				"trusted_proxy_cidrs": cfg.Server.TrustedProxyCIDRs,
+				"forwarded_proto":     forwardedProto,
+				"remote_ip":           remoteIP,
 			},
 		})
 	case forwardedProto != "" && cfg.Server.TrustedProxyHops > 0 && !trustedForwardedSource:
@@ -5756,9 +5776,10 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			ID:      "forwarded_proto_trust",
 			Status:  securityCheckBlock,
 			Title:   "转发 header 来源不受信任",
-			Message: "请求携带反向代理 header，但直连来源不是本机或私有网段。请不要让公网客户端直接访问后端端口。",
+			Message: "请求携带反向代理 header，但直连来源不是本机或显式配置的受信代理网段。请不要让公网客户端直接访问后端端口。",
 			Details: map[string]interface{}{
 				"trusted_proxy_hops":       cfg.Server.TrustedProxyHops,
+				"trusted_proxy_cidrs":      cfg.Server.TrustedProxyCIDRs,
 				"forwarded_proto":          forwardedProto,
 				"remote_ip":                remoteIP,
 				"trusted_forwarded_source": trustedForwardedSource,
@@ -5772,6 +5793,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Message: "未检测到被忽略或来源异常的转发 header。",
 			Details: map[string]interface{}{
 				"trusted_proxy_hops":       cfg.Server.TrustedProxyHops,
+				"trusted_proxy_cidrs":      cfg.Server.TrustedProxyCIDRs,
 				"forwarded_proto":          forwardedProto,
 				"trusted_forwarded_source": trustedForwardedSource,
 			},
@@ -6069,6 +6091,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			"server_port":          cfg.Server.Port,
 			"tls_enabled":          cfg.Server.TLS.Enabled,
 			"trusted_proxy_hops":   cfg.Server.TrustedProxyHops,
+			"trusted_proxy_cidrs":  cfg.Server.TrustedProxyCIDRs,
 			"dataplane_grpc_addr":  cfg.DataPlane.GRPCAddress,
 			"dataplane_http_addr":  dataplaneHTTPAddress,
 			"webdav_enabled":       cfg.WebDAV.Enabled,
@@ -6092,12 +6115,13 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 	settings := map[string]interface{}{
 		"server": map[string]interface{}{
-			"host":               cfg.Server.Host,
-			"port":               cfg.Server.Port,
-			"read_timeout":       cfg.Server.ReadTimeout.String(),
-			"write_timeout":      cfg.Server.WriteTimeout.String(),
-			"idle_timeout":       cfg.Server.IdleTimeout.String(),
-			"trusted_proxy_hops": cfg.Server.TrustedProxyHops,
+			"host":                cfg.Server.Host,
+			"port":                cfg.Server.Port,
+			"read_timeout":        cfg.Server.ReadTimeout.String(),
+			"write_timeout":       cfg.Server.WriteTimeout.String(),
+			"idle_timeout":        cfg.Server.IdleTimeout.String(),
+			"trusted_proxy_hops":  cfg.Server.TrustedProxyHops,
+			"trusted_proxy_cidrs": cfg.Server.TrustedProxyCIDRs,
 			"tls": map[string]interface{}{
 				"enabled":       cfg.Server.TLS.Enabled,
 				"cert_file":     cfg.Server.TLS.CertFile,
@@ -6453,13 +6477,14 @@ type StorageSettingsUpdate struct {
 }
 
 type ServerSettingsUpdate struct {
-	Host             *string                  `json:"host,omitempty"`
-	Port             *int                     `json:"port,omitempty"`
-	ReadTimeout      *string                  `json:"read_timeout,omitempty"`
-	WriteTimeout     *string                  `json:"write_timeout,omitempty"`
-	IdleTimeout      *string                  `json:"idle_timeout,omitempty"`
-	TrustedProxyHops *int                     `json:"trusted_proxy_hops,omitempty"`
-	TLS              *ServerTLSSettingsUpdate `json:"tls,omitempty"`
+	Host              *string                  `json:"host,omitempty"`
+	Port              *int                     `json:"port,omitempty"`
+	ReadTimeout       *string                  `json:"read_timeout,omitempty"`
+	WriteTimeout      *string                  `json:"write_timeout,omitempty"`
+	IdleTimeout       *string                  `json:"idle_timeout,omitempty"`
+	TrustedProxyHops  *int                     `json:"trusted_proxy_hops,omitempty"`
+	TrustedProxyCIDRs *[]string                `json:"trusted_proxy_cidrs,omitempty"`
+	TLS               *ServerTLSSettingsUpdate `json:"tls,omitempty"`
 }
 
 type ServerTLSSettingsUpdate struct {
@@ -6735,6 +6760,9 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updatedConfig.Server.TrustedProxyHops = *req.Server.TrustedProxyHops
+		}
+		if req.Server.TrustedProxyCIDRs != nil {
+			updatedConfig.Server.TrustedProxyCIDRs = config.NormalizeTrustedProxyCIDRs(*req.Server.TrustedProxyCIDRs)
 		}
 		if req.Server.TLS != nil {
 			if req.Server.TLS.Enabled != nil {
@@ -7185,8 +7213,13 @@ func (s *Server) prepareDataplaneReplacement(ctx context.Context, req UpdateSett
 }
 
 func (s *Server) applyRuntimeSettings(ctx context.Context, req UpdateSettingsRequest, cfg config.Config, preparedDataplane *dataplane.Client, preparedWebDAV *WebDAVRuntimeConfig) {
-	if req.Server != nil && req.Server.TrustedProxyHops != nil {
-		requestip.SetTrustedProxyHops(cfg.Server.TrustedProxyHops)
+	if req.Server != nil {
+		if req.Server.TrustedProxyHops != nil {
+			requestip.SetTrustedProxyHops(cfg.Server.TrustedProxyHops)
+		}
+		if req.Server.TrustedProxyCIDRs != nil {
+			_ = requestip.SetTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs)
+		}
 	}
 
 	if req.DataPlane != nil && req.DataPlane.GRPCAddress != nil {
@@ -7550,42 +7583,65 @@ func (s *Server) ensureShareWithinOwnerHome(id string) (*share.Share, error) {
 		return nil, err
 	}
 
+	if err := s.authorizeShareOwnerPath(context.Background(), shareInfo, shareInfo.Path); err != nil {
+		if errors.Is(err, share.ErrShareNotFound) {
+			return nil, share.ErrShareNotFound
+		}
+		return nil, err
+	}
+
+	return shareInfo, nil
+}
+
+func (s *Server) authorizeShareOwnerPath(ctx context.Context, shareInfo *share.Share, targetPath string) error {
+	_ = ctx
+	if shareInfo == nil {
+		return share.ErrShareNotFound
+	}
 	if !s.authEnabled || s.userStore == nil {
-		return shareInfo, nil
+		return nil
+	}
+
+	targetPath, err := validatePath(targetPath)
+	if err != nil {
+		return share.ErrShareNotFound
+	}
+	if !pathWithinBase(shareInfo.Path, targetPath) {
+		return share.ErrShareNotFound
 	}
 
 	owner, err := s.resolveShareOwner(shareInfo.CreatedBy)
 	if err != nil {
 		if errors.Is(err, auth.ErrUserNotFound) {
-			return nil, share.ErrShareNotFound
+			return share.ErrShareNotFound
 		}
-		return nil, err
+		return err
 	}
 	if owner.Disabled {
-		return nil, share.ErrShareNotFound
+		return share.ErrShareNotFound
 	}
 	if owner.Role == auth.RoleAdmin {
-		return shareInfo, nil
+		return nil
 	}
-	if rule, ok := s.matchDirectoryAccessRule(shareInfo.Path); ok {
+	if rule, ok := s.matchDirectoryAccessRule(targetPath); ok {
 		if directoryAccessRuleAllowsUser(rule, owner, pathAccessRead) {
-			return shareInfo, nil
+			return nil
 		}
-		return nil, share.ErrShareNotFound
+		return share.ErrShareNotFound
 	}
 	if strings.TrimSpace(owner.HomeDir) == "" {
-		return nil, share.ErrShareNotFound
+		return share.ErrShareNotFound
 	}
 
 	homeDir, err := validatePath(owner.HomeDir)
 	if err != nil {
-		return nil, share.ErrShareNotFound
+		return share.ErrShareNotFound
 	}
-	if !pathWithinBase(homeDir, shareInfo.Path) {
-		return nil, share.ErrShareNotFound
+	if !pathWithinBase(homeDir, targetPath) {
+		return share.ErrShareNotFound
 	}
 
-	return shareInfo, nil
+	return nil
 }
 
 func (s *Server) resolveShareOwner(ownerRef string) (*auth.User, error) {
