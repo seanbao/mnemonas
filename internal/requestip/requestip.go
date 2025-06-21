@@ -180,11 +180,11 @@ func parseTrustedProxyCIDRs(cidrs []string) ([]*net.IPNet, error) {
 
 func parseTrustedProxyCIDR(value string) (*net.IPNet, error) {
 	if strings.Contains(value, "/") {
-		ip, network, err := net.ParseCIDR(value)
+		_, network, err := net.ParseCIDR(value)
 		if err != nil {
 			return nil, err
 		}
-		network.IP = normalizeNetworkIP(ip)
+		network.IP = normalizeNetworkIP(network.IP)
 		return network, nil
 	}
 
