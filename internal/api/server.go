@@ -2094,6 +2094,105 @@ func (s *Server) filterSharesByHomeDir(ctx context.Context, items []*share.Share
 	return filtered, nil
 }
 
+func (s *Server) authorizeUserTreeWritePath(ctx context.Context, targetPath string) error {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return nil
+	}
+	if err := s.authorizeUserWritePath(ctx, targetPath); err != nil {
+		return err
+	}
+	if s.fs == nil || !s.hasDirectoryAccessRules() {
+		return nil
+	}
+	return s.authorizeUserTreeDescendants(ctx, targetPath, "", pathAccessWrite)
+}
+
+func (s *Server) authorizeUserTreeMovePath(ctx context.Context, sourcePath, destinationPath string) error {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return nil
+	}
+	if err := s.authorizeUserWritePath(ctx, sourcePath); err != nil {
+		return err
+	}
+	if err := s.authorizeUserWritePath(ctx, destinationPath); err != nil {
+		return err
+	}
+	if s.fs == nil || !s.hasDirectoryAccessRules() {
+		return nil
+	}
+	return s.authorizeUserTreeDescendants(ctx, sourcePath, destinationPath, pathAccessWrite)
+}
+
+func (s *Server) authorizeUserTreeDescendants(ctx context.Context, sourcePath, destinationPath string, mode pathAccessMode) error {
+	info, err := s.fs.Stat(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return nil
+	}
+
+	children, err := s.fs.ReadDir(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		if err := s.authorizeUserPathFor(ctx, child.Path, mode); err != nil {
+			return err
+		}
+		childDestination := ""
+		if destinationPath != "" {
+			childDestination = mapDescendantPath(sourcePath, destinationPath, child.Path)
+			if err := s.authorizeUserPathFor(ctx, childDestination, mode); err != nil {
+				return err
+			}
+		}
+		if child.IsDir {
+			if err := s.authorizeUserTreeDescendants(ctx, child.Path, childDestination, mode); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func mapDescendantPath(sourceRoot, destinationRoot, currentPath string) string {
+	sourceRoot = path.Clean(sourceRoot)
+	destinationRoot = path.Clean(destinationRoot)
+	currentPath = path.Clean(currentPath)
+
+	relativePath := ""
+	if sourceRoot == "/" {
+		relativePath = strings.TrimPrefix(currentPath, "/")
+	} else {
+		relativePath = strings.TrimPrefix(currentPath, sourceRoot)
+		relativePath = strings.TrimPrefix(relativePath, "/")
+	}
+	if relativePath == "" {
+		return destinationRoot
+	}
+	return path.Clean(path.Join(destinationRoot, relativePath))
+}
+
+func (s *Server) respondTreeMutationPreflightError(w http.ResponseWriter, action string, err error) {
+	if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
+		respondPathAccessError(w, err)
+		return
+	}
+	if errors.Is(err, storage.ErrNotDir) {
+		Conflict(w, "parent path is not a directory")
+		return
+	}
+	if isStorageNotFound(err) {
+		s.respondNotFound(w, action, err)
+		return
+	}
+	s.respondInternalError(w, action, err)
+}
+
 // validateHash validates a BLAKE3 hash string (64 hex characters).
 func validateHash(hash string) error {
 	if len(hash) != 64 {
@@ -2597,6 +2696,10 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
 	}
+	if err := s.authorizeUserTreeWritePath(r.Context(), filePath); err != nil {
+		s.respondTreeMutationPreflightError(w, "delete file", err)
+		return
+	}
 
 	if err := s.fs.Delete(r.Context(), filePath); err != nil {
 		deleteWarningDetails := map[string]string{}
@@ -2863,6 +2966,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if !isStorageNotFound(err) {
 		s.respondInternalError(w, "stat move source", err)
+		return
+	}
+	if err := s.authorizeUserTreeMovePath(r.Context(), fromPath, toPath); err != nil {
+		s.respondTreeMutationPreflightError(w, "move file", err)
 		return
 	}
 

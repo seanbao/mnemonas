@@ -6508,6 +6508,74 @@ func TestServer_DirectoryAccessRulesGrantSharedPaths(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteDirectoryRejectsDeniedDescendantAccessRule(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/team/private", WriteUsers: []string{"other"}},
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/team", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("delete directory status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/private/secret.txt"); err != nil {
+		t.Fatalf("expected denied descendant to remain after rejected delete: %v", err)
+	}
+}
+
+func TestServer_MoveDirectoryRejectsDeniedDestinationDescendantAccessRule(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/team/copied/private", WriteUsers: []string{"other"}},
+	})
+
+	ctx := context.Background()
+	for _, dir := range []string{"/tester", "/tester/src", "/tester/src/private", "/team"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/tester/src/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/tester/src/private/secret.txt) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(`{"from":"/tester/src","to":"/team/copied"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("move directory status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/tester/src/private/secret.txt"); err != nil {
+		t.Fatalf("expected source tree to remain after rejected move: %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/team/copied"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination tree to remain absent after rejected move, got %v", err)
+	}
+}
+
 func TestServer_CheckPathAccess_ExplainsEffectivePermissions(t *testing.T) {
 	server, session := newRouteSmokeServer(t)
 	targetUser, err := server.userStore.CreateWithGroups("alice", "password123", "", auth.RoleUser, []string{"family"})
