@@ -4788,6 +4788,35 @@ func TestFileSystem_Search(t *testing.T) {
 	}
 }
 
+func TestFileSystem_SearchWithinBase_RespectsLimitWithinRoot(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/other"); err != nil {
+		t.Fatalf("Mkdir(/other) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/other/report.txt", bytes.NewReader([]byte("other"))); err != nil {
+		t.Fatalf("WriteFile(/other/report.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/report.txt", bytes.NewReader([]byte("tester"))); err != nil {
+		t.Fatalf("WriteFile(/tester/report.txt) error: %v", err)
+	}
+
+	results, err := fs.SearchWithinBase(ctx, "/tester", "report", 1)
+	if err != nil {
+		t.Fatalf("SearchWithinBase() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchWithinBase() returned %d results, want 1", len(results))
+	}
+	if results[0].Path != "/tester/report.txt" {
+		t.Fatalf("SearchWithinBase() first result path = %q, want %q", results[0].Path, "/tester/report.txt")
+	}
+}
+
 func TestFileSystem_Search_PropagatesTraversalError(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()

@@ -111,7 +111,7 @@ func NewUserStore(filePath string) (*UserStore, string, error) {
 		}
 	}
 
-	if len(store.users) == 0 {
+	if !store.hasEnabledAdmin() {
 		password, err := store.createDefaultAdmin()
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to create default admin: %w", err)
@@ -425,6 +425,31 @@ func syncAuthDir(dir string) error {
 	return dirHandle.Sync()
 }
 
+func (s *UserStore) hasEnabledAdmin() bool {
+	for _, user := range s.users {
+		if user.Role == RoleAdmin && !user.Disabled {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *UserStore) bootstrapAdminUsername() string {
+	const recoveryPrefix = "admin-recovery"
+
+	if _, exists := s.byName[normalizeUsername("admin")]; !exists {
+		return "admin"
+	}
+
+	candidate := recoveryPrefix
+	for suffix := 2; ; suffix++ {
+		if _, exists := s.byName[normalizeUsername(candidate)]; !exists {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", recoveryPrefix, suffix)
+	}
+}
+
 func (s *UserStore) createDefaultAdmin() (string, error) {
 	password, err := generateRandomPassword(16)
 	if err != nil {
@@ -434,10 +459,11 @@ func (s *UserStore) createDefaultAdmin() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("generate default admin ID: %w", err)
 	}
+	username := s.bootstrapAdminUsername()
 
 	admin := &User{
 		ID:        adminID,
-		Username:  "admin",
+		Username:  username,
 		Role:      RoleAdmin,
 		HomeDir:   "/",
 		CreatedAt: time.Now(),
@@ -454,12 +480,12 @@ func (s *UserStore) createDefaultAdmin() (string, error) {
 	passwordFile := filepath.Join(filepath.Dir(s.filePath), "initial-password.txt")
 	passwordContent := fmt.Sprintf(`MnemoNAS Initial Admin Password
 ================================
-Username: admin
+Username: %s
 Password: %s
 
 Please change this password after first login!
 This file will be automatically deleted after you login.
-`, password)
+`, username, password)
 
 	if err := writeAuthFileAtomically(passwordFile, []byte(passwordContent), errPasswordFileSymlink, ".initial-password-*.tmp", "initial password"); err != nil {
 		return "", fmt.Errorf("failed to write initial password file: %w", err)
@@ -482,7 +508,7 @@ This file will be automatically deleted after you login.
 		fmt.Printf("\n")
 		fmt.Printf("╔══════════════════════════════════════════════════════════╗\n")
 		fmt.Printf("║  Default admin account created                           ║\n")
-		fmt.Printf("║  Username: admin                                         ║\n")
+		fmt.Printf("║  Username: %-45s ║\n", username)
 		fmt.Printf("║  Password: %-45s ║\n", password)
 		fmt.Printf("║                                                          ║\n")
 		fmt.Printf("║  Please change this password after first login!          ║\n")
@@ -542,7 +568,7 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 			return nil, ErrInvalidCredentials
 		}
 
-		if err := removeInitialPasswordFile(snapshot.filePath); err != nil {
+		if err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username); err != nil {
 			return nil, fmt.Errorf("failed to remove initial password file: %w", err)
 		}
 
@@ -565,8 +591,27 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 	return authenticatedUser, nil
 }
 
-func removeInitialPasswordFile(usersFilePath string) error {
+func removeInitialPasswordFileForUser(usersFilePath, username string) error {
 	passwordFile := filepath.Join(filepath.Dir(usersFilePath), "initial-password.txt")
+	content, err := os.ReadFile(passwordFile)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	matchedUsername := false
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == "Username: "+username {
+			matchedUsername = true
+			break
+		}
+	}
+	if !matchedUsername {
+		return nil
+	}
+
 	if err := os.Remove(passwordFile); err != nil && !os.IsNotExist(err) {
 		return err
 	}

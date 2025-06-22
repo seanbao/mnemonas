@@ -301,6 +301,9 @@ func (h *Handler) json(w http.ResponseWriter, status int, data any) {
 }
 
 func (h *Handler) success(w http.ResponseWriter, status int, data any, message string) {
+	if data == nil {
+		data = json.RawMessage("null")
+	}
 	h.json(w, status, responseEnvelope{
 		Success: true,
 		Data:    data,

@@ -72,6 +72,7 @@ type Service struct {
 	// In-progress generation to prevent duplicate work
 	inProgress          map[string]*thumbnailGenerationResult
 	ipMu                sync.Mutex
+	saveWG              sync.WaitGroup
 	failedCacheReuseTTL time.Duration
 }
 
@@ -97,6 +98,29 @@ func (s *Service) waitForInProgressThumbnail(ctx context.Context, cachePath stri
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (s *Service) clearInProgress(cacheKey string, result *thumbnailGenerationResult) {
+	s.ipMu.Lock()
+	defer s.ipMu.Unlock()
+	if current, ok := s.inProgress[cacheKey]; ok && current == result {
+		delete(s.inProgress, cacheKey)
+	}
+}
+
+func (s *Service) scheduleInProgressExpiry(cacheKey string, result *thumbnailGenerationResult, ttl time.Duration) {
+	if ttl <= 0 {
+		s.clearInProgress(cacheKey, result)
+		return
+	}
+	time.AfterFunc(ttl, func() {
+		s.clearInProgress(cacheKey, result)
+	})
+}
+
+// Wait blocks until background cache persistence work has finished.
+func (s *Service) Wait() {
+	s.saveWG.Wait()
 }
 
 // NewService creates a new thumbnail service
@@ -175,10 +199,8 @@ func (s *Service) getThumbnail(ctx context.Context, filePath, cacheVersion strin
 		if !cleanupInProgress {
 			return
 		}
-		s.ipMu.Lock()
-		delete(s.inProgress, cacheKey)
+		s.clearInProgress(cacheKey, result)
 		close(result.done)
-		s.ipMu.Unlock()
 	}()
 
 	// Generate thumbnail
@@ -195,20 +217,15 @@ func (s *Service) getThumbnail(ctx context.Context, filePath, cacheVersion strin
 	cleanupInProgress = false
 
 	// Keep the completed result available to concurrent callers until cache persistence finishes.
+	s.saveWG.Add(1)
 	go func() {
-		removeDelay := time.Duration(0)
-		defer func() {
-			if removeDelay > 0 {
-				time.Sleep(removeDelay)
-			}
-			s.ipMu.Lock()
-			delete(s.inProgress, cacheKey)
-			s.ipMu.Unlock()
-		}()
+		defer s.saveWG.Done()
 		if err := s.saveToCache(cachePath, data); err != nil {
 			log.Printf("thumbnail: failed to save cache for %s: %v", filePath, err)
-			removeDelay = s.failedCacheReuseTTL
+			s.scheduleInProgressExpiry(cacheKey, result, s.failedCacheReuseTTL)
+			return
 		}
+		s.clearInProgress(cacheKey, result)
 	}()
 
 	return data, nil

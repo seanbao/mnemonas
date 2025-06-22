@@ -643,6 +643,8 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
+	h.tokenManager.RevokeByUser(userID)
+
 	writeSuccess(w, http.StatusOK, nil, "user deleted successfully")
 }
 
@@ -768,6 +770,9 @@ func writeError(w http.ResponseWriter, status int, message, code string) {
 }
 
 func writeSuccess(w http.ResponseWriter, status int, data interface{}, message string) {
+	if data == nil {
+		data = json.RawMessage("null")
+	}
 	writeEnvelope(w, status, ResponseEnvelope{
 		Success: true,
 		Data:    data,
