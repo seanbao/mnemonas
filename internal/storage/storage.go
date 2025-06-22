@@ -1643,6 +1643,66 @@ func (fs *FileSystem) GetTrashItem(ctx context.Context, id string) (*TrashItem, 
 	}, nil
 }
 
+// WalkTrashItemRestorePaths walks the workspace paths that a trash item would
+// restore to at its original location.
+func (fs *FileSystem) WalkTrashItemRestorePaths(ctx context.Context, id string, fn func(restoredPath string, isDir bool) error) error {
+	if fn == nil {
+		return nil
+	}
+
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	item, err := fs.versions.GetTrashItem(ctx, id)
+	if err != nil {
+		if errors.Is(err, versionstore.ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	contentPath := filepath.Join(fs.trashRoot, id, "content")
+	info, err := os.Lstat(contentPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	originalRoot := path.Clean(item.OriginalPath)
+	if err := fn(originalRoot, info.IsDir()); err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	return filepath.WalkDir(contentPath, func(currentPath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return ErrNotFound
+			}
+			return walkErr
+		}
+		if currentPath == contentPath {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		relativePath, err := filepath.Rel(contentPath, currentPath)
+		if err != nil {
+			return err
+		}
+		restoredPath := path.Clean(path.Join(originalRoot, filepath.ToSlash(relativePath)))
+		return fn(restoredPath, entry.IsDir())
+	})
+}
+
 // RestoreFromTrash restores a file from trash
 func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 	release := fs.beginMutation()

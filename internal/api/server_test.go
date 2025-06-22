@@ -11737,6 +11737,155 @@ func TestServer_EmptyTrash_FiltersResultsByHomeDirForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestServer_TrashRestoreDirectoryRejectsDeniedDestinationDescendantAccessRule(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/restore", WriteUsers: []string{username}},
+		{Path: "/restore/copied/private", WriteUsers: []string{"other"}},
+	})
+
+	ctx := context.Background()
+	for _, dir := range []string{"/team", "/team/private", "/restore"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/team"); err != nil {
+		t.Fatalf("Delete(/team) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trash/"+items[0].ID+"/restore?path=/restore/copied", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("restore directory status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/restore/copied"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected destination tree to remain absent after rejected restore, got %v", err)
+	}
+	if _, err := fs.GetTrashItem(ctx, items[0].ID); err != nil {
+		t.Fatalf("expected trash item to remain after rejected restore: %v", err)
+	}
+}
+
+func TestServer_DeleteFromTrashDirectoryRejectsDeniedDescendantAccessRule(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/team/private", WriteUsers: []string{"other"}},
+	})
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team/private"); err != nil {
+		t.Fatalf("Mkdir(/team/private) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/team"); err != nil {
+		t.Fatalf("Delete(/team) error: %v", err)
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item, got %d", len(items))
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/"+items[0].ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("delete from trash status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if _, err := fs.GetTrashItem(ctx, items[0].ID); err != nil {
+		t.Fatalf("expected trash item to remain after rejected permanent delete: %v", err)
+	}
+}
+
+func TestServer_EmptyTrashSkipsDirectoryWithDeniedDescendantAccessRule(t *testing.T) {
+	server, fs, _, username, password := setupAuthServer(t)
+	setUserHomeDirForTest(t, server, username, "/tester")
+	setDirectoryAccessRulesForTest(t, server, []config.DirectoryAccessRuleConfig{
+		{Path: "/team", WriteUsers: []string{username}},
+		{Path: "/team/private", WriteUsers: []string{"other"}},
+	})
+
+	ctx := context.Background()
+	for _, dir := range []string{"/tester", "/team", "/team/private"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/tester/deleted.txt", bytes.NewReader([]byte("deleted"))); err != nil {
+		t.Fatalf("WriteFile(/tester/deleted.txt) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/tester/deleted.txt"); err != nil {
+		t.Fatalf("Delete(/tester/deleted.txt) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/team"); err != nil {
+		t.Fatalf("Delete(/team) error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty trash status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			DeletedCount int  `json:"deleted_count"`
+			Partial      bool `json:"partial"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if payload.Data.DeletedCount != 1 {
+		t.Fatalf("deleted_count = %d, want 1; body=%s", payload.Data.DeletedCount, rec.Body.String())
+	}
+	if payload.Data.Partial {
+		t.Fatalf("partial = true, want false; body=%s", rec.Body.String())
+	}
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 || items[0].OriginalPath != "/team" {
+		t.Fatalf("expected denied directory trash item to remain, got %+v", items)
+	}
+}
+
 func TestServer_CreateShare_RejectsPathOutsideHomeForNonAdmin(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
