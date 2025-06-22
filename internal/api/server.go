@@ -1972,6 +1972,27 @@ func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*st
 	return filtered, nil
 }
 
+func (s *Server) filterFileInfosByPathAccess(ctx context.Context, items []*storage.FileInfo) ([]*storage.FileInfo, error) {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return items, nil
+	}
+	_, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !scoped {
+		return items, nil
+	}
+
+	filtered := make([]*storage.FileInfo, 0, len(items))
+	for _, item := range items {
+		if item != nil && s.authorizeUserPath(ctx, item.Path) == nil {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
 func (s *Server) filterTrashItemsByHomeDir(ctx context.Context, items []*storage.TrashItem) ([]*storage.TrashItem, error) {
 	if !s.authEnabled || auth.IsAdmin(ctx) {
 		return items, nil
@@ -2521,6 +2542,11 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.respondInternalError(w, "list files", err)
+		return
+	}
+	files, err = s.filterFileInfosByPathAccess(r.Context(), files)
+	if err != nil {
+		respondPathAccessError(w, err)
 		return
 	}
 

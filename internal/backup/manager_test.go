@@ -362,6 +362,48 @@ func TestManager_RunRestoreRejectsUnsafeTarget(t *testing.T) {
 	}
 }
 
+func TestManager_RunRestoreRejectsTargetSymlinkAncestor(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	realParent := filepath.Join(tmpDir, "real-parent")
+	linkParent := filepath.Join(tmpDir, "restore-link")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+	if err := os.MkdirAll(filepath.Join(realParent, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+
+	target := filepath.Join(linkParent, "nested", "restore-target")
+	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: target})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestore() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(target); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("restore target stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestManager_RunRestoreBlocksFailedPreflight(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -600,6 +642,40 @@ func TestManager_RunJobRejectsDestinationInsideSource(t *testing.T) {
 			Type:        JobTypeLocal,
 			Source:      source,
 			Destination: filepath.Join(source, "backups"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	_, err = manager.RunJob(context.Background(), "home")
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunJob() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestManager_RunJobRejectsDestinationSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	realDestination := filepath.Join(tmpDir, "real-destination")
+	destinationLink := filepath.Join(tmpDir, "destination-link")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+	if err := os.MkdirAll(realDestination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDestination, destinationLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destinationLink,
 		}},
 	})
 	if err != nil {

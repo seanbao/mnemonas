@@ -72,7 +72,7 @@ encryption_required = false
 
 [backup]
 # 默认不启用内置备份任务。source 留空表示备份 storage.root；生产环境更建议填快照挂载目录。
-# type 支持 local、restic、rclone。local 的 destination 不能位于 storage.root 内。
+# type 支持 local、restic、rclone。local 的 destination 不能位于 storage.root 内，且已存在路径组件不能是符号链接。
 # [[backup.jobs]]
 # id = "external-disk"
 # name = "外置硬盘备份"
