@@ -554,6 +554,63 @@ func TestFileSystem_OpenFileSnapshot_PreservesSnapshotAcrossPathReplacement(t *t
 	}
 }
 
+func TestFileSystem_WriteFile_DistinguishesTrailingWhitespacePathMetadata(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+	plainPath := "/docs/report.txt"
+	spacedPath := "/docs/report.txt "
+	plainOriginal := []byte("plain original")
+	plainCurrent := []byte("plain current")
+	spacedOriginal := []byte("spaced original")
+	spacedCurrent := []byte("spaced current")
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(docs) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, plainPath, bytes.NewReader(plainOriginal)); err != nil {
+		t.Fatalf("WriteFile(plain original) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, spacedPath, bytes.NewReader(spacedOriginal)); err != nil {
+		t.Fatalf("WriteFile(spaced original) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, plainPath, bytes.NewReader(plainCurrent)); err != nil {
+		t.Fatalf("WriteFile(plain current) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, spacedPath, bytes.NewReader(spacedCurrent)); err != nil {
+		t.Fatalf("WriteFile(spaced current) error: %v", err)
+	}
+
+	plainVersions, err := fs.versions.GetVersions(ctx, plainPath)
+	if err != nil {
+		t.Fatalf("GetVersions(plain) error: %v", err)
+	}
+	if len(plainVersions) != 1 || plainVersions[0].Hash != computeHash(plainOriginal) {
+		t.Fatalf("plain historical versions = %+v, want original hash only", plainVersions)
+	}
+	spacedVersions, err := fs.versions.GetVersions(ctx, spacedPath)
+	if err != nil {
+		t.Fatalf("GetVersions(spaced) error: %v", err)
+	}
+	if len(spacedVersions) != 1 || spacedVersions[0].Hash != computeHash(spacedOriginal) {
+		t.Fatalf("spaced historical versions = %+v, want original hash only", spacedVersions)
+	}
+
+	plainSize, _, plainHash, err := fs.versions.GetFileIndex(ctx, plainPath)
+	if err != nil {
+		t.Fatalf("GetFileIndex(plain) error: %v", err)
+	}
+	if plainSize != int64(len(plainCurrent)) || plainHash != computeHash(plainCurrent) {
+		t.Fatalf("plain file index = (%d, %q), want (%d, %q)", plainSize, plainHash, len(plainCurrent), computeHash(plainCurrent))
+	}
+	spacedSize, _, spacedHash, err := fs.versions.GetFileIndex(ctx, spacedPath)
+	if err != nil {
+		t.Fatalf("GetFileIndex(spaced) error: %v", err)
+	}
+	if spacedSize != int64(len(spacedCurrent)) || spacedHash != computeHash(spacedCurrent) {
+		t.Fatalf("spaced file index = (%d, %q), want (%d, %q)", spacedSize, spacedHash, len(spacedCurrent), computeHash(spacedCurrent))
+	}
+}
+
 func TestFileSystem_WriteFile_ReturnsErrNotDirWhenParentIsFile(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
