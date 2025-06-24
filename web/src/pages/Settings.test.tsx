@@ -815,6 +815,30 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('shows a restart-required warning when the backend reports save changes may need restart', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockUpdateSettings.mockResolvedValueOnce({
+        success: true,
+        message: 'settings updated, some changes may require restart',
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue('8080')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '设置已保存，部分变更需要重启后生效',
+          description: '部分配置项需要重启相关服务后才会生效。',
+          color: 'warning',
+        })
+      })
+    })
+
     it('preserves newer local edits when an older save resolves', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const firstSave = createDeferred<{ success: boolean; message: string }>()

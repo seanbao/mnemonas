@@ -115,6 +115,22 @@ function getVersionsActionErrorToast(
   }
 }
 
+function isMissingVersionError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404
+}
+
+function getMissingVersionToast(action: 'restore' | 'download'): {
+  title: string
+  description: string
+  color: 'warning'
+} {
+  return {
+    title: action === 'restore' ? '所选版本已不存在，已同步更新' : '所选版本已不存在',
+    description: '该版本或目标文件已被移除，请刷新版本历史后重试。',
+    color: 'warning',
+  }
+}
+
 function getVersionsActionSuccessToast(result: ActionResult): {
   title: string
   color: 'success' | 'warning'
@@ -321,7 +337,21 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
         onClose()
       }
     },
-    onError: (error: unknown) => {
+    onError: (error: unknown, variables) => {
+      if (isMissingVersionError(error)) {
+        queryClient.invalidateQueries({ queryKey: ['versions', variables.path] })
+        queryClient.invalidateQueries({ queryKey: ['files'] })
+        if (
+          restoreSessionRef.current === variables.sessionId
+          && currentSelectedPathRef.current === variables.path
+          && currentSelectedVersionRef.current?.hash === variables.hash
+        ) {
+          onClose()
+        }
+        addToast(getMissingVersionToast('restore'))
+        return
+      }
+
       addToast(getVersionsActionErrorToast(error, {
         unavailable: '恢复版本暂不可用',
         failure: '恢复版本失败',
@@ -385,6 +415,12 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, hasInvalidHo
 
   const handleDownload = (version: VersionInfo) => {
     void downloadFile(selectedPath!, { version: version.hash }).catch((error: unknown) => {
+      if (selectedPath && isMissingVersionError(error)) {
+        queryClient.invalidateQueries({ queryKey: ['versions', selectedPath] })
+        addToast(getMissingVersionToast('download'))
+        return
+      }
+
       addToast(getVersionsActionErrorToast(error, {
         unavailable: '下载版本暂不可用',
         failure: '下载版本失败',

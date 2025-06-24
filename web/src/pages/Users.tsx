@@ -37,7 +37,7 @@ import {
   RefreshCw,
   AlertCircle,
 } from 'lucide-react'
-import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, UsersError, type User } from '@/api/users'
+import { listUsers, createUser, deleteUser, resetUserPassword, toggleUserStatus, UsersError, type ListUsersResponse, type User } from '@/api/users'
 import { getStoredUser } from '@/api/auth'
 import { formatBytes, formatDate, cn } from '@/lib/utils'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -45,6 +45,34 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { StatCard } from '@/components/ui/StatCard'
 
 const usersUnavailableDescription = '用户配置当前不可用，请检查系统配置状态或稍后重试。'
+
+function isMissingUserError(error: unknown): boolean {
+  return error instanceof UsersError && (error.status === 404 || error.code === 'USER_NOT_FOUND')
+}
+
+function syncMissingUserInCache(queryClient: ReturnType<typeof useQueryClient>, userId: string): boolean {
+  let removed = false
+
+  queryClient.setQueryData<ListUsersResponse | undefined>(['users'], (current) => {
+    if (!current) {
+      return current
+    }
+
+    const users = current.users.filter((user) => user.id !== userId)
+    removed = users.length !== current.users.length
+    if (!removed) {
+      return current
+    }
+
+    return {
+      ...current,
+      users,
+      total: users.length,
+    }
+  })
+
+  return removed
+}
 
 function shallowEqualStringRecord<T extends Record<string, string>>(left: T, right: T): boolean {
   const leftKeys = Object.keys(left)
@@ -133,6 +161,41 @@ function getUsersRefreshErrorPresentation(error: unknown): {
     unavailable: '用户管理暂不可用',
     failure: '刷新失败',
   })
+}
+
+function getUsersActionSuccessToast(
+  action: 'create' | 'delete' | 'reset-password' | 'toggle-status',
+  options?: { warning?: boolean; disabled?: boolean }
+): {
+  title: string
+  description?: string
+  color: 'success' | 'warning'
+} {
+  const warningDescription = '操作已提交，但用户配置持久化存在告警，请检查系统状态。'
+
+  switch (action) {
+    case 'create':
+      return options?.warning
+        ? { title: '用户已创建，但持久化存在告警', description: warningDescription, color: 'warning' }
+        : { title: '用户创建成功', color: 'success' }
+    case 'delete':
+      return options?.warning
+        ? { title: '用户已删除，但持久化存在告警', description: warningDescription, color: 'warning' }
+        : { title: '用户已删除', color: 'success' }
+    case 'reset-password':
+      return options?.warning
+        ? { title: '密码已重置，但持久化存在告警', description: warningDescription, color: 'warning' }
+        : { title: '密码已重置', color: 'success' }
+    case 'toggle-status':
+      if (options?.warning) {
+        return {
+          title: options.disabled ? '用户已禁用，但持久化存在告警' : '用户已启用，但持久化存在告警',
+          description: warningDescription,
+          color: 'warning',
+        }
+      }
+      return { title: options?.disabled ? '用户已禁用' : '用户已启用', color: 'success' }
+  }
 }
 
 // Role badge component
@@ -314,7 +377,7 @@ export function UsersPage() {
       submittedDraft: typeof createDraftRef.current
       createSession: number
     }) => createUser(request),
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
       if (
         createSessionRef.current === variables.createSession
@@ -323,7 +386,7 @@ export function UsersPage() {
         onCreateClose()
         resetCreateForm()
       }
-      addToast({ title: '用户创建成功', color: 'success' })
+      addToast(getUsersActionSuccessToast('create', { warning: result.warning }))
     },
     onError: (error) => {
       addToast(getUsersActionErrorPresentation(error, {
@@ -335,13 +398,21 @@ export function UsersPage() {
 
   const deleteMutation = useMutation({
     mutationFn: deleteUser,
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
       onDeleteClose()
       setDeleteTarget(null)
-      addToast({ title: '用户已删除', color: 'success' })
+      addToast(getUsersActionSuccessToast('delete', { warning: result.warning }))
     },
-    onError: (error) => {
+    onError: (error, userId) => {
+      if (isMissingUserError(error)) {
+        syncMissingUserInCache(queryClient, userId)
+        onDeleteClose()
+        setDeleteTarget(null)
+        addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
+        return
+      }
+
       addToast(getUsersActionErrorPresentation(error, {
         unavailable: '删除用户暂不可用',
         failure: '删除失败',
@@ -352,14 +423,23 @@ export function UsersPage() {
   const resetPasswordMutation = useMutation({
     mutationFn: ({ userId, password }: { userId: string; password: string }) =>
       resetUserPassword(userId, { new_password: password }),
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
       onResetClose()
       setResetTarget(null)
       setResetPassword('')
-      addToast({ title: '密码已重置', color: 'success' })
+      addToast(getUsersActionSuccessToast('reset-password', { warning: result.warning }))
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (isMissingUserError(error)) {
+        syncMissingUserInCache(queryClient, variables.userId)
+        onResetClose()
+        setResetTarget(null)
+        setResetPassword('')
+        addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
+        return
+      }
+
       addToast(getUsersActionErrorPresentation(error, {
         unavailable: '重置密码暂不可用',
         failure: '重置失败',
@@ -370,11 +450,20 @@ export function UsersPage() {
   const toggleStatusMutation = useMutation({
     mutationFn: ({ userId, disabled }: { userId: string; disabled: boolean }) =>
       toggleUserStatus(userId, disabled),
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
-      addToast({ title: variables.disabled ? '用户已禁用' : '用户已启用', color: 'success' })
+      addToast(getUsersActionSuccessToast('toggle-status', {
+        warning: result.warning,
+        disabled: variables.disabled,
+      }))
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      if (isMissingUserError(error)) {
+        syncMissingUserInCache(queryClient, variables.userId)
+        addToast({ title: '用户已不存在，已同步更新', color: 'warning' })
+        return
+      }
+
       addToast(getUsersActionErrorPresentation(error, {
         unavailable: '状态更新暂不可用',
         failure: '状态更新失败',
