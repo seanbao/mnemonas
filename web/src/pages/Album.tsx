@@ -23,7 +23,8 @@ import { refreshAuthSession } from '@/api/auth'
 import { ApiError, listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
 import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
 import { useUser } from '@/stores/auth'
-import { formatBytes, formatDate, isImageFile, cn, normalizePath } from '@/lib/utils'
+import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
+import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 
@@ -565,25 +566,27 @@ export function AlbumPage() {
   const [thumbnailFailureScope, setThumbnailFailureScope] = useState<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   const user = useUser()
-  const rootPath = user && user.role !== 'admin' ? normalizePath(user.homeDir || '/') : '/'
+  const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
+  const scanRootPath = rootPath ?? '/'
   
   const { data, dataUpdatedAt, isLoading, error, refetch } = useQuery<AlbumQueryResult>({
-    queryKey: ['album-images', rootPath],
+    queryKey: ['album-images', scanRootPath],
     queryFn: async () => {
       // Cancel previous request if any
       abortControllerRef.current?.abort()
       abortControllerRef.current = new AbortController()
       const errorState = { hadPartialError: false }
-      const images = await fetchAllImages(rootPath, 0, abortControllerRef.current.signal, { count: 0 }, errorState)
+      const images = await fetchAllImages(scanRootPath, 0, abortControllerRef.current.signal, { count: 0 }, errorState)
       return {
         images,
         hadPartialError: errorState.hadPartialError,
       }
     },
+    enabled: !hasInvalidHomeDir,
     staleTime: 1000 * 60 * 5, // Cache for 5 minutes
   })
 
-  const albumScope = `${rootPath}:${dataUpdatedAt}`
+  const albumScope = `${scanRootPath}:${dataUpdatedAt}`
   const images = data?.images
   const hasThumbnailLoadFailures = thumbnailFailureScope === albumScope
   
@@ -622,6 +625,25 @@ export function AlbumPage() {
               />
             ))}
           </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (hasInvalidHomeDir) {
+    return (
+      <div className="h-full overflow-auto custom-scrollbar p-7">
+        <div className="space-y-6">
+          <PageHeader
+            title="相册"
+            subtitle="主目录配置无效"
+            icon={ImageIcon}
+          />
+          <EmptyState
+            icon={AlertCircle}
+            title={invalidHomeDirTitle}
+            description={getInvalidHomeDirDescription('加载相册')}
+          />
         </div>
       </div>
     )

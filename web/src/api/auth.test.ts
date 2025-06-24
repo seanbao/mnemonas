@@ -63,6 +63,31 @@ describe('auth API', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('rejects successful login responses with an invalid home directory', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          access_token: 'access-1',
+          refresh_token: 'refresh-1',
+          expires_at: '2026-03-13T00:00:00Z',
+          token_type: 'Bearer',
+          user: { id: 'u1', username: 'tester', role: 'user', home_dir: '   ' },
+        },
+      }),
+    })
+
+    await expect(login('tester', 'password')).rejects.toMatchObject({
+      message: '登录响应无效',
+      status: 200,
+    })
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
   it('rejects false-success login responses instead of storing fake session state', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -128,6 +153,33 @@ describe('auth API', () => {
         success: true,
         data: {
           user: { id: 'u1', username: 'admin', role: 'admin' },
+        },
+      }),
+    })
+
+    await expect(getCurrentUser()).resolves.toBeNull()
+    expect(localStorage.getItem('mnemonas_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
+  })
+
+  it('clears local auth state when current user payload contains an invalid home directory', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '/',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          user: { id: 'u1', username: 'admin', role: 'admin', home_dir: '../secret' },
         },
       }),
     })
@@ -355,6 +407,18 @@ describe('auth API', () => {
     }))
 
     expect(getStoredUser()).toMatchObject({ homeDir: '/legacy' })
+  })
+
+  it('clears stored user payloads with an invalid home directory', () => {
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '   ',
+    }))
+
+    expect(getStoredUser()).toBeNull()
+    expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
   it('clears corrupted stored user payloads', () => {

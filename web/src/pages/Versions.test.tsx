@@ -173,6 +173,21 @@ describe('VersionsPage', () => {
       expect(input).toHaveValue('/tester')
     })
 
+    it('shows an invalid-home error instead of querying versions for non-admin users without a home directory', async () => {
+      mockUseIsAdmin.mockReturnValue(false)
+      mockUseUser.mockReturnValue({ id: 'tester', username: 'tester', role: 'user', email: '', homeDir: '' })
+
+      render(<VersionsPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('主目录配置无效').length).toBeGreaterThan(0)
+        expect(screen.getByText('当前账户未配置有效的主目录，无法查看版本历史。请联系管理员修复账户 home_dir。')).toBeTruthy()
+      })
+
+      expect(mockGetVersions).not.toHaveBeenCalled()
+      expect(screen.queryByText('查询版本')).toBeNull()
+    })
+
     it('syncs the selected path when the URL query changes after mount', async () => {
       window.history.pushState({}, '', '/versions?path=/first.txt')
       render(<VersionsPage />)
