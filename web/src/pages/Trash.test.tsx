@@ -28,6 +28,8 @@ let mockBatchResult = {
   total: 1,
   succeededItems: ['item1'],
   failedItems: [] as string[],
+	warningCount: 0,
+	warningMessages: [] as string[],
 }
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: (options: { onComplete?: (result: typeof mockBatchResult) => void }) => ({
@@ -83,6 +85,8 @@ describe('TrashPage', () => {
       total: 1,
       succeededItems: ['item1'],
       failedItems: [],
+		warningCount: 0,
+		warningMessages: [],
     }
     mockListTrash.mockResolvedValue({
       items: [
@@ -384,7 +388,7 @@ describe('TrashPage', () => {
 
     it('restores item on restore button click', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockRestoreFromTrash.mockResolvedValue(undefined)
+		mockRestoreFromTrash.mockResolvedValue({ warning: false })
       
       render(<TrashPage />)
       
@@ -426,9 +430,32 @@ describe('TrashPage', () => {
       })
     })
 
+  it('shows warning toast when restore succeeds with a warning', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockRestoreFromTrash.mockResolvedValue({
+      warning: true,
+      message: 'file restored with metadata warning',
+    })
+
+    render(<TrashPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+    })
+
+    await user.click(screen.getByRole('button', { name: '恢复 deleted-file.txt' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'file restored with metadata warning',
+        color: 'warning',
+      })
+    })
+  })
+
     it('optimistically removes a restored selected item before trash refetch completes', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockRestoreFromTrash.mockResolvedValue(undefined)
+		mockRestoreFromTrash.mockResolvedValue({ warning: false })
       mockListTrash.mockReset()
       mockListTrash.mockResolvedValueOnce({
         items: [
@@ -498,7 +525,7 @@ describe('TrashPage', () => {
 
     it('deletes item on confirm', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      mockDeleteFromTrash.mockResolvedValue(undefined)
+		mockDeleteFromTrash.mockResolvedValue({ warning: false })
       
       render(<TrashPage />)
       
@@ -551,9 +578,38 @@ describe('TrashPage', () => {
       })
     })
 
+  it('shows warning toast when permanent delete succeeds with a warning', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    mockDeleteFromTrash.mockResolvedValue({
+      warning: true,
+      message: 'item permanently deleted with cleanup warning',
+    })
+
+    render(<TrashPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('deleted-file.txt')).toBeTruthy()
+    })
+
+    await user.click(screen.getByRole('button', { name: '永久删除 deleted-file.txt' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '永久删除' })).toBeTruthy()
+    })
+
+    await user.click(screen.getByRole('button', { name: '永久删除' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'item permanently deleted with cleanup warning',
+        color: 'warning',
+      })
+    })
+  })
+
     it('keeps the delete modal open when a pending permanent delete later fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const pendingDelete = createDeferred<void>()
+		const pendingDelete = createDeferred<{ warning: boolean }>()
       mockDeleteFromTrash.mockImplementationOnce(() => pendingDelete.promise)
 
       render(<TrashPage />)
@@ -600,7 +656,7 @@ describe('TrashPage', () => {
 
     it('keeps a newer delete modal open when an older delete request resolves', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
-      const pendingDelete = createDeferred<void>()
+		const pendingDelete = createDeferred<{ warning: boolean }>()
       mockDeleteFromTrash.mockImplementationOnce(() => pendingDelete.promise)
 
       render(<TrashPage />)
@@ -631,7 +687,7 @@ describe('TrashPage', () => {
       })
 
       await act(async () => {
-        pendingDelete.resolve(undefined)
+  		pendingDelete.resolve({ warning: false })
       })
 
       await waitFor(() => {

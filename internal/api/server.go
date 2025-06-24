@@ -166,7 +166,7 @@ func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) e
 	if s.favoritesStore != nil {
 		if err := s.favoritesStore.UpdatePathReferences(oldPath, newPath); err != nil {
 			if len(renamedShares) > 0 {
-				if rollbackErr := s.shareStore.RestoreShares(renamedShares); rollbackErr != nil {
+				if rollbackErr := s.shareStore.RestoreMovedSharesPreservingCurrent(renamedShares); rollbackErr != nil {
 					return errors.Join(
 						fmt.Errorf("sync favorite paths after rename: %w", err),
 						fmt.Errorf("rollback share paths after rename: %w", rollbackErr),
@@ -369,7 +369,7 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 		removedFavorites, err = s.favoritesStore.RemoveFavoritesUnderPathWithRestore(targetPath)
 		if err != nil {
 			if s.shareStore != nil {
-				if rollbackErr := s.shareStore.RestoreShares(disabledShares); rollbackErr != nil {
+				if rollbackErr := s.shareStore.RestoreDisabledSharesPreservingCurrent(disabledShares); rollbackErr != nil {
 					return nil, errors.Join(
 						fmt.Errorf("remove favorites after delete: %w", err),
 						fmt.Errorf("rollback shares after delete: %w", rollbackErr),
@@ -387,12 +387,12 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*stora
 	rollback := func() error {
 		var rollbackErr error
 		if len(removedFavorites) > 0 {
-			if err := s.favoritesStore.RestoreFavorites(removedFavorites); err != nil {
+			if err := s.favoritesStore.RestoreFavoritesIfMissing(removedFavorites); err != nil {
 				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore favorites after delete rollback: %w", err))
 			}
 		}
 		if len(disabledShares) > 0 {
-			if err := s.shareStore.RestoreShares(disabledShares); err != nil {
+			if err := s.shareStore.RestoreDisabledSharesPreservingCurrent(disabledShares); err != nil {
 				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore shares after delete rollback: %w", err))
 			}
 		}
@@ -442,10 +442,14 @@ func settingsStringSlice(values []string) []string {
 }
 
 const (
-	auditStatusHeaderName             = "X-Mnemonas-Audit-Status"
-	auditStatusFailedValue            = "failed"
-	auditWarningHeader                = `199 MnemoNAS "activity log persistence failed"`
-	trashRestoreMetadataWarningHeader = `199 MnemoNAS "trash restore metadata reconciliation failed"`
+	auditStatusHeaderName               = "X-Mnemonas-Audit-Status"
+	auditStatusFailedValue              = "failed"
+	auditWarningHeader                  = `199 MnemoNAS "activity log persistence failed"`
+	workspaceMutationWarningHeader      = `199 MnemoNAS "workspace mutation persistence incomplete"`
+	scrubResultPersistenceWarningHeader = `199 MnemoNAS "scrub result persistence incomplete"`
+	trashRestoreMetadataWarningHeader   = `199 MnemoNAS "trash restore metadata reconciliation failed"`
+	deleteCleanupWarningHeader          = `199 MnemoNAS "delete cleanup incomplete"`
+	trashDeleteCleanupWarningHeader     = `199 MnemoNAS "trash delete cleanup incomplete"`
 )
 
 func decodeJSONBodyWithLimit(r *http.Request, dst any, limit int64) error {
@@ -1637,6 +1641,18 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.Mkdir(r.Context(), dirPath); err != nil {
+		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+			markWorkspaceMutationWarningHeaders(w)
+			s.LogActivityWithWarning(w, r, activity.ActionCreate, dirPath, map[string]string{
+				"type":                "directory",
+				"persistence_warning": "true",
+			})
+			NewAPIResponse(map[string]any{
+				"path":    dirPath,
+				"warning": true,
+			}).WithMessage("directory created with persistence warning").Write(w, http.StatusCreated)
+			return
+		}
 		if errors.Is(err, storage.ErrNotDir) {
 			Conflict(w, "parent path is not a directory")
 			return
@@ -1681,6 +1697,39 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.Delete(r.Context(), filePath); err != nil {
+		deleteWarningDetails := map[string]string{}
+		hasWarning := false
+		message := ""
+		if errors.As(err, new(*storage.TrashDeleteWarningError)) {
+			markTrashDeleteCleanupWarningHeaders(w)
+			deleteWarningDetails["trash_cleanup_warning"] = "true"
+			hasWarning = true
+			message = "file deleted with trash cleanup warning"
+		}
+		if errors.As(err, new(*storage.DeleteCleanupWarningError)) {
+			markDeleteCleanupWarningHeaders(w)
+			deleteWarningDetails["cleanup_warning"] = "true"
+			hasWarning = true
+			if message == "" {
+				message = "file deleted with cleanup warning"
+			}
+		}
+		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+			markWorkspaceMutationWarningHeaders(w)
+			deleteWarningDetails["persistence_warning"] = "true"
+			hasWarning = true
+			if message == "" {
+				message = "file deleted with persistence warning"
+			}
+		}
+		if hasWarning {
+			s.LogActivityWithWarning(w, r, activity.ActionDelete, filePath, deleteWarningDetails)
+			NewAPIResponse(map[string]any{
+				"path":    filePath,
+				"warning": true,
+			}).WithMessage(message).Write(w, http.StatusOK)
+			return
+		}
 		if errors.Is(err, storage.ErrDirNotEmpty) {
 			Conflict(w, "directory not empty")
 			return
@@ -2013,6 +2062,19 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.copyResource(r.Context(), fromPath, toPath); err != nil {
+		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+			markWorkspaceMutationWarningHeaders(w)
+			s.LogActivityWithWarning(w, r, activity.ActionCopy, fromPath, map[string]string{
+				"to":                  toPath,
+				"persistence_warning": "true",
+			})
+			NewAPIResponse(map[string]any{
+				"from":    fromPath,
+				"to":      toPath,
+				"warning": true,
+			}).WithMessage("resource copied with persistence warning").Write(w, http.StatusCreated)
+			return
+		}
 		if isStorageConflict(err) {
 			if errors.Is(err, storage.ErrNotDir) {
 				Conflict(w, "parent path is not a directory")
@@ -2057,8 +2119,13 @@ func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) erro
 	}
 
 	if info.IsDir {
+		var copyWarning error
 		if err := s.fs.Mkdir(ctx, dstPath); err != nil {
-			return err
+			if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+				copyWarning = mergeCopyWarning(copyWarning, err)
+			} else {
+				return err
+			}
 		}
 
 		children, err := s.fs.ReadDir(ctx, srcPath)
@@ -2069,13 +2136,27 @@ func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) erro
 		for _, child := range children {
 			childName := path.Base(child.Path)
 			if err := s.copyResource(ctx, child.Path, path.Join(dstPath, childName)); err != nil {
+				if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+					copyWarning = mergeCopyWarning(copyWarning, err)
+					continue
+				}
 				return s.rollbackCopiedDirectory(dstPath, err)
 			}
 		}
-		return nil
+		return copyWarning
 	}
 
 	return s.fs.Copy(ctx, srcPath, dstPath)
+}
+
+func mergeCopyWarning(existing, err error) error {
+	if err == nil {
+		return existing
+	}
+	if existing == nil {
+		return err
+	}
+	return errors.Join(existing, err)
 }
 
 func (s *Server) rollbackCopiedDirectory(dstPath string, copyErr error) error {
@@ -2199,6 +2280,16 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.fs.RestoreVersion(r.Context(), filePath, hash); err != nil {
+		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+			markWorkspaceMutationWarningHeaders(w)
+			s.LogActivityWithWarning(w, r, activity.ActionRestore, filePath, map[string]string{"hash": hash, "persistence_warning": "true"})
+			NewAPIResponse(map[string]any{
+				"path":     filePath,
+				"restored": hash,
+				"warning":  true,
+			}).WithMessage("version restored with persistence warning").Write(w, http.StatusOK)
+			return
+		}
 		if errors.Is(err, versionstore.ErrUnavailable) {
 			ServiceUnavailable(w, "version storage unavailable")
 			return
@@ -2501,6 +2592,8 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	scrubPersistenceWarning := false
+
 	// Save completed result
 	if s.maintenance != nil && scrubRecord != nil {
 		scrubRecord.Status = "completed"
@@ -2513,12 +2606,12 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		scrubRecord.DurationMs = result.DurationMs
 		scrubRecord.Errors = maintErrors
 		if err := saveScrubResult(s.maintenance, scrubRecord); err != nil {
-			s.respondInternalError(w, "persist scrub result", err)
-			return
+			scrubPersistenceWarning = true
+			s.logger.Warn().Err(err).Msg("failed to persist completed scrub result")
 		}
 	}
 
-	NewAPIResponse(map[string]any{
+	response := map[string]any{
 		"total_objects":     result.TotalObjects,
 		"valid_objects":     result.ValidObjects,
 		"corrupted_objects": result.CorruptedObjects,
@@ -2526,7 +2619,14 @@ func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
 		"total_size":        result.TotalSize,
 		"duration_ms":       result.DurationMs,
 		"errors":            errors,
-	}).Write(w, http.StatusOK)
+	}
+	apiResponse := NewAPIResponse(response)
+	if scrubPersistenceWarning {
+		markScrubResultPersistenceWarningHeaders(w)
+		response["warning"] = true
+		apiResponse = apiResponse.WithMessage("scrub completed with persistence warning")
+	}
+	apiResponse.Write(w, http.StatusOK)
 }
 
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
@@ -3156,19 +3256,23 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	}
 
 	activityDetails := map[string]string(nil)
+	message := "file restored successfully"
+	responseData := map[string]any{
+		"id":       id,
+		"restored": true,
+	}
 	if err := s.restoreDeletedPathState(item.OriginalPath, activityPath, item.RestoreData); err != nil {
 		markTrashRestoreMetadataWarningHeaders(w)
 		s.logger.Warn().Err(err).Str("path", activityPath).Msg("failed to restore trash-linked metadata")
 		activityDetails = map[string]string{"metadata_restore": "failed"}
+		message = "file restored with metadata warning"
+		responseData["warning"] = true
 	}
 
 	// Log activity
 	s.LogActivityWithWarning(w, r, activity.ActionTrashRestore, activityPath, activityDetails)
 
-	NewAPIResponse(map[string]any{
-		"id":       id,
-		"restored": true,
-	}).WithMessage("file restored successfully").Write(w, http.StatusOK)
+	NewAPIResponse(responseData).WithMessage(message).Write(w, http.StatusOK)
 }
 
 func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
@@ -3199,6 +3303,17 @@ func (s *Server) handleDeleteFromTrash(w http.ResponseWriter, r *http.Request) {
 	activityPath := item.OriginalPath
 
 	if err := s.fs.DeleteFromTrash(r.Context(), id); err != nil {
+		var warningErr *storage.TrashDeleteWarningError
+		if errors.As(err, &warningErr) {
+			markTrashDeleteCleanupWarningHeaders(w)
+			s.LogActivityWithWarning(w, r, activity.ActionTrashDelete, activityPath, map[string]string{"cleanup_warning": "true"})
+			NewAPIResponse(map[string]any{
+				"id":      id,
+				"deleted": true,
+				"warning": true,
+			}).WithMessage("item permanently deleted with cleanup warning").Write(w, http.StatusOK)
+			return
+		}
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "delete from trash", err)
 			return
@@ -3235,12 +3350,22 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		}
 
 		deletedCount := 0
+		cleanupWarning := false
 		for _, item := range items {
 			if item == nil || !pathWithinBase(homeDir, item.OriginalPath) {
 				continue
 			}
 			if err := s.fs.DeleteFromTrash(r.Context(), item.ID); err != nil {
+				var warningErr *storage.TrashDeleteWarningError
+				if errors.As(err, &warningErr) {
+					deletedCount++
+					cleanupWarning = true
+					continue
+				}
 				if deletedCount > 0 {
+					if cleanupWarning {
+						markTrashDeleteCleanupWarningHeaders(w)
+					}
 					s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
 						"count":   strconv.Itoa(deletedCount),
 						"partial": "true",
@@ -3257,16 +3382,39 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 			deletedCount++
 		}
 
-		s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{"count": strconv.Itoa(deletedCount)})
-		NewAPIResponse(map[string]any{
+		details := map[string]string{"count": strconv.Itoa(deletedCount)}
+		response := map[string]any{
 			"deleted_count": deletedCount,
 			"partial":       false,
-		}).WithMessage("trash emptied successfully").Write(w, http.StatusOK)
+		}
+		message := "trash emptied successfully"
+		if cleanupWarning {
+			markTrashDeleteCleanupWarningHeaders(w)
+			details["cleanup_warning"] = "true"
+			response["warning"] = true
+			message = "trash emptied with cleanup warning"
+		}
+		s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", details)
+		NewAPIResponse(response).WithMessage(message).Write(w, http.StatusOK)
 		return
 	}
 
 	count, err := s.fs.EmptyTrash(r.Context())
 	if err != nil {
+		var warningErr *storage.TrashDeleteWarningError
+		if errors.As(err, &warningErr) {
+			markTrashDeleteCleanupWarningHeaders(w)
+			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
+				"count":           strconv.Itoa(count),
+				"cleanup_warning": "true",
+			})
+			NewAPIResponse(map[string]any{
+				"deleted_count": count,
+				"partial":       false,
+				"warning":       true,
+			}).WithMessage("trash emptied with cleanup warning").Write(w, http.StatusOK)
+			return
+		}
 		if count > 0 {
 			s.LogActivityWithWarning(w, r, activity.ActionTrashEmpty, "", map[string]string{
 				"count":   strconv.Itoa(count),
@@ -3646,6 +3794,58 @@ func markTrashRestoreMetadataWarningHeaders(w http.ResponseWriter) {
 		}
 	}
 	headers.Add("Warning", trashRestoreMetadataWarningHeader)
+}
+
+func markScrubResultPersistenceWarningHeaders(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == scrubResultPersistenceWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", scrubResultPersistenceWarningHeader)
+}
+
+func markWorkspaceMutationWarningHeaders(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == workspaceMutationWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", workspaceMutationWarningHeader)
+}
+
+func markTrashDeleteCleanupWarningHeaders(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == trashDeleteCleanupWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", trashDeleteCleanupWarningHeader)
+}
+
+func markDeleteCleanupWarningHeaders(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == deleteCleanupWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", deleteCleanupWarningHeader)
 }
 
 // handleLoginWithActivity wraps auth login to log activity

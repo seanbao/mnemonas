@@ -1410,6 +1410,66 @@ func TestShareStore_DisableSharesUnderPathWithRestore_RestoresDisabledShares(t *
 	}
 }
 
+func TestShareStore_RestoreDisabledSharesPreservingCurrent_PreservesNewerMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	createdShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1", Description: "original"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	disabled, err := store.DisableSharesUnderPathWithRestore("/docs/a.txt")
+	if err != nil {
+		t.Fatalf("DisableSharesUnderPathWithRestore() error: %v", err)
+	}
+	if len(disabled) != 1 {
+		t.Fatalf("expected one disabled share in restore state, got %d", len(disabled))
+	}
+
+	if err := store.Update(createdShare.ID, func(updated *Share) error {
+		updated.Description = "newer"
+		return nil
+	}); err != nil {
+		t.Fatalf("Update() error: %v", err)
+	}
+
+	if err := store.RestoreDisabledSharesPreservingCurrent(disabled); err != nil {
+		t.Fatalf("RestoreDisabledSharesPreservingCurrent() error: %v", err)
+	}
+
+	restoredShare, err := store.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if !restoredShare.Enabled {
+		t.Fatal("expected share to be re-enabled after rollback restore")
+	}
+	if restoredShare.Description != "newer" {
+		t.Fatalf("expected newer description to be preserved, got %q", restoredShare.Description)
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloaded.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if !reloadedShare.Enabled {
+		t.Fatal("expected persisted share to stay enabled after reload")
+	}
+	if reloadedShare.Description != "newer" {
+		t.Fatalf("expected persisted newer description to be preserved, got %q", reloadedShare.Description)
+	}
+}
+
 func TestShareStore_RestoreShares_RewritesPathsFromRestoreState(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1459,6 +1519,66 @@ func TestShareStore_RestoreShares_RewritesPathsFromRestoreState(t *testing.T) {
 	}
 	if reloadedShare.Path != "/restored/a.txt" {
 		t.Fatalf("expected reloaded share path %q, got %q", "/restored/a.txt", reloadedShare.Path)
+	}
+}
+
+func TestShareStore_RestoreMovedSharesPreservingCurrent_PreservesNewerMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	createdShare, err := store.Create(CreateShareOptions{Path: "/docs/a.txt", Type: ShareTypeFile, CreatedBy: "user1", Description: "original"})
+	if err != nil {
+		t.Fatalf("failed to create file share: %v", err)
+	}
+
+	originalShares, err := store.UpdatePathReferencesWithRestore("/docs/a.txt", "/archive/a.txt")
+	if err != nil {
+		t.Fatalf("UpdatePathReferencesWithRestore() error: %v", err)
+	}
+	if len(originalShares) != 1 {
+		t.Fatalf("expected one moved share in restore state, got %d", len(originalShares))
+	}
+
+	if err := store.Update(createdShare.ID, func(updated *Share) error {
+		updated.Description = "newer"
+		return nil
+	}); err != nil {
+		t.Fatalf("Update() error: %v", err)
+	}
+
+	if err := store.RestoreMovedSharesPreservingCurrent(originalShares); err != nil {
+		t.Fatalf("RestoreMovedSharesPreservingCurrent() error: %v", err)
+	}
+
+	restoredShare, err := store.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(restoredShare) error: %v", err)
+	}
+	if restoredShare.Path != "/docs/a.txt" {
+		t.Fatalf("expected restored share path %q, got %q", "/docs/a.txt", restoredShare.Path)
+	}
+	if restoredShare.Description != "newer" {
+		t.Fatalf("expected newer description to be preserved, got %q", restoredShare.Description)
+	}
+
+	reloaded, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("NewShareStore(reload) error: %v", err)
+	}
+	reloadedShare, err := reloaded.Get(createdShare.ID)
+	if err != nil {
+		t.Fatalf("Get(reloadedShare) error: %v", err)
+	}
+	if reloadedShare.Path != "/docs/a.txt" {
+		t.Fatalf("expected persisted share path %q, got %q", "/docs/a.txt", reloadedShare.Path)
+	}
+	if reloadedShare.Description != "newer" {
+		t.Fatalf("expected persisted newer description to be preserved, got %q", reloadedShare.Description)
 	}
 }
 
