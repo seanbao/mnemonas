@@ -115,6 +115,34 @@ func TestFlatLayout(t *testing.T) {
 	})
 }
 
+func TestEnsureCASDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "ab", "cd", "ef")
+
+	originalSyncDir := syncDir
+	var synced []string
+	syncDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncDir = originalSyncDir
+	}()
+
+	if err := ensureCASDir(targetDir, 0755); err != nil {
+		t.Fatalf("ensureCASDir() error: %v", err)
+	}
+
+	want := []string{
+		filepath.Join(tmpDir, "ab", "cd"),
+		filepath.Join(tmpDir, "ab"),
+		tmpDir,
+	}
+	if strings.Join(synced, "|") != strings.Join(want, "|") {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+}
+
 func TestStore_PutGetDelete(t *testing.T) {
 	// Create temp directory
 	tmpDir := t.TempDir()

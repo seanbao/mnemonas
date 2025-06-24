@@ -906,6 +906,57 @@ func TestUpdateShare_ReturnsUpdatedShare(t *testing.T) {
 	}
 }
 
+func TestUpdateShare_ReturnsForbiddenForDifferentNonAdminUser(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:        "/docs/report.pdf",
+		Type:        ShareTypeFile,
+		CreatedBy:   "owner",
+		Description: "before",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	body := []byte(`{"enabled":false,"description":"after"}`)
+	req := newRouteRequest(http.MethodPut, "/api/v1/shares/"+share.ID, share.ID, body)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "other", Role: auth.RoleUser}))
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateShare(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != "FORBIDDEN" {
+		t.Fatalf("expected FORBIDDEN, got %+v", payload.Error)
+	}
+
+	reloaded, err := store.Get(share.ID)
+	if err != nil {
+		t.Fatalf("failed to reload share: %v", err)
+	}
+	if !reloaded.Enabled {
+		t.Fatal("expected share to remain enabled after forbidden update")
+	}
+	if reloaded.Description != "before" {
+		t.Fatalf("expected description to remain unchanged, got %q", reloaded.Description)
+	}
+}
+
 func TestUpdateShare_ReturnsNotFoundWhenShareDeletedAfterAuthorization(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
@@ -1004,6 +1055,48 @@ func TestDeleteShare_ReturnsNotFoundWhenShareDeletedAfterAuthorization(t *testin
 	}
 	if payload.Error == nil || payload.Error.Code != "SHARE_NOT_FOUND" {
 		t.Fatalf("expected SHARE_NOT_FOUND, got %+v", payload.Error)
+	}
+}
+
+func TestDeleteShare_ReturnsForbiddenForDifferentNonAdminUser(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "shares.json")
+
+	store, err := NewShareStore(storePath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	share, err := store.Create(CreateShareOptions{
+		Path:      "/docs/report.pdf",
+		Type:      ShareTypeFile,
+		CreatedBy: "owner",
+	})
+	if err != nil {
+		t.Fatalf("failed to create share: %v", err)
+	}
+
+	handler := NewHandler(store, &fakeShareFS{})
+	req := newRouteRequest(http.MethodDelete, "/api/v1/shares/"+share.ID, share.ID, nil)
+	req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "other", Role: auth.RoleUser}))
+	recorder := httptest.NewRecorder()
+
+	handler.DeleteShare(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d", recorder.Code)
+	}
+
+	var payload responseEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != "FORBIDDEN" {
+		t.Fatalf("expected FORBIDDEN, got %+v", payload.Error)
+	}
+
+	if _, err := store.Get(share.ID); err != nil {
+		t.Fatalf("expected share to remain after forbidden delete, got %v", err)
 	}
 }
 

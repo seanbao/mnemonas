@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -189,6 +190,30 @@ func TestWriteTLSFile_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filePath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected no TLS file to be created, got %v", statErr)
+	}
+}
+
+func TestEnsureTLSDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	nestedDir := filepath.Join(tmpDir, "nested", "tls")
+
+	originalSyncTLSDir := syncTLSDir
+	var synced []string
+	syncTLSDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncTLSDir = originalSyncTLSDir
+	}()
+
+	if err := ensureTLSDir(nestedDir, 0755, "certificate file"); err != nil {
+		t.Fatalf("ensureTLSDir() error: %v", err)
+	}
+
+	expected := []string{filepath.Join(tmpDir, "nested"), tmpDir}
+	if !reflect.DeepEqual(synced, expected) {
+		t.Fatalf("syncTLSDir() order = %#v, want %#v", synced, expected)
 	}
 }
 

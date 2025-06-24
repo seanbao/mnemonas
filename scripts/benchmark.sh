@@ -2,15 +2,144 @@
 # Performance benchmark script for MnemoNAS WebDAV
 # Tests PROPFIND response time with varying directory sizes
 
-set -e
+set -euo pipefail
 
 BASE_URL="${1:-http://localhost:8080}"
 DAV_URL="$BASE_URL/dav"
-TEST_DIR="$HOME/.mnemonas/metadata/benchmark-test"
+STORAGE_ROOT="${MNEMONAS_STORAGE_ROOT:-$HOME/.mnemonas}"
+TEST_DIR="$STORAGE_ROOT/files/benchmark-test"
+CONFIG_FILE="${CONFIG_FILE:-$STORAGE_ROOT/config.toml}"
+SECRETS_FILE="${SECRETS_FILE:-$STORAGE_ROOT/secrets.json}"
+INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
+INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
+WEBDAV_AUTH_ARGS=()
+ADMIN_ACCESS_TOKEN="${MNEMONAS_ACCESS_TOKEN:-}"
+
+read_config_value() {
+    local section=$1
+    local key=$2
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        return 0
+    fi
+
+    awk -v section="[$section]" -v key="$key" '
+        $0 == section { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            line = $0
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^"/, "", line)
+            gsub(/"$/, "", line)
+            print line
+            exit
+        }
+    ' "$CONFIG_FILE"
+}
+
+read_secret_value() {
+    local key=$1
+
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        return 0
+    fi
+
+    grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$SECRETS_FILE" | sed 's/.*: *"//' | sed 's/"$//' || true
+}
+
+configure_webdav_auth() {
+    local auth_type="${MNEMONAS_WEBDAV_AUTH_TYPE:-$(read_config_value webdav auth_type)}"
+    local username="${MNEMONAS_WEBDAV_USERNAME:-$(read_config_value webdav username)}"
+    local password="${MNEMONAS_WEBDAV_PASSWORD:-$(read_config_value webdav password)}"
+
+    if [[ -z "$auth_type" ]] && [[ -n "$username$password" ]]; then
+        auth_type="basic"
+    fi
+    if [[ "$auth_type" != "basic" ]]; then
+        return 0
+    fi
+
+    if [[ -z "$username" ]]; then
+        username="admin"
+    fi
+    if [[ -z "$password" ]]; then
+        password=$(read_secret_value webdav_password)
+    fi
+    if [[ -z "$password" ]]; then
+        echo "WebDAV basic auth is enabled but no password was found; set MNEMONAS_WEBDAV_PASSWORD or update $CONFIG_FILE" >&2
+        return 0
+    fi
+
+    WEBDAV_AUTH_ARGS=(-u "$username:$password")
+}
+
+configure_admin_auth() {
+    local auth_enabled="${MNEMONAS_AUTH_ENABLED:-$(read_config_value auth enabled)}"
+
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]] || [[ "$auth_enabled" != "true" ]] || [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
+        return 0
+    fi
+
+    local password
+    password=$(grep '^Password:' "$INITIAL_PASSWORD_FILE" | awk '{print $2}' || true)
+    if [[ -z "$password" ]]; then
+        return 0
+    fi
+
+    local resp
+    resp=$(command curl -sf -X POST "$BASE_URL/api/v1/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null || echo "")
+    if echo "$resp" | grep -q '"success":true'; then
+        ADMIN_ACCESS_TOKEN=$(echo "$resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+    fi
+}
+
+webdav_curl() {
+    if [[ ${#WEBDAV_AUTH_ARGS[@]} -gt 0 ]]; then
+        command curl "${WEBDAV_AUTH_ARGS[@]}" "$@"
+        return
+    fi
+    command curl "$@"
+}
+
+metrics_curl() {
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"
+        return
+    fi
+    command curl "$@"
+}
+
+cleanup() {
+    rm -rf "$TEST_DIR"
+}
+
+trap cleanup EXIT
+
+run_propfind() {
+    local path=$1
+    local depth=$2
+    local status
+
+    if ! status=$(webdav_curl -sS -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: $depth" "$DAV_URL$path"); then
+        echo "PROPFIND $path failed to reach $DAV_URL$path" >&2
+        return 1
+    fi
+    if [ "$status" != "207" ]; then
+        echo "PROPFIND $path returned unexpected HTTP status: $status" >&2
+        return 1
+    fi
+}
 
 echo "=== MnemoNAS WebDAV Performance Benchmark ==="
 echo "Base URL: $BASE_URL"
+echo "Storage Root: $STORAGE_ROOT"
 echo ""
+
+configure_webdav_auth
+configure_admin_auth
 
 # Function to create test files
 create_test_files() {
@@ -21,10 +150,7 @@ create_test_files() {
     mkdir -p "$dir"
     
     for i in $(seq 1 $count); do
-        # Create minimal metadata files
-        cat > "$dir/file-$(printf '%05d' $i).json" << EOF
-{"name":"file-$(printf '%05d' $i).txt","isDir":false,"size":1024,"modTime":"$(date -Iseconds)","contentHash":"test$i"}
-EOF
+        printf 'benchmark file %05d\n' "$i" > "$dir/file-$(printf '%05d' $i).txt"
     done
 }
 
@@ -37,13 +163,13 @@ benchmark_propfind() {
     echo -n "PROPFIND $desc (Depth: $depth): "
     
     # Warm up cache
-    curl -s -X PROPFIND -H "Depth: $depth" "$DAV_URL$path" > /dev/null 2>&1 || true
+    run_propfind "$path" "$depth"
     
     # Measure time (3 runs, take average)
     local total=0
     for i in 1 2 3; do
         local start=$(date +%s%N)
-        curl -s -X PROPFIND -H "Depth: $depth" "$DAV_URL$path" > /dev/null 2>&1 || true
+        run_propfind "$path" "$depth"
         local end=$(date +%s%N)
         local duration=$(( (end - start) / 1000000 ))
         total=$((total + duration))
@@ -61,7 +187,7 @@ benchmark_get() {
     echo -n "GET $desc: "
     
     local start=$(date +%s%N)
-    curl -s "$DAV_URL$path" > /dev/null 2>&1 || true
+    webdav_curl -s "$DAV_URL$path" > /dev/null 2>&1 || true
     local end=$(date +%s%N)
     local duration=$(( (end - start) / 1000000 ))
     
@@ -69,7 +195,7 @@ benchmark_get() {
 }
 
 # Clean up old test data
-rm -rf "$TEST_DIR"
+cleanup
 mkdir -p "$TEST_DIR"
 
 echo "--- Creating test directories ---"
@@ -99,20 +225,23 @@ echo "--- Cache Effect Test ---"
 echo "Testing cache effect on 1000-file directory..."
 echo -n "First request (cold): "
 start=$(date +%s%N)
-curl -s -X PROPFIND -H "Depth: 1" "$DAV_URL/benchmark-test/dir-1000" > /dev/null 2>&1 || true
+run_propfind "/benchmark-test/dir-1000" "1"
 end=$(date +%s%N)
 echo "$(( (end - start) / 1000000 ))ms"
 
 # Second request (cache hit)
 echo -n "Second request (cached): "
 start=$(date +%s%N)
-curl -s -X PROPFIND -H "Depth: 1" "$DAV_URL/benchmark-test/dir-1000" > /dev/null 2>&1 || true
+run_propfind "/benchmark-test/dir-1000" "1"
 end=$(date +%s%N)
 echo "$(( (end - start) / 1000000 ))ms"
 
 echo ""
 echo "--- API Metrics ---"
-curl -s "$BASE_URL/api/v1/metrics" | python3 -c "
+if [[ "${MNEMONAS_AUTH_ENABLED:-$(read_config_value auth enabled)}" == "true" ]] && [[ -z "$ADMIN_ACCESS_TOKEN" ]]; then
+    echo "(metrics request skipped: no admin token available; set MNEMONAS_ACCESS_TOKEN if bootstrap login is unavailable)"
+elif metrics_json=$(metrics_curl -fsS "$BASE_URL/api/v1/metrics"); then
+    printf '%s' "$metrics_json" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)['data']
 print(f\"Total requests: {data['requests']['total']}\")
@@ -120,10 +249,13 @@ print(f\"Avg latency: {data['latency']['avg_ms']:.2f}ms\")
 print(f\"Max latency: {data['latency']['max_ms']:.2f}ms\")
 print(f\"Error rate: {data['requests']['error_rate']*100:.2f}%\")
 " 2>/dev/null || echo "(metrics parsing failed)"
+else
+    echo "(metrics request failed)"
+fi
 
 echo ""
 echo "--- Cleanup ---"
-rm -rf "$TEST_DIR"
+cleanup
 echo "Test files removed."
 
 echo ""

@@ -354,6 +354,98 @@ cooldown_period = "6h"
 	}
 }
 
+func TestLoad_ExpandsHomeDirectoryInStorageRootAndDerivedPaths(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	content := []byte(`
+[storage]
+root = "~/.mnemonas-custom"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	wantRoot := filepath.Join(homeDir, ".mnemonas-custom")
+	wantInternal := filepath.Join(wantRoot, ".mnemonas")
+	if cfg.Storage.Root != wantRoot {
+		t.Fatalf("storage root = %q, want %q", cfg.Storage.Root, wantRoot)
+	}
+	if cfg.Server.TLS.CertDir != filepath.Join(wantInternal, "certs") {
+		t.Fatalf("cert dir = %q, want %q", cfg.Server.TLS.CertDir, filepath.Join(wantInternal, "certs"))
+	}
+	if cfg.Auth.UsersFile != filepath.Join(wantInternal, "users.json") {
+		t.Fatalf("users file = %q, want %q", cfg.Auth.UsersFile, filepath.Join(wantInternal, "users.json"))
+	}
+	if cfg.Share.StoreFile != filepath.Join(wantInternal, "shares.json") {
+		t.Fatalf("share store = %q, want %q", cfg.Share.StoreFile, filepath.Join(wantInternal, "shares.json"))
+	}
+	if cfg.Favorites.StoreFile != filepath.Join(wantInternal, "favorites.json") {
+		t.Fatalf("favorites store = %q, want %q", cfg.Favorites.StoreFile, filepath.Join(wantInternal, "favorites.json"))
+	}
+}
+
+func TestLoad_ExpandsExplicitHomeRelativePaths(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	content := []byte(`
+[server.tls]
+cert_dir = "~/tls"
+cert_file = "~/tls/server.crt"
+key_file = "~/tls/server.key"
+
+[auth]
+users_file = "~/data/users.json"
+
+[share]
+store_file = "~/data/shares.json"
+
+[favorites]
+store_file = "~/data/favorites.json"
+
+[log]
+output = "~/logs/mnemonas.log"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Server.TLS.CertDir != filepath.Join(homeDir, "tls") {
+		t.Fatalf("cert dir = %q, want %q", cfg.Server.TLS.CertDir, filepath.Join(homeDir, "tls"))
+	}
+	if cfg.Server.TLS.CertFile != filepath.Join(homeDir, "tls", "server.crt") {
+		t.Fatalf("cert file = %q, want %q", cfg.Server.TLS.CertFile, filepath.Join(homeDir, "tls", "server.crt"))
+	}
+	if cfg.Server.TLS.KeyFile != filepath.Join(homeDir, "tls", "server.key") {
+		t.Fatalf("key file = %q, want %q", cfg.Server.TLS.KeyFile, filepath.Join(homeDir, "tls", "server.key"))
+	}
+	if cfg.Auth.UsersFile != filepath.Join(homeDir, "data", "users.json") {
+		t.Fatalf("users file = %q, want %q", cfg.Auth.UsersFile, filepath.Join(homeDir, "data", "users.json"))
+	}
+	if cfg.Share.StoreFile != filepath.Join(homeDir, "data", "shares.json") {
+		t.Fatalf("share store = %q, want %q", cfg.Share.StoreFile, filepath.Join(homeDir, "data", "shares.json"))
+	}
+	if cfg.Favorites.StoreFile != filepath.Join(homeDir, "data", "favorites.json") {
+		t.Fatalf("favorites store = %q, want %q", cfg.Favorites.StoreFile, filepath.Join(homeDir, "data", "favorites.json"))
+	}
+	if cfg.Log.Output != filepath.Join(homeDir, "logs", "mnemonas.log") {
+		t.Fatalf("log output = %q, want %q", cfg.Log.Output, filepath.Join(homeDir, "logs", "mnemonas.log"))
+	}
+}
+
 func TestLoad_ExampleConfig(t *testing.T) {
 	configPath := filepath.Join("..", "..", "mnemonas.example.toml")
 

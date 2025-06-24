@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -89,6 +90,7 @@ var (
 	ErrInvalidUsername     = errors.New("invalid username")
 	ErrPasswordTooShort    = errors.New("password must be at least 8 characters")
 	ErrLastAdmin           = errors.New("cannot delete last admin user")
+	errInvalidUserHomeDir  = errors.New("invalid home_dir")
 	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
 	errPasswordFileSymlink = errors.New("initial password file path must not be a symlink")
 )
@@ -158,8 +160,13 @@ func (s *UserStore) load() error {
 		if existing, exists := loadedByName[normalizedUsername]; exists {
 			return fmt.Errorf("users file contains duplicate username %q conflicting with %q", u.Username, existing.Username)
 		}
+		homeDir, err := normalizeHomeDir(u.HomeDir)
+		if err != nil {
+			return fmt.Errorf("users file contains invalid home_dir for user %q: %w", u.Username, err)
+		}
 
 		loaded := cloneUser(u)
+		loaded.HomeDir = homeDir
 		loadedUsers[loaded.ID] = loaded
 		loadedByName[normalizedUsername] = loaded
 	}
@@ -396,7 +403,7 @@ func collectMissingAuthDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedAuthDirs(createdDirs []string, label string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncAuthFileDir(filepath.Dir(createdDirs[i])); err != nil {
 			return fmt.Errorf("failed to sync %s directory tree: %w", label, err)
 		}
@@ -876,6 +883,23 @@ func normalizeNewUsername(username string) (string, error) {
 		return "", ErrInvalidUsername
 	}
 	return trimmed, nil
+}
+
+func normalizeHomeDir(homeDir string) (string, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(homeDir), "\\", "/")
+	if normalized == "" {
+		return "", errInvalidUserHomeDir
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return "", errInvalidUserHomeDir
+		}
+	}
+	cleaned := path.Clean("/" + normalized)
+	if cleaned != "/" && !strings.HasPrefix(cleaned, "/") {
+		return "", errInvalidUserHomeDir
+	}
+	return cleaned, nil
 }
 
 func normalizeUsername(username string) string {

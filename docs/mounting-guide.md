@@ -8,10 +8,10 @@ MnemoNAS 通过 WebDAV 协议提供文件访问。本文档介绍如何在各平
 |------|-----|
 | **协议** | WebDAV (HTTP) |
 | **地址** | `http://<服务器IP>:8080/dav` |
-| **用户名** | 按配置，默认无需认证 |
-| **密码** | 按配置，默认无需认证 |
+| **用户名** | 按配置；默认启用 Basic Auth，留空时使用 `admin` |
+| **密码** | 按配置；默认可使用自定义密码或首次启动生成的 WebDAV 密码 |
 
-> ⚠️ 生产环境建议启用认证，参见 [配置说明](../mnemonas.example.toml)
+> 默认配置已启用 WebDAV Basic Auth。可通过启动日志、`secrets.json` 或管理接口查看当前凭据，参见 [配置说明](configuration.md)。
 
 ---
 
@@ -137,8 +137,8 @@ rclone config
 # Storage> webdav
 # url> http://localhost:8080/dav
 # vendor> other
-# user> (留空或输入用户名)
-# pass> (留空或输入密码)
+# user> admin（或当前配置的 WebDAV 用户名）
+# pass> 输入当前 WebDAV 密码
 
 # 挂载
 rclone mount mnemonas: /mnt/nas --vfs-cache-mode full

@@ -331,7 +331,7 @@ func collectMissingActivityDirs(dir string) ([]string, error) {
 }
 
 func syncCreatedActivityDirs(createdDirs []string) error {
-	for i := len(createdDirs) - 1; i >= 0; i-- {
+	for i := 0; i < len(createdDirs); i++ {
 		if err := syncActivityLogDir(filepath.Dir(createdDirs[i])); err != nil {
 			return fmt.Errorf("failed to sync activity directory tree: %w", err)
 		}

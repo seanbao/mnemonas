@@ -37,6 +37,8 @@ cp mnemonas.example.toml ~/.mnemonas/config.toml
 
 - `password` - WebDAV 认证密码
 
+如修改 `[storage].root`，需额外挂载该容器内路径；否则数据会写入容器临时层。例如设置 `root = "/data-root"` 时，需要在 `docker-compose.yml` 中增加 `- ~/.mnemonas-data:/data-root`。
+
 ### 3. 启动服务
 
 ```bash
@@ -311,8 +313,8 @@ curl http://localhost:8080/health
 
 MnemoNAS 提供 `/api/v1/metrics` JSON 指标端点。
 
-- 当 `auth.enabled = false` 时，可直接由 Prometheus 抓取。
-- 当 `auth.enabled = true` 时，需要在反向代理或抓取配置中附带有效认证信息。
+- Prometheus 原生抓取器不能直接解析该 JSON 响应；接入时需使用 `json_exporter`、自定义 exporter，或先由中间层转换为 Prometheus exposition format。
+- 当 `auth.enabled = true` 时，转换层或抓取代理还需要附带有效认证信息。
 
 ---
 
@@ -365,9 +367,10 @@ docker compose up -d
 # 查看详细日志
 docker compose logs mnemonas
 
-# 检查配置文件语法（启动时校验，报错会直接退出）
-docker run --rm -v ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro \
-  ghcr.io/seanbao/mnemonas:latest --config /root/.mnemonas/config.toml
+# 检查配置文件语法与基础字段校验（无副作用，不会启动 dataplane）
+docker run --rm --entrypoint /app/nasd \
+  -v ~/.mnemonas/config.toml:/root/.mnemonas/config.toml:ro \
+  ghcr.io/seanbao/mnemonas:latest --check-config --config /root/.mnemonas/config.toml
 ```
 
 ### 权限问题

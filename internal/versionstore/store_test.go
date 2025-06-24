@@ -124,6 +124,34 @@ func TestNew_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestEnsureVersionStoreDir_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "nested", "db", "store")
+
+	originalSyncVersionStoreDir := syncVersionStoreDir
+	var synced []string
+	syncVersionStoreDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncVersionStoreDir = originalSyncVersionStoreDir
+	}()
+
+	if err := ensureVersionStoreDir(targetDir, 0700); err != nil {
+		t.Fatalf("ensureVersionStoreDir() error: %v", err)
+	}
+
+	want := []string{
+		filepath.Join(tmpDir, "nested", "db"),
+		filepath.Join(tmpDir, "nested"),
+		tmpDir,
+	}
+	if strings.Join(synced, "|") != strings.Join(want, "|") {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+}
+
 func TestStore_AddVersion(t *testing.T) {
 	s := setupStore(t)
 	ctx := context.Background()

@@ -20,6 +20,12 @@ NC='\033[0m' # No Color
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 WEBDAV_URL="${BASE_URL}/dav"
 API_URL="${BASE_URL}/api/v1"
+STORAGE_ROOT="${STORAGE_ROOT:-$HOME/.mnemonas}"
+INTERNAL_DIR="${INTERNAL_DIR:-$STORAGE_ROOT/.mnemonas}"
+CONFIG_FILE="${CONFIG_FILE:-$STORAGE_ROOT/config.toml}"
+SECRETS_FILE="${SECRETS_FILE:-$STORAGE_ROOT/secrets.json}"
+INITIAL_PASSWORD_FILE="${INITIAL_PASSWORD_FILE:-$INTERNAL_DIR/initial-password.txt}"
+USERS_FILE="${USERS_FILE:-$INTERNAL_DIR/users.json}"
 TEST_DIR="/tmp/mnemonas-e2e-$$"
 QUICK_MODE=false
 
@@ -36,12 +42,121 @@ done
 PASSED=0
 FAILED=0
 SKIPPED=0
+ADMIN_ACCESS_TOKEN=""
+ADMIN_REFRESH_TOKEN=""
+ADMIN_API_BODY=""
+ADMIN_API_STATUS=""
+WEBDAV_AUTH_ARGS=()
 
 # Utility functions
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED++)); }
 log_fail()  { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED++)); }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_skip()  { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED++)); }
+
+read_config_value() {
+    local section=$1
+    local key=$2
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        return 0
+    fi
+
+    awk -v section="[$section]" -v key="$key" '
+        $0 == section { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            line = $0
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/^"/, "", line)
+            gsub(/"$/, "", line)
+            print line
+            exit
+        }
+    ' "$CONFIG_FILE"
+}
+
+read_secret_value() {
+    local key=$1
+
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        return 0
+    fi
+
+    grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$SECRETS_FILE" | sed 's/.*: *"//' | sed 's/"$//' || true
+}
+
+configure_webdav_auth() {
+    local auth_type=$(read_config_value webdav auth_type)
+    local username
+    local password
+
+    if [[ -z "$auth_type" ]]; then
+        auth_type="basic"
+    fi
+
+    if [[ "$auth_type" != "basic" ]]; then
+        return 0
+    fi
+
+    username=$(read_config_value webdav username)
+    password=$(read_config_value webdav password)
+
+    if [[ -z "$username" ]]; then
+        username="admin"
+    fi
+    if [[ -z "$password" ]]; then
+        password=$(read_secret_value webdav_password)
+    fi
+
+    if [[ -z "$password" ]]; then
+        log_warn "WebDAV basic auth is enabled but no password was found; WebDAV tests may fail"
+        return 0
+    fi
+
+    WEBDAV_AUTH_ARGS=(-u "$username:$password")
+    log_info "Using WebDAV basic auth credentials for user: $username"
+}
+
+load_initial_admin_password() {
+    if [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
+        return 1
+    fi
+
+    grep '^Password:' "$INITIAL_PASSWORD_FILE" | awk '{print $2}' || true
+}
+
+authenticated_api_curl() {
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        command curl -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" "$@"
+        return
+    fi
+
+    command curl "$@"
+}
+
+curl() {
+    local args=("$@")
+    local needs_webdav_auth=false
+
+    for arg in "${args[@]}"; do
+        case "$arg" in
+            "$WEBDAV_URL"|"$WEBDAV_URL"/*)
+                needs_webdav_auth=true
+                break
+                ;;
+        esac
+    done
+
+    if $needs_webdav_auth && [[ ${#WEBDAV_AUTH_ARGS[@]} -gt 0 ]]; then
+        command curl "${WEBDAV_AUTH_ARGS[@]}" "${args[@]}"
+        return
+    fi
+
+    command curl "${args[@]}"
+}
 
 cleanup() {
     log_info "Cleaning up test directory..."
@@ -56,6 +171,7 @@ trap 'cleanup' EXIT
 setup() {
     log_info "Setting up test environment..."
     mkdir -p "$TEST_DIR"
+    configure_webdav_auth
     
     # Check service health
     if ! curl -sf "$BASE_URL/health" > /dev/null; then
@@ -64,6 +180,21 @@ setup() {
         exit 1
     fi
     log_info "Service is healthy"
+}
+
+admin_api_request() {
+    local method=$1
+    local url=$2
+    local response=""
+    local curl_args=(-s -X "$method" "$url")
+
+    if [[ -n "$ADMIN_ACCESS_TOKEN" ]]; then
+        curl_args+=(-H "Authorization: Bearer $ADMIN_ACCESS_TOKEN")
+    fi
+
+    response=$(curl "${curl_args[@]}" -w $'\n%{http_code}' 2>/dev/null || true)
+    ADMIN_API_STATUS="${response##*$'\n'}"
+    ADMIN_API_BODY="${response%$'\n'*}"
 }
 
 # ==============================================================================
@@ -269,11 +400,15 @@ test_version_history() {
         sleep 0.1
     done
     
-    local resp=$(curl -sf "$API_URL/versions/e2e-test/versioned.txt" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "versions\|hash"; then
+    local history_file="$TEST_DIR/version-history.json"
+    local status=$(authenticated_api_curl -s -w "%{http_code}" -o "$history_file" "$API_URL/versions/e2e-test/versioned.txt")
+    local resp=$(cat "$history_file" 2>/dev/null || echo "")
+    if [[ "$status" == "200" ]] && echo "$resp" | grep -q "versions\|hash"; then
         log_ok "Version history API returns data"
+    elif [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$status" == "401" || "$status" == "403" ) ]]; then
+        log_skip "Version history API requires admin authentication"
     else
-        log_fail "Version history API failed: $resp"
+        log_fail "Version history API failed (status: $status): $resp"
     fi
 }
 
@@ -356,41 +491,49 @@ test_concurrent_same_file() {
 
 test_metrics_api() {
     log_info "Testing metrics API..."
-    local resp=$(curl -sf "$API_URL/metrics" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "requests"; then
+    admin_api_request GET "$API_URL/metrics"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Metrics API requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "requests"; then
         log_ok "Metrics API returns request statistics"
     else
-        log_fail "Metrics API failed: $resp"
+        log_fail "Metrics API failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
 test_scrub_api() {
     log_info "Testing scrub API..."
-    local resp=$(curl -sf "$API_URL/scrub" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "success\|has_result\|running"; then
+    admin_api_request GET "$API_URL/maintenance/scrub"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Scrub API requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "success\|has_result\|running"; then
         log_ok "Scrub API returns status"
     else
-        log_fail "Scrub API failed: $resp"
+        log_fail "Scrub API failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
 test_scrub_trigger() {
     log_info "Testing scrub trigger (POST)..."
-    local resp=$(curl -sf -X POST "$API_URL/scrub" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "success\|started\|running"; then
+    admin_api_request POST "$API_URL/maintenance/scrub"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Scrub trigger API requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "success\|started\|running"; then
         log_ok "Scrub trigger API works"
     else
-        log_fail "Scrub trigger API failed: $resp"
+        log_fail "Scrub trigger API failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
 test_diagnostics_export() {
     log_info "Testing diagnostics export..."
-    local resp=$(curl -sf "$API_URL/diagnostics" 2>/dev/null || echo "error")
-    if echo "$resp" | grep -q "system\|storage\|success"; then
+    admin_api_request GET "$API_URL/diagnostics"
+    if [[ -z "$ADMIN_ACCESS_TOKEN" && ( "$ADMIN_API_STATUS" == "401" || "$ADMIN_API_STATUS" == "403" ) ]]; then
+        log_skip "Diagnostics export requires admin authentication"
+    elif [[ "$ADMIN_API_STATUS" == "200" ]] && echo "$ADMIN_API_BODY" | grep -q "system\|storage\|success"; then
         log_ok "Diagnostics export returns system info"
     else
-        log_fail "Diagnostics export failed: $resp"
+        log_fail "Diagnostics export failed (status: $ADMIN_API_STATUS): $ADMIN_API_BODY"
     fi
 }
 
@@ -497,16 +640,15 @@ test_auth_login_success() {
     log_info "Testing auth login with valid credentials..."
     
     # Check if initial password file exists (fresh install)
-    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
-    if [[ ! -f "$password_file" ]]; then
+    if [[ ! -f "$INITIAL_PASSWORD_FILE" ]]; then
         log_skip "Auth login test - no initial password file (auth may be disabled or already logged in)"
         return
     fi
     
     # Extract password from file
-    local password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+    local password=$(load_initial_admin_password)
     if [[ -z "$password" ]]; then
-        log_fail "Could not extract password from $password_file"
+        log_fail "Could not extract password from $INITIAL_PASSWORD_FILE"
         return
     fi
     
@@ -515,6 +657,8 @@ test_auth_login_success() {
         -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null || echo "error")
     
     if echo "$resp" | grep -q '"success":true'; then
+        ADMIN_ACCESS_TOKEN=$(echo "$resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+        ADMIN_REFRESH_TOKEN=$(echo "$resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
         log_ok "Auth login with initial password successful"
     else
         log_fail "Auth login failed: $resp"
@@ -541,7 +685,7 @@ test_auth_login_failure() {
 test_auth_password_file_deleted_after_login() {
     log_info "Testing password file deletion after login..."
     
-    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+    local password_file="$INITIAL_PASSWORD_FILE"
     
     # If auth is enabled and we just logged in, file should be deleted
     if [[ -f "$password_file" ]]; then
@@ -550,7 +694,7 @@ test_auth_password_file_deleted_after_login() {
     else
         # File doesn't exist - could be already deleted, or auth disabled
         # Check if users.json exists to confirm auth is set up
-        if [[ -f "$HOME/.mnemonas/.mnemonas/users.json" ]]; then
+        if [[ -f "$USERS_FILE" ]]; then
             log_ok "Password file correctly deleted after login"
         else
             log_skip "Auth not initialized (no users.json)"
@@ -576,31 +720,36 @@ test_auth_protected_endpoint() {
 test_auth_token_refresh() {
     log_info "Testing token refresh flow..."
     
-    local password_file="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+    local password_file="$INITIAL_PASSWORD_FILE"
+    local refresh_token="$ADMIN_REFRESH_TOKEN"
     
     # Need to get a valid token first
     # This test requires auth to be enabled and initial password available
-    if [[ ! -f "$password_file" ]] && [[ ! -f "$HOME/.mnemonas/.mnemonas/users.json" ]]; then
+    if [[ ! -f "$password_file" ]] && [[ ! -f "$USERS_FILE" ]]; then
         log_skip "Auth not configured for token refresh test"
         return
     fi
-    
-    # Try to login and get refresh token
-    local password=""
-    if [[ -f "$password_file" ]]; then
-        password=$(grep "^Password:" "$password_file" | awk '{print $2}')
+
+    if [[ -z "$refresh_token" ]]; then
+        # Try to login and get refresh token
+        local password=""
+        if [[ -f "$password_file" ]]; then
+            password=$(load_initial_admin_password)
+        fi
+
+        if [[ -z "$password" ]]; then
+            log_skip "No password available for token refresh test"
+            return
+        fi
+
+        local login_resp=$(curl -sf -X POST "$API_URL/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null)
+
+        ADMIN_ACCESS_TOKEN=$(echo "$login_resp" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+        ADMIN_REFRESH_TOKEN=$(echo "$login_resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
+        refresh_token="$ADMIN_REFRESH_TOKEN"
     fi
-    
-    if [[ -z "$password" ]]; then
-        log_skip "No password available for token refresh test"
-        return
-    fi
-    
-    local login_resp=$(curl -sf -X POST "$API_URL/auth/login" \
-        -H "Content-Type: application/json" \
-        -d "{\"username\":\"admin\",\"password\":\"$password\"}" 2>/dev/null)
-    
-    local refresh_token=$(echo "$login_resp" | grep -o '"refresh_token":"[^"]*"' | cut -d'"' -f4)
     
     if [[ -z "$refresh_token" ]]; then
         log_skip "Could not get refresh token from login response"
@@ -654,6 +803,13 @@ main() {
     test_if_match_success
     test_if_match_failure
 
+    # Group 10: Authentication
+    test_auth_login_failure
+    test_auth_login_success
+    test_auth_password_file_deleted_after_login
+    test_auth_protected_endpoint
+    test_auth_token_refresh
+
     # Group 4: Versions
     test_version_history
 
@@ -661,12 +817,6 @@ main() {
     test_concurrent_reads
     test_concurrent_writes
     test_concurrent_same_file
-
-    # Group 6: Maintenance
-    test_metrics_api
-    test_scrub_api
-    test_scrub_trigger
-    test_diagnostics_export
 
     # Group 7: Large Files
     test_large_file_upload
@@ -679,12 +829,11 @@ main() {
     test_path_traversal
     test_localhost_binding
 
-    # Group 10: Authentication
-    test_auth_login_failure
-    test_auth_login_success
-    test_auth_password_file_deleted_after_login
-    test_auth_protected_endpoint
-    test_auth_token_refresh
+    # Group 6: Maintenance (admin token available after auth tests when enabled)
+    test_metrics_api
+    test_scrub_api
+    test_scrub_trigger
+    test_diagnostics_export
 
     # Summary
     echo ""

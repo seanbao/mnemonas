@@ -156,6 +156,34 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNew_SyncsCreatedDirectoriesDeepestParentFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nested", "workspace", "root")
+
+	originalSyncWorkspaceDir := syncWorkspaceDir
+	var synced []string
+	syncWorkspaceDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	defer func() {
+		syncWorkspaceDir = originalSyncWorkspaceDir
+	}()
+
+	if _, err := New(root); err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	want := []string{
+		filepath.Join(tmpDir, "nested", "workspace"),
+		filepath.Join(tmpDir, "nested"),
+		tmpDir,
+	}
+	if strings.Join(synced, "|") != strings.Join(want, "|") {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+}
+
 func TestNew_ReturnsDirectorySyncErrorWhenCreatingRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	root := filepath.Join(tmpDir, "nested", "workspace")

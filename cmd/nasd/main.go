@@ -36,6 +36,11 @@ var (
 	buildTime = "unknown"
 )
 
+var startupDataplaneContext = dataplane.WithTimeout
+var startupDataplaneConnect = func(client *dataplane.Client, ctx context.Context) error {
+	return client.Connect(ctx)
+}
+
 type switchableWebDAVHandler struct {
 	mu      sync.RWMutex
 	prefix  string
@@ -84,9 +89,23 @@ func buildWebDAVHandler(fs *storage.FileSystem, cfg api.WebDAVRuntimeConfig) (st
 	})
 }
 
+func connectStartupDataplane(addr string, timeout time.Duration) (*dataplane.Client, error) {
+	ctx, cancel := startupDataplaneContext(timeout)
+	defer cancel()
+
+	client := dataplane.NewClient(addr)
+	if err := startupDataplaneConnect(client, ctx); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+
+	return client, nil
+}
+
 func main() {
 	// Command line arguments
 	configPath := flag.String("config", "", "config file path")
+	checkConfig := flag.Bool("check-config", false, "validate config and exit")
 	showVersion := flag.Bool("version", false, "show version info")
 	flag.Parse()
 
@@ -94,6 +113,13 @@ func main() {
 		fmt.Printf("MnemoNAS %s\n", version)
 		fmt.Printf("  Commit:     %s\n", commit)
 		fmt.Printf("  Build Time: %s\n", buildTime)
+		return
+	}
+
+	if *checkConfig {
+		if err := validateConfigOnly(*configPath, os.Stdout); err != nil {
+			log.Fatal().Err(err).Msg("failed to validate config")
+		}
 		return
 	}
 
@@ -171,16 +197,16 @@ func main() {
 		log.Info().Msg("🔐 WebDAV using auto-generated password from secrets.json")
 	}
 
-	// Create background context for initialization
-	ctx := context.Background()
-
 	// Create data plane client for storage operations
-	dataplaneClient := dataplane.NewClient(cfg.DataPlane.Address())
-	if err := dataplaneClient.Connect(ctx); err != nil {
+	dataplaneClient, err := connectStartupDataplane(cfg.DataPlane.Address(), cfg.DataPlane.Timeout)
+	if err != nil {
 		log.Fatal().Err(err).Str("address", cfg.DataPlane.Address()).Msg("failed to connect to dataplane")
 	}
 	defer dataplaneClient.Close()
 	log.Info().Str("address", cfg.DataPlane.Address()).Msg("connected to dataplane")
+
+	// Create background context for initialization
+	ctx := context.Background()
 
 	// Create filesystem with new storage architecture
 	fs, err := storage.New(&storage.Config{
@@ -501,6 +527,15 @@ func resolveJSONLogTimeFormat(timeFormat string) string {
 }
 
 func loadConfig(path string) (*config.Config, string, error) {
+	if path != "" {
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return nil, path, fmt.Errorf("config file does not exist: %s", path)
+			}
+			return nil, path, fmt.Errorf("failed to stat config file %s: %w", path, err)
+		}
+	}
+
 	if path == "" {
 		// Try default paths
 		home, _ := os.UserHomeDir()
@@ -524,6 +559,41 @@ func loadConfig(path string) (*config.Config, string, error) {
 
 	log.Info().Msg("using default config")
 	return config.Default(), "", nil
+}
+
+func validateConfigOnly(path string, output io.Writer) error {
+	if path != "" {
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("config file does not exist: %s", path)
+			}
+			return fmt.Errorf("failed to stat config file %s: %w", path, err)
+		}
+	}
+
+	resolvedPath := path
+	if resolvedPath == "" {
+		home, _ := os.UserHomeDir()
+		candidate := filepath.Join(home, ".mnemonas", "config.toml")
+		if _, err := os.Stat(candidate); err == nil {
+			resolvedPath = candidate
+		}
+	}
+
+	if resolvedPath == "" {
+		cfg := config.Default()
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(output, "configuration is valid (using built-in defaults)")
+		return nil
+	}
+
+	if _, err := config.Load(resolvedPath); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(output, "configuration is valid: %s\n", resolvedPath)
+	return nil
 }
 
 func matchesWebDAVPrefix(prefix, requestPath string) bool {
