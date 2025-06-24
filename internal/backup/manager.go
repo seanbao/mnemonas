@@ -453,7 +453,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		}
 		root = absRoot
 	}
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if err := ensureBackupStateRoot(root); err != nil {
 		return nil, fmt.Errorf("create backup state directory: %w", err)
 	}
 
@@ -484,6 +484,19 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+func ensureBackupStateRoot(root string) error {
+	if filepath.Clean(root) == string(filepath.Separator) {
+		return fmt.Errorf("%w: backup state root must not be filesystem root", ErrUnsafePath)
+	}
+	if _, err := rootio.MkdirAllPathNoFollowTracked(root, 0700); err != nil {
+		if rootio.IsSymlinkError(err) {
+			return fmt.Errorf("%w: backup state root must not contain symlink", ErrUnsafePath)
+		}
+		return err
+	}
+	return nil
 }
 
 // ListJobs returns all configured backup jobs with latest status.

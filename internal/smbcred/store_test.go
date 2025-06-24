@@ -1,6 +1,7 @@
 package smbcred
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,5 +87,47 @@ func TestStoreDisable(t *testing.T) {
 	}
 	if credential.Enabled {
 		t.Fatal("credential should be disabled")
+	}
+}
+
+func TestNewStoreRejectsSymlinkCredentialFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "outside.json")
+	if err := os.WriteFile(targetPath, []byte(`{"credentials":[]}`), credentialFileMode); err != nil {
+		t.Fatalf("WriteFile(target) error: %v", err)
+	}
+	linkPath := filepath.Join(tmpDir, "smb-credentials.json")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Fatalf("Symlink() error: %v", err)
+	}
+
+	if _, err := NewStore(linkPath); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("NewStore() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestStoreSetPasswordRejectsSymlinkCredentialParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	parentPath := filepath.Join(tmpDir, "credentials")
+	filePath := filepath.Join(parentPath, "smb-credentials.json")
+
+	store, err := NewStore(filePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(outside) error: %v", err)
+	}
+	if err := os.Symlink(outsideDir, parentPath); err != nil {
+		t.Fatalf("Symlink(parent) error: %v", err)
+	}
+
+	if _, err := store.SetPassword("user-1", "Alice", "password", true); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("SetPassword() error = %v, want ErrUnsafePath", err)
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "smb-credentials.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside credential file stat error = %v, want ErrNotExist", err)
 	}
 }

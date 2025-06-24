@@ -32,6 +32,49 @@ func (n *recordingNotifier) Events() []NotificationEvent {
 	return append([]NotificationEvent(nil), n.events...)
 }
 
+func TestNewManagerRejectsSymlinkStateRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	realRoot := filepath.Join(tmpDir, "real-state")
+	linkRoot := filepath.Join(tmpDir, "state-link")
+	if err := os.Mkdir(realRoot, 0700); err != nil {
+		t.Fatalf("Mkdir(realRoot) error: %v", err)
+	}
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Fatalf("Symlink(stateRoot) error: %v", err)
+	}
+
+	_, err := NewManager(ManagerConfig{
+		Root:        linkRoot,
+		StorageRoot: filepath.Join(tmpDir, "source"),
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("NewManager() error = %v, want %v", err, ErrUnsafePath)
+	}
+}
+
+func TestNewManagerRejectsSymlinkStateRootParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	linkParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Mkdir(realParent, 0700); err != nil {
+		t.Fatalf("Mkdir(realParent) error: %v", err)
+	}
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Fatalf("Symlink(linkParent) error: %v", err)
+	}
+
+	_, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(linkParent, "state"),
+		StorageRoot: filepath.Join(tmpDir, "source"),
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("NewManager() error = %v, want %v", err, ErrUnsafePath)
+	}
+	if _, statErr := os.Stat(filepath.Join(realParent, "state")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("state root created through symlink parent, stat error = %v", statErr)
+	}
+}
+
 func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
