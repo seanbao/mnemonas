@@ -288,31 +288,13 @@ describe('ShareDialog', () => {
     )
   })
 
-  it('keeps a reopened dialog focused on the new file when an older create request resolves', async () => {
+  it('keeps the dialog open while a pending create request is in flight', async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
     const pendingShare = createDeferred<Awaited<ReturnType<typeof createShare>>>()
-    vi.mocked(createShare).mockImplementation((request) => {
-      if (request.path === '/test/file.txt') {
-        return pendingShare.promise as ReturnType<typeof createShare>
-      }
-      return Promise.resolve({
-        id: 'share-2',
-        path: '/test/other.txt',
-        type: 'file',
-        created_by: 'user-1',
-        created_at: new Date().toISOString(),
-        has_password: false,
-        permission: 'read',
-        enabled: true,
-        access_count: 0,
-        max_access: 0,
-        description: '',
-        url: '/s/share-2',
-      } as never)
-    })
+    vi.mocked(createShare).mockImplementationOnce(() => pendingShare.promise as ReturnType<typeof createShare>)
 
-    const view = render(
+    render(
       <ShareDialog
         isOpen={true}
         onClose={onClose}
@@ -330,26 +312,9 @@ describe('ShareDialog', () => {
     )
 
     await user.click(screen.getByText('取消'))
-    expect(onClose).toHaveBeenCalledTimes(1)
-
-    view.rerender(
-      <ShareDialog
-        isOpen={false}
-        onClose={onClose}
-        filePath="/test/file.txt"
-      />,
-    )
-
-    view.rerender(
-      <ShareDialog
-        isOpen={true}
-        onClose={onClose}
-        filePath="/test/other.txt"
-      />,
-    )
-
-    expect(screen.getByText('/test/other.txt')).toBeInTheDocument()
-    expect(screen.getByText('创建分享链接')).toBeInTheDocument()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByText('/test/file.txt')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /创建分享链接/ })).toBeInTheDocument()
 
     await act(async () => {
       pendingShare.resolve({
@@ -369,9 +334,48 @@ describe('ShareDialog', () => {
       await pendingShare.promise
     })
 
-    expect(screen.getByText('/test/other.txt')).toBeInTheDocument()
-    expect(screen.getByText('创建分享链接')).toBeInTheDocument()
-    expect(screen.queryAllByText('分享链接已创建')).toHaveLength(0)
-    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('/test/file.txt')).toBeInTheDocument()
+    expect(screen.getByText('分享链接已创建')).toBeInTheDocument()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('keeps the dialog open when a pending create request later fails', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const pendingShare = createDeferred<Awaited<ReturnType<typeof createShare>>>()
+    vi.mocked(createShare).mockImplementationOnce(() => pendingShare.promise as ReturnType<typeof createShare>)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={onClose}
+        filePath="/test/file.txt"
+      />,
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(createShare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/test/file.txt',
+        type: 'file',
+      }),
+    )
+
+    await user.click(screen.getByText('取消'))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByText('/test/file.txt')).toBeInTheDocument()
+
+    await act(async () => {
+      pendingShare.reject(new Error('create failed'))
+    })
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '创建分享失败',
+      description: 'create failed',
+      color: 'danger',
+    })
+    expect(screen.getByText('/test/file.txt')).toBeInTheDocument()
+    expect(onClose).not.toHaveBeenCalled()
   })
 })

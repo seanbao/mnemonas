@@ -218,6 +218,31 @@ describe('FilesPage upload queue', () => {
     expect(screen.queryByText('上传完成')).toBeNull()
   })
 
+  it('clears the hidden upload input after a selection so the same file can be picked again', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['data'], 'test.txt', { type: 'text/plain' })
+    Object.defineProperty(fileInput as HTMLInputElement, 'value', {
+      configurable: true,
+      writable: true,
+      value: 'C:\\fakepath\\test.txt',
+    })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect((fileInput as HTMLInputElement).value).toBe('')
+    expect(mockUploadFile).toHaveBeenCalledWith('/', file, expect.any(Function))
+  })
+
   it('clears only the latest upload timer', async () => {
     render(<FilesPage />)
 

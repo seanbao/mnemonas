@@ -121,9 +121,12 @@ export function ShareDialog({
   }, [])
 
   const handleClose = useCallback(() => {
+    if (isLoading) {
+      return
+    }
     resetForm()
     onClose()
-  }, [onClose, resetForm])
+  }, [isLoading, onClose, resetForm])
 
   useEffect(() => {
     currentOpenRef.current = isOpen
@@ -408,7 +411,7 @@ export function ShareDialog({
             </Button>
           ) : (
             <>
-              <Button variant="flat" onPress={handleClose} className="rounded-xl">
+              <Button variant="flat" onPress={handleClose} isDisabled={isLoading} className="rounded-xl">
                 取消
               </Button>
               <Button 

@@ -175,7 +175,108 @@ func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) e
 	return nil
 }
 
-func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (func() error, error) {
+type deletedPathRestoreState struct {
+	Shares    []*share.Share        `json:"shares,omitempty"`
+	Favorites []*favorites.Favorite `json:"favorites,omitempty"`
+}
+
+func relocateDeletedPathRestorePath(sourcePath, restoredPath, currentPath string) (string, bool) {
+	sourcePath = path.Clean(sourcePath)
+	restoredPath = path.Clean(restoredPath)
+	currentPath = path.Clean(currentPath)
+
+	if currentPath == sourcePath {
+		return restoredPath, true
+	}
+
+	if sourcePath == "/" {
+		if !strings.HasPrefix(currentPath, "/") {
+			return "", false
+		}
+		return path.Join(restoredPath, strings.TrimPrefix(currentPath, "/")), true
+	}
+
+	prefix := sourcePath + "/"
+	if !strings.HasPrefix(currentPath, prefix) {
+		return "", false
+	}
+
+	return path.Join(restoredPath, strings.TrimPrefix(currentPath, prefix)), true
+}
+
+func relocateDeletedPathRestoreState(state deletedPathRestoreState, sourcePath, restoredPath string) deletedPathRestoreState {
+	if sourcePath == restoredPath {
+		return state
+	}
+
+	relocated := deletedPathRestoreState{}
+	if len(state.Shares) > 0 {
+		relocated.Shares = make([]*share.Share, 0, len(state.Shares))
+		for _, item := range state.Shares {
+			if item == nil {
+				continue
+			}
+			updatedPath, ok := relocateDeletedPathRestorePath(sourcePath, restoredPath, item.Path)
+			if !ok {
+				continue
+			}
+			clone := *item
+			clone.Path = updatedPath
+			relocated.Shares = append(relocated.Shares, &clone)
+		}
+	}
+	if len(state.Favorites) > 0 {
+		relocated.Favorites = make([]*favorites.Favorite, 0, len(state.Favorites))
+		for _, item := range state.Favorites {
+			if item == nil {
+				continue
+			}
+			updatedPath, ok := relocateDeletedPathRestorePath(sourcePath, restoredPath, item.Path)
+			if !ok {
+				continue
+			}
+			clone := *item
+			clone.Path = updatedPath
+			relocated.Favorites = append(relocated.Favorites, &clone)
+		}
+	}
+
+	return relocated
+}
+
+func (s *Server) restoreDeletedPathState(sourcePath, restoredPath string, restoreData []byte) error {
+	if len(restoreData) == 0 {
+		return nil
+	}
+
+	var state deletedPathRestoreState
+	if err := json.Unmarshal(restoreData, &state); err != nil {
+		return fmt.Errorf("decode trash restore metadata: %w", err)
+	}
+
+	state = relocateDeletedPathRestoreState(state, sourcePath, restoredPath)
+
+	if len(state.Shares) > 0 && s.shareStore == nil {
+		return errors.New("share store unavailable for trash restore metadata")
+	}
+	if len(state.Shares) > 0 && s.shareStore != nil {
+		if err := s.shareStore.RestoreShares(state.Shares); err != nil {
+			return fmt.Errorf("restore shares from trash metadata: %w", err)
+		}
+	}
+	if len(state.Favorites) > 0 && s.favoritesStore == nil {
+		return errors.New("favorites store unavailable for trash restore metadata")
+	}
+	if len(state.Favorites) > 0 && s.favoritesStore != nil {
+		if err := s.favoritesStore.RestoreFavorites(state.Favorites); err != nil {
+			return fmt.Errorf("restore favorites from trash metadata: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (*storage.PathDeleteHookResult, error) {
 	var disabledShares []*share.Share
 	if s.shareStore != nil {
 		var err error
@@ -206,7 +307,7 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (func()
 		return nil, nil
 	}
 
-	return func() error {
+	rollback := func() error {
 		var rollbackErr error
 		if len(removedFavorites) > 0 {
 			if err := s.favoritesStore.RestoreFavorites(removedFavorites); err != nil {
@@ -219,6 +320,25 @@ func (s *Server) handlePathDeleted(_ context.Context, targetPath string) (func()
 			}
 		}
 		return rollbackErr
+	}
+
+	restoreData, err := json.Marshal(deletedPathRestoreState{
+		Shares:    disabledShares,
+		Favorites: removedFavorites,
+	})
+	if err != nil {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("encode delete restore metadata: %w", err),
+				fmt.Errorf("rollback delete hooks after metadata encode failure: %w", rollbackErr),
+			)
+		}
+		return nil, fmt.Errorf("encode delete restore metadata: %w", err)
+	}
+
+	return &storage.PathDeleteHookResult{
+		Rollback:    rollback,
+		RestoreData: restoreData,
 	}, nil
 }
 
@@ -245,9 +365,10 @@ func settingsStringSlice(values []string) []string {
 }
 
 const (
-	auditStatusHeaderName  = "X-Mnemonas-Audit-Status"
-	auditStatusFailedValue = "failed"
-	auditWarningHeader     = `199 MnemoNAS "activity log persistence failed"`
+	auditStatusHeaderName             = "X-Mnemonas-Audit-Status"
+	auditStatusFailedValue            = "failed"
+	auditWarningHeader                = `199 MnemoNAS "activity log persistence failed"`
+	trashRestoreMetadataWarningHeader = `199 MnemoNAS "trash restore metadata reconciliation failed"`
 )
 
 func decodeJSONBodyWithLimit(r *http.Request, dst any, limit int64) error {
@@ -2946,8 +3067,15 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	activityDetails := map[string]string(nil)
+	if err := s.restoreDeletedPathState(item.OriginalPath, activityPath, item.RestoreData); err != nil {
+		markTrashRestoreMetadataWarningHeaders(w)
+		s.logger.Warn().Err(err).Str("path", activityPath).Msg("failed to restore trash-linked metadata")
+		activityDetails = map[string]string{"metadata_restore": "failed"}
+	}
+
 	// Log activity
-	s.LogActivityWithWarning(w, r, activity.ActionTrashRestore, activityPath, nil)
+	s.LogActivityWithWarning(w, r, activity.ActionTrashRestore, activityPath, activityDetails)
 
 	NewAPIResponse(map[string]any{
 		"id":       id,
@@ -3417,6 +3545,19 @@ func markAuditFailureHeaders(w http.ResponseWriter) {
 		}
 	}
 	headers.Add("Warning", auditWarningHeader)
+}
+
+func markTrashRestoreMetadataWarningHeaders(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	headers := w.Header()
+	for _, warningValue := range headers.Values("Warning") {
+		if warningValue == trashRestoreMetadataWarningHeader {
+			return
+		}
+	}
+	headers.Add("Warning", trashRestoreMetadataWarningHeader)
 }
 
 // handleLoginWithActivity wraps auth login to log activity

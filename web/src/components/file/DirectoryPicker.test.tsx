@@ -328,9 +328,10 @@ describe('DirectoryPicker', () => {
     })
   })
 
-  it('keeps a reopened picker focused on the new path when an older create request resolves', async () => {
+  it('keeps the picker open while a pending create request is in flight', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const pendingCreate = createDeferred<void>()
+    const onClose = vi.fn()
     mockListFiles.mockImplementation(async (path) => {
       if (path === '/') {
         return {
@@ -351,7 +352,7 @@ describe('DirectoryPicker', () => {
       return Promise.resolve(undefined)
     })
 
-    const view = renderPicker()
+    renderPicker({ onClose })
 
     await waitFor(() => {
       expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
@@ -365,21 +366,10 @@ describe('DirectoryPicker', () => {
       expect(mockCreateDirectory).toHaveBeenCalledWith('/old')
     })
 
-    view.rerender(
-      <QueryClientProvider client={view.queryClient}>
-        <DirectoryPicker isOpen={false} onClose={vi.fn()} onSelect={vi.fn()} />
-      </QueryClientProvider>,
-    )
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
 
-    view.rerender(
-      <QueryClientProvider client={view.queryClient}>
-        <DirectoryPicker isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} initialPath="/docs" />
-      </QueryClientProvider>,
-    )
-
-    await waitFor(() => {
-      expect(screen.getByText('/docs')).toBeTruthy()
-    })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByDisplayValue('old')).toBeTruthy()
 
     await act(async () => {
       pendingCreate.resolve(undefined)
@@ -387,9 +377,50 @@ describe('DirectoryPicker', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByText('/docs')).toBeTruthy()
-      expect(screen.queryAllByText('/old')).toHaveLength(0)
+      expect(screen.getByText('/old')).toBeTruthy()
+      expect(screen.queryByDisplayValue('old')).toBeFalsy()
     })
+  })
+
+  it('keeps the picker open when a pending create request later fails', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const pendingCreate = createDeferred<void>()
+    const onClose = vi.fn()
+    mockCreateDirectory.mockImplementationOnce(() => pendingCreate.promise)
+
+    renderPicker({ onClose })
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), 'old')
+    await user.click(screen.getByRole('button', { name: '创建' }))
+
+    await waitFor(() => {
+      expect(mockCreateDirectory).toHaveBeenCalledWith('/old')
+    })
+
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByDisplayValue('old')).toBeTruthy()
+
+    await act(async () => {
+      pendingCreate.reject(new Error('create failed'))
+    })
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '创建文件夹失败',
+        description: 'create failed',
+        color: 'danger',
+      })
+    })
+
+    expect(screen.getByDisplayValue('old')).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('reloads a directory after reopen instead of using a stale older expansion result', async () => {

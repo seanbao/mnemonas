@@ -401,7 +401,7 @@ describe('FavoritesPage', () => {
     })
   })
 
-  it('keeps a newer note editor open when an older note save resolves', async () => {
+  it('keeps the note editor open while a pending save is in flight', async () => {
     const user = userEvent.setup()
     const pendingNoteSave = createDeferred<void>()
     vi.mocked(favoritesApi.updateFavoriteNote).mockImplementationOnce(() => pendingNoteSave.promise)
@@ -423,17 +423,57 @@ describe('FavoritesPage', () => {
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
-    await user.click(screen.getByRole('button', { name: '编辑备注 /photos/' }))
-    await user.type(screen.getByLabelText('备注'), '新相册备注')
+
+    expect(screen.getByRole('heading', { name: '编辑备注' })).toBeInTheDocument()
+    expect(screen.getByLabelText('备注')).toHaveValue('旧备注')
 
     await act(async () => {
       pendingNoteSave.resolve(undefined)
     })
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
-      expect(screen.getByLabelText('备注')).toHaveValue('新相册备注')
-      expect(screen.getAllByText('photos').length).toBeGreaterThan(1)
+      expect(screen.queryByRole('heading', { name: '编辑备注' })).not.toBeInTheDocument()
     })
+  })
+
+  it('keeps the note editor open when a pending save later fails', async () => {
+    const user = userEvent.setup()
+    const pendingNoteSave = createDeferred<void>()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockImplementationOnce(() => pendingNoteSave.promise)
+
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+    await user.clear(screen.getByLabelText('备注'))
+    await user.type(screen.getByLabelText('备注'), '保留备注')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(favoritesApi.updateFavoriteNote).toHaveBeenCalledWith('/docs/report.pdf', '保留备注')
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+
+    expect(screen.getByRole('heading', { name: '编辑备注' })).toBeInTheDocument()
+    expect(screen.getByLabelText('备注')).toHaveValue('保留备注')
+
+    await act(async () => {
+      pendingNoteSave.reject(new Error('save failed'))
+    })
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '操作失败',
+        description: 'save failed',
+        color: 'danger',
+      })
+    })
+
+    expect(screen.getByRole('heading', { name: '编辑备注' })).toBeInTheDocument()
+    expect(screen.getByLabelText('备注')).toHaveValue('保留备注')
   })
 })

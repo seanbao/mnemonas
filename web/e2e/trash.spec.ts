@@ -96,6 +96,51 @@ test.describe('回收站单项操作', () => {
 
     expect(hasRestore || hasDelete).toBe(true)
   })
+
+  test('删除非空目录后应只显示目录回收站项', async ({ page }) => {
+    const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const dirName = `e2e-trash-dir-${suffix}`
+    const nestedFileName = `nested-${suffix}.txt`
+    const rootDirUrl = `/api/v1/directories/${dirName}`
+    const nestedDirUrl = `/api/v1/directories/${dirName}/nested`
+    const nestedFileUrl = `/api/v1/files/${dirName}/nested/${nestedFileName}`
+    const deleteDirUrl = `/api/v1/files/${dirName}`
+
+    await page.goto('/files')
+
+    await page.evaluate(async ({ rootDirUrl, nestedDirUrl, nestedFileUrl, deleteDirUrl, nestedFileName }) => {
+      const token = localStorage.getItem('mnemonas_token')
+      if (!token) {
+        throw new Error('missing auth token in localStorage')
+      }
+
+      const createHeaders = () => new Headers({
+        Authorization: `Bearer ${token}`,
+      })
+
+      const requireOk = async (response: Response, action: string) => {
+        if (!response.ok) {
+          throw new Error(`${action} failed: ${response.status} ${await response.text()}`)
+        }
+      }
+
+      await requireOk(await fetch(rootDirUrl, { method: 'POST', headers: createHeaders() }), 'create root directory')
+      await requireOk(await fetch(nestedDirUrl, { method: 'POST', headers: createHeaders() }), 'create nested directory')
+
+      const formData = new FormData()
+      formData.append('file', new File(['nested content'], nestedFileName, { type: 'text/plain' }))
+      await requireOk(await fetch(nestedFileUrl, { method: 'POST', body: formData, headers: createHeaders() }), 'upload nested file')
+
+      await requireOk(await fetch(deleteDirUrl, { method: 'DELETE', headers: createHeaders() }), 'delete non-empty directory')
+    }, { rootDirUrl, nestedDirUrl, nestedFileUrl, deleteDirUrl, nestedFileName })
+
+    await ensureAuthenticatedAt(page, '/trash')
+
+    await expect(page.getByText(dirName, { exact: true })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(`/${dirName}`, { exact: true })).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText(`/${dirName}/nested/${nestedFileName}`)).toHaveCount(0)
+    await expect(page.getByRole('button', { name: `恢复 ${dirName}` })).toBeVisible({ timeout: 5000 })
+  })
 })
 
 test.describe('回收站确认对话框', () => {

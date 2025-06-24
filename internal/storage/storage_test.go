@@ -1159,6 +1159,90 @@ func TestFileSystem_DeleteAndRestore_EmptyDirectory(t *testing.T) {
 	}
 }
 
+func TestFileSystem_DeleteAndRestore_NonEmptyDirectory(t *testing.T) {
+	fs := setupFileSystem(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/docs"); err != nil {
+		t.Fatalf("Mkdir(/docs) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/docs/nested"); err != nil {
+		t.Fatalf("Mkdir(/docs/nested) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report v1"))); err != nil {
+		t.Fatalf("WriteFile(report v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/nested/report.txt", bytes.NewReader([]byte("report v2"))); err != nil {
+		t.Fatalf("WriteFile(report v2) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/docs/readme.md", bytes.NewReader([]byte("readme"))); err != nil {
+		t.Fatalf("WriteFile(readme) error: %v", err)
+	}
+
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/nested/report.txt"); err != nil {
+		t.Fatalf("GetFileIndex(report before delete) error: %v", err)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(readme before delete) error: %v", err)
+	}
+
+	if err := fs.Delete(ctx, "/docs"); err != nil {
+		t.Fatalf("Delete(/docs) error: %v", err)
+	}
+
+	if _, err := fs.Stat(ctx, "/docs"); err != ErrNotFound {
+		t.Fatalf("expected deleted directory to be absent, got %v", err)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/nested/report.txt"); err != versionstore.ErrNotFound {
+		t.Fatalf("GetFileIndex(report after delete) error = %v, want ErrNotFound", err)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/readme.md"); err != versionstore.ErrNotFound {
+		t.Fatalf("GetFileIndex(readme after delete) error = %v, want ErrNotFound", err)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Expected 1 trash item, got %d", len(items))
+	}
+	if !items[0].IsDir {
+		t.Fatal("Expected trash item to be a directory")
+	}
+	if items[0].Size != int64(len("report v2")+len("readme")) {
+		t.Fatalf("trash directory size = %d, want %d", items[0].Size, len("report v2")+len("readme"))
+	}
+	if !items[0].HadVersions {
+		t.Fatal("Expected trash item to preserve directory version metadata state")
+	}
+
+	if err := fs.RestoreFromTrash(ctx, items[0].ID); err != nil {
+		t.Fatalf("RestoreFromTrash() error: %v", err)
+	}
+
+	data, err := fs.workspace.ReadFile(ctx, "/docs/nested/report.txt")
+	if err != nil {
+		t.Fatalf("ReadFile(report after restore) error: %v", err)
+	}
+	if string(data) != "report v2" {
+		t.Fatalf("restored report content = %q, want %q", string(data), "report v2")
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/nested/report.txt"); err != nil {
+		t.Fatalf("GetFileIndex(report after restore) error: %v", err)
+	}
+	if _, _, _, err := fs.versions.GetFileIndex(ctx, "/docs/readme.md"); err != nil {
+		t.Fatalf("GetFileIndex(readme after restore) error: %v", err)
+	}
+	versions, err := fs.ListVersions(ctx, "/docs/nested/report.txt")
+	if err != nil {
+		t.Fatalf("ListVersions(report after restore) error: %v", err)
+	}
+	if len(versions) == 0 {
+		t.Fatal("expected restored directory file to retain version history")
+	}
+}
+
 func TestFileSystem_Delete_RollsBackFileWhenIndexDeleteFails(t *testing.T) {
 	fs := setupFileSystem(t)
 	ctx := context.Background()
@@ -1211,7 +1295,7 @@ func TestFileSystem_Delete_RollsBackWhenPathDeleteHookFails(t *testing.T) {
 		t.Fatalf("Stat() before delete error: %v", err)
 	}
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (func() error, error) {
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
 		return nil, errors.New("favorite cleanup failed")
 	})
 
@@ -1262,7 +1346,7 @@ func TestFileSystem_Delete_CompletesWhenDeleteHookRegistered(t *testing.T) {
 	}
 
 	hookCalled := make(chan struct{}, 1)
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (func() error, error) {
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
 		hookCalled <- struct{}{}
 		return nil, nil
 	})
@@ -1346,7 +1430,7 @@ func TestFileSystem_Delete_RollsBackDirectoryWhenIndexDeleteFails(t *testing.T) 
 		t.Fatalf("Mkdir() error: %v", err)
 	}
 
-	fs.deleteFileIndex = func(ctx context.Context, path string) error {
+	fs.deleteFileIndexPrefix = func(ctx context.Context, path string) error {
 		return errors.New("index delete failed")
 	}
 
@@ -1462,7 +1546,7 @@ func TestFileSystem_PermanentDelete_RollsBackWhenPathDeleteHookFails(t *testing.
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	fs.SetPathChangeHooks(nil, func(context.Context, string) (func() error, error) {
+	fs.SetPathChangeHooks(nil, func(context.Context, string) (*PathDeleteHookResult, error) {
 		return nil, errors.New("favorite cleanup failed")
 	})
 
@@ -1631,19 +1715,6 @@ func TestFileSystem_PermanentDelete_DoesNotDeleteSharedVersionObject(t *testing.
 	}
 	if string(data) != string(sharedContent) {
 		t.Fatalf("expected shared historical content %q, got %q", string(sharedContent), string(data))
-	}
-}
-
-func TestFileSystem_Delete_DirNotEmpty(t *testing.T) {
-	fs := setupFileSystem(t)
-	ctx := context.Background()
-
-	fs.Mkdir(ctx, "/nonemptydir")
-	fs.WriteFile(ctx, "/nonemptydir/file.txt", bytes.NewReader([]byte("x")))
-
-	err := fs.Delete(ctx, "/nonemptydir")
-	if err != ErrDirNotEmpty {
-		t.Errorf("Delete() error = %v, want ErrDirNotEmpty", err)
 	}
 }
 
