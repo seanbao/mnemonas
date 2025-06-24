@@ -218,6 +218,35 @@ describe('ShareManager', () => {
     })
   })
 
+  it('removes a stale share and shows a warning when toggle hits SHARE_NOT_FOUND', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.updateShare).mockRejectedValue(new ShareError('share not found', 404, 'SHARE_NOT_FOUND'))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+
+    await waitFor(() => {
+      expect(screen.getByText('禁用分享')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('禁用分享'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享已不存在',
+        description: '该分享可能已被其他操作删除，列表已同步更新。',
+        color: 'warning',
+      })
+    })
+
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+  })
+
   it('shows unavailable toast when deleting a share fails because the share service is unavailable', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.deleteShare).mockRejectedValue(new ShareError('share service unavailable', 503))
@@ -249,6 +278,42 @@ describe('ShareManager', () => {
         color: 'warning',
       })
     })
+  })
+
+  it('removes a stale share and closes the modal when delete hits SHARE_NOT_FOUND', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.deleteShare).mockRejectedValue(new ShareError('share not found', 404, 'SHARE_NOT_FOUND'))
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+
+    await waitFor(() => {
+      expect(screen.getByText('删除分享')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('删除分享'))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '删除' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '分享已不存在',
+        description: '该分享可能已被其他操作删除，列表已同步更新。',
+        color: 'warning',
+      })
+    })
+
+    expect(screen.queryByRole('heading', { name: '删除分享' })).not.toBeInTheDocument()
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
   })
 
   it('keeps the delete modal open while a pending delete is in flight', async () => {

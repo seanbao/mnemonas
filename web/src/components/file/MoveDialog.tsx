@@ -14,6 +14,29 @@ import { DirectoryPicker } from './DirectoryPicker'
 import { moveFile, copyFile, ApiError } from '@/api/files'
 import { FileIcon } from '@/components/ui/FileIcon'
 
+function getMoveDialogSuccessToast(
+  mode: 'move' | 'copy',
+  successCount: number,
+  warningMessages: string[]
+): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  const actionText = mode === 'move' ? '移动' : '复制'
+
+  if (warningMessages.length > 0) {
+    return {
+      title: warningMessages[0] || `成功${actionText} ${successCount} 个项目，但存在警告`,
+      color: 'warning',
+    }
+  }
+
+  return {
+    title: `成功${actionText} ${successCount} 个项目`,
+    color: 'success',
+  }
+}
+
 function getMoveDialogFailureToast(
   mode: 'move' | 'copy',
   successCount: number,
@@ -92,6 +115,7 @@ function MoveDialogContent({
     let errorCount = 0
     const failedFiles: typeof filesToProcess = []
     const failedErrors: unknown[] = []
+    const warningMessages: string[] = []
 
     for (const file of filesToProcess) {
       const fileName = file.path.split('/').pop() || ''
@@ -99,9 +123,15 @@ function MoveDialogContent({
 
       try {
         if (mode === 'move') {
-          await moveFile(file.path, destPath)
+          const result = await moveFile(file.path, destPath)
+          if (result.warning) {
+            warningMessages.push(result.message ?? '')
+          }
         } else {
-          await copyFile(file.path, destPath)
+          const result = await copyFile(file.path, destPath)
+          if (result.warning) {
+            warningMessages.push(result.message ?? '')
+          }
         }
         successCount++
       } catch (error) {
@@ -120,10 +150,7 @@ function MoveDialogContent({
       if (isActiveRef.current) {
         onClose()
       }
-      addToast({
-        title: `成功${actionText} ${successCount} 个项目`,
-        color: 'success',
-      })
+      addToast(getMoveDialogSuccessToast(mode, successCount, warningMessages))
       return
     }
 

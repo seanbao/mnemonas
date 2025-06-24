@@ -43,6 +43,11 @@ const mockMoveFile = vi.mocked(moveFile)
 const mockCopyFile = vi.mocked(copyFile)
 const mockListFiles = vi.mocked(listFiles)
 const mockCreateDirectory = vi.mocked(createDirectory)
+const successActionResult = { warning: false, message: undefined } as const
+
+function warningActionResult(message: string) {
+  return { warning: true, message } as const
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -87,14 +92,14 @@ describe('MoveDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockListFiles.mockResolvedValue({ files: [], path: '/' })
-    mockCreateDirectory.mockResolvedValue(undefined)
+    mockCreateDirectory.mockResolvedValue(successActionResult)
   })
 
   it('keeps only failed files visible after partial move failure', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
     mockMoveFile
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(successActionResult)
       .mockRejectedValueOnce(new Error('move failed'))
 
     renderDialog({ onClose })
@@ -119,6 +124,59 @@ describe('MoveDialog', () => {
       title: '批量移动部分完成',
       description: '成功 1 个，失败 1 个',
       color: 'warning',
+    })
+  })
+
+  it('shows warning toast when full move succeeds with warnings', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockMoveFile
+      .mockResolvedValueOnce(warningActionResult('resource moved with persistence warning'))
+      .mockResolvedValueOnce(successActionResult)
+
+    renderDialog({ onClose })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    await waitFor(() => {
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'resource moved with persistence warning',
+        color: 'warning',
+      })
+    })
+  })
+
+  it('shows warning toast when full copy succeeds with warnings', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockCopyFile
+      .mockResolvedValueOnce(warningActionResult('resource copied with persistence warning'))
+      .mockResolvedValueOnce(successActionResult)
+
+    renderDialog({ onClose, mode: 'copy' })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    await user.click(screen.getByRole('button', { name: '复制' }))
+
+    await waitFor(() => {
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'resource copied with persistence warning',
+        color: 'warning',
+      })
     })
   })
 
@@ -210,7 +268,7 @@ describe('MoveDialog', () => {
   it('keeps the dialog open while a pending move request is in flight', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
-    const firstMove = createDeferred<void>()
+    const firstMove = createDeferred<typeof successActionResult>()
     const firstFiles = [{ path: '/source/a.txt', name: 'a.txt', isDir: false }]
     mockMoveFile.mockImplementationOnce(() => firstMove.promise)
 
@@ -233,7 +291,7 @@ describe('MoveDialog', () => {
     expect(screen.getAllByText('a.txt').length).toBeGreaterThan(0)
 
     await act(async () => {
-      firstMove.resolve(undefined)
+      firstMove.resolve(successActionResult)
       await firstMove.promise
     })
 
@@ -245,7 +303,7 @@ describe('MoveDialog', () => {
   it('keeps the dialog open when a pending move request later fails', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
     const onClose = vi.fn()
-    const firstMove = createDeferred<void>()
+    const firstMove = createDeferred<typeof successActionResult>()
     const firstFiles = [{ path: '/source/a.txt', name: 'a.txt', isDir: false }]
     mockMoveFile.mockImplementationOnce(() => firstMove.promise)
 

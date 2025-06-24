@@ -221,4 +221,16 @@ describe('FilesPage sharing behavior', () => {
     expect((await screen.findAllByText('分享功能已关闭')).length).toBeGreaterThan(0)
     expect(screen.getByText('当前服务已关闭分享功能。请在系统设置中重新启用后再创建分享链接。')).toBeInTheDocument()
   })
+
+  it('disables share entry points with an unavailable label when the initial share availability check is temporarily unavailable', async () => {
+    mockListShares.mockRejectedValueOnce(new ShareError('share unavailable', 503))
+
+    await act(async () => {
+      render(<FilesPage />)
+      await Promise.resolve()
+    })
+
+    expect((await screen.findAllByText('分享功能暂不可用')).length).toBeGreaterThan(0)
+    expect(screen.getByText('分享服务当前不可用，请检查系统健康状态或稍后重试。')).toBeInTheDocument()
+  })
 })

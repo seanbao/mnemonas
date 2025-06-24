@@ -147,6 +147,14 @@ function getSettingsActionErrorToast(
     }
   }
 
+  if (error instanceof Error && error.message.includes('webdav.username must not match a non-admin user')) {
+    return {
+      title: 'WebDAV 用户名不可用',
+      description: '当前 WebDAV 用户名与现有非管理员账号冲突，请改用管理员账号或其他专用用户名。',
+      color: 'warning',
+    }
+  }
+
   return {
     title: titles.failure,
     description: error instanceof Error ? error.message : '请稍后重试',

@@ -25,6 +25,7 @@ import {
   deleteFromTrash,
   emptyTrash,
   ApiError,
+  type ActionResult,
   type TrashItem,
   type TrashListResponse
 } from '@/api/files'
@@ -46,7 +47,11 @@ function daysUntilDelete(deletedAt: string, retentionDays: number): number | nul
   return Math.max(0, Math.ceil((autoDelete.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
 }
 
-function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number, retentionEnabled: boolean): string | null {
+function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number | undefined, retentionEnabled: boolean | undefined): string | null {
+  if (retentionEnabled === undefined || retentionDays === undefined) {
+    return '自动清理设置未知'
+  }
+
   if (!retentionEnabled) {
     return null
   }
@@ -67,6 +72,13 @@ function getAutoDeleteBadgeLabel(deletedAt: string, retentionDays: number, reten
 }
 
 const trashUnavailableDescription = '文件系统当前不可用，请稍后重试'
+
+function getMissingTrashItemResult(): ActionResult {
+  return {
+    warning: true,
+    message: '回收站条目已不存在，已同步更新',
+  }
+}
 
 function getTrashLoadErrorPresentation(error: unknown): {
   title: string
@@ -156,12 +168,17 @@ function TrashRow({
   onSelect: () => void
   onRestore: () => void
   onDelete: () => void
-  retentionDays: number
-  retentionEnabled: boolean
+  retentionDays: number | undefined
+  retentionEnabled: boolean | undefined
   canWrite: boolean
 }) {
   const autoDeleteBadgeLabel = getAutoDeleteBadgeLabel(item.deletedAt, retentionDays, retentionEnabled)
   const isExpiredForCleanup = autoDeleteBadgeLabel === '已过期，等待清理'
+  const autoDeleteBadgeColor = autoDeleteBadgeLabel === '自动清理设置未知'
+    ? 'default'
+    : isExpiredForCleanup
+      ? 'danger'
+      : 'warning'
   
   return (
     <div
@@ -194,7 +211,7 @@ function TrashRow({
           {formatRelativeTime(item.deletedAt)}
         </div>
         {autoDeleteBadgeLabel && (
-          <Chip size="sm" variant="flat" color={isExpiredForCleanup ? 'danger' : 'warning'} className="mt-1">
+          <Chip size="sm" variant="flat" color={autoDeleteBadgeColor} className="mt-1">
             {autoDeleteBadgeLabel}
           </Chip>
         )}
@@ -351,9 +368,33 @@ export function TrashPage() {
   addToast({ title: '回收站已刷新', color: 'success' })
   }, [refetch])
 
+  const restoreTrashItem = useCallback(async (id: string) => {
+    try {
+      return await restoreFromTrash(id)
+    } catch (error) {
+      if (error instanceof ApiError && error.isNotFound) {
+        return getMissingTrashItemResult()
+      }
+
+      throw error
+    }
+  }, [])
+
+  const deleteTrashItem = useCallback(async (id: string) => {
+    try {
+      return await deleteFromTrash(id)
+    } catch (error) {
+      if (error instanceof ApiError && error.isNotFound) {
+        return getMissingTrashItemResult()
+      }
+
+      throw error
+    }
+  }, [])
+
   // Mutations
   const restoreMutation = useMutation({
-    mutationFn: (id: string) => restoreFromTrash(id),
+    mutationFn: (id: string) => restoreTrashItem(id),
     onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
@@ -374,7 +415,7 @@ export function TrashPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteFromTrash(id),
+    mutationFn: (id: string) => deleteTrashItem(id),
     onSuccess: (result, id) => {
       removeTrashItemsFromCache([id])
       removeSelectedIds([id])
@@ -405,6 +446,8 @@ export function TrashPage() {
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       if (result.partial) {
         addToast({ title: `回收站已部分清空，删除 ${result.deletedCount} 项`, color: 'warning' })
+      } else if (result.warning) {
+        addToast({ title: result.message ?? `已清空回收站，删除 ${result.deletedCount} 项，但存在警告`, color: 'warning' })
       } else {
         addToast({ title: `已清空回收站，删除 ${result.deletedCount} 项`, color: 'success' })
       }
@@ -444,7 +487,7 @@ export function TrashPage() {
 
   // Batch restore using custom hook
   const { execute: executeBatchRestore, isLoading: isBatchRestoring } = useBatchOperation({
-    operation: restoreFromTrash,
+    operation: restoreTrashItem,
     messages: {
       success: '{count} 项恢复成功',
       failure: '{count} 项恢复失败',
@@ -470,7 +513,7 @@ export function TrashPage() {
 
   // Batch delete using custom hook
   const { execute: executeBatchDelete, isLoading: isBatchDeleting } = useBatchOperation({
-    operation: deleteFromTrash,
+    operation: deleteTrashItem,
     messages: {
       success: '{count} 项已永久删除',
       failure: '{count} 项永久删除失败',
@@ -653,8 +696,8 @@ export function TrashPage() {
               key={item.id}
               item={item}
               isSelected={visibleSelectedItems.has(item.id)}
-              retentionDays={retentionDays ?? 0}
-              retentionEnabled={retentionEnabled ?? false}
+              retentionDays={retentionDays}
+              retentionEnabled={retentionEnabled}
               canWrite={canWrite}
               onSelect={() => {
                 if (!canWrite) return

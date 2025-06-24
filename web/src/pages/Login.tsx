@@ -19,6 +19,7 @@ import {
   EyeOff,
 } from 'lucide-react'
 import { useAuthStore, useIsAuthenticated } from '@/stores/auth'
+import { getSetupStatus } from '@/api/setup'
 
 export function LoginPage() {
   const navigate = useNavigate()
@@ -30,6 +31,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [isFirstRun, setIsFirstRun] = useState<boolean | null>(null)
   const usernameInputId = 'login-username'
   const passwordInputId = 'login-password'
   const displayError = formError ?? error
@@ -41,6 +43,26 @@ export function LoginPage() {
       navigate(from, { replace: true })
     }
   }, [isAuthenticated, navigate, location])
+
+  useEffect(() => {
+    let cancelled = false
+
+    void getSetupStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setIsFirstRun(status.is_first_run)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsFirstRun(null)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const handleUsernameChange = (value: string) => {
     setUsername(value)
@@ -235,10 +257,24 @@ export function LoginPage() {
 
               {/* Hints */}
               <div className="bg-content2/50 rounded-lg p-4">
-                <p className="mb-2 text-sm font-medium">默认账户</p>
+                <p className="mb-2 text-sm font-medium">登录说明</p>
                 <div className="text-default-500 space-y-1 text-xs">
-                  <p>首次运行时默认管理员账号为 <span className="font-mono text-accent-primary">admin</span></p>
-                  <p>初始密码请查看服务器启动日志，浏览器界面不显示初始密码</p>
+                  {isFirstRun === true ? (
+                    <>
+                      <p>首次运行时默认管理员账号为 <span className="font-mono text-accent-primary">admin</span></p>
+                      <p>初始密码请查看服务器启动日志，浏览器界面不显示初始密码</p>
+                    </>
+                  ) : isFirstRun === false ? (
+                    <>
+                      <p>使用已配置的管理员或用户账户登录。</p>
+                      <p>首次启动时生成的初始密码不会在浏览器界面再次显示。</p>
+                    </>
+                  ) : (
+                    <>
+                      <p>使用管理员或已有账户登录。</p>
+                      <p>首次启动凭据仅记录在服务端日志中，浏览器界面不显示初始密码。</p>
+                    </>
+                  )}
                 </div>
               </div>
             </CardBody>

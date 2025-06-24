@@ -122,6 +122,18 @@ function getShareLoadErrorToast(error: unknown): {
   }
 }
 
+function getMissingShareToast(): {
+  title: string
+  description: string
+  color: 'warning'
+} {
+  return {
+    title: '分享已不存在',
+    description: '该分享可能已被其他操作删除，列表已同步更新。',
+    color: 'warning',
+  }
+}
+
 interface ShareManagerProps {
   showAllShares?: boolean
   featureEnabled?: boolean
@@ -221,6 +233,12 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         color: 'success' 
       })
     } catch (err) {
+      if (err instanceof ShareError && err.isNotFound) {
+        setShares(prev => prev.filter(s => s.id !== share.id))
+        addToast(getMissingShareToast())
+        return
+      }
+
       addToast(getShareActionErrorToast(err, {
         unavailable: '分享操作暂不可用',
         failure: '操作失败',
@@ -238,6 +256,13 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       addToast({ title: '分享已删除', color: 'success' })
       setDeleteTarget(current => (current?.id === target.id ? null : current))
     } catch (err) {
+      if (err instanceof ShareError && err.isNotFound) {
+        setShares(prev => prev.filter(s => s.id !== target.id))
+        addToast(getMissingShareToast())
+        setDeleteTarget(current => (current?.id === target.id ? null : current))
+        return
+      }
+
       addToast(getShareActionErrorToast(err, {
         unavailable: '删除分享暂不可用',
         failure: '删除失败',

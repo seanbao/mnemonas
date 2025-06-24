@@ -31,6 +31,9 @@ export function versionToDisplayFormat(v: VersionInfo): { modTime: string; size:
 }
 
 export interface StorageStats {
+  fileCount?: number
+  fileCountAvailable?: boolean
+  storageStatsAvailable?: boolean
   totalSize?: number
   totalObjects?: number
   uniqueSize?: number
@@ -335,12 +338,18 @@ function isVersionsResponseShape(value: unknown): value is { path: string, versi
 }
 
 function isStorageStatsShape(value: unknown): value is {
+  total_files?: number
+  total_files_available?: boolean
+  storage_stats_available?: boolean
   total_size?: number
   total_chunks?: number
   unique_size?: number
   dedup_ratio?: number
 } {
   return isRecord(value)
+    && isNumberOrUndefined(value.total_files)
+    && isBooleanOrUndefined(value.total_files_available)
+    && isBooleanOrUndefined(value.storage_stats_available)
     && isNumberOrUndefined(value.total_size)
     && isNumberOrUndefined(value.total_chunks)
     && isNumberOrUndefined(value.unique_size)
@@ -643,13 +652,13 @@ export async function getVersions(path: string): Promise<VersionInfo[]> {
 }
 
 // Delete a file (soft delete)
-export async function deleteFile(path: string): Promise<void> {
+export async function deleteFile(path: string): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/files${encodedPath}`, {
     method: 'DELETE',
   })
-  await expectWrappedActionResponse(response, '删除文件失败', isPathActionShape)
+  return expectWrappedActionResponse(response, '删除文件失败', isPathActionShape)
 }
 
 // Get storage stats (direct response, not wrapped)
@@ -660,6 +669,14 @@ export async function getStorageStats(): Promise<StorageStats> {
     throw new Error('服务器返回了无效的数据')
   }
   return {
+    fileCount: data.total_files,
+    fileCountAvailable: data.total_files_available ?? data.total_files !== undefined,
+    storageStatsAvailable: data.storage_stats_available ?? (
+      data.total_size !== undefined
+      || data.total_chunks !== undefined
+      || data.unique_size !== undefined
+      || data.dedup_ratio !== undefined
+    ),
     totalSize: data.total_size,
     totalObjects: data.total_chunks,
     uniqueSize: data.unique_size,
@@ -743,13 +760,13 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
 }
 
 // Create directory
-export async function createDirectory(path: string): Promise<void> {
+export async function createDirectory(path: string): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/directories${encodedPath}`, {
     method: 'POST',
   })
-  await expectWrappedActionResponse(response, '创建文件夹失败', isPathActionShape)
+  return expectWrappedActionResponse(response, '创建文件夹失败', isPathActionShape)
 }
 
 // Upload file
@@ -913,7 +930,7 @@ export function getThumbnailUrl(path?: string, size: ThumbnailSize = 'medium'): 
 }
 
 // Rename/Move file
-export async function moveFile(fromPath: string, toPath: string): Promise<void> {
+export async function moveFile(fromPath: string, toPath: string): Promise<ActionResult> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
   
@@ -927,11 +944,11 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
       to: normalizedTo,
     }),
   })
-  await expectWrappedActionResponse(response, '移动文件失败', isMoveCopyActionShape)
+  return expectWrappedActionResponse(response, '移动文件失败', isMoveCopyActionShape)
 }
 
 // Copy file
-export async function copyFile(fromPath: string, toPath: string): Promise<void> {
+export async function copyFile(fromPath: string, toPath: string): Promise<ActionResult> {
   const normalizedFrom = normalizePath(fromPath)
   const normalizedTo = normalizePath(toPath)
   
@@ -945,17 +962,17 @@ export async function copyFile(fromPath: string, toPath: string): Promise<void> 
       to: normalizedTo,
     }),
   })
-  await expectWrappedActionResponse(response, '复制文件失败', isMoveCopyActionShape)
+  return expectWrappedActionResponse(response, '复制文件失败', isMoveCopyActionShape)
 }
 
 // Restore file to a specific version
-export async function restoreVersion(path: string, hash: string): Promise<void> {
+export async function restoreVersion(path: string, hash: string): Promise<ActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodeURIComponent(normalizedPath)
   const response = await authFetch(`${API_BASE}/versions/${hash}/restore?path=${encodedPath}`, {
     method: 'POST',
   })
-  await expectWrappedActionResponse(response, '恢复版本失败', isRestoreVersionActionShape)
+  return expectWrappedActionResponse(response, '恢复版本失败', isRestoreVersionActionShape)
 }
 
 // === Trash/Recycle Bin API ===
@@ -974,6 +991,8 @@ export interface TrashItem {
 export interface EmptyTrashResult {
   deletedCount: number
   partial: boolean
+  warning?: boolean
+  message?: string
 }
 
 export interface TrashListResponse {
@@ -1039,13 +1058,26 @@ export async function emptyTrash(): Promise<EmptyTrashResult> {
   const response = await authFetch(`${API_BASE}/trash/`, {
     method: 'DELETE',
   })
-  const data = await handleWrappedResponse<unknown>(response, '清空回收站失败')
+  const body = await handleResponse<ApiResponseWrapper<unknown>>(response, '清空回收站失败')
+  if (
+    !body
+    || typeof body !== 'object'
+    || body.success !== true
+    || !('data' in body)
+  ) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  const data = body.data
   if (!isEmptyTrashResultShape(data)) {
     throw new Error('服务器返回了无效的数据')
   }
   return {
     deletedCount: data.deleted_count,
     partial: !!data.partial,
+    warning: response.headers?.get?.('Warning') != null
+      || (isRecord(data) && data.warning === true),
+    message: typeof body.message === 'string' && body.message ? body.message : undefined,
   }
 }
 
@@ -1060,6 +1092,7 @@ export interface ScrubError {
 export interface ScrubResult {
   has_result: boolean
   message?: string
+  warning?: boolean
   id?: string
   start_time?: string
   end_time?: string
@@ -1091,7 +1124,17 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
     headers: hashes?.length ? { 'Content-Type': 'application/json' } : {},
     body: hashes?.length ? JSON.stringify({ hashes }) : undefined,
   })
-  const data = await handleWrappedResponse<unknown>(response, '执行数据校验失败')
+  const body = await handleResponse<ApiResponseWrapper<unknown>>(response, '执行数据校验失败')
+  if (
+    !body
+    || typeof body !== 'object'
+    || body.success !== true
+    || !('data' in body)
+  ) {
+    throw new Error('服务器返回了无效的数据')
+  }
+
+  const data = body.data
   if (!isRunScrubResponseShape(data)) {
     throw new Error('服务器返回了无效的数据')
   }
@@ -1099,6 +1142,9 @@ export async function runScrub(hashes?: string[]): Promise<ScrubResult> {
   const result: ScrubResult = {
     has_result: true,
     ...data,
+    warning: response.headers?.get?.('Warning') != null
+      || (isRecord(data) && data.warning === true),
+    message: typeof body.message === 'string' && body.message ? body.message : undefined,
   }
   if (!result.status) {
     result.status = 'completed'

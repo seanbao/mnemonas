@@ -70,6 +70,27 @@ function formatMetricWithUnit(value: number | undefined, unit: string): string {
   return value === undefined ? '--' : `${value} ${unit}`
 }
 
+function areStorageStatsAvailable(stats: {
+  storageStatsAvailable?: boolean
+  totalSize?: number
+  totalObjects?: number
+  uniqueSize?: number
+  dedupRatio?: number
+} | undefined): boolean {
+  if (!stats) {
+    return false
+  }
+  if (stats.storageStatsAvailable !== undefined) {
+    return stats.storageStatsAvailable
+  }
+  return (
+    stats.totalSize !== undefined
+    || stats.totalObjects !== undefined
+    || stats.uniqueSize !== undefined
+    || stats.dedupRatio !== undefined
+  )
+}
+
 function getHealthLoadErrorPresentation(errors: Array<unknown>): { title: string; description: string } {
   if (errors.some((error) => error instanceof ApiError && error.isUnavailable)) {
     return {
@@ -116,8 +137,11 @@ export function HealthPage() {
   })
 
   const isLoading = diagLoading || statsLoading
+  const hasAvailableData = diagnostics !== undefined || stats !== undefined
+  const hasPartialError = !isLoading && [diagError, statsError].some(Boolean) && hasAvailableData
   const loadError = diagError || statsError
   const loadErrorPresentation = getHealthLoadErrorPresentation([diagError, statsError])
+  const storageStatsAvailable = areStorageStatsAvailable(stats)
 
   const handleRefresh = async () => {
     const [diagResult, statsResult] = await Promise.all([refetchDiag(), refetchStats()])
@@ -132,8 +156,8 @@ export function HealthPage() {
   }
 
   // Calculate dedup savings
-  const totalSize = stats?.totalSize ?? 0
-  const uniqueSize = stats?.uniqueSize ?? 0
+  const totalSize = storageStatsAvailable ? stats?.totalSize ?? 0 : 0
+  const uniqueSize = storageStatsAvailable ? stats?.uniqueSize ?? 0 : 0
   const dedupSavings = totalSize > 0 && uniqueSize > 0
     ? ((totalSize - uniqueSize) / totalSize * 100).toFixed(1)
     : '0'
@@ -155,22 +179,22 @@ export function HealthPage() {
     {
       icon: Database,
       title: '存储对象',
-      value: stats?.totalObjects?.toString() ?? '--',
-      subtitle: stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : undefined,
+      value: storageStatsAvailable ? stats?.totalObjects?.toString() ?? '--' : '--',
+      subtitle: storageStatsAvailable && stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : undefined,
       gradient: 'from-emerald-500/20 to-cyan-500/20',
     },
     {
       icon: HardDrive,
       title: '去重率',
-      value: stats?.dedupRatio !== undefined
+      value: storageStatsAvailable && stats?.dedupRatio !== undefined
         ? `${(stats.dedupRatio * 100).toFixed(1)}%`
         : '--',
-      subtitle: dedupSavings !== '0' ? `节省 ${dedupSavings}%` : undefined,
+      subtitle: storageStatsAvailable && dedupSavings !== '0' ? `节省 ${dedupSavings}%` : undefined,
       gradient: 'from-amber-500/20 to-orange-500/20',
     },
   ]
 
-  if (!isLoading && loadError) {
+  if (!isLoading && loadError && !hasAvailableData) {
     return (
       <div className="p-6 lg:p-8">
         <EmptyState
@@ -205,6 +229,29 @@ export function HealthPage() {
           刷新
         </Button>
       </div>
+
+      {hasPartialError && (
+        <Card className="border-warning/30 bg-warning/5 shadow-none">
+          <CardBody className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-start gap-3">
+              <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
+              <div>
+                <p className="text-sm font-medium text-foreground">部分健康数据加载失败</p>
+                <p className="text-xs text-default-600">当前页面展示的是可用数据，部分指标可能不是最新状态。</p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="flat"
+              className="rounded-xl"
+              startContent={<RefreshCw size={14} />}
+              onPress={handleRefresh}
+            >
+              重新加载
+            </Button>
+          </CardBody>
+        </Card>
+      )}
 
       {/* System Status */}
       <Card className="card-meridian">
@@ -302,27 +349,31 @@ export function HealthPage() {
             <div>
               <div className="flex justify-between text-sm mb-2">
                 <span className="text-default-500">总存储</span>
-                <span className="data-value">{stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : '--'}</span>
+                <span className="data-value">{storageStatsAvailable && stats?.totalSize !== undefined ? formatBytes(stats.totalSize) : '--'}</span>
               </div>
-              <Progress 
-                isIndeterminate
-                color="primary" 
-                className="h-2"
-                aria-label="存储使用"
-              />
-              <p className="text-xs text-default-400 mt-2">容量未知</p>
+              {storageStatsAvailable ? (
+                <Progress 
+                  isIndeterminate
+                  color="primary" 
+                  className="h-2"
+                  aria-label="存储使用"
+                />
+              ) : (
+                <div className="h-2 rounded-full bg-content2/50" aria-label="存储使用" />
+              )}
+              <p className="text-xs text-default-400 mt-2">{storageStatsAvailable ? '容量未知' : '统计不可用'}</p>
             </div>
 
             <Divider />
 
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div className="text-center p-3 rounded-lg bg-content2/50">
-                <p className="text-2xl font-semibold data-value">{stats?.totalObjects ?? '--'}</p>
+                <p className="text-2xl font-semibold data-value">{storageStatsAvailable ? stats?.totalObjects ?? '--' : '--'}</p>
                 <p className="text-default-500 text-xs">对象数量</p>
               </div>
               <div className="text-center p-3 rounded-lg bg-content2/50">
                 <p className="text-2xl font-semibold data-value">
-                  {stats?.dedupRatio !== undefined
+                  {storageStatsAvailable && stats?.dedupRatio !== undefined
                     ? `${(stats.dedupRatio * 100).toFixed(1)}%`
                     : '--'}
                 </p>
