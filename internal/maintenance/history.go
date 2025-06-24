@@ -15,6 +15,7 @@ import (
 )
 
 var errHistoryFileSymlink = errors.New("maintenance history file path must not be a symlink")
+var ErrScrubAlreadyRunning = errors.New("scrub already running")
 
 const interruptedScrubErrorMessage = "scrub interrupted before completion"
 
@@ -132,6 +133,9 @@ func (s *HistoryStore) ScrubIsRunning() bool {
 func (s *HistoryStore) StartScrub() (*ScrubResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.scrubResult != nil && s.scrubResult.Status == "running" {
+		return nil, ErrScrubAlreadyRunning
+	}
 
 	previous := s.scrubResult
 	result := &ScrubResult{

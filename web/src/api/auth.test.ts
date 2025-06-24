@@ -138,6 +138,38 @@ describe('auth API', () => {
     expect(localStorage.getItem('mnemonas_user')).toBeNull()
   })
 
+  it('preserves local auth state when current user lookup is temporarily unavailable', async () => {
+    localStorage.setItem('mnemonas_token', 'access-1')
+    localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
+    localStorage.setItem('mnemonas_user', JSON.stringify({
+      id: 'u1',
+      username: 'admin',
+      role: 'admin',
+      home_dir: '/',
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        success: false,
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'auth unavailable',
+        },
+      }),
+    })
+
+    await expect(getCurrentUser()).rejects.toMatchObject({
+      message: 'auth unavailable',
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+    })
+    expect(localStorage.getItem('mnemonas_token')).toBe('access-1')
+    expect(localStorage.getItem('mnemonas_refresh_token')).toBe('refresh-1')
+    expect(localStorage.getItem('mnemonas_user')).not.toBeNull()
+  })
+
   it('retries once after refreshing token', async () => {
     localStorage.setItem('mnemonas_token', 'access-1')
     localStorage.setItem('mnemonas_refresh_token', 'refresh-1')

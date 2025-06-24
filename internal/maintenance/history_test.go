@@ -596,6 +596,38 @@ func TestHistoryStore_StartScrubRejectsSymlinkHistoryFile(t *testing.T) {
 	}
 }
 
+func TestHistoryStore_StartScrub_RejectsAlreadyRunning(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewHistoryStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewHistoryStore failed: %v", err)
+	}
+
+	started, err := store.StartScrub()
+	if err != nil {
+		t.Fatalf("first StartScrub failed: %v", err)
+	}
+	if started == nil || started.Status != "running" {
+		t.Fatalf("expected first scrub start to return running result, got %#v", started)
+	}
+
+	startedAgain, err := store.StartScrub()
+	if !errors.Is(err, ErrScrubAlreadyRunning) {
+		t.Fatalf("expected ErrScrubAlreadyRunning, got %v", err)
+	}
+	if startedAgain != nil {
+		t.Fatalf("expected nil result when scrub already running, got %#v", startedAgain)
+	}
+	if !store.ScrubIsRunning() {
+		t.Fatal("expected scrub to remain running after duplicate start rejection")
+	}
+
+	current := store.GetLastScrubResult()
+	if current == nil || current.ID != started.ID {
+		t.Fatalf("expected running scrub record to remain unchanged, got %#v", current)
+	}
+}
+
 func TestGCRunningState(t *testing.T) {
 	// Ensure clean state first
 	for GCIsRunning() {

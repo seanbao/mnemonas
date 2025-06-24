@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams, type SetURLSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
@@ -229,7 +229,18 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
   const [selectedVersion, setSelectedVersion] = useState<VersionInfo | null>(null)
   const { isOpen, onOpen, onClose } = useDisclosure()
   const queryClient = useQueryClient()
+  const restoreSessionRef = useRef(0)
+  const currentSelectedPathRef = useRef<string | null>(initialState.selectedPath)
+  const currentSelectedVersionRef = useRef<VersionInfo | null>(null)
   const selectedPathAllowed = !selectedPath || !scopedHomeDir || pathWithinBase(scopedHomeDir, selectedPath)
+
+  useEffect(() => {
+    currentSelectedPathRef.current = selectedPath
+  }, [selectedPath])
+
+  useEffect(() => {
+    currentSelectedVersionRef.current = selectedVersion
+  }, [selectedVersion])
 
   useEffect(() => {
     if (!initialState.isBlocked) {
@@ -263,14 +274,20 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
   }
 
   const restoreMutation = useMutation({
-    mutationFn: async ({ path, hash }: { path: string; hash: string }) => {
+    mutationFn: async ({ path, hash }: { path: string; hash: string; sessionId: number }) => {
       await restoreVersion(path, hash)
     },
     retry: false,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['versions', selectedPath] })
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['versions', variables.path] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
-      onClose()
+      if (
+        restoreSessionRef.current === variables.sessionId
+        && currentSelectedPathRef.current === variables.path
+        && currentSelectedVersionRef.current?.hash === variables.hash
+      ) {
+        onClose()
+      }
     },
     onError: (error: unknown) => {
       addToast(getVersionsActionErrorToast(error, {
@@ -309,13 +326,18 @@ function VersionsPageContent({ initialPath, isAdmin, scopedHomeDir, setSearchPar
   }
 
   const handleRestore = (version: VersionInfo) => {
+    restoreSessionRef.current += 1
     setSelectedVersion(version)
     onOpen()
   }
 
   const confirmRestore = () => {
     if (selectedPath && selectedVersion) {
-      restoreMutation.mutate({ path: selectedPath, hash: selectedVersion.hash })
+      restoreMutation.mutate({
+        path: selectedPath,
+        hash: selectedVersion.hash,
+        sessionId: restoreSessionRef.current,
+      })
     }
   }
 

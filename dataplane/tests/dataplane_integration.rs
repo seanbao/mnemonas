@@ -311,7 +311,7 @@ async fn test_get_file_reports_missing_chunk() {
         .await
         .expect_err("missing chunk should surface as stream error");
 
-    assert_eq!(err.code(), Code::NotFound);
+    assert_eq!(err.code(), Code::DataLoss);
 
     let _ = shutdown_tx.send(());
 }
