@@ -154,7 +154,7 @@ POST /api/v1/auth/login
 **失败行为**:
 - 同一 `username + 客户端地址` 组合连续登录失败达到限制时，返回 `429 Too Many Requests`，错误码为 `LOGIN_RATE_LIMITED`
 - `username` 分桶遵循账户名大小写不敏感语义，`handleruser` 与 `HANDLERUSER` 计入同一限流桶
-- 客户端地址默认使用直连来源；只有当请求直接来自 loopback 或私有网段代理时，才采信 `X-Forwarded-For` / `X-Real-IP`
+- 客户端地址默认按一层受信代理解析；只有当请求直接来自 loopback 或私有网段代理时，才采信转发头，并按 `server.trusted_proxy_hops` 从 `X-Forwarded-For` 右侧回溯客户端地址。多跳代理部署需要显式提高该值；设置为 `0` 时始终使用直连来源
 
 ### 刷新令牌
 
@@ -519,7 +519,7 @@ GET /api/v1/diagnostics
 
 获取 JSON 格式的指标数据。
 
-**需要认证**: 当 `auth.enabled = true` 时需要 JWT 认证
+**需要认证**: 当 `auth.enabled = true` 时需要管理员 JWT；未开启认证时可直接访问
 
 ```
 GET /api/v1/metrics
@@ -947,7 +947,7 @@ DELETE /api/v1/trash/{id}
 DELETE /api/v1/trash
 ```
 
-说明：当回收站已经清空、但部分历史对象 cleanup 仅部分完成时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `trash emptied with cleanup warning`。
+说明：当回收站已经清空、但部分历史对象 cleanup 仅部分完成时，接口仍返回 `200 OK`，并附带 `Warning` 响应头；响应 body 会包含 `warning: true`，`message` 为 `trash emptied with cleanup warning`。若前面已有条目删除成功且带 cleanup warning，随后又有其他条目硬失败，则接口仍返回 `200 OK`，同时保留 `partial: true`、`warning: true`，`message` 为 `trash emptied partially with cleanup warning`。
 
 ---
 
@@ -1165,9 +1165,10 @@ POST /api/v1/public/shares/{share_id}/access
 - 当分享已过期时，返回 `410 Gone`，错误码为 `SHARE_EXPIRED`
 - 当创建该分享的用户被禁用或删除后，公开访问、下载和文件夹列表都会返回 `410 Gone`，错误码为 `SHARE_DISABLED`
 - `access_count` 在下载与文件夹列表请求时递增；`POST /api/v1/public/shares/{share_id}/access` 与兼容路径 `POST /s/{share_id}` 的密码验证不会计数
+- 一旦下载或文件夹列表响应已经开始向客户端写出字节，即使后续流式传输中断，该次访问仍计入 `access_count`
 - 密码验证成功后，服务端通过 HttpOnly cookie 记录访问状态；后续下载和文件夹列表请求不使用 `password` 查询参数
 - 连续密码错误达到限制时，返回 `429 Too Many Requests`，错误码为 `SHARE_PASSWORD_RATE_LIMITED`
-- 口令失败限流默认按 share ID 与直连客户端地址组合统计；只有当请求直接来自 loopback 或私有网段代理时，才采信 `X-Forwarded-For` / `X-Real-IP`
+- 口令失败限流默认按 share ID 与客户端地址组合统计；只有当请求直接来自 loopback 或私有网段代理时，才采信转发头，并按 `server.trusted_proxy_hops` 从 `X-Forwarded-For` 右侧回溯客户端地址
 - 兼容路径 `/s/{share_id}` 与 `POST /s/{share_id}` 保持相同 JSON 行为，适用于非 SPA 或直接脚本调用
 
 **下载文件**:

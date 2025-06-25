@@ -34,6 +34,7 @@ import (
 	"github.com/seanbao/mnemonas/internal/dataplane"
 	"github.com/seanbao/mnemonas/internal/favorites"
 	"github.com/seanbao/mnemonas/internal/maintenance"
+	"github.com/seanbao/mnemonas/internal/requestip"
 	"github.com/seanbao/mnemonas/internal/share"
 	"github.com/seanbao/mnemonas/internal/storage"
 	"github.com/seanbao/mnemonas/internal/thumbnail"
@@ -874,6 +875,181 @@ func TestServer_Health_DegradedWhenConfiguredSubsystemsFailInitialization(t *tes
 	}
 	if !strings.Contains(w.Body.String(), `"status":"degraded"`) {
 		t.Fatalf("expected health response to degrade when configured subsystems fail, got %q", w.Body.String())
+	}
+}
+
+func TestServer_ThumbnailServiceSymlinkInitFailure_DegradesHealthAndDiagnostics(t *testing.T) {
+	tmpDir := t.TempDir()
+	realThumbnailRoot := filepath.Join(tmpDir, "real-thumbnails")
+	if err := os.MkdirAll(realThumbnailRoot, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-thumbnails) error: %v", err)
+	}
+	linkedThumbnailRoot := filepath.Join(tmpDir, "linked-thumbnails")
+	if err := os.Symlink(realThumbnailRoot, linkedThumbnailRoot); err != nil {
+		t.Fatalf("Symlink(linked-thumbnails) error: %v", err)
+	}
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{ThumbnailRoot: linkedThumbnailRoot})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	healthW := httptest.NewRecorder()
+	server.Router().ServeHTTP(healthW, healthReq)
+
+	if healthW.Code != http.StatusOK {
+		t.Fatalf("Health status = %d, want %d", healthW.Code, http.StatusOK)
+	}
+	if !strings.Contains(healthW.Body.String(), `"status":"degraded"`) {
+		t.Fatalf("expected health response to degrade when thumbnail init fails, got %q", healthW.Body.String())
+	}
+
+	diagnosticsReq := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	diagnosticsW := httptest.NewRecorder()
+	server.Router().ServeHTTP(diagnosticsW, diagnosticsReq)
+
+	if diagnosticsW.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", diagnosticsW.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			System struct {
+				ThumbnailServiceReady bool `json:"thumbnail_service_ready"`
+			} `json:"system"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(diagnosticsW.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatal("expected diagnostics response success=true")
+	}
+	if payload.Data.System.ThumbnailServiceReady {
+		t.Fatal("expected diagnostics to report thumbnail service unavailable after symlink init failure")
+	}
+}
+
+func TestServer_ResolveWebDAVRuntimeConfig_DisablesWebDAVWhenGeneratedPasswordUnavailable(t *testing.T) {
+	server := &Server{logger: zerolog.Nop()}
+	cfg := config.Default()
+	cfg.Storage.Root = filepath.Join(t.TempDir(), "missing-secrets")
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.WebDAV.Username = ""
+	cfg.WebDAV.Password = ""
+
+	runtimeCfg := server.resolveWebDAVRuntimeConfig(*cfg)
+	if runtimeCfg.Enabled {
+		t.Fatalf("expected WebDAV runtime config to fail closed when generated password is unavailable, got %+v", runtimeCfg)
+	}
+	if runtimeCfg.Username != "admin" {
+		t.Fatalf("expected default username admin, got %q", runtimeCfg.Username)
+	}
+	if runtimeCfg.Password != "" {
+		t.Fatalf("expected runtime password to remain empty on fail-closed path, got %q", runtimeCfg.Password)
+	}
+	if runtimeCfg.PasswordIsGenerated {
+		t.Fatal("expected generated-password flag to remain false when password resolution fails")
+	}
+}
+
+func TestServer_WebDAVGeneratedPasswordUnavailable_DegradesHealthAndDiagnostics(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Root = filepath.Join(t.TempDir(), "missing-secrets")
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.WebDAV.Username = ""
+	cfg.WebDAV.Password = ""
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	active := server.currentActiveWebDAV()
+	if active.Enabled {
+		t.Fatalf("expected active WebDAV runtime config to be disabled, got %+v", active)
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	healthW := httptest.NewRecorder()
+	server.Router().ServeHTTP(healthW, healthReq)
+
+	if healthW.Code != http.StatusOK {
+		t.Fatalf("Health status = %d, want %d", healthW.Code, http.StatusOK)
+	}
+	if !strings.Contains(healthW.Body.String(), `"status":"degraded"`) {
+		t.Fatalf("expected health response to degrade when generated WebDAV password is unavailable, got %q", healthW.Body.String())
+	}
+
+	diagnosticsReq := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	diagnosticsW := httptest.NewRecorder()
+	server.Router().ServeHTTP(diagnosticsW, diagnosticsReq)
+
+	if diagnosticsW.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", diagnosticsW.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			System struct {
+				WebDAVRuntimeReady bool `json:"webdav_runtime_ready"`
+			} `json:"system"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(diagnosticsW.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatal("expected diagnostics response success=true")
+	}
+	if payload.Data.System.WebDAVRuntimeReady {
+		t.Fatal("expected diagnostics to report WebDAV runtime unavailable when generated password cannot be loaded")
+	}
+}
+
+func TestServer_ActivityAndMaintenanceSymlinkParentInitFailure_DoNotCreateDirsAndDegradeHealth(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) error: %v", err)
+	}
+
+	activityRoot := filepath.Join(linkedParent, "activity")
+	maintenanceRoot := filepath.Join(linkedParent, "maintenance")
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		ActivityRoot:    activityRoot,
+		MaintenanceRoot: maintenanceRoot,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(realParent, "activity")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("activity root created through symlink parent, stat error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(realParent, "maintenance")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("maintenance root created through symlink parent, stat error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Health status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"degraded"`) {
+		t.Fatalf("expected health response to degrade when activity/maintenance init fails, got %q", w.Body.String())
 	}
 }
 
@@ -2146,6 +2322,42 @@ func TestServer_Login_LogsActivityWithUsername(t *testing.T) {
 	}
 }
 
+func TestServer_Login_DoesNotTrustSpoofedForwardedHeadersFromUntrustedRemote(t *testing.T) {
+	server, _, _, username, _ := setupAuthServer(t)
+
+	body := fmt.Sprintf(`{"username":"%s","password":"wrong-password"}`, username)
+	for attempt := 1; attempt <= 5; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		req.RemoteAddr = "203.0.113.10:4123"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", attempt))
+		w := httptest.NewRecorder()
+
+		server.Router().ServeHTTP(w, req)
+
+		wantStatus := http.StatusUnauthorized
+		wantCode := "INVALID_CREDENTIALS"
+		if attempt == 5 {
+			wantStatus = http.StatusTooManyRequests
+			wantCode = "LOGIN_RATE_LIMITED"
+		}
+		if w.Code != wantStatus {
+			t.Fatalf("attempt %d status = %d, want %d; body=%s", attempt, w.Code, wantStatus, w.Body.String())
+		}
+
+		var envelope struct {
+			Error *struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("attempt %d failed to decode response: %v", attempt, err)
+		}
+		if envelope.Error == nil || envelope.Error.Code != wantCode {
+			t.Fatalf("attempt %d error code = %+v, want %q", attempt, envelope.Error, wantCode)
+		}
+	}
+}
+
 func TestServer_Login_AddsAuditWarningHeaderWhenActivityLogSaveFails(t *testing.T) {
 	server, _, tmpDir, username, password := setupAuthServer(t)
 	if server.activity == nil {
@@ -2271,6 +2483,51 @@ func TestServer_CreateShare_UsesBaseURL(t *testing.T) {
 	}
 }
 
+func TestServer_ListShares_IncludesCreatedSharesWhenAuthDisabled(t *testing.T) {
+	server, _ := setupShareServer(t)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/shares", strings.NewReader(`{"path":"/docs/a.txt","type":"file"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d, want %d", createRec.Code, http.StatusCreated)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/shares", nil)
+	listRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list shares status = %d, want %d", listRec.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			Path string `json:"path"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", listRec.Body.String())
+	}
+
+	found := false
+	for _, item := range payload.Data {
+		if item.Path == "/docs/a.txt" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected auth-disabled share list to include created share, got %s", listRec.Body.String())
+	}
+}
+
 func TestServer_CreateShare_LogsShareActivityPath(t *testing.T) {
 	server, _ := setupShareServer(t)
 	if server.activity == nil {
@@ -2337,6 +2594,111 @@ func TestServer_DeleteShare_LogsUnshareActivity(t *testing.T) {
 	}
 	if entries[0].Path != "/docs" {
 		t.Fatalf("expected unshare activity path %q, got %q", "/docs", entries[0].Path)
+	}
+}
+
+func TestServer_AddFavorite_LogsFavoriteActivity(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/favorites", strings.NewReader(`{"path":"/docs/a.txt","note":"starred"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("add favorite status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionFavorite, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one favorite activity entry, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].User != username {
+		t.Fatalf("expected favorite activity user %q, got %q", username, entries[0].User)
+	}
+	if entries[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected favorite activity path %q, got %q", "/docs/a.txt", entries[0].Path)
+	}
+}
+
+func TestServer_RemoveFavorite_LogsUnfavoriteActivity(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/docs/a.txt", "starred"); err != nil {
+		t.Fatalf("favoritesStore.Add() error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/favorites/docs/a.txt", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("remove favorite status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionUnfavorite, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one unfavorite activity entry, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].User != username {
+		t.Fatalf("expected unfavorite activity user %q, got %q", username, entries[0].User)
+	}
+	if entries[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected unfavorite activity path %q, got %q", "/docs/a.txt", entries[0].Path)
+	}
+}
+
+func TestServer_UpdateFavoriteNote_LogsFavoriteNoteActivity(t *testing.T) {
+	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
+	if server.activity == nil {
+		t.Fatal("expected activity store to be initialized")
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	if _, err := server.favoritesStore.Add(user.ID, "/docs/a.txt", "old note"); err != nil {
+		t.Fatalf("favoritesStore.Add() error: %v", err)
+	}
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/favorites/docs/a.txt", strings.NewReader(`{"note":"new note"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update favorite note status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionFavoriteNote, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one favorite-note activity entry, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].User != username {
+		t.Fatalf("expected favorite-note activity user %q, got %q", username, entries[0].User)
+	}
+	if entries[0].Path != "/docs/a.txt" {
+		t.Fatalf("expected favorite-note activity path %q, got %q", "/docs/a.txt", entries[0].Path)
 	}
 }
 
@@ -3683,6 +4045,39 @@ func TestServer_WebDAVCredentials_RequiresAdminWhenAuthEnabled(t *testing.T) {
 	}
 }
 
+func TestServer_GetSettings_IncludesTrustedProxyHops(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Server.TrustedProxyHops = 2
+	server.storeConfig(server.config)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get settings status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Server struct {
+				TrustedProxyHops int `json:"trusted_proxy_hops"`
+			} `json:"server"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse settings response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if payload.Data.Server.TrustedProxyHops != 2 {
+		t.Fatalf("trusted proxy hops = %d, want %d", payload.Data.Server.TrustedProxyHops, 2)
+	}
+}
+
 func TestServer_ListFiles_EnforcesHomeDirForNonAdmin(t *testing.T) {
 	server, fs, _, username, password := setupAuthServer(t)
 
@@ -3839,6 +4234,41 @@ func TestServer_Metrics(t *testing.T) {
 	}
 }
 
+func TestServer_Metrics_RequiresAdminWhenAuthEnabled(t *testing.T) {
+	server, _, _, username, password := setupAuthServer(t)
+
+	userToken := loginAndGetAccessToken(t, server, username, password)
+
+	userReq := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+	userReq.Header.Set("Authorization", "Bearer "+userToken)
+	userRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(userRec, userReq)
+
+	if userRec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin metrics status = %d, want %d", userRec.Code, http.StatusForbidden)
+	}
+
+	adminUsername := "metrics-admin"
+	adminPassword := "adminpass123"
+	if _, err := server.userStore.Create(adminUsername, adminPassword, "", auth.RoleAdmin); err != nil {
+		t.Fatalf("create admin user error: %v", err)
+	}
+
+	adminToken := loginAndGetAccessToken(t, server, adminUsername, adminPassword)
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+adminToken)
+	adminRec := httptest.NewRecorder()
+	server.Router().ServeHTTP(adminRec, adminReq)
+
+	if adminRec.Code != http.StatusOK {
+		t.Fatalf("admin metrics status = %d, want %d", adminRec.Code, http.StatusOK)
+	}
+	if !strings.Contains(adminRec.Body.String(), "requests") {
+		t.Fatalf("expected metrics response to contain requests, got %s", adminRec.Body.String())
+	}
+}
+
 func TestServer_PathTraversal(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 
@@ -3867,6 +4297,61 @@ func TestServer_PathTraversal(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestServer_DeleteFile_RejectsWorkspaceRoot(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/root-guard.txt", bytes.NewReader([]byte("content"))); err != nil {
+		t.Fatalf("WriteFile(root-guard.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/files/", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("delete workspace root status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/root-guard.txt"); err != nil {
+		t.Fatalf("expected workspace contents to remain after rejected root delete, got %v", err)
+	}
+}
+
+func TestServer_MoveFile_RejectsWorkspaceRootPath(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-move", strings.NewReader(`{"from":"/","to":"/moved-root"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("move workspace root status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid source path") {
+		t.Fatalf("expected invalid source path response, got %s", w.Body.String())
+	}
+}
+
+func TestServer_CopyFile_RejectsWorkspaceRootPath(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files-copy", strings.NewReader(`{"from":"/docs/a.txt","to":"/"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("copy to workspace root status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid destination path") {
+		t.Fatalf("expected invalid destination path response, got %s", w.Body.String())
 	}
 }
 
@@ -5788,6 +6273,98 @@ func TestServer_Trash_EmptyReturnsWarningWhenCleanupFailsAfterVisibleDelete(t *t
 	}
 }
 
+func TestServer_Trash_EmptyPartialSuccessPreservesCleanupWarning(t *testing.T) {
+	server, fs, _ := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := fs.WriteFile(ctx, "/trash-empty-mixed-plain.txt", bytes.NewReader([]byte("plain"))); err != nil {
+		t.Fatalf("WriteFile(plain) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-empty-mixed-versioned.md", bytes.NewReader([]byte("v1"))); err != nil {
+		t.Fatalf("WriteFile(versioned v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/trash-empty-mixed-versioned.md", bytes.NewReader([]byte("v2"))); err != nil {
+		t.Fatalf("WriteFile(versioned v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-empty-mixed-plain.txt"); err != nil {
+		t.Fatalf("Delete(plain) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/trash-empty-mixed-versioned.md"); err != nil {
+		t.Fatalf("Delete(versioned) error: %v", err)
+	}
+
+	removeCalls := 0
+	setStorageHook(t, fs, "removeTrashPath", func(path string) error {
+		removeCalls++
+		if removeCalls == 2 {
+			return errors.New("trash delete failed")
+		}
+		return os.RemoveAll(path)
+	})
+	setStorageHook(t, fs, "deleteVersionObject", func(ctx context.Context, hash string) error {
+		return errors.New("delete object failed")
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/trash/", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("EmptyTrash mixed warning status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != trashDeleteCleanupWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, trashDeleteCleanupWarningHeader)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DeletedCount int  `json:"deleted_count"`
+			Partial      bool `json:"partial"`
+			Warning      bool `json:"warning"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+	if !payload.Success {
+		t.Fatal("expected success response for mixed partial warning trash empty")
+	}
+	if payload.Data.DeletedCount != 1 {
+		t.Fatalf("expected deleted_count 1, got %d", payload.Data.DeletedCount)
+	}
+	if !payload.Data.Partial {
+		t.Fatal("expected partial=true when a later trash item fails")
+	}
+	if !payload.Data.Warning {
+		t.Fatal("expected warning=true when cleanup warning occurred before hard failure")
+	}
+	if payload.Message != "trash emptied partially with cleanup warning" {
+		t.Fatalf("unexpected message %q", payload.Message)
+	}
+
+	entries, total := server.activity.List(10, 0, activity.ActionTrashEmpty, "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one trash empty activity entry, got total=%d len=%d", total, len(entries))
+	}
+	if entries[0].Details["cleanup_warning"] != "true" {
+		t.Fatalf("expected activity cleanup_warning=true, got %+v", entries[0].Details)
+	}
+	if entries[0].Details["partial"] != "true" {
+		t.Fatalf("expected activity partial=true, got %+v", entries[0].Details)
+	}
+
+	items, err := fs.ListTrash(ctx)
+	if err != nil {
+		t.Fatalf("ListTrash() after mixed warning empty error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one trash item to remain after mixed warning empty, got %d", len(items))
+	}
+}
+
 func TestServer_Scrub_NoDataplane(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	server.dataplane = nil
@@ -5948,6 +6525,62 @@ func TestServer_Scrub_SaveCompletedResultFailureReturnsWarning(t *testing.T) {
 	getData := getPayload.Data
 	if status, ok := getData["status"].(string); !ok || status != "completed" {
 		t.Fatalf("expected completed scrub status after warning response, got %+v", getData)
+	}
+}
+
+func TestServer_Scrub_StartPersistenceWarningStillRuns(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	maintRoot := filepath.Join(tmpDir, "maintenance")
+	maint, err := maintenance.NewHistoryStore(maintRoot)
+	if err != nil {
+		t.Fatalf("NewHistoryStore() error: %v", err)
+	}
+	server.maintenance = maint
+	server.maintenanceConfigured = true
+
+	originalStartScrub := startScrub
+	startScrub = func(store *maintenance.HistoryStore) (*maintenance.ScrubResult, error) {
+		result, err := originalStartScrub(store)
+		if err != nil {
+			return result, err
+		}
+		return result, errors.New("directory fsync warning")
+	}
+	defer func() {
+		startScrub = originalStartScrub
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/scrub", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("scrub start warning status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != "" {
+		t.Fatalf("expected no persistence warning header when final scrub save succeeds, got %q", got)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			TotalObjects uint64 `json:"total_objects"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse scrub response: %v", err)
+	}
+	if !payload.Success {
+		t.Fatalf("expected success response, got %s", w.Body.String())
+	}
+	if payload.Data.TotalObjects == 0 {
+		t.Fatalf("expected scrub to run despite start warning, got payload %+v", payload)
+	}
+
+	result := server.maintenance.GetLastScrubResult()
+	if result == nil || result.Status != "completed" {
+		t.Fatalf("expected completed scrub result after start warning, got %#v", result)
 	}
 }
 
@@ -7037,6 +7670,39 @@ func TestServer_PublicShareAccess_HidesShareForDisabledOwner(t *testing.T) {
 	}
 }
 
+func TestServer_PublicShareAccess_HidesShareForOwnerWithInvalidHomeDir(t *testing.T) {
+	server, fs, _, username, _ := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create share error: %v", err)
+	}
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	req := httptest.NewRequest(http.MethodGet, "/s/"+fileShare.ID, nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("public share for invalid owner home_dir status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(w.Body.String(), "SHARE_NOT_FOUND") {
+		t.Fatalf("expected SHARE_NOT_FOUND response, got %s", w.Body.String())
+	}
+}
+
 func TestServer_GetShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
@@ -7085,6 +7751,41 @@ func TestServer_GetShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.
 
 	if legacyRec.Code != http.StatusNotFound {
 		t.Fatalf("get outside-home share status = %d, want %d", legacyRec.Code, http.StatusNotFound)
+	}
+}
+
+func TestServer_GetShare_HidesShareForInvalidOwnerHomeDir(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create share error: %v", err)
+	}
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/shares/"+fileShare.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("get share with invalid owner home_dir status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(w.Body.String(), "SHARE_NOT_FOUND") {
+		t.Fatalf("expected SHARE_NOT_FOUND response, got %s", w.Body.String())
 	}
 }
 
@@ -7155,6 +7856,46 @@ func TestServer_UpdateShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testi
 	}
 }
 
+func TestServer_UpdateShare_HidesShareForInvalidOwnerHomeDir(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create share error: %v", err)
+	}
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/shares/"+fileShare.ID, strings.NewReader(`{"description":"updated"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("update share with invalid owner home_dir status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	current, err := server.shareStore.Get(fileShare.ID)
+	if err != nil {
+		t.Fatalf("Get(fileShare) error: %v", err)
+	}
+	if current.Description != "" {
+		t.Fatalf("expected share description to remain unchanged, got %q", current.Description)
+	}
+}
+
 func TestServer_DeleteShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testing.T) {
 	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
 
@@ -7209,6 +7950,41 @@ func TestServer_DeleteShare_HidesLegacyShareOutsideHomeForNonAdminOwner(t *testi
 	}
 	if _, err := server.shareStore.Get(allowedShare.ID); err != share.ErrShareNotFound {
 		t.Fatalf("expected own-home share to be deleted, got %v", err)
+	}
+}
+
+func TestServer_DeleteShare_HidesShareForInvalidOwnerHomeDir(t *testing.T) {
+	server, fs, _, username, password := setupAuthServerWithFeatures(t, true, false)
+
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "/tester"); err != nil {
+		t.Fatalf("Mkdir(/tester) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/tester/own.txt", bytes.NewReader([]byte("own"))); err != nil {
+		t.Fatalf("WriteFile(/tester/own.txt) error: %v", err)
+	}
+
+	user, err := server.userStore.GetByUsername(username)
+	if err != nil {
+		t.Fatalf("GetByUsername(%s) error: %v", username, err)
+	}
+	fileShare, err := server.shareStore.Create(share.CreateShareOptions{Path: "/tester/own.txt", Type: share.ShareTypeFile, CreatedBy: user.ID})
+	if err != nil {
+		t.Fatalf("Create share error: %v", err)
+	}
+	setUserHomeDirForTest(t, server, username, "../escape")
+
+	token := loginAndGetAccessToken(t, server, username, password)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/shares/"+fileShare.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("delete share with invalid owner home_dir status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	if _, err := server.shareStore.Get(fileShare.ID); err != nil {
+		t.Fatalf("expected share to remain after rejected delete, got %v", err)
 	}
 }
 
@@ -7970,6 +8746,61 @@ func TestServer_UpdateSettings_RejectsInvalidWebDAVAuthType(t *testing.T) {
 	}
 	if server.config.WebDAV.AuthType != originalAuthType {
 		t.Fatalf("expected invalid webdav auth type update to leave config unchanged")
+	}
+}
+
+func TestServer_UpdateSettings_UpdatesTrustedProxyHops(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Server.TrustedProxyHops = 1
+	server.storeConfig(server.config)
+
+	body := `{"server":{"trusted_proxy_hops":2}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("update settings status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if server.config.Server.TrustedProxyHops != 2 {
+		t.Fatalf("trusted proxy hops = %d, want %d", server.config.Server.TrustedProxyHops, 2)
+	}
+	if current := requestip.TrustedProxyHops(); current != 2 {
+		t.Fatalf("requestip trusted proxy hops = %d, want %d", current, 2)
+	}
+
+	loaded, err := config.Load(server.configPath)
+	if err != nil {
+		t.Fatalf("Load(configPath) error: %v", err)
+	}
+	if loaded.Server.TrustedProxyHops != 2 {
+		t.Fatalf("persisted trusted proxy hops = %d, want %d", loaded.Server.TrustedProxyHops, 2)
+	}
+}
+
+func TestServer_UpdateSettings_RejectsNegativeTrustedProxyHops(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	originalTrustedProxyHops := server.config.Server.TrustedProxyHops
+
+	body := `{"server":{"trusted_proxy_hops":-1}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings invalid trusted proxy hops status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid server.trusted_proxy_hops") {
+		t.Fatalf("expected invalid trusted proxy hops message, got %s", w.Body.String())
+	}
+	if server.config.Server.TrustedProxyHops != originalTrustedProxyHops {
+		t.Fatalf("expected invalid trusted proxy hops update to leave config unchanged")
 	}
 }
 

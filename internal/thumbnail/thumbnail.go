@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,9 +31,27 @@ import (
 
 var errThumbnailCacheSymlink = errors.New("thumbnail cache path must not be a symlink")
 var syncThumbnailCacheDir = syncThumbnailDir
-var walkThumbnailCache = filepath.Walk
+var syncThumbnailCacheRootDir = syncThumbnailRootDir
+var walkThumbnailCache = func(cacheDir string, cacheRoot *os.Root, walkFn thumbnailWalkFunc) error {
+	if cacheRoot != nil {
+		return walkThumbnailCacheWithRoot(cacheRoot, ".", walkFn)
+	}
+
+	return filepath.Walk(cacheDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relPath, err := filepath.Rel(cacheDir, path)
+		if err != nil {
+			return err
+		}
+		return walkFn(filepath.Clean(relPath), info)
+	})
+}
 var afterValidateThumbnailCachePath = func() {}
 var ErrThumbnailSourceTooLarge = errors.New("source image too large for thumbnail generation")
+
+const thumbnailRootEscapeError = "path escapes from parent"
 
 // Size represents thumbnail size preset
 type Size string
@@ -69,8 +89,9 @@ var SupportedExtensions = map[string]bool{
 
 // Service provides thumbnail generation and caching
 type Service struct {
-	cacheDir string
-	mu       sync.RWMutex
+	cacheDir  string
+	cacheRoot *os.Root
+	mu        sync.RWMutex
 	// In-progress generation to prevent duplicate work
 	inProgress          map[string]*thumbnailGenerationResult
 	ipMu                sync.Mutex
@@ -83,6 +104,8 @@ type thumbnailGenerationResult struct {
 	data []byte
 	err  error
 }
+
+type thumbnailWalkFunc func(relPath string, info os.FileInfo) error
 
 func (s *Service) waitForInProgressThumbnail(ctx context.Context, cachePath string, result *thumbnailGenerationResult) ([]byte, error) {
 	select {
@@ -127,13 +150,14 @@ func (s *Service) Wait() {
 
 // NewService creates a new thumbnail service
 func NewService(cacheDir string) (*Service, error) {
-	// Create cache directory if it doesn't exist
-	if err := ensureThumbnailDir(cacheDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create cache dir: %w", err)
+	normalizedCacheDir, cacheRoot, err := ensureThumbnailCacheRoot(cacheDir)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Service{
-		cacheDir:            cacheDir,
+		cacheDir:            normalizedCacheDir,
+		cacheRoot:           cacheRoot,
 		inProgress:          make(map[string]*thumbnailGenerationResult),
 		failedCacheReuseTTL: failedCacheReuseTTL,
 	}, nil
@@ -355,6 +379,24 @@ func (s *Service) loadFromCache(cachePath string) ([]byte, error) {
 		return nil, err
 	}
 	afterValidateThumbnailCachePath()
+	if s.cacheRoot != nil {
+		relPath, err := s.cacheRelativePath(cachePath)
+		if err != nil {
+			return nil, err
+		}
+
+		cacheFile, err := s.cacheRoot.OpenFile(relPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			return nil, mapThumbnailRootPathError(err)
+		}
+		defer cacheFile.Close()
+
+		data, err := io.ReadAll(cacheFile)
+		if err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
 
 	cacheFile, err := os.OpenFile(cachePath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
@@ -379,6 +421,53 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 
 	if err := validateThumbnailCachePath(cachePath); err != nil {
 		return err
+	}
+	afterValidateThumbnailCachePath()
+
+	if s.cacheRoot != nil {
+		relPath, err := s.cacheRelativePath(cachePath)
+		if err != nil {
+			return err
+		}
+		relDir := filepath.Dir(relPath)
+		if err := ensureThumbnailDirWithRoot(s.cacheRoot, relDir, 0755); err != nil {
+			return err
+		}
+
+		tmpFile, tmpPath, err := createThumbnailTempFile(s.cacheRoot, relDir)
+		if err != nil {
+			return err
+		}
+		cleanup := true
+		defer func() {
+			if cleanup {
+				_ = s.cacheRoot.Remove(tmpPath)
+			}
+		}()
+
+		if err := tmpFile.Chmod(0644); err != nil {
+			_ = tmpFile.Close()
+			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
+		}
+		if _, err := tmpFile.Write(data); err != nil {
+			_ = tmpFile.Close()
+			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
+		}
+		if err := tmpFile.Sync(); err != nil {
+			_ = tmpFile.Close()
+			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, err)
+		}
+		if err := s.cacheRoot.Rename(tmpPath, relPath); err != nil {
+			return cleanupThumbnailTempPath(s.cacheRoot, tmpPath, mapThumbnailRootPathError(err))
+		}
+		cleanup = false
+		if err := syncThumbnailCacheRootDir(s.cacheRoot, relDir); err != nil {
+			return fmt.Errorf("failed to sync thumbnail cache directory: %w", err)
+		}
+		return nil
 	}
 
 	// Create directory if needed
@@ -424,6 +513,21 @@ func (s *Service) saveToCache(cachePath string, data []byte) error {
 	return nil
 }
 
+func (s *Service) cacheRelativePath(cachePath string) (string, error) {
+	cleanedPath, err := normalizeThumbnailCachePath(cachePath)
+	if err != nil {
+		return "", err
+	}
+	relPath, err := filepath.Rel(s.cacheDir, cleanedPath)
+	if err != nil {
+		return "", err
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+		return "", errThumbnailCacheSymlink
+	}
+	return filepath.Clean(relPath), nil
+}
+
 func collectMissingThumbnailDirs(dir string) ([]string, error) {
 	missing := make([]string, 0)
 	current := filepath.Clean(dir)
@@ -465,6 +569,55 @@ func ensureThumbnailDir(dir string, perm os.FileMode) error {
 	return syncCreatedThumbnailDirs(createdDirs)
 }
 
+func collectMissingThumbnailDirsWithRoot(root *os.Root, dir string) ([]string, error) {
+	if dir == "." || dir == "" {
+		return nil, nil
+	}
+
+	missing := make([]string, 0)
+	current := filepath.Clean(dir)
+	for {
+		if _, err := root.Stat(current); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, mapThumbnailRootPathError(err)
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current || parent == "." {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedThumbnailDirsWithRoot(root *os.Root, createdDirs []string) error {
+	for i := 0; i < len(createdDirs); i++ {
+		if err := syncThumbnailCacheRootDir(root, filepath.Dir(createdDirs[i])); err != nil {
+			return fmt.Errorf("failed to sync thumbnail cache directory tree: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureThumbnailDirWithRoot(root *os.Root, dir string, perm os.FileMode) error {
+	if dir == "." || dir == "" {
+		return nil
+	}
+
+	createdDirs, err := collectMissingThumbnailDirsWithRoot(root, dir)
+	if err != nil {
+		return err
+	}
+	if err := root.MkdirAll(dir, perm); err != nil {
+		return mapThumbnailRootPathError(err)
+	}
+	return syncCreatedThumbnailDirsWithRoot(root, createdDirs)
+}
+
 func syncThumbnailDir(dir string) error {
 	dirHandle, err := os.Open(dir)
 	if err != nil {
@@ -475,14 +628,152 @@ func syncThumbnailDir(dir string) error {
 	return dirHandle.Sync()
 }
 
-func validateThumbnailCachePath(path string) error {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		absPath, err := filepath.Abs(cleaned)
+func syncThumbnailRootDir(root *os.Root, dir string) error {
+	if dir == "" {
+		dir = "."
+	}
+	dirHandle, err := root.Open(dir)
+	if err != nil {
+		return mapThumbnailRootPathError(err)
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
+}
+
+func createThumbnailTempFile(root *os.Root, dir string) (*os.File, string, error) {
+	for range 32 {
+		tmpName, err := newThumbnailTempName()
 		if err != nil {
-			return fmt.Errorf("failed to resolve thumbnail cache path: %w", err)
+			return nil, "", err
 		}
-		cleaned = absPath
+		tmpPath := filepath.Join(dir, tmpName)
+		tmpFile, err := root.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		if err == nil {
+			return tmpFile, tmpPath, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapThumbnailRootPathError(err)
+	}
+	return nil, "", errors.New("failed to allocate unique thumbnail temp file")
+}
+
+func newThumbnailTempName() (string, error) {
+	randomBytes := make([]byte, 8)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	return ".thumbnail-" + hex.EncodeToString(randomBytes) + ".tmp", nil
+}
+
+func cleanupThumbnailTempPath(root *os.Root, path string, err error) error {
+	if removeErr := root.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return errors.Join(err, fmt.Errorf("cleanup temp thumbnail %s: %w", path, removeErr))
+	}
+	return err
+}
+
+func thumbnailChildRelativePath(parent, child string) string {
+	if parent == "." {
+		return child
+	}
+	return filepath.Join(parent, child)
+}
+
+func walkThumbnailCacheWithRoot(root *os.Root, relPath string, walkFn thumbnailWalkFunc) error {
+	info, err := root.Lstat(relPath)
+	if err != nil {
+		return mapThumbnailRootPathError(err)
+	}
+	return walkThumbnailCacheEntryWithRoot(root, relPath, info, walkFn)
+}
+
+func walkThumbnailCacheEntryWithRoot(root *os.Root, relPath string, info os.FileInfo, walkFn thumbnailWalkFunc) error {
+	if err := walkFn(relPath, info); err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	dirHandle, err := root.Open(relPath)
+	if err != nil {
+		return mapThumbnailRootPathError(err)
+	}
+	defer dirHandle.Close()
+
+	entries, err := dirHandle.ReadDir(-1)
+	if err != nil {
+		return mapThumbnailRootPathError(err)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		childRelPath := thumbnailChildRelativePath(relPath, entry.Name())
+		childInfo, err := root.Lstat(childRelPath)
+		if err != nil {
+			return mapThumbnailRootPathError(err)
+		}
+		if err := walkThumbnailCacheEntryWithRoot(root, childRelPath, childInfo, walkFn); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func mapThumbnailRootPathError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ELOOP) || isThumbnailRootEscapeError(err) {
+		return errThumbnailCacheSymlink
+	}
+	return err
+}
+
+func isThumbnailRootEscapeError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), thumbnailRootEscapeError)
+}
+
+func normalizeThumbnailCachePath(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve thumbnail cache path: %w", err)
+	}
+	return absPath, nil
+}
+
+func ensureThumbnailCacheRoot(cacheDir string) (string, *os.Root, error) {
+	normalizedCacheDir, err := normalizeThumbnailCachePath(cacheDir)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := validateThumbnailCachePath(normalizedCacheDir); err != nil {
+		return "", nil, err
+	}
+	if err := ensureThumbnailDir(normalizedCacheDir, 0755); err != nil {
+		return "", nil, fmt.Errorf("failed to create cache dir: %w", err)
+	}
+	cacheRoot, err := os.OpenRoot(normalizedCacheDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to open thumbnail cache root: %w", mapThumbnailRootPathError(err))
+	}
+	return normalizedCacheDir, cacheRoot, nil
+}
+
+func validateThumbnailCachePath(path string) error {
+	cleaned, err := normalizeThumbnailCachePath(path)
+	if err != nil {
+		return err
 	}
 
 	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
@@ -526,14 +817,22 @@ func (s *Service) CleanCache(ctx context.Context, maxAge time.Duration) (int, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.cacheRoot == nil {
+		if err := validateThumbnailCachePath(s.cacheDir); err != nil {
+			return 0, err
+		}
+	}
+	afterValidateThumbnailCachePath()
+	if s.cacheRoot == nil {
+		if err := validateThumbnailCachePath(s.cacheDir); err != nil {
+			return 0, err
+		}
+	}
+
 	cutoff := time.Now().Add(-maxAge)
 	var count int
 
-	err := filepath.Walk(s.cacheDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
+	err := walkThumbnailCache(s.cacheDir, s.cacheRoot, func(relPath string, info os.FileInfo) error {
 		// Check context cancellation
 		select {
 		case <-ctx.Done():
@@ -542,7 +841,18 @@ func (s *Service) CleanCache(ctx context.Context, maxAge time.Duration) (int, er
 		}
 
 		if !info.IsDir() && info.ModTime().Before(cutoff) {
-			if err := os.Remove(path); err == nil {
+			if s.cacheRoot != nil {
+				if err := s.cacheRoot.Remove(relPath); err == nil {
+					count++
+				}
+				return nil
+			}
+
+			absPath := s.cacheDir
+			if relPath != "." {
+				absPath = filepath.Join(s.cacheDir, relPath)
+			}
+			if err := os.Remove(absPath); err == nil {
 				count++
 			}
 		}
@@ -556,12 +866,23 @@ func (s *Service) CleanCache(ctx context.Context, maxAge time.Duration) (int, er
 func (s *Service) CacheStats(ctx context.Context) (count int, size int64, err error) {
 	s.mu.RLock()
 	cacheDir := s.cacheDir
+	cacheRoot := s.cacheRoot
 	s.mu.RUnlock()
 
-	err = walkThumbnailCache(cacheDir, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	if cacheRoot == nil {
+		if err := validateThumbnailCachePath(cacheDir); err != nil {
+			return 0, 0, err
 		}
+	}
+	afterValidateThumbnailCachePath()
+	if cacheRoot == nil {
+		if err := validateThumbnailCachePath(cacheDir); err != nil {
+			return 0, 0, err
+		}
+	}
+
+	err = walkThumbnailCache(cacheDir, cacheRoot, func(relPath string, info os.FileInfo) error {
+		_ = relPath
 
 		select {
 		case <-ctx.Done():
@@ -590,6 +911,17 @@ func (s *Service) InvalidateCache(filePath string) error {
 	for size := range SizeDimensions {
 		cacheKey := s.cacheKey(filePath, size)
 		cachePath := s.cachePath(cacheKey)
+		if s.cacheRoot != nil {
+			relPath, err := s.cacheRelativePath(cachePath)
+			if err != nil {
+				removeErr = errors.Join(removeErr, fmt.Errorf("remove thumbnail cache %q: %w", cachePath, err))
+				continue
+			}
+			if err := s.cacheRoot.Remove(relPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				removeErr = errors.Join(removeErr, fmt.Errorf("remove thumbnail cache %q: %w", cachePath, mapThumbnailRootPathError(err)))
+			}
+			continue
+		}
 		if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			removeErr = errors.Join(removeErr, fmt.Errorf("remove thumbnail cache %q: %w", cachePath, err))
 		}

@@ -4,7 +4,7 @@
 
 ## 测试金字塔
 
-```
+```text
                     ┌──────────────┐
                     │   手动测试    │  ← 探索性测试、UX 验证
                    ┌┴──────────────┴┐
@@ -13,16 +13,16 @@
                   │   集成测试       │  ← 组件交互、配置验证
                  ┌┴──────────────────┴┐
                  │     单元测试       │  ← 函数逻辑、边界条件
-                └────────────────────┘
+        └────────────────────┘
 ```
 
 ### 测试比例目标
 
-| 层级     | 覆盖率目标 | 执行频率        | 典型耗时   |
-|----------|-----------|-----------------|-----------|
-| 单元测试  | ≥80%      | 每次提交        | < 30s     |
-| 集成测试  | 关键路径   | 每次 PR         | < 2min    |
-| E2E 测试 | 核心场景   | 每日/发布前     | < 10min   |
+| 层级     | 覆盖率目标 | 执行频率    | 典型耗时 |
+| -------- | ---------- | ----------- | -------- |
+| 单元测试 | ≥80%       | 每次提交    | < 30s    |
+| 集成测试 | 关键路径   | 每次 PR     | < 2min   |
+| E2E 测试 | 核心场景   | 每日/发布前 | < 10min  |
 
 ---
 
@@ -35,35 +35,35 @@
 ```go
 // internal/auth/user_integration_test.go
 func TestConfigMatrix_AuthInitialization(t *testing.T) {
-    cases := []struct {
-        name            string
-        authEnabled     bool
-        expectPassFile  bool
-        expectUserFile  bool
-        expectWarning   bool
-    }{
-        {
-            name:           "auth enabled - creates password file",
-            authEnabled:    true,
-            expectPassFile: true,
-            expectUserFile: true,
-            expectWarning:  false,
-        },
-        {
-            name:           "auth disabled - no initialization",
-            authEnabled:    false,
-            expectPassFile: false,
-            expectUserFile: false,
-            expectWarning:  true,
-        },
-    }
+  cases := []struct {
+    name           string
+    authEnabled    bool
+    expectPassFile bool
+    expectUserFile bool
+    expectWarning  bool
+  }{
+    {
+      name:           "auth enabled - creates password file",
+      authEnabled:    true,
+      expectPassFile: true,
+      expectUserFile: true,
+      expectWarning:  false,
+    },
+    {
+      name:           "auth disabled - no initialization",
+      authEnabled:    false,
+      expectPassFile: false,
+      expectUserFile: false,
+      expectWarning:  true,
+    },
+  }
 
-    for _, tc := range cases {
-        t.Run(tc.name, func(t *testing.T) {
-            // 在临时目录测试
-            // 验证文件创建、日志输出
-        })
-    }
+  for _, tc := range cases {
+    t.Run(tc.name, func(t *testing.T) {
+      // 在临时目录测试
+      // 验证文件创建、日志输出
+    })
+  }
 }
 ```
 
@@ -87,11 +87,12 @@ func TestBoundaryConditions(t *testing.T) {
 
 ### 1.3 测试命名规范
 
-```
+```text
 Test<Module>_<Scenario>_<ExpectedBehavior>
 ```
 
 示例：
+
 - `TestUserStore_DuplicateUsername_ReturnsError`
 - `TestTokenManager_ExpiredToken_ReturnsErrTokenExpired`
 - `TestConfig_MissingFile_UsesDefaults`
@@ -103,6 +104,7 @@ Test<Module>_<Scenario>_<ExpectedBehavior>
 ### 2.1 组件交互测试
 
 测试多个模块协作的场景：
+
 ```go
 // internal/auth/integration_test.go
 func TestAuthIntegration_FullLoginFlow(t *testing.T) {
@@ -179,16 +181,16 @@ test_fresh_install_auth_enabled() {
 
 ### 3.2 E2E 测试分组
 
-| 分组              | 测试内容                           | 模式        |
-|-------------------|-----------------------------------|-------------|
-| Basic             | 健康检查、版本 API                  | --quick     |
-| File Operations   | CRUD、COPY、MOVE                   | --quick     |
-| Authentication    | 登录、刷新、权限                    | --quick     |
-| ETag/Conditional  | 304、412 响应                      | --quick     |
-| Versions          | 版本历史 API                       | --quick     |
-| Concurrency       | 并发读写                           | --quick     |
-| Large Files       | 100MB 文件                         | --full only |
-| Crash Recovery    | 中断恢复                           | --full only |
+| 分组             | 测试内容           | 模式        |
+| ---------------- | ------------------ | ----------- |
+| Basic            | 健康检查、版本 API | --quick     |
+| File Operations  | CRUD、COPY、MOVE   | --quick     |
+| Authentication   | 登录、刷新、权限   | --quick     |
+| ETag/Conditional | 304、412 响应      | --quick     |
+| Versions         | 版本历史 API       | --quick     |
+| Concurrency      | 并发读写           | --quick     |
+| Large Files      | 100MB 文件         | --full only |
+| Crash Recovery   | 中断恢复           | --full only |
 
 ---
 
@@ -299,7 +301,7 @@ go test -fuzz=FuzzPasswordValidation ./internal/auth/
 
 使用 AI 工具（Copilot、Claude）生成边界用例：
 
-```
+```text
 提示词示例：
 "分析 internal/auth/user.go 的 createDefaultAdmin 函数，
 列出所有可能的边界条件和错误场景，
@@ -308,7 +310,7 @@ go test -fuzz=FuzzPasswordValidation ./internal/auth/
 
 ### 5.2 代码审查辅助
 
-```
+```text
 提示词示例：
 "审查以下测试代码，指出：
 1. 缺失的断言
@@ -319,7 +321,7 @@ go test -fuzz=FuzzPasswordValidation ./internal/auth/
 
 ### 5.3 不变量发现
 
-```
+```text
 提示词示例：
 "分析 MnemoNAS 认证模块，
 识别系统应该始终满足的不变量（invariants），
@@ -539,7 +541,7 @@ coverage:
 
 ## 7. 测试文件组织
 
-```
+```text
 internal/
 ├── auth/
 │   ├── auth_test.go           # 单元测试
@@ -606,7 +608,7 @@ testdata/
 
 ### 10.1 测试分层
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │        视觉回归测试 (Visual)             │  ← 截图对比、防止 UI 回归
 ├─────────────────────────────────────────┤
@@ -792,7 +794,7 @@ npm run test:e2e:update
 
 **E2E 测试目录结构**：
 
-```
+```text
 web/e2e/
 ├── login.spec.ts           # 登录流程测试
 ├── dashboard.spec.ts       # 仪表板测试
@@ -823,7 +825,7 @@ npm run test:visual:update
 
 ### 10.6 测试文件组织
 
-```
+```text
 web/
 ├── src/
 │   ├── components/
@@ -940,4 +942,3 @@ jobs:
 - [ ] Storybook 构建成功
 - [ ] 无 TypeScript 错误
 - [ ] 无 ESLint 警告
-

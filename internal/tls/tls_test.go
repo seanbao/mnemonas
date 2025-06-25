@@ -1,7 +1,9 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +11,38 @@ import (
 	"strings"
 	"testing"
 )
+
+func loadTestCertificateDER(t *testing.T, path string) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read certificate %s: %v", path, err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		t.Fatalf("failed to decode PEM certificate %s", path)
+	}
+	return block.Bytes
+}
+
+func generateTestTLSPair(t *testing.T, dir string) ([]byte, *CertInfo) {
+	t.Helper()
+
+	manager := NewManager(Config{
+		Enabled:      true,
+		AutoGenerate: true,
+		CertDir:      dir,
+	})
+	if _, err := manager.GetTLSConfig(); err != nil {
+		t.Fatalf("failed to generate certificate pair in %s: %v", dir, err)
+	}
+	info, err := manager.GetCertificateInfo()
+	if err != nil {
+		t.Fatalf("failed to read certificate info in %s: %v", dir, err)
+	}
+	return loadTestCertificateDER(t, filepath.Join(dir, "server.crt")), info
+}
 
 func TestNewManager(t *testing.T) {
 	cfg := Config{
@@ -137,12 +171,12 @@ func TestWriteTLSFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "server.crt")
 
-	originalSyncTLSDir := syncTLSDir
-	syncTLSDir = func(dir string) error {
+	originalSyncTLSRootDir := syncTLSRootDir
+	syncTLSRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncTLSDir = originalSyncTLSDir
+		syncTLSRootDir = originalSyncTLSRootDir
 	}()
 
 	err := writeTLSFile(filePath, []byte("certificate"), 0644, errCertFileSymlink, ".tls-cert-*.tmp", "certificate file")
@@ -427,6 +461,195 @@ func TestGetTLSConfig_AutoGenerateRejectsSymlinkCertDir(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(realCertDir, "server.key")); !os.IsNotExist(statErr) {
 		t.Fatalf("expected no generated key in symlink target dir, got %v", statErr)
+	}
+}
+
+func TestGetTLSConfig_LoadExisting_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	certDir := filepath.Join(baseDir, "certs")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(certDir, 0755); err != nil {
+		t.Fatalf("failed to create cert dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	originalDER, _ := generateTestTLSPair(t, certDir)
+	outsideDER, _ := generateTestTLSPair(t, outsideDir)
+
+	manager := NewManager(Config{
+		Enabled:      true,
+		AutoGenerate: false,
+		CertFile:     filepath.Join(certDir, "server.crt"),
+		KeyFile:      filepath.Join(certDir, "server.key"),
+	})
+
+	originalHook := afterValidateTLSFilePath
+	var hookErr error
+	swapped := false
+	afterValidateTLSFilePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "certs-backup")
+		if err := os.Rename(certDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, certDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateTLSFilePath = originalHook
+	}()
+
+	cfg, err := manager.GetTLSConfig()
+	if hookErr != nil {
+		t.Fatalf("afterValidateTLSFilePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected TLS load to stay bound to the original directory, got %v", err)
+	}
+	if len(cfg.Certificates) == 0 || len(cfg.Certificates[0].Certificate) == 0 {
+		t.Fatal("expected loaded certificate material")
+	}
+	if !bytes.Equal(cfg.Certificates[0].Certificate[0], originalDER) {
+		t.Fatal("expected loaded certificate to remain bound to the original directory")
+	}
+	if bytes.Equal(cfg.Certificates[0].Certificate[0], outsideDER) {
+		t.Fatal("expected loaded certificate to ignore the swapped symlink target")
+	}
+}
+
+func TestGetTLSConfig_AutoGenerate_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	certDir := filepath.Join(baseDir, "certs")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	outsideCertPath := filepath.Join(outsideDir, "server.crt")
+	outsideKeyPath := filepath.Join(outsideDir, "server.key")
+	if err := os.WriteFile(outsideCertPath, []byte("outside-cert"), 0644); err != nil {
+		t.Fatalf("failed to seed outside cert: %v", err)
+	}
+	if err := os.WriteFile(outsideKeyPath, []byte("outside-key"), 0600); err != nil {
+		t.Fatalf("failed to seed outside key: %v", err)
+	}
+
+	manager := NewManager(Config{
+		Enabled:      true,
+		AutoGenerate: true,
+		CertDir:      certDir,
+	})
+
+	originalHook := afterValidateTLSFilePath
+	var hookErr error
+	swapped := false
+	afterValidateTLSFilePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "certs-backup")
+		if err := os.Rename(certDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, certDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateTLSFilePath = originalHook
+	}()
+
+	cfg, err := manager.GetTLSConfig()
+	if hookErr != nil {
+		t.Fatalf("afterValidateTLSFilePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected TLS auto-generate to stay bound to the original directory, got %v", err)
+	}
+	if len(cfg.Certificates) == 0 {
+		t.Fatal("expected generated certificate material")
+	}
+
+	certBytes, err := os.ReadFile(outsideCertPath)
+	if err != nil {
+		t.Fatalf("failed to read outside cert: %v", err)
+	}
+	if string(certBytes) != "outside-cert" {
+		t.Fatalf("expected outside cert to remain unchanged, got %q", string(certBytes))
+	}
+	keyBytes, err := os.ReadFile(outsideKeyPath)
+	if err != nil {
+		t.Fatalf("failed to read outside key: %v", err)
+	}
+	if string(keyBytes) != "outside-key" {
+		t.Fatalf("expected outside key to remain unchanged, got %q", string(keyBytes))
+	}
+	if _, statErr := os.Stat(filepath.Join(baseDir, "certs-backup", "server.crt")); statErr != nil {
+		t.Fatalf("expected generated cert to remain in original directory inode, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(baseDir, "certs-backup", "server.key")); statErr != nil {
+		t.Fatalf("expected generated key to remain in original directory inode, got %v", statErr)
+	}
+}
+
+func TestGetCertificateInfo_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	certDir := filepath.Join(baseDir, "certs")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(certDir, 0755); err != nil {
+		t.Fatalf("failed to create cert dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	_, originalInfo := generateTestTLSPair(t, certDir)
+	_, outsideInfo := generateTestTLSPair(t, outsideDir)
+
+	manager := NewManager(Config{
+		Enabled:  true,
+		CertFile: filepath.Join(certDir, "server.crt"),
+	})
+
+	originalHook := afterValidateTLSFilePath
+	var hookErr error
+	swapped := false
+	afterValidateTLSFilePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "certs-backup")
+		if err := os.Rename(certDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, certDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateTLSFilePath = originalHook
+	}()
+
+	info, err := manager.GetCertificateInfo()
+	if hookErr != nil {
+		t.Fatalf("afterValidateTLSFilePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected GetCertificateInfo to stay bound to the original directory, got %v", err)
+	}
+	if info.SerialNumber != originalInfo.SerialNumber {
+		t.Fatalf("expected original certificate serial %s, got %s", originalInfo.SerialNumber, info.SerialNumber)
+	}
+	if info.SerialNumber == outsideInfo.SerialNumber {
+		t.Fatal("expected GetCertificateInfo to ignore the swapped symlink target")
 	}
 }
 

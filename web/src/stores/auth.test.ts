@@ -95,6 +95,30 @@ describe('authStore', () => {
     expect(acknowledgeSetupMock).toHaveBeenCalledTimes(1)
   })
 
+  it('preserves authenticated state when logout fails', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+      authEnabled: true,
+    })
+    logoutMock.mockRejectedValueOnce(new Error('退出登录失败'))
+
+    await expect(useAuthStore.getState().logout()).rejects.toThrow('退出登录失败')
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+    expect(useAuthStore.getState().user?.username).toBe('admin')
+    expect(useAuthStore.getState().isLoading).toBe(false)
+    expect(useAuthStore.getState().error).toBe('退出登录失败')
+  })
+
   it('does not acknowledge setup for non-admin login', async () => {
     loginMock.mockResolvedValue({
       user: {

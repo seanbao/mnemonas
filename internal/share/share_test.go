@@ -12,16 +12,28 @@ import (
 	"time"
 )
 
+func writeShareFixture(t *testing.T, path string, shares []*Share) {
+	t.Helper()
+
+	data, err := json.Marshal(shares)
+	if err != nil {
+		t.Fatalf("failed to marshal share fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("failed to write share fixture: %v", err)
+	}
+}
+
 func TestWriteShareStoreFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "shares.json")
 
-	originalSyncShareStoreDir := syncShareStoreDir
-	syncShareStoreDir = func(dir string) error {
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncShareStoreDir = originalSyncShareStoreDir
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
 	}()
 
 	err := writeShareStoreFile(storePath, []byte("[]"))
@@ -124,7 +136,8 @@ func TestNewShareStore_ReturnsErrorWhenCorruptSharesBackupSyncFails(t *testing.T
 
 	originalSyncShareStoreDir := syncShareStoreDir
 	syncFailed := false
-	syncShareStoreDir = func(dir string) error {
+	originalSyncShareStoreRootDir := syncShareStoreRootDir
+	syncShareStoreRootDir = func(root *os.Root) error {
 		if !syncFailed {
 			syncFailed = true
 			return errors.New("directory fsync failed")
@@ -133,6 +146,7 @@ func TestNewShareStore_ReturnsErrorWhenCorruptSharesBackupSyncFails(t *testing.T
 	}
 	defer func() {
 		syncShareStoreDir = originalSyncShareStoreDir
+		syncShareStoreRootDir = originalSyncShareStoreRootDir
 	}()
 
 	if _, err := NewShareStore(storePath); err == nil {
@@ -721,6 +735,214 @@ func TestShareStore_RejectsSymlinkParentDirectoryOnLoad(t *testing.T) {
 	_, err := NewShareStore(filepath.Join(linkedDir, "shares.json"))
 	if !errors.Is(err, errShareStoreSymlink) {
 		t.Fatalf("expected parent-directory symlink error, got %v", err)
+	}
+}
+
+func TestNewShareStore_Load_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	sharesDir := filepath.Join(baseDir, "shares")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(sharesDir, 0755); err != nil {
+		t.Fatalf("failed to create shares dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+
+	writeShareFixture(t, filepath.Join(sharesDir, "shares.json"), []*Share{{
+		ID:         "original",
+		Path:       "/docs/original.txt",
+		Type:       ShareTypeFile,
+		CreatedBy:  "user1",
+		CreatedAt:  time.Now(),
+		Permission: PermissionRead,
+		Enabled:    true,
+	}})
+	writeShareFixture(t, filepath.Join(outsideDir, "shares.json"), []*Share{{
+		ID:         "outside",
+		Path:       "/docs/outside.txt",
+		Type:       ShareTypeFile,
+		CreatedBy:  "user2",
+		CreatedAt:  time.Now(),
+		Permission: PermissionRead,
+		Enabled:    true,
+	}})
+
+	originalHook := afterValidateShareStorePath
+	var hookErr error
+	swapped := false
+	afterValidateShareStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "shares-backup")
+		if err := os.Rename(sharesDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, sharesDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateShareStorePath = originalHook
+	}()
+
+	store, err := NewShareStore(filepath.Join(sharesDir, "shares.json"))
+	if hookErr != nil {
+		t.Fatalf("afterValidateShareStorePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected load to stay bound to the original directory, got %v", err)
+	}
+
+	shares := store.ListAll()
+	if len(shares) != 1 || shares[0].ID != "original" {
+		t.Fatalf("expected original shares file to be loaded, got %+v", shares)
+	}
+}
+
+func TestShareStore_Create_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	sharesDir := filepath.Join(baseDir, "shares")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(sharesDir, 0755); err != nil {
+		t.Fatalf("failed to create shares dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	writeShareFixture(t, filepath.Join(outsideDir, "shares.json"), []*Share{})
+
+	store, err := NewShareStore(filepath.Join(sharesDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("failed to create share store: %v", err)
+	}
+
+	originalHook := afterValidateShareStorePath
+	var hookErr error
+	swapped := false
+	afterValidateShareStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "shares-backup")
+		if err := os.Rename(sharesDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, sharesDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateShareStorePath = originalHook
+	}()
+
+	created, err := store.Create(CreateShareOptions{
+		Path:      "/docs/file.txt",
+		Type:      ShareTypeFile,
+		CreatedBy: "user1",
+	})
+	if hookErr != nil {
+		t.Fatalf("afterValidateShareStorePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected create to stay bound to the original directory, got %v", err)
+	}
+
+	outsideStore, err := NewShareStore(filepath.Join(outsideDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("failed to reload outside share store: %v", err)
+	}
+	if len(outsideStore.ListAll()) != 0 {
+		t.Fatalf("expected outside share store to remain unchanged, got %+v", outsideStore.ListAll())
+	}
+
+	backupStore, err := NewShareStore(filepath.Join(baseDir, "shares-backup", "shares.json"))
+	if err != nil {
+		t.Fatalf("failed to reload original share store inode: %v", err)
+	}
+	loaded, err := backupStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("expected created share to persist in original directory inode, got %v", err)
+	}
+	if loaded.Path != "/docs/file.txt" {
+		t.Fatalf("expected created share path to persist, got %q", loaded.Path)
+	}
+}
+
+func TestNewShareStore_RecoverCorruptShares_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	sharesDir := filepath.Join(baseDir, "shares")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(sharesDir, 0755); err != nil {
+		t.Fatalf("failed to create shares dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	storePath := filepath.Join(sharesDir, "shares.json")
+	if err := os.WriteFile(storePath, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("failed to seed corrupt shares file: %v", err)
+	}
+	writeShareFixture(t, filepath.Join(outsideDir, "shares.json"), []*Share{})
+
+	originalHook := afterValidateShareStorePath
+	var hookErr error
+	swapped := false
+	afterValidateShareStorePath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "shares-backup")
+		if err := os.Rename(sharesDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, sharesDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateShareStorePath = originalHook
+	}()
+
+	store, err := NewShareStore(storePath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateShareStorePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected corrupt recovery to stay bound to the original directory, got %v", err)
+	}
+	if len(store.ListAll()) != 0 {
+		t.Fatalf("expected recovered share store to be empty, got %+v", store.ListAll())
+	}
+
+	entries, err := os.ReadDir(filepath.Join(baseDir, "shares-backup"))
+	if err != nil {
+		t.Fatalf("failed to read backup directory: %v", err)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "shares.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt backup to remain in original directory inode")
+	}
+
+	outsideStore, err := NewShareStore(filepath.Join(outsideDir, "shares.json"))
+	if err != nil {
+		t.Fatalf("failed to reload outside share store: %v", err)
+	}
+	if len(outsideStore.ListAll()) != 0 {
+		t.Fatalf("expected outside share store to remain unchanged, got %+v", outsideStore.ListAll())
 	}
 }
 
@@ -1641,7 +1863,7 @@ func TestShareStore_CreateRollbackOnSaveFailure(t *testing.T) {
 	}
 }
 
-func TestShareStore_CreateRejectsSymlinkPath(t *testing.T) {
+func TestShareStore_Create_DoesNotFollowSymlinkPath(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -1665,14 +1887,32 @@ func TestShareStore_CreateRejectsSymlinkPath(t *testing.T) {
 		Type:      ShareTypeFile,
 		CreatedBy: "user1",
 	})
-	if !errors.Is(err, errShareStoreSymlink) {
-		t.Fatalf("expected symlink error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected create to stay within the original directory root, got %v", err)
 	}
-	if created != nil {
-		t.Fatal("expected failed create to return nil share")
+	if created == nil {
+		t.Fatal("expected successful create to return a share")
 	}
-	if len(store.shares) != 0 {
-		t.Fatalf("expected shares map to remain empty, got %d entries", len(store.shares))
+	targetBytes, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("failed to read symlink target: %v", err)
+	}
+	if string(targetBytes) != "[]" {
+		t.Fatalf("expected symlink target to remain unchanged, got %q", string(targetBytes))
+	}
+	info, err := os.Lstat(symlinkPath)
+	if err != nil {
+		t.Fatalf("failed to stat replaced symlink path: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("expected symlink path to be replaced with a regular file inside the original root")
+	}
+	reloaded, err := NewShareStore(symlinkPath)
+	if err != nil {
+		t.Fatalf("failed to reload replaced share store path: %v", err)
+	}
+	if _, err := reloaded.Get(created.ID); err != nil {
+		t.Fatalf("expected created share to persist at replaced symlink path, got %v", err)
 	}
 }
 

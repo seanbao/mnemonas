@@ -186,12 +186,12 @@ func TestSaveSecrets_TightensExistingFilePermissions(t *testing.T) {
 func TestSaveSecrets_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalSyncManagedDir := syncManagedDir
-	syncManagedDir = func(dir string) error {
+	originalSyncManagedRootDir := syncManagedRootDir
+	syncManagedRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncManagedDir = originalSyncManagedDir
+		syncManagedRootDir = originalSyncManagedRootDir
 	}()
 
 	err := SaveSecrets(tmpDir, &Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
@@ -434,6 +434,111 @@ func TestLoadOrCreateSecrets_RejectsSymlinkParentDirectory(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(realDir, SecretsFile)); !os.IsNotExist(statErr) {
 		t.Fatalf("expected no secrets file created in symlink target dir, got %v", statErr)
+	}
+}
+
+func TestSaveSecrets_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	secretsDir := filepath.Join(baseDir, "secrets")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	outsidePath := filepath.Join(outsideDir, SecretsFile)
+	if err := os.WriteFile(outsidePath, []byte(`{"keep":"outside"}`), 0600); err != nil {
+		t.Fatalf("failed to seed outside secrets: %v", err)
+	}
+
+	originalHook := afterValidateManagedFilePath
+	var hookErr error
+	afterValidateManagedFilePath = func() {
+		if hookErr != nil {
+			return
+		}
+		backupDir := filepath.Join(baseDir, "secrets-backup")
+		if err := os.Rename(secretsDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, secretsDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateManagedFilePath = originalHook
+	}()
+
+	err := SaveSecrets(secretsDir, &Secrets{JWTSecret: "jwt", WebDAVPassword: "password"})
+	if hookErr != nil {
+		t.Fatalf("afterValidateManagedFilePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected SaveSecrets to stay bound to the original directory, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(outsidePath)
+	if readErr != nil {
+		t.Fatalf("failed to read outside secrets: %v", readErr)
+	}
+	if string(data) != `{"keep":"outside"}` {
+		t.Fatalf("expected outside secrets to remain unchanged, got %q", string(data))
+	}
+
+	loaded, loadErr := LoadSecrets(filepath.Join(baseDir, "secrets-backup"))
+	if loadErr != nil {
+		t.Fatalf("failed to load secrets written through original directory root: %v", loadErr)
+	}
+	if loaded == nil || loaded.JWTSecret != "jwt" || loaded.WebDAVPassword != "password" {
+		t.Fatalf("expected saved secrets to remain bound to original directory, got %+v", loaded)
+	}
+}
+
+func TestLoadSecrets_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	secretsDir := filepath.Join(baseDir, "secrets")
+	if err := os.MkdirAll(secretsDir, 0755); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+	secretsPath := filepath.Join(secretsDir, SecretsFile)
+	if err := os.WriteFile(secretsPath, []byte(`{"jwt_secret":"jwt","webdav_password":"password"}`), 0600); err != nil {
+		t.Fatalf("failed to seed secrets file: %v", err)
+	}
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, SecretsFile), []byte(`{"jwt_secret":"outside"}`), 0600); err != nil {
+		t.Fatalf("failed to seed outside secrets file: %v", err)
+	}
+
+	originalHook := afterValidateManagedFilePath
+	var hookErr error
+	afterValidateManagedFilePath = func() {
+		if hookErr != nil {
+			return
+		}
+		backupDir := filepath.Join(baseDir, "secrets-backup")
+		if err := os.Rename(secretsDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, secretsDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateManagedFilePath = originalHook
+	}()
+
+	loaded, err := LoadSecrets(secretsDir)
+	if hookErr != nil {
+		t.Fatalf("afterValidateManagedFilePath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected LoadSecrets to stay bound to the original directory, got %v", err)
+	}
+	if loaded == nil || loaded.JWTSecret != "jwt" || loaded.WebDAVPassword != "password" {
+		t.Fatalf("expected secrets load to ignore the swapped symlink target, got %+v", loaded)
 	}
 }
 

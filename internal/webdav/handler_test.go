@@ -518,6 +518,66 @@ func TestHandler_PUT_GET(t *testing.T) {
 	}
 }
 
+func TestHandler_PUT_WithContentRangeReturnsBadRequestAndDoesNotOverwrite(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/files/test.txt", strings.NewReader("original")); err != nil {
+		t.Fatalf("WriteFile(test.txt) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/test.txt", strings.NewReader("partial-update"))
+	req.Header.Set("Content-Range", "bytes 0-6/14")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PUT with Content-Range status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "Content-Range is not supported for PUT") {
+		t.Fatalf("expected unsupported Content-Range message, got %q", w.Body.String())
+	}
+
+	reader, err := fs.OpenFile(ctx, "/files/test.txt")
+	if err != nil {
+		t.Fatalf("OpenFile(test.txt) error: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(test.txt) error: %v", err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("expected existing file content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestHandler_PUT_WithContentRangeDoesNotCreateMissingFile(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/files"); err != nil {
+		t.Fatalf("Mkdir(/files) error: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/dav/files/new.txt", strings.NewReader("partial-create"))
+	req.Header.Set("Content-Range", "bytes 0-6/14")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PUT create with Content-Range status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if _, err := fs.Stat(ctx, "/files/new.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected missing file to remain absent, got %v", err)
+	}
+}
+
 func TestHandler_HEAD_PreservesFileContentType(t *testing.T) {
 	handler, _, _ := setupTestHandler(t)
 

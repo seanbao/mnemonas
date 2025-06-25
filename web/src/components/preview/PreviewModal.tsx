@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Modal, ModalContent, ModalBody, Button, Spinner, addToast } from '@heroui/react'
 import { X, ChevronLeft, ChevronRight, Download, ExternalLink, AlertCircle } from 'lucide-react'
 import { downloadFile } from '@/api/files'
-import { refreshAuthSession } from '@/api/auth'
+import { ensureDownloadSession, refreshAuthSession } from '@/api/auth'
 import { getPreviewType, buildPreviewUrl } from '@/lib/preview-utils'
 import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
 import { TextPreview } from './TextPreview'
@@ -139,8 +139,15 @@ export function PreviewModal({
     })
   }, [currentFile])
 
-  const handleOpenExternal = useCallback(() => {
+  const handleOpenExternal = useCallback(async () => {
     if (!currentFile) return
+
+    const session = await ensureDownloadSession()
+    if (!session.ok) {
+      addToast({ title: session.message ?? '原始预览和下载会话同步失败，请稍后重试', color: 'warning' })
+      return
+    }
+
     const url = buildStreamUrl(currentFile.path)
     if (!openUrlInNewTab(url)) {
       addToast({ title: '浏览器拦截了新标签页，请允许弹窗后重试', color: 'warning' })

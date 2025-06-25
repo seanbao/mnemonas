@@ -8,22 +8,32 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 var (
-	errCertFileSymlink = errors.New("TLS certificate file path must not be a symlink")
-	errKeyFileSymlink  = errors.New("TLS private key file path must not be a symlink")
-	syncTLSDir         = syncTLSDirectory
+	errCertFileSymlink       = errors.New("TLS certificate file path must not be a symlink")
+	errKeyFileSymlink        = errors.New("TLS private key file path must not be a symlink")
+	syncTLSDir               = syncTLSDirectory
+	syncTLSRootDir           = syncTLSRootDirectory
+	afterValidateTLSFilePath = func() {}
 )
+
+var tlsDirRootsMu sync.RWMutex
+var tlsDirRoots = map[string]*os.Root{}
+
+const tlsRootEscapeError = "path escapes from parent"
 
 func syncTLSDirectory(dir string) error {
 	parentDir, err := os.Open(dir)
@@ -99,13 +109,18 @@ func (m *Manager) loadOrGenerateCert() (tls.Certificate, error) {
 
 	// Try to load existing certificate
 	if certFile != "" && keyFile != "" {
-		if err := validateTLSFilePath(certFile, errCertFileSymlink, "certificate file"); err != nil {
+		normalizedCertFile, err := ensureTLSDirRoot(certFile, errCertFileSymlink, "certificate file", false)
+		if err != nil {
 			return tls.Certificate{}, err
 		}
-		if err := validateTLSFilePath(keyFile, errKeyFileSymlink, "private key file"); err != nil {
+		normalizedKeyFile, err := ensureTLSDirRoot(keyFile, errKeyFileSymlink, "private key file", false)
+		if err != nil {
 			return tls.Certificate{}, err
 		}
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		certFile = normalizedCertFile
+		keyFile = normalizedKeyFile
+
+		cert, err := loadRegisteredTLSKeyPair(certFile, keyFile)
 		if err == nil {
 			return cert, nil
 		}
@@ -199,13 +214,9 @@ func (m *Manager) saveCertFiles(certFile, keyFile string, certPEM, keyPEM []byte
 }
 
 func validateTLSFilePath(path string, symlinkErr error, label string) error {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		absPath, err := filepath.Abs(cleaned)
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s path: %w", label, err)
-		}
-		cleaned = absPath
+	cleaned, err := normalizeTLSFilePath(path, label)
+	if err != nil {
+		return err
 	}
 
 	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
@@ -245,16 +256,228 @@ func validateTLSFilePath(path string, symlinkErr error, label string) error {
 	return nil
 }
 
-func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
+func normalizeTLSFilePath(path string, label string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve %s path: %w", label, err)
+	}
+	return absPath, nil
+}
+
+func ensureTLSDirRoot(path string, symlinkErr error, label string, create bool) (string, error) {
+	normalizedPath, err := normalizeTLSFilePath(path, label)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(normalizedPath)
+	tlsDirRootsMu.RLock()
+	root := tlsDirRoots[dir]
+	tlsDirRootsMu.RUnlock()
+	if root != nil {
+		return normalizedPath, nil
+	}
+
+	if err := validateTLSFilePath(normalizedPath, symlinkErr, label); err != nil {
+		return "", err
+	}
+
+	if create {
+		if err := ensureTLSDir(dir, 0700, label); err != nil {
+			return "", fmt.Errorf("failed to create %s directory: %w", label, err)
+		}
+	} else if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return normalizedPath, nil
+		}
+		return "", fmt.Errorf("failed to stat %s directory: %w", label, err)
+	}
+
+	root, err = os.OpenRoot(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to open %s directory root: %w", label, err)
+	}
+
+	tlsDirRootsMu.Lock()
+	if existing := tlsDirRoots[dir]; existing != nil {
+		tlsDirRootsMu.Unlock()
+		_ = root.Close()
+		return normalizedPath, nil
+	}
+	tlsDirRoots[dir] = root
+	tlsDirRootsMu.Unlock()
+
+	return normalizedPath, nil
+}
+
+func registeredTLSDirRoot(path string, label string) (*os.Root, string, bool, error) {
+	normalizedPath, err := normalizeTLSFilePath(path, label)
+	if err != nil {
+		return nil, "", false, err
+	}
+	dir := filepath.Dir(normalizedPath)
+	tlsDirRootsMu.RLock()
+	root := tlsDirRoots[dir]
+	tlsDirRootsMu.RUnlock()
+	return root, normalizedPath, root != nil, nil
+}
+
+func readRegisteredTLSFile(path string, symlinkErr error, label string) ([]byte, error) {
+	root, normalizedPath, ok, err := registeredTLSDirRoot(path, label)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if err := validateTLSFilePath(normalizedPath, symlinkErr, label); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(normalizedPath)
+	}
+	return readTLSFileWithRoot(root, normalizedPath, symlinkErr, label)
+}
+
+func loadRegisteredTLSKeyPair(certFile, keyFile string) (tls.Certificate, error) {
+	certPEM, err := readRegisteredTLSFile(certFile, errCertFileSymlink, "certificate file")
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM, err := readRegisteredTLSFile(keyFile, errKeyFileSymlink, "private key file")
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+func writeRegisteredTLSFileAtomically(path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
+	root, normalizedPath, ok, err := registeredTLSDirRoot(path, label)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return writeTLSFileAtomically(normalizedPath, data, mode, symlinkErr, pattern, label)
+	}
+	return writeTLSFileAtomicallyWithRoot(root, normalizedPath, data, mode, symlinkErr, pattern, label)
+}
+
+func syncRegisteredTLSDir(path string, label string) error {
+	root, normalizedPath, ok, err := registeredTLSDirRoot(path, label)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return syncTLSRootDir(root)
+	}
+	return syncTLSDir(filepath.Dir(normalizedPath))
+}
+
+func syncTLSRootDirectory(root *os.Root) error {
+	parentDir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = parentDir.Close()
+	}()
+	if err := parentDir.Sync(); err != nil {
+		return err
+	}
+	if err := parentDir.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readTLSFileWithRoot(root *os.Root, path string, symlinkErr error, label string) ([]byte, error) {
+	afterValidateTLSFilePath()
+
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return nil, mapTLSRootPathError(err, symlinkErr)
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+func writeTLSFileAtomicallyWithRoot(root *os.Root, path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
+	afterValidateTLSFilePath()
+
+	tmpFile, tmpName, err := createTLSTempFile(root, pattern, symlinkErr)
+	if err != nil {
+		return fmt.Errorf("failed to create temp %s: %w", label, err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = root.Remove(tmpName)
+		}
+	}()
+
+	if err := tmpFile.Chmod(mode); err != nil {
+		_ = tmpFile.Close()
+		return cleanupTLSTempPath(root, tmpName, fmt.Errorf("failed to set temp %s permissions: %w", label, err))
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return cleanupTLSTempPath(root, tmpName, fmt.Errorf("failed to write %s: %w", label, err))
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return cleanupTLSTempPath(root, tmpName, fmt.Errorf("failed to sync %s: %w", label, err))
+	}
+	if err := tmpFile.Close(); err != nil {
+		return cleanupTLSTempPath(root, tmpName, fmt.Errorf("failed to close temp %s: %w", label, err))
+	}
+	if err := root.Rename(tmpName, filepath.Base(path)); err != nil {
+		return cleanupTLSTempPath(root, tmpName, fmt.Errorf("failed to replace %s: %w", label, mapTLSRootPathError(err, symlinkErr)))
+	}
+	cleanup = false
+	if err := syncRegisteredTLSDir(path, label); err != nil {
+		return fmt.Errorf("failed to sync %s directory: %w", label, err)
+	}
+	return nil
+}
+
+func createTLSTempFile(root *os.Root, pattern string, symlinkErr error) (*os.File, string, error) {
+	tmpName, err := newTLSTempName(pattern)
+	if err != nil {
+		return nil, "", err
+	}
+	tmpFile, err := root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, "", mapTLSRootPathError(err, symlinkErr)
+	}
+	return tmpFile, tmpName, nil
+}
+
+func newTLSTempName(pattern string) (string, error) {
+	random := make([]byte, 8)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	name := strings.Replace(pattern, "*", hex.EncodeToString(random), 1)
+	if !strings.Contains(name, ".") {
+		return pattern + hex.EncodeToString(random), nil
+	}
+	return name, nil
+}
+
+func cleanupTLSTempPath(root *os.Root, path string, err error) error {
+	_ = root.Remove(path)
+	return err
+}
+
+func writeTLSFileAtomically(path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
 	if err := validateTLSFilePath(path, symlinkErr, label); err != nil {
 		return err
 	}
+	afterValidateTLSFilePath()
 
 	dir := filepath.Dir(path)
-	if err := ensureTLSDir(dir, 0700, label); err != nil {
-		return fmt.Errorf("failed to create %s directory: %w", label, err)
-	}
-
 	tmpFile, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return fmt.Errorf("failed to create temp %s: %w", label, err)
@@ -290,6 +513,25 @@ func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, 
 		return fmt.Errorf("failed to sync %s directory: %w", label, err)
 	}
 	return nil
+}
+
+func mapTLSRootPathError(err error, symlinkErr error) error {
+	if errors.Is(err, os.ErrPermission) || isTLSRootEscapeError(err) {
+		return symlinkErr
+	}
+	return err
+}
+
+func isTLSRootEscapeError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), tlsRootEscapeError)
+}
+
+func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
+	normalizedPath, err := ensureTLSDirRoot(path, symlinkErr, label, true)
+	if err != nil {
+		return err
+	}
+	return writeRegisteredTLSFileAtomically(normalizedPath, data, mode, symlinkErr, pattern, label)
 }
 
 func collectMissingTLSDirs(dir string) ([]string, error) {
@@ -347,11 +589,12 @@ func (m *Manager) GetCertificateInfo() (*CertInfo, error) {
 	if certFile == "" {
 		return nil, errors.New("no certificate file configured")
 	}
-	if err := validateTLSFilePath(certFile, errCertFileSymlink, "certificate file"); err != nil {
+	normalizedCertFile, err := ensureTLSDirRoot(certFile, errCertFileSymlink, "certificate file", false)
+	if err != nil {
 		return nil, err
 	}
 
-	certPEM, err := os.ReadFile(certFile)
+	certPEM, err := readRegisteredTLSFile(normalizedCertFile, errCertFileSymlink, "certificate file")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read certificate: %w", err)
 	}

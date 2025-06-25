@@ -24,6 +24,9 @@ func TestWorkspace_WriteFile_ReturnsDirectorySyncErrorAfterRename(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected WriteFile() to fail when parent directory sync fails")
 	}
+	if !IsVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "sync parent directory") {
 		t.Fatalf("expected directory sync error, got %v", err)
 	}
@@ -57,6 +60,9 @@ func TestWorkspace_WriteFileFromReader_ReturnsDirectorySyncErrorAfterRename(t *t
 	err := w.WriteFileFromReader(context.Background(), "/stream.txt", strings.NewReader("streamed content"))
 	if err == nil {
 		t.Fatal("expected WriteFileFromReader() to fail when parent directory sync fails")
+	}
+	if !IsVisibleMutationWarning(err) {
+		t.Fatalf("expected visible mutation warning, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "sync parent directory") {
 		t.Fatalf("expected directory sync error, got %v", err)
@@ -109,6 +115,34 @@ func TestWorkspace_Copy_RollsBackDestinationWhenDirectorySyncFails(t *testing.T)
 	}
 	if string(data) != "copy content" {
 		t.Fatalf("expected source content to remain unchanged, got %q", string(data))
+	}
+}
+
+func TestWorkspace_RootMutationsAreRejected(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.WriteFile(ctx, "/source.txt", []byte("copy content")); err != nil {
+		t.Fatalf("WriteFile(source.txt) error: %v", err)
+	}
+
+	if err := w.Delete(ctx, "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete(/) error = %v, want ErrNotFound", err)
+	}
+	if err := w.DeleteAll(ctx, "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("DeleteAll(/) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Rename(ctx, "/", "/renamed-root"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Rename(/, /renamed-root) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Copy(ctx, "/", "/copied-root"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Copy(/, /copied-root) error = %v, want ErrNotFound", err)
+	}
+	if err := w.Copy(ctx, "/source.txt", "/"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Copy(/source.txt, /) error = %v, want ErrNotFound", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.Root(), "source.txt")); err != nil {
+		t.Fatalf("expected source file to remain after rejected root mutations, got %v", err)
 	}
 }
 
@@ -217,6 +251,43 @@ func TestNew_RejectsSymlinkRoot(t *testing.T) {
 	_, err := New(rootLink)
 	if !errors.Is(err, errWorkspaceRootSymlink) {
 		t.Fatalf("expected symlink root rejection, got %v", err)
+	}
+}
+
+func TestNew_RejectsSymlinkParentDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) error: %v", err)
+	}
+
+	_, err := New(filepath.Join(linkedParent, "workspace"))
+	if !errors.Is(err, errWorkspaceRootSymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+}
+
+func TestNew_DoesNotCreateRootThroughSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) error: %v", err)
+	}
+
+	workspaceRoot := filepath.Join(linkedParent, "workspace")
+	if _, err := New(workspaceRoot); !errors.Is(err, errWorkspaceRootSymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(realParent, "workspace")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace root created through symlink parent, stat error = %v", err)
 	}
 }
 
@@ -522,11 +593,11 @@ func TestWorkspace_ReadDir_StopsWhenContextIsCanceledMidIteration(t *testing.T) 
 	}
 
 	originalReadDirEntryInfo := readDirEntryInfo
-	readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+	readDirEntryInfo = func(root *os.Root, name string, entry os.DirEntry) (os.FileInfo, error) {
 		if entry.Name() == "a.txt" {
 			cancel()
 		}
-		return originalReadDirEntryInfo(entry)
+		return originalReadDirEntryInfo(root, name, entry)
 	}
 	defer func() {
 		readDirEntryInfo = originalReadDirEntryInfo
@@ -556,11 +627,11 @@ func TestWorkspace_ReadDir_ReturnsEntryInfoError(t *testing.T) {
 	}
 
 	originalReadDirEntryInfo := readDirEntryInfo
-	readDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+	readDirEntryInfo = func(root *os.Root, name string, entry os.DirEntry) (os.FileInfo, error) {
 		if entry.Name() == "broken.txt" {
 			return nil, errors.New("stat failed")
 		}
-		return originalReadDirEntryInfo(entry)
+		return originalReadDirEntryInfo(root, name, entry)
 	}
 	defer func() {
 		readDirEntryInfo = originalReadDirEntryInfo
@@ -1090,6 +1161,79 @@ func TestWorkspace_Walk_PropagatesTraversalError(t *testing.T) {
 	}
 }
 
+func TestWorkspace_Walk_DoesNotFollowWorkspaceRootSymlinkInsertedAfterValidation(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	if err := w.Mkdir(ctx, "/walktest"); err != nil {
+		t.Fatalf("Mkdir(walktest) error: %v", err)
+	}
+	if err := w.WriteFile(ctx, "/walktest/original.txt", []byte("original")); err != nil {
+		t.Fatalf("WriteFile(original.txt) error: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outsideRoot, "walktest"), 0755); err != nil {
+		t.Fatalf("Mkdir(outside walktest) error: %v", err)
+	}
+	outsidePath := filepath.Join(outsideRoot, "walktest", "secret.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside secret.txt) error: %v", err)
+	}
+
+	backupRoot := w.Root() + "-backup"
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Rename(w.Root(), backupRoot); err != nil {
+			return err
+		}
+		return os.Symlink(outsideRoot, w.Root())
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+		if info, err := os.Lstat(w.Root()); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(w.Root()); removeErr != nil {
+				t.Errorf("Remove(workspace root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupRoot); err == nil {
+			if renameErr := os.Rename(backupRoot, w.Root()); renameErr != nil {
+				t.Errorf("Rename(backup root) error: %v", renameErr)
+			}
+		}
+	})
+
+	var paths []string
+	err := w.Walk(ctx, "/walktest", func(path string, info *FileInfo) error {
+		paths = append(paths, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk() error: %v", err)
+	}
+
+	foundOriginal := false
+	for _, walkedPath := range paths {
+		if walkedPath == "/walktest/original.txt" {
+			foundOriginal = true
+		}
+		if walkedPath == "/walktest/secret.txt" {
+			t.Fatalf("expected Walk() to stay on original workspace root, got outside path list %v", paths)
+		}
+	}
+	if !foundOriginal {
+		t.Fatalf("expected Walk() to visit original workspace file, got %v", paths)
+	}
+
+	data, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFile(outside secret.txt) error: %v", err)
+	}
+	if string(data) != "outside" {
+		t.Fatalf("expected outside file unchanged, got %q", string(data))
+	}
+}
+
 func TestWorkspace_OpenFile(t *testing.T) {
 	w := setupWorkspace(t)
 	ctx := context.Background()
@@ -1204,6 +1348,77 @@ func TestWorkspace_CleanupStaging_PropagatesWalkError(t *testing.T) {
 	_, _, err := w.CleanupStaging(ctx)
 	if err == nil {
 		t.Fatal("expected CleanupStaging() to return walk error")
+	}
+}
+
+func TestWorkspace_CleanupStaging_DoesNotFollowWorkspaceRootSymlinkInsertedAfterValidation(t *testing.T) {
+	w := setupWorkspace(t)
+	ctx := context.Background()
+
+	originalTemp := filepath.Join(w.Root(), ".workspace-original.tmp")
+	keepFile := filepath.Join(w.Root(), "keep.tmp")
+	if err := os.WriteFile(originalTemp, []byte("inside"), 0644); err != nil {
+		t.Fatalf("WriteFile(original staging) error: %v", err)
+	}
+	if err := os.WriteFile(keepFile, []byte("keep"), 0644); err != nil {
+		t.Fatalf("WriteFile(keep.tmp) error: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsideTemp := filepath.Join(outsideRoot, ".workspace-outside.tmp")
+	if err := os.WriteFile(outsideTemp, []byte("outside"), 0644); err != nil {
+		t.Fatalf("WriteFile(outside staging) error: %v", err)
+	}
+
+	backupRoot := w.Root() + "-backup"
+	originalAfterValidateWorkspacePaths := afterValidateWorkspacePaths
+	afterValidateWorkspacePaths = func() error {
+		if err := os.Rename(w.Root(), backupRoot); err != nil {
+			return err
+		}
+		return os.Symlink(outsideRoot, w.Root())
+	}
+	t.Cleanup(func() {
+		afterValidateWorkspacePaths = originalAfterValidateWorkspacePaths
+		if info, err := os.Lstat(w.Root()); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if removeErr := os.Remove(w.Root()); removeErr != nil {
+				t.Errorf("Remove(workspace root symlink) error: %v", removeErr)
+			}
+		}
+		if _, err := os.Stat(backupRoot); err == nil {
+			if renameErr := os.Rename(backupRoot, w.Root()); renameErr != nil {
+				t.Errorf("Rename(backup root) error: %v", renameErr)
+			}
+		}
+	})
+
+	files, bytes, err := w.CleanupStaging(ctx)
+	if err != nil {
+		t.Fatalf("CleanupStaging() error: %v", err)
+	}
+	if files != 1 {
+		t.Fatalf("CleanupStaging() files = %d, want 1", files)
+	}
+	if bytes != int64(len("inside")) {
+		t.Fatalf("CleanupStaging() bytes = %d, want %d", bytes, len("inside"))
+	}
+
+	if _, err := os.Stat(filepath.Join(backupRoot, ".workspace-original.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("expected original staging file to be removed from anchored workspace, got %v", err)
+	}
+	keepData, err := os.ReadFile(filepath.Join(backupRoot, "keep.tmp"))
+	if err != nil {
+		t.Fatalf("ReadFile(keep.tmp) error: %v", err)
+	}
+	if string(keepData) != "keep" {
+		t.Fatalf("expected keep.tmp to remain unchanged, got %q", string(keepData))
+	}
+	outsideData, err := os.ReadFile(outsideTemp)
+	if err != nil {
+		t.Fatalf("ReadFile(outside staging) error: %v", err)
+	}
+	if string(outsideData) != "outside" {
+		t.Fatalf("expected outside staging file unchanged, got %q", string(outsideData))
 	}
 }
 

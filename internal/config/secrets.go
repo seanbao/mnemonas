@@ -33,17 +33,18 @@ var ErrSecretsNotFound = errors.New("secrets file not found")
 // Returns nil if file does not exist.
 func LoadSecrets(dataDir string) (*Secrets, error) {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
-	if err := validateSecretsFilePath(secretsPath); err != nil {
+	normalizedPath, err := ensureManagedDirRoot(secretsPath, errSecretsFileSymlink, "secrets file", false)
+	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(secretsPath)
+	data, err := readRegisteredManagedFile(normalizedPath, errSecretsFileSymlink, "secrets file")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to read secrets file: %w", err)
 	}
-	if err := ensureSecretsFilePermissions(secretsPath); err != nil {
+	if err := ensureSecretsFilePermissions(normalizedPath); err != nil {
 		return nil, err
 	}
 
@@ -57,13 +58,9 @@ func LoadSecrets(dataDir string) (*Secrets, error) {
 // SaveSecrets saves secrets to file
 func SaveSecrets(dataDir string, secrets *Secrets) error {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
-	if err := validateSecretsFilePath(secretsPath); err != nil {
+	normalizedPath, err := ensureManagedDirRoot(secretsPath, errSecretsFileSymlink, "secrets file", true)
+	if err != nil {
 		return err
-	}
-
-	// Ensure directory exists
-	if err := ensureManagedDir(dataDir, 0755); err != nil {
-		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 
 	data, err := json.MarshalIndent(secrets, "", "  ")
@@ -71,7 +68,7 @@ func SaveSecrets(dataDir string, secrets *Secrets) error {
 		return fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 
-	if err := writeSecretsFile(secretsPath, data); err != nil {
+	if err := writeSecretsFile(normalizedPath, data); err != nil {
 		return err
 	}
 	return nil
@@ -95,14 +92,15 @@ func MarkSetupShown(dataDir string) error {
 // Returns the secrets and a boolean indicating if they were newly created.
 func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 	secretsPath := filepath.Join(dataDir, SecretsFile)
-	if err := validateSecretsFilePath(secretsPath); err != nil {
+	normalizedPath, err := ensureManagedDirRoot(secretsPath, errSecretsFileSymlink, "secrets file", false)
+	if err != nil {
 		return nil, false, err
 	}
 
 	// Try to load existing secrets
-	data, err := os.ReadFile(secretsPath)
+	data, err := readRegisteredManagedFile(normalizedPath, errSecretsFileSymlink, "secrets file")
 	if err == nil {
-		if err := ensureSecretsFilePermissions(secretsPath); err != nil {
+		if err := ensureSecretsFilePermissions(normalizedPath); err != nil {
 			return nil, false, err
 		}
 		var secrets Secrets
@@ -130,9 +128,9 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 		WebDAVPassword: webdavPassword,
 	}
 
-	// Ensure directory exists
-	if err := ensureManagedDir(dataDir, 0755); err != nil {
-		return nil, false, fmt.Errorf("failed to create data directory: %w", err)
+	normalizedPath, err = ensureManagedDirRoot(normalizedPath, errSecretsFileSymlink, "secrets file", true)
+	if err != nil {
+		return nil, false, err
 	}
 
 	// Save secrets with restricted permissions
@@ -141,7 +139,7 @@ func LoadOrCreateSecrets(dataDir string) (*Secrets, bool, error) {
 		return nil, false, fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 
-	if err := writeSecretsFile(secretsPath, secretsData); err != nil {
+	if err := writeSecretsFile(normalizedPath, secretsData); err != nil {
 		return nil, false, err
 	}
 
@@ -153,53 +151,14 @@ func validateSecretsFilePath(secretsPath string) error {
 }
 
 func writeSecretsFile(secretsPath string, data []byte) error {
-	if err := validateSecretsFilePath(secretsPath); err != nil {
+	if err := writeRegisteredManagedFileAtomically(secretsPath, data, errSecretsFileSymlink, ".secrets-*.tmp", "secrets", secretsFileMode); err != nil {
 		return err
 	}
-
-	dir := filepath.Dir(secretsPath)
-	tmpFile, err := os.CreateTemp(dir, ".secrets-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp secrets file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmpFile.Chmod(secretsFileMode); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to set temp secrets permissions: %w", err)
-	}
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write secrets file: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to sync secrets file: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp secrets file: %w", err)
-	}
-	if err := os.Rename(tmpPath, secretsPath); err != nil {
-		return fmt.Errorf("failed to replace secrets file: %w", err)
-	}
-	cleanup = false
-	if err := ensureSecretsFilePermissions(secretsPath); err != nil {
-		return err
-	}
-	if err := syncManagedDir(dir); err != nil {
-		return fmt.Errorf("failed to sync secrets directory: %w", err)
-	}
-	return nil
+	return ensureSecretsFilePermissions(secretsPath)
 }
 
 func ensureSecretsFilePermissions(secretsPath string) error {
-	if err := os.Chmod(secretsPath, secretsFileMode); err != nil {
+	if err := chmodRegisteredManagedFile(secretsPath, secretsFileMode, errSecretsFileSymlink, "secrets file"); err != nil {
 		return fmt.Errorf("failed to set secrets file permissions: %w", err)
 	}
 	return nil

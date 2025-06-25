@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+func setTrustedProxyHopsForTest(t *testing.T, hops int) {
+	t.Helper()
+	previous := TrustedProxyHops()
+	SetTrustedProxyHops(hops)
+	t.Cleanup(func() {
+		SetTrustedProxyHops(previous)
+	})
+}
+
 func TestClientIP_IgnoresSpoofedForwardedHeadersFromUntrustedSource(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "203.0.113.5:1234"
@@ -91,5 +100,42 @@ func TestClientIP_UsesBracketedIPv6FromTrustedProxy(t *testing.T) {
 
 	if got := ClientIP(req); got != net.ParseIP("2001:db8::20").String() {
 		t.Fatalf("ClientIP() = %q, want %q", got, net.ParseIP("2001:db8::20").String())
+	}
+}
+
+func TestClientIP_UsesConfiguredTrustedProxyHops(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 2)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.2:8080"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20, 203.0.113.30")
+
+	if got := ClientIP(req); got != "198.51.100.20" {
+		t.Fatalf("ClientIP() = %q, want %q", got, "198.51.100.20")
+	}
+}
+
+func TestClientIP_ConfiguredTrustedProxyHopsStillIgnoreSpoofedLeadingEntries(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 2)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.2:8080"
+	req.Header.Set("X-Forwarded-For", "203.0.113.250, 198.51.100.20, 203.0.113.30")
+
+	if got := ClientIP(req); got != "198.51.100.20" {
+		t.Fatalf("ClientIP() = %q, want %q", got, "198.51.100.20")
+	}
+}
+
+func TestClientIP_TrustedProxyHopsZeroDisablesForwardedHeaders(t *testing.T) {
+	setTrustedProxyHopsForTest(t, 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.2:8080"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20")
+	req.Header.Set("X-Real-IP", "198.51.100.21")
+
+	if got := ClientIP(req); got != "10.0.0.2" {
+		t.Fatalf("ClientIP() = %q, want %q", got, "10.0.0.2")
 	}
 }

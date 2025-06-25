@@ -1,6 +1,7 @@
 package activity
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,16 +12,28 @@ import (
 	"time"
 )
 
+func writeActivityFixture(t *testing.T, path string, entries []Entry) {
+	t.Helper()
+
+	data, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("failed to marshal activity fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0640); err != nil {
+		t.Fatalf("failed to write activity fixture: %v", err)
+	}
+}
+
 func TestWriteActivityLogFile_ReturnsDirectorySyncError(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "activity.json")
 
-	originalSyncActivityLogDir := syncActivityLogDir
-	syncActivityLogDir = func(dir string) error {
+	originalSyncActivityLogRootDir := syncActivityLogRootDir
+	syncActivityLogRootDir = func(root *os.Root) error {
 		return errors.New("directory fsync failed")
 	}
 	defer func() {
-		syncActivityLogDir = originalSyncActivityLogDir
+		syncActivityLogRootDir = originalSyncActivityLogRootDir
 	}()
 
 	err := writeActivityLogFile(logPath, []byte("[]"))
@@ -169,7 +182,8 @@ func TestNewStore_ReturnsErrorWhenCorruptLogBackupDirectorySyncFails(t *testing.
 
 	originalSyncActivityLogDir := syncActivityLogDir
 	syncFailed := false
-	syncActivityLogDir = func(dir string) error {
+	originalSyncActivityLogRootDir := syncActivityLogRootDir
+	syncActivityLogRootDir = func(root *os.Root) error {
 		if !syncFailed {
 			syncFailed = true
 			return errors.New("sync dir failed")
@@ -178,6 +192,7 @@ func TestNewStore_ReturnsErrorWhenCorruptLogBackupDirectorySyncFails(t *testing.
 	}
 	t.Cleanup(func() {
 		syncActivityLogDir = originalSyncActivityLogDir
+		syncActivityLogRootDir = originalSyncActivityLogRootDir
 	})
 
 	if _, err := NewStore(tmpDir); err == nil {
@@ -236,6 +251,221 @@ func TestNewStore_RejectsSymlinkParentDirectory(t *testing.T) {
 	_, err := NewStore(linkedRoot)
 	if !errors.Is(err, errActivityLogSymlink) {
 		t.Fatalf("expected parent-directory symlink rejection, got %v", err)
+	}
+}
+
+func TestNewStore_DoesNotCreateRootThroughSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	realParent := filepath.Join(tmpDir, "real-parent")
+	if err := os.MkdirAll(realParent, 0755); err != nil {
+		t.Fatalf("MkdirAll(real-parent) error: %v", err)
+	}
+	linkedParent := filepath.Join(tmpDir, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Fatalf("Symlink(linked-parent) error: %v", err)
+	}
+
+	activityRoot := filepath.Join(linkedParent, "activity")
+	if _, err := NewStore(activityRoot); !errors.Is(err, errActivityLogSymlink) {
+		t.Fatalf("expected symlink parent rejection, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(realParent, "activity")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("activity root created through symlink parent, stat error = %v", err)
+	}
+}
+
+func TestNewStore_Load_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	activityDir := filepath.Join(baseDir, "activity")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(activityDir, 0755); err != nil {
+		t.Fatalf("failed to create activity dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	writeActivityFixture(t, filepath.Join(activityDir, "activity.json"), []Entry{{
+		ID:        "original",
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "/docs/original.txt",
+		User:      "user1",
+	}})
+	writeActivityFixture(t, filepath.Join(outsideDir, "activity.json"), []Entry{{
+		ID:        "outside",
+		Timestamp: time.Now(),
+		Action:    ActionDelete,
+		Path:      "/docs/outside.txt",
+		User:      "user2",
+	}})
+
+	originalHook := afterValidateActivityLogPath
+	var hookErr error
+	swapped := false
+	afterValidateActivityLogPath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "activity-backup")
+		if err := os.Rename(activityDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, activityDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateActivityLogPath = originalHook
+	}()
+
+	store, err := NewStore(activityDir)
+	if hookErr != nil {
+		t.Fatalf("afterValidateActivityLogPath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected load to stay bound to the original directory, got %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 || entries[0].ID != "original" {
+		t.Fatalf("expected original activity log to be loaded, got total=%d entries=%+v", total, entries)
+	}
+}
+
+func TestStore_Log_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	activityDir := filepath.Join(baseDir, "activity")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	writeActivityFixture(t, filepath.Join(outsideDir, "activity.json"), []Entry{})
+
+	store, err := NewStore(activityDir)
+	if err != nil {
+		t.Fatalf("failed to create activity store: %v", err)
+	}
+
+	originalHook := afterValidateActivityLogPath
+	var hookErr error
+	swapped := false
+	afterValidateActivityLogPath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "activity-backup")
+		if err := os.Rename(activityDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, activityDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateActivityLogPath = originalHook
+	}()
+
+	err = store.Log(ActionUpload, "/docs/file.txt", "user1", "127.0.0.1", nil)
+	if hookErr != nil {
+		t.Fatalf("afterValidateActivityLogPath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected log write to stay bound to the original directory, got %v", err)
+	}
+
+	outsideStore, err := NewStore(outsideDir)
+	if err != nil {
+		t.Fatalf("failed to reload outside activity store: %v", err)
+	}
+	if outsideStore.Count() != 0 {
+		entries, total := outsideStore.List(10, 0, "", "")
+		t.Fatalf("expected outside activity log to remain unchanged, got total=%d entries=%+v", total, entries)
+	}
+
+	backupStore, err := NewStore(filepath.Join(baseDir, "activity-backup"))
+	if err != nil {
+		t.Fatalf("failed to reload original activity directory inode: %v", err)
+	}
+	entries, total := backupStore.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 || entries[0].Path != "/docs/file.txt" {
+		t.Fatalf("expected logged entry to persist in original directory inode, got total=%d entries=%+v", total, entries)
+	}
+}
+
+func TestNewStore_RecoverCorruptLog_DoesNotFollowSymlinkInsertedAfterValidation(t *testing.T) {
+	baseDir := t.TempDir()
+	activityDir := filepath.Join(baseDir, "activity")
+	outsideDir := filepath.Join(baseDir, "outside")
+	if err := os.MkdirAll(activityDir, 0755); err != nil {
+		t.Fatalf("failed to create activity dir: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(activityDir, "activity.json"), []byte("{invalid json"), 0640); err != nil {
+		t.Fatalf("failed to seed corrupt activity log: %v", err)
+	}
+	writeActivityFixture(t, filepath.Join(outsideDir, "activity.json"), []Entry{})
+
+	originalHook := afterValidateActivityLogPath
+	var hookErr error
+	swapped := false
+	afterValidateActivityLogPath = func() {
+		if hookErr != nil || swapped {
+			return
+		}
+		swapped = true
+		backupDir := filepath.Join(baseDir, "activity-backup")
+		if err := os.Rename(activityDir, backupDir); err != nil {
+			hookErr = err
+			return
+		}
+		if err := os.Symlink(outsideDir, activityDir); err != nil {
+			hookErr = err
+		}
+	}
+	defer func() {
+		afterValidateActivityLogPath = originalHook
+	}()
+
+	store, err := NewStore(activityDir)
+	if hookErr != nil {
+		t.Fatalf("afterValidateActivityLogPath hook error: %v", hookErr)
+	}
+	if err != nil {
+		t.Fatalf("expected corrupt recovery to stay bound to the original directory, got %v", err)
+	}
+	if store.Count() != 0 {
+		entries, total := store.List(10, 0, "", "")
+		t.Fatalf("expected recovered activity store to be empty, got total=%d entries=%+v", total, entries)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(baseDir, "activity-backup"))
+	if err != nil {
+		t.Fatalf("failed to read backup activity directory: %v", err)
+	}
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity backup to remain in original directory inode")
+	}
+
+	outsideStore, err := NewStore(outsideDir)
+	if err != nil {
+		t.Fatalf("failed to reload outside activity store: %v", err)
+	}
+	if outsideStore.Count() != 0 {
+		entries, total := outsideStore.List(10, 0, "", "")
+		t.Fatalf("expected outside activity log to remain unchanged, got total=%d entries=%+v", total, entries)
 	}
 }
 
@@ -785,6 +1015,33 @@ func TestLogCopiesDetailsMap(t *testing.T) {
 	}
 	if entries[0].Details["reason"] != "original" {
 		t.Fatalf("Expected stored details to remain original, got %q", entries[0].Details["reason"])
+	}
+}
+
+func TestLogUsesInjectedClock(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	fixedNow := time.Date(2026, time.April, 20, 10, 30, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	originalNow := activityTimeNow
+	activityTimeNow = func() time.Time { return fixedNow }
+	defer func() {
+		activityTimeNow = originalNow
+	}()
+
+	if err := store.Log(ActionUpload, "/clock.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log() error: %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("Expected 1 entry, got total=%d len=%d", total, len(entries))
+	}
+	if !entries[0].Timestamp.Equal(fixedNow) {
+		t.Fatalf("expected logged timestamp %s, got %s", fixedNow, entries[0].Timestamp)
 	}
 }
 

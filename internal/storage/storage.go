@@ -68,10 +68,27 @@ func isVisibleMutationWarning(err error) bool {
 }
 
 var syncStoragePathDir = syncStorageDir
+var syncManagedStorageDir = func(root *os.Root, relName, absPath string) error {
+	dirHandle, err := root.Open(relName)
+	if err != nil {
+		return mapStorageRootPathError(err)
+	}
+	defer dirHandle.Close()
+
+	return dirHandle.Sync()
+}
 var storageRandomRead = rand.Read
-var movePathRename = os.Rename
-var movePathRemove = os.Remove
-var movePathRemoveAll = os.RemoveAll
+var movePathRename = func(root *os.Root, oldRel, newRel, oldAbs, newAbs string) error {
+	return root.Rename(oldRel, newRel)
+}
+var movePathRemove = func(root *os.Root, rel, abs string) error {
+	return root.Remove(rel)
+}
+var movePathRemoveAll = func(root *os.Root, rel, abs string) error {
+	return root.RemoveAll(rel)
+}
+var beforeStorageWorkspaceWrite = func() error { return nil }
+var afterValidateStoragePaths = func() error { return nil }
 var walkStorageWorkspace = func(ctx context.Context, ws *workspace.Workspace, root string, fn workspace.WalkFunc) error {
 	return ws.Walk(ctx, root, fn)
 }
@@ -152,6 +169,8 @@ type Config struct {
 // FileSystem provides unified storage operations
 type FileSystem struct {
 	workspace              *workspace.Workspace
+	filesRootHandle        *os.Root
+	trashRootHandle        *os.Root
 	versions               *versionstore.Store
 	policy                 *versionstore.VersioningPolicy
 	trashRoot              string
@@ -230,6 +249,20 @@ func (fs *FileSystem) UpdateVersioningSettings(extensions, filenames []string, m
 	}
 }
 
+func (fs *FileSystem) currentVersioningPolicy() *versionstore.VersioningPolicy {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if fs.policy == nil {
+		return nil
+	}
+
+	policy := *fs.policy
+	policy.AutoVersionedExtensions = append([]string(nil), fs.policy.AutoVersionedExtensions...)
+	policy.AutoVersionedFilenames = append([]string(nil), fs.policy.AutoVersionedFilenames...)
+	return &policy
+}
+
 // SetDataplaneClient swaps the dataplane client used by version storage operations.
 func (fs *FileSystem) SetDataplaneClient(client *dataplane.Client) {
 	fs.mu.Lock()
@@ -264,11 +297,15 @@ func New(cfg *Config) (*FileSystem, error) {
 	if cfg.Dataplane == nil {
 		return nil, errors.New("dataplane client is required")
 	}
+	trashRoot, err := normalizeStorageHostPath(cfg.TrashRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize trash root: %w", err)
+	}
 
 	if err := validateStoragePath(cfg.InternalRoot); err != nil {
 		return nil, fmt.Errorf("failed to validate internal root: %w", err)
 	}
-	if err := validateStoragePath(cfg.TrashRoot); err != nil {
+	if err := validateStoragePath(trashRoot); err != nil {
 		return nil, fmt.Errorf("failed to validate trash root: %w", err)
 	}
 
@@ -300,15 +337,27 @@ func New(cfg *Config) (*FileSystem, error) {
 	}
 
 	// Ensure trash directory exists
-	if err := ensureStorageDir(cfg.TrashRoot, 0700); err != nil {
+	if err := ensureStorageDir(trashRoot, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create trash directory: %w", err)
+	}
+
+	filesRootHandle, err := os.OpenRoot(ws.Root())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open files root: %w", err)
+	}
+	trashRootHandle, err := os.OpenRoot(trashRoot)
+	if err != nil {
+		_ = filesRootHandle.Close()
+		return nil, fmt.Errorf("failed to open trash root: %w", err)
 	}
 
 	return &FileSystem{
 		workspace:              ws,
+		filesRootHandle:        filesRootHandle,
+		trashRootHandle:        trashRootHandle,
 		versions:               vs,
 		policy:                 policy,
-		trashRoot:              cfg.TrashRoot,
+		trashRoot:              trashRoot,
 		config:                 cfg,
 		listReferencedHashes:   vs.GetAllVersionHashes,
 		listVersionPaths:       vs.ListVersionPaths,
@@ -336,7 +385,22 @@ func New(cfg *Config) (*FileSystem, error) {
 
 // Close closes the filesystem
 func (fs *FileSystem) Close() error {
-	return fs.versions.Close()
+	var err error
+	if fs.versions != nil {
+		err = errors.Join(err, fs.versions.Close())
+	}
+	if fs.workspace != nil {
+		err = errors.Join(err, fs.workspace.Close())
+	}
+	if fs.filesRootHandle != nil {
+		err = errors.Join(err, fs.filesRootHandle.Close())
+		fs.filesRootHandle = nil
+	}
+	if fs.trashRootHandle != nil {
+		err = errors.Join(err, fs.trashRootHandle.Close())
+		fs.trashRootHandle = nil
+	}
+	return err
 }
 
 // ============================================================================
@@ -379,10 +443,11 @@ func (fs *FileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) 
 		Size:    info.Size,
 		ModTime: info.ModTime,
 	}
+	policy := fs.currentVersioningPolicy()
 
 	// Check if file has versioning
-	if !info.IsDir {
-		fileInfo.Versioned = fs.policy.ShouldVersion(ctx, name, info.Size)
+	if !info.IsDir && policy != nil {
+		fileInfo.Versioned = policy.ShouldVersion(ctx, name, info.Size)
 		if contentHash, err := fs.hashWorkspaceFile(ctx, name); err == nil {
 			fileInfo.ContentHash = contentHash
 		}
@@ -411,6 +476,7 @@ func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, er
 	}
 
 	result := make([]*FileInfo, 0, len(entries))
+	policy := fs.currentVersioningPolicy()
 	for _, e := range entries {
 		info := &FileInfo{
 			Path:    e.Path,
@@ -419,8 +485,8 @@ func (fs *FileSystem) ReadDir(ctx context.Context, name string) ([]*FileInfo, er
 			Size:    e.Size,
 			ModTime: e.ModTime,
 		}
-		if !e.IsDir {
-			info.Versioned = fs.policy.ShouldVersion(ctx, e.Path, e.Size)
+		if !e.IsDir && policy != nil {
+			info.Versioned = policy.ShouldVersion(ctx, e.Path, e.Size)
 		}
 		result = append(result, info)
 	}
@@ -447,6 +513,56 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string) (*os.File, erro
 	return f, nil
 }
 
+// OpenFileSnapshot opens a file for reading and returns metadata derived from the
+// same open file handle so callers can serve a consistent snapshot.
+func (fs *FileSystem) OpenFileSnapshot(ctx context.Context, name string) (*os.File, *FileInfo, error) {
+	fs.mu.RLock()
+
+	var err error
+	name, err = normalizeStorageWorkspacePath(name)
+	if err != nil {
+		fs.mu.RUnlock()
+		return nil, nil, err
+	}
+
+	f, err := fs.workspace.OpenFile(ctx, name)
+	fs.mu.RUnlock()
+	if err != nil {
+		return nil, nil, mapWorkspaceReadablePathError(err)
+	}
+
+	info, err := fs.snapshotFileInfo(ctx, name, f, fs.currentVersioningPolicy())
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+
+	return f, info, nil
+}
+
+func (fs *FileSystem) snapshotFileInfo(ctx context.Context, name string, file *os.File, policy *versionstore.VersioningPolicy) (*FileInfo, error) {
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	fileInfo := &FileInfo{
+		Path:    name,
+		Name:    path.Base(name),
+		IsDir:   false,
+		Size:    stat.Size(),
+		ModTime: stat.ModTime(),
+	}
+	if policy != nil {
+		fileInfo.Versioned = policy.ShouldVersion(ctx, name, stat.Size())
+	}
+	if contentHash, err := hashOpenWorkspaceFile(file); err == nil {
+		fileInfo.ContentHash = contentHash
+	}
+
+	return fileInfo, nil
+}
+
 // WriteFile writes a file, creating versions if needed
 func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) error {
 	release := fs.beginMutation()
@@ -465,155 +581,77 @@ func (fs *FileSystem) WriteFile(ctx context.Context, name string, r io.Reader) e
 	var rollbackVersionHash string
 	var rollbackVersionRecorded bool
 	var rollbackVersionObjectCreated bool
-
-	fullPath := fs.workspace.FullPath(name)
-	if err := validateStoragePath(fullPath); err != nil {
-		if errors.Is(err, errStoragePathSymlink) {
-			return ErrNotFound
+	rollbackMutation := func(cause error) error {
+		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
+		fileRollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData)
+		if fileRollbackErr != nil && versionRollbackErr != nil {
+			return errors.Join(
+				cause,
+				fmt.Errorf("failed to rollback file content: %w", fileRollbackErr),
+				fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr),
+			)
 		}
-		if isPathNotDirError(err) {
-			return ErrNotDir
+		if fileRollbackErr != nil {
+			return errors.Join(cause, fmt.Errorf("failed to rollback file content: %w", fileRollbackErr))
 		}
-		return fmt.Errorf("failed to validate path: %w", err)
-	}
-	if err := ensureStorageDir(filepath.Dir(fullPath), 0755); err != nil {
-		if isPathNotDirError(err) {
-			return ErrNotDir
+		if versionRollbackErr != nil {
+			return errors.Join(cause, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
 		}
-		return fmt.Errorf("failed to create parent directory: %w", err)
-	}
-
-	f, err := os.CreateTemp(filepath.Dir(fullPath), ".storage-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpPath := f.Name()
-	if err := f.Chmod(0644); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to set temp file permissions: %w", err)
+		return cause
 	}
 
 	hasher := blake3.New()
-	limited := &io.LimitedReader{R: r, N: defaultMaxWriteSize + 1}
-	written, copyErr := io.Copy(io.MultiWriter(f, hasher), limited)
-	syncErr := f.Sync()
-	closeErr := f.Close()
 
-	if copyErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to write file: %w", copyErr)
-	}
-	if syncErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to sync file: %w", syncErr)
-	}
-	if closeErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to close file: %w", closeErr)
-	}
-	if written > defaultMaxWriteSize {
-		os.Remove(tmpPath)
-		return fmt.Errorf("%w (max: %d bytes)", ErrFileTooLarge, defaultMaxWriteSize)
+	if err := beforeStorageWorkspaceWrite(); err != nil {
+		return rollbackMutation(err)
 	}
 
-	// Check if versioning is needed
+	written, err := fs.workspace.WriteFileFromReaderWithOptions(ctx, name, io.TeeReader(r, hasher), workspace.WriteFileOptions{
+		MaxBytes:   defaultMaxWriteSize,
+		SyncParent: syncStoragePathDir,
+	})
+	if err != nil {
+		mappedErr := mapWorkspaceWritablePathError(unwrapWorkspaceVisibleMutationError(err))
+		if workspace.IsVisibleMutationWarning(err) {
+			return rollbackMutation(mappedErr)
+		}
+		return mappedErr
+	}
+
 	shouldVersion := fs.policy.ShouldVersion(ctx, name, written)
-
-	// If versioning enabled and file exists, save old version first
 	if shouldVersion && hadPreviousFile {
 		oldData := previousData
 		candidateHash := computeHash(oldData)
 		rollbackVersionHash = candidateHash
 		hasObject, err := fs.hasVersionObject(ctx, candidateHash)
 		if err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to check existing version object: %w", err)
+			return rollbackMutation(fmt.Errorf("failed to check existing version object: %w", err))
 		}
 		rollbackVersionObjectCreated = !hasObject
 
 		_, versionErr := fs.versions.GetVersion(ctx, name, candidateHash)
 		versionAlreadyRecorded := versionErr == nil
 		if versionErr != nil && !errors.Is(versionErr, versionstore.ErrNotFound) {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to check existing version: %w", versionErr)
+			return rollbackMutation(fmt.Errorf("failed to check existing version: %w", versionErr))
 		}
 
 		oldHash, err := fs.putVersionObject(ctx, oldData)
 		if err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to store version: %w", err)
+			return rollbackMutation(fmt.Errorf("failed to store version: %w", err))
 		}
 		rollbackVersionHash = oldHash
 
 		if !versionAlreadyRecorded {
 			if err := fs.addFileVersion(ctx, name, oldHash, int64(len(oldData)), ""); err != nil {
-				os.Remove(tmpPath)
-				if rollbackVersionObjectCreated {
-					if deleteErr := fs.deleteVersionObject(ctx, oldHash); deleteErr != nil {
-						return errors.Join(
-							fmt.Errorf("failed to record version: %w", err),
-							fmt.Errorf("failed to cleanup version object during rollback: %w", deleteErr),
-						)
-					}
-				}
-				return fmt.Errorf("failed to record version: %w", err)
+				return rollbackMutation(fmt.Errorf("failed to record version: %w", err))
 			}
 			rollbackVersionRecorded = true
 		}
 	}
 
-	if err := os.Rename(tmpPath, fullPath); err != nil {
-		os.Remove(tmpPath)
-		if rollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated); rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to replace file: %w", err),
-				fmt.Errorf("failed to rollback version metadata: %w", rollbackErr),
-			)
-		}
-		return fmt.Errorf("failed to replace file: %w", err)
-	}
-	if err := syncStoragePathDir(filepath.Dir(fullPath)); err != nil {
-		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
-		if rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData); rollbackErr != nil {
-			joinedErr := errors.Join(
-				fmt.Errorf("failed to sync parent directory: %w", err),
-				fmt.Errorf("failed to rollback file content: %w", rollbackErr),
-			)
-			if versionRollbackErr != nil {
-				joinedErr = errors.Join(joinedErr, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
-			}
-			return joinedErr
-		}
-		if versionRollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to sync parent directory: %w", err),
-				fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr),
-			)
-		}
-		return fmt.Errorf("failed to sync parent directory: %w", err)
-	}
-
 	newHash := fmt.Sprintf("%x", hasher.Sum(nil))
 	if err := fs.updateFileIndex(ctx, name, written, time.Now(), newHash); err != nil {
-		versionRollbackErr := fs.rollbackWriteVersion(ctx, name, rollbackVersionHash, rollbackVersionRecorded, rollbackVersionObjectCreated)
-		if rollbackErr := fs.restoreFileAfterIndexFailure(ctx, name, hadPreviousFile, previousData); rollbackErr != nil {
-			joinedErr := errors.Join(
-				fmt.Errorf("failed to update file index: %w", err),
-				fmt.Errorf("failed to rollback file content: %w", rollbackErr),
-			)
-			if versionRollbackErr != nil {
-				joinedErr = errors.Join(joinedErr, fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr))
-			}
-			return joinedErr
-		}
-		if versionRollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("failed to update file index: %w", err),
-				fmt.Errorf("failed to rollback version metadata: %w", versionRollbackErr),
-			)
-		}
-		return fmt.Errorf("failed to update file index: %w", err)
+		return rollbackMutation(fmt.Errorf("failed to update file index: %w", err))
 	}
 
 	if shouldVersion && (fs.config.MaxVersions > 0 || fs.config.MaxVersionAge > 0) {
@@ -683,6 +721,9 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectStorageRootMutation(name); err != nil {
+		return err
+	}
 
 	// Get file info
 	info, err := fs.workspace.Stat(ctx, name)
@@ -728,7 +769,7 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	}
 
 	fullPath := fs.workspace.FullPath(name)
-	if err := movePath(fullPath, trashContentPath); err != nil {
+	if err := fs.movePath(fullPath, trashContentPath); err != nil {
 		return fmt.Errorf("failed to move to trash: %w", err)
 	}
 
@@ -744,7 +785,7 @@ func (fs *FileSystem) Delete(ctx context.Context, name string) error {
 	}
 	if err := fs.versions.AddToTrash(ctx, trashItem); err != nil {
 		// Rollback: move back from trash
-		if rollbackErr := movePath(trashContentPath, fullPath); rollbackErr != nil {
+		if rollbackErr := fs.movePath(trashContentPath, fullPath); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to add to trash: %w", err),
 				fmt.Errorf("failed to rollback trash move: %w", rollbackErr),
@@ -844,6 +885,9 @@ func (fs *FileSystem) PermanentDelete(ctx context.Context, name string) error {
 	var err error
 	name, err = normalizeStorageWorkspacePath(name)
 	if err != nil {
+		return err
+	}
+	if err := rejectStorageRootMutation(name); err != nil {
 		return err
 	}
 	previousData, hadPreviousFile, err := fs.readExistingFileForRollback(ctx, name)
@@ -983,8 +1027,14 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 	if err != nil {
 		return err
 	}
+	if err := rejectStorageRootMutation(oldName); err != nil {
+		return err
+	}
 	newName, err = normalizeStorageWorkspacePath(newName)
 	if err != nil {
+		return err
+	}
+	if err := rejectStorageRootMutation(newName); err != nil {
 		return err
 	}
 
@@ -1040,8 +1090,14 @@ func (fs *FileSystem) Copy(ctx context.Context, srcName, dstName string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectStorageRootMutation(srcName); err != nil {
+		return err
+	}
 	dstName, err = normalizeStorageWorkspacePath(dstName)
 	if err != nil {
+		return err
+	}
+	if err := rejectStorageRootMutation(dstName); err != nil {
 		return err
 	}
 
@@ -1180,6 +1236,21 @@ func mapWorkspaceOpenFileError(err error) error {
 	return mapWorkspaceReadablePathError(err)
 }
 
+func mapWorkspaceWritablePathError(err error) error {
+	if errors.Is(err, workspace.ErrFileTooLarge) {
+		return fmt.Errorf("%w (max: %d bytes)", ErrFileTooLarge, defaultMaxWriteSize)
+	}
+	return mapWorkspaceReadablePathError(err)
+}
+
+func unwrapWorkspaceVisibleMutationError(err error) error {
+	var warningErr *workspace.VisibleMutationWarningError
+	if errors.As(err, &warningErr) {
+		return warningErr.Unwrap()
+	}
+	return err
+}
+
 type readSeekNopCloser struct {
 	*bytes.Reader
 }
@@ -1246,8 +1317,19 @@ func (fs *FileSystem) hashWorkspaceFile(ctx context.Context, name string) (strin
 	}
 	defer reader.Close()
 
+	return hashOpenWorkspaceFile(reader)
+}
+
+func hashOpenWorkspaceFile(reader *os.File) (string, error) {
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
 	hasher := blake3.New()
 	if _, err := io.Copy(hasher, reader); err != nil {
+		return "", err
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
 
@@ -1409,7 +1491,11 @@ func (fs *FileSystem) GetVersioningStatus(ctx context.Context, name string) (ena
 		return false, "", err
 	}
 
-	enabled, reason = fs.policy.GetVersioningStatus(ctx, name, info.Size)
+	policy := fs.currentVersioningPolicy()
+	if policy == nil {
+		return false, "not_versioned_type", nil
+	}
+	enabled, reason = policy.GetVersioningStatus(ctx, name, info.Size)
 	return enabled, reason, nil
 }
 
@@ -1497,13 +1583,13 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	if err := movePath(trashContentPath, destPath); err != nil {
+	if err := fs.movePath(trashContentPath, destPath); err != nil {
 		return fmt.Errorf("failed to restore from trash: %w", err)
 	}
 
 	// Remove from trash database
 	if err := fs.versions.RemoveFromTrash(ctx, id); err != nil {
-		if rollbackErr := movePath(destPath, trashContentPath); rollbackErr != nil {
+		if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to remove trash metadata: %w", err),
 				fmt.Errorf("failed to rollback restored content: %w", rollbackErr),
@@ -1511,9 +1597,9 @@ func (fs *FileSystem) RestoreFromTrash(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("failed to remove trash metadata: %w", err)
 	}
-	os.RemoveAll(path.Join(fs.trashRoot, id))
+	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id))
 	if err := fs.syncRestoredIndexEntries(ctx, item.OriginalPath, item.IsDir); err != nil {
-		rollbackErr := movePath(destPath, trashContentPath)
+		rollbackErr := fs.movePath(destPath, trashContentPath)
 		metadataErr := fs.versions.AddToTrash(ctx, item)
 		indexRollbackErr := fs.deleteFileIndexPrefix(ctx, item.OriginalPath)
 		var errs []error
@@ -1578,13 +1664,13 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	if err := movePath(trashContentPath, destPath); err != nil {
+	if err := fs.movePath(trashContentPath, destPath); err != nil {
 		return fmt.Errorf("failed to restore from trash: %w", err)
 	}
 
 	if err := fs.removeTrashMetadata(ctx, id); err != nil {
 		var rollbackErrs []error
-		if rollbackErr := movePath(destPath, trashContentPath); rollbackErr != nil {
+		if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
 			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
 		}
 		if len(rollbackErrs) > 0 {
@@ -1593,10 +1679,10 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 		return fmt.Errorf("failed to remove trash metadata: %w", err)
 	}
 
-	os.RemoveAll(path.Join(fs.trashRoot, id))
+	fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id))
 	if err := fs.syncRestoredIndexEntries(ctx, newPath, item.IsDir); err != nil {
 		var rollbackErrs []error
-		if rollbackErr := movePath(destPath, trashContentPath); rollbackErr != nil {
+		if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
 			rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
 		}
 		if metadataErr := fs.addTrashMetadata(ctx, item); metadataErr != nil {
@@ -1614,7 +1700,7 @@ func (fs *FileSystem) RestoreFromTrashTo(ctx context.Context, id, newPath string
 	if item.HadVersions {
 		if err := fs.renameMetadataPath(ctx, item.OriginalPath, newPath); err != nil {
 			var rollbackErrs []error
-			if rollbackErr := movePath(destPath, trashContentPath); rollbackErr != nil {
+			if rollbackErr := fs.movePath(destPath, trashContentPath); rollbackErr != nil {
 				rollbackErrs = append(rollbackErrs, fmt.Errorf("failed to rollback restored content: %w", rollbackErr))
 			}
 			if metadataErr := fs.addTrashMetadata(ctx, item); metadataErr != nil {
@@ -1698,6 +1784,9 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 	var warningErr error
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
+			if warningErr != nil {
+				return deleted, wrapTrashDeletePartialWarning(errors.Join(warningErr, err))
+			}
 			return deleted, err
 		}
 		visibleDeleted, err := fs.permanentlyDeleteTrashItem(ctx, &item)
@@ -1706,6 +1795,9 @@ func (fs *FileSystem) EmptyTrash(ctx context.Context) (int, error) {
 				deleted++
 				warningErr = errors.Join(warningErr, err)
 				continue
+			}
+			if warningErr != nil {
+				return deleted, wrapTrashDeletePartialWarning(errors.Join(warningErr, err))
 			}
 			return deleted, err
 		}
@@ -1737,6 +1829,9 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 	var warningErr error
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
+			if warningErr != nil {
+				return deleted, wrapTrashDeletePartialWarning(errors.Join(warningErr, err))
+			}
 			return deleted, err
 		}
 		if !item.ExpiresAt.Before(now) {
@@ -1748,6 +1843,9 @@ func (fs *FileSystem) CleanupExpiredTrash(ctx context.Context) (int, error) {
 				deleted++
 				warningErr = errors.Join(warningErr, err)
 				continue
+			}
+			if warningErr != nil {
+				return deleted, wrapTrashDeletePartialWarning(errors.Join(warningErr, err))
 			}
 			return deleted, err
 		}
@@ -1831,12 +1929,12 @@ func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.Tr
 	stagedTrashPath := path.Join(fs.trashRoot, ".deleting", item.ID+"-"+stageID)
 
 	// Stage the trash entry first so metadata deletion can be rolled back safely.
-	if err := movePath(trashItemPath, stagedTrashPath); err != nil {
+	if err := fs.movePath(trashItemPath, stagedTrashPath); err != nil {
 		return fmt.Errorf("failed to stage trash content for %s: %w", item.ID, err)
 	}
 
 	if err := fs.removeTrashMetadata(ctx, item.ID); err != nil {
-		if rollbackErr := movePath(stagedTrashPath, trashItemPath); rollbackErr != nil {
+		if rollbackErr := fs.movePath(stagedTrashPath, trashItemPath); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to remove trash metadata for %s: %w", item.ID, err),
 				fmt.Errorf("failed to rollback trash content for %s: %w", item.ID, rollbackErr),
@@ -1851,7 +1949,7 @@ func (fs *FileSystem) deleteTrashItem(ctx context.Context, item *versionstore.Tr
 		if removedContent {
 			return &trashDeleteDurabilityError{err: fmt.Errorf("failed to sync deleted trash content for %s: %w", item.ID, err)}
 		}
-		rollbackErr := movePath(stagedTrashPath, trashItemPath)
+		rollbackErr := fs.movePath(stagedTrashPath, trashItemPath)
 		metadataErr := fs.addTrashMetadata(ctx, item)
 		fs.cleanupTrashStagingDir(stagedTrashPath)
 		if rollbackErr != nil && metadataErr != nil {
@@ -1896,7 +1994,8 @@ func (e *trashDeleteDurabilityError) Unwrap() error {
 // TrashDeleteWarningError reports that a trash deletion became externally
 // visible, but a follow-up cleanup step still failed.
 type TrashDeleteWarningError struct {
-	err error
+	err     error
+	partial bool
 }
 
 func (e *TrashDeleteWarningError) Error() string {
@@ -1907,15 +2006,30 @@ func (e *TrashDeleteWarningError) Unwrap() error {
 	return e.err
 }
 
+func (e *TrashDeleteWarningError) Partial() bool {
+	return e != nil && e.partial
+}
+
 func wrapTrashDeleteWarning(err error) error {
+	return wrapTrashDeleteWarningWithPartial(err, false)
+}
+
+func wrapTrashDeletePartialWarning(err error) error {
+	return wrapTrashDeleteWarningWithPartial(err, true)
+}
+
+func wrapTrashDeleteWarningWithPartial(err error, partial bool) error {
 	if err == nil {
 		return nil
 	}
 	var warningErr *TrashDeleteWarningError
 	if errors.As(err, &warningErr) {
+		if partial && !warningErr.partial {
+			return &TrashDeleteWarningError{err: err, partial: true}
+		}
 		return err
 	}
-	return &TrashDeleteWarningError{err: err}
+	return &TrashDeleteWarningError{err: err, partial: partial}
 }
 
 // DeleteCleanupWarningError reports that a delete operation already became
@@ -2296,14 +2410,113 @@ func normalizeStorageWorkspacePath(name string) (string, error) {
 	return workspace.CleanPath(name), nil
 }
 
-func validateStoragePath(target string) error {
+func rejectStorageRootMutation(name string) error {
+	if workspace.CleanPath(name) == "/" {
+		return ErrNotFound
+	}
+	return nil
+}
+
+const storageRootEscapeError = "path escapes from parent"
+
+type storagePathRoot struct {
+	absRoot string
+	handle  *os.Root
+}
+
+func normalizeStorageHostPath(target string) (string, error) {
 	cleaned := filepath.Clean(target)
 	if !filepath.IsAbs(cleaned) {
 		absPath, err := filepath.Abs(cleaned)
 		if err != nil {
-			return err
+			return "", err
 		}
 		cleaned = absPath
+	}
+	return cleaned, nil
+}
+
+func storageRelativePath(rootAbs, targetAbs string) (string, bool) {
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil {
+		return "", false
+	}
+	if rel == "." {
+		return ".", true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
+func storageAbsolutePath(root *storagePathRoot, rel string) string {
+	if rel == "." {
+		return root.absRoot
+	}
+	return filepath.Join(root.absRoot, rel)
+}
+
+func isStorageRootEscapeError(err error) bool {
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		return false
+	}
+	return pathErr.Err != nil && pathErr.Err.Error() == storageRootEscapeError
+}
+
+func mapStorageRootPathError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isStorageRootEscapeError(err) {
+		return errStoragePathSymlink
+	}
+	return err
+}
+
+func newStorageTempName(parentName, prefix string) (string, error) {
+	var suffix [8]byte
+	if _, err := storageRandomRead(suffix[:]); err != nil {
+		return "", err
+	}
+	tempName := prefix + hex.EncodeToString(suffix[:]) + ".tmp"
+	if parentName == "." {
+		return tempName, nil
+	}
+	return filepath.Join(parentName, tempName), nil
+}
+
+func createStorageTempFile(root *os.Root, parentName, prefix string) (*os.File, string, error) {
+	for range 32 {
+		tempName, err := newStorageTempName(parentName, prefix)
+		if err != nil {
+			return nil, "", err
+		}
+		tempFile, err := root.OpenFile(tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			return tempFile, tempName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", mapStorageRootPathError(err)
+	}
+
+	return nil, "", errors.New("failed to allocate unique temp file")
+}
+
+func cleanupStorageTempPath(root *os.Root, tmpPath string, operationErr error) error {
+	if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return errors.Join(operationErr, fmt.Errorf("cleanup temp file %s: %w", tmpPath, removeErr))
+	}
+	return operationErr
+}
+
+func validateStoragePath(target string) error {
+	cleaned, err := normalizeStorageHostPath(target)
+	if err != nil {
+		return err
 	}
 
 	root := filepath.VolumeName(cleaned) + string(filepath.Separator)
@@ -2342,6 +2555,98 @@ func validateStoragePath(target string) error {
 	}
 
 	return nil
+}
+
+func (fs *FileSystem) resolveStoragePathRoot(target string) (*storagePathRoot, string, string, error) {
+	absPath, err := normalizeStorageHostPath(target)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	if rel, ok := storageRelativePath(fs.workspace.Root(), absPath); ok {
+		return &storagePathRoot{absRoot: fs.workspace.Root(), handle: fs.filesRootHandle}, rel, absPath, nil
+	}
+	if rel, ok := storageRelativePath(fs.trashRoot, absPath); ok {
+		return &storagePathRoot{absRoot: fs.trashRoot, handle: fs.trashRootHandle}, rel, absPath, nil
+	}
+
+	return nil, "", "", fmt.Errorf("managed path %q is outside storage roots", absPath)
+}
+
+func collectMissingStorageManagedDirs(root *storagePathRoot, relDir string) ([]string, error) {
+	if relDir == "." {
+		return nil, nil
+	}
+
+	missing := make([]string, 0)
+	current := filepath.Clean(relDir)
+	for {
+		info, err := root.handle.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return nil, syscall.ENOTDIR
+			}
+			break
+		}
+		if mappedErr := mapStorageRootPathError(err); mappedErr != err {
+			return nil, mappedErr
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, syscall.ENOTDIR) {
+				return nil, err
+			}
+			return nil, err
+		}
+
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == "." || parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return missing, nil
+}
+
+func syncCreatedStorageManagedDirs(root *storagePathRoot, createdDirs []string) error {
+	for i := 0; i < len(createdDirs); i++ {
+		parent := filepath.Dir(createdDirs[i])
+		if err := syncManagedStorageDir(root.handle, parent, storageAbsolutePath(root, parent)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureStorageManagedDir(root *storagePathRoot, absDir string, perm os.FileMode) error {
+	relDir, ok := storageRelativePath(root.absRoot, absDir)
+	if !ok {
+		return fmt.Errorf("managed directory %q is outside storage root %q", absDir, root.absRoot)
+	}
+
+	createdDirs, err := collectMissingStorageManagedDirs(root, relDir)
+	if err != nil {
+		return err
+	}
+	if relDir != "." {
+		if err := root.handle.MkdirAll(relDir, perm); err != nil {
+			return mapStorageRootPathError(err)
+		}
+	}
+	return syncCreatedStorageManagedDirs(root, createdDirs)
+}
+
+func syncStorageManagedRenameDirs(oldRoot *storagePathRoot, oldRel string, newRoot *storagePathRoot, newRel string) error {
+	oldParent := filepath.Dir(oldRel)
+	newParent := filepath.Dir(newRel)
+	if oldRoot.handle == newRoot.handle && oldParent == newParent {
+		return syncManagedStorageDir(oldRoot.handle, oldParent, storageAbsolutePath(oldRoot, oldParent))
+	}
+	if err := syncManagedStorageDir(newRoot.handle, newParent, storageAbsolutePath(newRoot, newParent)); err != nil {
+		return err
+	}
+	return syncManagedStorageDir(oldRoot.handle, oldParent, storageAbsolutePath(oldRoot, oldParent))
 }
 
 func syncStorageDir(dir string) error {
@@ -2415,66 +2720,82 @@ func ensureStorageDir(dir string, perm os.FileMode) error {
 	return syncCreatedStorageDirs(createdDirs)
 }
 
-func copyFile(src, dst string) error {
+func (fs *FileSystem) copyFile(src, dst string) error {
 	if err := validateStoragePath(src); err != nil {
 		return err
 	}
 	if err := validateStoragePath(dst); err != nil {
 		return err
 	}
+	if err := afterValidateStoragePaths(); err != nil {
+		return err
+	}
 
-	srcInfo, err := os.Stat(src)
+	srcRoot, srcRel, srcAbs, err := fs.resolveStoragePathRoot(src)
+	if err != nil {
+		return err
+	}
+	dstRoot, dstRel, dstAbs, err := fs.resolveStoragePathRoot(dst)
 	if err != nil {
 		return err
 	}
 
-	srcFile, err := os.Open(src)
+	return fs.copyFileBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs)
+}
+
+func (fs *FileSystem) copyFileBetweenRoots(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) error {
+	srcInfo, err := srcRoot.handle.Stat(srcRel)
 	if err != nil {
-		return err
+		return mapStorageRootPathError(err)
+	}
+
+	srcFile, err := srcRoot.handle.Open(srcRel)
+	if err != nil {
+		return mapStorageRootPathError(err)
 	}
 	defer srcFile.Close()
 
-	if err := ensureStorageDir(path.Dir(dst), 0755); err != nil {
+	if err := ensureStorageManagedDir(dstRoot, filepath.Dir(dstAbs), 0755); err != nil {
 		return err
 	}
 
-	dstFile, err := os.CreateTemp(path.Dir(dst), ".storage-copy-*.tmp")
+	dstParentRel := filepath.Dir(dstRel)
+	dstFile, tmpRel, err := createStorageTempFile(dstRoot.handle, dstParentRel, ".storage-copy-")
 	if err != nil {
 		return err
 	}
-	tmpPath := dstFile.Name()
 	defer func() {
-		_ = os.Remove(tmpPath)
+		_ = dstRoot.handle.Remove(tmpRel)
 	}()
 	if err := dstFile.Chmod(srcInfo.Mode().Perm()); err != nil {
 		dstFile.Close()
-		return err
+		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 
 	_, err = io.Copy(dstFile, srcFile)
 	if err != nil {
 		dstFile.Close()
-		return err
+		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 	if err := dstFile.Sync(); err != nil {
 		dstFile.Close()
-		return err
+		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 	if err := dstFile.Close(); err != nil {
-		return err
+		return cleanupStorageTempPath(dstRoot.handle, tmpRel, err)
 	}
 
-	if err := os.Rename(tmpPath, dst); err != nil {
-		return err
+	if err := dstRoot.handle.Rename(tmpRel, dstRel); err != nil {
+		return cleanupStorageTempPath(dstRoot.handle, tmpRel, mapStorageRootPathError(err))
 	}
-	if err := syncStoragePathDir(path.Dir(dst)); err != nil {
-		if rollbackErr := os.Remove(dst); rollbackErr != nil {
+	if err := syncManagedStorageDir(dstRoot.handle, dstParentRel, filepath.Dir(dstAbs)); err != nil {
+		if rollbackErr := dstRoot.handle.Remove(dstRel); rollbackErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to sync copied file: %w", err),
-				fmt.Errorf("failed to rollback copied file: %w", rollbackErr),
+				fmt.Errorf("failed to rollback copied file: %w", mapStorageRootPathError(rollbackErr)),
 			)
 		}
-		if rollbackSyncErr := syncStoragePathDir(path.Dir(dst)); rollbackSyncErr != nil {
+		if rollbackSyncErr := syncManagedStorageDir(dstRoot.handle, dstParentRel, filepath.Dir(dstAbs)); rollbackSyncErr != nil {
 			return errors.Join(
 				fmt.Errorf("failed to sync copied file: %w", err),
 				fmt.Errorf("failed to sync copy rollback: %w", rollbackSyncErr),
@@ -2513,63 +2834,17 @@ func (fs *FileSystem) readExistingFileForRollback(ctx context.Context, name stri
 }
 
 func (fs *FileSystem) writeWorkspaceFile(ctx context.Context, name string, data []byte) error {
-	fullPath := fs.workspace.FullPath(name)
-	if err := validateStoragePath(fullPath); err != nil {
-		if errors.Is(err, errStoragePathSymlink) {
-			return ErrNotFound
-		}
-		if isPathNotDirError(err) {
-			return ErrNotDir
-		}
-		return fmt.Errorf("failed to validate path: %w", err)
+	_, err := fs.workspace.WriteFileFromReaderWithOptions(ctx, name, bytes.NewReader(data), workspace.WriteFileOptions{
+		SyncParent: syncStoragePathDir,
+	})
+	if err == nil {
+		return nil
 	}
-	if err := ensureStorageDir(filepath.Dir(fullPath), 0755); err != nil {
-		if isPathNotDirError(err) {
-			return ErrNotDir
-		}
-		return fmt.Errorf("failed to create parent directory: %w", err)
+	mappedErr := mapWorkspaceWritablePathError(unwrapWorkspaceVisibleMutationError(err))
+	if workspace.IsVisibleMutationWarning(err) {
+		return wrapVisibleMutationWarning(mappedErr)
 	}
-
-	f, err := os.CreateTemp(filepath.Dir(fullPath), ".storage-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpPath := f.Name()
-	if err := f.Chmod(0644); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to set temp file permissions: %w", err)
-	}
-
-	_, writeErr := f.Write(data)
-	syncErr := f.Sync()
-	closeErr := f.Close()
-
-	if writeErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to write file: %w", writeErr)
-	}
-	if syncErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to sync file: %w", syncErr)
-	}
-	if closeErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to close file: %w", closeErr)
-	}
-
-	if err := os.Rename(tmpPath, fullPath); err != nil {
-		os.Remove(tmpPath)
-		if isPathNotDirError(err) {
-			return ErrNotDir
-		}
-		return fmt.Errorf("failed to replace file: %w", err)
-	}
-	if err := syncStoragePathDir(filepath.Dir(fullPath)); err != nil {
-		return wrapVisibleMutationWarning(fmt.Errorf("failed to sync parent directory: %w", err))
-	}
-
-	return nil
+	return mappedErr
 }
 
 func (fs *FileSystem) restoreFileAfterIndexFailure(ctx context.Context, name string, hadPreviousFile bool, previousData []byte) error {
@@ -2639,14 +2914,14 @@ func (fs *FileSystem) restoreDeletedIndexEntries(ctx context.Context, name strin
 
 func (fs *FileSystem) rollbackSoftDelete(ctx context.Context, name string, info *FileInfo, id, trashContentPath string, restoreIndex bool) error {
 	fullPath := fs.workspace.FullPath(name)
-	rollbackErr := movePath(trashContentPath, fullPath)
+	rollbackErr := fs.movePath(trashContentPath, fullPath)
 	metadataErr := fs.versions.RemoveFromTrash(ctx, id)
 	var restoreTrashContentErr error
 	if rollbackErr == nil && metadataErr != nil {
-		restoreTrashContentErr = restoreTrashContent(fullPath, trashContentPath, info.IsDir)
+		restoreTrashContentErr = fs.restoreTrashContent(fullPath, trashContentPath, info.IsDir)
 	}
 	if rollbackErr == nil && metadataErr == nil {
-		os.RemoveAll(path.Join(fs.trashRoot, id))
+		fs.cleanupTrashItemDir(path.Join(fs.trashRoot, id))
 	}
 
 	var restoreIndexErr error
@@ -2669,11 +2944,11 @@ func wrapStorageStepError(step string, err error) error {
 	return fmt.Errorf("failed to %s: %w", step, err)
 }
 
-func restoreTrashContent(src, dst string, isDir bool) error {
+func (fs *FileSystem) restoreTrashContent(src, dst string, isDir bool) error {
 	if isDir {
-		return copyDir(src, dst)
+		return fs.copyDir(src, dst)
 	}
-	return copyFile(src, dst)
+	return fs.copyFile(src, dst)
 }
 
 func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
@@ -2687,61 +2962,96 @@ func (fs *FileSystem) removeTrashPathDurably(trashPath string) (bool, error) {
 }
 
 func (fs *FileSystem) cleanupTrashStagingDir(stagedTrashPath string) {
-	_ = os.Remove(path.Dir(stagedTrashPath))
+	root, relPath, _, err := fs.resolveStoragePathRoot(stagedTrashPath)
+	if err != nil {
+		return
+	}
+	stagingDir := filepath.Dir(relPath)
+	if stagingDir == "." {
+		return
+	}
+	_ = root.handle.Remove(stagingDir)
 }
 
-func movePath(src, dst string) error {
+func (fs *FileSystem) cleanupTrashItemDir(trashItemPath string) {
+	root, relPath, _, err := fs.resolveStoragePathRoot(trashItemPath)
+	if err != nil {
+		return
+	}
+	if relPath == "." {
+		return
+	}
+	_ = root.handle.RemoveAll(relPath)
+}
+
+func (fs *FileSystem) movePath(src, dst string) error {
 	if err := validateStoragePath(src); err != nil {
 		return err
 	}
 	if err := validateStoragePath(dst); err != nil {
 		return err
 	}
-
-	if err := ensureStorageDir(path.Dir(dst), 0755); err != nil {
+	if err := afterValidateStoragePaths(); err != nil {
 		return err
 	}
 
-	if err := movePathRename(src, dst); err == nil {
-		if syncErr := syncStorageRenameDirs(src, dst); syncErr != nil {
-			if rollbackErr := movePathRename(dst, src); rollbackErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to sync renamed path: %w", syncErr),
-					fmt.Errorf("failed to rollback renamed path: %w", rollbackErr),
-				)
-			}
-			if rollbackSyncErr := syncStorageRenameDirs(dst, src); rollbackSyncErr != nil {
-				return errors.Join(
-					fmt.Errorf("failed to sync renamed path: %w", syncErr),
-					fmt.Errorf("failed to sync rollback path: %w", rollbackSyncErr),
-				)
-			}
-			return fmt.Errorf("failed to sync renamed path: %w", syncErr)
-		}
-		return nil
+	srcRoot, srcRel, srcAbs, err := fs.resolveStoragePathRoot(src)
+	if err != nil {
+		return err
+	}
+	dstRoot, dstRel, dstAbs, err := fs.resolveStoragePathRoot(dst)
+	if err != nil {
+		return err
 	}
 
-	info, statErr := os.Stat(src)
+	if err := ensureStorageManagedDir(dstRoot, filepath.Dir(dstAbs), 0755); err != nil {
+		return err
+	}
+
+	if srcRoot.handle == dstRoot.handle {
+		if err := movePathRename(srcRoot.handle, srcRel, dstRel, srcAbs, dstAbs); err == nil {
+			if syncErr := syncStorageManagedRenameDirs(srcRoot, srcRel, dstRoot, dstRel); syncErr != nil {
+				if rollbackErr := movePathRename(srcRoot.handle, dstRel, srcRel, dstAbs, srcAbs); rollbackErr != nil {
+					return errors.Join(
+						fmt.Errorf("failed to sync renamed path: %w", syncErr),
+						fmt.Errorf("failed to rollback renamed path: %w", mapStorageRootPathError(rollbackErr)),
+					)
+				}
+				if rollbackSyncErr := syncStorageManagedRenameDirs(dstRoot, dstRel, srcRoot, srcRel); rollbackSyncErr != nil {
+					return errors.Join(
+						fmt.Errorf("failed to sync renamed path: %w", syncErr),
+						fmt.Errorf("failed to sync rollback path: %w", rollbackSyncErr),
+					)
+				}
+				return fmt.Errorf("failed to sync renamed path: %w", syncErr)
+			}
+			return nil
+		} else if mappedErr := mapStorageRootPathError(err); mappedErr != err {
+			return mappedErr
+		}
+	}
+
+	info, statErr := srcRoot.handle.Stat(srcRel)
 	if statErr != nil {
-		return statErr
+		return mapStorageRootPathError(statErr)
 	}
 
 	if info.IsDir() {
-		if err := copyDir(src, dst); err != nil {
+		if err := fs.copyDirBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
 			return err
 		}
-		if err := movePathRemoveAll(src); err != nil {
-			return fmt.Errorf("failed to remove copied source directory: %w", err)
+		if err := movePathRemoveAll(srcRoot.handle, srcRel, srcAbs); err != nil {
+			return fmt.Errorf("failed to remove copied source directory: %w", mapStorageRootPathError(err))
 		}
 		return nil
 	}
 
-	if err := copyFile(src, dst); err != nil {
+	if err := fs.copyFileBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs); err != nil {
 		return err
 	}
-	if err := movePathRemove(src); err != nil {
-		_ = movePathRemove(dst)
-		return err
+	if err := movePathRemove(srcRoot.handle, srcRel, srcAbs); err != nil {
+		_ = movePathRemove(dstRoot.handle, dstRel, dstAbs)
+		return mapStorageRootPathError(err)
 	}
 	return nil
 }
@@ -2750,43 +3060,71 @@ func isPathNotDirError(err error) bool {
 	return errors.Is(err, syscall.ENOTDIR)
 }
 
-func copyDir(src, dst string) error {
+func (fs *FileSystem) copyDir(src, dst string) error {
 	if err := validateStoragePath(src); err != nil {
 		return err
 	}
 	if err := validateStoragePath(dst); err != nil {
 		return err
 	}
+	if err := afterValidateStoragePaths(); err != nil {
+		return err
+	}
 
-	srcInfo, err := os.Stat(src)
+	srcRoot, srcRel, srcAbs, err := fs.resolveStoragePathRoot(src)
+	if err != nil {
+		return err
+	}
+	dstRoot, dstRel, dstAbs, err := fs.resolveStoragePathRoot(dst)
 	if err != nil {
 		return err
 	}
 
-	if err := ensureStorageDir(dst, srcInfo.Mode().Perm()); err != nil {
-		return err
-	}
-	if err := os.Chmod(dst, srcInfo.Mode().Perm()); err != nil {
-		return err
+	return fs.copyDirBetweenRoots(srcRoot, srcRel, srcAbs, dstRoot, dstRel, dstAbs)
+}
+
+func (fs *FileSystem) copyDirBetweenRoots(srcRoot *storagePathRoot, srcRel, srcAbs string, dstRoot *storagePathRoot, dstRel, dstAbs string) error {
+	srcInfo, err := srcRoot.handle.Stat(srcRel)
+	if err != nil {
+		return mapStorageRootPathError(err)
 	}
 
-	entries, err := os.ReadDir(src)
+	if err := ensureStorageManagedDir(dstRoot, dstAbs, srcInfo.Mode().Perm()); err != nil {
+		return err
+	}
+	if err := dstRoot.handle.Chmod(dstRel, srcInfo.Mode().Perm()); err != nil {
+		return mapStorageRootPathError(err)
+	}
+
+	srcDir, err := srcRoot.handle.Open(srcRel)
+	if err != nil {
+		return mapStorageRootPathError(err)
+	}
+	defer srcDir.Close()
+
+	entries, err := srcDir.ReadDir(-1)
 	if err != nil {
 		return err
 	}
 
 	for _, entry := range entries {
-		srcPath := path.Join(src, entry.Name())
-		dstPath := path.Join(dst, entry.Name())
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errStoragePathSymlink
+		}
+
+		srcPathRel := filepath.Join(srcRel, entry.Name())
+		dstPathRel := filepath.Join(dstRel, entry.Name())
+		srcPathAbs := storageAbsolutePath(srcRoot, srcPathRel)
+		dstPathAbs := storageAbsolutePath(dstRoot, dstPathRel)
 
 		if entry.IsDir() {
-			if err := copyDir(srcPath, dstPath); err != nil {
+			if err := fs.copyDirBetweenRoots(srcRoot, srcPathRel, srcPathAbs, dstRoot, dstPathRel, dstPathAbs); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if err := copyFile(srcPath, dstPath); err != nil {
+		if err := fs.copyFileBetweenRoots(srcRoot, srcPathRel, srcPathAbs, dstRoot, dstPathRel, dstPathAbs); err != nil {
 			return err
 		}
 	}

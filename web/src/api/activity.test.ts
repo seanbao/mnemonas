@@ -34,6 +34,25 @@ describe('Activity API', () => {
     expect(result.items[0].action).toBe('login')
   })
 
+  it('accepts favorite-related activity action types', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          items: [{ id: '1', timestamp: '2026-03-14T00:00:00Z', action: 'favorite_note_update', path: '/docs/a.txt', user: 'admin' }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        },
+      }),
+    })
+
+    const result = await listActivity()
+
+    expect(result.items[0].action).toBe('favorite_note_update')
+  })
+
   it('derives activity summary fields from returned items and request defaults when missing', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -174,6 +193,20 @@ describe('Activity API', () => {
     })
 
     await expect(clearActivity()).rejects.toThrow('admin access required')
+  })
+
+  it('unwraps wrapped clear activity success responses', async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve({
+        success: true,
+        data: { message: 'Activity log cleared' },
+      }),
+    })
+
+    await expect(clearActivity()).resolves.toEqual({ message: 'Activity log cleared' })
   })
 
   it('rejects malformed successful clear activity responses', async () => {
