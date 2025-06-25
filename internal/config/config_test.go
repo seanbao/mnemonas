@@ -583,6 +583,53 @@ func TestConfig_Save_ReturnsDirectoryTreeSyncError(t *testing.T) {
 	}
 }
 
+func TestConfig_Save_CleansCreatedDirectoriesWhenTempCreateFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "nested", "config", "config.toml")
+	configDir := filepath.Dir(configPath)
+
+	originalHook := afterValidateManagedFilePath
+	var hookErr error
+	hookApplied := false
+	afterValidateManagedFilePath = func() {
+		if hookApplied || hookErr != nil {
+			return
+		}
+		hookApplied = true
+		hookErr = os.Chmod(configDir, 0500)
+	}
+	defer func() {
+		afterValidateManagedFilePath = originalHook
+		_ = os.Chmod(configDir, 0755)
+	}()
+
+	cfg := Default()
+	err := cfg.Save(configPath)
+	if hookErr != nil {
+		t.Fatalf("afterValidateManagedFilePath hook error: %v", hookErr)
+	}
+	if err == nil {
+		t.Fatal("expected Save() to fail when temp file creation fails")
+	}
+	if !strings.Contains(err.Error(), "failed to create temp config file") {
+		t.Fatalf("expected temp create error, got %v", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no config file to be created, got %v", statErr)
+	}
+	if _, statErr := os.Stat(configDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created config directory to be removed, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "nested")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected created parent directory to be removed, got %v", statErr)
+	}
+
+	afterValidateManagedFilePath = originalHook
+	if err := cfg.Save(configPath); err != nil {
+		t.Fatalf("expected retry after failed save cleanup to succeed, got %v", err)
+	}
+}
+
 func TestLoad_NonExistentFile(t *testing.T) {
 	cfg, err := Load("/nonexistent/path/config.toml")
 	if err != nil {

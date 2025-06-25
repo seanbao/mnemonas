@@ -270,48 +270,65 @@ func normalizeTLSFilePath(path string, label string) (string, error) {
 }
 
 func ensureTLSDirRoot(path string, symlinkErr error, label string, create bool) (string, error) {
+	normalizedPath, _, err := ensureTLSDirRootWithState(path, symlinkErr, label, create)
+	return normalizedPath, err
+}
+
+func ensureTLSDirRootWithState(path string, symlinkErr error, label string, create bool) (string, *os.Root, error) {
 	normalizedPath, err := normalizeTLSFilePath(path, label)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	dir := filepath.Dir(normalizedPath)
 	tlsDirRootsMu.RLock()
 	root := tlsDirRoots[dir]
 	tlsDirRootsMu.RUnlock()
 	if root != nil {
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 
 	if err := validateTLSFilePath(normalizedPath, symlinkErr, label); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	if create {
 		if err := ensureTLSDir(dir, 0700, label); err != nil {
-			return "", fmt.Errorf("failed to create %s directory: %w", label, err)
+			return "", nil, fmt.Errorf("failed to create %s directory: %w", label, err)
 		}
 	} else if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return normalizedPath, nil
+			return normalizedPath, nil, nil
 		}
-		return "", fmt.Errorf("failed to stat %s directory: %w", label, err)
+		return "", nil, fmt.Errorf("failed to stat %s directory: %w", label, err)
 	}
 
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return "", fmt.Errorf("failed to open %s directory root: %w", label, err)
+		return "", nil, fmt.Errorf("failed to open %s directory root: %w", label, err)
 	}
 
 	tlsDirRootsMu.Lock()
 	if existing := tlsDirRoots[dir]; existing != nil {
 		tlsDirRootsMu.Unlock()
 		_ = root.Close()
-		return normalizedPath, nil
+		return normalizedPath, nil, nil
 	}
 	tlsDirRoots[dir] = root
 	tlsDirRootsMu.Unlock()
 
-	return normalizedPath, nil
+	return normalizedPath, root, nil
+}
+
+func releaseRegisteredTLSDirRoot(dir string, root *os.Root) {
+	if root == nil {
+		return
+	}
+	tlsDirRootsMu.Lock()
+	if tlsDirRoots[dir] == root {
+		delete(tlsDirRoots, dir)
+	}
+	tlsDirRootsMu.Unlock()
+	_ = root.Close()
 }
 
 func registeredTLSDirRoot(path string, label string) (*os.Root, string, bool, error) {
@@ -471,6 +488,17 @@ func cleanupTLSTempPath(root *os.Root, path string, err error) error {
 	return err
 }
 
+func cleanupCreatedTLSDirs(createdDirs []string, label string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		if removeErr := os.Remove(dir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created %s directory %s: %w", label, dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
+}
+
 func writeTLSFileAtomically(path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
 	if err := validateTLSFilePath(path, symlinkErr, label); err != nil {
 		return err
@@ -527,11 +555,31 @@ func isTLSRootEscapeError(err error) bool {
 }
 
 func writeTLSFile(path string, data []byte, mode os.FileMode, symlinkErr error, pattern, label string) error {
-	normalizedPath, err := ensureTLSDirRoot(path, symlinkErr, label, true)
+	_, normalizedPath, ok, err := registeredTLSDirRoot(path, label)
 	if err != nil {
 		return err
 	}
-	return writeRegisteredTLSFileAtomically(normalizedPath, data, mode, symlinkErr, pattern, label)
+	if ok {
+		return writeRegisteredTLSFileAtomically(normalizedPath, data, mode, symlinkErr, pattern, label)
+	}
+	if err := validateTLSFilePath(normalizedPath, symlinkErr, label); err != nil {
+		return err
+	}
+	createdDirs, err := collectMissingTLSDirs(filepath.Dir(normalizedPath))
+	if err != nil {
+		return err
+	}
+	registeredRoot := (*os.Root)(nil)
+	normalizedPath, registeredRoot, err = ensureTLSDirRootWithState(normalizedPath, symlinkErr, label, true)
+	if err != nil {
+		releaseRegisteredTLSDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedTLSDirs(createdDirs, label, err)
+	}
+	if err := writeRegisteredTLSFileAtomically(normalizedPath, data, mode, symlinkErr, pattern, label); err != nil {
+		releaseRegisteredTLSDirRoot(filepath.Dir(normalizedPath), registeredRoot)
+		return cleanupCreatedTLSDirs(createdDirs, label, err)
+	}
+	return nil
 }
 
 func collectMissingTLSDirs(dir string) ([]string, error) {

@@ -77,6 +77,24 @@ func cleanupWorkspaceTempPath(root *os.Root, tmpPath string, operationErr error)
 	return operationErr
 }
 
+func cleanupWorkspaceCreatedDirs(rootPath string, root *os.Root, createdDirs []string, operationErr error) error {
+	rollbackErr := operationErr
+	for _, dir := range createdDirs {
+		relDir, err := filepath.Rel(rootPath, dir)
+		if err != nil {
+			return errors.Join(rollbackErr, fmt.Errorf("cleanup created directory %s: %w", dir, err))
+		}
+		if relDir == "." {
+			continue
+		}
+		if removeErr := root.Remove(relDir); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("cleanup created directory %s: %w", dir, removeErr))
+			break
+		}
+	}
+	return rollbackErr
+}
+
 func syncWorkspaceParentDir(dir string) error {
 	dirHandle, err := os.Open(dir)
 	if err != nil {
@@ -129,8 +147,12 @@ func collectMissingWorkspaceDirs(fullPath string) ([]string, error) {
 }
 
 func syncCreatedWorkspaceDirs(createdDirs []string) error {
+	return syncCreatedWorkspaceDirsWith(createdDirs, syncWorkspaceDir)
+}
+
+func syncCreatedWorkspaceDirsWith(createdDirs []string, syncDir func(string) error) error {
 	for i := 0; i < len(createdDirs); i++ {
-		if err := syncWorkspaceDir(filepath.Dir(createdDirs[i])); err != nil {
+		if err := syncDir(filepath.Dir(createdDirs[i])); err != nil {
 			return err
 		}
 	}
@@ -642,6 +664,10 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 
 	rootName := workspaceRootRelativeName(name)
 	parentName := workspaceParentRelativeName(name)
+	createdDirs, err := collectMissingWorkspaceDirs(filepath.Dir(fullPath))
+	if err != nil {
+		return 0, err
+	}
 
 	// Ensure parent directory exists
 	if err := w.rootHandle.MkdirAll(parentName, 0755); err != nil {
@@ -655,7 +681,7 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 	}
 	if err := tmpFile.Chmod(0644); err != nil {
 		_ = tmpFile.Close()
-		return 0, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
+		return 0, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err))
 	}
 
 	copyReader := r
@@ -668,23 +694,23 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 	closeErr := tmpFile.Close()
 
 	if writeErr != nil {
-		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, writeErr)
+		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, writeErr))
 	}
 	if syncErr != nil {
-		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr)
+		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, syncErr))
 	}
 	if closeErr != nil {
-		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr)
+		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, closeErr))
 	}
 	if options.MaxBytes > 0 && written > options.MaxBytes {
-		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, ErrFileTooLarge)
+		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, ErrFileTooLarge))
 	}
 
 	if err := w.rootHandle.Rename(tmpPath, rootName); err != nil {
 		if mappedErr := mapWorkspaceRootPathError(err); mappedErr != err {
-			return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr)
+			return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, mappedErr))
 		}
-		return written, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err)
+		return written, cleanupWorkspaceCreatedDirs(w.root, w.rootHandle, createdDirs, cleanupWorkspaceTempPath(w.rootHandle, tmpPath, err))
 	}
 	syncParent := options.SyncParent
 	if syncParent == nil {
@@ -692,6 +718,9 @@ func (w *Workspace) WriteFileFromReaderWithOptions(ctx context.Context, name str
 	}
 	if err := syncParent(filepath.Dir(fullPath)); err != nil {
 		return written, WrapVisibleMutationWarning(fmt.Errorf("sync parent directory: %w", err))
+	}
+	if err := syncCreatedWorkspaceDirsWith(createdDirs, syncParent); err != nil {
+		return written, WrapVisibleMutationWarning(fmt.Errorf("sync created directory tree: %w", err))
 	}
 
 	return written, nil
