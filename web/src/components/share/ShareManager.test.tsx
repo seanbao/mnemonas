@@ -5,6 +5,7 @@ import * as shareApi from '@/api/share'
 import { ShareError } from '@/api/share'
 
 const mockAddToast = vi.fn()
+const successActionResult = { warning: false, message: undefined } as const
 
 vi.mock('@heroui/react', async () => {
   const actual = await vi.importActual<typeof import('@heroui/react')>('@heroui/react')
@@ -318,7 +319,7 @@ describe('ShareManager', () => {
 
   it('keeps the delete modal open while a pending delete is in flight', async () => {
     const user = userEvent.setup()
-    const firstDelete = createDeferred<void>()
+    const firstDelete = createDeferred<typeof successActionResult>()
     vi.mocked(shareApi.deleteShare).mockImplementationOnce(() => firstDelete.promise)
 
     render(<ShareManager />)
@@ -353,7 +354,7 @@ describe('ShareManager', () => {
       expect(screen.getByText('/docs/report.pdf', { selector: 'span' })).toBeInTheDocument()
     })
 
-    firstDelete.resolve(undefined)
+    firstDelete.resolve(successActionResult)
 
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: '删除分享' })).not.toBeInTheDocument()
@@ -363,7 +364,7 @@ describe('ShareManager', () => {
 
   it('keeps the delete modal open when a pending delete later fails', async () => {
     const user = userEvent.setup()
-    const firstDelete = createDeferred<void>()
+    const firstDelete = createDeferred<typeof successActionResult>()
     vi.mocked(shareApi.deleteShare).mockImplementationOnce(() => firstDelete.promise)
 
     render(<ShareManager />)
@@ -407,5 +408,42 @@ describe('ShareManager', () => {
 
     expect(screen.getByRole('heading', { name: '删除分享' })).toBeInTheDocument()
     expect(screen.getByText('/docs/report.pdf', { selector: 'span' })).toBeInTheDocument()
+  })
+
+  it('shows warning toast when delete succeeds with backend warning metadata', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.deleteShare).mockResolvedValueOnce({
+      warning: true,
+      message: 'share deleted with audit warning',
+    })
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+
+    await waitFor(() => {
+      expect(screen.getByText('删除分享')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByText('删除分享'))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '删除' }))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: 'share deleted with audit warning',
+        color: 'warning',
+      })
+    })
+
+    expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
   })
 })

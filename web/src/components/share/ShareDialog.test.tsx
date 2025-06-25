@@ -282,6 +282,8 @@ describe('ShareDialog', () => {
       max_access: 0,
       description: '',
       url: '/s/share-1',
+      warning: false,
+      message: undefined,
     } as never)
 
     render(
@@ -307,6 +309,44 @@ describe('ShareDialog', () => {
         password: 'secret-123',
       })
     )
+  })
+
+  it('shows warning toast when share creation succeeds with backend warning metadata', async () => {
+    const user = userEvent.setup()
+    vi.mocked(createShare).mockResolvedValue({
+      id: 'share-1',
+      path: '/test/file.txt',
+      type: 'file',
+      created_by: 'user-1',
+      created_at: new Date().toISOString(),
+      has_password: false,
+      permission: 'read',
+      enabled: true,
+      access_count: 0,
+      max_access: 0,
+      description: '',
+      url: '/s/share-1',
+      warning: true,
+      message: 'share created with audit warning',
+    } as never)
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: 'share created with audit warning',
+      color: 'warning',
+    })
+    expect(screen.getByText('分享链接已创建，但存在警告')).toBeInTheDocument()
+    expect(screen.getByText('share created with audit warning')).toBeInTheDocument()
+    expect(screen.getByText('http://localhost:3000/s/share-1')).toBeInTheDocument()
   })
 
   it('keeps the dialog open while a pending create request is in flight', async () => {

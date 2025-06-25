@@ -94,6 +94,53 @@ function getDirectoryPickerCreateSuccessToast(message?: string): {
   }
 }
 
+function getDirectoryPickerCreateToast(result: { warning: boolean; message?: string }): {
+  title: string
+  color: 'warning'
+} | null {
+  if (result.warning) {
+    return getDirectoryPickerCreateSuccessToast(result.message)
+  }
+
+  if (result.message === 'directory already exists') {
+    return {
+      title: '文件夹已存在，已同步更新',
+      color: 'warning',
+    }
+  }
+
+  return null
+}
+
+function getDirectoryPickerCreateErrorToast(error: unknown): {
+  title: string
+  description: string
+  color: 'warning' | 'danger'
+} {
+  if (error instanceof Error) {
+    if (error.message === 'resource already exists') {
+      return {
+        title: '同名项目已存在',
+        description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+        color: 'warning',
+      }
+    }
+
+    if (error.message === 'parent path is not a directory') {
+      return {
+        title: '目标位置不可用',
+        description: '当前目录状态已变更，请刷新列表后重试。',
+        color: 'warning',
+      }
+    }
+  }
+
+  return getDirectoryPickerErrorPresentation(error, {
+    unavailable: '创建目录暂不可用',
+    failure: '创建文件夹失败',
+  })
+}
+
 function pathWithinBase(basePath: string, targetPath: string): boolean {
   if (basePath === '/') {
     return targetPath.startsWith('/')
@@ -358,14 +405,12 @@ export function DirectoryPicker({
         setIsCreatingFolder(false)
       }
 
-      if (result.warning) {
-        addToast(getDirectoryPickerCreateSuccessToast(result.message))
+      const createToast = getDirectoryPickerCreateToast(result)
+      if (createToast) {
+        addToast(createToast)
       }
     } catch (error) {
-      addToast(getDirectoryPickerErrorPresentation(error, {
-        unavailable: '创建目录暂不可用',
-        failure: '创建文件夹失败',
-      }))
+      addToast(getDirectoryPickerCreateErrorToast(error))
     } finally {
       if (pickerSessionRef.current === sessionId && currentOpenRef.current) {
         setIsCreating(false)

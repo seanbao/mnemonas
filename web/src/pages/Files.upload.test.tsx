@@ -171,7 +171,7 @@ describe('FilesPage upload queue', () => {
       files: [],
       path: '/',
     })
-    mockUploadFile.mockResolvedValue(undefined)
+    mockUploadFile.mockResolvedValue(successActionResult)
     mockCreateDirectory.mockResolvedValue(successActionResult)
   })
 
@@ -295,8 +295,8 @@ describe('FilesPage upload queue', () => {
       await vi.runOnlyPendingTimersAsync()
     })
 
-    const firstUpload = createDeferred<void>()
-    const secondUpload = createDeferred<void>()
+    const firstUpload = createDeferred<typeof successActionResult>()
+    const secondUpload = createDeferred<typeof successActionResult>()
     mockUploadFile
       .mockImplementationOnce(() => firstUpload.promise)
       .mockImplementationOnce(() => secondUpload.promise)
@@ -320,7 +320,7 @@ describe('FilesPage upload queue', () => {
     expect(screen.getByText('second.txt')).toBeTruthy()
     expect(screen.queryByText('first.txt')).toBeNull()
 
-    firstUpload.resolve(undefined)
+    firstUpload.resolve(successActionResult)
     await flushUi()
 
     expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
@@ -334,7 +334,7 @@ describe('FilesPage upload queue', () => {
     expect(screen.getByText('上传中 (0/1)')).toBeTruthy()
     expect(screen.getByText('second.txt')).toBeTruthy()
 
-    secondUpload.resolve(undefined)
+    secondUpload.resolve(successActionResult)
     await flushUi()
 
     expect(screen.getByText('上传完成')).toBeTruthy()
@@ -432,7 +432,7 @@ describe('FilesPage upload queue', () => {
     })
 
     mockUploadFile
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(successActionResult)
       .mockRejectedValueOnce(new Error('网络错误'))
 
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
@@ -476,6 +476,61 @@ describe('FilesPage upload queue', () => {
     expect(mockAddToast).toHaveBeenCalledWith({
       title: 'directory created with persistence warning',
       description: '成功上传 1 个文件',
+      color: 'warning',
+    })
+  })
+
+  it('shows warning summary for file uploads when upload succeeds with warnings', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile.mockResolvedValueOnce(warningActionResult('file uploaded with persistence warning'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const file = new File(['ok'], 'warn.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [file] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: 'file uploaded with persistence warning',
+      description: '成功上传 1 个文件',
+      color: 'warning',
+    })
+  })
+
+  it('preserves warning detail when folder uploads partially succeed with warnings', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    mockUploadFile
+      .mockResolvedValueOnce(warningActionResult('file uploaded with persistence warning'))
+      .mockRejectedValueOnce(new Error('网络错误'))
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const firstFile = new File(['ok'], 'first.txt', { type: 'text/plain' })
+    const secondFile = new File(['bad'], 'second.txt', { type: 'text/plain' })
+    Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
+    Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/second.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile, secondFile] } })
+
+    await flushUi()
+
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: 'file uploaded with persistence warning',
+      description: '成功上传 1 个文件，失败 1 个',
       color: 'warning',
     })
   })

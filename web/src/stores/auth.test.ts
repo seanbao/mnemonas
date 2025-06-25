@@ -34,7 +34,7 @@ describe('authStore', () => {
       authEnabled: true,
     })
 
-    logoutMock.mockResolvedValue(undefined)
+    logoutMock.mockResolvedValue({ warning: false, message: undefined })
     getCurrentUserMock.mockResolvedValue(null)
     getStoredUserMock.mockReturnValue(null)
     getStoredTokenMock.mockReturnValue(null)
@@ -62,17 +62,21 @@ describe('authStore', () => {
     }) => void) | null = null
 
     loginMock.mockResolvedValue({
-      id: 'admin-1',
-      username: 'admin',
-      role: 'admin',
-      email: '',
-      homeDir: '/',
+      user: {
+        id: 'admin-1',
+        username: 'admin',
+        role: 'admin',
+        email: '',
+        homeDir: '/',
+      },
+      warning: false,
+      message: undefined,
     })
     getSetupStatusMock.mockImplementation(() => new Promise((resolve) => {
       resolveSetup = resolve
     }))
 
-    await expect(useAuthStore.getState().login('admin', 'password')).resolves.toBeUndefined()
+    await expect(useAuthStore.getState().login('admin', 'password')).resolves.toMatchObject({ warning: false })
 
     expect(useAuthStore.getState().isAuthenticated).toBe(true)
     expect(useAuthStore.getState().user?.username).toBe('admin')
@@ -93,14 +97,18 @@ describe('authStore', () => {
 
   it('does not acknowledge setup for non-admin login', async () => {
     loginMock.mockResolvedValue({
-      id: 'user-1',
-      username: 'user',
-      role: 'user',
-      email: '',
-      homeDir: '/',
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/',
+      },
+      warning: false,
+      message: undefined,
     })
 
-    await expect(useAuthStore.getState().login('user', 'password')).resolves.toBeUndefined()
+    await expect(useAuthStore.getState().login('user', 'password')).resolves.toMatchObject({ warning: false })
 
     expect(useAuthStore.getState().isAuthenticated).toBe(true)
     expect(getSetupStatusMock).not.toHaveBeenCalled()
@@ -263,16 +271,20 @@ describe('authStore', () => {
       resolveCurrentUser = resolve
     }))
     loginMock.mockResolvedValue({
-      id: 'user-1',
-      username: 'user',
-      role: 'user',
-      email: '',
-      homeDir: '/',
+      user: {
+        id: 'user-1',
+        username: 'user',
+        role: 'user',
+        email: '',
+        homeDir: '/',
+      },
+      warning: false,
+      message: undefined,
     })
 
     const initializePromise = useAuthStore.getState().initialize()
 
-    await expect(useAuthStore.getState().login('user', 'password')).resolves.toBeUndefined()
+    await expect(useAuthStore.getState().login('user', 'password')).resolves.toMatchObject({ warning: false })
 
     resolveSetupStatus?.({
       success: true,

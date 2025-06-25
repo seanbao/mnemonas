@@ -87,6 +87,15 @@ interface AuthSessionData {
   user: User
 }
 
+export interface AuthActionResult {
+  warning: boolean
+  message?: string
+}
+
+export interface LoginActionResult extends AuthActionResult {
+  user: User
+}
+
 export interface AuthClearedDetail {
   message?: string
   reason?: 'expired' | 'disabled' | 'missing'
@@ -174,6 +183,13 @@ function readAuthSuccessData<T>(body: AuthApiResponse<T> | undefined): T {
   }
 
   return body.data
+}
+
+function getAuthActionResult<T>(response: Response, body: AuthApiResponse<T> | undefined): AuthActionResult {
+  return {
+    warning: response.headers?.get?.('Warning') != null,
+    message: body?.message,
+  }
 }
 
 async function handleUnauthorizedSessionResponse(response: Response): Promise<void> {
@@ -396,7 +412,7 @@ async function tryRefreshToken(): Promise<boolean> {
 }
 
 // Login
-export async function login(username: string, password: string): Promise<User> {
+export async function login(username: string, password: string): Promise<LoginActionResult> {
   const response = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -415,8 +431,9 @@ export async function login(username: string, password: string): Promise<User> {
   }
   
   let data: AuthSessionData
+  let body: AuthApiResponse<LoginResponse> | undefined
   try {
-    const body: AuthApiResponse<LoginResponse> = await response.json()
+    body = await response.json()
     data = parseAuthSessionData(readAuthSuccessData(body))
   } catch {
     throw new AuthError('登录响应无效', response.status)
@@ -424,23 +441,39 @@ export async function login(username: string, password: string): Promise<User> {
 
   storeTokens(data.accessToken, data.refreshToken, data.user)
   await syncDownloadSession()
-  return data.user
+  return {
+    user: data.user,
+    ...getAuthActionResult(response, body),
+  }
 }
 
 // Logout
-export async function logout(): Promise<void> {
+export async function logout(): Promise<AuthActionResult> {
   const token = getStoredToken()
+  let result: AuthActionResult = { warning: false, message: undefined }
+
   if (token) {
     try {
-      await fetch(`${API_BASE}/auth/logout`, {
+      const response = await fetch(`${API_BASE}/auth/logout`, {
         method: 'POST',
         headers: getAuthHeaders(),
       })
+
+      if (response.ok) {
+        let body: AuthApiResponse<null> | undefined
+        try {
+          body = await response.json()
+        } catch {
+          body = undefined
+        }
+        result = getAuthActionResult(response, body)
+      }
     } catch {
       // Ignore logout errors
     }
   }
   clearTokens()
+  return result
 }
 
 // Get current user

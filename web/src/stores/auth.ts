@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { User } from '@/api/auth'
+import type { AuthActionResult, User } from '@/api/auth'
 import { 
   AUTH_CLEARED_EVENT,
   login as apiLogin, 
@@ -29,8 +29,8 @@ interface AuthState {
   
   // Actions
   initialize: () => Promise<void>
-  login: (username: string, password: string) => Promise<void>
-  logout: () => Promise<void>
+  login: (username: string, password: string) => Promise<AuthActionResult>
+  logout: () => Promise<AuthActionResult>
   clearError: () => void
   setAuthEnabled: (enabled: boolean) => void
 }
@@ -116,7 +116,8 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true, error: null })
     
     try {
-      const user = await apiLogin(username, password)
+      const result = await apiLogin(username, password)
+      const user = result.user
 
       set({ user, isAuthenticated: true, isLoading: false, error: null })
 
@@ -132,6 +133,11 @@ export const useAuthStore = create<AuthState>((set) => ({
           }
         })()
       }
+
+      return {
+        warning: result.warning,
+        message: result.message,
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : '登录失败'
       set({ isLoading: false, error: message })
@@ -144,7 +150,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true })
     
     try {
-      await apiLogout()
+      return await apiLogout()
     } finally {
       set({ user: null, isAuthenticated: false, isLoading: false, error: null })
     }

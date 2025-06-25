@@ -277,6 +277,37 @@ function createApiErrorFromXhr(xhr: XMLHttpRequest, fallback: string): ApiError 
   return new ApiError(message, xhr.status, xhr.statusText, code)
 }
 
+function getActionResultFromXhr(xhr: XMLHttpRequest): ActionResult {
+  const warningHeader = typeof xhr.getResponseHeader === 'function'
+    ? xhr.getResponseHeader('Warning')
+    : null
+
+  let message: string | undefined
+  let dataWarning = false
+
+  if (xhr.responseText) {
+    try {
+      const body = JSON.parse(xhr.responseText)
+      if (isRecord(body)) {
+        if (typeof body.message === 'string' && body.message) {
+          message = body.message
+        }
+
+        if (isRecord(body.data) && body.data.warning === true) {
+          dataWarning = true
+        }
+      }
+    } catch {
+      // Ignore malformed success bodies and preserve upload completion state.
+    }
+  }
+
+  return {
+    warning: warningHeader != null || dataWarning,
+    message,
+  }
+}
+
 // API Response wrapper from backend
 interface ApiResponseWrapper<T> {
   success: boolean
@@ -774,7 +805,7 @@ export async function uploadFile(
   path: string,
   file: File,
   onProgress?: (progress: number) => void
-): Promise<void> {
+): Promise<ActionResult> {
   // Sanitize filename to prevent path traversal
   const safeFilename = sanitizeFilename(file.name)
   const normalizedPath = normalizePath(path)
@@ -783,7 +814,7 @@ export async function uploadFile(
   
   const url = `${API_BASE}/files${encodedPath}/${encodedFilename}`
 
-  const sendUpload = (retryCount: number): Promise<void> => new Promise((resolve, reject) => {
+  const sendUpload = (retryCount: number): Promise<ActionResult> => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     const token = getStoredToken()
 
@@ -795,7 +826,7 @@ export async function uploadFile(
 
     xhr.addEventListener('load', async () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve()
+        resolve(getActionResultFromXhr(xhr))
         return
       }
 
@@ -803,8 +834,8 @@ export async function uploadFile(
         const refreshed = await refreshAuthSession()
         if (refreshed) {
           try {
-            await sendUpload(retryCount + 1)
-            resolve()
+            const retryResult = await sendUpload(retryCount + 1)
+            resolve(retryResult)
           } catch (error) {
             reject(error)
           }
