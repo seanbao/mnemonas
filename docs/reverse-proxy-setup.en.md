@@ -20,6 +20,8 @@ sudo mnemonas-public-setup --proxy caddy nas.example.com admin@example.com
 
 The systemd installer installs `scripts/setup-reverse-proxy.sh` as `mnemonas-public-setup`. The script sets `server.host = "127.0.0.1"`, `trusted_proxy_hops = 1`, configures Caddy or Nginx, adjusts local UFW rules, and runs basic checks. Cloud-provider security groups still need manual confirmation: expose only `80/443`, not `8080/9090/9091` or any custom backend ports.
 
+When overriding the default backend host with `MNEMONAS_UPSTREAM_HOST`, use only a hostname, IPv4 address, or IPv6 literal. Do not include a scheme, path, or port. IPv6 may be written as `::1` or `[::1]`.
+
 For Traefik or Cloudflare Tunnel, start from the repository templates instead of assembling commands ad hoc:
 
 - `deploy/public-access/traefik/`: Traefik on a Linux host, while MnemoNAS still runs under systemd on `127.0.0.1:8080`.
