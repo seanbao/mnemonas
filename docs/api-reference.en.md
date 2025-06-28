@@ -328,6 +328,19 @@ Public endpoints:
 
 Password-protected shares use an `HttpOnly` cookie after password validation. Failed password attempts are rate-limited.
 
+Public share behavior:
+
+- Public shares, and password-protected shares with a valid access cookie, return `file_name`, `file_size`, or `folder_items` metadata where applicable.
+- When `max_access > 0` and `access_count` has reached the limit, public access returns `410 Gone` with `SHARE_ACCESS_LIMIT_REACHED`.
+- Expired shares return `410 Gone` with `SHARE_EXPIRED`.
+- Shares created by a disabled or deleted owner return `410 Gone` with `SHARE_DISABLED` for public metadata, downloads, and folder listings.
+- `access_count` increments on downloads and folder-listing requests. Password validation through `POST /api/v1/public/shares/{share_id}/access` and the compatibility path `POST /s/{share_id}` does not increment it.
+- Once a download or folder-listing response has started writing to the client, that request remains counted even if the later stream fails.
+- Successful password validation sets an `HttpOnly` access cookie; later downloads and folder-listing requests use the cookie rather than a password query parameter.
+- Repeated password failures return `429 Too Many Requests` with `SHARE_PASSWORD_RATE_LIMITED`.
+- Password failure rate limiting is keyed by share ID and client address. Forwarded headers are ignored by default and are used only when `server.trusted_proxy_hops > 0` and the direct peer is loopback or belongs to `server.trusted_proxy_cidrs`.
+- Compatibility paths `/s/{share_id}` and `POST /s/{share_id}` return the same public JSON behavior for direct script or non-SPA use.
+
 ## Favorites
 
 | Method | Path | Description |
