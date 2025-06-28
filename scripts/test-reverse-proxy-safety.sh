@@ -87,6 +87,22 @@ run_upstream_host_validation_tests() {
         'MNEMONAS_UPSTREAM_HOST=*'
 }
 
+run_config_path_validation_tests() {
+    local target_dir target_config
+
+    target_dir="$TMP_ROOT/config-target"
+    mkdir -p "$target_dir"
+    ln -s "$target_dir" "$TMP_ROOT/config-link-dir"
+    run_expect_failure_with_env "config-path-symlink-directory" "nas.example.com" "" "--config 不能包含符号链接" \
+        MNEMONAS_CONFIG_PATH="$TMP_ROOT/config-link-dir/config.toml"
+
+    target_config="$TMP_ROOT/target-config.toml"
+    printf '[server]\nport = 8080\n' > "$target_config"
+    ln -s "$target_config" "$TMP_ROOT/config-link.toml"
+    run_expect_failure_with_env "config-path-symlink-file" "nas.example.com" "" "--config 不能包含符号链接" \
+        MNEMONAS_CONFIG_PATH="$TMP_ROOT/config-link.toml"
+}
+
 run_config_rewrite_self_test() {
     MNEMONAS_REVERSE_PROXY_SELF_TEST=1 bash "$REPO_ROOT/scripts/setup-reverse-proxy.sh" > "$TMP_ROOT/self-test.log" 2>&1
     assert_file_contains "$TMP_ROOT/self-test.log" "[reverse-proxy-self-test] all checks passed"
@@ -96,6 +112,7 @@ run_domain_validation_tests
 run_email_validation_tests
 run_port_validation_tests
 run_upstream_host_validation_tests
+run_config_path_validation_tests
 run_config_rewrite_self_test
 
 printf '[reverse-proxy-test] all checks passed\n'

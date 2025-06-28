@@ -29,6 +29,7 @@ var (
 	ErrShareDisabled     = errors.New("share is disabled")
 	errInvalidSharePath  = errors.New("invalid share path")
 	errInvalidShareID    = errors.New("invalid share ID")
+	errShareIDImmutable  = errors.New("share ID cannot be changed")
 	errInvalidShareType  = errors.New("invalid share type")
 	errInvalidMaxAccess  = errors.New("invalid max access")
 	errSharePasswordLong = errors.New("share password must be at most 72 bytes")
@@ -1183,6 +1184,9 @@ func (s *ShareStore) Update(id string, fn func(*Share) error) error {
 		}
 		if err := validateShareInvariants(updated); err != nil {
 			return err
+		}
+		if updated.ID != id {
+			return errShareIDImmutable
 		}
 
 		oldPath := share.Path
