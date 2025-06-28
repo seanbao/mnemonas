@@ -195,6 +195,44 @@ existing_path_for_df() {
 	fi
 }
 
+normalize_compare_path() {
+	local path="$1"
+
+	while [[ "$path" != "/" && "$path" == */ ]]; do
+		path="${path%/}"
+	done
+	if [[ -z "$path" ]]; then
+		path="/"
+	fi
+	printf '%s\n' "$path"
+}
+
+path_has_parent_segment() {
+	local value="$1"
+	local trimmed="${value#/}"
+	trimmed="${trimmed%/}"
+
+	local -a segments
+	IFS='/' read -r -a segments <<< "$trimmed"
+
+	local segment
+	for segment in "${segments[@]}"; do
+		[[ "$segment" == ".." ]] && return 0
+	done
+	return 1
+}
+
+is_protected_data_dir() {
+	local path
+	path="$(normalize_compare_path "$1")"
+	case "$path" in
+		/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/local|/usr/local/bin|/usr/local/share|/var)
+			return 0
+			;;
+	esac
+	return 1
+}
+
 check_no_symlink_components() {
 	local value="$1"
 	local label="$2"
@@ -281,8 +319,12 @@ check_docker() {
 		fail "Docker Compose v2 plugin is missing. On Ubuntu try: sudo apt install docker-compose-v2; with Docker's apt repo use: sudo apt install docker-compose-plugin docker-buildx-plugin"
 	fi
 
+	local image
+	image="$(env_value MNEMONAS_IMAGE "$ENV_PATH")"
 	if docker buildx version >/dev/null 2>&1; then
 		ok "Docker Buildx plugin available"
+	elif [[ -n "$image" && "$image" != "mnemonas:local" ]]; then
+		ok "Docker Buildx plugin is not required for release image: $image"
 	else
 		warn "Docker Buildx plugin is missing. Builds still may work, but BuildKit caching and modern Docker workflows are less reliable."
 	fi
@@ -385,9 +427,36 @@ check_data_dir_writable_by_configured_user() {
 	fi
 }
 
+validate_data_dir_path() {
+	if [[ -z "$DATA_DIR" ]]; then
+		fail "Data directory cannot be empty."
+		return 1
+	fi
+	if [[ "$DATA_DIR" == *$'\n'* || "$DATA_DIR" == *$'\r'* ]]; then
+		fail "Data directory cannot contain newline characters: $DATA_DIR"
+		return 1
+	fi
+	if [[ "$DATA_DIR" != /* ]]; then
+		fail "Data directory must be an absolute path because Docker Compose does not expand relative volume roots: $DATA_DIR"
+		return 1
+	fi
+	if path_has_parent_segment "$DATA_DIR"; then
+		fail "Data directory cannot contain parent directory segments: $DATA_DIR"
+		return 1
+	fi
+	if is_protected_data_dir "$DATA_DIR"; then
+		fail "Data directory points at a protected system directory and must not be bind-mounted as /data: $DATA_DIR"
+		return 1
+	fi
+	return 0
+}
+
 check_data_dir() {
 	local df_target available_kb available_bytes config_path configured_root
 
+	if ! validate_data_dir_path; then
+		return
+	fi
 	if ! check_no_symlink_components "$DATA_DIR" "Data directory"; then
 		return
 	fi

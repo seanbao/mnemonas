@@ -44,7 +44,7 @@ enabled = true
 auth_type = "users"
 ```
 
-推荐使用 `auth_type = "users"`：WebDAV 客户端用 MnemoNAS 用户名和密码登录，管理员访问全局目录，普通用户的挂载根目录映射到自己的 `home_dir`，guest 账号只读，用户配额会限制 WebDAV PUT/COPY 写入。
+推荐使用 `auth_type = "users"`：WebDAV 客户端用 MnemoNAS 用户名和密码登录，管理员访问全局目录，普通用户的挂载根目录映射到自己的 `home_dir`，guest 账号只读，用户配额会限制写入 `home_dir` 的 WebDAV PUT/COPY/MOVE。
 
 如需兼容旧配置或单独的服务凭据，可使用全局 Basic Auth：
 
@@ -290,7 +290,7 @@ curl https://<domain>/dav/
 - 当前版本已支持多用户与角色（admin/user/guest）
 - 当前版本已支持用户组和 `storage.directory_access_rules` 目录授权；非管理员默认按账号 `home_dir` 限制访问，命中目录规则时按用户、用户组或角色授权放行
 - 文件、搜索、收藏、分享、回收站、最近操作和 WebDAV `users` 模式使用同一套路径权限判定
-- 管理员可为用户设置 `quota_bytes`；非管理员通过 Web/API 上传、复制、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY 会按该用户 `home_dir` 的当前用量执行服务端配额限制
+- 管理员可为用户设置 `quota_bytes`；非管理员通过 Web/API 上传、复制、移动、回收站恢复，以及 `webdav.auth_type = "users"` 下的 WebDAV PUT/COPY/MOVE，在写入目标位于该用户 `home_dir` 内时，会按 `home_dir` 当前用量执行服务端配额限制。共享目录容量应通过目录配额限制
 - WebDAV `users` 模式携带应用层用户身份并执行角色、用户组、`home_dir` 和目录授权边界；`basic` 模式是全局服务凭据兼容模式，不携带应用层用户身份
 
 #### 速率限制粒度

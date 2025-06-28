@@ -703,21 +703,31 @@ impl CasStore {
         let mut summary = ScrubSummary::default();
 
         // Collect hashes to check
-        let hashes_to_check: Vec<(String, u64)> = match hashes {
+        let hashes_to_check: Vec<(String, Option<u64>)> = match hashes {
             Some(h) => h
                 .iter()
-                .filter_map(|hash| self.index.get(hash).map(|e| (hash.clone(), *e)))
+                .map(|hash| (hash.clone(), self.index.get(hash).map(|e| *e)))
                 .collect(),
             None => self
                 .index
                 .iter()
-                .map(|e| (e.key().clone(), *e.value()))
+                .map(|e| (e.key().clone(), Some(*e.value())))
                 .collect(),
         };
 
         // Iterate objects
         for (hash, expected_size) in hashes_to_check {
             summary.total_objects += 1;
+
+            let Some(expected_size) = expected_size else {
+                summary.missing_objects += 1;
+                summary.errors.push((
+                    hash.clone(),
+                    "missing".to_string(),
+                    "file not found".to_string(),
+                ));
+                continue;
+            };
 
             // Use CAS read path to handle compressed objects transparently
             match self.get(&hash).await {
@@ -1624,6 +1634,30 @@ mod tests {
             store.scrub(Some(&hashes)).await,
             Err(CasError::InvalidHash)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_scrub_specific_hash_reports_missing_when_absent_from_index() {
+        let dir = tempdir().unwrap();
+        let config = CasConfig {
+            root: dir.path().to_path_buf(),
+            compression_enabled: false,
+            ..Default::default()
+        };
+        let store = CasStore::new(config).await.unwrap();
+        let missing_hash = compute_hash(b"missing targeted object");
+        let hashes = vec![missing_hash.clone()];
+
+        let summary = store.scrub(Some(&hashes)).await.unwrap();
+
+        assert_eq!(summary.total_objects, 1);
+        assert_eq!(summary.valid_objects, 0);
+        assert_eq!(summary.corrupted_objects, 0);
+        assert_eq!(summary.missing_objects, 1);
+        assert_eq!(summary.total_size, 0);
+        assert_eq!(summary.errors.len(), 1);
+        assert_eq!(summary.errors[0].0, missing_hash);
+        assert_eq!(summary.errors[0].1, "missing");
     }
 
     #[tokio::test]

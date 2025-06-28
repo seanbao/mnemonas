@@ -405,6 +405,7 @@ function shouldRefreshToken(url: string, retryCount: number): boolean {
 
 // Fetch with auth
 export async function authFetch(url: string, options: RequestInit = {}, retryCount = 0): Promise<Response> {
+  const hadAuthStateBeforeRequest = hasStoredAuthState()
   const headers = mergeAuthHeaders(options.headers)
   
   const response = await fetch(url, {
@@ -415,7 +416,7 @@ export async function authFetch(url: string, options: RequestInit = {}, retryCou
   
   // If unauthorized, try to refresh token
   if (response.status === 401 && shouldRefreshToken(url, retryCount)) {
-    const refreshed = await tryRefreshToken()
+    const refreshed = await tryRefreshToken(hadAuthStateBeforeRequest)
     if (refreshed) {
       return authFetch(url, options, retryCount + 1)
     }
@@ -434,7 +435,7 @@ export async function refreshAuthSession(): Promise<boolean> {
 }
 
 // Try to refresh the token
-async function tryRefreshToken(): Promise<boolean> {
+async function tryRefreshToken(hadAuthState = hasStoredAuthState()): Promise<boolean> {
   if (refreshPromise) {
     return refreshPromise
   }
@@ -448,7 +449,9 @@ async function tryRefreshToken(): Promise<boolean> {
       })
 
       if (!response.ok) {
-        clearTokens()
+        if (hadAuthState) {
+          clearTokens()
+        }
         return false
       }
 
@@ -458,7 +461,9 @@ async function tryRefreshToken(): Promise<boolean> {
       const downloadSession = await syncDownloadSession()
       return !downloadSession.authCleared
     } catch {
-      clearTokens()
+      if (hadAuthState) {
+        clearTokens()
+      }
       return false
     } finally {
       refreshPromise = null

@@ -90,6 +90,75 @@ func TestStoreDisable(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsDuplicateUsername(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "smb-credentials.json"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := store.SetCredential("user-1", "Alice", "8846f7eaee8fb117ad06bdd830b7586c", true); err != nil {
+		t.Fatalf("SetCredential(user-1) error: %v", err)
+	}
+
+	if _, err := store.SetCredential("user-2", "alice", "8846f7eaee8fb117ad06bdd830b7586c", true); !errors.Is(err, ErrDuplicateUsername) {
+		t.Fatalf("SetCredential(user-2 duplicate username) error = %v, want ErrDuplicateUsername", err)
+	}
+	if _, ok := store.GetByUserID("user-2"); ok {
+		t.Fatal("duplicate username write should not leave user-2 in memory")
+	}
+	got, ok := store.GetByUsername("ALICE")
+	if !ok || got.UserID != "user-1" {
+		t.Fatalf("username lookup after duplicate rejection = %+v, %v; want user-1", got, ok)
+	}
+}
+
+func TestNewStoreRejectsDuplicatePersistedUsername(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "smb-credentials.json")
+	data := `{"credentials":[` +
+		`{"user_id":"user-1","username":"Alice","enabled":true,"nt_hash_hex":"8846f7eaee8fb117ad06bdd830b7586c"},` +
+		`{"user_id":"user-2","username":"alice","enabled":true,"nt_hash_hex":"8846f7eaee8fb117ad06bdd830b7586c"}` +
+		`]}`
+	if err := os.WriteFile(filePath, []byte(data), credentialFileMode); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	if _, err := NewStore(filePath); !errors.Is(err, ErrDuplicateUsername) {
+		t.Fatalf("NewStore() error = %v, want ErrDuplicateUsername", err)
+	}
+}
+
+func TestStoreDisableRollsBackOnPersistenceFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	parentPath := filepath.Join(tmpDir, "credentials")
+	filePath := filepath.Join(parentPath, "smb-credentials.json")
+	store, err := NewStore(filePath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if _, err := store.SetCredential("user-1", "Alice", "8846f7eaee8fb117ad06bdd830b7586c", true); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+
+	realParent := filepath.Join(tmpDir, "credentials-real")
+	if err := os.Rename(parentPath, realParent); err != nil {
+		t.Fatalf("Rename(parent) error: %v", err)
+	}
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.Mkdir(outsideDir, 0700); err != nil {
+		t.Fatalf("Mkdir(outside) error: %v", err)
+	}
+	if err := os.Symlink(outsideDir, parentPath); err != nil {
+		t.Fatalf("Symlink(parent) error: %v", err)
+	}
+
+	if err := store.Disable("user-1"); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("Disable() error = %v, want ErrUnsafePath", err)
+	}
+	credential, ok := store.GetByUserID("user-1")
+	if !ok || !credential.Enabled {
+		t.Fatalf("credential after failed disable = %+v, %v; want still enabled", credential, ok)
+	}
+}
+
 func TestNewStoreRejectsSymlinkCredentialFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	targetPath := filepath.Join(tmpDir, "outside.json")
@@ -126,6 +195,12 @@ func TestStoreSetPasswordRejectsSymlinkCredentialParent(t *testing.T) {
 
 	if _, err := store.SetPassword("user-1", "Alice", "password", true); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("SetPassword() error = %v, want ErrUnsafePath", err)
+	}
+	if _, ok := store.GetByUserID("user-1"); ok {
+		t.Fatal("failed SetPassword should not leave credential in memory")
+	}
+	if _, ok := store.GetByUsername("Alice"); ok {
+		t.Fatal("failed SetPassword should not leave username index in memory")
 	}
 	if _, err := os.Stat(filepath.Join(outsideDir, "smb-credentials.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("outside credential file stat error = %v, want ErrNotExist", err)

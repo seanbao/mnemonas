@@ -80,7 +80,7 @@ The script:
 - Writes `MNEMONAS_UID` and `MNEMONAS_GID` from the current host user.
 - Creates `MNEMONAS_DATA_DIR`.
 - Runs Docker preflight checks.
-- Starts Compose with `docker compose up -d --build` when `--start` is used.
+- Starts Compose when `--start` is used. With `MNEMONAS_IMAGE=mnemonas:local`, it runs a local build; with a release image tag, it uses `docker compose up --pull missing --no-build` to pull a missing image and prevent local builds.
 
 First startup creates persistent config under `<MNEMONAS_DATA_DIR>/config.toml`. The initial Web UI password is stored at:
 
@@ -113,7 +113,7 @@ root = "/data"
 
 Do not set `root = "/"`. If you set another container path such as `/data-root`, mount that path explicitly in Compose or the data will land in the container's writable layer.
 
-Docker quickstart, the container start entrypoint, and the preflight script reject symlink components in the data directory path so config and object data cannot be written through a replaced directory. Container `CONFIG_PATH` must be absolute and stay under `STORAGE_ROOT`; the default is `/data/config.toml`. When customizing host storage, mount a real directory rather than a symlink.
+Docker quickstart, the container start entrypoint, and the preflight script require an absolute data directory and reject `..` segments, protected system directories, and symlink path components so config and object data cannot be written through a replaced or overly broad directory. Container `CONFIG_PATH` must be absolute and stay under `STORAGE_ROOT`; the default is `/data/config.toml`. When customizing host storage, mount a real directory rather than a symlink.
 
 If your host user is not UID/GID `1000`, use the quickstart script or pass the IDs directly:
 
@@ -174,6 +174,14 @@ MNEMONAS_IMAGE=ghcr.io/seanbao/mnemonas:<version>
 ```
 
 Prefer an explicit version tag. Use `latest` only for temporary evaluation or environments that intentionally accept automatic upgrades.
+
+The bundled Compose file still includes local build settings. The quickstart script adds `--pull missing --no-build` for release image tags automatically. Manual starts should use:
+
+```bash
+docker compose up -d --pull missing --no-build
+```
+
+Binary archives from GitHub Releases include `docker-compose.yml` and `.env.example`. The packaged template presets `MNEMONAS_IMAGE` to the GHCR image for the same release tag, so `./scripts/docker-quickstart.sh --start` from an extracted archive uses the release-image path by default instead of a source build.
 
 The examples below default to the source-built local image and can be switched to a verified release image with `MNEMONAS_IMAGE`.
 
@@ -245,7 +253,7 @@ Do not use `server.host = "127.0.0.1"` inside the container to limit host access
 
 ## Multi-User NAS Example
 
-Admins can create users in the Web UI and set groups, `home_dir`, user quotas, and directory access rules. Non-admin users are scoped to that configured root unless a matching directory rule grants shared access; file browsing, search, favorites, shares, trash, activity, and WebDAV `users` mode use the same boundary. Web/API uploads, copies, and trash restores honor the configured quota.
+Admins can create users in the Web UI and set groups, `home_dir`, user quotas, and directory access rules. Non-admin users are scoped to that configured root unless a matching directory rule grants shared access; file browsing, search, favorites, shares, trash, activity, and WebDAV `users` mode use the same boundary. Web/API uploads, copies, moves, and trash restores into `home_dir` honor the configured user quota; shared-path capacity limits are handled by directory quotas.
 
 ```yaml
 services:
@@ -372,7 +380,7 @@ Release image:
 
 ```bash
 docker compose pull
-docker compose up -d
+docker compose up -d --no-build
 ```
 
 Cold backup:
@@ -393,6 +401,8 @@ DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
 [ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR"
 tar xzf mnemonas-backup-YYYYMMDD.tar.gz -C ~
+
+# For release images, use docker compose up -d --no-build instead.
 docker compose up -d
 ```
 
@@ -431,6 +441,8 @@ Port conflict:
 sudo lsof -i :8080
 sed -i "s/^MNEMONAS_HTTP_PORT=.*/MNEMONAS_HTTP_PORT=8888/" .env
 ./scripts/mnemonas-docker-preflight.sh
+
+# For release images, use docker compose up -d --no-build instead.
 docker compose up -d
 ```
 

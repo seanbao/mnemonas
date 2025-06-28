@@ -10,6 +10,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOMAIN=""
 EMAIL=""
 PROXY_TYPE="${MNEMONAS_PROXY_TYPE:-}"
@@ -323,6 +324,30 @@ sed_replacement_escape() {
     sed 's/[\/&]/\\&/g' <<< "$1"
 }
 
+find_nasd_binary() {
+    local candidate
+
+    if [[ -n "${MNEMONAS_NASD_BIN:-}" ]]; then
+        [[ -x "$MNEMONAS_NASD_BIN" && ! -d "$MNEMONAS_NASD_BIN" ]] || return 1
+        printf '%s\n' "$MNEMONAS_NASD_BIN"
+        return 0
+    fi
+
+    if command -v nasd >/dev/null 2>&1; then
+        command -v nasd
+        return 0
+    fi
+
+    for candidate in "$SCRIPT_DIR/nasd" "$SCRIPT_DIR/../nasd"; do
+        if [[ -x "$candidate" && ! -d "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 parse_args() {
     local -a positional=()
 
@@ -520,6 +545,12 @@ update_mnemonas_server_config() {
             gsub("^[[:space:]]+|[[:space:]]+$", "", text)
             return text
         }
+        function normalized_section(text) {
+            sub("^\\[[[:space:]]*", "[", text)
+            sub("[[:space:]]*\\]$", "]", text)
+            gsub("[[:space:]]*\\.[[:space:]]*", ".", text)
+            return text
+        }
         function emit_missing() {
             if (in_server) {
                 if (!host_seen) {
@@ -537,7 +568,7 @@ update_mnemonas_server_config() {
                     emit_missing()
                     in_server = 0
                 }
-                if (trimmed == "[server]") {
+                if (normalized_section(trimmed) == "[server]") {
                     server_seen = 1
                     in_server = 1
                     host_seen = 0
@@ -581,6 +612,7 @@ update_mnemonas_server_config() {
 configure_mnemonas() {
     local backup=""
     local check_log=""
+    local nasd_bin=""
 
     if [[ "$CONFIGURE_MNEMONAS" != "1" ]]; then
         log_warn "已跳过 MnemoNAS 配置修改；请手动设置 server.host 和 trusted_proxy_hops"
@@ -601,9 +633,10 @@ configure_mnemonas() {
     log_info "已设置 MnemoNAS 后端监听: $UPSTREAM_ENDPOINT"
     log_info "已设置 server.trusted_proxy_hops = $TRUSTED_PROXY_HOPS"
 
-    if command -v nasd >/dev/null 2>&1; then
+    nasd_bin="$(find_nasd_binary || true)"
+    if [[ -n "$nasd_bin" ]]; then
         check_log="$(mktemp)"
-        if nasd --check-config --config "$CONFIG_PATH" >"$check_log" 2>&1; then
+        if "$nasd_bin" --check-config --config "$CONFIG_PATH" >"$check_log" 2>&1; then
             log_info "MnemoNAS 配置校验通过"
         else
             mv "$backup" "$CONFIG_PATH"
@@ -1002,6 +1035,21 @@ EOF
     grep -Fq 'host = "127.0.0.1"' "$config" || fail "self-test failed: host was not updated"
     grep -Fq 'trusted_proxy_hops = 1' "$config" || fail "self-test failed: trusted_proxy_hops was not inserted"
 
+    config="$tmp/spaced-server.toml"
+    cat > "$config" <<'EOF'
+[ server ]
+host = "0.0.0.0"
+port = 8080
+
+[ server . tls ]
+enabled = false
+EOF
+    update_mnemonas_server_config "$config" "127.0.0.1" "1"
+    grep -Fq '[ server ]' "$config" || fail "self-test failed: spaced server section was not preserved"
+    grep -Fq 'host = "127.0.0.1"' "$config" || fail "self-test failed: spaced server host was not updated"
+    grep -Fq 'trusted_proxy_hops = 1' "$config" || fail "self-test failed: spaced server trusted_proxy_hops was not inserted"
+    [[ "$(grep -Fc '[server]' "$config")" == "0" ]] || fail "self-test failed: duplicate server section was appended"
+
     config="$tmp/missing-server.toml"
     cat > "$config" <<'EOF'
 [storage]
@@ -1024,6 +1072,16 @@ EOF
     [[ "$(format_host_port_endpoint '127.0.0.1' '8080')" == "127.0.0.1:8080" ]] || fail "self-test failed: IPv4 endpoint formatting"
     [[ "$(format_host_port_endpoint '::1' '8080')" == "[::1]:8080" ]] || fail "self-test failed: raw IPv6 endpoint formatting"
     [[ "$(format_host_port_endpoint '[::1]' '8080')" == "[::1]:8080" ]] || fail "self-test failed: bracketed IPv6 endpoint formatting"
+
+    if [[ -x "$SCRIPT_DIR/../nasd" ]]; then
+        local old_path
+        old_path="$PATH"
+        # This intentionally hides PATH so the self-test proves adjacent release binary discovery.
+        # shellcheck disable=SC2123
+        PATH="$tmp/no-path"
+        [[ "$(find_nasd_binary)" == "$SCRIPT_DIR/../nasd" ]] || fail "self-test failed: adjacent release nasd was not discovered"
+        PATH="$old_path"
+    fi
 
     cat > "$tmp/mnemonas-dataplane.service" <<'EOF'
 [Service]

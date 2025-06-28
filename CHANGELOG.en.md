@@ -63,7 +63,7 @@ This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 - Bilingual README, documentation index, main topic docs, support policy, and security policy.
 
 ### Changed
-- Release archives include a top-level directory, Web UI assets, install/uninstall scripts, diagnostic scripts, and docs.
+- Release archives include a top-level directory, Web UI assets, install/uninstall scripts, diagnostic scripts, docs, public-access deploy templates, and Docker Compose/env templates preset for the matching release image.
 - The default `docker-compose.yml` builds `mnemonas:local` from source; public release images can be selected with explicit version tags after they are available.
 - Docker Compose host HTTP port is configured through `MNEMONAS_HTTP_PORT`.
 - CI pins protobuf generator versions and `protoc 3.20.1`, then verifies generated files do not drift after `make proto`.

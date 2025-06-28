@@ -339,6 +339,32 @@ run_server_host_validation_test() {
   assert_file_contains "$case_dir/ipv6.log" "Open Web UI: http://[::1]:18080"
 }
 
+run_server_port_normalization_test() {
+  local case_dir="$TMP_ROOT/server-port-normalization"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    SERVER_HOST="127.0.0.1" \
+    SERVER_PORT="018080" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log"
+
+  assert_file_contains "$case_dir/install.log" "Open Web UI: http://127.0.0.1:18080"
+  assert_file_contains "$install_dir/etc/mnemonas/config.toml" "port = 18080"
+}
+
 run_protected_web_dir_test() {
   local case_dir="$TMP_ROOT/protected-web-dir"
   local fake_path="$case_dir/fake-bin"
@@ -1010,6 +1036,7 @@ run_existing_config_test
 run_invalid_input_test
 run_service_account_validation_test
 run_server_host_validation_test
+run_server_port_normalization_test
 run_protected_web_dir_test
 run_share_dir_overlap_test
 run_web_dir_overlap_test

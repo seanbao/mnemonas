@@ -41,7 +41,7 @@ docker compose up -d
 
 # 如果使用已公开的 release 镜像，则改用：
 # docker compose pull
-# docker compose up -d
+# docker compose up -d --no-build
 ```
 
 Ubuntu/systemd 方式：
@@ -358,7 +358,7 @@ DATA_DIR="${MNEMONAS_DATA_DIR:-$DEFAULT_DATA_DIR}"
 [ ! -L "$DATA_DIR" ] || { echo "refusing symlink DATA_DIR: $DATA_DIR"; exit 1; }
 rm -rf -- "$DATA_DIR/files" "$DATA_DIR/.mnemonas"
 
-# 重启服务
+# 重启服务；release 镜像可改用 docker compose up -d --no-build
 docker compose up -d
 ```
 

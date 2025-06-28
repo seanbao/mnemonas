@@ -159,6 +159,71 @@ run_refuse_traversal_storage_test() {
 	assert_not_exists "$invoked_log"
 }
 
+run_refuse_relative_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-relative-storage"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	mkdir -p "$case_dir"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="relative-storage" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		ALLOW_REAL_STORAGE=1 \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT must be an absolute path"
+	assert_not_exists "$invoked_log"
+}
+
+run_refuse_protected_storage_with_override_test() {
+	local case_dir="$TMP_ROOT/refuse-protected-storage"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	mkdir -p "$case_dir"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="/tmp" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		ALLOW_REAL_STORAGE=1 \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT points at a protected system directory"
+	assert_not_exists "$invoked_log"
+}
+
+run_refuse_symlink_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-symlink-storage"
+	local target_dir="$case_dir/target"
+	local link_dir="$case_dir/link"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	mkdir -p "$target_dir"
+	ln -s "$target_dir" "$link_dir"
+	make_fake_nasd "$fake_nasd"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="$link_dir" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT must not contain symlink path components"
+	assert_not_exists "$invoked_log"
+}
+
 run_refuse_default_personal_storage_test() {
 	local case_dir="$TMP_ROOT/refuse-default-storage"
 	local fake_home="$case_dir/home"
@@ -225,6 +290,9 @@ run_refuse_unisolated_storage_test
 run_refuse_invalid_base_url_test
 run_refuse_invalid_nasd_pid_test
 run_refuse_traversal_storage_test
+run_refuse_relative_storage_test
+run_refuse_protected_storage_with_override_test
+run_refuse_symlink_storage_test
 run_refuse_default_personal_storage_test
 run_noninteractive_confirmation_test
 run_health_failure_does_not_restart_test

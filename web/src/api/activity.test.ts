@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { ApiError, clearActivity, getActionColor, getActivityStats, listActivity, type ActionType } from './activity'
+import { ACTIVITY_ACTIONS, ApiError, clearActivity, getActionColor, getActivityStats, listActivity, type ActionType } from './activity'
 
 vi.mock('./auth', () => ({
   authFetch: vi.fn(),
@@ -349,6 +349,8 @@ describe('Activity API', () => {
       disk_health: 'warning',
       scrub: 'warning',
     }
+
+    expect(ACTIVITY_ACTIONS).toEqual(Object.keys(expected))
 
     for (const [action, color] of Object.entries(expected) as Array<[ActionType, ReturnType<typeof getActionColor>]>) {
       expect(getActionColor(action)).toBe(color)

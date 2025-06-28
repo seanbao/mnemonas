@@ -151,6 +151,155 @@ func openNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*os.F
 	return os.NewFile(uintptr(fd), name), nil
 }
 
+func replaceEmptyDirPathNoFollow(rootPath, relParent, oldName, newName, oldDisplay, newDisplay string) error {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	rootDir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer rootDir.Close()
+
+	parentFD := int(rootDir.Fd())
+	closeParent := false
+	defer func() {
+		if closeParent {
+			_ = unix.Close(parentFD)
+		}
+	}()
+
+	if relParent != "" {
+		parts, err := splitRelativeName(relParent)
+		if err != nil {
+			return rootPathError("openat", newDisplay, err)
+		}
+		for _, part := range parts {
+			if part == "." {
+				continue
+			}
+			nextFD, err := unix.Openat(parentFD, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+			if err != nil {
+				return noFollowPathError("openat", newDisplay, parentFD, part, err)
+			}
+			if closeParent {
+				_ = unix.Close(parentFD)
+			}
+			parentFD = nextFD
+			closeParent = true
+		}
+	}
+
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, oldName, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return noFollowPathError("fstatat", oldDisplay, parentFD, oldName, err)
+	}
+	if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return symlinkPathError("renameat", oldDisplay)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return rootPathError("renameat", oldDisplay, unix.ENOTDIR)
+	}
+
+	if err := unix.Fstatat(parentFD, newName, &stat, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+		switch stat.Mode & unix.S_IFMT {
+		case unix.S_IFLNK:
+			return symlinkPathError("renameat", newDisplay)
+		case unix.S_IFDIR:
+			if err := unix.Unlinkat(parentFD, newName, unix.AT_REMOVEDIR); err != nil {
+				if err == unix.ENOTEMPTY || err == unix.EEXIST {
+					return rootPathError("unlinkat", newDisplay, os.ErrExist)
+				}
+				return rootPathError("unlinkat", newDisplay, err)
+			}
+		default:
+			return rootPathError("renameat", newDisplay, unix.ENOTDIR)
+		}
+	} else if err != unix.ENOENT {
+		return noFollowPathError("fstatat", newDisplay, parentFD, newName, err)
+	}
+
+	if err := unix.Renameat(parentFD, oldName, parentFD, newName); err != nil {
+		return rootPathError("renameat", newDisplay, err)
+	}
+	return nil
+}
+
+func replaceFilePathNoFollow(rootPath, relParent, oldName, newName, oldDisplay, newDisplay string) error {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	rootDir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer rootDir.Close()
+
+	parentFD := int(rootDir.Fd())
+	closeParent := false
+	defer func() {
+		if closeParent {
+			_ = unix.Close(parentFD)
+		}
+	}()
+
+	if relParent != "" {
+		parts, err := splitRelativeName(relParent)
+		if err != nil {
+			return rootPathError("openat", newDisplay, err)
+		}
+		for _, part := range parts {
+			if part == "." {
+				continue
+			}
+			nextFD, err := unix.Openat(parentFD, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+			if err != nil {
+				return noFollowPathError("openat", newDisplay, parentFD, part, err)
+			}
+			if closeParent {
+				_ = unix.Close(parentFD)
+			}
+			parentFD = nextFD
+			closeParent = true
+		}
+	}
+
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, oldName, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return noFollowPathError("fstatat", oldDisplay, parentFD, oldName, err)
+	}
+	switch stat.Mode & unix.S_IFMT {
+	case unix.S_IFLNK:
+		return symlinkPathError("renameat", oldDisplay)
+	case unix.S_IFREG:
+	default:
+		return rootPathError("renameat", oldDisplay, unix.EINVAL)
+	}
+
+	if err := unix.Fstatat(parentFD, newName, &stat, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+		switch stat.Mode & unix.S_IFMT {
+		case unix.S_IFLNK:
+			return symlinkPathError("renameat", newDisplay)
+		case unix.S_IFREG:
+		default:
+			return rootPathError("renameat", newDisplay, unix.EINVAL)
+		}
+	} else if err != unix.ENOENT {
+		return noFollowPathError("fstatat", newDisplay, parentFD, newName, err)
+	}
+
+	if err := unix.Renameat(parentFD, oldName, parentFD, newName); err != nil {
+		return rootPathError("renameat", newDisplay, err)
+	}
+	return nil
+}
+
 func noFollowPathError(op, fullName string, parentFD int, name string, err error) error {
 	if err == unix.ELOOP || ((err == unix.ENOTDIR || err == unix.EEXIST) && isSymlinkAt(parentFD, name)) {
 		return symlinkPathError(op, fullName)

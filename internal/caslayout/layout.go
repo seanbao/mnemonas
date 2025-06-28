@@ -144,8 +144,7 @@ func (s *Store) Put(hash string, data []byte) error {
 	}
 	afterValidateCASPath()
 
-	// I1 fix: Atomic write with proper fsync
-	// Step 1: Write to temp file
+	// Write to a temporary file, fsync it, then atomically rename it into place.
 	f, tmpPath, err := createCASTempFile(s.rootHandle, relDir)
 	if err != nil {
 		cleanupCreatedCASDirsWithRoot(s.rootHandle, createdDirs)

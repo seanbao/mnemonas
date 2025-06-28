@@ -37,6 +37,7 @@ vi.mock('@heroui/react', async () => {
       <div>
         <span>{placeholder}</span>
         <button onClick={() => onSelectionChange?.(new Set(['delete']))}>筛选删除文件</button>
+        <button onClick={() => onSelectionChange?.(new Set(['scrub']))}>筛选数据校验</button>
         <button onClick={() => onSelectionChange?.(new Set())}>清空筛选</button>
         <div>{children}</div>
       </div>
@@ -49,6 +50,28 @@ const mockAddToast = vi.fn()
 
 // Mock activity API
 vi.mock('@/api/activity', () => ({
+  ACTIVITY_ACTIONS: [
+    'upload',
+    'download',
+    'delete',
+    'rename',
+    'move',
+    'copy',
+    'create',
+    'restore',
+    'share',
+    'unshare',
+    'favorite',
+    'unfavorite',
+    'favorite_note_update',
+    'login',
+    'logout',
+    'trash_restore',
+    'trash_delete',
+    'trash_empty',
+    'disk_health',
+    'scrub',
+  ],
   listActivity: vi.fn(),
   getActivityStats: vi.fn(),
   ApiError: class ApiError extends Error {
@@ -69,6 +92,7 @@ vi.mock('@/api/activity', () => ({
       download: '下载文件',
       delete: '删除文件',
       login: '登录',
+      scrub: '数据校验',
     }
     return labels[action] || action
   }),
@@ -78,6 +102,7 @@ vi.mock('@/api/activity', () => ({
       delete: 'danger',
       download: 'warning',
       login: 'default',
+      scrub: 'warning',
     }
     return colors[action] || 'primary'
   }),
@@ -432,6 +457,7 @@ describe('ActivityPage', () => {
       
       await waitFor(() => {
         expect(screen.getByText('筛选操作')).toBeTruthy()
+        expect(screen.getAllByText('数据校验').length).toBeGreaterThan(0)
       })
     })
 
@@ -458,6 +484,26 @@ describe('ActivityPage', () => {
           limit: 20,
           offset: 0,
           action: 'delete',
+        })
+        expect(screen.getByText('当前筛选:')).toBeTruthy()
+      })
+    })
+
+    it('requests scrub activity when the scrub filter is selected', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<ActivityPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('筛选数据校验')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('筛选数据校验'))
+
+      await waitFor(() => {
+        expect(mockListActivity).toHaveBeenCalledWith({
+          limit: 20,
+          offset: 0,
+          action: 'scrub',
         })
         expect(screen.getByText('当前筛选:')).toBeTruthy()
       })

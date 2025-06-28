@@ -29,6 +29,7 @@ vi.mock('@/api/users', async (importOriginal) => {
     resetUserPassword: vi.fn(),
     revokeUserSessions: vi.fn(),
     toggleUserStatus: vi.fn(),
+    updateUser: vi.fn(),
   }
 })
 
@@ -560,6 +561,81 @@ describe('UsersPage', () => {
           color: 'warning',
         })
       })
+    })
+  })
+
+  describe('edit user modal', () => {
+    it('submits edited metadata, groups, home directory, and quota', async () => {
+      vi.mocked(usersApi.updateUser).mockResolvedValueOnce({
+        success: true,
+        warning: false,
+        message: 'user updated successfully',
+        user: {
+          ...mockUsers[1],
+          email: 'editor@example.com',
+          groups: ['editors', 'family'],
+          home_dir: '/team/editors',
+          quota_bytes: 2147483648,
+        },
+      })
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
+      })
+
+      fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: ' editor@example.com ' } })
+      fireEvent.change(screen.getByLabelText('用户组'), { target: { value: 'Family editors family' } })
+      fireEvent.change(screen.getByLabelText('主目录'), { target: { value: ' /team/editors ' } })
+      fireEvent.change(screen.getByLabelText('容量配额'), { target: { value: '2' } })
+      await user.click(screen.getByRole('button', { name: '保存' }))
+
+      await waitFor(() => {
+        expect(usersApi.updateUser).toHaveBeenCalledWith('user-2', {
+          email: 'editor@example.com',
+          role: 'user',
+          groups: ['editors', 'family'],
+          home_dir: '/team/editors',
+          quota_bytes: 2147483648,
+        })
+        expect(mockAddToast).toHaveBeenCalledWith({ title: '用户已更新', color: 'success' })
+      })
+    })
+
+    it('rejects invalid group names before updating a user', async () => {
+      const user = userEvent.setup()
+      renderUsersPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('testuser')).toBeInTheDocument()
+      })
+
+      await user.click(screen.getByRole('button', { name: 'testuser 用户操作' }))
+      await user.click(screen.getAllByRole('menuitem').find((item) => item.textContent?.includes('编辑用户'))!)
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '编辑用户' })).toBeInTheDocument()
+      })
+
+      fireEvent.change(screen.getByLabelText('用户组'), { target: { value: 'family/team' } })
+      await user.click(screen.getByRole('button', { name: '保存' }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '用户组无效',
+          description: '用户组只能包含字母、数字、点、短横线和下划线。',
+          color: 'warning',
+        })
+      })
+      expect(usersApi.updateUser).not.toHaveBeenCalled()
     })
   })
 

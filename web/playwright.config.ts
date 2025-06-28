@@ -11,16 +11,67 @@ const BACKEND_URL = process.env.MNEMONAS_E2E_BACKEND_URL || 'http://127.0.0.1:18
 const FRONTEND_URL = process.env.MNEMONAS_E2E_FRONTEND_URL || 'http://127.0.0.1:4173'
 const REUSE_EXISTING_SERVER = process.env.MNEMONAS_E2E_REUSE_EXISTING === '1'
 const BACKEND_PARSED_URL = new URL(BACKEND_URL)
-const BACKEND_HOST = BACKEND_PARSED_URL.hostname || '127.0.0.1'
 const BACKEND_PORT = BACKEND_PARSED_URL.port || (BACKEND_PARSED_URL.protocol === 'https:' ? '443' : '80')
 const FRONTEND_PARSED_URL = new URL(FRONTEND_URL)
-const FRONTEND_HOST = FRONTEND_PARSED_URL.hostname || '127.0.0.1'
+const RAW_BACKEND_HOST = BACKEND_PARSED_URL.hostname || '127.0.0.1'
+const RAW_FRONTEND_HOST = FRONTEND_PARSED_URL.hostname || '127.0.0.1'
+const BACKEND_HOST = normalizeTcpHostForCli('MNEMONAS_E2E_BACKEND_URL host', RAW_BACKEND_HOST)
+const FRONTEND_HOST = normalizeTcpHostForCli('MNEMONAS_E2E_FRONTEND_URL host', RAW_FRONTEND_HOST)
 const FRONTEND_PORT = FRONTEND_PARSED_URL.port || (FRONTEND_PARSED_URL.protocol === 'https:' ? '443' : '80')
 const WEB_SERVER_ENV = { ...process.env }
 delete WEB_SERVER_ENV.NO_COLOR
 
 process.env.E2E_USERNAME ||= 'admin'
 process.env.E2E_PASSWORD_FILE ||= path.join(E2E_ROOT, 'backend', 'e2e-password.txt')
+
+assertSafeTcpPort('MNEMONAS_E2E_BACKEND_URL port', BACKEND_PORT)
+assertSafeTcpPort('MNEMONAS_E2E_FRONTEND_URL port', FRONTEND_PORT)
+
+function normalizeTcpHostForCli(label: string, value: string): string {
+  const host = value.startsWith('[') && value.endsWith(']')
+    ? value.slice(1, -1)
+    : value
+
+  assertSafeTcpHost(label, host)
+  return host
+}
+
+function assertSafeTcpHost(label: string, value: string): void {
+  const host = value.endsWith('.') ? value.slice(0, -1) : value
+  if (!host || /\s/.test(host) || host.includes('[') || host.includes(']')) {
+    throw new Error(`${label} is invalid: ${value}`)
+  }
+  if (host.includes(':')) {
+    if (!/^[0-9A-Fa-f:.]+$/.test(host)) {
+      throw new Error(`${label} is invalid: ${value}`)
+    }
+    return
+  }
+  if (host.length > 253) {
+    throw new Error(`${label} is invalid: ${value}`)
+  }
+  for (const labelPart of host.split('.')) {
+    if (
+      !labelPart
+      || labelPart.length > 63
+      || labelPart.startsWith('-')
+      || labelPart.endsWith('-')
+      || !/^[A-Za-z0-9-]+$/.test(labelPart)
+    ) {
+      throw new Error(`${label} is invalid: ${value}`)
+    }
+  }
+}
+
+function assertSafeTcpPort(label: string, value: string): void {
+  if (!/^[0-9]+$/.test(value)) {
+    throw new Error(`${label} must be numeric: ${value}`)
+  }
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error(`${label} must be between 1 and 65535: ${value}`)
+  }
+}
 
 /**
  * Playwright E2E 测试配置

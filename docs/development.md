@@ -569,7 +569,7 @@ make e2e
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-`scripts/e2e-test.sh` 仍可用于手动验证一个已启动的服务；这种模式必须显式传入 `BASE_URL`、`STORAGE_ROOT`、`CONFIG_FILE`、`SECRETS_FILE` 和 `INITIAL_PASSWORD_FILE`，防止测试数据写入真实存储。
+`scripts/e2e-test.sh` 仍可用于手动验证一个已启动的服务；这种模式必须显式传入 `BASE_URL`、`STORAGE_ROOT`、`CONFIG_FILE`、`SECRETS_FILE` 和 `INITIAL_PASSWORD_FILE`，且 `STORAGE_ROOT` 不能包含 `..` 或符号链接路径组件，防止测试数据写入真实存储。
 
 脚本会在认证测试阶段自动尝试使用 bootstrap admin 凭据登录；启用认证但当前环境没有可用 bootstrap 凭据时，依赖管理员权限的 maintenance / diagnostics 检查会标记为 `skip`，避免把权限前置条件误报成产品故障。
 
@@ -598,7 +598,7 @@ RUN_CORRUPTION_TESTS=0 \
 ./scripts/fault-injection-test.sh
 ```
 
-安全门禁由 `scripts/test-fault-injection-safety.sh` 覆盖，并纳入 `make scripts-check`。脚本要求 `BASE_URL`、`STORAGE_ROOT`、`NASD_BIN` 都来自显式环境变量；默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`，需要真实存储路径时必须额外设置 `ALLOW_REAL_STORAGE=1`。
+安全门禁由 `scripts/test-fault-injection-safety.sh` 覆盖，并纳入 `make scripts-check`。脚本要求 `BASE_URL`、`STORAGE_ROOT`、`NASD_BIN` 都来自显式环境变量；默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`。真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含 `..` 或符号链接路径组件，不能指向 `/`、`/tmp`、`/var` 等受保护系统目录。
 
 ### 性能基准测试
 
@@ -630,7 +630,7 @@ MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
 ./scripts/benchmark.sh http://127.0.0.1:18080
 ```
 
-脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件，退出时删除该目录，并优先从 `config.toml` / `secrets.json` 自动读取 WebDAV Basic Auth。默认只允许 `/tmp` 或当前 checkout 下的 `MNEMONAS_STORAGE_ROOT`；真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`。若认证已初始化且 bootstrap admin 凭据不可用，可通过 `MNEMONAS_ACCESS_TOKEN` 显式传入管理员 token；否则 metrics 段会标记为 `skip`。若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
+脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件，退出时删除该目录，并优先从 `config.toml` / `secrets.json` 自动读取 WebDAV Basic Auth。默认只允许 `/tmp` 或当前 checkout 下的 `MNEMONAS_STORAGE_ROOT`；真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含 `..` 或符号链接路径组件，不能指向受保护系统目录。若认证已初始化且 bootstrap admin 凭据不可用，可通过 `MNEMONAS_ACCESS_TOKEN` 显式传入管理员 token；否则 metrics 段会标记为 `skip`。若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
 
 测试内容：
 

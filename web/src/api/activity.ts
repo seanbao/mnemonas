@@ -80,49 +80,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 // Activity action types
-export type ActionType =
-  | 'upload'
-  | 'download'
-  | 'delete'
-  | 'rename'
-  | 'move'
-  | 'copy'
-  | 'create'
-  | 'restore'
-  | 'share'
-  | 'unshare'
-  | 'favorite'
-  | 'unfavorite'
-  | 'favorite_note_update'
-  | 'login'
-  | 'logout'
-  | 'trash_restore'
-  | 'trash_delete'
-  | 'trash_empty'
-  | 'disk_health'
-  | 'scrub'
+export const ACTIVITY_ACTIONS = [
+  'upload',
+  'download',
+  'delete',
+  'rename',
+  'move',
+  'copy',
+  'create',
+  'restore',
+  'share',
+  'unshare',
+  'favorite',
+  'unfavorite',
+  'favorite_note_update',
+  'login',
+  'logout',
+  'trash_restore',
+  'trash_delete',
+  'trash_empty',
+  'disk_health',
+  'scrub',
+] as const
+
+export type ActionType = typeof ACTIVITY_ACTIONS[number]
+
+const activityActionSet = new Set<string>(ACTIVITY_ACTIONS)
 
 function isActionType(value: unknown): value is ActionType {
-  return value === 'upload'
-    || value === 'download'
-    || value === 'delete'
-    || value === 'rename'
-    || value === 'move'
-    || value === 'copy'
-    || value === 'create'
-    || value === 'restore'
-    || value === 'share'
-    || value === 'unshare'
-    || value === 'favorite'
-    || value === 'unfavorite'
-    || value === 'favorite_note_update'
-    || value === 'login'
-    || value === 'logout'
-    || value === 'trash_restore'
-    || value === 'trash_delete'
-    || value === 'trash_empty'
-    || value === 'disk_health'
-    || value === 'scrub'
+  return typeof value === 'string' && activityActionSet.has(value)
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

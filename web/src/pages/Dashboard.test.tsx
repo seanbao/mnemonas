@@ -682,6 +682,22 @@ describe('DashboardPage', () => {
   })
 
   describe('recent activity', () => {
+    it('renders scrub activity with the maintenance action presentation', async () => {
+      mockListActivity.mockResolvedValueOnce({
+        items: [
+          { id: 'act-scrub', action: 'scrub', path: '/system/scrub', timestamp: '2024-01-15T10:00:00Z' },
+        ],
+      })
+
+      render(<DashboardPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('数据校验')).toBeTruthy()
+        expect(screen.getByText('/system/scrub')).toBeTruthy()
+      })
+      expect(document.querySelector('.text-amber-500')).toBeTruthy()
+    })
+
     it('navigates to the activity page from the recent activity header', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<DashboardPage />)

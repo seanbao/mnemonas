@@ -68,6 +68,7 @@ Notes:
 
 - Protected-page tests prefer `E2E_PASSWORD` and also support `E2E_PASSWORD_FILE`.
 - The default configuration starts an isolated test backend, generates an initial password, and writes it under `MNEMONAS_E2E_ROOT`.
+- `MNEMONAS_E2E_ROOT` must be under `/tmp` or the current checkout and must not contain `..` or symlink path components.
 - `MNEMONAS_E2E_BACKEND_URL` and `MNEMONAS_E2E_FRONTEND_URL` can adjust isolated test server ports; `MNEMONAS_E2E_REUSE_EXISTING=1` is required to skip automatic startup.
 - Without `E2E_PASSWORD_FILE`, Playwright tries the default initial-password path `~/.mnemonas/.mnemonas/initial-password.txt`.
 - Protected-page tests skip automatically when no admin password is available.

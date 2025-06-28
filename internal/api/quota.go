@@ -243,6 +243,47 @@ func (s *Server) pathLogicalSize(ctx context.Context, targetPath string) (int64,
 	return s.fileInfoLogicalSize(ctx, info)
 }
 
+func (s *Server) authorizedPathLogicalSize(ctx context.Context, targetPath string) (int64, error) {
+	if err := s.authorizeUserPath(ctx, targetPath); err != nil {
+		return 0, err
+	}
+	info, err := s.fs.Stat(ctx, targetPath)
+	if err != nil {
+		return 0, err
+	}
+	return s.authorizedFileInfoLogicalSize(ctx, info)
+}
+
+func (s *Server) authorizedFileInfoLogicalSize(ctx context.Context, info *storage.FileInfo) (int64, error) {
+	if info == nil {
+		return 0, nil
+	}
+	if err := s.authorizeUserPath(ctx, info.Path); err != nil {
+		return 0, err
+	}
+	if !info.IsDir {
+		return nonNegativeSize(info.Size), nil
+	}
+
+	children, err := s.fs.ReadDir(ctx, info.Path)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for _, child := range children {
+		size, err := s.authorizedFileInfoLogicalSize(ctx, child)
+		if err != nil {
+			return 0, err
+		}
+		total, err = addQuotaSize(total, size)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
 func (s *Server) fileInfoLogicalSize(ctx context.Context, info *storage.FileInfo) (int64, error) {
 	if info == nil {
 		return 0, nil
@@ -293,8 +334,9 @@ func (s *Server) quotaCheckedUploadReader(ctx context.Context, targetPath string
 	if err != nil {
 		return nil, nil, err
 	}
+	userQuotaApplies := quotaScoped && quotaBytes > 0 && pathWithinBase(homeDir, targetPath)
 	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), targetPath)
-	if !quotaScoped && len(directoryRules) == 0 {
+	if !userQuotaApplies && len(directoryRules) == 0 {
 		return reader, func() {}, nil
 	}
 
@@ -310,7 +352,7 @@ func (s *Server) quotaCheckedUploadReader(ctx context.Context, targetPath string
 	}
 
 	checks := make([]quotaCheck, 0, 1+len(directoryRules))
-	if quotaScoped {
+	if userQuotaApplies {
 		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
 		if err != nil {
 			unlock()
@@ -386,19 +428,20 @@ func (s *Server) copyResourceWithQuota(ctx context.Context, srcPath, dstPath str
 	if err != nil {
 		return err
 	}
+	userQuotaApplies := quotaScoped && quotaBytes > 0 && pathWithinBase(homeDir, dstPath)
 	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), dstPath)
-	if !quotaScoped && len(directoryRules) == 0 {
+	if !userQuotaApplies && len(directoryRules) == 0 {
 		return s.copyResource(ctx, srcPath, dstPath)
 	}
 
 	s.quotaMu.Lock()
 	defer s.quotaMu.Unlock()
 
-	requiredBytes, err := s.pathLogicalSize(ctx, srcPath)
+	requiredBytes, err := s.authorizedPathLogicalSize(ctx, srcPath)
 	if err != nil {
 		return err
 	}
-	if quotaScoped {
+	if userQuotaApplies {
 		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
 		if err != nil {
 			return err
@@ -426,17 +469,17 @@ func (s *Server) copyResourceWithQuota(ctx context.Context, srcPath, dstPath str
 	return s.copyResource(ctx, srcPath, dstPath)
 }
 
-func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.TrashItem, restore func() error) error {
+func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.TrashItem, targetPath string, restore func() error) error {
 	homeDir, quotaBytes, quotaScoped, err := s.currentUserQuota(ctx)
 	if err != nil {
 		return err
 	}
-	targetPath := ""
-	if item != nil {
+	if targetPath == "" && item != nil {
 		targetPath = item.OriginalPath
 	}
+	userQuotaApplies := quotaScoped && quotaBytes > 0 && pathWithinBase(homeDir, targetPath)
 	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), targetPath)
-	if !quotaScoped && len(directoryRules) == 0 {
+	if !userQuotaApplies && len(directoryRules) == 0 {
 		return restore()
 	}
 
@@ -447,7 +490,7 @@ func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.Tr
 	if item != nil {
 		requiredBytes = nonNegativeSize(item.Size)
 	}
-	if quotaScoped {
+	if userQuotaApplies {
 		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
 		if err != nil {
 			return err
@@ -476,8 +519,13 @@ func (s *Server) restoreFromTrashWithQuota(ctx context.Context, item *storage.Tr
 }
 
 func (s *Server) moveResourceWithQuota(ctx context.Context, srcPath, dstPath string) error {
+	homeDir, quotaBytes, quotaScoped, err := s.currentUserQuota(ctx)
+	if err != nil {
+		return err
+	}
+	userQuotaApplies := quotaScoped && quotaBytes > 0 && pathWithinBase(homeDir, dstPath) && !pathWithinBase(homeDir, srcPath)
 	directoryRules := directoryQuotaRulesForTarget(s.directoryQuotaRules(), dstPath)
-	if len(directoryRules) == 0 {
+	if !userQuotaApplies && len(directoryRules) == 0 {
 		return s.fs.Rename(ctx, srcPath, dstPath)
 	}
 
@@ -487,6 +535,21 @@ func (s *Server) moveResourceWithQuota(ctx context.Context, srcPath, dstPath str
 	requiredBytes, err := s.pathLogicalSize(ctx, srcPath)
 	if err != nil {
 		return err
+	}
+	if userQuotaApplies {
+		usedBytes, err := s.pathLogicalSizeIfExists(ctx, homeDir)
+		if err != nil {
+			return err
+		}
+		if err := ensureQuotaCheckAvailable(quotaCheck{
+			QuotaType:     quotaTypeUser,
+			QuotaPath:     homeDir,
+			UsedBytes:     usedBytes,
+			QuotaBytes:    quotaBytes,
+			RequiredBytes: requiredBytes,
+		}); err != nil {
+			return err
+		}
 	}
 	for _, rule := range directoryRules {
 		if pathWithinBase(rule.Path, srcPath) {

@@ -164,6 +164,6 @@ message ListObjectsResponse {
 message ObjectInfo {
   string hash = 1;
   uint64 size = 2;
-  // NEW-2 fix: Creation timestamp for GC grace period filtering
+  // Creation timestamp for GC grace period filtering
   optional int64 created_at_unix = 3;  // Unix timestamp in seconds
 }

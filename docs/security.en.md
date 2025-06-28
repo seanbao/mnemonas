@@ -42,7 +42,7 @@ enabled = true
 auth_type = "users"
 ```
 
-`auth_type = "users"` is recommended for day-to-day mounting. WebDAV clients log in with MnemoNAS usernames and passwords; admins see the global namespace; regular users see their `home_dir` as the mount root; guest users are read-only; user quotas limit WebDAV PUT/COPY writes.
+`auth_type = "users"` is recommended for day-to-day mounting. WebDAV clients log in with MnemoNAS usernames and passwords; admins see the global namespace; regular users see their `home_dir` as the mount root; guest users are read-only; user quotas limit WebDAV PUT/COPY/MOVE writes into `home_dir`.
 
 For legacy setups or a separate service credential, use global Basic Auth:
 
@@ -260,7 +260,7 @@ Regular maintenance:
 
 ### Multi-User Boundary
 
-MnemoNAS supports users, roles, groups, and directory access rules. Non-admin users are limited by `home_dir` unless a matching `storage.directory_access_rules` entry grants read or write access; files, search, favorites, shares, trash, activity log views, and WebDAV `users` mode use the same path decision. Admins can set `quota_bytes`; non-admin Web/API uploads, copies, trash restores, and WebDAV PUT/COPY writes in `webdav.auth_type = "users"` are checked against the current logical size of that user's `home_dir`.
+MnemoNAS supports users, roles, groups, and directory access rules. Non-admin users are limited by `home_dir` unless a matching `storage.directory_access_rules` entry grants read or write access; files, search, favorites, shares, trash, activity log views, and WebDAV `users` mode use the same path decision. Admins can set `quota_bytes`; non-admin Web/API uploads, copies, moves, trash restores, and WebDAV PUT/COPY/MOVE writes in `webdav.auth_type = "users"` are checked against the current logical size of that user's `home_dir` when the write target is inside that `home_dir`. Use directory quotas for shared-directory capacity limits.
 
 WebDAV `users` mode carries application user identity and enforces role, group, `home_dir`, and directory access-rule boundaries. WebDAV `basic` mode remains a global service credential compatibility mode.
 

@@ -104,7 +104,7 @@ Quick isolated run:
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`.
+The isolated runner starts a temporary backend, temporary storage, and non-default ports before invoking `scripts/e2e-test.sh`. The isolated root must be under `/tmp` or the current checkout and must not contain `..` or symlink path components.
 
 Manual tests against an existing service must provide explicit targets:
 
@@ -116,6 +116,8 @@ SECRETS_FILE=/tmp/mnemonas-e2e-secrets.json \
 INITIAL_PASSWORD_FILE=/tmp/mnemonas-e2e-initial-password.txt \
 ./scripts/e2e-test.sh
 ```
+
+Manual `STORAGE_ROOT` values must be absolute paths, must not contain `..` or symlink path components, and are limited to `/tmp` or the current checkout by default.
 
 E2E groups:
 
@@ -240,9 +242,10 @@ Safety gates:
 
 - `BASE_URL`, `STORAGE_ROOT`, and `NASD_BIN` must be explicit.
 - Default allowed storage roots are `/tmp` or the current checkout.
+- `STORAGE_ROOT` must be absolute and must not contain `..` or symlink path components.
 - `$HOME/.mnemonas` is rejected by default.
 - Non-interactive runs require `FAULT_INJECTION_ASSUME_YES=1`.
-- Real storage paths require `ALLOW_REAL_STORAGE=1`.
+- Real storage paths require `ALLOW_REAL_STORAGE=1`, must still be absolute, and must not point at protected system directories such as `/`, `/tmp`, or `/var`.
 
 These gates are tested by `scripts/test-fault-injection-safety.sh` and included in `make scripts-check`.
 

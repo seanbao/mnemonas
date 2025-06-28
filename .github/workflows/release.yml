@@ -131,12 +131,21 @@ jobs:
         run: |
           package_name="mnemonas-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
           rm -rf dist/package "dist/$package_name"
-          mkdir -p "dist/$package_name/web" "dist/$package_name/scripts" "dist/$package_name/docs"
+          mkdir -p "dist/$package_name/web" "dist/$package_name/scripts" "dist/$package_name/docs" "dist/$package_name/deploy"
           install -m 755 dist/nasd-${{ matrix.os }}-${{ matrix.arch }} "dist/$package_name/nasd"
           install -m 755 dist/dataplane-${{ matrix.os }}-${{ matrix.arch }} "dist/$package_name/dataplane"
           cp -R web/dist/. "dist/$package_name/web/"
           install -m 755 scripts/*.sh "dist/$package_name/scripts/"
           cp -R docs/. "dist/$package_name/docs/"
+          cp -R deploy/. "dist/$package_name/deploy/"
+          install -m 644 docker-compose.yml .env.example "dist/$package_name/"
+          release_image="ghcr.io/${GITHUB_REPOSITORY}:${VERSION#v}"
+          awk -v image="$release_image" -v version="$VERSION" '
+            /^MNEMONAS_IMAGE=/ { print "MNEMONAS_IMAGE=" image; next }
+            /^MNEMONAS_VERSION=/ { print "MNEMONAS_VERSION=" version; next }
+            { print }
+          ' "dist/$package_name/.env.example" > "dist/$package_name/.env.example.tmp"
+          mv "dist/$package_name/.env.example.tmp" "dist/$package_name/.env.example"
           install -m 644 mnemonas.example.toml README.md README.en.md CHANGELOG.md CHANGELOG.en.md SECURITY.md SECURITY.zh-CN.md SUPPORT.md SUPPORT.en.md LICENSE "dist/$package_name/"
           tar -czvf "dist/mnemonas-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
             -C dist \

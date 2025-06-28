@@ -1,6 +1,6 @@
 services:
   mnemonas:
-    image: mnemonas:local
+    image: ${MNEMONAS_IMAGE:-mnemonas:local}
     build:
       context: .
       args:

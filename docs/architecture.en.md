@@ -142,7 +142,7 @@ Security boundaries:
 - User roles are `admin`, `user`, and `guest`.
 - Non-admin users are scoped to their configured `home_dir`, with optional `storage.directory_access_rules` grants for shared directories.
 - Directory access rules use the same most-specific path decision for files, search, shares, favorites, trash, activity logs, and WebDAV users mode.
-- WebDAV can authenticate MnemoNAS users and apply role, group, `home_dir`, and directory access-rule boundaries; the legacy `basic` mode remains a separate global service credential.
+- WebDAV can authenticate MnemoNAS users and apply role, group, `home_dir`, directory access-rule, home-scoped user-quota, and directory-quota boundaries; the legacy `basic` mode remains a separate global service credential.
 - Share-link password validation uses short-lived HttpOnly cookies.
 - Download and preview flows use short-lived download-session cookies instead of long-lived tokens in URLs.
 
