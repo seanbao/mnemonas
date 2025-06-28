@@ -38,6 +38,8 @@ port = 8080
 read_timeout = "30s"
 write_timeout = "60s"
 idle_timeout = "120s"
+trusted_proxy_hops = 0
+trusted_proxy_cidrs = []
 
 [server.tls]
 enabled = false
@@ -83,6 +85,39 @@ auth_type = "basic"
 username = "admin"
 password = ""
 
+[smb]
+enabled = false
+listen = "127.0.0.1:1445"
+server_name = "mnemonas"
+gateway_socket = ""
+credential_file = ""
+signing_required = true
+encryption_required = false
+
+# [[smb.shares]]
+# name = "homes"
+# path = "/"
+# read_only = false
+# allowed_roles = ["admin", "user"]
+# allowed_users = []
+
+[backup]
+# [[backup.jobs]]
+# id = "external-disk"
+# name = "External disk backup"
+# type = "local"
+# source = ""
+# destination = "/mnt/backup-drive/mnemonas"
+# schedule_interval = "24h"
+# schedule_window_start = "02:00"
+# schedule_window_end = "05:00"
+# stale_after = "72h"
+# restore_drill_stale_after = "720h"
+# max_snapshots = 7
+# max_age = "720h"
+# include_config = true
+# verify_after_backup = true
+
 [auth]
 enabled = true
 jwt_secret = ""
@@ -116,6 +151,10 @@ min_free_bytes = 10737418240
 cooldown_period = "4h"
 webhook_url = ""
 webhook_method = "POST"
+webhook_headers = []
+telegram_enabled = false
+telegram_bot_token = ""
+telegram_chat_id = ""
 email_enabled = false
 smtp_host = ""
 smtp_port = 587
@@ -140,6 +179,12 @@ name = "data-disk"
 path = "/dev/disk/by-id/ata-example"
 type = "sat"
 serial = ""
+
+[maintenance.scrub]
+enabled = false
+schedule_interval = "168h"
+retry_interval = "1h"
+max_retries = 1
 
 [security]
 allow_unsafe_no_auth = false
@@ -190,6 +235,8 @@ trusted_proxy_cidrs = ["10.0.0.0/8"]
 | `key_file` | string | `""` | Private key path |
 | `auto_generate` | bool | `true` | Generate a self-signed cert when paths are empty |
 | `cert_dir` | string | `~/.mnemonas/.mnemonas/certs` | Generated-cert directory |
+
+Set `cert_file` and `key_file` together or leave both empty; when set, they must point to different files. When both are empty, MnemoNAS uses `cert_dir/server.crt` and `cert_dir/server.key`. If `auto_generate = false`, those files must already exist.
 
 For public deployments, a reverse proxy such as Caddy or Nginx is usually preferred.
 
@@ -327,7 +374,7 @@ The dataplane reads these values on startup. Restart dataplane after changing th
 Runtime behavior:
 
 - Settings API updates can switch prefix, read-only mode, and auth config without full restart.
-- `auth_type = "users"` uses MnemoNAS app users over HTTP Basic. Admins see the global namespace; regular users see their `home_dir` as the WebDAV root; guest users are read-only; user quotas are enforced for PUT/COPY writes.
+- `auth_type = "users"` uses MnemoNAS app users over HTTP Basic. Admins see the global namespace; regular users see their `home_dir` as the WebDAV root; guest users are read-only; user quotas are enforced for PUT/COPY/MOVE writes into `home_dir`.
 - Empty password with Basic Auth keeps using the generated password.
 - WebDAV is matched before the API and frontend handlers, so enabled prefixes cannot overlap reserved application routes.
 - `auth_type = "basic"` is the compatibility mode: one global service credential, without app-level `home_dir` isolation.

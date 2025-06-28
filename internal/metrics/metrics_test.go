@@ -4,6 +4,7 @@ package metrics
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -245,6 +246,24 @@ func TestResponseWriter(t *testing.T) {
 	}
 }
 
+func TestResponseWriterKeepsFirstStatus(t *testing.T) {
+	w := httptest.NewRecorder()
+	rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+
+	rw.WriteHeader(http.StatusCreated)
+	rw.WriteHeader(http.StatusInternalServerError)
+
+	if rw.status != http.StatusCreated {
+		t.Fatalf("status = %d, want first status %d", rw.status, http.StatusCreated)
+	}
+	if w.Code != http.StatusCreated {
+		t.Fatalf("underlying status = %d, want %d", w.Code, http.StatusCreated)
+	}
+	if rw.Unwrap() != w {
+		t.Fatal("expected Unwrap to return the underlying response writer")
+	}
+}
+
 func TestUptime(t *testing.T) {
 	m := NewRequestMetrics()
 
@@ -279,4 +298,24 @@ func TestConcurrentAccess(t *testing.T) {
 	if stats.TotalRequests != 1000 {
 		t.Errorf("TotalRequests = %d, want 1000", stats.TotalRequests)
 	}
+}
+
+func TestConcurrentResetAndGetStats(t *testing.T) {
+	m := NewRequestMetrics()
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			m.Reset()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_ = m.GetStats()
+		}
+	}()
+	wg.Wait()
 }

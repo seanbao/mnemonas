@@ -120,6 +120,59 @@ run_refuse_traversal_storage_test() {
 	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT must not contain '..' path segments"
 }
 
+run_refuse_relative_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-relative-storage"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="relative-storage" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		ALLOW_REAL_STORAGE=1 \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT must be an absolute path"
+}
+
+run_refuse_protected_storage_with_override_test() {
+	local case_dir="$TMP_ROOT/refuse-protected-storage"
+	mkdir -p "$case_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="/tmp" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		ALLOW_REAL_STORAGE=1 \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT points at a protected system directory"
+}
+
+run_refuse_symlink_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-symlink-storage"
+	local target_dir="$case_dir/target"
+	local link_dir="$case_dir/link"
+	mkdir -p "$target_dir"
+	ln -s "$target_dir" "$link_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		HOME="$case_dir/home" \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="$link_dir" \
+		CONFIG_FILE="$case_dir/config.toml" \
+		SECRETS_FILE="$case_dir/secrets.json" \
+		INITIAL_PASSWORD_FILE="$case_dir/initial-password.txt" \
+		bash "$REPO_ROOT/scripts/e2e-test.sh" --quick
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT must not contain symlink path components"
+}
+
 run_refuse_traversal_isolated_root_test() {
   local case_dir="$TMP_ROOT/refuse-traversal-isolated-root"
   mkdir -p "$case_dir"
@@ -129,6 +182,21 @@ run_refuse_traversal_isolated_root_test() {
 		bash "$REPO_ROOT/scripts/run-e2e-isolated.sh" --quick
 
   assert_file_contains "$case_dir/out.log" "MNEMONAS_E2E_ROOT must not contain '..' path segments"
+}
+
+run_refuse_symlink_isolated_root_test() {
+  local case_dir="$TMP_ROOT/refuse-symlink-isolated-root"
+  local target_dir="$case_dir/target"
+  local link_dir="$case_dir/link"
+  mkdir -p "$target_dir"
+  ln -s "$target_dir" "$link_dir"
+
+  run_expect_failure "$case_dir/out.log" env \
+    MNEMONAS_E2E_ROOT="$link_dir" \
+    bash "$REPO_ROOT/scripts/run-e2e-isolated.sh" --quick
+
+  assert_file_contains "$case_dir/out.log" "MNEMONAS_E2E_ROOT must not contain symlink path components"
+  assert_not_exists "$target_dir/backend"
 }
 
 run_refuse_invalid_isolated_addr_test() {
@@ -170,6 +238,21 @@ run_refuse_invalid_playwright_backend_addr_test() {
 	assert_not_exists "$case_dir/root/backend"
 }
 
+run_refuse_symlink_playwright_backend_root_test() {
+	local case_dir="$TMP_ROOT/refuse-symlink-playwright-root"
+	local target_dir="$case_dir/target"
+	local link_dir="$case_dir/link"
+	mkdir -p "$target_dir"
+	ln -s "$target_dir" "$link_dir"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_E2E_ROOT="$link_dir" \
+		bash "$REPO_ROOT/web/scripts/start-e2e-backend.sh"
+
+	assert_file_contains "$case_dir/out.log" "MNEMONAS_E2E_ROOT must not contain symlink path components"
+	assert_not_exists "$target_dir/backend"
+}
+
 run_refuse_default_personal_storage_test() {
 	local case_dir="$TMP_ROOT/refuse-default-storage"
 	local fake_home="$case_dir/home"
@@ -207,10 +290,15 @@ run_missing_explicit_target_test
 run_refuse_unisolated_storage_test
 run_refuse_invalid_base_url_test
 run_refuse_traversal_storage_test
+run_refuse_relative_storage_test
+run_refuse_protected_storage_with_override_test
+run_refuse_symlink_storage_test
 run_refuse_traversal_isolated_root_test
+run_refuse_symlink_isolated_root_test
 run_refuse_invalid_isolated_addr_test
 run_refuse_invalid_isolated_ready_attempts_test
 run_refuse_invalid_playwright_backend_addr_test
+run_refuse_symlink_playwright_backend_root_test
 run_refuse_default_personal_storage_test
 run_isolated_target_reaches_health_check_test
 

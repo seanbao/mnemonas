@@ -224,8 +224,7 @@ if [[ "$scripts_changed" == "1" ]]; then
 fi
 
 if [[ "$proto_changed" == "1" ]]; then
-	add_command "Regenerate protobuf" "make proto"
-	add_command "Check generated protobuf diff" "git diff --exit-code -- proto/dataplane.pb.go proto/dataplane_grpc.pb.go dataplane/src/proto/mnemonas.dataplane.v1.rs"
+	add_command "Regenerate protobuf and check generated output stability" "tmp=\"\$(mktemp -d)\"; trap 'rm -rf -- \"\$tmp\"' EXIT; git diff -- proto/dataplane.pb.go proto/dataplane_grpc.pb.go dataplane/src/proto/mnemonas.dataplane.v1.rs > \"\$tmp/before.diff\"; make proto; git diff -- proto/dataplane.pb.go proto/dataplane_grpc.pb.go dataplane/src/proto/mnemonas.dataplane.v1.rs > \"\$tmp/after.diff\"; if ! cmp -s \"\$tmp/before.diff\" \"\$tmp/after.diff\"; then printf '%s\n' 'generated protobuf files changed after regeneration; run make proto and keep generated files updated' >&2; diff -u \"\$tmp/before.diff\" \"\$tmp/after.diff\" >&2 || true; exit 1; fi"
 fi
 
 if [[ "$go_changed" == "1" || "$makefile_changed" == "1" ]]; then

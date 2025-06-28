@@ -645,6 +645,64 @@ describe('ShareAccessPage', () => {
     expect(screen.getByText('根目录')).toBeInTheDocument()
   })
 
+  it('ignores stale folder listing responses after navigating to another share', async () => {
+    const user = userEvent.setup()
+    const folderListing = createDeferred<{
+      path: string
+      items: Array<{ name: string; path: string; is_dir: boolean; size: number; mod_time: string }>
+    }>()
+
+    mockGetPublicShare
+      .mockResolvedValueOnce({
+        id: 'folder-share',
+        type: 'folder',
+        has_password: false,
+        permission: 'read',
+        file_name: 'folder-share',
+        folder_items: 1,
+      })
+      .mockResolvedValueOnce({
+        id: 'file-share',
+        type: 'file',
+        has_password: false,
+        permission: 'read',
+        file_name: 'next.txt',
+        file_size: 42,
+      })
+    mockGetPublicShareItems.mockReturnValueOnce(folderListing.promise)
+
+    render(
+      <MemoryRouter initialEntries={['/s/folder-share']}>
+        <Routes>
+          <Route path="/s/:id" element={<NavigatingWrapper nextId="file-share" />} />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('加载文件夹内容...')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: 'go' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('next.txt')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '下载文件' })).toBeInTheDocument()
+    })
+
+    folderListing.resolve({
+      path: '',
+      items: [
+        { name: 'old-folder-file.txt', path: 'old-folder-file.txt', is_dir: false, size: 12, mod_time: '2024-01-02T00:00:00Z' },
+      ],
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('next.txt')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('old-folder-file.txt')).not.toBeInTheDocument()
+  })
+
   it('retries loading folder items after a listing failure', async () => {
     const user = userEvent.setup()
     mockGetPublicShare.mockResolvedValue({

@@ -1,6 +1,8 @@
 import { test, expect, type Page } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
-import { uploadTextFileThroughPicker } from './helpers/files'
+import { createFolderThroughUi, fileRowByName, openFolderThroughUi, uploadTextFileThroughPicker } from './helpers/files'
+
+test.describe.configure({ mode: 'serial' })
 
 /**
  * 文件浏览页面 E2E 测试
@@ -23,14 +25,11 @@ function escapeRegExp(value: string): string {
 }
 
 async function createFolder(page: Page, folderName: string) {
-  await page.getByRole('button', { name: /新建空间|新建文件夹/i }).click()
-  await page.getByPlaceholder('请输入文件夹名称').fill(folderName)
-  await page.getByRole('button', { name: '创建' }).click()
-  await expect(page.getByText(folderName, { exact: true }).first()).toBeVisible({ timeout: 10_000 })
+  await createFolderThroughUi(page, folderName)
 }
 
 async function openFolder(page: Page, folderName: string) {
-  await page.getByText(folderName, { exact: true }).first().dblclick()
+  await openFolderThroughUi(page, folderName)
 }
 
 async function expectFolderView(page: Page, expectedPath: string, breadcrumbName: string) {
@@ -240,6 +239,7 @@ test.describe('文件浏览页面', () => {
     await expectFolderView(page, `/files/${folderName}`, folderName)
 
     await uploadTextFileThroughPicker(page, fileName, `human playwright workflow ${suffix}`)
+    await expect(fileRowByName(page, fileName)).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('上传完成')).toBeVisible({ timeout: 10_000 })
 
     const deleteResponsePromise = page.waitForResponse((response) => {
@@ -290,7 +290,8 @@ test.describe('新建文件夹功能', () => {
       await newFolderBtn.click()
       
       // 检查模态框出现
-      await expect(page.getByText(/新建文件夹|文件夹名称/i)).toBeVisible({ timeout: 5000 })
+      await expect(page.getByRole('heading', { name: '新建文件夹' })).toBeVisible({ timeout: 5000 })
+      await expect(page.getByPlaceholder('请输入文件夹名称')).toBeVisible()
     }
   })
 })

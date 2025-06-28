@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { ensureAuthenticatedAt } from './helpers/auth-check'
-import { uploadTextFileThroughPicker } from './helpers/files'
+import { createFolderThroughUi, fileRowByName, openFolderThroughUi, uploadTextFileThroughPicker } from './helpers/files'
 
 function getVersionPathInput(page: import('@playwright/test').Page) {
   return page.getByRole('textbox', { name: /输入文件路径|文件路径/i })
@@ -108,11 +108,15 @@ test.describe('版本历史查询', () => {
         pageErrors.push(message.text())
       }
     })
-    const fileName = `single-version-${Date.now()}.avif`
-    const targetPath = `/${fileName}`
+    const folderName = `e2e-version-${test.info().workerIndex}-${Date.now()}`
+    const fileName = `single-version-${Date.now()}.txt`
+    const targetPath = `/${folderName}/${fileName}`
 
     await ensureAuthenticatedAt(page, '/files')
+    await createFolderThroughUi(page, folderName)
+    await openFolderThroughUi(page, folderName)
     await uploadTextFileThroughPicker(page, fileName, 'single current version')
+    await expect(fileRowByName(page, fileName)).toBeVisible({ timeout: 10_000 })
 
     await page.goto(`/versions?path=${encodeURIComponent(targetPath)}`, { waitUntil: 'domcontentloaded' })
 

@@ -108,11 +108,26 @@ run_config_rewrite_self_test() {
     assert_file_contains "$TMP_ROOT/self-test.log" "[reverse-proxy-self-test] all checks passed"
 }
 
+run_release_layout_nasd_discovery_test() {
+    local case_dir="$TMP_ROOT/release-layout"
+    mkdir -p "$case_dir/release/scripts"
+    cp "$REPO_ROOT/scripts/setup-reverse-proxy.sh" "$case_dir/release/scripts/setup-reverse-proxy.sh"
+    cat > "$case_dir/release/nasd" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$case_dir/release/nasd"
+
+    MNEMONAS_REVERSE_PROXY_SELF_TEST=1 bash "$case_dir/release/scripts/setup-reverse-proxy.sh" > "$case_dir/self-test.log" 2>&1
+    assert_file_contains "$case_dir/self-test.log" "[reverse-proxy-self-test] all checks passed"
+}
+
 run_domain_validation_tests
 run_email_validation_tests
 run_port_validation_tests
 run_upstream_host_validation_tests
 run_config_path_validation_tests
 run_config_rewrite_self_test
+run_release_layout_nasd_discovery_test
 
 printf '[reverse-proxy-test] all checks passed\n'

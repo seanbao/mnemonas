@@ -818,7 +818,7 @@ label {
   width: min(22rem, calc(100vw - 1.5rem)) !important;
   min-width: 0 !important;
   max-width: calc(100vw - 1.5rem) !important;
-  pointer-events: auto !important;
+  pointer-events: none !important;
 }
 
 .mn-toast-content {
@@ -845,7 +845,7 @@ label {
 [class*="toast-wrapper"],
 [data-slot="toast-region"] [role="status"],
 [data-slot="toast-region"] [role="alert"] {
-  pointer-events: auto !important; /* Toast itself remains clickable */
+  pointer-events: none !important;
   border-radius: 8px !important;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06) !important;
   backdrop-filter: blur(12px);

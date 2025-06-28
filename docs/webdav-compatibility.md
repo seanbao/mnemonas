@@ -10,7 +10,7 @@
 
 补充：部分写请求在变更已经提交、但后续持久化或清理步骤失败时，会保持成功状态码并附带 HTTP `Warning` 响应头，而不是改写成整体失败。当前已覆盖的 warning 文案包括 `199 MnemoNAS "workspace mutation persistence incomplete"`、`199 MnemoNAS "delete cleanup incomplete"`、`199 MnemoNAS "trash delete cleanup incomplete"`。
 
-认证：`auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户挂载根目录映射到自己的 `home_dir`，共享路径按命中的目录授权放行，guest 只读，并对 PUT/COPY 执行用户配额限制；`auth_type = "basic"` 保留为全局服务凭据兼容模式。
+认证：`auth_type = "users"` 使用 MnemoNAS 用户账号登录，普通用户挂载根目录映射到自己的 `home_dir`，共享路径按命中的目录授权放行，guest 只读，并对写入 `home_dir` 的 PUT/COPY/MOVE 执行用户配额限制；共享路径容量由目录配额限制。`auth_type = "basic"` 保留为全局服务凭据兼容模式。
 
 ## 协议实现状态
 

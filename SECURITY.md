@@ -6,7 +6,7 @@ English | [简体中文](SECURITY.zh-CN.md)
 
 | Version | Supported |
 | ------- | --------- |
-| `main` / unreleased | Best-effort fixes before the first public release |
+| `main` / `master` / unreleased | Best-effort fixes before the first public release |
 | Published releases | Latest supported minor after releases are cut |
 | Older releases | Not supported unless noted in release notes |
 
@@ -97,7 +97,7 @@ By default, `make security-check` covers Go with `govulncheck` and Rust with `ca
 
 ### Current Limitations
 
-1. **No Fine-Grained ACL**: Users, roles, and per-user root directories are supported, but per-file ACLs are not
+1. **Limited ACL model**: Users, roles, groups, per-user root directories, and directory access rules are supported, but per-file or RFC-style ACLs are not
 2. **HTTP by Default**: Built-in TLS exists, but production HTTPS is best handled by a reverse proxy
 3. **Local Network Focus**: MnemoNAS is not designed for direct internet exposure without a hardened proxy/VPN layer
 

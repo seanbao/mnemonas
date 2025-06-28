@@ -81,7 +81,7 @@ MnemoNAS has a built-in backup job entry point that can run from the Maintenance
 
 Limits:
 
-- `local.destination` must be an absolute path outside `storage.root`; existing destination path components must not be symlinks, otherwise the backup can recurse into itself or write through a symlink target.
+- `local.destination` must be an absolute path outside `storage.root`; existing destination path components must not be symlinks, otherwise the backup can recurse into itself or write through a symlink target. Local restore previews, restores, and restore drills recheck the destination before reading snapshot manifests or creating drill artifacts.
 - The default source is `storage.root`; for production data, prefer a ZFS, Btrfs, or LVM snapshot mount as `source`.
 - Symlinks inside the source directory abort backup jobs so the backup cannot escape the intended source tree. `rclone` restore drills also reject current source-tree symlinks before remote verification.
 - `restic` and `rclone` jobs do not build shell command strings; `command` must be a bare executable name or absolute path, and `extra_args` are appended to backup commands as argv entries. Restore commands do not reuse backup-specific extra args.
@@ -403,6 +403,9 @@ For Docker, replace the systemd commands with `docker compose stop` and `docker 
 ```bash
 sudo systemctl start mnemonas-dataplane mnemonas
 sudo mnemonas-doctor
+
+# Docker start; for release images, use docker compose up -d --no-build instead.
+docker compose up -d
 
 curl http://localhost:8080/health
 

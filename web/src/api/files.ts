@@ -136,6 +136,7 @@ export interface DiagnosticsInfo {
   }
   goroutines?: number
   filesystem?: {
+    trashStatsAvailable?: boolean
     trashItems?: number
     trashSize?: number
     diskStatsAvailable?: boolean
@@ -145,6 +146,9 @@ export interface DiagnosticsInfo {
     diskUsed?: number
     diskUsageRatio?: number
     diskFilesystemType?: string
+    diskMountPoint?: string
+    diskMountSource?: string
+    diskMountOptions?: string
     diskNativeDataChecksumSupport?: boolean
   }
   alerts?: {
@@ -802,6 +806,7 @@ function isDiagnosticsShape(value: unknown): value is {
   }
   goroutines?: number
   filesystem?: {
+    trash_stats_available?: boolean
     trash_items?: number
     trash_size?: number
     disk_stats_available?: boolean
@@ -811,6 +816,9 @@ function isDiagnosticsShape(value: unknown): value is {
     disk_used?: number
     disk_usage_ratio?: number
     disk_filesystem_type?: string
+    disk_mount_point?: string
+    disk_mount_source?: string
+    disk_mount_options?: string
     disk_native_data_checksum_support?: boolean
   }
   alerts?: {
@@ -918,6 +926,7 @@ function isDiagnosticsShape(value: unknown): value is {
 
   if (value.filesystem !== undefined) {
     if (!isRecord(value.filesystem)
+      || !isBooleanOrUndefined(value.filesystem.trash_stats_available)
       || !isNumberOrUndefined(value.filesystem.trash_items)
       || !isNumberOrUndefined(value.filesystem.trash_size)
       || !isBooleanOrUndefined(value.filesystem.disk_stats_available)
@@ -927,6 +936,9 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isNumberOrUndefined(value.filesystem.disk_used)
       || !isNumberOrUndefined(value.filesystem.disk_usage_ratio)
       || !isStringOrUndefined(value.filesystem.disk_filesystem_type)
+      || !isStringOrUndefined(value.filesystem.disk_mount_point)
+      || !isStringOrUndefined(value.filesystem.disk_mount_source)
+      || !isStringOrUndefined(value.filesystem.disk_mount_options)
       || !isBooleanOrUndefined(value.filesystem.disk_native_data_checksum_support)) {
       return false
     }
@@ -1824,6 +1836,7 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
     } : undefined,
     goroutines: data.goroutines,
     filesystem: data.filesystem ? {
+      trashStatsAvailable: data.filesystem.trash_stats_available,
       trashItems: data.filesystem.trash_items,
       trashSize: data.filesystem.trash_size,
       diskStatsAvailable: data.filesystem.disk_stats_available,
@@ -1833,6 +1846,9 @@ export async function getDiagnostics(): Promise<DiagnosticsInfo> {
       diskUsed: data.filesystem.disk_used,
       diskUsageRatio: data.filesystem.disk_usage_ratio,
       diskFilesystemType: data.filesystem.disk_filesystem_type,
+      diskMountPoint: data.filesystem.disk_mount_point,
+      diskMountSource: data.filesystem.disk_mount_source,
+      diskMountOptions: data.filesystem.disk_mount_options,
       diskNativeDataChecksumSupport: data.filesystem.disk_native_data_checksum_support,
     } : undefined,
     alerts: data.alerts ? {

@@ -37,6 +37,48 @@ func TestCleanupManagedTempPath_ReturnsOperationError(t *testing.T) {
 	}
 }
 
+func TestConfigSaveRetriesTempNameCollision(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	collisionPath := filepath.Join(tmpDir, ".config-collision.tmp")
+	if err := os.WriteFile(collisionPath, []byte("busy"), 0600); err != nil {
+		t.Fatalf("WriteFile(collision) error: %v", err)
+	}
+
+	originalTempName := managedTempName
+	calls := 0
+	managedTempName = func(pattern string) (string, error) {
+		calls++
+		if calls == 1 {
+			return ".config-collision.tmp", nil
+		}
+		return ".config-success.tmp", nil
+	}
+	defer func() {
+		managedTempName = originalTempName
+	}()
+
+	cfg := Default()
+	cfg.Server.Port = 18080
+	if err := cfg.Save(configPath); err != nil {
+		t.Fatalf("Save() error after temp-name collision: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("managedTempName calls = %d, want 2", calls)
+	}
+	if _, err := os.Stat(collisionPath); err != nil {
+		t.Fatalf("collision temp file should remain untouched: %v", err)
+	}
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(saved config) error: %v", err)
+	}
+	if loaded.Server.Port != 18080 {
+		t.Fatalf("loaded server port = %d, want 18080", loaded.Server.Port)
+	}
+}
+
 func TestDefault(t *testing.T) {
 	cfg := Default()
 
@@ -218,6 +260,47 @@ func TestConfig_Validate(t *testing.T) {
 			name:    "Invalid trusted proxy CIDR",
 			modify:  func(c *Config) { c.Server.TrustedProxyCIDRs = []string{"not-a-cidr"} },
 			wantErr: true,
+		},
+		{
+			name: "Invalid TLS certificate pair missing key",
+			modify: func(c *Config) {
+				c.Server.TLS.Enabled = true
+				c.Server.TLS.CertFile = filepath.Join(t.TempDir(), "server.crt")
+				c.Server.TLS.KeyFile = ""
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid TLS certificate pair same path",
+			modify: func(c *Config) {
+				c.Server.TLS.Enabled = true
+				certFile := filepath.Join(t.TempDir(), "server.pem")
+				c.Server.TLS.CertFile = certFile
+				c.Server.TLS.KeyFile = certFile
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid TLS without auto-generate and no certificate source",
+			modify: func(c *Config) {
+				c.Server.TLS.Enabled = true
+				c.Server.TLS.AutoGenerate = false
+				c.Server.TLS.CertFile = ""
+				c.Server.TLS.KeyFile = ""
+				c.Server.TLS.CertDir = ""
+			},
+			wantErr: true,
+		},
+		{
+			name: "Valid TLS explicit distinct pair without auto-generate",
+			modify: func(c *Config) {
+				c.Server.TLS.Enabled = true
+				c.Server.TLS.AutoGenerate = false
+				certDir := t.TempDir()
+				c.Server.TLS.CertFile = filepath.Join(certDir, "server.crt")
+				c.Server.TLS.KeyFile = filepath.Join(certDir, "server.key")
+			},
+			wantErr: false,
 		},
 		{
 			name:    "Empty storage.root",
@@ -1761,6 +1844,59 @@ func TestLoad_ExampleConfig(t *testing.T) {
 	if cfg.Alerts.CheckInterval != time.Hour {
 		t.Fatalf("expected alerts check interval 1h, got %s", cfg.Alerts.CheckInterval)
 	}
+	if cfg.Share.DefaultExpiresIn != 168*time.Hour {
+		t.Fatalf("expected share default expiry 168h, got %s", cfg.Share.DefaultExpiresIn)
+	}
+	if cfg.Alerts.SMTPPort != 587 {
+		t.Fatalf("expected SMTP port 587, got %d", cfg.Alerts.SMTPPort)
+	}
+	if cfg.Maintenance.Scrub.ScheduleInterval != 168*time.Hour {
+		t.Fatalf("expected scrub schedule interval 168h, got %s", cfg.Maintenance.Scrub.ScheduleInterval)
+	}
+}
+
+func TestLoad_DocumentationConfigExamples(t *testing.T) {
+	for _, docPath := range []string{
+		filepath.Join("..", "..", "docs", "configuration.md"),
+		filepath.Join("..", "..", "docs", "configuration.en.md"),
+	} {
+		t.Run(filepath.Base(docPath), func(t *testing.T) {
+			data, err := os.ReadFile(docPath)
+			if err != nil {
+				t.Fatalf("failed to read documentation config example: %v", err)
+			}
+			configText := extractFirstTomlBlock(t, string(data))
+			configPath := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(configPath, []byte(configText), 0600); err != nil {
+				t.Fatalf("failed to write documentation config example: %v", err)
+			}
+			cfg, err := Load(configPath)
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.Share.DefaultExpiresIn != 168*time.Hour {
+				t.Fatalf("share default expiry = %s, want 168h", cfg.Share.DefaultExpiresIn)
+			}
+			if cfg.Maintenance.Scrub.ScheduleInterval != 168*time.Hour {
+				t.Fatalf("scrub schedule interval = %s, want 168h", cfg.Maintenance.Scrub.ScheduleInterval)
+			}
+		})
+	}
+}
+
+func extractFirstTomlBlock(t *testing.T, markdown string) string {
+	t.Helper()
+	const marker = "```toml\n"
+	start := strings.Index(markdown, marker)
+	if start < 0 {
+		t.Fatal("documentation config example does not contain a TOML block")
+	}
+	start += len(marker)
+	end := strings.Index(markdown[start:], "\n```")
+	if end < 0 {
+		t.Fatal("documentation config example TOML block is not closed")
+	}
+	return markdown[start : start+end]
 }
 
 func TestConfig_SaveLoad(t *testing.T) {

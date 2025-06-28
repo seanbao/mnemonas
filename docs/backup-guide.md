@@ -89,7 +89,7 @@ MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查
 
 限制：
 
-- `local.destination` 必须是 `storage.root` 之外的绝对路径，且已存在的路径组件不能是符号链接，避免递归把备份写回源目录或写入符号链接指向的位置。
+- `local.destination` 必须是 `storage.root` 之外的绝对路径，且已存在的路径组件不能是符号链接，避免递归把备份写回源目录或写入符号链接指向的位置。本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。
 - 默认来源是 `storage.root`；生产环境更推荐把 `source` 指向 ZFS/Btrfs/LVM 快照挂载目录。
 - 源目录中遇到符号链接会中止备份任务，避免备份逃逸到源目录之外；`rclone` 恢复演练也会在执行远端校验前拒绝当前源树中的符号链接。
 - `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。
@@ -456,7 +456,7 @@ restic restore <snapshot-id> \
 sudo systemctl start mnemonas-dataplane mnemonas
 sudo mnemonas-doctor
 
-# Docker 启动服务
+# Docker 启动服务；release 镜像可改用 docker compose up -d --no-build
 docker compose up -d
 
 # 检查健康状态

@@ -1210,7 +1210,7 @@ type ObjectInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Hash  string                 `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
 	Size  uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	// NEW-2 fix: Creation timestamp for GC grace period filtering
+	// Creation timestamp for GC grace period filtering
 	CreatedAtUnix *int64 `protobuf:"varint,3,opt,name=created_at_unix,json=createdAtUnix,proto3,oneof" json:"created_at_unix,omitempty"` // Unix timestamp in seconds
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

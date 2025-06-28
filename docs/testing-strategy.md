@@ -157,13 +157,13 @@ func TestCASIntegration_WriteReadVerify(t *testing.T) {
 
 ### 3.1 用户场景测试
 
-默认入口是 `make e2e`，它通过 `scripts/run-e2e-isolated.sh` 启动临时后端、临时存储和非默认端口，再调用 `scripts/e2e-test.sh` 测试真实用户场景。需要跳过耗时测试时：
+默认入口是 `make e2e`，它通过 `scripts/run-e2e-isolated.sh` 启动临时后端、临时存储和非默认端口，再调用 `scripts/e2e-test.sh` 测试真实用户场景。隔离根目录必须位于 `/tmp` 或当前 checkout 下，且不能包含 `..` 或符号链接路径组件。需要跳过耗时测试时：
 
 ```bash
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-`scripts/e2e-test.sh` 可以手动打一个已启动的服务；此时需要显式提供 `BASE_URL` 和对应的临时存储、配置、密钥、初始密码文件路径。
+`scripts/e2e-test.sh` 可以手动打一个已启动的服务；此时需要显式提供 `BASE_URL` 和对应的临时存储、配置、密钥、初始密码文件路径。手动 `STORAGE_ROOT` 必须是绝对路径，不能包含 `..` 或符号链接路径组件，且默认只允许位于 `/tmp` 或当前 checkout 下。
 
 示例场景：
 
@@ -359,9 +359,10 @@ RUN_CORRUPTION_TESTS=0 \
 
 - 必须显式传入 `BASE_URL`、`STORAGE_ROOT` 和 `NASD_BIN`
 - 默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`
+- `STORAGE_ROOT` 必须是绝对路径，不能包含 `..` 或符号链接路径组件
 - 默认拒绝 `$HOME/.mnemonas`
 - 非交互环境必须设置 `FAULT_INJECTION_ASSUME_YES=1`
-- 真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`
+- 真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能指向 `/`、`/tmp`、`/var` 等受保护系统目录
 
 这些门禁由 `scripts/test-fault-injection-safety.sh` 回归测试覆盖，并纳入 `make scripts-check`。
 

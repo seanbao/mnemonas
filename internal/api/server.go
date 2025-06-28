@@ -2165,6 +2165,55 @@ func (s *Server) authorizeUserTreeMovePath(ctx context.Context, sourcePath, dest
 	return s.authorizeUserTreeDescendants(ctx, sourcePath, destinationPath, pathAccessWrite)
 }
 
+func (s *Server) authorizeUserTreeCopyPath(ctx context.Context, sourcePath, destinationPath string) error {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return nil
+	}
+	if err := s.authorizeUserPath(ctx, sourcePath); err != nil {
+		return err
+	}
+	if err := s.authorizeUserWritePath(ctx, destinationPath); err != nil {
+		return err
+	}
+	if s.fs == nil || !s.hasDirectoryAccessRules() {
+		return nil
+	}
+	return s.authorizeUserCopyTreeDescendants(ctx, sourcePath, destinationPath)
+}
+
+func (s *Server) authorizeUserCopyTreeDescendants(ctx context.Context, sourcePath, destinationPath string) error {
+	info, err := s.fs.Stat(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir {
+		return nil
+	}
+
+	children, err := s.fs.ReadDir(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		if err := s.authorizeUserPathFor(ctx, child.Path, pathAccessRead); err != nil {
+			return err
+		}
+		childDestination := mapDescendantPath(sourcePath, destinationPath, child.Path)
+		if err := s.authorizeUserPathFor(ctx, childDestination, pathAccessWrite); err != nil {
+			return err
+		}
+		if child.IsDir {
+			if err := s.authorizeUserCopyTreeDescendants(ctx, child.Path, childDestination); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Server) authorizeUserTrashItemTreeWritePath(ctx context.Context, item *storage.TrashItem, destinationPath string) error {
 	if item == nil {
 		return storage.ErrNotFound
@@ -2534,7 +2583,6 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REM-5 fix: Validate path to prevent traversal attacks
 	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -2601,7 +2649,6 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REM-5 fix: Validate path
 	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -2677,7 +2724,6 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REM-5 fix: Validate path
 	dirPath, err = validatePath(dirPath)
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -2757,7 +2803,6 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REM-5 fix: Validate path
 	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -2847,7 +2892,6 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REM-5 fix: Validate path
 	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -3183,6 +3227,12 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "stat copy destination parent", err)
 		return
 	}
+	if srcInfo.IsDir {
+		if err := s.authorizeUserTreeCopyPath(r.Context(), fromPath, toPath); err != nil {
+			respondPathAccessError(w, err)
+			return
+		}
+	}
 	if err := s.copyResourceWithQuota(r.Context(), fromPath, toPath); err != nil {
 		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
 			markWorkspaceMutationWarningHeaders(w)
@@ -3332,7 +3382,6 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REM-5 fix: Validate path
 	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -3406,7 +3455,6 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REM-5 fix: Validate path
 	filePath, err = validatePath(filePath)
 	if err != nil {
 		badRequestInvalidPath(w)
@@ -4100,7 +4148,6 @@ func (s *Server) logScheduledScrubActivity(status string, result *dataplane.Scru
 }
 
 func (s *Server) handleScrub(w http.ResponseWriter, r *http.Request) {
-	// M3 fix: Limit request body size
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultScrubRequestBodyLimit)
 
 	// Parse optional hashes from request body
@@ -4348,9 +4395,9 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), DefaultGCTimeout*time.Second)
 	defer cancel()
 
-	// I3 fix: Grace period - skip objects created in the last 24 hours
-	// This prevents deleting chunks from in-progress uploads
-	graceCutoff := time.Now().Add(-gracePeriod) // NEW-2 fix: actual cutoff time
+	// Skip objects created during the grace period to avoid deleting chunks
+	// from in-progress uploads.
+	graceCutoff := time.Now().Add(-gracePeriod)
 
 	// Step 1: Block storage mutations for the duration of GC and snapshot referenced hashes.
 	referencedHashes, releaseGCLock, err := s.fs.AcquireGCLock(ctx)
@@ -4891,8 +4938,12 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	}
 
 	activityPath := item.OriginalPath
+	quotaTargetPath := item.OriginalPath
+	if newPath != "" {
+		quotaTargetPath = newPath
+	}
 
-	err = s.restoreFromTrashWithQuota(r.Context(), item, func() error {
+	err = s.restoreFromTrashWithQuota(r.Context(), item, quotaTargetPath, func() error {
 		if newPath != "" {
 			// Restore to custom path
 			activityPath = newPath
@@ -4904,11 +4955,7 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 
 	if err != nil {
 		if errors.As(err, new(*quotaExceededError)) {
-			targetPath := ""
-			if item != nil {
-				targetPath = item.OriginalPath
-			}
-			s.sendQuotaExceededAlertEvent(r.Context(), "trash_restore", targetPath, err)
+			s.sendQuotaExceededAlertEvent(r.Context(), "trash_restore", quotaTargetPath, err)
 			respondQuotaExceeded(w, err)
 			return
 		}
@@ -7273,8 +7320,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			updatedConfig.DiskHealth.MediaWearCriticalPct = *req.DiskHealth.MediaWearCriticalPct
 		}
 		if req.DiskHealth.Devices != nil {
-			devices := append([]config.DiskHealthDeviceConfig(nil), (*req.DiskHealth.Devices)...)
-			updatedConfig.DiskHealth.Devices = devices
+			updatedConfig.DiskHealth.Devices = config.NormalizeDiskHealthDevices(*req.DiskHealth.Devices)
 		}
 	}
 

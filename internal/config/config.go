@@ -28,6 +28,7 @@ var errManagedDirectorySymlink = errors.New("managed directory path must not be 
 var syncManagedDir = syncManagedDirectory
 var syncManagedRootDir = syncManagedRootDirectory
 var afterValidateManagedFilePath = func() {}
+var managedTempName = newManagedTempName
 
 var managedDirRootsMu sync.RWMutex
 var managedDirRoots = map[string]*os.Root{}
@@ -35,6 +36,7 @@ var managedDirRoots = map[string]*os.Root{}
 const (
 	configFileMode         os.FileMode = 0600
 	managedRootEscapeError             = "path escapes from parent"
+	maxManagedTempAttempts             = 32
 )
 
 var durationFieldPaths = [][]string{
@@ -46,6 +48,7 @@ var durationFieldPaths = [][]string{
 	{"dataplane", "timeout"},
 	{"auth", "access_token_ttl"},
 	{"auth", "refresh_token_ttl"},
+	{"share", "default_expires_in"},
 	{"alerts", "check_interval"},
 	{"alerts", "cooldown_period"},
 	{"disk_health", "check_interval"},
@@ -529,7 +532,7 @@ func applyStorageRootDefaults(cfg *Config, defaultRoot string) {
 	cfg.Alerts.SMTPFrom = strings.TrimSpace(cfg.Alerts.SMTPFrom)
 	cfg.Alerts.SMTPTo = normalizeTrimmedStringSlice(cfg.Alerts.SMTPTo)
 	cfg.DiskHealth.Command = expandUserPath(strings.TrimSpace(cfg.DiskHealth.Command))
-	cfg.DiskHealth.Devices = normalizeDiskHealthDevices(cfg.DiskHealth.Devices)
+	cfg.DiskHealth.Devices = NormalizeDiskHealthDevices(cfg.DiskHealth.Devices)
 	cfg.Server.TLS.CertDir = expandUserPath(cfg.Server.TLS.CertDir)
 	cfg.Server.TLS.CertFile = expandUserPath(cfg.Server.TLS.CertFile)
 	cfg.Server.TLS.KeyFile = expandUserPath(cfg.Server.TLS.KeyFile)
@@ -689,20 +692,24 @@ func normalizeSMBShares(shares []SMBShareConfig) []SMBShareConfig {
 	return shares
 }
 
-func normalizeDiskHealthDevices(devices []DiskHealthDeviceConfig) []DiskHealthDeviceConfig {
+// NormalizeDiskHealthDevices returns a copy with trimmed labels and clean host paths.
+func NormalizeDiskHealthDevices(devices []DiskHealthDeviceConfig) []DiskHealthDeviceConfig {
 	if devices == nil {
 		return []DiskHealthDeviceConfig{}
 	}
-	for i := range devices {
-		devices[i].Name = strings.TrimSpace(devices[i].Name)
-		devices[i].Path = expandUserPath(strings.TrimSpace(devices[i].Path))
-		if devices[i].Path != "" {
-			devices[i].Path = filepath.Clean(devices[i].Path)
+	normalized := make([]DiskHealthDeviceConfig, 0, len(devices))
+	for _, device := range devices {
+		copied := device
+		copied.Name = strings.TrimSpace(copied.Name)
+		copied.Path = expandUserPath(strings.TrimSpace(copied.Path))
+		if copied.Path != "" {
+			copied.Path = filepath.Clean(copied.Path)
 		}
-		devices[i].Type = strings.TrimSpace(devices[i].Type)
-		devices[i].Serial = strings.TrimSpace(devices[i].Serial)
+		copied.Type = strings.TrimSpace(copied.Type)
+		copied.Serial = strings.TrimSpace(copied.Serial)
+		normalized = append(normalized, copied)
 	}
-	return devices
+	return normalized
 }
 
 func normalizeBackupJobs(jobs []BackupJobConfig) []BackupJobConfig {
@@ -1417,15 +1424,22 @@ func chmodManagedFileWithRoot(root *os.Root, path string, mode os.FileMode, syml
 }
 
 func createManagedTempFile(root *os.Root, pattern string, symlinkErr error) (*os.File, string, error) {
-	tmpName, err := newManagedTempName(pattern)
-	if err != nil {
-		return nil, "", err
-	}
-	tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-	if err != nil {
+	for range maxManagedTempAttempts {
+		tmpName, err := managedTempName(pattern)
+		if err != nil {
+			return nil, "", err
+		}
+		tmpFile, err := rootio.OpenFileNoFollow(root, tmpName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		if err == nil {
+			return tmpFile, tmpName, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
 		return nil, "", mapManagedRootPathError(err, symlinkErr)
 	}
-	return tmpFile, tmpName, nil
+
+	return nil, "", errors.New("failed to allocate unique managed temp file")
 }
 
 func newManagedTempName(pattern string) (string, error) {
@@ -1501,6 +1515,9 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("server.trusted_proxy_hops cannot be negative"))
 	}
 	if err := validateTrustedProxyCIDRs(c.Server.TrustedProxyCIDRs); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateServerTLSConfig(c.Server.TLS); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -1698,6 +1715,60 @@ func validateTrustedProxyCIDRs(values []string) error {
 		}
 	}
 	return nil
+}
+
+func validateServerTLSConfig(cfg TLSConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+
+	var errs []error
+	certFile := strings.TrimSpace(cfg.CertFile)
+	keyFile := strings.TrimSpace(cfg.KeyFile)
+	certDir := strings.TrimSpace(cfg.CertDir)
+	certConfigured := certFile != ""
+	keyConfigured := keyFile != ""
+
+	if certConfigured != keyConfigured {
+		errs = append(errs, errors.New("server.tls.cert_file and server.tls.key_file must be set together"))
+	}
+	if !cfg.AutoGenerate && !certConfigured && !keyConfigured && certDir == "" {
+		errs = append(errs, errors.New("server.tls.cert_dir or a certificate file pair is required when server.tls.auto_generate=false"))
+	}
+	if certConfigured && keyConfigured {
+		samePath, err := sameConfigFilePath(certFile, keyFile)
+		if err != nil {
+			errs = append(errs, err)
+		} else if samePath {
+			errs = append(errs, errors.New("server.tls.cert_file and server.tls.key_file must be different files"))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func sameConfigFilePath(left, right string) (bool, error) {
+	normalizedLeft, err := normalizeComparableConfigPath(left, "server.tls.cert_file")
+	if err != nil {
+		return false, err
+	}
+	normalizedRight, err := normalizeComparableConfigPath(right, "server.tls.key_file")
+	if err != nil {
+		return false, err
+	}
+	return normalizedLeft == normalizedRight, nil
+}
+
+func normalizeComparableConfigPath(path, label string) (string, error) {
+	cleaned := filepath.Clean(expandUserPath(path))
+	if filepath.IsAbs(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve %s path: %w", label, err)
+	}
+	return filepath.Clean(absPath), nil
 }
 
 func validateWebhookHeader(header string) error {

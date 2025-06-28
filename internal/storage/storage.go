@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -1661,13 +1662,16 @@ func (fs *FileSystem) WalkTrashItemRestorePaths(ctx context.Context, id string, 
 		return err
 	}
 
-	contentPath := filepath.Join(fs.trashRoot, id, "content")
-	info, err := os.Lstat(contentPath)
+	contentRel := filepath.Join(id, "content")
+	info, err := fs.trashRootHandle.Lstat(contentRel)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
 		}
-		return err
+		return mapStorageRootPathError(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errStoragePathSymlink
 	}
 
 	originalRoot := path.Clean(item.OriginalPath)
@@ -1678,29 +1682,63 @@ func (fs *FileSystem) WalkTrashItemRestorePaths(ctx context.Context, id string, 
 		return nil
 	}
 
-	return filepath.WalkDir(contentPath, func(currentPath string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if errors.Is(walkErr, os.ErrNotExist) {
+	return fs.walkTrashContentRestorePaths(ctx, contentRel, contentRel, originalRoot, fn)
+}
+
+func (fs *FileSystem) walkTrashContentRestorePaths(ctx context.Context, contentRootRel, currentRel, originalRoot string, fn func(restoredPath string, isDir bool) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	dirHandle, err := rootio.OpenDirNoFollow(fs.trashRootHandle, currentRel)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return mapStorageRootPathError(err)
+	}
+	defer dirHandle.Close()
+
+	entries, err := dirHandle.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		childRel := filepath.Join(currentRel, entry.Name())
+		info, err := fs.trashRootHandle.Lstat(childRel)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
 				return ErrNotFound
 			}
-			return walkErr
+			return mapStorageRootPathError(err)
 		}
-		if currentPath == contentPath {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errStoragePathSymlink
 		}
 
-		relativePath, err := filepath.Rel(contentPath, currentPath)
+		relativePath, err := filepath.Rel(contentRootRel, childRel)
 		if err != nil {
 			return err
 		}
 		restoredPath := path.Clean(path.Join(originalRoot, filepath.ToSlash(relativePath)))
-		return fn(restoredPath, entry.IsDir())
-	})
+		if err := fn(restoredPath, info.IsDir()); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if err := fs.walkTrashContentRestorePaths(ctx, contentRootRel, childRel, originalRoot, fn); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 // RestoreFromTrash restores a file from trash

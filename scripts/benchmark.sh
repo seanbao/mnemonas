@@ -67,6 +67,15 @@ require_explicit_benchmark_target() {
         echo "ERROR: MNEMONAS_STORAGE_ROOT must not contain '..' path segments: $STORAGE_ROOT" >&2
         exit 1
     fi
+    if [[ "$STORAGE_ROOT" != /* ]]; then
+        echo "ERROR: MNEMONAS_STORAGE_ROOT must be an absolute path: $STORAGE_ROOT" >&2
+        exit 1
+    fi
+    if is_protected_storage_root "$STORAGE_ROOT"; then
+        echo "ERROR: MNEMONAS_STORAGE_ROOT points at a protected system directory: $STORAGE_ROOT" >&2
+        exit 1
+    fi
+    require_no_symlink_components "$STORAGE_ROOT" "MNEMONAS_STORAGE_ROOT"
 
     if [[ "$ALLOW_REAL_STORAGE" != "1" ]]; then
         case "$STORAGE_ROOT" in
@@ -96,6 +105,58 @@ path_has_parent_segment() {
         fi
     done
     return 1
+}
+
+require_no_symlink_components() {
+    local value="$1"
+    local label="$2"
+    local trimmed="$value"
+    local current="."
+    local -a segments
+
+    if [[ "$value" == /* ]]; then
+        trimmed="${value#/}"
+        current="/"
+    fi
+    trimmed="${trimmed%/}"
+
+    IFS='/' read -r -a segments <<< "$trimmed"
+    for segment in "${segments[@]}"; do
+        [[ -n "$segment" && "$segment" != "." ]] || continue
+        if [[ "$current" == "/" ]]; then
+            current="/$segment"
+        else
+            current="$current/$segment"
+        fi
+        if [[ -L "$current" ]]; then
+            echo "ERROR: $label must not contain symlink path components: $current" >&2
+            exit 1
+        fi
+        [[ -e "$current" ]] || break
+    done
+}
+
+normalize_absolute_path() {
+    local value="$1"
+
+    while [[ "$value" != "/" && "$value" == */ ]]; do
+        value="${value%/}"
+    done
+    printf '%s\n' "$value"
+}
+
+is_protected_storage_root() {
+    local value
+
+    value="$(normalize_absolute_path "$1")"
+    case "$value" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/local|/usr/local/bin|/usr/local/share|/var)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 read_config_value() {

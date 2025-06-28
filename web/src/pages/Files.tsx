@@ -1513,6 +1513,7 @@ export function FilesPage() {
   const virtualizer = useVirtualizer({
     count: sortedFiles.length,
     getScrollElement: () => parentRef.current,
+    getItemKey: (index) => sortedFiles[index]?.path ?? index,
     estimateSize: () => 72, // Increased row height
     overscan: 10,
   })
@@ -2991,7 +2992,7 @@ export function FilesPage() {
                   if (!file) return null
                   return (
                     <div
-                      key={virtualItem.key}
+                      key={file.path}
                       style={{
                         position: 'absolute',
                         top: 0,
@@ -3002,6 +3003,7 @@ export function FilesPage() {
                       }}
                     >
                       <FileRow
+                        key={file.path}
                         file={file}
                         isSelected={selectedFiles.has(file.path)}
                         isActive={activeFilePath === file.path}

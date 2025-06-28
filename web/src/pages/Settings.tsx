@@ -57,6 +57,7 @@ import {
   type DirectoryAccessRule,
   type DirectoryAccessRole,
   type DirectoryQuota,
+  type DiskHealthDeviceSettings,
   type SecurityCheckData,
   type SecurityCheckItem,
   type SecurityCheckStatus,
@@ -719,6 +720,88 @@ function parseDirectoryAccessRuleLines(value: string): { rules: DirectoryAccessR
   }
 
   return { rules }
+}
+
+function formatDiskHealthDeviceLines(devices: DiskHealthDeviceSettings[] | undefined): string {
+  return (devices ?? [])
+    .map((device) => [
+      device.path,
+      device.name ?? '',
+      device.type ?? '',
+      device.serial ?? '',
+      device.temperature_warning_c ? String(device.temperature_warning_c) : '',
+      device.temperature_critical_c ? String(device.temperature_critical_c) : '',
+    ].join(' | '))
+    .join('\n')
+}
+
+function parseOptionalNonNegativeIntegerCell(value: string, lineNumber: number, field: string): { value?: number; error?: string } {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return {}
+  }
+  const parsed = Number(trimmed)
+  if (!/^\d+$/.test(trimmed) || !Number.isInteger(parsed)) {
+    return { error: `第 ${lineNumber} 行 ${field} 必须是 0 或正整数` }
+  }
+  return { value: parsed }
+}
+
+function parseDiskHealthDeviceLines(value: string): { devices: DiskHealthDeviceSettings[]; error?: string } {
+  const lines = value.split('\n')
+  const devices: DiskHealthDeviceSettings[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineNumber = index + 1
+    const line = lines[index].trim()
+    if (!line) {
+      continue
+    }
+
+    const parts = line.split('|').map((part) => part.trim())
+    if (parts.length > 6) {
+      return { devices: [], error: `第 ${lineNumber} 行最多包含 6 列` }
+    }
+
+    const [path, name = '', type = '', serial = '', warningText = '', criticalText = ''] = parts
+    if (!path || !path.startsWith('/') || hasControlChar(path)) {
+      return { devices: [], error: `第 ${lineNumber} 行设备路径必须是绝对路径` }
+    }
+    if ([name, type, serial].some(hasControlChar)) {
+      return { devices: [], error: `第 ${lineNumber} 行设备名称、类型和序列号不能包含控制字符` }
+    }
+
+    const warning = parseOptionalNonNegativeIntegerCell(warningText, lineNumber, '温度提醒阈值')
+    if (warning.error) {
+      return { devices: [], error: warning.error }
+    }
+    const critical = parseOptionalNonNegativeIntegerCell(criticalText, lineNumber, '温度严重阈值')
+    if (critical.error) {
+      return { devices: [], error: critical.error }
+    }
+    if (warning.value && critical.value && critical.value < warning.value) {
+      return { devices: [], error: `第 ${lineNumber} 行温度严重阈值不能小于提醒阈值` }
+    }
+
+    devices.push({
+      path,
+      ...(name && { name }),
+      ...(type && { type }),
+      ...(serial && { serial }),
+      ...(warning.value !== undefined && { temperature_warning_c: warning.value }),
+      ...(critical.value !== undefined && { temperature_critical_c: critical.value }),
+    })
+  }
+
+  return { devices }
+}
+
+function isValidDiskHealthCommand(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed || hasControlChar(trimmed) || /\s/.test(trimmed) || trimmed === '.' || trimmed === '..') {
+    return false
+  }
+  return trimmed.startsWith('/') || !trimmed.includes('/')
 }
 
 function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRule[]): { rules: SharePolicyRule[]; error?: string } {
@@ -1705,10 +1788,28 @@ export function SettingsPage() {
     alertsTelegramBotToken: '',
     alertsTelegramBotTokenConfigured: false,
     alertsTelegramChatID: '',
+    alertsEmailEnabled: false,
+    alertsSMTPHost: '',
+    alertsSMTPPort: '587',
+    alertsSMTPUsername: '',
+    alertsSMTPPassword: '',
+    alertsSMTPPasswordConfigured: false,
+    alertsSMTPFrom: '',
+    alertsSMTPTo: '',
     scrubScheduleEnabled: false,
     scrubScheduleInterval: '168h',
     scrubRetryInterval: '1h',
     scrubMaxRetries: '1',
+    diskHealthEnabled: false,
+    diskHealthCheckInterval: '1h',
+    diskHealthProbeTimeout: '15s',
+    diskHealthCooldownPeriod: '4h',
+    diskHealthCommand: 'smartctl',
+    diskHealthTemperatureWarningC: '50',
+    diskHealthTemperatureCriticalC: '60',
+    diskHealthMediaWearWarningPct: '80',
+    diskHealthMediaWearCriticalPct: '100',
+    diskHealthDevices: '',
     dataplaneGrpcAddress: '127.0.0.1:9090',
     dataplaneTimeout: '30s',
     dataplaneMaxRetries: '3',
@@ -1935,10 +2036,28 @@ export function SettingsPage() {
       alertsTelegramBotToken: '',
       alertsTelegramBotTokenConfigured: data.alerts?.telegram_bot_token_configured ?? false,
       alertsTelegramChatID: data.alerts?.telegram_chat_id ?? '',
+      alertsEmailEnabled: data.alerts?.email_enabled ?? false,
+      alertsSMTPHost: data.alerts?.smtp_host ?? '',
+      alertsSMTPPort: String(data.alerts?.smtp_port ?? 587),
+      alertsSMTPUsername: data.alerts?.smtp_username ?? '',
+      alertsSMTPPassword: '',
+      alertsSMTPPasswordConfigured: data.alerts?.smtp_password_configured ?? false,
+      alertsSMTPFrom: data.alerts?.smtp_from ?? '',
+      alertsSMTPTo: data.alerts?.smtp_to?.join('\n') ?? '',
       scrubScheduleEnabled: data.maintenance?.scrub?.enabled ?? false,
       scrubScheduleInterval: data.maintenance?.scrub?.schedule_interval ?? '168h',
       scrubRetryInterval: data.maintenance?.scrub?.retry_interval ?? '1h',
       scrubMaxRetries: String(data.maintenance?.scrub?.max_retries ?? 1),
+      diskHealthEnabled: data.disk_health?.enabled ?? false,
+      diskHealthCheckInterval: data.disk_health?.check_interval ?? '1h',
+      diskHealthProbeTimeout: data.disk_health?.probe_timeout ?? '15s',
+      diskHealthCooldownPeriod: data.disk_health?.cooldown_period ?? '4h',
+      diskHealthCommand: data.disk_health?.command ?? 'smartctl',
+      diskHealthTemperatureWarningC: String(data.disk_health?.temperature_warning_c ?? 50),
+      diskHealthTemperatureCriticalC: String(data.disk_health?.temperature_critical_c ?? 60),
+      diskHealthMediaWearWarningPct: String(data.disk_health?.media_wear_warning_percent ?? 80),
+      diskHealthMediaWearCriticalPct: String(data.disk_health?.media_wear_critical_percent ?? 100),
+      diskHealthDevices: formatDiskHealthDeviceLines(data.disk_health?.devices),
       dataplaneMaxRetries: String(data.dataplane.max_retries),
       dataplaneGrpcAddress: data.dataplane.grpc_address,
       dataplaneTimeout: data.dataplane.timeout,
@@ -2226,13 +2345,35 @@ export function SettingsPage() {
     const trimmedAlertsWebhookMethod = settings.alertsWebhookMethod.trim().toUpperCase()
     const trimmedAlertsTelegramBotToken = settings.alertsTelegramBotToken.trim()
     const trimmedAlertsTelegramChatID = settings.alertsTelegramChatID.trim()
+    const trimmedAlertsSMTPHost = settings.alertsSMTPHost.trim()
+    const trimmedAlertsSMTPPort = settings.alertsSMTPPort.trim()
+    const parsedAlertsSMTPPort = Number(trimmedAlertsSMTPPort)
+    const trimmedAlertsSMTPUsername = settings.alertsSMTPUsername.trim()
+    const trimmedAlertsSMTPPassword = settings.alertsSMTPPassword.trim()
+    const trimmedAlertsSMTPFrom = settings.alertsSMTPFrom.trim()
     const trimmedScrubScheduleInterval = settings.scrubScheduleInterval.trim()
     const trimmedScrubRetryInterval = settings.scrubRetryInterval.trim()
     const trimmedScrubMaxRetries = settings.scrubMaxRetries.trim()
     const parsedScrubMaxRetries = Number(trimmedScrubMaxRetries)
+    const trimmedDiskHealthCheckInterval = settings.diskHealthCheckInterval.trim()
+    const trimmedDiskHealthProbeTimeout = settings.diskHealthProbeTimeout.trim()
+    const trimmedDiskHealthCooldownPeriod = settings.diskHealthCooldownPeriod.trim()
+    const trimmedDiskHealthCommand = settings.diskHealthCommand.trim()
+    const trimmedDiskHealthTemperatureWarningC = settings.diskHealthTemperatureWarningC.trim()
+    const parsedDiskHealthTemperatureWarningC = Number(trimmedDiskHealthTemperatureWarningC)
+    const trimmedDiskHealthTemperatureCriticalC = settings.diskHealthTemperatureCriticalC.trim()
+    const parsedDiskHealthTemperatureCriticalC = Number(trimmedDiskHealthTemperatureCriticalC)
+    const trimmedDiskHealthMediaWearWarningPct = settings.diskHealthMediaWearWarningPct.trim()
+    const parsedDiskHealthMediaWearWarningPct = Number(trimmedDiskHealthMediaWearWarningPct)
+    const trimmedDiskHealthMediaWearCriticalPct = settings.diskHealthMediaWearCriticalPct.trim()
+    const parsedDiskHealthMediaWearCriticalPct = Number(trimmedDiskHealthMediaWearCriticalPct)
     const alertsWebhookHeaders = settings.alertsWebhookHeaders
       .split('\n')
       .map(header => header.trim())
+      .filter(Boolean)
+    const alertsSMTPTo = settings.alertsSMTPTo
+      .split(/[\n,]+/)
+      .map(recipient => recipient.trim())
       .filter(Boolean)
     const parsedAlertsThresholdPct = Number(trimmedAlertsThresholdPct)
     const parsedAlertsCriticalPct = Number(trimmedAlertsCriticalPct)
@@ -2271,6 +2412,15 @@ export function SettingsPage() {
       addToast({
         title: '分享路径策略格式无效',
         description: parsedSharePolicyRules.error,
+        color: 'danger',
+      })
+      return
+    }
+    const parsedDiskHealthDevices = parseDiskHealthDeviceLines(settings.diskHealthDevices)
+    if (parsedDiskHealthDevices.error) {
+      addToast({
+        title: '磁盘健康设备格式无效',
+        description: parsedDiskHealthDevices.error,
         color: 'danger',
       })
       return
@@ -2557,6 +2707,42 @@ export function SettingsPage() {
       return
     }
 
+    if (!/^\d+$/.test(trimmedAlertsSMTPPort) || !Number.isInteger(parsedAlertsSMTPPort) || parsedAlertsSMTPPort < 1 || parsedAlertsSMTPPort > 65535) {
+      addToast({
+        title: 'SMTP 端口格式无效',
+        description: 'SMTP 端口必须是 1 到 65535 之间的整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (settings.alertsEmailEnabled) {
+      if (!trimmedAlertsSMTPHost) {
+        addToast({
+          title: 'SMTP 主机缺失',
+          description: '启用邮件通知时必须填写 SMTP 主机。',
+          color: 'danger',
+        })
+        return
+      }
+      if (!trimmedAlertsSMTPFrom) {
+        addToast({
+          title: 'SMTP 发件人缺失',
+          description: '启用邮件通知时必须填写发件人地址。',
+          color: 'danger',
+        })
+        return
+      }
+      if (alertsSMTPTo.length === 0) {
+        addToast({
+          title: 'SMTP 收件人缺失',
+          description: '启用邮件通知时至少需要一个收件人。',
+          color: 'danger',
+        })
+        return
+      }
+    }
+
     if (!trimmedScrubScheduleInterval) {
       addToast({
         title: 'Scrub 周期间隔格式无效',
@@ -2579,6 +2765,96 @@ export function SettingsPage() {
       addToast({
         title: 'Scrub 重试次数格式无效',
         description: '最大重试次数必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedDiskHealthCheckInterval || !isValidDurationString(trimmedDiskHealthCheckInterval)) {
+      addToast({
+        title: '磁盘健康检查间隔格式无效',
+        description: '检查间隔必须使用 1h / 30m 这类 Go duration 格式',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedDiskHealthProbeTimeout || !isValidDurationString(trimmedDiskHealthProbeTimeout)) {
+      addToast({
+        title: '磁盘健康探测超时格式无效',
+        description: '探测超时必须使用 15s / 1m 这类 Go duration 格式',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedDiskHealthCooldownPeriod || !isValidDurationString(trimmedDiskHealthCooldownPeriod)) {
+      addToast({
+        title: '磁盘健康冷却时间格式无效',
+        description: '冷却时间必须使用 4h / 30m 这类 Go duration 格式',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isValidDiskHealthCommand(trimmedDiskHealthCommand)) {
+      addToast({
+        title: '磁盘健康命令格式无效',
+        description: '命令必须是单个可执行文件名或绝对路径，不能包含空白或控制字符',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedDiskHealthTemperatureWarningC) || !Number.isInteger(parsedDiskHealthTemperatureWarningC)) {
+      addToast({
+        title: '磁盘温度提醒阈值格式无效',
+        description: '温度提醒阈值必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedDiskHealthTemperatureCriticalC) || !Number.isInteger(parsedDiskHealthTemperatureCriticalC)) {
+      addToast({
+        title: '磁盘温度严重阈值格式无效',
+        description: '温度严重阈值必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (parsedDiskHealthTemperatureWarningC > 0 && parsedDiskHealthTemperatureCriticalC > 0 && parsedDiskHealthTemperatureCriticalC < parsedDiskHealthTemperatureWarningC) {
+      addToast({
+        title: '磁盘温度阈值关系无效',
+        description: '温度严重阈值不能小于提醒阈值',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedDiskHealthMediaWearWarningPct) || !Number.isInteger(parsedDiskHealthMediaWearWarningPct)) {
+      addToast({
+        title: '介质磨损提醒阈值格式无效',
+        description: '介质磨损提醒阈值必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedDiskHealthMediaWearCriticalPct) || !Number.isInteger(parsedDiskHealthMediaWearCriticalPct)) {
+      addToast({
+        title: '介质磨损严重阈值格式无效',
+        description: '介质磨损严重阈值必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (parsedDiskHealthMediaWearWarningPct > 0 && parsedDiskHealthMediaWearCriticalPct > 0 && parsedDiskHealthMediaWearCriticalPct < parsedDiskHealthMediaWearWarningPct) {
+      addToast({
+        title: '介质磨损阈值关系无效',
+        description: '介质磨损严重阈值不能小于提醒阈值',
         color: 'danger',
       })
       return
@@ -2622,6 +2898,34 @@ export function SettingsPage() {
       return
     }
 
+    const tlsCertFile = settings.tlsCertFile.trim()
+    const tlsKeyFile = settings.tlsKeyFile.trim()
+    const tlsCertDir = settings.tlsCertDir.trim()
+    if (settings.tlsEnabled && Boolean(tlsCertFile) !== Boolean(tlsKeyFile)) {
+      addToast({
+        title: 'TLS 证书配置无效',
+        description: '证书文件和私钥文件必须同时设置或同时留空',
+        color: 'danger',
+      })
+      return
+    }
+    if (settings.tlsEnabled && tlsCertFile !== '' && tlsCertFile === tlsKeyFile) {
+      addToast({
+        title: 'TLS 证书配置无效',
+        description: '证书文件和私钥文件必须指向不同文件',
+        color: 'danger',
+      })
+      return
+    }
+    if (settings.tlsEnabled && !settings.tlsAutoGenerate && tlsCertFile === '' && tlsKeyFile === '' && tlsCertDir === '') {
+      addToast({
+        title: 'TLS 证书配置无效',
+        description: '禁用自动生成时必须配置证书目录或证书文件对',
+        color: 'danger',
+      })
+      return
+    }
+
     const req: UpdateSettingsRequest = {
       server: {
         host: trimmedServerHost,
@@ -2633,10 +2937,10 @@ export function SettingsPage() {
         trusted_proxy_cidrs: trustedProxyCIDRs,
         tls: {
           enabled: settings.tlsEnabled,
-          cert_file: settings.tlsCertFile.trim(),
-          key_file: settings.tlsKeyFile.trim(),
+          cert_file: tlsCertFile,
+          key_file: tlsKeyFile,
           auto_generate: settings.tlsAutoGenerate,
-          cert_dir: settings.tlsCertDir.trim(),
+          cert_dir: tlsCertDir,
         },
       },
       storage: {
@@ -2686,7 +2990,26 @@ export function SettingsPage() {
         webhook_headers: alertsWebhookHeaders,
         telegram_enabled: settings.alertsTelegramEnabled,
         telegram_chat_id: trimmedAlertsTelegramChatID,
+        email_enabled: settings.alertsEmailEnabled,
+        smtp_host: trimmedAlertsSMTPHost,
+        smtp_port: parsedAlertsSMTPPort,
+        smtp_username: trimmedAlertsSMTPUsername,
+        smtp_from: trimmedAlertsSMTPFrom,
+        smtp_to: alertsSMTPTo,
         ...(trimmedAlertsTelegramBotToken && { telegram_bot_token: trimmedAlertsTelegramBotToken }),
+        ...(trimmedAlertsSMTPPassword && { smtp_password: trimmedAlertsSMTPPassword }),
+      },
+      disk_health: {
+        enabled: settings.diskHealthEnabled,
+        check_interval: trimmedDiskHealthCheckInterval,
+        probe_timeout: trimmedDiskHealthProbeTimeout,
+        cooldown_period: trimmedDiskHealthCooldownPeriod,
+        command: trimmedDiskHealthCommand,
+        temperature_warning_c: parsedDiskHealthTemperatureWarningC,
+        temperature_critical_c: parsedDiskHealthTemperatureCriticalC,
+        media_wear_warning_percent: parsedDiskHealthMediaWearWarningPct,
+        media_wear_critical_percent: parsedDiskHealthMediaWearCriticalPct,
+        devices: parsedDiskHealthDevices.devices,
       },
       maintenance: {
         scrub: {
@@ -3816,6 +4139,153 @@ export function SettingsPage() {
               </SettingsSection>
 
               <SettingsSection
+                title="磁盘健康监控"
+                description="配置 smartctl 周期探测；保存后立即更新运行中的磁盘健康监控"
+                icon={HardDrive}
+              >
+                <div className="space-y-4">
+                  <SettingRow
+                    label="启用磁盘健康检查"
+                    description="启用后按周期检查已配置设备的 SMART、温度和介质健康状态"
+                  >
+                    <Switch
+                      aria-label="启用磁盘健康检查"
+                      isSelected={settings.diskHealthEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthEnabled: v }))}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      启用磁盘健康检查
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                    <Input
+                      label="检查间隔"
+                      aria-label="磁盘健康检查间隔"
+                      value={settings.diskHealthCheckInterval}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthCheckInterval: v }))}
+                      placeholder="1h"
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="探测超时"
+                      aria-label="磁盘健康探测超时"
+                      value={settings.diskHealthProbeTimeout}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthProbeTimeout: v }))}
+                      placeholder="15s"
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="磁盘健康冷却时间"
+                      aria-label="磁盘健康冷却时间"
+                      value={settings.diskHealthCooldownPeriod}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthCooldownPeriod: v }))}
+                      placeholder="4h"
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="探测命令"
+                      aria-label="磁盘健康探测命令"
+                      value={settings.diskHealthCommand}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthCommand: v }))}
+                      placeholder="smartctl"
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="温度提醒阈值 (C)"
+                      aria-label="磁盘温度提醒阈值"
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      value={settings.diskHealthTemperatureWarningC}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthTemperatureWarningC: v }))}
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="温度严重阈值 (C)"
+                      aria-label="磁盘温度严重阈值"
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      value={settings.diskHealthTemperatureCriticalC}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthTemperatureCriticalC: v }))}
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="介质磨损提醒 (%)"
+                      aria-label="介质磨损提醒阈值"
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      value={settings.diskHealthMediaWearWarningPct}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthMediaWearWarningPct: v }))}
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="介质磨损严重 (%)"
+                      aria-label="介质磨损严重阈值"
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      value={settings.diskHealthMediaWearCriticalPct}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthMediaWearCriticalPct: v }))}
+                      isDisabled={!settings.diskHealthEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                  </div>
+                  <Divider className="bg-divider" />
+                  <div>
+                    <label className="text-sm font-medium text-default-600 mb-1.5 block">设备列表</label>
+                    <textarea
+                      aria-label="磁盘健康设备列表"
+                      value={settings.diskHealthDevices}
+                      onChange={(event) => updateDirtySettings(s => ({ ...s, diskHealthDevices: event.target.value }))}
+                      disabled={!settings.diskHealthEnabled}
+                      placeholder={"/dev/disk/by-id/ata-data | Data | sat | SER123 | 45 | 55"}
+                      rows={4}
+                      className={cn(
+                        "input-shell w-full rounded-medium px-3 py-2 text-sm bg-transparent outline-none",
+                        "border border-transparent focus:border-accent-primary",
+                        !settings.diskHealthEnabled && "opacity-60 cursor-not-allowed"
+                      )}
+                    />
+                    <p className="text-xs text-default-500 mt-1">
+                      每行格式为：设备路径 | 名称 | 类型 | 期望序列号 | 温度提醒阈值 | 温度严重阈值。后五列可留空。
+                    </p>
+                  </div>
+                </div>
+              </SettingsSection>
+
+              <SettingsSection
                 title="数据巡检计划"
                 description="配置后台周期 Scrub；保存后立即更新调度，失败会按重试策略进入提醒和设备状态"
                 icon={Clock}
@@ -4048,6 +4518,107 @@ export function SettingsPage() {
                       )}
                     />
                     <p className="text-xs text-default-500 mt-1">每行一个 Header，使用 Key:Value 格式。</p>
+                  </div>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="邮件通知"
+                    description="将同一批提醒事件发送到 SMTP 收件人"
+                  >
+                    <Switch
+                      aria-label="启用邮件通知"
+                      isSelected={settings.alertsEmailEnabled}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsEmailEnabled: v }))}
+                      isDisabled={!settings.alertsEnabled}
+                      classNames={{
+                        wrapper: cn(
+                          "group-data-[selected=true]:bg-accent-primary",
+                          "bg-content2"
+                        ),
+                        label: "sr-only",
+                      }}
+                    >
+                      启用邮件通知
+                    </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    <Input
+                      label="SMTP 主机"
+                      aria-label="SMTP 主机"
+                      value={settings.alertsSMTPHost}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPHost: v }))}
+                      placeholder="smtp.example.com"
+                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="SMTP 端口"
+                      aria-label="SMTP 端口"
+                      type="number"
+                      min={1}
+                      max={65535}
+                      inputMode="numeric"
+                      value={settings.alertsSMTPPort}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPPort: v }))}
+                      placeholder="587"
+                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="SMTP 用户名"
+                      aria-label="SMTP 用户名"
+                      value={settings.alertsSMTPUsername}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPUsername: v }))}
+                      placeholder="alerts@example.com"
+                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="SMTP 密码"
+                      type="password"
+                      aria-label="SMTP 密码"
+                      value={settings.alertsSMTPPassword}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPPassword: v }))}
+                      placeholder={settings.alertsSMTPPasswordConfigured ? '已配置，留空不变' : '应用专用密码'}
+                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <Input
+                      label="SMTP 发件人"
+                      aria-label="SMTP 发件人"
+                      value={settings.alertsSMTPFrom}
+                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPFrom: v }))}
+                      placeholder="MnemoNAS <alerts@example.com>"
+                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
+                      classNames={{
+                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                      }}
+                    />
+                    <div className="lg:col-span-2">
+                      <label className="text-sm font-medium text-default-600 mb-1.5 block">SMTP 收件人</label>
+                      <textarea
+                        aria-label="SMTP 收件人"
+                        value={settings.alertsSMTPTo}
+                        onChange={(event) => updateDirtySettings(s => ({ ...s, alertsSMTPTo: event.target.value }))}
+                        disabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
+                        placeholder={"admin@example.com\nops@example.com"}
+                        rows={3}
+                        className={cn(
+                          "input-shell w-full rounded-medium px-3 py-2 text-sm bg-transparent outline-none",
+                          "border border-transparent focus:border-accent-primary",
+                          (!settings.alertsEnabled || !settings.alertsEmailEnabled) && "opacity-60 cursor-not-allowed"
+                        )}
+                      />
+                      <p className="text-xs text-default-500 mt-1">每行一个收件人，也支持用逗号分隔。</p>
+                    </div>
                   </div>
                   <Divider className="bg-divider" />
                   <SettingRow

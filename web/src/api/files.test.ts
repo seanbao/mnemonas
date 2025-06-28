@@ -2019,6 +2019,7 @@ describe('API: files', () => {
           },
           goroutines: 25,
           filesystem: {
+            trash_stats_available: true,
             trash_items: 5,
             trash_size: 1024,
             disk_stats_available: true,
@@ -2028,6 +2029,9 @@ describe('API: files', () => {
             disk_used: 10240,
             disk_usage_ratio: 0.5,
             disk_filesystem_type: 'btrfs',
+            disk_mount_point: '/srv/mnemonas',
+            disk_mount_source: 'tank/mnemonas',
+            disk_mount_options: 'rw,relatime',
             disk_native_data_checksum_support: true,
           },
           alerts: {
@@ -2109,12 +2113,16 @@ describe('API: files', () => {
       expect(result.system?.smbRuntimeReady).toBe(false)
       expect(result.memory?.allocMb).toBe(50)
       expect(result.goroutines).toBe(25)
+      expect(result.filesystem?.trashStatsAvailable).toBe(true)
       expect(result.filesystem?.trashItems).toBe(5)
       expect(result.filesystem?.diskStatsAvailable).toBe(true)
       expect(result.filesystem?.diskTotal).toBe(20480)
       expect(result.filesystem?.diskAvailable).toBe(8192)
       expect(result.filesystem?.diskUsageRatio).toBe(0.5)
       expect(result.filesystem?.diskFilesystemType).toBe('btrfs')
+      expect(result.filesystem?.diskMountPoint).toBe('/srv/mnemonas')
+      expect(result.filesystem?.diskMountSource).toBe('tank/mnemonas')
+      expect(result.filesystem?.diskMountOptions).toBe('rw,relatime')
       expect(result.filesystem?.diskNativeDataChecksumSupport).toBe(true)
       expect(result.alerts?.enabled).toBe(true)
       expect(result.alerts?.runtimeAvailable).toBe(true)

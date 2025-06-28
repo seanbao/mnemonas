@@ -384,7 +384,7 @@ type ScrubError struct {
 type ObjectInfo struct {
 	Hash      string
 	Size      uint64
-	CreatedAt time.Time // NEW-2: Creation time for GC grace period
+	CreatedAt time.Time // Creation time for GC grace period
 }
 
 // ListObjectsResult represents object listing result
@@ -457,7 +457,6 @@ func (c *Client) ListObjects(ctx context.Context, cursor string, limit uint32) (
 			Hash: o.Hash,
 			Size: o.Size,
 		}
-		// NEW-2: Parse creation time if available
 		if o.CreatedAtUnix != nil {
 			obj.CreatedAt = time.Unix(*o.CreatedAtUnix, 0)
 		}

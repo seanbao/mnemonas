@@ -135,3 +135,110 @@ func MkdirAllNoFollow(root *os.Root, name string, perm os.FileMode) error {
 	}
 	return nil
 }
+
+func replaceEmptyDirPathNoFollow(rootPath, relParent, oldName, newName, oldDisplay, newDisplay string) error {
+	if relParent != "" {
+		parts, err := splitRelativeName(relParent)
+		if err != nil {
+			return rootPathError("rename", newDisplay, err)
+		}
+		current := rootPath
+		for _, part := range parts {
+			if part == "." {
+				continue
+			}
+			current = filepath.Join(current, part)
+			info, err := os.Lstat(current)
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return symlinkPathError("rename", newDisplay)
+			}
+			if !info.IsDir() {
+				return rootPathError("rename", newDisplay, syscall.ENOTDIR)
+			}
+		}
+	}
+
+	oldInfo, err := os.Lstat(oldDisplay)
+	if err != nil {
+		return err
+	}
+	if oldInfo.Mode()&os.ModeSymlink != 0 {
+		return symlinkPathError("rename", oldDisplay)
+	}
+	if !oldInfo.IsDir() {
+		return rootPathError("rename", oldDisplay, syscall.ENOTDIR)
+	}
+
+	if info, err := os.Lstat(newDisplay); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return symlinkPathError("rename", newDisplay)
+		}
+		entries, err := os.ReadDir(newDisplay)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return rootPathError("remove", newDisplay, os.ErrExist)
+		}
+		if err := os.Remove(newDisplay); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return os.Rename(oldDisplay, newDisplay)
+}
+
+func replaceFilePathNoFollow(rootPath, relParent, oldName, newName, oldDisplay, newDisplay string) error {
+	if relParent != "" {
+		parts, err := splitRelativeName(relParent)
+		if err != nil {
+			return rootPathError("rename", newDisplay, err)
+		}
+		current := rootPath
+		for _, part := range parts {
+			if part == "." {
+				continue
+			}
+			current = filepath.Join(current, part)
+			info, err := os.Lstat(current)
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return symlinkPathError("rename", newDisplay)
+			}
+			if !info.IsDir() {
+				return rootPathError("rename", newDisplay, syscall.ENOTDIR)
+			}
+		}
+	}
+
+	oldInfo, err := os.Lstat(oldDisplay)
+	if err != nil {
+		return err
+	}
+	if oldInfo.Mode()&os.ModeSymlink != 0 {
+		return symlinkPathError("rename", oldDisplay)
+	}
+	if !oldInfo.Mode().IsRegular() {
+		return rootPathError("rename", oldDisplay, syscall.EINVAL)
+	}
+
+	if info, err := os.Lstat(newDisplay); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return symlinkPathError("rename", newDisplay)
+		}
+		if !info.Mode().IsRegular() {
+			return rootPathError("rename", newDisplay, syscall.EINVAL)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return os.Rename(oldDisplay, newDisplay)
+}
