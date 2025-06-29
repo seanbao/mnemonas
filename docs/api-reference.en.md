@@ -100,6 +100,10 @@ Some write endpoints may commit the visible mutation but fail a later persistenc
 
 Clients should inspect the HTTP `Warning` header in addition to the JSON body.
 
+## MnemoNAS Path Convention
+
+File, directory, favorite, activity-filter, `home_dir`, directory-quota, and directory access-rule fields use MnemoNAS logical absolute paths. Paths use `/` separators and normalize to a leading-`/` form; NUL bytes and standalone `.` or `..` path segments are invalid, while legal names containing repeated dots, such as `foo..txt`, remain valid. The root path `/` is valid only where an endpoint explicitly allows it. URL path parameters are encoded by path segment while preserving `/` separators.
+
 ## Auth Endpoints
 
 | Method | Path | Description |
@@ -291,7 +295,7 @@ Create response example:
 `POST /api/v1/admin/users/{id}/revoke-sessions` invalidates that user's existing Web cookie sessions, access tokens, and refresh tokens without changing the user's password or enabled state. The user must sign in again on the next request.
 
 Usernames are limited to 255 characters and must not contain `/`, `\`, control characters, `.`, or `..`. Passwords must be 8 to 72 bytes.
-`home_dir` is optional at creation time and defaults to `/<username>` when omitted. When provided, it is normalized to a clean absolute MnemoNAS path and must not be empty or contain `..` path segments or control characters. The `user` and `guest` roles cannot use `/` as `home_dir`; `admin` may use `/` for the global namespace. `quota_bytes` is optional, and `0` means unlimited.
+`home_dir` is optional at creation time and defaults to `/<username>` when omitted. When provided, it is normalized to a clean absolute MnemoNAS path and must not be empty or contain `.` or `..` path segments or control characters. The `user` and `guest` roles cannot use `/` as `home_dir`; `admin` may use `/` for the global namespace. `quota_bytes` is optional, and `0` means unlimited.
 Group names are normalized to lowercase and may contain only letters, digits, `.`, `_`, and `-`.
 
 `PUT /api/v1/admin/users/{id}` accepts at least one of:
@@ -526,7 +530,11 @@ Copy request:
 }
 ```
 
-Some file mutations may return success with a `Warning` header if the file operation succeeded but later metadata, activity, or cleanup work did not fully complete.
+This REST endpoint copies either one file or one directory tree. Source and target paths must differ, the target path must not already exist, and directory copies cannot target a descendant of the source directory. Use WebDAV `COPY` when `Overwrite: T/F` semantics are required.
+
+When a copy has completed but a later workspace persistence step fails, the endpoint still returns `201 Created` with `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`. The response body includes `data.warning: true` and `message: "resource copied with persistence warning"`.
+
+Other file mutations may return success with a `Warning` header if the file operation succeeded but later metadata, activity, or cleanup work did not fully complete.
 
 ## Thumbnails
 
@@ -702,6 +710,7 @@ Public share behavior:
 - Disabled shares return `410 Gone` with `SHARE_DISABLED`.
 - Shares created by a disabled or deleted owner return `404 Not Found` with `SHARE_NOT_FOUND` for public metadata, downloads, and folder listings.
 - `access_count` increments on downloads and folder-listing requests. Password validation through `POST /api/v1/public/shares/{share_id}/access` and the compatibility path `POST /s/{share_id}` does not increment it.
+- Subpaths in `items?path=` and `download/{path}` are relative to the shared folder root. NUL bytes and standalone `.` or `..` path segments are invalid, while legal names containing repeated dots, such as `foo..txt`, remain valid. Invalid subpaths do not increment `access_count`.
 - Once a download or folder-listing response has started writing to the client, that request remains counted even if the later stream fails.
 - Public share downloads honor HTTP Range requests when the backing file reader supports seeking. Local MnemoNAS storage supports this path for resumable downloads and browser media playback.
 - Set `archive=zip` on public download endpoints to download a shared folder root, subfolder, or file as a ZIP archive. Public ZIP archives return `application/zip`, do not guarantee Range support, skip entries no longer visible to the share owner, and are capped at 10000 entries and 20 GiB of file content.
@@ -715,7 +724,7 @@ Public share behavior:
 
 ## Favorites
 
-Favorite paths must normalize to a non-root absolute path. Empty values, the root path, and root-equivalent values such as `.` are rejected with `400 Bad Request` and `MISSING_PATH` before non-admin `home_dir` authorization.
+Favorite paths must normalize to a non-root absolute path. Empty values and the root path are rejected with `400 Bad Request` and `MISSING_PATH`; values containing standalone `.` or `..` path segments are rejected with `400 Bad Request` and `INVALID_PATH`. This validation runs before non-admin `home_dir` authorization.
 
 | Method | Path | Description |
 | --- | --- | --- |

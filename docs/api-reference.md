@@ -120,6 +120,10 @@ Authorization: Bearer <access_token>
 
 调用方应优先检查 HTTP `Warning` 响应头，而不是只依赖 JSON body。部分 `/api/v1` 写接口会额外返回 `warning: true` 和 `message`，例如 `resource copied with persistence warning`、`version restored with persistence warning`；但最近操作记录补写失败等场景可能只有 `Warning` header，body 仍保持原成功结构。
 
+### MnemoNAS 路径约定
+
+文件、目录、收藏、活动筛选、`home_dir`、目录配额和目录访问规则使用 MnemoNAS 逻辑绝对路径。路径以 `/` 分隔，并归一化为以 `/` 开头的形式；空字符和独立的 `.` / `..` 路径段无效，合法文件名中的连续点号（如 `foo..txt`）不受影响。根路径 `/` 只在端点明确允许时有效。路径作为 URL 参数时应按路径段编码，并保留 `/` 分隔符。
+
 ---
 
 ## 认证端点
@@ -344,7 +348,7 @@ POST /api/v1/admin/users
 ```
 
 用户名最多 255 个字符，不能包含 `/`、`\`、控制字符或 `.` / `..`；密码长度必须为 8 到 72 字节。用户组名称会归一化为小写，只能包含字母、数字、`.`、`_` 和 `-`。
-`home_dir` 可选；省略时默认使用 `/<username>`。提供时会归一化为干净的 MnemoNAS 绝对路径，不能为空，不能包含 `..` 路径段或控制字符。`user` 和 `guest` 角色不能使用 `/` 作为 `home_dir`；`admin` 可使用 `/` 表示全局命名空间。`quota_bytes` 可选，`0` 表示不限额。
+`home_dir` 可选；省略时默认使用 `/<username>`。提供时会归一化为干净的 MnemoNAS 绝对路径，不能为空，不能包含 `.` / `..` 路径段或控制字符。`user` 和 `guest` 角色不能使用 `/` 作为 `home_dir`；`admin` 可使用 `/` 表示全局命名空间。`quota_bytes` 可选，`0` 表示不限额。
 
 **请求体**:
 ```json
@@ -1019,7 +1023,7 @@ POST /api/v1/files-move
 POST /api/v1/files-copy
 ```
 
-说明：该 REST 端点支持复制单个文件或递归复制目录。目标路径必须不存在；如需 `Overwrite: T/F` 语义，请使用 WebDAV `COPY`。
+说明：该 REST 端点支持复制单个文件或递归复制目录。源路径与目标路径必须不同，目标路径必须不存在，目录不能复制到自身后代路径；如需 `Overwrite: T/F` 语义，请使用 WebDAV `COPY`。
 
 说明：当复制已经完成、仅最后的目录持久化失败时，接口返回 `201 Created` 并附带 `Warning: 199 MnemoNAS "workspace mutation persistence incomplete"`；响应 `message` 为 `resource copied with persistence warning`。
 
@@ -1573,6 +1577,7 @@ POST /api/v1/public/shares/{share_id}/access
 - 当分享本身被停用时，返回 `410 Gone`，错误码为 `SHARE_DISABLED`
 - 当创建该分享的用户被禁用或删除后，公开访问、下载和文件夹列表都会返回 `404 Not Found`，错误码为 `SHARE_NOT_FOUND`
 - `access_count` 在下载与文件夹列表请求时递增；`POST /api/v1/public/shares/{share_id}/access` 与兼容路径 `POST /s/{share_id}` 的密码验证不会计数
+- `items?path=` 和 `download/{path}` 中的子路径相对于分享文件夹根目录；空字符和独立的 `.` / `..` 路径段无效，合法文件名中的连续点号（如 `foo..txt`）不受影响。非法子路径不会递增 `access_count`
 - 一旦下载或文件夹列表响应已经开始向客户端写出字节，即使后续流式传输中断，该次访问仍计入 `access_count`
 - 底层文件读取器支持 seek 时，公开分享下载会处理 HTTP Range 请求；MnemoNAS 本地存储支持该路径，可用于断点续传和浏览器媒体播放
 - 公开下载端点设置 `archive=zip` 时，可将分享文件夹根目录、子文件夹或单个文件打包为 ZIP；归档响应返回 `application/zip`，不保证支持 Range，会跳过分享 owner 已不可见的条目，最多包含 10000 个条目和 20 GiB 文件内容
@@ -1624,7 +1629,7 @@ GET /api/v1/public/shares/{share_id}/download/{path}
 
 ## 收藏夹
 
-收藏路径必须规范化为非根绝对路径。空值、根路径或 `.` 等根等价值会以 `400 Bad Request` 和 `MISSING_PATH` 拒绝，并且该校验先于非管理员 `home_dir` 授权执行。
+收藏路径必须规范化为非根绝对路径。空值或根路径会以 `400 Bad Request` 和 `MISSING_PATH` 拒绝；包含独立 `.` / `..` 路径段的值会以 `400 Bad Request` 和 `INVALID_PATH` 拒绝。该校验先于非管理员 `home_dir` 授权执行。
 
 ### 列出收藏
 
@@ -1786,7 +1791,7 @@ GET /api/v1/activity
 - `since`: 仅返回该时间点之后或等于该时间点的记录，格式为 RFC3339 时间戳
 - `until`: 仅返回该时间点之前或等于该时间点的记录，格式为 RFC3339 时间戳
 
-`action` 和 `action_group` 可组合使用，此时结果取交集。`path` 会按 MnemoNAS 绝对路径规则规范化，包含路径穿越片段时返回 `400 Bad Request`。`action`、`action_group` 无效、时间参数格式无效，或 `since` 晚于 `until` 时，接口返回 `400 Bad Request`。
+`action` 和 `action_group` 可组合使用，此时结果取交集。`path` 会按 MnemoNAS 绝对路径规则规范化，包含独立 `.` / `..` 路径段时返回 `400 Bad Request`。`action`、`action_group` 无效、时间参数格式无效，或 `since` 晚于 `until` 时，接口返回 `400 Bad Request`。
 
 普通用户使用 `path` 过滤时，`/` 表示当前账号可见范围；若目标路径不在当前账号可见范围内，接口返回空列表，不会通过已隐藏的活动详情暴露不可见路径是否存在。
 

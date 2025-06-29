@@ -3295,6 +3295,26 @@ describe('SettingsPage', () => {
       expect(screen.getAllByText(/目录规则/).length).toBeGreaterThanOrEqual(2)
     })
 
+    it('rejects malformed directory access check paths before checking', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      await user.type(await screen.findByLabelText('检查用户'), 'alice')
+      const pathInput = screen.getByLabelText('检查路径')
+      await user.clear(pathInput)
+      await user.type(pathInput, '/team/./readme.txt')
+      await user.click(screen.getByRole('button', { name: '检查权限' }))
+
+      expect(mockCheckDirectoryAccess).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '权限检查路径无效',
+        description: '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。',
+        color: 'warning',
+      })
+    })
+
     it('maps directory access decision backend messages before rendering them', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockCheckDirectoryAccess.mockResolvedValueOnce({
@@ -3368,6 +3388,25 @@ describe('SettingsPage', () => {
       expect(screen.getByText('可访问')).toBeTruthy()
     })
 
+    it('rejects malformed directory access matrix paths before reporting', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const pathInput = await screen.findByLabelText('检查路径')
+      await user.clear(pathInput)
+      await user.type(pathInput, '/team/./readme.txt')
+      await user.click(screen.getByRole('button', { name: '用户矩阵' }))
+
+      expect(mockReportDirectoryAccess).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '权限矩阵路径无效',
+        description: '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。',
+        color: 'warning',
+      })
+    })
+
     it('previews unsaved directory access rule changes', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -3393,6 +3432,25 @@ describe('SettingsPage', () => {
       expect(await screen.findByLabelText('目录权限变更预览')).toBeTruthy()
       expect(screen.getByText('变更预览')).toBeTruthy()
       expect(screen.getByText('可读 2')).toBeTruthy()
+    })
+
+    it('rejects malformed directory access preview paths before previewing', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      fireEvent.change(await screen.findByLabelText('目录权限路径 1'), { target: { value: '/team' } })
+      fireEvent.change(screen.getByLabelText('读角色 1'), { target: { value: 'user' } })
+      fireEvent.change(screen.getByLabelText('检查路径'), { target: { value: '/team/./readme.txt' } })
+      await user.click(screen.getByRole('button', { name: '预览变更' }))
+
+      expect(mockPreviewDirectoryAccess).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '权限预览路径无效',
+        description: '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。',
+        color: 'warning',
+      })
     })
 
     it('aborts pending directory access checks when the page unmounts', async () => {

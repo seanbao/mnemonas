@@ -311,6 +311,43 @@ describe('DirectoryPicker', () => {
     expectListFilesNotCalledWithPath('/docs')
   })
 
+  it('normalizes excluded folder paths before selection', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onSelect = vi.fn()
+
+    renderPicker({ excludePaths: ['docs/'], onSelect })
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('docs'))
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    expect(onSelect).toHaveBeenCalledWith('/')
+  })
+
+  it('does not confirm an excluded root directory', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onSelect = vi.fn()
+
+    renderPicker({ excludePaths: ['/'], onSelect })
+
+    await waitFor(() => {
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    const confirmButton = screen.getByRole('button', { name: '选择此目录' })
+    expect(confirmButton).toBeDisabled()
+    expect(screen.queryByText('在此处新建文件夹')).toBeNull()
+
+    await user.click(screen.getByText('docs'))
+    await user.click(confirmButton)
+
+    expect(onSelect).not.toHaveBeenCalled()
+    expectListFilesNotCalledWithPath('/docs')
+  })
+
   it('cancels folder creation before submitting', async () => {
     const user = userEvent.setup({ writeToClipboard: false })
 
@@ -326,6 +363,32 @@ describe('DirectoryPicker', () => {
 
     expect(screen.queryByDisplayValue('draft')).toBeNull()
     expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    expect(mockCreateDirectory).not.toHaveBeenCalled()
+  })
+
+  it('rejects folder names with path separators before creating a directory', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+
+    renderPicker()
+
+    await waitFor(() => {
+      expect(screen.getByText('在此处新建文件夹')).toBeTruthy()
+    })
+
+    await user.click(screen.getByText('在此处新建文件夹'))
+    await user.type(screen.getByPlaceholderText('新文件夹名称'), '../escape')
+
+    expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '文件夹名称无效',
+        description: '名称不能包含路径分隔符、空字符，且不能为 . 或 ..。',
+        color: 'warning',
+      })
+    })
     expect(mockCreateDirectory).not.toHaveBeenCalled()
   })
 
@@ -805,6 +868,34 @@ describe('DirectoryPicker', () => {
       expect(screen.getByText('/team/projects')).toBeTruthy()
       expect(screen.getByText('drafts')).toBeTruthy()
     })
+  })
+
+  it('falls back to the visible root when the initial path is malformed', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onSelect = vi.fn()
+    mockUser.id = 'u2'
+    mockUser.username = 'tester'
+    mockUser.role = 'user'
+    mockUser.homeDir = '/tester'
+    mockListFiles.mockResolvedValueOnce({
+      path: '/tester',
+      files: [
+        { name: 'docs', path: '/tester/docs', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+      ],
+    })
+
+    renderPicker({ initialPath: '/team/./projects', onSelect })
+
+    await waitFor(() => {
+      expectListFilesCalledWithPath('/tester')
+      expectListFilesNotCalledWithPath('/team/./projects')
+      expect(screen.getAllByText('主目录').length).toBeGreaterThan(0)
+      expect(screen.getByText('docs')).toBeTruthy()
+    })
+
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    expect(onSelect).toHaveBeenCalledWith('/tester')
   })
 
   it('shows an invalid-home error instead of loading root for non-admin users without a home directory', async () => {

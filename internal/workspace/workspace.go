@@ -528,7 +528,7 @@ func validateWorkspaceName(name string) error {
 		return ErrNotFound
 	}
 	for _, segment := range strings.Split(normalized, "/") {
-		if segment == ".." {
+		if segment == "." || segment == ".." {
 			return ErrNotFound
 		}
 	}

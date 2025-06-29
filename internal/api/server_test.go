@@ -783,7 +783,7 @@ func setUserHomeDirForTest(t *testing.T, server *Server, username, homeDir strin
 	// Auth persistence now rejects empty or traversal-based home directories.
 	// For API-level authorization tests, simulate the same external behavior by
 	// switching the user into an isolated scope that does not include the target paths.
-	if strings.TrimSpace(homeDir) == "" || hasTraversalSegment(strings.ReplaceAll(homeDir, "\\", "/")) {
+	if strings.TrimSpace(homeDir) == "" || hasDotSegment(strings.ReplaceAll(homeDir, "\\", "/")) {
 		effectiveHomeDir = "/__invalid-scope__"
 	}
 
@@ -3004,6 +3004,18 @@ func TestDownloadArchiveChildPathRejectsEntriesOutsideSource(t *testing.T) {
 			child:      &storage.FileInfo{Path: "/", Name: "/"},
 			wantErr:    true,
 		},
+		{
+			name:       "dot segment child path",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Path: "/docs/./report.txt", Name: "report.txt"},
+			wantErr:    true,
+		},
+		{
+			name:       "dot segment fallback name",
+			sourcePath: "/docs",
+			child:      &storage.FileInfo{Name: "./report.txt"},
+			wantErr:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -3019,6 +3031,26 @@ func TestDownloadArchiveChildPathRejectsEntriesOutsideSource(t *testing.T) {
 				t.Fatalf("downloadArchiveChildPath() name = %q, want %q", gotName, tt.wantName)
 			}
 		})
+	}
+}
+
+func TestSafeDownloadArchiveEntryNameRejectsDotSegments(t *testing.T) {
+	for _, name := range []string{
+		"docs/./report.txt",
+		"docs/../report.txt",
+		"./docs/report.txt",
+	} {
+		if got, err := safeDownloadArchiveEntryName(name); err == nil {
+			t.Fatalf("safeDownloadArchiveEntryName(%q) = %q, want error", name, got)
+		}
+	}
+
+	got, err := safeDownloadArchiveEntryName("docs/foo..txt")
+	if err != nil {
+		t.Fatalf("safeDownloadArchiveEntryName(foo..txt) error: %v", err)
+	}
+	if got != "docs/foo..txt" {
+		t.Fatalf("safeDownloadArchiveEntryName(foo..txt) = %q, want docs/foo..txt", got)
 	}
 }
 
@@ -8830,6 +8862,9 @@ func TestValidatePath(t *testing.T) {
 		{"/foo/../bar", "", true},
 		{"..\\etc\\passwd", "", true},
 		{"/safe\\..\\secret.txt", "", true},
+		{"/docs/./report.pdf", "", true},
+		{"/docs/.", "", true},
+		{"./docs/report.pdf", "", true},
 	}
 
 	for _, tt := range tests {
@@ -9102,6 +9137,24 @@ func TestReadFavoriteRoutePath_DecodesEscapedPath(t *testing.T) {
 	}
 	if cleanPath != "/docs/my file.txt" {
 		t.Fatalf("expected decoded route path, got %q", cleanPath)
+	}
+}
+
+func TestReadFavoriteRoutePath_RejectsEncodedUnsafeSegments(t *testing.T) {
+	tests := []string{
+		"/api/v1/favorites/docs/%2e%2e/secret.txt",
+		"/api/v1/favorites/docs/%2E/report.txt",
+		"/api/v1/favorites/docs/report%00.txt",
+	}
+
+	for _, target := range tests {
+		t.Run(target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodDelete, target, nil)
+
+			if cleanPath, err := readFavoriteRoutePath(req); err == nil {
+				t.Fatalf("readFavoriteRoutePath() path = %q, want error", cleanPath)
+			}
+		})
 	}
 }
 
@@ -15936,7 +15989,7 @@ func TestServer_CheckFavorites_RejectsUnknownFieldsBeforeHomeScopeCheck(t *testi
 	}
 }
 
-func TestServer_CheckFavorite_RootLikePathReturnsBadRequestForScopedUser(t *testing.T) {
+func TestServer_CheckFavorite_DotPathReturnsInvalidPathForScopedUser(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 	token := loginAndGetAccessToken(t, server, username, password)
 
@@ -15948,12 +16001,12 @@ func TestServer_CheckFavorite_RootLikePathReturnsBadRequestForScopedUser(t *test
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("check favorite root-like path status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "path query parameter is required") {
-		t.Fatalf("expected missing path response, got %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
 	}
 }
 
-func TestServer_CheckFavorites_RootLikePathReturnsBadRequestBeforeHomeScopeCheck(t *testing.T) {
+func TestServer_CheckFavorites_DotPathReturnsInvalidPathBeforeHomeScopeCheck(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 	token := loginAndGetAccessToken(t, server, username, password)
 
@@ -15966,8 +16019,8 @@ func TestServer_CheckFavorites_RootLikePathReturnsBadRequestBeforeHomeScopeCheck
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("check favorites root-like path status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "paths must not contain empty values") {
-		t.Fatalf("expected missing path response, got %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
 	}
 }
 
@@ -16357,7 +16410,7 @@ func TestServer_AddFavorite_TraversalPathReturnsBadRequest(t *testing.T) {
 	}
 }
 
-func TestServer_AddFavorite_RootLikePathReturnsBadRequestForScopedUser(t *testing.T) {
+func TestServer_AddFavorite_DotPathReturnsInvalidPathForScopedUser(t *testing.T) {
 	server, _, _, username, password := setupAuthServerWithFeatures(t, false, true)
 	token := loginAndGetAccessToken(t, server, username, password)
 
@@ -16370,8 +16423,8 @@ func TestServer_AddFavorite_RootLikePathReturnsBadRequestForScopedUser(t *testin
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("add favorite root-like path status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
-	if !strings.Contains(w.Body.String(), "path is required") {
-		t.Fatalf("expected missing path response, got %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "invalid path") {
+		t.Fatalf("expected invalid path response, got %s", w.Body.String())
 	}
 }
 
@@ -19302,16 +19355,18 @@ func TestServer_ListActivity_FiltersByPathPrefix(t *testing.T) {
 func TestServer_ListActivity_RejectsInvalidPathFilter(t *testing.T) {
 	server, _, _, username, _ := setupAuthServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/?path="+url.QueryEscape("../secret"), nil)
-	req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
-	w := httptest.NewRecorder()
-	server.Router().ServeHTTP(w, req)
+	for _, invalidPath := range []string{"../secret", "/tester/./photos"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/?path="+url.QueryEscape(invalidPath), nil)
+		req.Header.Set("Authorization", "Bearer "+issueAccessTokenWithoutActivity(t, server, username))
+		w := httptest.NewRecorder()
+		server.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("list activity with invalid path status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "path parameter is invalid") {
-		t.Fatalf("expected invalid path filter message, got %s", w.Body.String())
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("list activity with invalid path %q status = %d, want %d: %s", invalidPath, w.Code, http.StatusBadRequest, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "path parameter is invalid") {
+			t.Fatalf("expected invalid path filter message for %q, got %s", invalidPath, w.Body.String())
+		}
 	}
 }
 
@@ -20810,6 +20865,25 @@ func TestServer_UploadFile_ErrorCases(t *testing.T) {
 
 		if w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound {
 			t.Errorf("Upload to invalid path status = %d", w.Code)
+		}
+	})
+
+	t.Run("UploadEncodedDotSegmentsRejected", func(t *testing.T) {
+		tests := []string{
+			"/api/v1/files/docs/%2e%2e/secret.txt",
+			"/api/v1/files/docs/%2E/report.txt",
+			"/api/v1/files/docs/report%00.txt",
+		}
+
+		for _, targetURL := range tests {
+			req := httptest.NewRequest("POST", targetURL, strings.NewReader("test content"))
+			w := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound {
+				t.Fatalf("upload to %s status = %d, want bad request or route not found", targetURL, w.Code)
+			}
 		}
 	})
 

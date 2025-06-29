@@ -249,19 +249,10 @@ func normalizeShareAbsolutePath(rawPath string) (string, error) {
 	if strings.TrimSpace(normalized) == "" {
 		return "", errors.New("invalid path")
 	}
-	if hasShareTraversalSegment(normalized) {
+	if hasShareDotSegment(normalized) {
 		return "", errors.New("invalid path")
 	}
 	return path.Clean("/" + normalized), nil
-}
-
-func hasShareTraversalSegment(filePath string) bool {
-	for _, segment := range strings.Split(filePath, "/") {
-		if segment == ".." {
-			return true
-		}
-	}
-	return false
 }
 
 func normalizeShareRelativePath(rawPath string) (string, error) {
@@ -270,6 +261,9 @@ func normalizeShareRelativePath(rawPath string) (string, error) {
 		return "", errors.New("invalid path")
 	}
 	normalized = strings.TrimLeft(normalized, "/")
+	if hasShareDotSegment(normalized) {
+		return "", errors.New("invalid path")
+	}
 	cleaned := path.Clean(normalized)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", errors.New("invalid path")
@@ -1536,7 +1530,7 @@ func setShareDownloadHeaders(w http.ResponseWriter, filePath string) {
 
 func safeShareArchiveEntryName(name string) (string, error) {
 	normalized := strings.ReplaceAll(name, "\\", "/")
-	if normalized == "" || strings.ContainsRune(normalized, '\x00') || strings.HasPrefix(normalized, "/") || hasShareTraversalSegment(normalized) {
+	if normalized == "" || strings.ContainsRune(normalized, '\x00') || strings.HasPrefix(normalized, "/") || hasShareDotSegment(normalized) {
 		return "", errInvalidShareArchivePath
 	}
 	cleaned := path.Clean(normalized)

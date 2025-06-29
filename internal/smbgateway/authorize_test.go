@@ -84,7 +84,27 @@ func TestResolvePathDeniesGuestWrite(t *testing.T) {
 }
 
 func TestResolvePathRejectsTraversal(t *testing.T) {
-	_, err := ResolvePath(testShares(), "docs", "../secret", &auth.User{
+	for _, requestPath := range []string{"../secret", "team/./readme.md", "."} {
+		t.Run(requestPath, func(t *testing.T) {
+			_, err := ResolvePath(testShares(), "docs", requestPath, &auth.User{
+				ID:       "admin-1",
+				Username: "admin",
+				Role:     auth.RoleAdmin,
+				HomeDir:  "/",
+			}, false)
+			if !errors.Is(err, ErrInvalidPath) {
+				t.Fatalf("ResolvePath() error = %v, want ErrInvalidPath", err)
+			}
+		})
+	}
+}
+
+func TestResolvePathRejectsDotSegmentShareRoot(t *testing.T) {
+	_, err := ResolvePath([]config.SMBShareConfig{{
+		Name:         "docs",
+		Path:         "/shared/./docs",
+		AllowedRoles: []string{"admin"},
+	}}, "docs", "readme.md", &auth.User{
 		ID:       "admin-1",
 		Username: "admin",
 		Role:     auth.RoleAdmin,
@@ -92,6 +112,18 @@ func TestResolvePathRejectsTraversal(t *testing.T) {
 	}, false)
 	if !errors.Is(err, ErrInvalidPath) {
 		t.Fatalf("ResolvePath() error = %v, want ErrInvalidPath", err)
+	}
+}
+
+func TestResolvePathRejectsDotSegmentHomeDir(t *testing.T) {
+	_, err := ResolvePath(testShares(), "docs", "alice/file.txt", &auth.User{
+		ID:       "user-1",
+		Username: "alice",
+		Role:     auth.RoleUser,
+		HomeDir:  "/shared/docs/./alice",
+	}, false)
+	if !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("ResolvePath() error = %v, want ErrAccessDenied", err)
 	}
 }
 

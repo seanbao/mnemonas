@@ -71,10 +71,19 @@ func normalizeFavoritePath(rawPath string) (string, error) {
 	if strings.ContainsRune(normalized, '\x00') {
 		return "", errors.New("invalid path")
 	}
-	if hasFavoriteTraversalSegment(normalized) {
+	if hasFavoriteDotSegment(normalized) {
 		return "", errors.New("invalid path")
 	}
 	return path.Clean("/" + normalized), nil
+}
+
+func hasFavoriteDotSegment(filePath string) bool {
+	for _, segment := range strings.Split(filePath, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func hasFavoriteTraversalSegment(filePath string) bool {

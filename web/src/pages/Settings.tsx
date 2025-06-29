@@ -938,6 +938,8 @@ function normalizeDirectoryQuotaPathInput(value: string): string | null {
   return withoutTrailingSlash
 }
 
+const logicalPathInputErrorDescription = '路径必须是站内绝对路径，且不能包含空字符、. 或 .. 路径段。'
+
 function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; error?: string } {
   const lines = value.split('\n')
   const quotas: DirectoryQuota[] = []
@@ -2662,11 +2664,20 @@ export function SettingsPage() {
       })
       return
     }
+    const normalizedTargetPath = normalizeDirectoryQuotaPathInput(targetPath)
+    if (!normalizedTargetPath) {
+      addToast({
+        title: '权限检查路径无效',
+        description: logicalPathInputErrorDescription,
+        color: 'warning',
+      })
+      return
+    }
     accessCheckAbortControllerRef.current?.abort()
     const controller = new AbortController()
     accessCheckAbortControllerRef.current = controller
     accessCheckMutation.mutate({
-      request: { username, path: targetPath },
+      request: { username, path: normalizedTargetPath },
       signal: controller.signal,
     })
   }
@@ -2681,11 +2692,20 @@ export function SettingsPage() {
       })
       return
     }
+    const normalizedTargetPath = normalizeDirectoryQuotaPathInput(targetPath)
+    if (!normalizedTargetPath) {
+      addToast({
+        title: '权限矩阵路径无效',
+        description: logicalPathInputErrorDescription,
+        color: 'warning',
+      })
+      return
+    }
     accessReportAbortControllerRef.current?.abort()
     const controller = new AbortController()
     accessReportAbortControllerRef.current = controller
     accessReportMutation.mutate({
-      request: { path: targetPath },
+      request: { path: normalizedTargetPath },
       signal: controller.signal,
     })
   }
@@ -2696,6 +2716,15 @@ export function SettingsPage() {
       addToast({
         title: '权限预览路径为空',
         description: '请输入需要预览的路径。',
+        color: 'warning',
+      })
+      return
+    }
+    const normalizedTargetPath = normalizeDirectoryQuotaPathInput(targetPath)
+    if (!normalizedTargetPath) {
+      addToast({
+        title: '权限预览路径无效',
+        description: logicalPathInputErrorDescription,
         color: 'warning',
       })
       return
@@ -2714,7 +2743,7 @@ export function SettingsPage() {
     accessPreviewAbortControllerRef.current = controller
     accessPreviewMutation.mutate({
       request: {
-        path: targetPath,
+        path: normalizedTargetPath,
         directory_access_rules: parsedRules.rules,
       },
       signal: controller.signal,
