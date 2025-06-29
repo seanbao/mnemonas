@@ -637,6 +637,25 @@ describe('FilesPage', () => {
       })
     })
 
+    it('rejects unsafe folder names before creating a folder', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '新建文件夹' })).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '新建文件夹' }))
+
+      const input = await screen.findByPlaceholderText('请输入文件夹名称')
+      await user.type(input, '../escape')
+
+      expect(screen.getByText('名称不能包含路径分隔符、空字符，且不能为 . 或 ..。')).toBeTruthy()
+      expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+      expect(mockCreateDirectory).not.toHaveBeenCalled()
+    })
+
     it('keeps the create folder modal open while a pending request is in flight', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       const firstCreate = createDeferred<typeof successActionResult>()
@@ -2496,6 +2515,64 @@ describe('FilesPage', () => {
       })
     })
 
+    it('does not move clipboard items back into the source directory', async () => {
+      mockFilesStoreState.currentPath = '/source'
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source/'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockListFiles.mockResolvedValueOnce({ files: [], path: '/source' })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '无法移动到原目录',
+          description: '目标目录与源目录相同，请选择其他文件夹。',
+          color: 'warning',
+        })
+      })
+
+      expect(mockMoveFile).not.toHaveBeenCalled()
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+      expect(mockClipboardState.cut).not.toHaveBeenCalled()
+    })
+
+    it('does not copy clipboard items back into the source directory', async () => {
+      mockFilesStoreState.currentPath = '/source'
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'copy'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockListFiles.mockResolvedValueOnce({ files: [], path: '/source' })
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '无法复制到原目录',
+          description: '目标目录与源目录相同，请选择其他文件夹。',
+          color: 'warning',
+        })
+      })
+
+      expect(mockCopyFile).not.toHaveBeenCalled()
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+      expect(mockClipboardState.copy).not.toHaveBeenCalled()
+    })
+
     it('keeps failed cut items in clipboard after partial paste failure', async () => {
       mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
       mockClipboardState.operation = 'cut'
@@ -2935,6 +3012,29 @@ describe('FilesPage', () => {
           color: 'warning',
         })
       })
+    })
+
+    it('rejects unsafe rename values before moving a file', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, '../escape')
+
+      expect(screen.getByText('名称不能包含路径分隔符、空字符，且不能为 . 或 ..。')).toBeTruthy()
+      expect(screen.getByRole('button', { name: '确定' })).toBeDisabled()
+      expect(mockMoveFile).not.toHaveBeenCalled()
     })
 
     it('keeps the rename modal open while a pending rename is in flight', async () => {

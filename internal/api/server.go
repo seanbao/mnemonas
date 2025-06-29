@@ -1991,8 +1991,8 @@ func validatePath(filePath string) (string, error) {
 	// Clean the path first
 	cleaned := path.Clean("/" + normalized)
 
-	// Reject any path with .. segments while allowing legal names like foo..txt.
-	if hasTraversalSegment(normalized) {
+	// Reject dot segments while allowing legal names like foo..txt.
+	if hasDotSegment(normalized) {
 		return "", errInvalidPath
 	}
 
@@ -2028,9 +2028,9 @@ func routePathAfterPrefix(r *http.Request, routePrefix string) (string, error) {
 	return decodedPath, nil
 }
 
-func hasTraversalSegment(filePath string) bool {
+func hasDotSegment(filePath string) bool {
 	for _, segment := range strings.Split(filePath, "/") {
-		if segment == ".." {
+		if segment == "." || segment == ".." {
 			return true
 		}
 	}

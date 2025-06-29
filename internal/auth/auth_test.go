@@ -535,8 +535,16 @@ func TestUserStore(t *testing.T) {
 	})
 
 	t.Run("invalid stored home dir", func(t *testing.T) {
-		usersPath := filepath.Join(dir, "users-invalid-home-dir.json")
-		content := `[
+		for _, tc := range []struct {
+			name    string
+			homeDir string
+		}{
+			{name: "empty", homeDir: ""},
+			{name: "dot-segment", homeDir: "/broken/./home"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				usersPath := filepath.Join(dir, "users-invalid-home-dir-"+tc.name+".json")
+				content := fmt.Sprintf(`[
 		  {
 		    "id": "u-invalid-home",
 		    "username": "broken-user",
@@ -544,17 +552,19 @@ func TestUserStore(t *testing.T) {
 		    "role": "user",
 		    "created_at": "2024-01-01T00:00:00Z",
 		    "updated_at": "2024-01-01T00:00:00Z",
-		    "home_dir": ""
+		    "home_dir": %q
 		  }
-		]`
-		if err := os.WriteFile(usersPath, []byte(content), 0600); err != nil {
-			t.Fatalf("failed to seed users file: %v", err)
-		}
+		]`, tc.homeDir)
+				if err := os.WriteFile(usersPath, []byte(content), 0600); err != nil {
+					t.Fatalf("failed to seed users file: %v", err)
+				}
 
-		if _, _, err := NewUserStore(usersPath); err == nil {
-			t.Fatal("expected invalid home_dir in users file to fail")
-		} else if !strings.Contains(err.Error(), "invalid home_dir") {
-			t.Fatalf("expected invalid home_dir error, got %v", err)
+				if _, _, err := NewUserStore(usersPath); err == nil {
+					t.Fatal("expected invalid home_dir in users file to fail")
+				} else if !strings.Contains(err.Error(), "invalid home_dir") {
+					t.Fatalf("expected invalid home_dir error, got %v", err)
+				}
+			})
 		}
 	})
 
@@ -746,6 +756,11 @@ func TestUserStore(t *testing.T) {
 		user.HomeDir = "../secret"
 		if err := store.Update(user); !errors.Is(err, errInvalidUserHomeDir) {
 			t.Fatalf("expected invalid home_dir error, got %v", err)
+		}
+
+		user.HomeDir = "/homefix/./docs"
+		if err := store.Update(user); !errors.Is(err, errInvalidUserHomeDir) {
+			t.Fatalf("expected invalid dot-segment home_dir error, got %v", err)
 		}
 
 		user.HomeDir = "/homefix/docs\x00secret"
@@ -3981,22 +3996,24 @@ func TestAuthHandler(t *testing.T) {
 	})
 
 	t.Run("admin create user rejects invalid home directory", func(t *testing.T) {
-		body := `{"username":"invalidhomedir","password":"newpass123","role":"user","home_dir":"../team/home"}`
-		req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
-		admin, _ := store.GetByUsername("handleradmin")
-		req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
-		rec := httptest.NewRecorder()
-		h.HandleCreateUser(rec, req)
+		for idx, homeDir := range []string{"../team/home", "/team/./home"} {
+			body := fmt.Sprintf(`{"username":"invalidhomedir%d","password":"newpass123","role":"user","home_dir":%q}`, idx, homeDir)
+			req := httptest.NewRequest("POST", "/api/v1/admin/users", bytes.NewBufferString(body))
+			admin, _ := store.GetByUsername("handleradmin")
+			req = req.WithContext(context.WithValue(req.Context(), ContextKeyUser, admin))
+			rec := httptest.NewRecorder()
+			h.HandleCreateUser(rec, req)
 
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
-		}
-		var envelope authEnvelope
-		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
-			t.Fatalf("unmarshal create error envelope: %v", err)
-		}
-		if envelope.Error == nil || envelope.Error.Code != "INVALID_HOME_DIR" {
-			t.Fatalf("expected INVALID_HOME_DIR error, got %+v", envelope.Error)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("home_dir %q: expected status 400, got %d: %s", homeDir, rec.Code, rec.Body.String())
+			}
+			var envelope authEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("home_dir %q: unmarshal create error envelope: %v", homeDir, err)
+			}
+			if envelope.Error == nil || envelope.Error.Code != "INVALID_HOME_DIR" {
+				t.Fatalf("home_dir %q: expected INVALID_HOME_DIR error, got %+v", homeDir, envelope.Error)
+			}
 		}
 	})
 

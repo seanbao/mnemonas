@@ -422,6 +422,10 @@ async function throwShareDownloadJsonError(response: Response): Promise<void> {
   throw new ShareError(details.message, response.status, details.code)
 }
 
+function normalizePublicShareRelativePath(filePath: string): string {
+  return normalizePath(filePath).split('/').filter(Boolean).join('/')
+}
+
 export function formatShareUrl(shareUrl: string, origin = window.location.origin): string {
   const trimmed = shareUrl.trim()
   try {
@@ -633,7 +637,10 @@ export async function getPublicShareItems(
 ): Promise<PublicShareItemsResponse> {
   const params = new URLSearchParams()
   if (options?.path) {
-    params.set('path', options.path)
+    const normalizedPath = normalizePublicShareRelativePath(options.path)
+    if (normalizedPath) {
+      params.set('path', normalizedPath)
+    }
   }
   const query = params.toString()
   const url = query ? `${PUBLIC_SHARE_API_BASE}/${id}/items?${query}` : `${PUBLIC_SHARE_API_BASE}/${id}/items`

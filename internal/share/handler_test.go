@@ -111,6 +111,43 @@ func TestNormalizeSharePathsRejectNUL(t *testing.T) {
 	}
 }
 
+func TestNormalizeSharePathsRejectDotSegments(t *testing.T) {
+	tests := []struct {
+		name      string
+		normalize func(string) (string, error)
+		input     string
+	}{
+		{
+			name:      "absolute dot segment",
+			normalize: normalizeShareAbsolutePath,
+			input:     "/docs/./report.pdf",
+		},
+		{
+			name:      "absolute parent segment",
+			normalize: normalizeShareAbsolutePath,
+			input:     "/docs/../report.pdf",
+		},
+		{
+			name:      "relative dot segment",
+			normalize: normalizeShareRelativePath,
+			input:     "docs/./report.pdf",
+		},
+		{
+			name:      "relative parent segment",
+			normalize: normalizeShareRelativePath,
+			input:     "docs/../report.pdf",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := tt.normalize(tt.input); err == nil {
+				t.Fatalf("normalize(%q) = %q, want error", tt.input, got)
+			}
+		})
+	}
+}
+
 func (f *failingReadCloser) Read(p []byte) (int, error) {
 	return 0, f.err
 }
@@ -970,7 +1007,12 @@ func TestCreateShare_RejectsTraversalPath(t *testing.T) {
 		statInfo: &storage.FileInfo{Path: "/docs/report.pdf", Name: "report.pdf", Size: 256},
 	})
 
-	for _, rawPath := range []string{"../docs/report.pdf", `..\\docs\\report.pdf`} {
+	for _, rawPath := range []string{
+		"../docs/report.pdf",
+		`..\\docs\\report.pdf`,
+		"/docs/./report.pdf",
+		"./docs/report.pdf",
+	} {
 		body := []byte(`{"path":"` + rawPath + `","type":"file"}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/shares", bytes.NewReader(body))
 		req = req.WithContext(auth.WithClaimsContext(req.Context(), &auth.TokenClaims{UserID: "user1"}))
@@ -3399,6 +3441,8 @@ func TestDownloadShareFile_PathTraversal(t *testing.T) {
 	for _, target := range []string{
 		"/s/" + share.ID + "/download/../secret",
 		"/s/" + share.ID + "/download//../secret",
+		"/s/" + share.ID + "/download/./secret",
+		"/s/" + share.ID + "/download/reports/./january.txt",
 	} {
 		req := newRouteRequest(http.MethodGet, target, share.ID, nil)
 		recorder := httptest.NewRecorder()
@@ -5239,7 +5283,7 @@ func TestListShareItems_PathIsFileReturnsBadRequest(t *testing.T) {
 	}
 }
 
-func TestListShareItems_NormalizesReturnedPath(t *testing.T) {
+func TestListShareItems_RejectsDotSegmentPath(t *testing.T) {
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "shares.json")
 
@@ -5257,29 +5301,35 @@ func TestListShareItems_NormalizesReturnedPath(t *testing.T) {
 		t.Fatalf("failed to create share: %v", err)
 	}
 
-	handler := NewHandler(store, &fakeShareFS{
-		dirItemsByPath: map[string][]*storage.FileInfo{
-			"/docs": {
-				{Path: "/docs/a.txt", Name: "a.txt", Size: 1, IsDir: false},
-			},
-		},
-	})
+	handler := NewHandler(store, &fakeShareFS{})
 
-	req := newRouteRequest(http.MethodGet, "/s/"+share.ID+"/items?path=sub/..", share.ID, nil)
-	recorder := httptest.NewRecorder()
-	handler.ListShareItems(recorder, req)
+	for _, target := range []string{
+		"/s/" + share.ID + "/items?path=sub/..",
+		"/s/" + share.ID + "/items?path=./sub",
+		"/s/" + share.ID + "/items?path=sub/./report",
+	} {
+		req := newRouteRequest(http.MethodGet, target, share.ID, nil)
+		recorder := httptest.NewRecorder()
+		handler.ListShareItems(recorder, req)
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
-	}
-	var payload struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if payload.Path != "" {
-		t.Fatalf("expected normalized root path, got %q", payload.Path)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("target %q expected status 400, got %d", target, recorder.Code)
+		}
+		payload := decodeResponseBody(t, recorder)
+		errorPayload, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("target %q expected error payload, got %v", target, payload)
+		}
+		if errorPayload["code"] != "INVALID_PATH" {
+			t.Fatalf("target %q expected INVALID_PATH code, got %v", target, errorPayload["code"])
+		}
+		current, err := store.Get(share.ID)
+		if err != nil {
+			t.Fatalf("failed to load share: %v", err)
+		}
+		if current.AccessCount != 0 {
+			t.Fatalf("target %q expected invalid path request not to consume access count, got %d", target, current.AccessCount)
+		}
 	}
 }
 

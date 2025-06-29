@@ -158,12 +158,24 @@ func downloadArchiveChildPath(sourcePath string, child *storage.FileInfo) (strin
 	if child == nil {
 		return "", "", storage.ErrNotFound
 	}
+	cleanSource := path.Clean(sourcePath)
 	childPath := child.Path
 	if strings.TrimSpace(childPath) == "" {
-		childPath = path.Join(sourcePath, child.Name)
+		childName := strings.ReplaceAll(child.Name, "\\", "/")
+		if strings.ContainsRune(childName, '\x00') || hasDotSegment(childName) {
+			return "", "", errInvalidPath
+		}
+		if cleanSource == "/" {
+			childPath = "/" + childName
+		} else {
+			childPath = cleanSource + "/" + childName
+		}
 	}
-	cleanSource := path.Clean(sourcePath)
-	cleanChild := path.Clean(childPath)
+	normalizedChildPath := strings.ReplaceAll(childPath, "\\", "/")
+	if strings.ContainsRune(normalizedChildPath, '\x00') || hasDotSegment(normalizedChildPath) {
+		return "", "", errInvalidPath
+	}
+	cleanChild := path.Clean(normalizedChildPath)
 	if cleanChild == cleanSource || path.Dir(cleanChild) != cleanSource {
 		return "", "", errInvalidPath
 	}
@@ -288,7 +300,7 @@ func clearDownloadArchiveHeaders(w http.ResponseWriter) {
 
 func safeDownloadArchiveEntryName(name string) (string, error) {
 	normalized := strings.ReplaceAll(name, "\\", "/")
-	if normalized == "" || strings.ContainsRune(normalized, '\x00') || strings.HasPrefix(normalized, "/") || hasTraversalSegment(normalized) {
+	if normalized == "" || strings.ContainsRune(normalized, '\x00') || strings.HasPrefix(normalized, "/") || hasDotSegment(normalized) {
 		return "", errInvalidPath
 	}
 	cleaned := path.Clean(normalized)

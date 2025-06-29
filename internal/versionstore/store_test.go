@@ -553,6 +553,9 @@ func TestStore_DeleteVersionRestoreVersionsAndReferenceChecks(t *testing.T) {
 	if err := s.RestoreVersions(ctx, []Version{{Path: "../escape", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
 		t.Fatalf("RestoreVersions(invalid path) error = %v, want %v", err, errInvalidStorePath)
 	}
+	if err := s.RestoreVersions(ctx, []Version{{Path: "/docs/./report.txt", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
+		t.Fatalf("RestoreVersions(dot-segment path) error = %v, want %v", err, errInvalidStorePath)
+	}
 	if err := s.RestoreVersions(ctx, []Version{{Path: "/docs/report\x00.txt", Hash: "bad"}}); !errors.Is(err, errInvalidStorePath) {
 		t.Fatalf("RestoreVersions(NUL path) error = %v, want %v", err, errInvalidStorePath)
 	}
@@ -858,6 +861,12 @@ func TestStore_TrashRejectsAndSkipsInvalidIDsAndPaths(t *testing.T) {
 		"invalid-path", "../evil.txt", 1, now.Unix(), now.Add(time.Hour).Unix(), false, false, []byte{}); err != nil {
 		t.Fatalf("insert invalid trash path fixture: %v", err)
 	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO trash (id, original_path, size, deleted_at, expires_at, is_dir, had_versions, restore_data)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"invalid-dot-path", "/docs/./evil.txt", 1, now.Unix(), now.Add(time.Hour).Unix(), false, false, []byte{}); err != nil {
+		t.Fatalf("insert invalid dot-segment trash path fixture: %v", err)
+	}
 
 	items, err := s.ListTrash(ctx)
 	if err != nil {
@@ -872,6 +881,9 @@ func TestStore_TrashRejectsAndSkipsInvalidIDsAndPaths(t *testing.T) {
 	}
 	if _, err := s.GetTrashItem(ctx, "invalid-path"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetTrashItem(invalid path row) error = %v, want %v", err, ErrNotFound)
+	}
+	if _, err := s.GetTrashItem(ctx, "invalid-dot-path"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetTrashItem(invalid dot-segment path row) error = %v, want %v", err, ErrNotFound)
 	}
 	if err := s.UpdateTrashRestoreData(ctx, "../escape", []byte("{}")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("UpdateTrashRestoreData(invalid ID) error = %v, want %v", err, ErrNotFound)
@@ -1550,6 +1562,9 @@ func TestStore_OperationsRejectTraversalLikePaths(t *testing.T) {
 	testCases := []string{
 		"../escape.txt",
 		`..\\escape.txt`,
+		"/docs/./report.txt",
+		"./docs/report.txt",
+		".",
 	}
 
 	for _, rawPath := range testCases {
