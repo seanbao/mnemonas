@@ -118,6 +118,7 @@ type fakeAlertMonitor struct {
 	lastConfig  alerts.Config
 	lastStats   *alerts.StorageStats
 	events      []alerts.EventPayload
+	sendErr     error
 }
 
 func (m *fakeAlertMonitor) UpdateConfig(cfg alerts.Config) {
@@ -140,6 +141,9 @@ func (m *fakeAlertMonitor) LastStats() *alerts.StorageStats {
 func (m *fakeAlertMonitor) SendEvent(_ context.Context, event alerts.EventPayload) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sendErr != nil {
+		return m.sendErr
+	}
 	m.events = append(m.events, event)
 	return nil
 }
@@ -6963,6 +6967,37 @@ func TestServer_Diagnostics_EmailChannelRequiresSender(t *testing.T) {
 	}
 	if _, ok := payload.Data.Alerts["smtp_password"]; ok {
 		t.Fatalf("alerts diagnostics must not expose smtp_password")
+	}
+}
+
+func TestServer_Diagnostics_EmailChannelRequiresRecipient(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	cfg := server.currentConfig()
+	cfg.Alerts.EmailEnabled = true
+	cfg.Alerts.SMTPHost = "smtp.example.com"
+	cfg.Alerts.SMTPFrom = "alerts@example.com"
+	cfg.Alerts.SMTPTo = []string{" ", "\t"}
+	cfg.Alerts.SMTPPassword = "secret"
+	server.storeConfig(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Diagnostics status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data struct {
+			Alerts map[string]any `json:"alerts"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to parse diagnostics response: %v", err)
+	}
+	if emailConfigured, ok := payload.Data.Alerts["email_configured"].(bool); !ok || emailConfigured {
+		t.Fatalf("alerts.email_configured = %v, want false when SMTP recipients are blank", payload.Data.Alerts["email_configured"])
 	}
 }
 
@@ -17559,6 +17594,132 @@ func TestServer_UpdateSettings_UpdatesAlertsConfig(t *testing.T) {
 	}
 }
 
+func TestServer_SendTestAlert_SendsConfiguredChannels(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Alerts.Enabled = true
+	server.config.Alerts.WebhookURL = "https://hooks.example.com/storage?token=secret-token"
+	server.config.Alerts.TelegramEnabled = true
+	server.config.Alerts.TelegramBotToken = "123456:secret-token"
+	server.config.Alerts.TelegramChatID = "-1001234567890"
+	server.config.Alerts.EmailEnabled = true
+	server.config.Alerts.SMTPHost = "smtp.example.com"
+	server.config.Alerts.SMTPPort = 587
+	server.config.Alerts.SMTPFrom = "MnemoNAS <alerts@example.com>"
+	server.config.Alerts.SMTPTo = []string{"admin@example.com"}
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/alerts/test", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("send test alert status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("alert event count = %d, want 1", len(monitor.events))
+	}
+	event := monitor.events[0]
+	if event.Type != alertTestEventType || event.Level != alerts.AlertLevelWarning || event.Message != "MnemoNAS test alert" {
+		t.Fatalf("unexpected test alert event: %+v", event)
+	}
+	if event.Timestamp.Location() != time.UTC {
+		t.Fatalf("test alert timestamp location = %v, want UTC", event.Timestamp.Location())
+	}
+	channels, ok := event.Details["channels"].([]string)
+	if !ok || !reflect.DeepEqual(channels, []string{"webhook", "telegram", "email"}) {
+		t.Fatalf("test alert channels = %#v, want webhook/telegram/email", event.Details["channels"])
+	}
+	if event.Details["trigger"] != "manual_test" || event.Details["source"] != "settings" {
+		t.Fatalf("unexpected test alert details: %+v", event.Details)
+	}
+	for _, leaked := range []string{"secret-token", "alerts@example.com", "admin@example.com"} {
+		if strings.Contains(w.Body.String(), leaked) {
+			t.Fatalf("test alert response leaked %q: %s", leaked, w.Body.String())
+		}
+	}
+}
+
+func TestServer_SendTestAlert_IgnoresBlankEmailRecipients(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Alerts.Enabled = true
+	server.config.Alerts.WebhookURL = "https://hooks.example.com/storage?token=secret-token"
+	server.config.Alerts.EmailEnabled = true
+	server.config.Alerts.SMTPHost = "smtp.example.com"
+	server.config.Alerts.SMTPPort = 587
+	server.config.Alerts.SMTPFrom = "MnemoNAS <alerts@example.com>"
+	server.config.Alerts.SMTPTo = []string{" ", "\t"}
+	server.storeConfig(server.config)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/alerts/test", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("send test alert status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if len(monitor.events) != 1 {
+		t.Fatalf("alert event count = %d, want 1", len(monitor.events))
+	}
+	channels, ok := monitor.events[0].Details["channels"].([]string)
+	if !ok || !reflect.DeepEqual(channels, []string{"webhook"}) {
+		t.Fatalf("test alert channels = %#v, want webhook only", monitor.events[0].Details["channels"])
+	}
+	if strings.Contains(w.Body.String(), "email") {
+		t.Fatalf("test alert response included incomplete email channel: %s", w.Body.String())
+	}
+}
+
+func TestServer_SendTestAlert_RejectsDisabledOrUnconfiguredAlerts(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	monitor := &fakeAlertMonitor{}
+	server.alertMonitor = monitor
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/alerts/test", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("disabled test alert status = %d, want %d", w.Code, http.StatusConflict)
+	}
+
+	server.config.Alerts.Enabled = true
+	server.storeConfig(server.config)
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/settings/alerts/test", nil)
+	w = httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("unconfigured test alert status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if len(monitor.events) != 0 {
+		t.Fatalf("unexpected alert events: %+v", monitor.events)
+	}
+}
+
+func TestServer_SendTestAlert_ReturnsGenericFailure(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	server.config.Alerts.Enabled = true
+	server.config.Alerts.WebhookURL = "https://hooks.example.com/storage?token=secret-token"
+	server.storeConfig(server.config)
+	server.alertMonitor = &fakeAlertMonitor{sendErr: errors.New("webhook token=secret-token failed")}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/alerts/test", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("failed test alert status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(w.Body.String(), "alert test failed") {
+		t.Fatalf("expected generic test alert failure message, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-token") {
+		t.Fatalf("test alert failure leaked secret: %s", w.Body.String())
+	}
+}
+
 func TestServer_UpdateSettings_ClearsAlertSecrets(t *testing.T) {
 	server, _, tmpDir := setupTestServer(t)
 	server.configPath = path.Join(tmpDir, "config.toml")
@@ -17664,6 +17825,31 @@ func TestServer_UpdateSettings_RejectsUnknownRedactedWebhookHeader(t *testing.T)
 		t.Fatalf("expected redacted placeholder validation message, got %s", w.Body.String())
 	}
 	expected := []string{"Authorization: Bearer secret-token"}
+	if !reflect.DeepEqual(server.config.Alerts.WebhookHeaders, expected) {
+		t.Fatalf("webhook headers changed after rejected update: %#v", server.config.Alerts.WebhookHeaders)
+	}
+}
+
+func TestServer_UpdateSettings_RejectsDuplicateWebhookHeaderNames(t *testing.T) {
+	server, _, tmpDir := setupTestServer(t)
+	server.configPath = path.Join(tmpDir, "config.toml")
+	server.config.Alerts.WebhookHeaders = []string{"Authorization: Bearer existing"}
+	server.storeConfig(server.config)
+
+	body := `{"alerts":{"webhook_headers":["Authorization: Bearer one","authorization: Bearer two"]}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("update settings duplicate webhook headers status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "invalid configuration") {
+		t.Fatalf("expected invalid configuration response, got %s", w.Body.String())
+	}
+	expected := []string{"Authorization: Bearer existing"}
 	if !reflect.DeepEqual(server.config.Alerts.WebhookHeaders, expected) {
 		t.Fatalf("webhook headers changed after rejected update: %#v", server.config.Alerts.WebhookHeaders)
 	}

@@ -58,6 +58,14 @@ assert_file_contains() {
   grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+  local path="$1"
+  local unexpected="$2"
+  if grep -Fq -- "$unexpected" "$path"; then
+    fail "$path unexpectedly contains: $unexpected"
+  fi
+}
+
 assert_mode() {
   local path="$1"
   local expected="$2"
@@ -1159,6 +1167,21 @@ EOF
   assert_file_contains "$case_dir/doctor-unsafe.log" "ufw appears to allow dataplane gRPC port 19090"
   assert_file_contains "$case_dir/doctor-unsafe.log" "ufw appears to allow dataplane HTTP port 19091"
   assert_file_contains "$case_dir/doctor-unsafe.log" "Summary: 0 failure(s), 4 warning(s)"
+
+  chmod 0644 "$bin_dir/dataplane"
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    SYSTEMD_DIR="$systemd_dir" \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/doctor-non-executable.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted a non-executable dataplane binary"
+  assert_file_contains "$case_dir/doctor-non-executable.log" "dataplane binary is not executable: $bin_dir/dataplane"
 }
 
 run_doctor_public_domain_test() {
@@ -1196,6 +1219,7 @@ EOF
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
     'url="${@: -1}"' \
+    'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "401"; exit 0; fi' \
     'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
     'case "$url" in' \
     '  https://nas.example.com/health) printf "ok\n";;' \
@@ -1247,6 +1271,9 @@ root = "$storage_dir"
 
 [dataplane]
 grpc_address = "127.0.0.1:019090"
+
+[webdav]
+prefix = " /files/team/../../dav/ "
 EOF
 
   PATH="$fake_path:$PATH" \
@@ -1266,6 +1293,7 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate is valid for at least 30 days"
   assert_file_contains "$case_dir/doctor-public.log" "certificate automation detected: Caddy"
   assert_file_contains "$case_dir/doctor-public.log" "public administrator redundancy verified: 2 enabled administrators"
+  assert_file_contains "$case_dir/doctor-public.log" "public WebDAV anonymous PROPFIND is rejected: https://nas.example.com/dav/ (HTTP 401)"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
   assert_file_contains "$case_dir/doctor-public.log" "public dataplane gRPC port 19090 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "control plane port 18080 is loopback-only"
@@ -1284,6 +1312,216 @@ EOF
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTPS health reachable: https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
   assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Summary: 0 failure(s)"
+
+  local custom_auth_dir="$case_dir/custom-auth"
+  mkdir -p "$custom_auth_dir"
+  cp "$storage_dir/.mnemonas/users.json" "$custom_auth_dir/users.json"
+  touch "$custom_auth_dir/initial-password.txt"
+  cat > "$case_dir/config-custom-auth-initial-password.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$custom_auth_dir/users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-custom-auth-initial-password.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-custom-auth-initial-password.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted custom auth initial password file"
+  assert_file_contains "$case_dir/doctor-public-custom-auth-initial-password.log" "initial admin password file still exists"
+  assert_file_contains "$case_dir/doctor-public-custom-auth-initial-password.log" "$custom_auth_dir/initial-password.txt"
+
+  cat > "$case_dir/config-share-trimmed.toml" <<EOF
+[server]
+host = "LOCALHOST"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = " https://NAS.EXAMPLE.COM./shares "
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-trimmed.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-trimmed.log"
+
+  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public backend host is loopback-only: LOCALHOST"
+  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "public share.base_url uses HTTPS on nas.example.com"
+  assert_file_contains "$case_dir/doctor-public-share-trimmed.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/config-share-route-prefix.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com/s/"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-route-prefix.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-route-prefix.log"
+
+  assert_file_contains "$case_dir/doctor-public-share-route-prefix.log" "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links"
+  assert_file_contains "$case_dir/doctor-public-share-route-prefix.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/config-webdav-placeholder-password.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[webdav]
+enabled = true
+auth_type = "basic"
+password = "change-this-webdav-password"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-webdav-placeholder-password.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-webdav-placeholder-password.log"
+
+  assert_file_contains "$case_dir/doctor-public-webdav-placeholder-password.log" "public WebDAV Basic Auth password should be changed before public access (risk: placeholder)"
+  assert_file_not_contains "$case_dir/doctor-public-webdav-placeholder-password.log" "change-this-webdav-password"
+  assert_file_contains "$case_dir/doctor-public-webdav-placeholder-password.log" "Summary: 0 failure(s)"
+
+  cat > "$case_dir/config-webdav-empty-prefix.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[webdav]
+enabled = true
+prefix = ""
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-webdav-empty-prefix.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-webdav-empty-prefix.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted empty WebDAV prefix"
+  assert_file_contains "$case_dir/doctor-public-webdav-empty-prefix.log" "public WebDAV prefix is invalid: <empty>"
+
+  cat > "$case_dir/config-webdav-reserved-prefix.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[webdav]
+enabled = true
+prefix = "/api/v1"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-webdav-reserved-prefix.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-webdav-reserved-prefix.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted reserved WebDAV prefix"
+  assert_file_contains "$case_dir/doctor-public-webdav-reserved-prefix.log" "public WebDAV prefix is invalid: /api/v1"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$*" == *" -X PROPFIND "* && "$url" == "https://nas.example.com/dav/" ]]; then printf "207"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-webdav-open.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted anonymous WebDAV PROPFIND"
+  assert_file_contains "$case_dir/doctor-public-webdav-open.log" "public WebDAV allows anonymous PROPFIND at https://nas.example.com/dav/ (HTTP 207)"
 
   write_executable "$fake_path/curl" \
     '#!/usr/bin/env bash' \
@@ -1439,6 +1677,37 @@ EOF
   assert_file_contains "$case_dir/doctor-public-no-auth.log" "public auth.enabled must remain true"
   assert_file_contains "$case_dir/doctor-public-no-auth.log" "security.allow_unsafe_no_auth must be false for public deployments"
   assert_file_contains "$case_dir/doctor-public-no-auth.log" "public WebDAV must not use auth_type=none"
+
+  cat > "$case_dir/config-webdav-spaced-none.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[webdav]
+enabled = true
+auth_type = " none "
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-webdav-spaced-none.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-webdav-spaced-none.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted whitespace-padded WebDAV auth_type=none"
+  assert_file_contains "$case_dir/doctor-public-webdav-spaced-none.log" "public WebDAV must not use auth_type=none"
 
   cat > "$case_dir/config-share-http.toml" <<EOF
 [server]

@@ -6,7 +6,7 @@ This guide describes recommended MnemoNAS security settings for LAN and public d
 
 ## Web UI Authentication
 
-Web UI authentication is enabled by default. On first startup with no user data, MnemoNAS creates an administrator account and writes the initial password to:
+Web UI authentication is enabled by default. On first startup with no user data, MnemoNAS creates an administrator account and writes the initial password to `initial-password.txt` next to `auth.users_file`. The default path is:
 
 ```text
 <storage.root>/.mnemonas/initial-password.txt
@@ -66,7 +66,7 @@ Custom password:
 
 ```toml
 [webdav]
-password = "change-this-strong-password"
+password = "" # leave empty to use generated credentials; use a password-manager value for custom credentials
 ```
 
 Use at least 16 characters with mixed letters, numbers, and symbols. A password manager is strongly recommended.
@@ -218,12 +218,12 @@ cloudflared tunnel run mnemonas
 
 - [ ] First login completed using server-side `initial-password.txt`.
 - [ ] Administrator password changed.
-- [ ] WebDAV uses `auth_type = "users"`, or global Basic Auth credentials are recorded and changed to a strong password.
+- [ ] WebDAV uses `auth_type = "users"`, or global Basic Auth credentials are recorded and changed to a strong custom or generated password, without placeholder values.
 - [ ] `webdav.auth_type` is not `none` unless the server is loopback-only.
 - [ ] Public deployments use `server.host = "127.0.0.1"` and are reachable only through the HTTPS reverse proxy.
 - [ ] Dataplane gRPC/HTTP ports are loopback-only or private.
 - [ ] The Web UI security self-check has no `block` items; public deployments should resolve all `warning` items before exposure, especially `allow_unsafe_no_auth`, reverse-proxy headers, dataplane ports, and spare-administrator warnings.
-- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
+- [ ] `sudo mnemonas-doctor --public-domain <domain>` reports HTTP redirects to HTTPS on the same public domain, a matching HTTPS certificate with at least 30 days remaining, verified renewal guidance, rejected anonymous WebDAV `PROPFIND`, and no direct backend exposure, dataplane exposure, or UFW allow warnings.
 - [ ] The [Public cloud firewall checklist](cloud-firewall-checklist.en.md) has been applied: cloud security groups or public firewall rules expose only `80/443`; management ports, the Web backend port, and dataplane ports are not publicly reachable.
 - [ ] Public deployments use HTTPS.
 
@@ -231,7 +231,7 @@ Runtime checks:
 
 ```bash
 sudo mnemonas-doctor --public-domain <domain>
-# Checks HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, 30-day certificate validity, renewal guidance, direct backend exposure, and dataplane exposure.
+# Checks HTTPS health, HTTP redirects to HTTPS on the same public domain, certificate hostname, 30-day certificate validity, renewal guidance, anonymous WebDAV PROPFIND, direct backend exposure, and dataplane exposure.
 
 ss -tlnp | grep 8080
 ss -tlnp | grep -E '9090|9091'

@@ -476,8 +476,8 @@ enabled = true
 prefix = "/dav"
 read_only = false
 auth_type = "basic"
-username = "myuser"
-password = "very-strong-password-here"
+username = "webdav-service"
+password = "" # 留空使用自动生成密码；自定义时填入密码管理器生成的随机强密码
 ```
 
 ---
@@ -586,7 +586,7 @@ max_access = 20
 | `cooldown_period` | duration | `4h` | 提醒冷却时间 |
 | `webhook_url` | string | `""` | Webhook URL；非空时必须是完整的 `http` 或 `https` URL |
 | `webhook_method` | string | `POST` | Webhook 方法；`POST` 发送 JSON body，`GET` 将提醒字段编码到 URL query |
-| `webhook_headers` | string[] | `[]` | 自定义 Header（`"Key: Value"`）；Header 名称必须是合法 HTTP token，值不能包含换行或控制字符 |
+| `webhook_headers` | string[] | `[]` | 自定义 Header（`"Key: Value"`）；Header 名称必须是合法 HTTP token，不能重复（大小写不敏感），值不能包含换行或控制字符 |
 | `telegram_enabled` | bool | `false` | 是否启用 Telegram 机器人通知 |
 | `telegram_bot_token` | string | `""` | Telegram Bot Token；不会在诊断或设置响应中明文返回 |
 | `telegram_chat_id` | string | `""` | Telegram Chat ID 或 `@channel` 用户名 |
@@ -598,7 +598,7 @@ max_access = 20
 | `smtp_from` | string | `""` | 发件人地址，例如 `MnemoNAS <alerts@example.com>` |
 | `smtp_to` | string[] | `[]` | 收件人地址列表 |
 
-设备状态页和诊断导出会显示提醒是否启用、运行态是否可用、最近一次检查级别，以及是否配置了 Webhook、Telegram 或邮件；邮件通道只有在启用且 SMTP 主机、端口、发件人和至少一个收件人均有效时才会标记为已配置。诊断响应不会暴露 `webhook_url`、`webhook_headers`、`telegram_bot_token`、SMTP 主机、SMTP 用户名、`smtp_password`、发件人或收件人地址。同一通知通道也用于备份失败、恢复演练失败、恢复演练缺失/过期提醒、磁盘健康异常、Scrub 异常和登录限流事件。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload；Telegram 发送错误不会包含 Bot Token。
+设备状态页和诊断导出会显示提醒是否启用、运行态是否可用、最近一次检查级别，以及是否配置了 Webhook、Telegram 或邮件；邮件通道只有在启用且 SMTP 主机、端口、发件人和至少一个非空收件人均存在时才会标记为已配置。诊断响应不会暴露 `webhook_url`、`webhook_headers`、`telegram_bot_token`、SMTP 主机、SMTP 用户名、`smtp_password`、发件人或收件人地址。同一通知通道也用于备份失败、备份完成但带警告、显式恢复失败或带警告、恢复后只读校验失败或带警告、恢复演练失败、恢复演练缺失/过期提醒、保留策略检测失败或带警告、磁盘健康异常、Scrub 异常和登录限流事件；备份相关事件类型包括 `backup_run`、`backup_restore`、`backup_restore_verify`、`backup_restore_drill` 和 `backup_retention_check`。保存提醒配置后，管理员可以在 Web 设置页或通过 `POST /api/v1/settings/alerts/test` 发送 `alert_test` 测试事件。Webhook 发送成功和失败日志只记录 URL 的 scheme 与 host，不记录路径、查询参数、凭据或 GET payload；Telegram 发送错误不会包含 Bot Token。
 
 **示例：**
 

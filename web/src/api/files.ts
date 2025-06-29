@@ -512,6 +512,14 @@ function normalizeAppVersion(value: BackendAppVersionInfo): AppVersionInfo {
   }
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
 function isPathActionShape(value: unknown): value is { path: string } {
   return isRecord(value) && typeof value.path === 'string'
 }
@@ -521,7 +529,7 @@ function isFileItemShape(value: unknown): value is FileItem {
     && typeof value.name === 'string'
     && typeof value.path === 'string'
     && typeof value.isDir === 'boolean'
-    && typeof value.size === 'number'
+    && isNonNegativeSafeInteger(value.size)
     && typeof value.modTime === 'string'
     && isStringOrUndefined(value.etag)
     && (value.capabilities === undefined || isFileCapabilitiesShape(value.capabilities))
@@ -544,9 +552,9 @@ function isFileListResponseShape(value: unknown): value is FileListResponse {
 
 function isVersionInfoShape(value: unknown): value is VersionInfo {
   return isRecord(value)
-    && typeof value.version === 'number'
+    && isPositiveSafeInteger(value.version)
     && typeof value.hash === 'string'
-    && typeof value.size === 'number'
+    && isNonNegativeSafeInteger(value.size)
     && typeof value.timestamp === 'string'
 }
 
@@ -555,6 +563,41 @@ function isVersionsResponseShape(value: unknown): value is { path: string, versi
     && typeof value.path === 'string'
     && Array.isArray(value.versions)
     && value.versions.every(isVersionInfoShape)
+}
+
+function isNonNegativeSafeIntegerOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || isNonNegativeSafeInteger(value)
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function isFiniteNumberOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value))
+}
+
+function getUploadProgressPercent(event: ProgressEvent): number | null {
+  if (!event.lengthComputable || !Number.isFinite(event.loaded) || !Number.isFinite(event.total) || event.total <= 0) {
+    return null
+  }
+  return Math.min(100, Math.max(0, (event.loaded / event.total) * 100))
+}
+
+function isNonNegativeFiniteNumberOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || isNonNegativeFiniteNumber(value)
+}
+
+function isPercentageOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || (isNonNegativeFiniteNumber(value) && value <= 100)
+}
+
+function isRatioOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || (isNonNegativeFiniteNumber(value) && value <= 1)
+}
+
+function isFiniteRatio(value: unknown): value is number {
+  return isNonNegativeFiniteNumber(value) && value <= 1
 }
 
 function isStorageStatsShape(value: unknown): value is {
@@ -588,20 +631,20 @@ function isStorageStatsShape(value: unknown): value is {
   }[]
 } {
   return isRecord(value)
-    && isNumberOrUndefined(value.total_files)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_files)
     && isBooleanOrUndefined(value.total_files_available)
     && isBooleanOrUndefined(value.storage_stats_available)
     && isBooleanOrUndefined(value.disk_stats_available)
     && isBooleanOrUndefined(value.directory_quota_stats_available)
-    && isNumberOrUndefined(value.total_size)
-    && isNumberOrUndefined(value.total_chunks)
-    && isNumberOrUndefined(value.unique_size)
-    && isNumberOrUndefined(value.dedup_ratio)
-    && isNumberOrUndefined(value.disk_total)
-    && isNumberOrUndefined(value.disk_free)
-    && isNumberOrUndefined(value.disk_available)
-    && isNumberOrUndefined(value.disk_used)
-    && isNumberOrUndefined(value.disk_usage_ratio)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_size)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_chunks)
+    && isNonNegativeSafeIntegerOrUndefined(value.unique_size)
+    && isNonNegativeFiniteNumberOrUndefined(value.dedup_ratio)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_total)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_free)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_available)
+    && isNonNegativeSafeIntegerOrUndefined(value.disk_used)
+    && isRatioOrUndefined(value.disk_usage_ratio)
     && isStringOrUndefined(value.disk_filesystem_type)
     && isStringOrUndefined(value.disk_mount_point)
     && isStringOrUndefined(value.disk_mount_source)
@@ -621,10 +664,10 @@ function isDirectoryQuotaUsageShape(value: unknown): value is {
 } {
   return isRecord(value)
     && typeof value.path === 'string'
-    && typeof value.quota_bytes === 'number'
-    && typeof value.used_bytes === 'number'
-    && typeof value.available_bytes === 'number'
-    && typeof value.usage_ratio === 'number'
+    && isNonNegativeSafeInteger(value.quota_bytes)
+    && isNonNegativeSafeInteger(value.used_bytes)
+    && isNonNegativeSafeInteger(value.available_bytes)
+    && isNonNegativeFiniteNumber(value.usage_ratio)
     && typeof value.exists === 'boolean'
     && isDirectoryQuotaUsageStatus(value.status)
 }
@@ -668,7 +711,7 @@ function isTrashItemShape(value: unknown): value is {
     && typeof value.deletedAt === 'string'
     && typeof value.name === 'string'
     && typeof value.isDir === 'boolean'
-    && typeof value.size === 'number'
+    && isNonNegativeSafeInteger(value.size)
     && isStringOrUndefined(value.hash)
     && isBooleanOrUndefined(value.hadVersions)
 }
@@ -693,16 +736,17 @@ function isTrashListResponseShape(value: unknown): value is {
   return isRecord(value)
     && Array.isArray(value.items)
     && value.items.every(isTrashItemShape)
-    && isNumberOrUndefined(value.count)
-    && isNumberOrUndefined(value.totalSize)
-    && isNumberOrUndefined(value.retentionDays)
+    && isNonNegativeSafeIntegerOrUndefined(value.count)
+    && (value.count === undefined || value.count >= value.items.length)
+    && isNonNegativeSafeIntegerOrUndefined(value.totalSize)
+    && isNonNegativeSafeIntegerOrUndefined(value.retentionDays)
     && isBooleanOrUndefined(value.retentionEnabled)
-    && isNumberOrUndefined(value.retentionMaxSize)
+    && isNonNegativeSafeIntegerOrUndefined(value.retentionMaxSize)
 }
 
 function isEmptyTrashResultShape(value: unknown): value is { deleted_count: number; partial?: boolean; warning?: boolean } {
   return isRecord(value)
-    && typeof value.deleted_count === 'number'
+    && isNonNegativeSafeInteger(value.deleted_count)
     && isBooleanOrUndefined(value.partial)
     && isBooleanOrUndefined(value.warning)
 }
@@ -712,7 +756,7 @@ function isHealthShape(value: unknown): value is HealthStatus & { uptime_secs?: 
     return false
   }
 
-  if (!isNumberOrUndefined(value.uptime_secs) || !isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
+  if (!isNonNegativeSafeIntegerOrUndefined(value.uptime_secs) || !isStringOrUndefined(value.timestamp) || !isStringOrUndefined(value.version)) {
     return false
   }
 
@@ -728,7 +772,7 @@ function isHealthShape(value: unknown): value is HealthStatus & { uptime_secs?: 
     if (!isRecord(value.dataplane)
       || !isBooleanOrUndefined(value.dataplane.healthy)
       || !isStringOrUndefined(value.dataplane.version)
-      || !isNumberOrUndefined(value.dataplane.uptime)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.dataplane.uptime)) {
       return false
     }
   }
@@ -768,17 +812,17 @@ function isDiskHealthDeviceShape(value: unknown): value is {
     && typeof value.present === 'boolean'
     && typeof value.smart_available === 'boolean'
     && isBooleanOrUndefined(value.smart_passed)
-    && isNumberOrUndefined(value.temperature_c)
-    && isNumberOrUndefined(value.power_on_hours)
-    && isNumberOrUndefined(value.wear_percent_used)
-    && isNumberOrUndefined(value.available_spare_percent)
-    && isNumberOrUndefined(value.available_spare_threshold_percent)
-    && isNumberOrUndefined(value.media_errors)
-    && isNumberOrUndefined(value.nvme_critical_warning)
+    && isFiniteNumberOrUndefined(value.temperature_c)
+    && isNonNegativeSafeIntegerOrUndefined(value.power_on_hours)
+    && isNonNegativeFiniteNumberOrUndefined(value.wear_percent_used)
+    && isPercentageOrUndefined(value.available_spare_percent)
+    && isPercentageOrUndefined(value.available_spare_threshold_percent)
+    && isNonNegativeSafeIntegerOrUndefined(value.media_errors)
+    && isNonNegativeSafeIntegerOrUndefined(value.nvme_critical_warning)
     && typeof value.status === 'string'
     && isStringOrUndefined(value.message)
-    && isNumberOrUndefined(value.temperature_warning_c)
-    && isNumberOrUndefined(value.temperature_critical_c)
+    && isFiniteNumberOrUndefined(value.temperature_warning_c)
+    && isFiniteNumberOrUndefined(value.temperature_critical_c)
 }
 
 function isDiskHealthReportShape(value: unknown): value is {
@@ -822,10 +866,6 @@ function isDiskHealthReportShape(value: unknown): value is {
 
 function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === 'boolean'
-}
-
-function isNumberOrUndefined(value: unknown): value is number | undefined {
-  return value === undefined || typeof value === 'number'
 }
 
 function isStringOrUndefined(value: unknown): value is string | undefined {
@@ -945,7 +985,7 @@ function isDiagnosticsShape(value: unknown): value is {
     return false
   }
 
-  if (!isNumberOrUndefined(value.uptime_secs) || !isNumberOrUndefined(value.goroutines)) {
+  if (!isNonNegativeSafeIntegerOrUndefined(value.uptime_secs) || !isNonNegativeSafeIntegerOrUndefined(value.goroutines)) {
     return false
   }
 
@@ -965,10 +1005,10 @@ function isDiagnosticsShape(value: unknown): value is {
 
   if (value.memory !== undefined) {
     if (!isRecord(value.memory)
-      || !isNumberOrUndefined(value.memory.alloc_mb)
-      || !isNumberOrUndefined(value.memory.total_alloc_mb)
-      || !isNumberOrUndefined(value.memory.sys_mb)
-      || !isNumberOrUndefined(value.memory.num_gc)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.alloc_mb)
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.total_alloc_mb)
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.sys_mb)
+      || !isNonNegativeSafeIntegerOrUndefined(value.memory.num_gc)) {
       return false
     }
   }
@@ -976,14 +1016,14 @@ function isDiagnosticsShape(value: unknown): value is {
   if (value.filesystem !== undefined) {
     if (!isRecord(value.filesystem)
       || !isBooleanOrUndefined(value.filesystem.trash_stats_available)
-      || !isNumberOrUndefined(value.filesystem.trash_items)
-      || !isNumberOrUndefined(value.filesystem.trash_size)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.trash_items)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.trash_size)
       || !isBooleanOrUndefined(value.filesystem.disk_stats_available)
-      || !isNumberOrUndefined(value.filesystem.disk_total)
-      || !isNumberOrUndefined(value.filesystem.disk_free)
-      || !isNumberOrUndefined(value.filesystem.disk_available)
-      || !isNumberOrUndefined(value.filesystem.disk_used)
-      || !isNumberOrUndefined(value.filesystem.disk_usage_ratio)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_total)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_free)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_available)
+      || !isNonNegativeSafeIntegerOrUndefined(value.filesystem.disk_used)
+      || !isRatioOrUndefined(value.filesystem.disk_usage_ratio)
       || !isStringOrUndefined(value.filesystem.disk_filesystem_type)
       || !isStringOrUndefined(value.filesystem.disk_mount_point)
       || !isStringOrUndefined(value.filesystem.disk_mount_source)
@@ -998,9 +1038,9 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isBooleanOrUndefined(value.alerts.enabled)
       || !isBooleanOrUndefined(value.alerts.runtime_available)
       || !isStringOrUndefined(value.alerts.check_interval)
-      || !isNumberOrUndefined(value.alerts.threshold_pct)
-      || !isNumberOrUndefined(value.alerts.critical_pct)
-      || !isNumberOrUndefined(value.alerts.min_free_bytes)
+      || !isPercentageOrUndefined(value.alerts.threshold_pct)
+      || !isPercentageOrUndefined(value.alerts.critical_pct)
+      || !isNonNegativeSafeIntegerOrUndefined(value.alerts.min_free_bytes)
       || !isStringOrUndefined(value.alerts.cooldown_period)
       || !isBooleanOrUndefined(value.alerts.webhook_configured)
       || !isBooleanOrUndefined(value.alerts.telegram_configured)
@@ -1008,8 +1048,8 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isStringOrUndefined(value.alerts.webhook_method)
       || !isStringOrUndefined(value.alerts.last_level)
       || !isStringOrUndefined(value.alerts.last_checked_at)
-      || !isNumberOrUndefined(value.alerts.last_used_pct)
-      || !isNumberOrUndefined(value.alerts.last_free_bytes)) {
+      || !isPercentageOrUndefined(value.alerts.last_used_pct)
+      || !isNonNegativeSafeIntegerOrUndefined(value.alerts.last_free_bytes)) {
       return false
     }
   }
@@ -1020,10 +1060,10 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isBooleanOrUndefined(value.maintenance.scrub_schedule_enabled)
       || !isStringOrUndefined(value.maintenance.scrub_schedule_interval)
       || !isStringOrUndefined(value.maintenance.scrub_retry_interval)
-      || !isNumberOrUndefined(value.maintenance.scrub_max_retries)
+      || !isNonNegativeSafeIntegerOrUndefined(value.maintenance.scrub_max_retries)
       || !isStringOrUndefined(value.maintenance.last_scrub_status)
       || !isStringOrUndefined(value.maintenance.last_scrub_at)
-      || !isNumberOrUndefined(value.maintenance.scrub_failure_retries)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.maintenance.scrub_failure_retries)) {
       return false
     }
   }
@@ -1035,18 +1075,18 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isStringOrUndefined(value.disk_health.check_interval)
       || !isStringOrUndefined(value.disk_health.probe_timeout)
       || !isStringOrUndefined(value.disk_health.cooldown_period)
-      || !isNumberOrUndefined(value.disk_health.temperature_warning_c)
-      || !isNumberOrUndefined(value.disk_health.temperature_critical_c)
-      || !isNumberOrUndefined(value.disk_health.media_wear_warning_percent)
-      || !isNumberOrUndefined(value.disk_health.media_wear_critical_percent)
-      || !isNumberOrUndefined(value.disk_health.device_count)
+      || !isFiniteNumberOrUndefined(value.disk_health.temperature_warning_c)
+      || !isFiniteNumberOrUndefined(value.disk_health.temperature_critical_c)
+      || !isPercentageOrUndefined(value.disk_health.media_wear_warning_percent)
+      || !isPercentageOrUndefined(value.disk_health.media_wear_critical_percent)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.device_count)
       || !isStringOrUndefined(value.disk_health.last_status)
       || !isStringOrUndefined(value.disk_health.last_checked_at)
-      || !isNumberOrUndefined(value.disk_health.last_warning_count)
-      || !isNumberOrUndefined(value.disk_health.last_device_count)
-      || !isNumberOrUndefined(value.disk_health.last_critical_devices)
-      || !isNumberOrUndefined(value.disk_health.last_warning_devices)
-      || !isNumberOrUndefined(value.disk_health.last_unavailable_devices)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_warning_count)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_device_count)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_critical_devices)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_warning_devices)
+      || !isNonNegativeSafeIntegerOrUndefined(value.disk_health.last_unavailable_devices)) {
       return false
     }
   }
@@ -1060,7 +1100,7 @@ function isDiagnosticsShape(value: unknown): value is {
       || !isStringOrUndefined(value.smb.server_name)
       || !isBooleanOrUndefined(value.smb.signing_required)
       || !isBooleanOrUndefined(value.smb.encryption_required)
-      || !isNumberOrUndefined(value.smb.share_count)
+      || !isNonNegativeSafeIntegerOrUndefined(value.smb.share_count)
       || !isBooleanOrUndefined(value.smb.credentials_ready)
       || !isBooleanOrUndefined(value.smb.gateway_configured)
       || !isStringOrUndefined(value.smb.message)) {
@@ -1070,10 +1110,10 @@ function isDiagnosticsShape(value: unknown): value is {
 
   if (value.storage !== undefined) {
     if (!isRecord(value.storage)
-      || !isNumberOrUndefined(value.storage.total_chunks)
-      || !isNumberOrUndefined(value.storage.total_size)
-      || !isNumberOrUndefined(value.storage.unique_size)
-      || !isNumberOrUndefined(value.storage.dedup_ratio)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.storage.total_chunks)
+      || !isNonNegativeSafeIntegerOrUndefined(value.storage.total_size)
+      || !isNonNegativeSafeIntegerOrUndefined(value.storage.unique_size)
+      || !isNonNegativeFiniteNumberOrUndefined(value.storage.dedup_ratio)) {
       return false
     }
   }
@@ -1082,7 +1122,7 @@ function isDiagnosticsShape(value: unknown): value is {
     if (!isRecord(value.dataplane)
       || !isBooleanOrUndefined(value.dataplane.healthy)
       || !isStringOrUndefined(value.dataplane.version)
-      || !isNumberOrUndefined(value.dataplane.uptime_sec)) {
+      || !isNonNegativeSafeIntegerOrUndefined(value.dataplane.uptime_sec)) {
       return false
     }
   }
@@ -1127,7 +1167,7 @@ function isScrubResultShape(value: unknown): value is ScrubResult {
     'duration_ms',
   ] as const
   for (const key of numericKeys) {
-    if (value[key] !== undefined && typeof value[key] !== 'number') {
+    if (value[key] !== undefined && !isNonNegativeSafeInteger(value[key])) {
       return false
     }
   }
@@ -1270,6 +1310,8 @@ export interface BackupRestoreVerifyResult {
   duration_ms: number
   source: string
   destination: string
+  snapshot_path?: string
+  manifest_path?: string
   target_path: string
   file_count: number
   verified_bytes: number
@@ -1396,6 +1438,8 @@ export interface BackupJob {
   restore_drill_history?: BackupRestoreDrillResult[]
   last_restore?: BackupRestoreResult
   last_restore_verify?: BackupRestoreVerifyResult
+  last_matching_restore_verify?: BackupRestoreVerifyResult
+  restore_report_findings?: string[]
   restore_history?: BackupRestoreResult[]
   last_retention_check?: BackupRetentionCheckResult
 }
@@ -1431,18 +1475,18 @@ function isBackupRunResultShape(value: unknown): value is BackupRunResult {
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.source === 'string'
     && typeof value.destination === 'string'
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
-    && typeof value.file_count === 'number'
-    && typeof value.total_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.total_bytes)
     && typeof value.config_included === 'boolean'
     && isStringOrUndefined(value.trigger)
     && isBooleanOrUndefined(value.warning)
     && (value.warnings === undefined || (Array.isArray(value.warnings) && value.warnings.every((entry) => typeof entry === 'string')))
-    && isNumberOrUndefined(value.pruned_snapshots)
+    && isNonNegativeSafeIntegerOrUndefined(value.pruned_snapshots)
     && isStringOrUndefined(value.error_message)
 }
 
@@ -1453,25 +1497,25 @@ function isBackupRestoreDrillResultShape(value: unknown): value is BackupRestore
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
     && isStringOrUndefined(value.restored_path)
     && typeof value.artifact_kept === 'boolean'
-    && typeof value.file_count === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isStringOrUndefined(value.error_message)
     && isStringOrUndefined(value.failure_category)
 }
 
 function isBackupRestoreDrillStatsShape(value: unknown): value is BackupRestoreDrillStats {
   return isRecord(value)
-    && typeof value.total_runs === 'number'
-    && typeof value.successful_runs === 'number'
-    && typeof value.failed_runs === 'number'
-    && typeof value.success_rate === 'number'
-    && isNumberOrUndefined(value.consecutive_successes)
-    && isNumberOrUndefined(value.consecutive_failures)
+    && isNonNegativeSafeInteger(value.total_runs)
+    && isNonNegativeSafeInteger(value.successful_runs)
+    && isNonNegativeSafeInteger(value.failed_runs)
+    && isFiniteRatio(value.success_rate)
+    && isNonNegativeSafeIntegerOrUndefined(value.consecutive_successes)
+    && isNonNegativeSafeIntegerOrUndefined(value.consecutive_failures)
     && isStringOrUndefined(value.latest_success_at)
     && isStringOrUndefined(value.latest_failure_at)
     && isStringOrUndefined(value.last_failure_message)
@@ -1485,14 +1529,14 @@ function isBackupRestoreResultShape(value: unknown): value is BackupRestoreResul
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
     && typeof value.target_path === 'string'
     && typeof value.config_restored === 'boolean'
     && isStringOrUndefined(value.config_path)
-    && typeof value.file_count === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isBackupRestorePreflightChecksOrUndefined(value.preflight_checks)
     && isStringArrayOrUndefined(value.warnings)
     && isStringArrayOrUndefined(value.cutover_checklist)
@@ -1507,14 +1551,14 @@ function isBackupRestorePreviewResultShape(value: unknown): value is BackupResto
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.source === 'string'
     && typeof value.destination === 'string'
     && isStringOrUndefined(value.snapshot_path)
     && isStringOrUndefined(value.manifest_path)
     && typeof value.target_path === 'string'
-    && typeof value.file_count === 'number'
-    && typeof value.total_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.total_bytes)
     && typeof value.config_available === 'boolean'
     && typeof value.config_included === 'boolean'
     && (value.sample_paths === undefined || (Array.isArray(value.sample_paths) && value.sample_paths.every((entry) => typeof entry === 'string')))
@@ -1532,12 +1576,14 @@ function isBackupRestoreVerifyResultShape(value: unknown): value is BackupRestor
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.source === 'string'
     && typeof value.destination === 'string'
+    && isStringOrUndefined(value.snapshot_path)
+    && isStringOrUndefined(value.manifest_path)
     && typeof value.target_path === 'string'
-    && typeof value.file_count === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.file_count)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isStringOrUndefined(value.config_path)
     && typeof value.config_found === 'boolean'
     && typeof value.files_dir_found === 'boolean'
@@ -1556,12 +1602,12 @@ function isBackupRetentionCheckResultShape(value: unknown): value is BackupReten
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && typeof value.target === 'string'
     && isStringOrUndefined(value.policy)
-    && isNumberOrUndefined(value.snapshot_count)
-    && isNumberOrUndefined(value.file_count)
-    && isNumberOrUndefined(value.total_bytes)
+    && isNonNegativeSafeIntegerOrUndefined(value.snapshot_count)
+    && isNonNegativeSafeIntegerOrUndefined(value.file_count)
+    && isNonNegativeSafeIntegerOrUndefined(value.total_bytes)
     && isStringOrUndefined(value.oldest_snapshot_at)
     && isStringOrUndefined(value.latest_snapshot_at)
     && isBooleanOrUndefined(value.warning)
@@ -1571,7 +1617,7 @@ function isBackupRetentionCheckResultShape(value: unknown): value is BackupReten
 
 function isBackupBatchRestorePreviewItemResultShape(value: unknown): value is BackupBatchRestorePreviewItemResult {
   return isRecord(value)
-    && typeof value.index === 'number'
+    && isNonNegativeSafeInteger(value.index)
     && typeof value.job_id === 'string'
     && typeof value.target_path === 'string'
     && typeof value.include_config === 'boolean'
@@ -1586,11 +1632,11 @@ function isBackupBatchRestorePreviewResultShape(value: unknown): value is Backup
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && Array.isArray(value.items)
     && value.items.every(isBackupBatchRestorePreviewItemResultShape)
-    && typeof value.total_files === 'number'
-    && typeof value.total_bytes === 'number'
+    && isNonNegativeSafeInteger(value.total_files)
+    && isNonNegativeSafeInteger(value.total_bytes)
     && isBooleanOrUndefined(value.warning)
     && isStringArrayOrUndefined(value.warnings)
     && isStringOrUndefined(value.error_message)
@@ -1598,7 +1644,7 @@ function isBackupBatchRestorePreviewResultShape(value: unknown): value is Backup
 
 function isBackupBatchRestoreItemResultShape(value: unknown): value is BackupBatchRestoreItemResult {
   return isRecord(value)
-    && typeof value.index === 'number'
+    && isNonNegativeSafeInteger(value.index)
     && typeof value.job_id === 'string'
     && typeof value.target_path === 'string'
     && typeof value.include_config === 'boolean'
@@ -1615,11 +1661,11 @@ function isBackupBatchRestoreResultShape(value: unknown): value is BackupBatchRe
     && isBackupStatus(value.status)
     && typeof value.started_at === 'string'
     && isStringOrUndefined(value.finished_at)
-    && typeof value.duration_ms === 'number'
+    && isNonNegativeSafeInteger(value.duration_ms)
     && Array.isArray(value.items)
     && value.items.every(isBackupBatchRestoreItemResultShape)
-    && typeof value.total_files === 'number'
-    && typeof value.verified_bytes === 'number'
+    && isNonNegativeSafeInteger(value.total_files)
+    && isNonNegativeSafeInteger(value.verified_bytes)
     && isBooleanOrUndefined(value.warning)
     && isStringArrayOrUndefined(value.warnings)
     && isStringOrUndefined(value.error_message)
@@ -1642,7 +1688,7 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && isStringOrUndefined(value.next_run_at)
     && isStringOrUndefined(value.stale_after)
     && isStringOrUndefined(value.restore_drill_stale_after)
-    && isNumberOrUndefined(value.max_snapshots)
+    && isNonNegativeSafeIntegerOrUndefined(value.max_snapshots)
     && isStringOrUndefined(value.max_age)
     && isStringOrUndefined(value.retention_policy)
     && typeof value.retention_status === 'string'
@@ -1664,6 +1710,8 @@ function isBackupJobShape(value: unknown): value is BackupJob {
     && (value.restore_drill_history === undefined || (Array.isArray(value.restore_drill_history) && value.restore_drill_history.every(isBackupRestoreDrillResultShape)))
     && (value.last_restore === undefined || isBackupRestoreResultShape(value.last_restore))
     && (value.last_restore_verify === undefined || isBackupRestoreVerifyResultShape(value.last_restore_verify))
+    && (value.last_matching_restore_verify === undefined || isBackupRestoreVerifyResultShape(value.last_matching_restore_verify))
+    && isStringArrayOrUndefined(value.restore_report_findings)
     && (value.restore_history === undefined || (Array.isArray(value.restore_history) && value.restore_history.every(isBackupRestoreResultShape)))
     && (value.last_retention_check === undefined || isBackupRetentionCheckResultShape(value.last_retention_check))
 }
@@ -2049,8 +2097,11 @@ export async function uploadFile(
     options.signal?.addEventListener('abort', abortUpload, { once: true })
 
     xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable && onProgress) {
-        onProgress((e.loaded / e.total) * 100)
+      if (onProgress) {
+        const progress = getUploadProgressPercent(e)
+        if (progress !== null) {
+          onProgress(progress)
+        }
       }
     })
 

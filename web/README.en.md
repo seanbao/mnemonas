@@ -51,12 +51,14 @@ npx playwright install
 
 # Playwright starts an isolated backend and Vite frontend by default.
 
-# To reuse an existing environment for protected-page tests, provide explicit services and admin credentials.
+# Reusing an existing environment for protected-page tests requires explicit services and admin credentials.
 export MNEMONAS_E2E_REUSE_EXISTING=1
 export MNEMONAS_E2E_BACKEND_URL=http://127.0.0.1:8080
 export MNEMONAS_E2E_FRONTEND_URL=http://127.0.0.1:5173
 export E2E_USERNAME=admin
-export E2E_PASSWORD='change-this-test-password'
+export E2E_PASSWORD_FILE="$HOME/.mnemonas/.mnemonas/initial-password.txt"
+# If the admin password was changed and no password file is used:
+# export E2E_PASSWORD="<admin-password>"
 
 npm run test:e2e
 npm run test:e2e:navigation

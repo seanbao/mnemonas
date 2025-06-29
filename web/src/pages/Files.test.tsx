@@ -11,6 +11,8 @@ const mockUser = { id: 'u1', username: 'admin', role: 'admin' as const, email: '
 
 // Mock API functions
 vi.mock('@/api/files', () => ({
+  MAX_UPLOAD_FILE_SIZE_BYTES: 10 * 1024 * 1024 * 1024,
+  MAX_UPLOAD_FILE_SIZE_LABEL: '10 GB',
   ApiError: class ApiError extends Error {
     status: number
     code?: string
@@ -107,9 +109,18 @@ vi.mock('@/components/share', () => ({
   ShareDialog: () => null,
 }))
 
-import { ApiError, listFiles, createDirectory, deleteFile, moveFile, copyFile } from '@/api/files'
+import {
+  ApiError,
+  listFiles,
+  createDirectory,
+  deleteFile,
+  moveFile,
+  copyFile,
+  downloadFile,
+  uploadFile,
+  MAX_UPLOAD_FILE_SIZE_BYTES,
+} from '@/api/files'
 import { listShares } from '@/api/share'
-import { downloadFile } from '@/api/files'
 import { checkFavorites, toggleFavorite } from '@/api/favorites'
 
 const mockListFiles = vi.mocked(listFiles)
@@ -118,6 +129,7 @@ const mockDeleteFile = vi.mocked(deleteFile)
 const mockMoveFile = vi.mocked(moveFile)
 const mockCopyFile = vi.mocked(copyFile)
 const mockDownloadFile = vi.mocked(downloadFile)
+const mockUploadFile = vi.mocked(uploadFile)
 const mockCheckFavorites = vi.mocked(checkFavorites)
 const mockToggleFavorite = vi.mocked(toggleFavorite)
 const mockListShares = vi.mocked(listShares)
@@ -270,6 +282,7 @@ describe('FilesPage', () => {
     mockClipboardState.clear.mockClear()
     mockClipboardState.hasPaths.mockReturnValue(false)
     mockDownloadFile.mockResolvedValue(undefined)
+    mockUploadFile.mockResolvedValue(successActionResult)
     mockCheckFavorites.mockResolvedValue({
       '/documents': false,
       '/photo.jpg': false,
@@ -1355,6 +1368,116 @@ describe('FilesPage', () => {
 
       await user.click(screen.getByRole('button', { name: '上传文件夹' }))
       expect(folderInputClick).toHaveBeenCalled()
+    })
+
+    it('clamps upload progress in the upload panel', async () => {
+      const deferred = createDeferred<typeof successActionResult>()
+      mockUploadFile.mockImplementation((_path, _file, onProgress) => {
+        onProgress?.(150)
+        return deferred.promise
+      })
+
+      render(<FilesPage />)
+
+      await screen.findByText('上传文件')
+      const inputs = document.querySelectorAll('input[type="file"]')
+      const fileInput = inputs[0] as HTMLInputElement
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['content'], 'report.txt', { type: 'text/plain' })] },
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('100%')).toBeTruthy()
+      })
+      expect(screen.queryByText('150%')).toBeNull()
+
+      deferred.resolve(successActionResult)
+      await waitFor(() => {
+        expect(screen.getByText('上传完成')).toBeTruthy()
+      })
+    })
+
+    it('shows a failed upload panel when every selected file is oversized', async () => {
+      const oversizedFile = new File(['content'], 'huge.bin', { type: 'application/octet-stream' })
+      Object.defineProperty(oversizedFile, 'size', { value: MAX_UPLOAD_FILE_SIZE_BYTES + 1 })
+      render(<FilesPage />)
+
+      await screen.findByText('上传文件')
+      const inputs = document.querySelectorAll('input[type="file"]')
+      const fileInput = inputs[0] as HTMLInputElement
+      fireEvent.change(fileInput, {
+        target: { files: [oversizedFile] },
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('上传失败')).toBeTruthy()
+      })
+      expect(screen.getByText(/失败 1 个/)).toBeTruthy()
+      expect(mockUploadFile).not.toHaveBeenCalled()
+    })
+
+    it('rejects invalid folder upload paths before creating directories', async () => {
+      const invalidFolderFile = new File(['content'], 'secret.txt', { type: 'text/plain' })
+      Object.defineProperty(invalidFolderFile, 'webkitRelativePath', { value: 'photos/../secret.txt' })
+      render(<FilesPage />)
+
+      await screen.findByText('上传文件')
+      const inputs = document.querySelectorAll('input[type="file"]')
+      const folderInput = inputs[1] as HTMLInputElement
+      fireEvent.change(folderInput, {
+        target: { files: [invalidFolderFile] },
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('上传失败')).toBeTruthy()
+      })
+      expect(screen.getByText('文件夹路径无效，已跳过上传')).toBeTruthy()
+      expect(mockCreateDirectory).not.toHaveBeenCalled()
+      expect(mockUploadFile).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '上传失败',
+        description: '文件夹路径无效，已跳过上传',
+        color: 'danger',
+      })
+    })
+
+    it('cancels an active upload from the upload panel', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const deferred = createDeferred<typeof successActionResult>()
+      let uploadSignal: AbortSignal | undefined
+      mockUploadFile.mockImplementation((_path, _file, onProgress, options) => {
+        uploadSignal = options?.signal
+        uploadSignal?.addEventListener('abort', () => {
+          deferred.reject(new DOMException('upload aborted', 'AbortError'))
+        }, { once: true })
+        onProgress?.(25)
+        return deferred.promise
+      })
+
+      render(<FilesPage />)
+
+      await screen.findByText('上传文件')
+      const inputs = document.querySelectorAll('input[type="file"]')
+      const fileInput = inputs[0] as HTMLInputElement
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['content'], 'report.txt', { type: 'text/plain' })] },
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText('25%')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '取消上传' }))
+
+      expect(uploadSignal?.aborted).toBe(true)
+      await waitFor(() => {
+        expect(screen.getAllByText('上传已取消').length).toBeGreaterThan(0)
+      })
+      expect(screen.getByText(/取消 1 个/)).toBeTruthy()
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '上传已取消',
+        color: 'warning',
+      })
     })
 
     it('clears selection when path changes', async () => {

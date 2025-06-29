@@ -189,6 +189,116 @@ PY
   ' "$file"
 }
 
+toml_key_exists() {
+  local section="$1"
+  local key="$2"
+  local file="$3"
+
+  [[ -f "$file" ]] || return 1
+
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(1)
+    current = current.get(part)
+    if current is None:
+        sys.exit(1)
+
+sys.exit(0 if isinstance(current, dict) and key in current else 1)
+PY
+    then
+      return 0
+    else
+      case "$?" in
+        1) return 1 ;;
+      esac
+    fi
+  fi
+
+  awk -v section="[$section]" -v key="$key" '
+    function strip_comment(text,    i, c, quote, escaped, out) {
+      quote = ""
+      escaped = 0
+      out = ""
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (quote == "\"") {
+          out = out c
+          if (escaped) {
+            escaped = 0
+            continue
+          }
+          if (c == "\\") {
+            escaped = 1
+            continue
+          }
+          if (c == quote) {
+            quote = ""
+          }
+          continue
+        }
+        if (quote == "\047") {
+          out = out c
+          if (c == quote) {
+            quote = ""
+          }
+          continue
+        }
+        if (c == "\"" || c == "\047") {
+          quote = c
+          out = out c
+          continue
+        }
+        if (c == "#") {
+          break
+        }
+        out = out c
+      }
+      return out
+    }
+    {
+      line = strip_comment($0)
+      gsub("^[[:space:]]+|[[:space:]]+$", "", line)
+      section_line = line
+      if (section_line ~ "^\\[") {
+        sub("^\\[[[:space:]]*", "[", section_line)
+        sub("[[:space:]]*\\]$", "]", section_line)
+        gsub("[[:space:]]*\\.[[:space:]]*", ".", section_line)
+      }
+    }
+    section_line == section {
+      in_section = 1
+      next
+    }
+    section_line ~ "^\\[" {
+      in_section = 0
+    }
+    in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      found = 1
+      exit
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$file"
+}
+
 systemd_env_value() {
   local key="$1"
   local file="$2"
@@ -413,15 +523,51 @@ normalize_public_domain() {
 }
 
 is_true_value() {
-  local value="${1,,}"
+  local value
+
+  value="$(trim_ascii_whitespace "$1")"
+  value="${value,,}"
 
   [[ "$value" == "true" || "$value" == "1" || "$value" == "yes" || "$value" == "on" ]]
 }
 
 is_false_value() {
-  local value="${1,,}"
+  local value
+
+  value="$(trim_ascii_whitespace "$1")"
+  value="${value,,}"
 
   [[ "$value" == "false" || "$value" == "0" || "$value" == "no" || "$value" == "off" ]]
+}
+
+normalize_webdav_auth_type_for_public_check() {
+  local value
+
+  value="$(trim_ascii_whitespace "$1")"
+  value="${value,,}"
+  if [[ -z "$value" ]]; then
+    value="basic"
+  fi
+  printf '%s\n' "$value"
+}
+
+webdav_basic_password_risk() {
+  local value lower
+
+  value="$(trim_ascii_whitespace "$1")"
+  [[ -n "$value" ]] || return 1
+  lower="${value,,}"
+  case "$lower" in
+    admin|changeme|change-me|change_this_password|change-this-password|change-this-strong-password|change-this-webdav-password|mnemonas|password|password123|very-strong-password-here|webdav|webdav-password|webdavpassword|*change-this*)
+      printf 'placeholder\n'
+      return 0
+      ;;
+  esac
+  if (( ${#value} < 16 )); then
+    printf 'too_short\n'
+    return 0
+  fi
+  return 1
 }
 
 parse_args "$@"
@@ -438,6 +584,9 @@ configured_auth_enabled=""
 configured_auth_users_file=""
 configured_webdav_enabled=""
 configured_webdav_auth_type=""
+configured_webdav_prefix=""
+configured_webdav_prefix_set=0
+configured_webdav_password=""
 configured_allow_unsafe_no_auth=""
 configured_share_enabled=""
 configured_share_base_url=""
@@ -451,6 +600,11 @@ if [[ -f "$CONFIG_PATH" ]]; then
   configured_auth_users_file="$(toml_value auth users_file "$CONFIG_PATH")"
   configured_webdav_enabled="$(toml_value webdav enabled "$CONFIG_PATH")"
   configured_webdav_auth_type="$(toml_value webdav auth_type "$CONFIG_PATH")"
+  configured_webdav_prefix="$(toml_value webdav prefix "$CONFIG_PATH")"
+  configured_webdav_password="$(toml_value webdav password "$CONFIG_PATH")"
+  if toml_key_exists webdav prefix "$CONFIG_PATH"; then
+    configured_webdav_prefix_set=1
+  fi
   configured_allow_unsafe_no_auth="$(toml_value security allow_unsafe_no_auth "$CONFIG_PATH")"
   configured_share_enabled="$(toml_value share enabled "$CONFIG_PATH")"
   configured_share_base_url="$(toml_value share base_url "$CONFIG_PATH")"
@@ -484,6 +638,21 @@ check_file() {
     ok "$label exists: $path"
   else
     fail "$label missing: $path"
+  fi
+}
+
+check_executable_file() {
+  local path="$1"
+  local label="$2"
+
+  if [[ ! -f "$path" ]]; then
+    fail "$label missing: $path"
+    return
+  fi
+  if [[ -x "$path" ]]; then
+    ok "$label is executable: $path"
+  else
+    fail "$label is not executable: $path"
   fi
 }
 
@@ -817,6 +986,31 @@ http_url_port() {
   fi
 }
 
+http_url_path() {
+  local value="$1"
+  local without_scheme remainder path_part
+
+  without_scheme="${value#*://}"
+  if [[ "$without_scheme" != */* ]]; then
+    printf '/\n'
+    return
+  fi
+  remainder="/${without_scheme#*/}"
+  path_part="${remainder%%\?*}"
+  path_part="${path_part%%#*}"
+  [[ -n "$path_part" ]] || path_part="/"
+  printf '%s\n' "$path_part"
+}
+
+http_url_path_ends_with_share_route() {
+  local path="$1"
+
+  while [[ "$path" != "/" && "$path" == */ ]]; do
+    path="${path%/}"
+  done
+  [[ "$path" == "/s" || "$path" == */s ]]
+}
+
 http_url_host_is_valid() {
   local host="$1"
 
@@ -826,6 +1020,158 @@ http_url_host_is_valid() {
     [[ "$host" != *. ]] || return 1
   fi
   is_valid_tcp_host "$host"
+}
+
+trim_ascii_whitespace() {
+  local value="$1"
+
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "$value"
+}
+
+clean_url_path_prefix() {
+  local value="$1"
+  local segment
+  local last_index
+  local -a input_segments=()
+  local -a output_segments=()
+
+  [[ "$value" == /* ]] || value="/$value"
+  IFS='/' read -r -a input_segments <<< "$value"
+  for segment in "${input_segments[@]}"; do
+    case "$segment" in
+      ""|.)
+        ;;
+      ..)
+        if [[ "${#output_segments[@]}" -gt 0 ]]; then
+          last_index=$(( ${#output_segments[@]} - 1 ))
+          output_segments=("${output_segments[@]:0:$last_index}")
+        fi
+        ;;
+      *)
+        output_segments+=("$segment")
+        ;;
+    esac
+  done
+
+  if [[ "${#output_segments[@]}" -eq 0 ]]; then
+    printf '/\n'
+    return
+  fi
+  printf '/%s' "${output_segments[@]}"
+  printf '\n'
+}
+
+normalize_webdav_prefix_for_probe() {
+  local trimmed
+  local value
+
+  trimmed="$(trim_ascii_whitespace "$1")"
+  if [[ -z "$trimmed" ]]; then
+    value="/dav"
+  else
+    value="$trimmed"
+  fi
+  if [[ "$value" != /* ]]; then
+    value="/$value"
+  fi
+
+  [[ "$value" != *[[:cntrl:]]* ]] || return 1
+  [[ "$value" != *\\* && "$value" != *\?* && "$value" != *\#* ]] || return 1
+
+  value="$(clean_url_path_prefix "$value")"
+  [[ "$value" != "/" ]] || return 1
+  webdav_prefix_overlaps_reserved_route "$value" && return 1
+
+  printf '%s\n' "$value"
+}
+
+normalize_configured_webdav_prefix_for_probe() {
+  local value
+
+  value="$(trim_ascii_whitespace "$1")"
+  if [[ -z "$value" ]]; then
+    value="/"
+  elif [[ "$value" != /* ]]; then
+    value="/$value"
+  fi
+
+  [[ "$value" != *[[:cntrl:]]* ]] || return 1
+  [[ "$value" != *\\* && "$value" != *\?* && "$value" != *\#* ]] || return 1
+
+  value="$(clean_url_path_prefix "$value")"
+  [[ "$value" != "/" ]] || return 1
+  webdav_prefix_overlaps_reserved_route "$value" && return 1
+
+  printf '%s\n' "$value"
+}
+
+webdav_prefix_overlaps_reserved_route() {
+  case "$1" in
+    /api|/api/*|/s|/s/*|/health|/health/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+normalize_public_backend_host_for_loopback_check() {
+  local value
+
+  value="$(trim_ascii_whitespace "$1")"
+  value="${value,,}"
+  if [[ "$value" =~ ^\[([^][]+)\]$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  fi
+  printf '%s\n' "$value"
+}
+
+configured_webdav_prefix_display() {
+  if [[ "$configured_webdav_prefix_set" != "1" ]]; then
+    printf '<unset>\n'
+  elif [[ -z "$configured_webdav_prefix" ]]; then
+    printf '<empty>\n'
+  else
+    printf '%s\n' "$configured_webdav_prefix"
+  fi
+}
+
+check_public_webdav_anonymous_rejected() {
+  local domain="$1"
+  local prefix="$2"
+  local url="https://$domain$prefix/"
+  local curl_result status http_code
+
+  if ! have curl; then
+    warn "curl not available; skipping public WebDAV anonymous access check"
+    return
+  fi
+
+  curl_result="$(curl -sS --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' -X PROPFIND -H 'Depth: 0' "$url" 2>/dev/null)"
+  status=$?
+  http_code="${curl_result//$'\n'/}"
+  if [[ "$status" -ne 0 || ! "$http_code" =~ ^[0-9][0-9][0-9]$ || "$http_code" == "000" ]]; then
+    warn "public WebDAV anonymous PROPFIND check was not readable: $url"
+    return
+  fi
+
+  case "$http_code" in
+    401|403)
+      ok "public WebDAV anonymous PROPFIND is rejected: $url (HTTP $http_code)"
+      ;;
+    404|405)
+      warn "public WebDAV endpoint did not answer PROPFIND at $url (HTTP $http_code); verify reverse-proxy WebDAV routing"
+      ;;
+    2??)
+      fail "public WebDAV allows anonymous PROPFIND at $url (HTTP $http_code)"
+      ;;
+    *)
+      warn "public WebDAV anonymous PROPFIND returned HTTP $http_code at $url; verify authentication before public use"
+      ;;
+  esac
 }
 
 count_enabled_admins() {
@@ -858,10 +1204,11 @@ PY
 }
 
 check_public_admin_redundancy() {
-  local users_file="${configured_auth_users_file:-$STORAGE_ROOT/.mnemonas/users.json}"
+  local users_file
   local active_admins
   local parse_error
 
+  users_file="$(effective_auth_users_file)"
   if is_false_value "${configured_auth_enabled:-true}"; then
     warn "public administrator redundancy check skipped because auth.enabled=false"
     return
@@ -901,6 +1248,21 @@ check_public_admin_redundancy() {
       ok "public administrator redundancy verified: $active_admins enabled administrators"
       ;;
   esac
+}
+
+effective_auth_users_file() {
+  if [[ -n "${configured_auth_users_file:-}" ]]; then
+    printf '%s\n' "$configured_auth_users_file"
+  else
+    printf '%s\n' "$STORAGE_ROOT/.mnemonas/users.json"
+  fi
+}
+
+initial_password_file() {
+  local users_file
+
+  users_file="$(effective_auth_users_file)"
+  printf '%s\n' "$(dirname "$users_file")/initial-password.txt"
 }
 
 format_kib() {
@@ -999,17 +1361,22 @@ check_public_domain() {
   local domain_lower="${domain,,}"
   local public_health_url="https://$domain/health"
   local public_webdav_auth_type
+  local public_webdav_password_risk
+  local public_webdav_prefix
   local public_share_base_url
+  local public_share_base_url_raw
   local public_share_base_url_lower
   local public_share_host
   local public_share_host_normalized
   local public_share_port
+  local public_backend_host
 
   [[ -n "$domain" ]] || return
 
   printf '\nPublic access checks for %s\n' "$domain"
 
-  if [[ "$configured_server_host" == "127.0.0.1" || "$configured_server_host" == "localhost" || "$configured_server_host" == "::1" || "$configured_server_host" == "[::1]" ]]; then
+  public_backend_host="$(normalize_public_backend_host_for_loopback_check "$configured_server_host")"
+  if is_loopback_host "$public_backend_host"; then
     ok "public backend host is loopback-only: ${configured_server_host:-<unset>}"
   else
     fail "public backend host should be 127.0.0.1 behind a reverse proxy, got: ${configured_server_host:-<unset>}"
@@ -1034,16 +1401,36 @@ check_public_domain() {
     ok "security.allow_unsafe_no_auth is not enabled"
   fi
 
-  public_webdav_auth_type="${configured_webdav_auth_type:-basic}"
-  public_webdav_auth_type="${public_webdav_auth_type,,}"
-  if ! is_false_value "${configured_webdav_enabled:-true}" && [[ "$public_webdav_auth_type" == "none" ]]; then
+  public_webdav_auth_type="$(normalize_webdav_auth_type_for_public_check "$configured_webdav_auth_type")"
+  if is_false_value "${configured_webdav_enabled:-true}"; then
+    ok "public WebDAV is disabled"
+  elif [[ "$public_webdav_auth_type" == "none" ]]; then
     fail "public WebDAV must not use auth_type=none"
   else
-    ok "public WebDAV is disabled or authenticated"
+    if [[ "$public_webdav_auth_type" == "basic" ]]; then
+      if public_webdav_password_risk="$(webdav_basic_password_risk "$configured_webdav_password")"; then
+        warn "public WebDAV Basic Auth password should be changed before public access (risk: $public_webdav_password_risk)"
+      else
+        ok "public WebDAV is configured with Basic Auth"
+      fi
+    else
+      ok "public WebDAV is configured with authentication"
+    fi
+    if [[ "$configured_webdav_prefix_set" == "1" ]]; then
+      public_webdav_prefix="$(normalize_configured_webdav_prefix_for_probe "$configured_webdav_prefix")" || public_webdav_prefix=""
+    else
+      public_webdav_prefix="$(normalize_webdav_prefix_for_probe "")" || public_webdav_prefix=""
+    fi
+    if [[ -n "$public_webdav_prefix" ]]; then
+      check_public_webdav_anonymous_rejected "$domain" "$public_webdav_prefix"
+    else
+      fail "public WebDAV prefix is invalid: $(configured_webdav_prefix_display)"
+    fi
   fi
 
   if is_true_value "${configured_share_enabled:-false}"; then
-    public_share_base_url="${configured_share_base_url:-}"
+    public_share_base_url_raw="${configured_share_base_url:-}"
+    public_share_base_url="$(trim_ascii_whitespace "$public_share_base_url_raw")"
     public_share_base_url_lower="${public_share_base_url,,}"
     if [[ -z "$public_share_base_url" ]]; then
       warn "public share.base_url is empty; generated share links may be relative instead of https://$domain"
@@ -1068,6 +1455,9 @@ check_public_domain() {
             ok "public share.base_url uses HTTPS on $domain"
           else
             warn "public share.base_url host does not match $domain: $public_share_base_url"
+          fi
+          if http_url_path_ends_with_share_route "$(http_url_path "$public_share_base_url")"; then
+            warn "public share.base_url should be the site origin or base path before /s; current value will generate nested /s/s share links: $public_share_base_url"
           fi
         fi
       fi
@@ -1099,8 +1489,10 @@ check_public_domain() {
     check_loopback_only_port_strict "$DATAPLANE_HTTP_PORT" "dataplane HTTP"
   fi
 
-  if [[ -f "$STORAGE_ROOT/.mnemonas/initial-password.txt" ]]; then
-    fail "initial admin password file still exists; change the admin password before public access"
+  local password_file
+  password_file="$(initial_password_file)"
+  if [[ -f "$password_file" ]]; then
+    fail "initial admin password file still exists at $password_file; change the admin password before public access"
   fi
 
   note "manual cloud firewall check: expose only 80/443 publicly; keep $SERVER_PORT/$DATAPLANE_GRPC_PORT/$DATAPLANE_HTTP_PORT closed to the public internet"
@@ -1111,8 +1503,8 @@ printf 'Config: %s\n' "$CONFIG_PATH"
 printf 'Storage: %s\n' "$STORAGE_ROOT"
 printf '\n'
 
-check_file "$BIN_DIR/nasd" "nasd binary"
-check_file "$BIN_DIR/dataplane" "dataplane binary"
+check_executable_file "$BIN_DIR/nasd" "nasd binary"
+check_executable_file "$BIN_DIR/dataplane" "dataplane binary"
 check_file "$CONFIG_PATH" "config"
 check_file "$WEB_DIR/index.html" "Web UI index"
 check_dir "$STORAGE_ROOT" "storage root"
@@ -1192,8 +1584,9 @@ fi
 
 check_disk_space "$STORAGE_ROOT"
 
-if [[ -f "$STORAGE_ROOT/.mnemonas/initial-password.txt" ]]; then
-  warn "initial admin password file still exists; log in once and change the password"
+password_file="$(initial_password_file)"
+if [[ -f "$password_file" ]]; then
+  warn "initial admin password file still exists at $password_file; log in once and change the password"
 else
   ok "initial admin password file is absent"
 fi

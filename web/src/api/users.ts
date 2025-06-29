@@ -83,6 +83,10 @@ function isUserRole(value: unknown): value is User['role'] {
   return value === 'admin' || value === 'user' || value === 'guest'
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 function isValidUser(value: unknown): value is User {
   if (!value || typeof value !== 'object') {
     return false
@@ -100,8 +104,8 @@ function isValidUser(value: unknown): value is User {
     typeof user.created_at === 'string' &&
     typeof user.updated_at === 'string' &&
     (user.last_login_at === undefined || typeof user.last_login_at === 'string') &&
-    typeof user.quota_bytes === 'number' &&
-    typeof user.used_bytes === 'number'
+    isNonNegativeSafeInteger(user.quota_bytes) &&
+    isNonNegativeSafeInteger(user.used_bytes)
   )
 }
 
@@ -173,6 +177,12 @@ async function parseUsersSuccess<T>(response: Response, invalidMessage: string):
   return body
 }
 
+function validateUserQuotaRequest(quotaBytes: unknown): void {
+  if (quotaBytes !== undefined && !isNonNegativeSafeInteger(quotaBytes)) {
+    throw new UsersError('用户配额必须是 0 或不超过安全范围的整数', 0, 'INVALID_QUOTA')
+  }
+}
+
 /**
  * List all users (admin only)
  */
@@ -190,7 +200,8 @@ export async function listUsers(options: UsersRequestOptions = {}): Promise<List
     !body.data ||
     !Array.isArray(body.data.users) ||
     body.data.users.some((user) => !isValidUser(user)) ||
-    (body.data.total !== undefined && typeof body.data.total !== 'number')
+    (body.data.total !== undefined && !isNonNegativeSafeInteger(body.data.total)) ||
+    (body.data.total !== undefined && body.data.total < body.data.users.length)
   ) {
     throw new Error(INVALID_USERS_RESPONSE_MESSAGE)
   }
@@ -208,6 +219,8 @@ export async function listUsers(options: UsersRequestOptions = {}): Promise<List
  * Create a new user (admin only)
  */
 export async function createUser(data: CreateUserRequest, options: UsersRequestOptions = {}): Promise<UserResponse> {
+  validateUserQuotaRequest(data.quota_bytes)
+
   const response = await authFetch(`${API_BASE}/`, {
     ...options,
     method: 'POST',
@@ -238,6 +251,8 @@ export async function createUser(data: CreateUserRequest, options: UsersRequestO
  * Update user metadata, role, home directory, or quota (admin only)
  */
 export async function updateUser(userId: string, data: UpdateUserRequest, options: UsersRequestOptions = {}): Promise<UserResponse> {
+  validateUserQuotaRequest(data.quota_bytes)
+
   const response = await authFetch(`${API_BASE}/${userId}`, {
     ...options,
     method: 'PUT',

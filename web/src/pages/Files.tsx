@@ -74,6 +74,13 @@ import { listShares, ShareError } from '@/api/share'
 import { getFileQueryScopeKey, getFilesQueryKey } from '@/lib/fileQueryKey'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import {
+  buildUploadQueue,
+  getUploadPanelTitle,
+  getUploadQueueCounts,
+  normalizeUploadProgress,
+  type UploadQueueItem,
+} from '@/lib/uploadQueue'
+import {
   getPathConflictErrorToast,
   getQuotaExceededErrorToast,
   getSharedPathConflictErrorToast,
@@ -125,10 +132,6 @@ function isDirectoryAlreadyExistsError(error: unknown): boolean {
 function getFilesRoutePath(filePath: string): string {
   const normalizedPath = normalizePath(filePath)
   return normalizedPath === '/' ? '/files' : `/files${encodePathForUrl(normalizedPath)}`
-}
-
-function getUploadSizeError(relativePath: string | undefined, file: File): string {
-  return `${relativePath || file.name} 超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`
 }
 
 function getFavoritesBannerContent(error: unknown): { title: string; description: string } {
@@ -1184,7 +1187,7 @@ export function FilesPage() {
   const dragCountRef = useRef(0)
   
   // Multi-file upload state
-  const [uploadQueue, setUploadQueue] = useState<{file: File, relativePath?: string, progress: number, status: 'pending' | 'uploading' | 'done' | 'error', error?: string}[]>([])
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [showUploadPanel, setShowUploadPanel] = useState(false)
   const uploadClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1292,6 +1295,7 @@ export function FilesPage() {
 
   const currentPathAllowed = !hasInvalidHomeDir
   const filesQueryKey = getFilesQueryKey(fileScopeKey, currentPath)
+  const uploadCounts = useMemo(() => getUploadQueueCounts(uploadQueue), [uploadQueue])
 
   useEffect(() => {
     if (hasInvalidHomeDir) return
@@ -2015,12 +2019,39 @@ export function FilesPage() {
     }
   }, [])
 
+  const handleCancelUpload = useCallback(() => {
+    const uploadController = uploadAbortControllerRef.current
+    if (!uploadController || uploadController.signal.aborted) {
+      return
+    }
+
+    uploadSessionRef.current += 1
+    uploadController.abort()
+    uploadAbortControllerRef.current = null
+    setIsUploading(false)
+    setShowUploadPanel(true)
+    setUploadQueue(prev => prev.map(item =>
+      item.status === 'pending' || item.status === 'uploading'
+        ? { ...item, status: 'cancelled' as const, error: '上传已取消' }
+        : item
+    ))
+    void queryClient.invalidateQueries({ queryKey: filesQueryKey })
+    addToast({
+      title: '上传已取消',
+      color: 'warning',
+    })
+  }, [filesQueryKey, queryClient])
+
   // Enhanced upload handler with queue support and folder support
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!currentPathCanWrite) return
     if (!files || files.length === 0) return
 
-    uploadAbortControllerRef.current?.abort()
+    const previousUploadController = uploadAbortControllerRef.current
+    if (previousUploadController && !previousUploadController.signal.aborted) {
+      previousUploadController.abort()
+      void queryClient.invalidateQueries({ queryKey: filesQueryKey })
+    }
     const uploadSession = uploadSessionRef.current + 1
     uploadSessionRef.current = uploadSession
     const uploadController = new AbortController()
@@ -2036,23 +2067,14 @@ export function FilesPage() {
     
     const fileArray = Array.from(files)
     
-    // Check if this is a folder upload (files have webkitRelativePath)
-    const isFolderUpload = fileArray.some(f => (f as File & { webkitRelativePath?: string }).webkitRelativePath)
-    
     // Reset created directories tracker
     createdDirsRef.current.clear()
     
-    const queue = fileArray.map(file => {
-      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
-      const isOversized = file.size > MAX_UPLOAD_FILE_SIZE_BYTES
-      return {
-        file,
-        relativePath,
-        progress: 0,
-        status: isOversized ? 'error' as const : 'pending' as const,
-        error: isOversized ? getUploadSizeError(relativePath, file) : undefined,
-      }
+    const queue = buildUploadQueue(fileArray, {
+      maxUploadFileSizeBytes: MAX_UPLOAD_FILE_SIZE_BYTES,
+      maxUploadFileSizeLabel: MAX_UPLOAD_FILE_SIZE_LABEL,
     })
+    const isFolderUpload = queue.some(item => item.folderRelativePath)
 
     const uploadableEntries = queue
       .map((item, index) => ({ item, index }))
@@ -2068,7 +2090,7 @@ export function FilesPage() {
         title: rejectedEntries.length === queue.length ? '上传失败' : '部分文件未上传',
         description: rejectedEntries.length === 1
           ? rejectedEntries[0].error
-          : `${rejectedEntries.length} 个文件超过 ${MAX_UPLOAD_FILE_SIZE_LABEL} 上传限制`,
+          : `${rejectedEntries.length} 个文件未进入上传队列，请查看上传记录。`,
         color: rejectedEntries.length === queue.length ? 'danger' : 'warning',
       })
     }
@@ -2088,7 +2110,7 @@ export function FilesPage() {
     try {
       for (const { item, index } of uploadableEntries) {
         const file = item.file
-        const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || ''
+        const relativePath = item.folderRelativePath || ''
 
         if (!isCurrentUploadSession()) {
           return
@@ -2100,10 +2122,10 @@ export function FilesPage() {
         try {
           // For folder uploads, create parent directories first
           if (relativePath && relativePath.includes('/')) {
-          const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
-          const targetDir = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
-          await ensureDirectoryExists(targetDir, uploadWarningMessages, uploadController.signal)
-        }
+            const relativeDir = relativePath.substring(0, relativePath.lastIndexOf('/'))
+            const targetDir = currentPath === '/' ? `/${relativeDir}` : `${currentPath}/${relativeDir}`
+            await ensureDirectoryExists(targetDir, uploadWarningMessages, uploadController.signal)
+          }
           if (!isCurrentUploadSession()) {
             return
           }
@@ -2119,8 +2141,9 @@ export function FilesPage() {
             if (!isCurrentUploadSession()) {
               return
             }
+            const normalizedProgress = normalizeUploadProgress(progress)
             setUploadQueue(prev => prev.map((item, j) =>
-              j === index ? { ...item, progress } : item
+              j === index ? { ...item, progress: normalizedProgress } : item
             ))
           }, { signal: uploadController.signal })
           if (result.warning) {
@@ -2935,10 +2958,20 @@ export function FilesPage() {
             <div className="flex items-center gap-2">
               <Upload size={16} className="text-accent-primary" />
               <span className="font-medium text-sm">
-                {isUploading ? `上传中 (${uploadQueue.filter(i => i.status === 'done').length}/${uploadQueue.length})` : '上传完成'}
+                {getUploadPanelTitle(isUploading, uploadCounts)}
               </span>
             </div>
             <div className="flex items-center gap-1">
+              {isUploading && (
+                <button
+                  onClick={handleCancelUpload}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs text-default-500 transition-colors hover:bg-content3 hover:text-default-700"
+                  aria-label="取消上传"
+                >
+                  <X size={12} />
+                  取消
+                </button>
+              )}
               {!isUploading && (
                 <button 
                   onClick={() => setUploadQueue([])}
@@ -2963,6 +2996,7 @@ export function FilesPage() {
                 <div className="flex items-center gap-2.5 mb-1.5">
                   {item.status === 'done' && <CheckCircle2 size={16} className="text-emerald-500 flex-shrink-0" />}
                   {item.status === 'error' && <AlertCircle size={16} className="text-rose flex-shrink-0" />}
+                  {item.status === 'cancelled' && <X size={16} className="text-default-400 flex-shrink-0" />}
                   {(item.status === 'pending' || item.status === 'uploading') && (
                     <div className="w-4 h-4 border-2 border-accent-primary border-t-transparent rounded-full animate-spin flex-shrink-0" />
                   )}
@@ -2986,16 +3020,22 @@ export function FilesPage() {
                 {item.status === 'error' && (
                   <p className="text-xs text-rose mt-1">{item.error}</p>
                 )}
+                {item.status === 'cancelled' && (
+                  <p className="text-xs text-default-500 mt-1">{item.error}</p>
+                )}
               </div>
             ))}
           </div>
           {/* Summary footer */}
           {!isUploading && uploadQueue.length > 0 && (
             <div className="px-4 py-2.5 bg-content2 border-t border-divider text-xs text-default-500">
-              共 {uploadQueue.length} 个文件，
-              成功 {uploadQueue.filter(i => i.status === 'done').length} 个
-              {uploadQueue.filter(i => i.status === 'error').length > 0 && (
-                <span className="text-rose">，失败 {uploadQueue.filter(i => i.status === 'error').length} 个</span>
+              共 {uploadCounts.total} 个文件，
+              成功 {uploadCounts.done} 个
+              {uploadCounts.error > 0 && (
+                <span className="text-rose">，失败 {uploadCounts.error} 个</span>
+              )}
+              {uploadCounts.cancelled > 0 && (
+                <span>，取消 {uploadCounts.cancelled} 个</span>
               )}
             </div>
           )}

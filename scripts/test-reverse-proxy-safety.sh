@@ -17,6 +17,14 @@ assert_file_contains() {
     grep -Fq -- "$expected" "$path" || fail "$path does not contain: $expected"
 }
 
+assert_file_not_contains() {
+    local path="$1"
+    local unexpected="$2"
+    if grep -Fq -- "$unexpected" "$path"; then
+        fail "$path unexpectedly contains: $unexpected"
+    fi
+}
+
 run_expect_failure_with_env() {
     local name="$1"
     local domain="$2"
@@ -153,6 +161,17 @@ run_docker_proxy_docs_include_trusted_proxy_cidrs_test() {
     assert_file_contains "$REPO_ROOT/docs/docker-deployment.en.md" 'Docker bridge'
 }
 
+run_webdav_docs_avoid_placeholder_password_test() {
+    assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'change-this-webdav-password'
+    assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'change-this-webdav-password'
+    assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '/srv/mnemonas/.mnemonas/secrets.json'
+    assert_file_not_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" '/srv/mnemonas/.mnemonas/secrets.json'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" 'WEBDAV_PASS="<实际 WebDAV 密码>"'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.md" '/srv/mnemonas/secrets.json 中的 webdav_password 字段'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'WEBDAV_PASS="<actual WebDAV password>"'
+    assert_file_contains "$REPO_ROOT/docs/reverse-proxy-setup.en.md" 'webdav_password field in /srv/mnemonas/secrets.json'
+}
+
 run_domain_validation_tests
 run_email_validation_tests
 run_port_validation_tests
@@ -162,5 +181,6 @@ run_config_rewrite_self_test
 run_release_layout_nasd_discovery_test
 run_nginx_webdav_docs_include_destination_header_test
 run_docker_proxy_docs_include_trusted_proxy_cidrs_test
+run_webdav_docs_avoid_placeholder_password_test
 
 printf '[reverse-proxy-test] all checks passed\n'

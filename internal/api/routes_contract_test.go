@@ -75,6 +75,7 @@ func expectedRESTRouteContracts() []string {
 		"POST /api/v1/settings/access-check",
 		"POST /api/v1/settings/access-preview",
 		"POST /api/v1/settings/access-report",
+		"POST /api/v1/settings/alerts/test",
 		"GET /api/v1/settings/security-check",
 		"PUT /api/v1/settings/",
 		"GET /api/v1/settings/webdav-credentials",

@@ -37,6 +37,7 @@ import {
   AlertCircle,
   Star,
   Trash2,
+  Send,
 } from 'lucide-react'
 import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes } from '@/lib/utils'
 import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
@@ -52,6 +53,7 @@ import {
   getWebDAVCredentials,
   previewDirectoryAccess,
   reportDirectoryAccess,
+  sendTestAlert,
   updateSettings,
   type DirectoryAccessCheckData,
   type DirectoryAccessCheckRequest,
@@ -85,6 +87,34 @@ const DEFAULT_VERSIONING_FILENAMES = [
   '.gitignore', '.dockerignore', '.editorconfig',
 ].join('\n')
 const REDACTED_SETTINGS_SECRET = '<redacted>'
+const ALERT_CHANNEL_LABELS: Record<string, string> = {
+  webhook: 'Webhook',
+  telegram: 'Telegram',
+  email: 'SMTP 邮件',
+}
+
+function formatAlertChannelLabel(channel: string): string {
+  const trimmed = channel.trim()
+  if (!trimmed) {
+    return ''
+  }
+  return ALERT_CHANNEL_LABELS[trimmed.toLowerCase()] ?? trimmed
+}
+
+function formatAlertChannelSummary(channels: string[]): string {
+  return channels
+    .map(formatAlertChannelLabel)
+    .filter(Boolean)
+    .join(' / ')
+}
+
+function redactWebhookHeaderLine(header: string): string {
+  const separator = header.indexOf(':')
+  if (separator <= 0) {
+    return REDACTED_SETTINGS_SECRET
+  }
+  return `${header.slice(0, separator).trim()}: ${REDACTED_SETTINGS_SECRET}`
+}
 
 const SHARE_POLICY_PRESETS = [
   {
@@ -109,6 +139,10 @@ const SHARE_POLICY_PRESETS = [
     defaultMaxAccess: '100',
   },
 ] as const
+
+type SharePolicyRuleDraft = SharePolicyRule & {
+  max_access_input?: string
+}
 
 // Settings section component
 function SettingsSection({ 
@@ -476,6 +510,25 @@ function isZeroDurationString(value: string): boolean {
     && parts.every(part => Number.parseFloat(part) === 0)
 }
 
+function parseNonNegativeSafeIntegerInput(value: string): { value: number; valid: boolean } {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return { value: 0, valid: true }
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return { value: 0, valid: false }
+  }
+  const parsed = Number(trimmed)
+  if (!Number.isSafeInteger(parsed)) {
+    return { value: 0, valid: false }
+  }
+  return { value: parsed, valid: true }
+}
+
+function isSafeByteSize(value: number, allowZero: boolean): boolean {
+  return Number.isSafeInteger(value) && (allowZero ? value >= 0 : value > 0)
+}
+
 function isPositiveDurationString(value: string): boolean {
   return isValidDurationString(value) && !isZeroDurationString(value)
 }
@@ -656,6 +709,38 @@ function trustedProxySourceFromSecurityCheck(check: SecurityCheckItem): string |
   return isPrivateOrLinkLocalIP(remoteIP) ? remoteIP : undefined
 }
 
+function pathEndsWithShareRoute(pathname: string): boolean {
+  const trimmedPath = pathname.replace(/\/+$/u, '')
+  return trimmedPath === '/s' || trimmedPath.endsWith('/s')
+}
+
+function stripShareRouteSuffix(pathname: string): string {
+  const trimmedPath = pathname.replace(/\/+$/u, '')
+  if (!pathEndsWithShareRoute(pathname)) {
+    return pathname
+  }
+  const strippedPath = trimmedPath.slice(0, -2)
+  return strippedPath === '' ? '/' : `${strippedPath}/`
+}
+
+function securityCheckHasWebDAVPasswordRisk(check: SecurityCheckItem): boolean {
+  return check.id === 'webdav_auth'
+    && typeof check.details?.password_risk === 'string'
+    && check.details.password_risk.trim() !== ''
+}
+
+function securityCheckHasTrustedNonHTTPSForwardedProto(check: SecurityCheckItem): boolean {
+  if (check.id !== 'forwarded_proto_trust') {
+    return false
+  }
+  const forwardedProto = typeof check.details?.forwarded_proto === 'string'
+    ? check.details.forwarded_proto.trim().toLowerCase()
+    : ''
+  return forwardedProto !== ''
+    && forwardedProto !== 'https'
+    && check.details?.trusted_forwarded_source === true
+}
+
 function httpsShareBaseURLFromSecurityCheck(check: SecurityCheckItem): string {
   const baseURL = typeof check.details?.base_url === 'string' ? check.details.base_url.trim() : ''
   if (!baseURL) {
@@ -679,6 +764,7 @@ function httpsShareBaseURLFromSecurityCheck(check: SecurityCheckItem): string {
     if (requestHost && !/[\s/:]/.test(requestHost)) {
       parsed.hostname = requestHost
     }
+    parsed.pathname = stripShareRouteSuffix(parsed.pathname)
 
     if (parsed.pathname === '/' && parsed.search === '') {
       return parsed.origin
@@ -756,15 +842,78 @@ function isValidTrustedProxyCIDR(value: string): boolean {
 
 const httpHeaderNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
 
-function isValidWebhookHeaderLine(header: string): boolean {
+function splitWebhookHeaderLine(header: string): { name: string; value: string } | null {
   const separator = header.indexOf(':')
   if (separator <= 0 || separator === header.length - 1) {
-    return false
+    return null
   }
 
   const name = header.slice(0, separator).trim()
   const value = header.slice(separator + 1).trim()
+  if (!name || !value) {
+    return null
+  }
+
+  return { name, value }
+}
+
+function isValidWebhookHeaderLine(header: string): boolean {
+  const parts = splitWebhookHeaderLine(header)
+  if (!parts) {
+    return false
+  }
+
+  const { name, value } = parts
   return httpHeaderNamePattern.test(name) && value.length > 0 && !hasInvalidHTTPHeaderValueChar(value)
+}
+
+function redactedWebhookHeaderNameCounts(headersText: string): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const header of headersText.split('\n')) {
+    const parts = splitWebhookHeaderLine(header.trim())
+    if (!parts || parts.value !== REDACTED_SETTINGS_SECRET) {
+      continue
+    }
+    const name = parts.name.toLowerCase()
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  return counts
+}
+
+function findUnknownRedactedWebhookHeader(headers: string[], savedHeadersText: string): string | null {
+  const savedHeaderCounts = redactedWebhookHeaderNameCounts(savedHeadersText)
+
+  for (const header of headers) {
+    const parts = splitWebhookHeaderLine(header)
+    if (!parts || parts.value !== REDACTED_SETTINGS_SECRET) {
+      continue
+    }
+
+    const name = parts.name.toLowerCase()
+    const remaining = savedHeaderCounts.get(name) ?? 0
+    if (remaining <= 0) {
+      return parts.name
+    }
+    savedHeaderCounts.set(name, remaining - 1)
+  }
+
+  return null
+}
+
+function findDuplicateWebhookHeaderName(headers: string[]): string | null {
+  const seen = new Set<string>()
+  for (const header of headers) {
+    const parts = splitWebhookHeaderLine(header)
+    if (!parts) {
+      continue
+    }
+    const name = parts.name.toLowerCase()
+    if (seen.has(name)) {
+      return parts.name
+    }
+    seen.add(name)
+  }
+  return null
 }
 
 function formatDirectoryQuotaLines(quotas: DirectoryQuota[] | undefined): string {
@@ -820,8 +969,8 @@ function parseDirectoryQuotaLines(value: string): { quotas: DirectoryQuota[]; er
     } catch {
       return { quotas: [], error: `第 ${index + 1} 行容量格式无效` }
     }
-    if (!Number.isFinite(quotaBytes) || quotaBytes <= 0) {
-      return { quotas: [], error: `第 ${index + 1} 行容量必须大于 0` }
+    if (!Number.isSafeInteger(quotaBytes) || quotaBytes <= 0) {
+      return { quotas: [], error: `第 ${index + 1} 行容量必须是大于 0 且不超过安全范围的整数` }
     }
 
     seenPaths.add(quotaPath)
@@ -985,8 +1134,8 @@ function parseOptionalNonNegativeIntegerCell(value: string, lineNumber: number, 
     return {}
   }
   const parsed = Number(trimmed)
-  if (!/^\d+$/.test(trimmed) || !Number.isInteger(parsed)) {
-    return { error: `第 ${lineNumber} 行 ${field} 必须是 0 或正整数` }
+  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(parsed)) {
+    return { error: `第 ${lineNumber} 行 ${field} 必须是 0 或不超过安全范围的整数` }
   }
   return { value: parsed }
 }
@@ -1048,7 +1197,7 @@ function isValidDiskHealthCommand(value: string): boolean {
   return trimmed.startsWith('/') || !trimmed.includes('/')
 }
 
-function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRule[]): { rules: SharePolicyRule[]; error?: string } {
+function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRuleDraft[]): { rules: SharePolicyRule[]; error?: string } {
   const rules: SharePolicyRule[] = []
   const seenPaths = new Set<string>()
 
@@ -1069,10 +1218,13 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRule[]): { rule
       return { rules: [], error: `第 ${lineNumber} 行有效期上限格式无效` }
     }
 
-    const maxAccess = inputRule.max_access ?? 0
-    if (!Number.isInteger(maxAccess) || maxAccess < 0) {
-      return { rules: [], error: `第 ${lineNumber} 行访问次数上限必须是 0 或正整数` }
+    const rawMaxAccess = inputRule.max_access_input
+      ?? (inputRule.max_access !== undefined ? String(inputRule.max_access) : '')
+    const parsedMaxAccess = parseNonNegativeSafeIntegerInput(rawMaxAccess)
+    if (!parsedMaxAccess.valid) {
+      return { rules: [], error: `第 ${lineNumber} 行访问次数上限必须是 0 或不超过安全范围的正整数` }
     }
+    const maxAccess = parsedMaxAccess.value
 
     if (!inputRule.require_password && !hasMaxExpiresInConstraint && maxAccess === 0) {
       return { rules: [], error: `第 ${lineNumber} 行至少需要一个约束` }
@@ -1537,7 +1689,7 @@ function SettingRow({
   )
 }
 
-function sharePolicyRuleHasConstraint(rule: SharePolicyRule): boolean {
+function sharePolicyRuleHasConstraint(rule: SharePolicyRuleDraft): boolean {
   const maxExpiresIn = rule.max_expires_in?.trim()
   return Boolean(rule.require_password || (maxExpiresIn && !isZeroDurationString(maxExpiresIn)) || (rule.max_access && rule.max_access > 0))
 }
@@ -1547,15 +1699,15 @@ function SharePolicyRuleEditor({
   isDisabled,
   onChange,
 }: {
-  rules: SharePolicyRule[]
+  rules: SharePolicyRuleDraft[]
   isDisabled?: boolean
-  onChange: (rules: SharePolicyRule[]) => void
+  onChange: (rules: SharePolicyRuleDraft[]) => void
 }) {
-  const commitRules = (nextRules: SharePolicyRule[]) => {
+  const commitRules = (nextRules: SharePolicyRuleDraft[]) => {
     onChange(nextRules)
   }
 
-  const updateRule = (index: number, patch: Partial<SharePolicyRule>) => {
+  const updateRule = (index: number, patch: Partial<SharePolicyRuleDraft>) => {
     const nextRules = rules.map((rule, ruleIndex) => (
       ruleIndex === index
         ? { ...rule, ...patch }
@@ -1630,12 +1782,17 @@ function SharePolicyRuleEditor({
                     aria-label={`分享策略最多访问次数 ${index + 1}`}
                     label="最多访问次数"
                     labelPlacement="outside"
-                    type="number"
-                    min="0"
-                    value={rule.max_access ? String(rule.max_access) : ''}
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={rule.max_access_input ?? (rule.max_access ? String(rule.max_access) : '')}
                     onValueChange={(nextValue) => {
                       const trimmed = nextValue.trim()
-                      updateRule(index, { max_access: trimmed ? Number(trimmed) : undefined })
+                      const parsed = parseNonNegativeSafeIntegerInput(trimmed)
+                      updateRule(index, {
+                        max_access_input: nextValue,
+                        max_access: trimmed && parsed.valid ? parsed.value : undefined,
+                      })
                     }}
                     placeholder="不限制"
                     isDisabled={isDisabled}
@@ -1749,10 +1906,15 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
       return check.status === 'pass'
         ? 'HTTPS 或受信代理配置已满足公网访问要求。'
         : '如通过反向代理发布公网，请配置实际代理层数或启用 TLS。'
-    case 'forwarded_proto_trust':
-      return check.status === 'pass'
-        ? '转发协议头来自受信代理来源。'
-        : '请求携带转发协议头，但来源未被明确标记为受信代理。'
+    case 'forwarded_proto_trust': {
+      if (check.status === 'pass') {
+        return '转发协议头来自受信代理来源。'
+      }
+      if (securityCheckHasTrustedNonHTTPSForwardedProto(check)) {
+        return '受信代理已转发协议头，但当前值不是 https，请检查反向代理的 X-Forwarded-Proto 配置。'
+      }
+      return '请求携带转发协议头，但来源未被明确标记为受信代理。'
+    }
     case 'server_listen':
       return check.status === 'pass'
         ? 'Web 服务仅监听本机地址。'
@@ -1770,6 +1932,9 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         ? '数据面 HTTP 健康接口仅监听本机地址。'
         : '数据面 HTTP 健康接口不应暴露到外网，请绑定到本机地址。'
     case 'webdav_auth':
+      if (securityCheckHasWebDAVPasswordRisk(check)) {
+        return 'WebDAV Basic Auth 使用弱密码或示例密码，公网访问前应更换为自动生成密码、自定义强密码，或改用 MnemoNAS 用户认证。'
+      }
       return check.status === 'pass'
         ? 'WebDAV 暴露面已启用合适的认证方式，或当前未启用 WebDAV。'
         : 'WebDAV 对外访问前必须启用 Basic 认证、MnemoNAS 用户认证或关闭 WebDAV。'
@@ -1778,6 +1943,13 @@ function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
         ? 'SMB 预览未启用，不会启动额外的 SMB/Samba 监听器。'
         : '当前版本仍未内置可挂载的 SMB/Samba 运行时；启用前应先收紧监听范围和防火墙。'
     case 'share_base_url':
+      if (
+        check.status === 'warning'
+        && typeof check.details?.base_url_path === 'string'
+        && pathEndsWithShareRoute(check.details.base_url_path)
+      ) {
+        return '分享基础 URL 已包含 /s 分享路由，继续使用会生成重复的 /s/s 分享链接。'
+      }
       if (
         check.status === 'warning'
         && typeof check.details?.base_url_host === 'string'
@@ -2150,7 +2322,7 @@ export function SettingsPage() {
     shareBaseURL: '',
     shareDefaultExpiresIn: '168h',
     shareDefaultMaxAccess: '0',
-    sharePolicyRules: [] as SharePolicyRule[],
+    sharePolicyRules: [] as SharePolicyRuleDraft[],
     favoritesEnabled: true,
     alertsEnabled: false,
     alertsCheckInterval: '1h',
@@ -2159,8 +2331,10 @@ export function SettingsPage() {
     alertsMinFreeSpace: '10GB',
     alertsCooldownPeriod: '4h',
     alertsWebhookURL: '',
+    alertsWebhookURLConfigured: false,
     alertsWebhookMethod: 'POST',
     alertsWebhookHeaders: '',
+    alertsWebhookHeadersConfigured: false,
     alertsTelegramEnabled: false,
     alertsTelegramBotToken: '',
     alertsTelegramBotTokenConfigured: false,
@@ -2214,6 +2388,119 @@ export function SettingsPage() {
   type DirectoryAccessPreviewVariables = {
     request: DirectoryAccessPreviewRequest
     signal: AbortSignal
+  }
+  type TestAlertVariables = {
+    signal: AbortSignal
+  }
+
+  const sanitizeSavedSettingsOverride = (
+    settings: SettingsDraft,
+    request: UpdateSettingsRequest,
+  ): SettingsDraft => {
+    const next: SettingsDraft = {
+      ...settings,
+      webdavPassword: '',
+      webdavUseGeneratedPassword: false,
+      alertsTelegramBotToken: '',
+      alertsTelegramBotTokenClear: false,
+      alertsSMTPPassword: '',
+      alertsSMTPPasswordClear: false,
+    }
+
+    if (request.alerts) {
+      const webhookURL = request.alerts.webhook_url?.trim() ?? ''
+      next.alertsWebhookURL = webhookURL ? REDACTED_SETTINGS_SECRET : ''
+      next.alertsWebhookURLConfigured = webhookURL !== ''
+      next.alertsWebhookHeaders = request.alerts.webhook_headers?.length
+        ? request.alerts.webhook_headers.map(redactWebhookHeaderLine).join('\n')
+        : ''
+      next.alertsWebhookHeadersConfigured = (request.alerts.webhook_headers?.length ?? 0) > 0
+      next.alertsTelegramBotTokenConfigured = request.alerts.telegram_bot_token === ''
+        ? false
+        : settings.alertsTelegramBotTokenConfigured || (request.alerts.telegram_bot_token?.trim() ?? '') !== ''
+      next.alertsSMTPPasswordConfigured = request.alerts.smtp_password === ''
+        ? false
+        : settings.alertsSMTPPasswordConfigured || (request.alerts.smtp_password?.trim() ?? '') !== ''
+    }
+
+    return next
+  }
+
+  const sanitizeDirtyDraftAfterSave = (
+    current: SettingsDraft,
+    submitted: SettingsDraft,
+    sanitizedSubmitted: SettingsDraft,
+  ): SettingsDraft => {
+    const next = { ...current }
+    if (current.webdavPassword === submitted.webdavPassword) {
+      next.webdavPassword = sanitizedSubmitted.webdavPassword
+    }
+    if (current.webdavUseGeneratedPassword === submitted.webdavUseGeneratedPassword) {
+      next.webdavUseGeneratedPassword = sanitizedSubmitted.webdavUseGeneratedPassword
+    }
+    if (current.alertsWebhookURL === submitted.alertsWebhookURL) {
+      next.alertsWebhookURL = sanitizedSubmitted.alertsWebhookURL
+      next.alertsWebhookURLConfigured = sanitizedSubmitted.alertsWebhookURLConfigured
+    }
+    if (current.alertsWebhookHeaders === submitted.alertsWebhookHeaders) {
+      next.alertsWebhookHeaders = sanitizedSubmitted.alertsWebhookHeaders
+      next.alertsWebhookHeadersConfigured = sanitizedSubmitted.alertsWebhookHeadersConfigured
+    }
+    if (current.alertsTelegramBotToken === submitted.alertsTelegramBotToken) {
+      next.alertsTelegramBotToken = sanitizedSubmitted.alertsTelegramBotToken
+      next.alertsTelegramBotTokenConfigured = sanitizedSubmitted.alertsTelegramBotTokenConfigured
+    }
+    if (current.alertsTelegramBotTokenClear === submitted.alertsTelegramBotTokenClear) {
+      next.alertsTelegramBotTokenClear = sanitizedSubmitted.alertsTelegramBotTokenClear
+    }
+    if (current.alertsSMTPPassword === submitted.alertsSMTPPassword) {
+      next.alertsSMTPPassword = sanitizedSubmitted.alertsSMTPPassword
+      next.alertsSMTPPasswordConfigured = sanitizedSubmitted.alertsSMTPPasswordConfigured
+    }
+    if (current.alertsSMTPPasswordClear === submitted.alertsSMTPPasswordClear) {
+      next.alertsSMTPPasswordClear = sanitizedSubmitted.alertsSMTPPasswordClear
+    }
+    return next
+  }
+
+  const hasSavedAlertNotificationChannel = (settings: SettingsDraft): boolean => {
+    if (settings.alertsWebhookURLConfigured || settings.alertsWebhookURL.trim() !== '') {
+      return true
+    }
+    if (
+      settings.alertsTelegramEnabled
+      && settings.alertsTelegramChatID.trim() !== ''
+      && (settings.alertsTelegramBotTokenConfigured || settings.alertsTelegramBotToken.trim() !== '')
+    ) {
+      return true
+    }
+    const smtpPort = Number(settings.alertsSMTPPort.trim())
+    const hasSMTPRecipient = settings.alertsSMTPTo
+      .split(/[\n,]+/)
+      .some(recipient => recipient.trim() !== '')
+    return settings.alertsEmailEnabled
+      && settings.alertsSMTPHost.trim() !== ''
+      && Number.isInteger(smtpPort)
+      && smtpPort > 0
+      && smtpPort <= 65535
+      && settings.alertsSMTPFrom.trim() !== ''
+      && hasSMTPRecipient
+  }
+
+  const getTestAlertReadinessWarning = (settings: SettingsDraft): { title: string; description: string } | null => {
+    if (!settings.alertsEnabled) {
+      return {
+        title: '提醒尚未启用',
+        description: '测试提醒会使用服务端已保存配置；请先启用提醒并保存。',
+      }
+    }
+    if (!hasSavedAlertNotificationChannel(settings)) {
+      return {
+        title: '没有可用提醒通道',
+        description: '请至少配置 Webhook、Telegram 或邮件通道并保存后再发送测试提醒。',
+      }
+    }
+    return null
   }
   
   // WebDAV credentials state
@@ -2269,16 +2556,19 @@ export function SettingsPage() {
   const accessCheckAbortControllerRef = useRef<AbortController | null>(null)
   const accessReportAbortControllerRef = useRef<AbortController | null>(null)
   const accessPreviewAbortControllerRef = useRef<AbortController | null>(null)
+  const testAlertAbortControllerRef = useRef<AbortController | null>(null)
   useEffect(() => {
     return () => {
       saveSettingsAbortControllerRef.current?.abort()
       accessCheckAbortControllerRef.current?.abort()
       accessReportAbortControllerRef.current?.abort()
       accessPreviewAbortControllerRef.current?.abort()
+      testAlertAbortControllerRef.current?.abort()
       saveSettingsAbortControllerRef.current = null
       accessCheckAbortControllerRef.current = null
       accessReportAbortControllerRef.current = null
       accessPreviewAbortControllerRef.current = null
+      testAlertAbortControllerRef.current = null
     }
   }, [user?.id])
   const accessCheckMutation = useMutation({
@@ -2329,6 +2619,34 @@ export function SettingsPage() {
     onSettled: (_data, _error, variables) => {
       if (accessPreviewAbortControllerRef.current?.signal === variables.signal) {
         accessPreviewAbortControllerRef.current = null
+      }
+    },
+  })
+  const testAlertMutation = useMutation({
+    mutationFn: ({ signal }: TestAlertVariables) => sendTestAlert({ signal }),
+    onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+      const channels = formatAlertChannelSummary(result.data.channels)
+      addToast({
+        title: '测试提醒已发送',
+        description: channels ? `已发送到 ${channels}` : result.message,
+        color: 'success',
+      })
+    },
+    onError: (err, variables) => {
+      if (variables.signal.aborted || isAbortError(err)) {
+        return
+      }
+      addToast(getSettingsActionErrorToast(err, {
+        unavailable: '提醒服务暂不可用',
+        failure: '测试提醒失败',
+      }))
+    },
+    onSettled: (_data, _error, variables) => {
+      if (testAlertAbortControllerRef.current?.signal === variables.signal) {
+        testAlertAbortControllerRef.current = null
       }
     },
   })
@@ -2401,6 +2719,32 @@ export function SettingsPage() {
       },
       signal: controller.signal,
     })
+  }
+
+  const handleSendTestAlert = () => {
+    if (isDirty) {
+      addToast({
+        title: '需要先保存设置',
+        description: '测试提醒会使用服务端已保存的提醒配置。',
+        color: 'warning',
+      })
+      return
+    }
+    const readinessWarning = getTestAlertReadinessWarning(settings)
+    if (readinessWarning) {
+      addToast({
+        ...readinessWarning,
+        color: 'warning',
+      })
+      return
+    }
+    if (saveMutation.isPending || testAlertMutation.isPending) {
+      return
+    }
+    testAlertAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    testAlertAbortControllerRef.current = controller
+    testAlertMutation.mutate({ signal: controller.signal })
   }
 
   const handleCopy = async (field: string, value: string) => {
@@ -2481,8 +2825,10 @@ export function SettingsPage() {
       alertsMinFreeSpace: formatBytes(data.alerts?.min_free_bytes ?? 10737418240),
       alertsCooldownPeriod: data.alerts?.cooldown_period ?? '4h',
       alertsWebhookURL: data.alerts?.webhook_url ?? '',
+      alertsWebhookURLConfigured: data.alerts?.webhook_url_configured ?? (data.alerts?.webhook_url ?? '') === REDACTED_SETTINGS_SECRET,
       alertsWebhookMethod: data.alerts?.webhook_method ?? 'POST',
       alertsWebhookHeaders: data.alerts?.webhook_headers?.join('\n') ?? '',
+      alertsWebhookHeadersConfigured: data.alerts?.webhook_headers_configured ?? ((data.alerts?.webhook_headers?.length ?? 0) > 0),
       alertsTelegramEnabled: data.alerts?.telegram_enabled ?? false,
       alertsTelegramBotToken: '',
       alertsTelegramBotTokenConfigured: data.alerts?.telegram_bot_token_configured ?? false,
@@ -2659,6 +3005,16 @@ export function SettingsPage() {
         addToast({ title: '已改为本机数据面地址', description: '保存设置后会校验并切换连接。', color: 'success' })
         return
       case 'webdav_auth':
+        if (securityCheckHasWebDAVPasswordRisk(check)) {
+          updateDirtySettings((prev) => ({
+            ...prev,
+            webdavAuthType: 'basic',
+            webdavPassword: '',
+            webdavUseGeneratedPassword: true,
+          }))
+          addToast({ title: '已改用自动生成 WebDAV 密码', description: '保存后会使用服务端生成的强随机密码。', color: 'success' })
+          return
+        }
         if (securityCheckResponse?.data.config.auth_enabled === false) {
           updateDirtySettings((prev) => ({
             ...prev,
@@ -2724,6 +3080,9 @@ export function SettingsPage() {
       case 'trusted_proxy_or_tls':
         return { label: '设置代理层数', onPress: () => applySecurityCheckFix(check) }
       case 'forwarded_proto_trust':
+        if (securityCheckHasTrustedNonHTTPSForwardedProto(check)) {
+          return undefined
+        }
         return { label: '修正代理设置', onPress: () => applySecurityCheckFix(check) }
       case 'server_listen':
         return { label: '改为本机监听', onPress: () => applySecurityCheckFix(check) }
@@ -2732,7 +3091,7 @@ export function SettingsPage() {
       case 'dataplane_http_listen':
         return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check) }
       case 'webdav_auth':
-        return { label: '启用认证', onPress: () => applySecurityCheckFix(check) }
+        return { label: securityCheckHasWebDAVPasswordRisk(check) ? '更换密码' : '启用认证', onPress: () => applySecurityCheckFix(check) }
       case 'share_base_url':
         return { label: '使用 HTTPS URL', onPress: () => applySecurityCheckFix(check) }
       case 'unsafe_no_auth_override':
@@ -2809,9 +3168,11 @@ export function SettingsPage() {
       if (variables.signal.aborted) {
         return
       }
-      setSavedSettingsOverride(variables.submittedSettings)
+      const sanitizedSubmittedSettings = sanitizeSavedSettingsOverride(variables.submittedSettings, variables.request)
+      setSavedSettingsOverride(sanitizedSubmittedSettings)
       setSavedSettingsOverrideUpdatedAt(variables.baseSettingsUpdatedAt)
       useAuthStore.getState().setShareEnabled(variables.submittedSettings.shareEnabled)
+      setDraftSettings(current => sanitizeDirtyDraftAfterSave(current, variables.submittedSettings, sanitizedSubmittedSettings))
 
       if (shallowEqualSettingsDraft(draftSettingsRef.current, variables.submittedSettings)) {
         setIsDirty(false)
@@ -2872,7 +3233,7 @@ export function SettingsPage() {
     const trimmedShareBaseURL = settings.shareBaseURL.trim()
     const trimmedShareDefaultExpiresIn = settings.shareDefaultExpiresIn.trim()
     const trimmedShareDefaultMaxAccess = settings.shareDefaultMaxAccess.trim()
-    const parsedShareDefaultMaxAccess = Number(trimmedShareDefaultMaxAccess)
+    const parsedShareDefaultMaxAccess = parseNonNegativeSafeIntegerInput(trimmedShareDefaultMaxAccess)
     const trimmedAlertsWebhookURL = settings.alertsWebhookURL.trim()
     const trimmedAlertsWebhookMethod = settings.alertsWebhookMethod.trim().toUpperCase()
     const trimmedAlertsTelegramBotToken = settings.alertsTelegramBotToken.trim()
@@ -2909,6 +3270,7 @@ export function SettingsPage() {
       .filter(Boolean)
     const parsedAlertsThresholdPct = Number(trimmedAlertsThresholdPct)
     const parsedAlertsCriticalPct = Number(trimmedAlertsCriticalPct)
+    const savedSettingsForSecretPlaceholders = savedSettingsOverride ?? (settingsData?.data ? mapServerSettings(settingsData.data) : null)
     const versioningExtensions = settings.versioningExtensions
       .split('\n')
       .map(entry => entry.trim())
@@ -2970,6 +3332,34 @@ export function SettingsPage() {
       addToast({
         title: '大小格式无效',
         description: err instanceof Error ? err.message : '请使用 1024、1 KB、1.5 MB 之类的格式',
+        color: 'danger',
+      })
+      return
+    }
+
+    const invalidCapacitySize = [
+      {
+        valid: isSafeByteSize(minFreeSpaceBytes, true),
+        description: '最小空闲空间必须是 0 或不超过安全范围的整数',
+      },
+      {
+        valid: isSafeByteSize(alertsMinFreeBytes, true),
+        description: '提醒最小剩余空间必须是 0 或不超过安全范围的整数',
+      },
+      {
+        valid: isSafeByteSize(trashMaxSizeBytes, false),
+        description: '回收站最大容量必须是大于 0 且不超过安全范围的整数',
+      },
+      {
+        valid: isSafeByteSize(versioningMaxSizeBytes, false),
+        description: '最大自动版本化文件大小必须是大于 0 且不超过安全范围的整数',
+      },
+    ].find((item) => !item.valid)
+
+    if (invalidCapacitySize) {
+      addToast({
+        title: '大小格式无效',
+        description: invalidCapacitySize.description,
         color: 'danger',
       })
       return
@@ -3083,10 +3473,10 @@ export function SettingsPage() {
       return
     }
 
-    if (!/^\d+$/.test(trimmedTrustedProxyHops) || !Number.isInteger(parsedTrustedProxyHops) || parsedTrustedProxyHops < 0) {
+    if (!/^\d+$/.test(trimmedTrustedProxyHops) || !Number.isSafeInteger(parsedTrustedProxyHops)) {
       addToast({
         title: '受信代理层数格式无效',
-        description: '受信代理层数必须是 0 或正整数',
+        description: '受信代理层数必须是 0 或不超过安全范围的整数',
         color: 'danger',
       })
       return
@@ -3103,10 +3493,10 @@ export function SettingsPage() {
       }
     }
 
-    if (!/^\d+$/.test(trimmedMaxVersions) || !Number.isInteger(parsedMaxVersions) || parsedMaxVersions < 0) {
+    if (!/^\d+$/.test(trimmedMaxVersions) || !Number.isSafeInteger(parsedMaxVersions)) {
       addToast({
         title: '最大版本数格式无效',
-        description: '最大版本数必须是 0 或正整数',
+        description: '最大版本数必须是 0 或不超过安全范围的整数',
         color: 'danger',
       })
       return
@@ -3157,10 +3547,10 @@ export function SettingsPage() {
       return
     }
 
-    if (!/^\d+$/.test(trimmedMaxRetries) || !Number.isInteger(parsedMaxRetries) || parsedMaxRetries < 0) {
+    if (!/^\d+$/.test(trimmedMaxRetries) || !Number.isSafeInteger(parsedMaxRetries)) {
       addToast({
         title: '最大重试次数格式无效',
-        description: '最大重试次数必须是 0 或正整数',
+        description: '最大重试次数必须是 0 或不超过安全范围的整数',
         color: 'danger',
       })
       return
@@ -3202,19 +3592,19 @@ export function SettingsPage() {
       return
     }
 
-    if (trimmedAlertsThresholdPct === '' || !Number.isFinite(parsedAlertsThresholdPct) || parsedAlertsThresholdPct < 0 || parsedAlertsThresholdPct > 100) {
+    if (!/^\d+$/.test(trimmedAlertsThresholdPct) || !Number.isInteger(parsedAlertsThresholdPct) || parsedAlertsThresholdPct < 0 || parsedAlertsThresholdPct > 100) {
       addToast({
         title: '提醒阈值格式无效',
-        description: '提醒阈值必须在 0 到 100 之间',
+        description: '提醒阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
       return
     }
 
-    if (trimmedAlertsCriticalPct === '' || !Number.isFinite(parsedAlertsCriticalPct) || parsedAlertsCriticalPct < 0 || parsedAlertsCriticalPct > 100) {
+    if (!/^\d+$/.test(trimmedAlertsCriticalPct) || !Number.isInteger(parsedAlertsCriticalPct) || parsedAlertsCriticalPct < 0 || parsedAlertsCriticalPct > 100) {
       addToast({
         title: '严重提醒阈值格式无效',
-        description: '严重提醒阈值必须在 0 到 100 之间',
+        description: '严重提醒阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
       return
@@ -3247,10 +3637,19 @@ export function SettingsPage() {
       return
     }
 
-    if (!Number.isInteger(parsedShareDefaultMaxAccess) || parsedShareDefaultMaxAccess < 0) {
+    if (!parsedShareDefaultMaxAccess.valid) {
       addToast({
         title: '分享默认访问次数无效',
-        description: '默认访问次数必须是 0 或正整数',
+        description: '默认访问次数必须是 0 或不超过安全范围的正整数',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (trimmedAlertsWebhookURL === REDACTED_SETTINGS_SECRET && !settings.alertsWebhookURLConfigured) {
+      addToast({
+        title: 'Webhook URL 占位符无效',
+        description: '只有服务端已保存的 Webhook URL 才能保留为 <redacted>；新增 Webhook URL 需要填写真实地址。',
         color: 'danger',
       })
       return
@@ -3391,10 +3790,10 @@ export function SettingsPage() {
       return
     }
 
-    if (!/^\d+$/.test(trimmedScrubMaxRetries) || !Number.isInteger(parsedScrubMaxRetries) || parsedScrubMaxRetries < 0) {
+    if (!/^\d+$/.test(trimmedScrubMaxRetries) || !Number.isSafeInteger(parsedScrubMaxRetries)) {
       addToast({
         title: 'Scrub 重试次数格式无效',
-        description: '最大重试次数必须是 0 或正整数',
+        description: '最大重试次数必须是 0 或不超过安全范围的整数',
         color: 'danger',
       })
       return
@@ -3436,19 +3835,19 @@ export function SettingsPage() {
       return
     }
 
-    if (!/^\d+$/.test(trimmedDiskHealthTemperatureWarningC) || !Number.isInteger(parsedDiskHealthTemperatureWarningC)) {
+    if (!/^\d+$/.test(trimmedDiskHealthTemperatureWarningC) || !Number.isSafeInteger(parsedDiskHealthTemperatureWarningC)) {
       addToast({
         title: '磁盘温度提醒阈值格式无效',
-        description: '温度提醒阈值必须是 0 或正整数',
+        description: '温度提醒阈值必须是 0 或不超过安全范围的整数',
         color: 'danger',
       })
       return
     }
 
-    if (!/^\d+$/.test(trimmedDiskHealthTemperatureCriticalC) || !Number.isInteger(parsedDiskHealthTemperatureCriticalC)) {
+    if (!/^\d+$/.test(trimmedDiskHealthTemperatureCriticalC) || !Number.isSafeInteger(parsedDiskHealthTemperatureCriticalC)) {
       addToast({
         title: '磁盘温度严重阈值格式无效',
-        description: '温度严重阈值必须是 0 或正整数',
+        description: '温度严重阈值必须是 0 或不超过安全范围的整数',
         color: 'danger',
       })
       return
@@ -3463,19 +3862,19 @@ export function SettingsPage() {
       return
     }
 
-    if (!/^\d+$/.test(trimmedDiskHealthMediaWearWarningPct) || !Number.isInteger(parsedDiskHealthMediaWearWarningPct)) {
+    if (!/^\d+$/.test(trimmedDiskHealthMediaWearWarningPct) || !Number.isInteger(parsedDiskHealthMediaWearWarningPct) || parsedDiskHealthMediaWearWarningPct > 100) {
       addToast({
         title: '介质磨损提醒阈值格式无效',
-        description: '介质磨损提醒阈值必须是 0 或正整数',
+        description: '介质磨损提醒阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
       return
     }
 
-    if (!/^\d+$/.test(trimmedDiskHealthMediaWearCriticalPct) || !Number.isInteger(parsedDiskHealthMediaWearCriticalPct)) {
+    if (!/^\d+$/.test(trimmedDiskHealthMediaWearCriticalPct) || !Number.isInteger(parsedDiskHealthMediaWearCriticalPct) || parsedDiskHealthMediaWearCriticalPct > 100) {
       addToast({
         title: '介质磨损严重阈值格式无效',
-        description: '介质磨损严重阈值必须是 0 或正整数',
+        description: '介质磨损严重阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
       return
@@ -3490,10 +3889,10 @@ export function SettingsPage() {
       return
     }
 
-    if (!/^\d+$/.test(trimmedTrashRetentionDays) || !Number.isInteger(parsedTrashRetentionDays) || parsedTrashRetentionDays < 0) {
+    if (!/^\d+$/.test(trimmedTrashRetentionDays) || !Number.isSafeInteger(parsedTrashRetentionDays)) {
       addToast({
         title: '回收站保留天数格式无效',
-        description: '回收站保留天数必须是 0 或正整数',
+        description: '回收站保留天数必须是 0 或不超过安全范围的整数',
         color: 'danger',
       })
       return
@@ -3508,6 +3907,27 @@ export function SettingsPage() {
         })
         return
       }
+    }
+    const duplicateWebhookHeaderName = findDuplicateWebhookHeaderName(alertsWebhookHeaders)
+    if (duplicateWebhookHeaderName) {
+      addToast({
+        title: 'Webhook Header 重复',
+        description: `Header ${duplicateWebhookHeaderName} 重复；每个自定义 Header 名称只能配置一次。`,
+        color: 'danger',
+      })
+      return
+    }
+    const unknownRedactedWebhookHeader = findUnknownRedactedWebhookHeader(
+      alertsWebhookHeaders,
+      savedSettingsForSecretPlaceholders?.alertsWebhookHeaders ?? '',
+    )
+    if (unknownRedactedWebhookHeader) {
+      addToast({
+        title: 'Webhook Header 占位符无效',
+        description: `Header ${unknownRedactedWebhookHeader} 没有已保存的值；新增或改名的 Header 需要填写真实值。`,
+        color: 'danger',
+      })
+      return
     }
 
     const normalizedWebDAVPrefix = normalizeWebDAVPrefix(settings.webdavPrefix)
@@ -3602,7 +4022,7 @@ export function SettingsPage() {
         enabled: settings.shareEnabled,
         base_url: trimmedShareBaseURL,
         default_expires_in: trimmedShareDefaultExpiresIn,
-        default_max_access: parsedShareDefaultMaxAccess,
+        default_max_access: parsedShareDefaultMaxAccess.value,
         policy_rules: parsedSharePolicyRules.rules,
       },
       favorites: {
@@ -4060,6 +4480,7 @@ export function SettingsPage() {
                     aria-label="回收站保留天数"
                     type="number"
                     min={0}
+                    step={1}
                     inputMode="numeric"
                     value={settings.trashRetentionDays}
                     onValueChange={(v) => updateDirtySettings(s => ({ ...s, trashRetentionDays: v }))}
@@ -4090,8 +4511,10 @@ export function SettingsPage() {
                     description="每个文件最多保留的历史版本数量"
                   >
                     <Input
+                      aria-label="最大版本数"
                       type="number"
                       min={0}
+                      step={1}
                       inputMode="numeric"
                       value={settings.maxVersions}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxVersions: v }))}
@@ -4122,6 +4545,7 @@ export function SettingsPage() {
                     description="剩余空间低于该阈值时，写入后会强制执行一次全局历史版本清理"
                   >
                     <Input
+                      aria-label="最小空闲空间"
                       value={settings.minFreeSpace}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, minFreeSpace: v }))}
                       className="w-24"
@@ -4285,6 +4709,7 @@ export function SettingsPage() {
                     description="超过该大小的文件默认不再自动创建历史版本"
                   >
                     <Input
+                      aria-label="最大自动版本化文件大小"
                       value={settings.versioningMaxSize}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, versioningMaxSize: v }))}
                       className="w-32"
@@ -4784,8 +5209,10 @@ export function SettingsPage() {
                     description="失败后重试次数"
                   >
                     <Input
+                      aria-label="数据面最大重试次数"
                       type="number"
                       min={0}
+                      step={1}
                       inputMode="numeric"
                       value={settings.dataplaneMaxRetries}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, dataplaneMaxRetries: v }))}
@@ -4900,6 +5327,8 @@ export function SettingsPage() {
                       aria-label="介质磨损提醒阈值"
                       type="number"
                       min={0}
+                      max={100}
+                      step={1}
                       inputMode="numeric"
                       value={settings.diskHealthMediaWearWarningPct}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthMediaWearWarningPct: v }))}
@@ -4913,6 +5342,8 @@ export function SettingsPage() {
                       aria-label="介质磨损严重阈值"
                       type="number"
                       min={0}
+                      max={100}
+                      step={1}
                       inputMode="numeric"
                       value={settings.diskHealthMediaWearCriticalPct}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, diskHealthMediaWearCriticalPct: v }))}
@@ -5013,6 +5444,7 @@ export function SettingsPage() {
                       aria-label="Scrub 最大重试次数"
                       type="number"
                       min={0}
+                      step={1}
                       inputMode="numeric"
                       value={settings.scrubMaxRetries}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, scrubMaxRetries: v }))}
@@ -5034,7 +5466,7 @@ export function SettingsPage() {
                 <div className="space-y-4">
                   <SettingRow
                     label="启用提醒"
-                    description="启用后定期检查存储空间，并在备份失败或备份提醒时发送通知"
+                    description="启用后定期检查存储空间，并通过已配置通道发送备份、恢复、磁盘健康、Scrub 和登录限流事件通知"
                   >
                     <Switch
                       aria-label="启用提醒"
@@ -5050,6 +5482,22 @@ export function SettingsPage() {
                     >
                       启用提醒
                     </Switch>
+                  </SettingRow>
+                  <Divider className="bg-divider" />
+                  <SettingRow
+                    label="测试提醒"
+                    description="使用已保存的提醒配置发送一次测试事件"
+                  >
+                    <Button
+                      variant="bordered"
+                      className="btn-secondary btn-md rounded-lg"
+                      startContent={<Send size={16} />}
+                      onPress={handleSendTestAlert}
+                      isLoading={testAlertMutation.isPending}
+                      isDisabled={saveMutation.isPending}
+                    >
+                      发送测试提醒
+                    </Button>
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow
@@ -5076,6 +5524,7 @@ export function SettingsPage() {
                         type="number"
                         min={0}
                         max={100}
+                        step={1}
                         inputMode="numeric"
                         value={settings.alertsThresholdPct}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsThresholdPct: v }))}
@@ -5089,6 +5538,7 @@ export function SettingsPage() {
                         type="number"
                         min={0}
                         max={100}
+                        step={1}
                         inputMode="numeric"
                         value={settings.alertsCriticalPct}
                         onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsCriticalPct: v }))}
@@ -5103,6 +5553,7 @@ export function SettingsPage() {
                     description="剩余空间低于该值时发送提醒"
                   >
                     <Input
+                      aria-label="最小剩余空间"
                       value={settings.alertsMinFreeSpace}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsMinFreeSpace: v }))}
                       className="w-32"
@@ -5296,7 +5747,7 @@ export function SettingsPage() {
                           (!settings.alertsEnabled || !settings.alertsEmailEnabled) && "opacity-60 cursor-not-allowed"
                         )}
                       />
-                      <p className="text-xs text-default-500 mt-1">每行一个收件人，也支持用逗号分隔。</p>
+                      <p className="text-xs text-default-500 mt-1">每行一个收件人，也支持用逗号分隔；启用邮件通知时至少需要一个非空收件人。</p>
                     </div>
                   </div>
                   <Divider className="bg-divider" />
@@ -5512,8 +5963,9 @@ export function SettingsPage() {
                     description="0 表示不限制；只影响之后创建的分享链接"
                   >
                     <Input
-                      type="number"
-                      min="0"
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
                       value={settings.shareDefaultMaxAccess}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, shareDefaultMaxAccess: v }))}
                       placeholder="0"

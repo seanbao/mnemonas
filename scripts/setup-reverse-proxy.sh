@@ -252,18 +252,88 @@ normalize_port() {
     printf '%s\n' "$((10#$value))"
 }
 
-normalize_webdav_prefix() {
+trim_ascii_whitespace() {
     local value="$1"
 
-    if [[ -z "$value" ]]; then
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+clean_url_path_prefix() {
+    local value="$1"
+    local segment
+    local last_index
+    local -a input_segments=()
+    local -a output_segments=()
+
+    [[ "$value" == /* ]] || value="/$value"
+    IFS='/' read -r -a input_segments <<< "$value"
+    for segment in "${input_segments[@]}"; do
+        case "$segment" in
+            ""|.)
+                ;;
+            ..)
+                if [[ "${#output_segments[@]}" -gt 0 ]]; then
+                    last_index=$(( ${#output_segments[@]} - 1 ))
+                    output_segments=("${output_segments[@]:0:$last_index}")
+                fi
+                ;;
+            *)
+                output_segments+=("$segment")
+                ;;
+        esac
+    done
+
+    if [[ "${#output_segments[@]}" -eq 0 ]]; then
+        printf '/\n'
+        return
+    fi
+    printf '/%s' "${output_segments[@]}"
+    printf '\n'
+}
+
+normalize_webdav_prefix() {
+    local raw_value="$1"
+    local value
+
+    if [[ -z "$raw_value" ]]; then
         value="/dav"
+    else
+        value="$(trim_ascii_whitespace "$raw_value")"
     fi
     [[ "$value" != *[[:cntrl:]]* ]] || fail "webdav.prefix 不能包含控制字符: $value"
     [[ "$value" != *\\* && "$value" != *\?* && "$value" != *#* ]] || fail "webdav.prefix 不能包含反斜杠、? 或 #: $value"
     [[ "$value" == /* ]] || value="/$value"
-    while [[ "$value" != "/" && "$value" == */ ]]; do
-        value="${value%/}"
-    done
+    value="$(clean_url_path_prefix "$value")"
+    printf '%s\n' "$value"
+}
+
+webdav_prefix_overlaps_reserved_route() {
+    case "$1" in
+        /api|/api/*|/s|/s/*|/health|/health/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+normalize_configured_webdav_prefix() {
+    local raw_value="$1"
+    local value
+
+    value="$(trim_ascii_whitespace "$raw_value")"
+    if [[ -z "$value" ]]; then
+        value="/"
+    fi
+    [[ "$value" != *[[:cntrl:]]* ]] || fail "webdav.prefix 不能包含控制字符: $value"
+    [[ "$value" != *\\* && "$value" != *\?* && "$value" != *#* ]] || fail "webdav.prefix 不能包含反斜杠、? 或 #: $value"
+    [[ "$value" == /* ]] || value="/$value"
+    value="$(clean_url_path_prefix "$value")"
+    [[ "$value" != "/" ]] || fail "webdav.prefix 不能是根路径"
+    ! webdav_prefix_overlaps_reserved_route "$value" || fail "webdav.prefix 不能覆盖 /api、/s 或 /health 保留路由: $value"
     printf '%s\n' "$value"
 }
 
@@ -381,6 +451,116 @@ PY
             gsub("^\047|\047$", "", line)
             print line
             exit
+        }
+    ' "$file"
+}
+
+toml_key_exists() {
+    local section="$1"
+    local key="$2"
+    local file="$3"
+
+    [[ -f "$file" ]] || return 1
+
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(1)
+    current = current.get(part)
+    if current is None:
+        sys.exit(1)
+
+sys.exit(0 if isinstance(current, dict) and key in current else 1)
+PY
+        then
+            return 0
+        else
+            case "$?" in
+                1) return 1 ;;
+            esac
+        fi
+    fi
+
+    awk -v section="[$section]" -v key="$key" '
+        function strip_comment(text,    i, c, quote, escaped, out) {
+            quote = ""
+            escaped = 0
+            out = ""
+            for (i = 1; i <= length(text); i++) {
+                c = substr(text, i, 1)
+                if (quote == "\"") {
+                    out = out c
+                    if (escaped) {
+                        escaped = 0
+                        continue
+                    }
+                    if (c == "\\") {
+                        escaped = 1
+                        continue
+                    }
+                    if (c == quote) {
+                        quote = ""
+                    }
+                    continue
+                }
+                if (quote == "\047") {
+                    out = out c
+                    if (c == quote) {
+                        quote = ""
+                    }
+                    continue
+                }
+                if (c == "\"" || c == "\047") {
+                    quote = c
+                    out = out c
+                    continue
+                }
+                if (c == "#") {
+                    break
+                }
+                out = out c
+            }
+            return out
+        }
+        {
+            line = strip_comment($0)
+            gsub("^[[:space:]]+|[[:space:]]+$", "", line)
+            section_line = line
+            if (section_line ~ "^\\[") {
+                sub("^\\[[[:space:]]*", "[", section_line)
+                sub("[[:space:]]*\\]$", "]", section_line)
+                gsub("[[:space:]]*\\.[[:space:]]*", ".", section_line)
+            }
+        }
+        section_line == section {
+            in_section = 1
+            next
+        }
+        section_line ~ "^\\[" {
+            in_section = 0
+        }
+        in_section && line ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            found = 1
+            exit
+        }
+        END {
+            exit found ? 0 : 1
         }
     ' "$file"
 }
@@ -572,11 +752,19 @@ resolve_dataplane_ports() {
 
 resolve_webdav_prefix() {
     local configured_prefix=""
+    local configured_prefix_set=0
 
     if [[ -f "$CONFIG_PATH" ]]; then
-        configured_prefix="$(toml_value webdav prefix "$CONFIG_PATH" || true)"
+        if toml_key_exists webdav prefix "$CONFIG_PATH"; then
+            configured_prefix_set=1
+            configured_prefix="$(toml_value webdav prefix "$CONFIG_PATH" || true)"
+        fi
     fi
-    WEBDAV_PREFIX="$(normalize_webdav_prefix "$configured_prefix")"
+    if [[ "$configured_prefix_set" == "1" ]]; then
+        WEBDAV_PREFIX="$(normalize_configured_webdav_prefix "$configured_prefix")"
+    else
+        WEBDAV_PREFIX="$(normalize_webdav_prefix "")"
+    fi
 }
 
 validate_public_setup_ports() {
@@ -1426,7 +1614,7 @@ run_post_setup_checks() {
     fi
 
     if command -v mnemonas-doctor >/dev/null 2>&1; then
-        if SERVER_URL="http://$UPSTREAM_ENDPOINT" DATAPLANE_GRPC_PORT="$DATAPLANE_GRPC_PORT" DATAPLANE_HTTP_PORT="$DATAPLANE_HTTP_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
+        if CONFIG_PATH="$CONFIG_PATH" SYSTEMD_DIR="$SYSTEMD_DIR" SERVER_PORT="$UPSTREAM_PORT" SERVER_URL="http://$UPSTREAM_ENDPOINT" DATAPLANE_GRPC_PORT="$DATAPLANE_GRPC_PORT" DATAPLANE_HTTP_PORT="$DATAPLANE_HTTP_PORT" mnemonas-doctor --public-domain "$DOMAIN"; then
             log_info "mnemonas-doctor 检查通过"
         else
             log_warn "mnemonas-doctor 存在失败或警告，请按输出处理后再开放给真实用户"
@@ -1560,17 +1748,39 @@ EOF
     [[ "$(normalize_webdav_prefix '')" == "/dav" ]] || fail "self-test failed: default WebDAV prefix formatting"
     [[ "$(normalize_webdav_prefix 'files')" == "/files" ]] || fail "self-test failed: relative WebDAV prefix formatting"
     [[ "$(normalize_webdav_prefix '/files/')" == "/files" ]] || fail "self-test failed: trailing slash WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix ' /files/ ')" == "/files" ]] || fail "self-test failed: spaced WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix '/files/../dav//team/./')" == "/dav/team" ]] || fail "self-test failed: clean WebDAV prefix formatting"
+    [[ "$(normalize_webdav_prefix '/files/team/../../dav/')" == "/dav" ]] || fail "self-test failed: repeated WebDAV prefix parent cleanup"
+    [[ "$(normalize_configured_webdav_prefix '/files/../dav//team/./')" == "/dav/team" ]] || fail "self-test failed: configured WebDAV prefix formatting"
+    if (normalize_configured_webdav_prefix '' >/dev/null 2>&1); then
+        fail "self-test failed: configured empty WebDAV prefix was accepted"
+    fi
+    if (normalize_configured_webdav_prefix '/' >/dev/null 2>&1); then
+        fail "self-test failed: configured root WebDAV prefix was accepted"
+    fi
+    if (normalize_configured_webdav_prefix '/api/v1' >/dev/null 2>&1); then
+        fail "self-test failed: configured reserved WebDAV prefix was accepted"
+    fi
     [[ "$(normalize_domain 'NAS.EXAMPLE.COM.')" == "nas.example.com" ]] || fail "self-test failed: FQDN domain normalization"
 
     config="$tmp/custom-webdav-prefix.toml"
     cat > "$config" <<'EOF'
 [webdav]
-prefix = "/files\u002f"
+prefix = "/files\u002f..\u002fdav\u002f"
 EOF
     CONFIG_PATH="$config"
     WEBDAV_PREFIX=""
     resolve_webdav_prefix
-    [[ "$WEBDAV_PREFIX" == "/files" ]] || fail "self-test failed: configured WebDAV prefix was not resolved"
+    [[ "$WEBDAV_PREFIX" == "/dav" ]] || fail "self-test failed: configured WebDAV prefix was not resolved"
+
+    config="$tmp/empty-webdav-prefix.toml"
+    cat > "$config" <<'EOF'
+[webdav]
+prefix = ""
+EOF
+    if (CONFIG_PATH="$config"; resolve_webdav_prefix >/dev/null 2>&1); then
+        fail "self-test failed: configured empty WebDAV prefix was resolved"
+    fi
 
     DOMAIN="nas.example.com"
     PROXY_TYPE="caddy"
@@ -1593,6 +1803,44 @@ EOF
     fake_bin="$tmp/fake-bin"
     fake_ufw_log="$tmp/ufw.log"
     mkdir -p "$fake_bin"
+
+    cat > "$fake_bin/ss" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fake_bin/mnemonas-doctor" <<'EOF'
+#!/usr/bin/env bash
+{
+    printf 'CONFIG_PATH=%s\n' "${CONFIG_PATH:-}"
+    printf 'SYSTEMD_DIR=%s\n' "${SYSTEMD_DIR:-}"
+    printf 'SERVER_PORT=%s\n' "${SERVER_PORT:-}"
+    printf 'SERVER_URL=%s\n' "${SERVER_URL:-}"
+    printf 'DATAPLANE_GRPC_PORT=%s\n' "${DATAPLANE_GRPC_PORT:-}"
+    printf 'DATAPLANE_HTTP_PORT=%s\n' "${DATAPLANE_HTTP_PORT:-}"
+    printf 'args=%s\n' "$*"
+} > "$MNEMONAS_FAKE_DOCTOR_LOG"
+exit 0
+EOF
+    chmod +x "$fake_bin/ss" "$fake_bin/curl" "$fake_bin/mnemonas-doctor"
+    CONFIG_PATH="$tmp/custom-doctor-config.toml"
+    SYSTEMD_DIR="$tmp/custom-systemd"
+    UPSTREAM_PORT="18080"
+    UPSTREAM_ENDPOINT="127.0.0.1:18080"
+    DATAPLANE_GRPC_PORT="19090"
+    DATAPLANE_HTTP_PORT="19091"
+    # shellcheck disable=SC2030,SC2031 # The fake PATH is intentionally scoped to this subshell.
+    (PATH="$fake_bin:$PATH"; MNEMONAS_FAKE_DOCTOR_LOG="$tmp/doctor-env.log" run_post_setup_checks) > "$tmp/post-setup-checks.log"
+    grep -Fq "CONFIG_PATH=$tmp/custom-doctor-config.toml" "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive CONFIG_PATH"
+    grep -Fq "SYSTEMD_DIR=$tmp/custom-systemd" "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive SYSTEMD_DIR"
+    grep -Fq 'SERVER_PORT=18080' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive SERVER_PORT"
+    grep -Fq 'SERVER_URL=http://127.0.0.1:18080' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive SERVER_URL"
+    grep -Fq 'DATAPLANE_GRPC_PORT=19090' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive DATAPLANE_GRPC_PORT"
+    grep -Fq 'DATAPLANE_HTTP_PORT=19091' "$tmp/doctor-env.log" || fail "self-test failed: doctor did not receive DATAPLANE_HTTP_PORT"
+    grep -Fq 'args=--public-domain nas.example.com' "$tmp/doctor-env.log" || fail "self-test failed: doctor was not invoked with public domain"
 
     cat > "$fake_bin/ufw" <<'EOF'
 #!/usr/bin/env bash

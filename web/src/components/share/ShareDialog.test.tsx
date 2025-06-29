@@ -220,7 +220,7 @@ describe('ShareDialog', () => {
     await waitFor(() => {
       expect(getSharePolicy).toHaveBeenCalled()
       expect(screen.getByText('系统默认：7 天')).toBeInTheDocument()
-      expect(screen.getByText('系统默认：不限制')).toBeInTheDocument()
+      expect(screen.getByText('系统默认：不限制；0 表示不限制')).toBeInTheDocument()
     })
   })
 
@@ -597,7 +597,7 @@ describe('ShareDialog', () => {
     }))
   })
 
-  it('ignores non-positive access limits when creating a share', async () => {
+  it('sends explicit unlimited access limit when set to zero', async () => {
     const user = userEvent.setup()
     vi.mocked(createShare).mockResolvedValue({
       id: 'share-1',
@@ -625,9 +625,37 @@ describe('ShareDialog', () => {
     await user.type(screen.getByPlaceholderText('使用系统默认'), '0')
     await user.click(screen.getByText('创建分享链接'))
 
-    expectCreateShareCalledWithAbortSignal(expect.not.objectContaining({
-      max_access: expect.any(Number),
+    expectCreateShareCalledWithAbortSignal(expect.objectContaining({
+      max_access: 0,
     }))
+  })
+
+  it.each([
+    ['小数', '1.5', '访问次数必须是 0 或正整数'],
+    ['科学计数法', '1e3', '访问次数必须是 0 或正整数'],
+    ['超出安全整数范围', '9007199254740992', '访问次数过大'],
+  ])('blocks invalid access limits with %s before creating a share', async (_label, maxAccess, message) => {
+    const user = userEvent.setup()
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await user.type(screen.getByPlaceholderText('使用系统默认'), maxAccess)
+
+    const createButton = screen.getByText('创建分享链接').closest('button')
+    expect(createButton).toBeDisabled()
+    expect(screen.getByText(message)).toBeInTheDocument()
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+      title: '分享链接已创建',
+    }))
+    expect(createShare).not.toHaveBeenCalled()
   })
 
   it('calls the created callback and supports copying the created share link', async () => {

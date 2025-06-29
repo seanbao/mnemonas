@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act } from '@/test/utils'
 import React from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { FilesPage } from './Files'
 
 const mockAddToast = vi.fn()
@@ -453,8 +454,26 @@ describe('FilesPage upload queue', () => {
     expect(screen.getByText('second.txt')).toBeTruthy()
   })
 
-  it('aborts a pending upload when a new upload session starts', async () => {
-    render(<FilesPage />)
+  it('aborts a pending upload and refreshes the file list when a new upload session starts', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+          staleTime: 0,
+        },
+        mutations: {
+          retry: false,
+        },
+      },
+    })
+    const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
 
     await act(async () => {
       await vi.runOnlyPendingTimersAsync()
@@ -488,6 +507,9 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect(firstSignal?.aborted).toBe(true)
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['files', 'anonymous:guest:/', '/'],
+    })
     expect(mockUploadFile).toHaveBeenNthCalledWith(
       2,
       '/',

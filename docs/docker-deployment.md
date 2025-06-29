@@ -220,7 +220,7 @@ enabled = true
 prefix = "/dav"
 auth_type = "basic"
 username = "webdav"
-password = "change-this-strong-password"  # 请修改！
+password = ""             # 留空使用自动生成密码；自定义时使用密码管理器生成的随机强密码
 
 [log]
 level = "info"

@@ -444,6 +444,36 @@ func TestReplaceEmptyDirPathNoFollowRejectsOldSymlinkBeforeRemovingTarget(t *tes
 	}
 }
 
+func TestReplaceEmptyDirPathNoFollowRejectsNonEmptyTarget(t *testing.T) {
+	rootPath := t.TempDir()
+	oldPath := filepath.Join(rootPath, "old")
+	target := filepath.Join(rootPath, "target")
+	if err := os.Mkdir(oldPath, 0755); err != nil {
+		t.Fatalf("Mkdir(old) error: %v", err)
+	}
+	if err := os.Mkdir(target, 0755); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "keep.txt"), []byte("target"), 0644); err != nil {
+		t.Fatalf("WriteFile(target/keep.txt) error: %v", err)
+	}
+
+	err := ReplaceEmptyDirPathNoFollow(oldPath, target)
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("ReplaceEmptyDirPathNoFollow() error = %v, want ErrExist", err)
+	}
+	if _, statErr := os.Stat(oldPath); statErr != nil {
+		t.Fatalf("old directory was moved on failure: %v", statErr)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "keep.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(target/keep.txt) error: %v", err)
+	}
+	if string(data) != "target" {
+		t.Fatalf("target content = %q, want target", data)
+	}
+}
+
 func TestReplaceFilePathNoFollowRejectsOldSymlink(t *testing.T) {
 	rootPath := t.TempDir()
 	realOld := filepath.Join(rootPath, "real-old.txt")
@@ -557,6 +587,34 @@ func TestRenamePathIntoDirNoFollowRejectsTargetDirSymlink(t *testing.T) {
 	}
 }
 
+func TestRenamePathIntoDirNoFollowRejectsSourceSymlink(t *testing.T) {
+	rootPath := t.TempDir()
+	sourceDir := filepath.Join(rootPath, "source")
+	targetDir := filepath.Join(rootPath, "target")
+	realSource := filepath.Join(sourceDir, "real-docs")
+	sourceLink := filepath.Join(sourceDir, "docs")
+	if err := os.MkdirAll(realSource, 0755); err != nil {
+		t.Fatalf("MkdirAll(real source) error: %v", err)
+	}
+	if err := os.Mkdir(targetDir, 0755); err != nil {
+		t.Fatalf("Mkdir(target) error: %v", err)
+	}
+	if err := os.Symlink(realSource, sourceLink); err != nil {
+		t.Fatalf("Symlink(source-link) error: %v", err)
+	}
+
+	err := RenamePathIntoDirNoFollow(sourceLink, targetDir, "docs")
+	if !IsSymlinkError(err) {
+		t.Fatalf("RenamePathIntoDirNoFollow() error = %v, want ErrSymlink", err)
+	}
+	if _, statErr := os.Lstat(sourceLink); statErr != nil {
+		t.Fatalf("source symlink was moved on failure: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(targetDir, "docs")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("target docs stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestRenamePathIntoDirNoFollowRejectsExistingTarget(t *testing.T) {
 	rootPath := t.TempDir()
 	sourceDir := filepath.Join(rootPath, "source")
@@ -614,6 +672,72 @@ func TestRenameNoFollowRejectsExistingTarget(t *testing.T) {
 	}
 	if string(targetData) != "target" {
 		t.Fatalf("target content = %q, want target", targetData)
+	}
+}
+
+func TestRenameNoFollowRejectsSourceSymlink(t *testing.T) {
+	rootPath := t.TempDir()
+	realSource := filepath.Join(rootPath, "real-source.txt")
+	sourceLink := filepath.Join(rootPath, "source-link.txt")
+	if err := os.WriteFile(realSource, []byte("source"), 0644); err != nil {
+		t.Fatalf("WriteFile(real source) error: %v", err)
+	}
+	if err := os.Symlink(realSource, sourceLink); err != nil {
+		t.Fatalf("Symlink(source-link) error: %v", err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	err = RenameNoFollow(root, "source-link.txt", "target.txt")
+	if !IsSymlinkError(err) {
+		t.Fatalf("RenameNoFollow() error = %v, want ErrSymlink", err)
+	}
+	if _, statErr := os.Lstat(sourceLink); statErr != nil {
+		t.Fatalf("source symlink was moved on failure: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(rootPath, "target.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("target stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestRenameNoFollowRejectsTargetSymlink(t *testing.T) {
+	rootPath := t.TempDir()
+	sourcePath := filepath.Join(rootPath, "source.txt")
+	realTarget := filepath.Join(rootPath, "real-target.txt")
+	targetLink := filepath.Join(rootPath, "target-link.txt")
+	if err := os.WriteFile(sourcePath, []byte("source"), 0644); err != nil {
+		t.Fatalf("WriteFile(source) error: %v", err)
+	}
+	if err := os.WriteFile(realTarget, []byte("target"), 0644); err != nil {
+		t.Fatalf("WriteFile(real target) error: %v", err)
+	}
+	if err := os.Symlink(realTarget, targetLink); err != nil {
+		t.Fatalf("Symlink(target-link) error: %v", err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	err = RenameNoFollow(root, "source.txt", "target-link.txt")
+	if !IsSymlinkError(err) {
+		t.Fatalf("RenameNoFollow() error = %v, want ErrSymlink", err)
+	}
+	if _, statErr := os.Stat(sourcePath); statErr != nil {
+		t.Fatalf("source was moved on failure: %v", statErr)
+	}
+	data, err := os.ReadFile(realTarget)
+	if err != nil {
+		t.Fatalf("ReadFile(real target) error: %v", err)
+	}
+	if string(data) != "target" {
+		t.Fatalf("real target content = %q, want target", data)
 	}
 }
 
@@ -759,6 +883,41 @@ func TestRemoveAllNoFollowRemovesChildSymlinkWithoutFollowing(t *testing.T) {
 	}
 	if string(data) != "outside" {
 		t.Fatalf("outside file content = %q, want outside", data)
+	}
+}
+
+func TestRemoveAllNoFollowRemovesReadOnlyDirectoryTree(t *testing.T) {
+	rootPath := t.TempDir()
+	targetDir := filepath.Join(rootPath, "target")
+	lockedDir := filepath.Join(targetDir, "locked")
+	if err := os.MkdirAll(lockedDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(target/locked) error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(lockedDir, "note.txt"), []byte("locked"), 0600); err != nil {
+		t.Fatalf("WriteFile(target/locked/note.txt) error: %v", err)
+	}
+	if err := os.Chmod(lockedDir, 0500); err != nil {
+		t.Fatalf("Chmod(target/locked) error: %v", err)
+	}
+	if err := os.Chmod(targetDir, 0500); err != nil {
+		t.Fatalf("Chmod(target) error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(targetDir, 0700)
+		_ = os.Chmod(lockedDir, 0700)
+	})
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatalf("OpenRoot() error: %v", err)
+	}
+	defer root.Close()
+
+	if err := RemoveAllNoFollow(root, "target"); err != nil {
+		t.Fatalf("RemoveAllNoFollow() error: %v", err)
+	}
+	if _, statErr := os.Stat(targetDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("target stat error = %v, want not exist", statErr)
 	}
 }
 

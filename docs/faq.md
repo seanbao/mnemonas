@@ -118,7 +118,7 @@ auth_type = "users"  # 使用 MnemoNAS 用户账号登录
 [webdav]
 auth_type = "basic"
 username = "admin"
-password = "change-this-strong-password"
+password = ""  # 留空使用自动生成密码；自定义时使用密码管理器生成的随机强密码
 ```
 
 重启服务后生效。

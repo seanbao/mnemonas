@@ -126,11 +126,12 @@ type Server struct {
 	appVersion            string
 	buildTime             string
 	// Auth components
-	userStore    *auth.UserStore
-	tokenManager *auth.TokenManager
-	authHandler  *auth.Handler
-	authMw       *auth.Middleware
-	authEnabled  bool
+	userStore     *auth.UserStore
+	tokenManager  *auth.TokenManager
+	authHandler   *auth.Handler
+	authMw        *auth.Middleware
+	authEnabled   bool
+	authUsersFile string
 	// Share components
 	shareStore       *share.ShareStore
 	shareHandler     *share.Handler
@@ -250,6 +251,16 @@ func (s *Server) webDAVConfiguredButUnavailable() bool {
 	}
 	runtimeCfg := s.currentActiveWebDAV()
 	return !runtimeCfg.Enabled || config.NormalizeWebDAVAuthType(runtimeCfg.AuthType) != "basic" || strings.TrimSpace(runtimeCfg.Password) == ""
+}
+
+func (s *Server) effectiveAuthUsersFile(cfg *config.Config) string {
+	if s.authUsersFile != "" {
+		return s.authUsersFile
+	}
+	if cfg != nil {
+		return cfg.Auth.UsersFile
+	}
+	return ""
 }
 
 func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) error {
@@ -652,34 +663,9 @@ func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.
 		alertEvent := alerts.EventPayload{
 			Type:      event.Type,
 			Level:     backupNotificationLevel(event.Level),
-			Message:   event.Message,
+			Message:   backup.SanitizeNotificationText(event.Message),
 			Timestamp: event.Timestamp,
-			Details: map[string]any{
-				"job_id":                 event.JobID,
-				"job_name":               event.JobName,
-				"job_type":               event.JobType,
-				"run_id":                 event.RunID,
-				"trigger":                event.Trigger,
-				"status":                 event.Status,
-				"started_at":             event.StartedAt,
-				"finished_at":            event.FinishedAt,
-				"source":                 event.Source,
-				"destination":            event.Destination,
-				"snapshot_path":          event.SnapshotPath,
-				"manifest_path":          event.ManifestPath,
-				"snapshot_count":         event.SnapshotCount,
-				"file_count":             event.FileCount,
-				"total_bytes":            event.TotalBytes,
-				"verified_bytes":         event.VerifiedBytes,
-				"last_successful_run_at": event.LastSuccessfulRunAt,
-				"last_restore_drill_at":  event.LastRestoreDrillAt,
-				"stale_after":            event.StaleAfter,
-				"reminder_cooldown":      event.ReminderCooldown,
-				"pruned_snapshots":       event.PrunedSnapshots,
-				"warnings":               event.Warnings,
-				"error_message":          event.ErrorMessage,
-				"failure_category":       event.FailureCategory,
-			},
+			Details:   backupAlertDetails(event),
 		}
 		if err := sender.SendEvent(ctx, alertEvent); err != nil {
 			logger.Warn().
@@ -691,6 +677,71 @@ func newBackupAlertNotifier(monitor AlertMonitor, logger zerolog.Logger) backup.
 		}
 		return nil
 	})
+}
+
+func backupAlertDetails(event backup.NotificationEvent) map[string]any {
+	details := make(map[string]any, 24)
+	addString := func(key, value string) {
+		if strings.TrimSpace(value) != "" {
+			details[key] = backup.SanitizeNotificationText(value)
+		}
+	}
+	addTime := func(key string, value time.Time) {
+		if !value.IsZero() {
+			details[key] = value
+		}
+	}
+	addTimePtr := func(key string, value *time.Time) {
+		if value != nil && !value.IsZero() {
+			details[key] = value
+		}
+	}
+	addInt := func(key string, value int) {
+		if value != 0 {
+			details[key] = value
+		}
+	}
+	addInt64 := func(key string, value int64) {
+		if value != 0 {
+			details[key] = value
+		}
+	}
+	addStrings := func(key string, values []string) {
+		if len(values) > 0 {
+			sanitized := make([]string, len(values))
+			for i, value := range values {
+				sanitized[i] = backup.SanitizeNotificationText(value)
+			}
+			details[key] = sanitized
+		}
+	}
+
+	addString("job_id", event.JobID)
+	addString("job_name", event.JobName)
+	addString("job_type", event.JobType)
+	addString("run_id", event.RunID)
+	addString("trigger", event.Trigger)
+	addString("status", event.Status)
+	addTime("started_at", event.StartedAt)
+	addTimePtr("finished_at", event.FinishedAt)
+	addString("source", event.Source)
+	addString("destination", event.Destination)
+	addString("target_path", event.TargetPath)
+	addString("snapshot_path", event.SnapshotPath)
+	addString("manifest_path", event.ManifestPath)
+	addInt("snapshot_count", event.SnapshotCount)
+	addInt64("file_count", event.FileCount)
+	addInt64("total_bytes", event.TotalBytes)
+	addInt64("verified_bytes", event.VerifiedBytes)
+	addTimePtr("last_successful_run_at", event.LastSuccessfulRunAt)
+	addTimePtr("last_restore_drill_at", event.LastRestoreDrillAt)
+	addString("stale_after", event.StaleAfter)
+	addString("reminder_cooldown", event.ReminderCooldown)
+	addInt("pruned_snapshots", event.PrunedSnapshots)
+	addStrings("warnings", event.Warnings)
+	addString("error_message", event.ErrorMessage)
+	addString("failure_category", event.FailureCategory)
+	return details
 }
 
 func backupNotificationLevel(level string) alerts.AlertLevel {
@@ -729,6 +780,7 @@ func diskHealthRuntimeConfig(cfg config.DiskHealthConfig) diskhealth.Config {
 const (
 	diskHealthActivityPath = "/system/disk-health"
 	diskHealthActivityUser = "system"
+	alertTestEventType     = "alert_test"
 	scrubActivityPath      = "/system/scrub"
 	scrubNotificationType  = "scrub_run"
 	scrubTriggerManual     = "manual"
@@ -1310,6 +1362,19 @@ func serverBuildMetadata(cfg *ServerConfig) (string, string) {
 	return appVersion, buildTime
 }
 
+func serverAuthUsersFile(cfg *ServerConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.AuthUsersFile != "" {
+		return cfg.AuthUsersFile
+	}
+	if cfg.Config != nil {
+		return cfg.Config.Auth.UsersFile
+	}
+	return ""
+}
+
 // NewServer creates a new API server
 func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 	r := chi.NewRouter()
@@ -1339,6 +1404,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		s.afterPathRenamed = cfg.AfterPathRenamed
 		s.afterPathDeleted = cfg.AfterPathDeleted
 		s.updateWebDAV = cfg.UpdateWebDAV
+		s.authUsersFile = serverAuthUsersFile(cfg)
 	}
 
 	// Store config early so runtime dataplane connection settings are available
@@ -1447,7 +1513,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 		userStore := cfg.AuthUserStore
 		if userStore == nil {
 			var err error
-			userStore, _, err = auth.NewUserStore(cfg.AuthUsersFile)
+			userStore, _, err = auth.NewUserStore(s.authUsersFile)
 			if err != nil {
 				return nil, fmt.Errorf("failed to initialize user store: %w", err)
 			}
@@ -1467,7 +1533,7 @@ func NewServer(logger zerolog.Logger, cfg *ServerConfig) (*Server, error) {
 			refreshTTL = 7 * 24 * time.Hour
 		}
 		s.tokenManager = auth.NewTokenManager(cfg.AuthJWTSecret, accessTTL, refreshTTL)
-		tokenRevocationStoreFile := filepath.Join(filepath.Dir(cfg.AuthUsersFile), "token-revocations.json")
+		tokenRevocationStoreFile := filepath.Join(filepath.Dir(s.authUsersFile), "token-revocations.json")
 		if err := s.tokenManager.EnablePersistence(tokenRevocationStoreFile); err != nil {
 			return nil, fmt.Errorf("failed to initialize token revocation store: %w", err)
 		}
@@ -1879,6 +1945,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/access-check", s.handleCheckPathAccess)
 			r.Post("/access-preview", s.handlePreviewPathAccess)
 			r.Post("/access-report", s.handleReportPathAccess)
+			r.Post("/alerts/test", s.handleSendTestAlert)
 			r.Get("/security-check", s.handleGetSecurityCheck)
 			r.Get("/webdav-credentials", s.handleGetWebDAVCredentials)
 		})
@@ -4206,7 +4273,16 @@ func emailAlertsConfigured(alerts config.AlertsConfig) bool {
 		strings.TrimSpace(alerts.SMTPHost) != "" &&
 		strings.TrimSpace(alerts.SMTPFrom) != "" &&
 		alerts.SMTPPort > 0 &&
-		len(alerts.SMTPTo) > 0
+		hasNonBlankString(alerts.SMTPTo)
+}
+
+func hasNonBlankString(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) maintenanceDiagnostics(cfg *config.Config) map[string]any {
@@ -6565,7 +6641,15 @@ func securityShareBaseURLPublicRisk(baseURL string) string {
 	if !securityShareBaseURLHostIsValid(parsed.Hostname()) {
 		return "invalid_host"
 	}
+	if securityShareBaseURLPathEndsWithShareRoute(parsed.Path) {
+		return "nested_share_route"
+	}
 	return ""
+}
+
+func securityShareBaseURLPathEndsWithShareRoute(path string) bool {
+	trimmedPath := strings.TrimRight(path, "/")
+	return trimmedPath == "/s" || strings.HasSuffix(trimmedPath, "/s")
 }
 
 func securityShareBaseURLHostIsValid(host string) bool {
@@ -6615,6 +6699,45 @@ func securityShareBaseURLHost(baseURL string) string {
 	return securityNormalizedHostName(parsed.Hostname())
 }
 
+func securityShareBaseURLPath(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return ""
+	}
+	return parsed.Path
+}
+
+func securityWebDAVBasicPasswordRisk(password string) string {
+	trimmed := strings.TrimSpace(password)
+	if trimmed == "" {
+		return ""
+	}
+	normalized := strings.ToLower(trimmed)
+	placeholderValues := map[string]struct{}{
+		"admin":                       {},
+		"changeme":                    {},
+		"change-me":                   {},
+		"change_this_password":        {},
+		"change-this-password":        {},
+		"change-this-strong-password": {},
+		"change-this-webdav-password": {},
+		"mnemonas":                    {},
+		"password":                    {},
+		"password123":                 {},
+		"very-strong-password-here":   {},
+		"webdav":                      {},
+		"webdav-password":             {},
+		"webdavpassword":              {},
+	}
+	if _, ok := placeholderValues[normalized]; ok || strings.Contains(normalized, "change-this") {
+		return "placeholder"
+	}
+	if len([]rune(trimmed)) < 16 {
+		return "too_short"
+	}
+	return ""
+}
+
 func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) {
 	cfg := s.currentConfig()
 	if cfg == nil {
@@ -6636,10 +6759,11 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 	dataplaneHTTPLoopback := securityListenHostIsLoopback(dataplaneHTTPHost)
 	smbHost := securityTCPAddressHost(cfg.SMB.Listen)
 	smbLoopback := securityListenHostIsLoopback(smbHost)
-	initialPasswordFile := filepath.Join(filepath.Dir(cfg.Auth.UsersFile), "initial-password.txt")
+	initialPasswordFile := filepath.Join(filepath.Dir(s.effectiveAuthUsersFile(cfg)), "initial-password.txt")
 	forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
 	remotePublic := securityRemoteIPIsPublic(remoteIP)
 	webDAVAuthType := config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType)
+	webDAVPasswordRisk := securityWebDAVBasicPasswordRisk(cfg.WebDAV.Password)
 	unsafeNoAuthRisk := cfg.Security.AllowUnsafeNoAuth && !serverLoopback && (!s.authEnabled || (cfg.WebDAV.Enabled && webDAVAuthType == "none"))
 
 	checks := make([]securityCheckItem, 0, 14)
@@ -6826,6 +6950,20 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 				"trusted_forwarded_source": trustedForwardedSource,
 			},
 		})
+	case forwardedProto != "" && cfg.Server.TrustedProxyHops > 0 && !strings.EqualFold(forwardedProto, "https"):
+		checks = append(checks, securityCheckItem{
+			ID:      "forwarded_proto_trust",
+			Status:  securityCheckWarning,
+			Title:   "反向代理未声明 HTTPS",
+			Message: "当前请求来自受信代理来源，但 X-Forwarded-Proto 不是 https。请确认公网入口到浏览器使用 HTTPS，并让代理转发 X-Forwarded-Proto=https。",
+			Details: map[string]interface{}{
+				"trusted_proxy_hops":       cfg.Server.TrustedProxyHops,
+				"trusted_proxy_cidrs":      cfg.Server.TrustedProxyCIDRs,
+				"forwarded_proto":          forwardedProto,
+				"remote_ip":                remoteIP,
+				"trusted_forwarded_source": trustedForwardedSource,
+			},
+		})
 	default:
 		checks = append(checks, securityCheckItem{
 			ID:      "forwarded_proto_trust",
@@ -6978,6 +7116,19 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Title:   "WebDAV 未启用",
 			Message: "当前没有额外的 WebDAV 暴露面。",
 		})
+	case webDAVAuthType == "basic" && webDAVPasswordRisk != "":
+		checks = append(checks, securityCheckItem{
+			ID:      "webdav_auth",
+			Status:  securityCheckWarning,
+			Title:   "WebDAV Basic 密码需要更换",
+			Message: "WebDAV 使用全局 Basic Auth 且配置了弱密码或示例密码；公网访问前应改为自动生成密码、自定义强密码，或切换到 MnemoNAS 用户认证。",
+			Details: map[string]interface{}{
+				"prefix":        cfg.WebDAV.Prefix,
+				"auth_type":     webDAVAuthType,
+				"read_only":     cfg.WebDAV.ReadOnly,
+				"password_risk": webDAVPasswordRisk,
+			},
+		})
 	case webDAVAuthType == "basic" || webDAVAuthType == "users":
 		message := "WebDAV 入口使用独立 Basic 凭据。"
 		if webDAVAuthType == "users" {
@@ -7086,6 +7237,17 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Status:  securityCheckWarning,
 			Title:   "分享基础 URL 未固定",
 			Message: "建议配置固定的公网基础 URL，避免从内网地址生成分享链接。",
+		})
+	case shareBaseURLRisk == "nested_share_route":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckWarning,
+			Title:   "分享基础 URL 包含分享路由",
+			Message: "share.base_url 应填写站点 origin 或 /s 之前的基础路径；当前值会生成重复的 /s/s 分享链接。",
+			Details: map[string]interface{}{
+				"base_url":      cfg.Share.BaseURL,
+				"base_url_path": securityShareBaseURLPath(cfg.Share.BaseURL),
+			},
 		})
 	case shareBaseURLRisk == "not_https":
 		checks = append(checks, securityCheckItem{
@@ -7344,6 +7506,66 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(settings).Write(w, http.StatusOK)
+}
+
+func (s *Server) handleSendTestAlert(w http.ResponseWriter, r *http.Request) {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		ServiceUnavailable(w, "settings not available")
+		return
+	}
+	if !cfg.Alerts.Enabled {
+		Conflict(w, "alerts are not enabled")
+		return
+	}
+	channels := configuredAlertChannels(cfg.Alerts)
+	if len(channels) == 0 {
+		Conflict(w, "no alert notification channel configured")
+		return
+	}
+	sender, ok := s.alertMonitor.(AlertEventSender)
+	if !ok || sender == nil {
+		ServiceUnavailable(w, "alert notifications unavailable")
+		return
+	}
+
+	hostname, _ := os.Hostname()
+	event := alerts.EventPayload{
+		Type:      alertTestEventType,
+		Level:     alerts.AlertLevelWarning,
+		Message:   "MnemoNAS test alert",
+		Timestamp: time.Now().UTC(),
+		Hostname:  hostname,
+		Details: map[string]any{
+			"trigger":  "manual_test",
+			"source":   "settings",
+			"channels": channels,
+		},
+	}
+	if err := sender.SendEvent(r.Context(), event); err != nil {
+		s.logger.Warn().Err(err).Str("event_type", event.Type).Msg("failed to send alert test event")
+		InternalError(w, "alert test failed")
+		return
+	}
+
+	NewAPIResponse(map[string]any{
+		"event_type": event.Type,
+		"channels":   channels,
+	}).WithMessage("test alert sent").Write(w, http.StatusOK)
+}
+
+func configuredAlertChannels(cfg config.AlertsConfig) []string {
+	channels := make([]string, 0, 3)
+	if strings.TrimSpace(cfg.WebhookURL) != "" {
+		channels = append(channels, "webhook")
+	}
+	if cfg.TelegramEnabled && strings.TrimSpace(cfg.TelegramBotToken) != "" && strings.TrimSpace(cfg.TelegramChatID) != "" {
+		channels = append(channels, "telegram")
+	}
+	if emailAlertsConfigured(cfg) {
+		channels = append(channels, "email")
+	}
+	return channels
 }
 
 func settingsWebhookURLForResponse(webhookURL string) string {

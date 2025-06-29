@@ -1690,10 +1690,22 @@ func (c *Config) Validate() error {
 	if err := validateOptionalHTTPURL(c.Alerts.WebhookURL, "alerts.webhook_url"); err != nil {
 		errs = append(errs, err)
 	}
+	seenWebhookHeaderNames := make(map[string]string)
 	for _, header := range c.Alerts.WebhookHeaders {
-		if err := validateWebhookHeader(header); err != nil {
+		key, err := validateWebhookHeader(header)
+		if err != nil {
 			errs = append(errs, err)
+			continue
 		}
+		if key == "" {
+			continue
+		}
+		normalizedKey := strings.ToLower(key)
+		if previous, ok := seenWebhookHeaderNames[normalizedKey]; ok {
+			errs = append(errs, fmt.Errorf("duplicate alerts.webhook_headers header name: %q conflicts with %q", key, previous))
+			continue
+		}
+		seenWebhookHeaderNames[normalizedKey] = key
 	}
 	if err := validateEmailAlertsConfig(c.Alerts); err != nil {
 		errs = append(errs, err)
@@ -1789,25 +1801,25 @@ func normalizeComparableConfigPath(path, label string) (string, error) {
 	return filepath.Clean(absPath), nil
 }
 
-func validateWebhookHeader(header string) error {
+func validateWebhookHeader(header string) (string, error) {
 	trimmed := strings.TrimSpace(header)
 	if trimmed == "" {
-		return nil
+		return "", nil
 	}
 
 	key, value, ok := strings.Cut(trimmed, ":")
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	if !ok || key == "" || value == "" {
-		return fmt.Errorf("invalid alerts.webhook_headers entry: %q", header)
+		return "", fmt.Errorf("invalid alerts.webhook_headers entry: %q", header)
 	}
 	if !isValidHTTPHeaderToken(key) {
-		return fmt.Errorf("invalid alerts.webhook_headers header name: %q", key)
+		return "", fmt.Errorf("invalid alerts.webhook_headers header name: %q", key)
 	}
 	if hasInvalidHTTPHeaderValueControl(value) {
-		return fmt.Errorf("invalid alerts.webhook_headers header value for %q", key)
+		return "", fmt.Errorf("invalid alerts.webhook_headers header value for %q", key)
 	}
-	return nil
+	return key, nil
 }
 
 func validateEmailAlertsConfig(alerts AlertsConfig) error {

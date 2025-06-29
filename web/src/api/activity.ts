@@ -130,7 +130,7 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 function isNonNegativeIntegerRecord(value: unknown): value is Record<string, number> {

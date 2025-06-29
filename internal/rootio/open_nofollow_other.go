@@ -186,7 +186,50 @@ func RemoveAllNoFollow(root *os.Root, name string) error {
 			return rootPathError("remove", name, syscall.ENOTDIR)
 		}
 	}
-	return root.RemoveAll(filepath.Join(parts...))
+	target := filepath.Join(parts...)
+	chmodErr := chmodTreeWritableNoFollow(root, target)
+	if err := root.RemoveAll(target); err != nil {
+		if chmodErr != nil {
+			return errors.Join(chmodErr, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func chmodTreeWritableNoFollow(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+
+	if err := root.Chmod(name, info.Mode().Perm()|0700); err != nil {
+		return err
+	}
+	dir, err := OpenDirNoFollow(root, name)
+	if err != nil {
+		return err
+	}
+	children, readErr := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, child := range children {
+		if err := chmodTreeWritableNoFollow(root, filepath.Join(name, child.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func replaceEmptyDirPathNoFollow(rootPath, relParent, oldName, newName, oldDisplay, newDisplay string) error {

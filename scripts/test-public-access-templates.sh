@@ -96,9 +96,29 @@ test_docker_docs_mount_syntax() {
     assert_tree_not_contains "$REPO_ROOT/docs" ".mnemonas:/data"
 }
 
+test_docs_avoid_webdav_placeholder_passwords() {
+    assert_tree_not_contains "$REPO_ROOT/docs" "change-this-strong-password"
+    assert_tree_not_contains "$REPO_ROOT/docs" "very-strong-password-here"
+    assert_file_not_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'sudo cat /srv/mnemonas/secrets.json'
+    assert_file_not_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'sudo cat /srv/mnemonas/secrets.json'
+    assert_file_contains "$REPO_ROOT/docs/docker-deployment.md" 'password = ""'
+    assert_file_contains "$REPO_ROOT/docs/docker-deployment.en.md" 'password = ""'
+    assert_file_contains "$REPO_ROOT/docs/configuration.md" 'password = "" # 留空使用自动生成密码'
+    assert_file_contains "$REPO_ROOT/docs/configuration.en.md" 'password = "" # leave empty to use generated credentials'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" 'webdav_password'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'webdav_password'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" '不应复制到工单、聊天记录或日志中'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" 'should not be copied into support requests, chats, or logs'
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.md" "自定义 \`auth.users_file\` 时会检查该文件所在目录"
+    assert_file_contains "$REPO_ROOT/docs/public-server-quickstart.en.md" "a custom \`auth.users_file\` moves the checked password file location"
+    assert_file_contains "$REPO_ROOT/docs/security.md" '密码管理器生成的随机强密码'
+    assert_file_contains "$REPO_ROOT/docs/security.en.md" 'password-manager value'
+}
+
 test_traefik_template
 test_cloudflare_tunnel_template
 test_public_access_readmes
 test_docker_docs_mount_syntax
+test_docs_avoid_webdav_placeholder_passwords
 
 printf '[public-access-template-test] all checks passed\n'

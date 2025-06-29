@@ -125,7 +125,7 @@ sudo mnemonas-doctor --public-domain nas.example.com
 ss -tlnp | grep -E '80|443|8080|9090|9091'
 ```
 
-带 `--public-domain` 的检查会先将域名统一为小写，并移除单个 FQDN 尾点，再验证公网 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书剩余有效期、公开部署认证配置、管理员账号冗余、分享链接基础 URL、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。公开部署认证检查要求 `auth.enabled = true`、`security.allow_unsafe_no_auth = false`，且启用 WebDAV 时不能使用 `auth_type = "none"`。管理员冗余检查会读取 `auth.users_file`，未配置时读取 `$STORAGE_ROOT/.mnemonas/users.json`；文件缺失、解析失败或没有启用中的管理员会失败，只有一个启用中的管理员会产生告警，两个及以上启用中的管理员为通过。启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数或片段，且主机名必须有效；使用 HTTP、非 443 端口、userinfo、查询参数、片段或无效主机名会失败，留空或使用其他域名会给出人工复核提示。它也会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
+带 `--public-domain` 的检查会先将域名统一为小写，并移除单个 FQDN 尾点，再验证公网 HTTPS health、HTTP 是否跳转到同一域名的 HTTPS、证书 hostname、证书剩余有效期、公开部署认证配置、管理员账号冗余、分享链接基础 URL、后端直连端口和 dataplane 端口暴露情况，并提示云安全组人工复核项；证书检查需要服务器上有 `openssl`。公开部署认证检查要求 `auth.enabled = true`、`security.allow_unsafe_no_auth = false`，且启用 WebDAV 时不能使用 `auth_type = "none"`；如果保留全局 Basic Auth，显式配置的常见占位密码或少于 16 字符的密码会产生告警。管理员冗余检查会读取 `auth.users_file`，未配置时读取 `$STORAGE_ROOT/.mnemonas/users.json`；文件缺失、解析失败或没有启用中的管理员会失败，只有一个启用中的管理员会产生告警，两个及以上启用中的管理员为通过。初始密码文件检查使用同一个用户数据目录中的 `initial-password.txt`，因此自定义 `auth.users_file` 时会检查该文件所在目录。启用分享功能时，`share.base_url` 应使用 HTTPS 默认端口，不能包含 userinfo、查询参数或片段，且主机名必须有效；使用 HTTP、非 443 端口、userinfo、查询参数、片段或无效主机名会失败，留空、使用其他域名，或路径已经以 `/s` 结尾时会给出人工复核提示。`share.base_url` 应填写站点 origin 或 `/s` 之前的基础路径，否则生成的分享链接会包含重复的 `/s/s` 路由。它也会提示本机可检测到的续期路径：Nginx/certbot 部署应先执行 `sudo certbot renew --dry-run`，Caddy 部署应检查 `sudo journalctl -u caddy --since '24 hours ago'` 是否没有 ACME 错误。
 
 期望状态：
 
@@ -148,11 +148,13 @@ https://nas.example.com/dav
 auth_type = "users"
 ```
 
-保留旧版全局 Basic Auth 模式时，WebDAV 凭据不是 Web UI 管理员密码。默认生成的凭据保存在：
+保留旧版全局 Basic Auth 模式时，WebDAV 凭据不是 Web UI 管理员密码。默认生成值可在管理员登录后的设置页查看；命令行排查时只输出 `webdav_password` 字段，避免把 JWT 签名密钥一起打印：
 
 ```bash
-sudo cat /srv/mnemonas/secrets.json
+sudo python3 -c 'import json; print(json.load(open("/srv/mnemonas/secrets.json", encoding="utf-8")).get("webdav_password", ""))'
 ```
+
+完整 `secrets.json` 还包含运行态签名密钥，不应复制到工单、聊天记录或日志中。
 
 也可以在 `/etc/mnemonas/config.toml` 的 `[webdav]` 中设置自定义 Basic Auth 强密码，修改后先校验再重启：
 

@@ -19,6 +19,7 @@ import { getSecurityCheck } from '@/api/settings'
 import { checkDirectoryAccess } from '@/api/settings'
 import { previewDirectoryAccess } from '@/api/settings'
 import { reportDirectoryAccess } from '@/api/settings'
+import { sendTestAlert } from '@/api/settings'
 
 const mockGetSettings = vi.mocked(getSettings)
 const mockUpdateSettings = vi.mocked(updateSettings)
@@ -27,6 +28,7 @@ const mockGetSecurityCheck = vi.mocked(getSecurityCheck)
 const mockCheckDirectoryAccess = vi.mocked(checkDirectoryAccess)
 const mockPreviewDirectoryAccess = vi.mocked(previewDirectoryAccess)
 const mockReportDirectoryAccess = vi.mocked(reportDirectoryAccess)
+const mockSendTestAlert = vi.mocked(sendTestAlert)
 
 function expectCalledWithOnlyAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
   const call = mockFn.mock.calls.find(([options]) => {
@@ -181,6 +183,11 @@ vi.mock('@/api/settings', () => ({
   getSettings: vi.fn().mockResolvedValue(defaultSettingsResponse),
   getSecurityCheck: vi.fn().mockResolvedValue(defaultSecurityCheckResponse),
   updateSettings: vi.fn().mockResolvedValue({ success: true }),
+  sendTestAlert: vi.fn().mockResolvedValue({
+    success: true,
+    message: 'test alert sent',
+    data: { event_type: 'alert_test', channels: ['webhook'] },
+  }),
   checkDirectoryAccess: vi.fn().mockResolvedValue({
     username: 'alice',
     user_id: 'u1',
@@ -289,6 +296,11 @@ describe('SettingsPage', () => {
     window.history.pushState({}, '', '/settings')
     mockGetSettings.mockResolvedValue(defaultSettingsResponse)
     mockGetSecurityCheck.mockResolvedValue(defaultSecurityCheckResponse)
+    mockSendTestAlert.mockResolvedValue({
+      success: true,
+      message: 'test alert sent',
+      data: { event_type: 'alert_test', channels: ['webhook'] },
+    })
     mockGetWebDAVCredentials.mockResolvedValue({
       enabled: true,
       url: '/dav/',
@@ -873,6 +885,60 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('repairs share base URLs that already include the share route', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        data: {
+          ...defaultSettingsResponse.data,
+          share: {
+            ...defaultSettingsResponse.data.share,
+            enabled: true,
+            base_url: 'https://nas.example.com/s/',
+          },
+        },
+      })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'share_base_url',
+              status: 'warning',
+              title: '分享基础 URL 包含分享路由',
+              message: '当前值会生成重复的 /s/s 分享链接。',
+              details: {
+                base_url: 'https://nas.example.com/s/',
+                base_url_path: '/s/',
+              },
+            },
+          ],
+          request: { scheme: 'https', host: 'nas.example.com' },
+          config: { share_enabled: true },
+        },
+      })
+
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('分享基础 URL 包含分享路由')).toBeTruthy()
+        expect(screen.getByText('分享基础 URL 已包含 /s 分享路由，继续使用会生成重复的 /s/s 分享链接。')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '使用 HTTPS URL' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          share: expect.objectContaining({
+            enabled: true,
+            base_url: 'https://nas.example.com',
+          }),
+        }))
+      })
+    })
+
     it('shows stable fallback text when the security check cannot load', async () => {
       mockGetSecurityCheck.mockRejectedValueOnce(new Error('security check failed'))
 
@@ -967,6 +1033,53 @@ describe('SettingsPage', () => {
       })
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已启用 WebDAV Basic 认证',
+      }))
+    })
+
+    it('switches weak WebDAV Basic passwords back to generated credentials from security check', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'webdav_auth',
+              status: 'warning',
+              title: 'WebDAV Basic 密码需要更换',
+              message: 'WebDAV 使用全局 Basic Auth 且配置了弱密码或示例密码。',
+              details: {
+                prefix: '/dav',
+                auth_type: 'basic',
+                password_risk: 'placeholder',
+              },
+            },
+          ],
+          request: { scheme: 'https' },
+          config: { auth_enabled: true, webdav_enabled: true, webdav_auth_type: 'basic' },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('WebDAV Basic 密码需要更换')).toBeTruthy()
+        expect(screen.getByText('WebDAV Basic Auth 使用弱密码或示例密码，公网访问前应更换为自动生成密码、自定义强密码，或改用 MnemoNAS 用户认证。')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('button', { name: '更换密码' }))
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          webdav: expect.objectContaining({
+            auth_type: 'basic',
+            password: '',
+          }),
+        }))
+      })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '已改用自动生成 WebDAV 密码',
       }))
     })
 
@@ -1208,6 +1321,40 @@ describe('SettingsPage', () => {
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '已加入受信代理来源',
       }))
+    })
+
+    it('shows manual guidance for trusted proxies forwarding http proto', async () => {
+      mockGetSecurityCheck.mockResolvedValueOnce({
+        success: true,
+        data: {
+          status: 'warning',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [
+            {
+              id: 'forwarded_proto_trust',
+              status: 'warning',
+              title: '反向代理未声明 HTTPS',
+              message: '当前请求来自受信代理来源，但 X-Forwarded-Proto 不是 https。',
+              details: {
+                remote_ip: '127.0.0.1',
+                trusted_proxy_hops: 1,
+                forwarded_proto: 'http',
+                trusted_forwarded_source: true,
+              },
+            },
+          ],
+          request: { scheme: 'http', remote_ip: '127.0.0.1' },
+          config: { server_host: '127.0.0.1', trusted_proxy_hops: 1 },
+        },
+      })
+      render(<SettingsPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('反向代理未声明 HTTPS')).toBeTruthy()
+      })
+
+      expect(screen.getByText('受信代理已转发协议头，但当前值不是 https，请检查反向代理的 X-Forwarded-Proto 配置。')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: '修正代理设置' })).toBeNull()
     })
 
     it('sets trusted proxy hops without forcing loopback listening', async () => {
@@ -1561,6 +1708,33 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('clears newly saved WebDAV password while waiting for refreshed settings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings
+        .mockResolvedValueOnce(defaultSettingsResponse)
+        .mockImplementationOnce(() => new Promise(() => {}))
+      render(<SettingsPage />)
+
+      await openTab(user, 'WebDAV')
+
+      const passwordInput = await screen.findByPlaceholderText('••••••••')
+      fireEvent.change(passwordInput, { target: { value: 'new-webdav-secret' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          webdav: expect.objectContaining({
+            auth_type: 'basic',
+            password: 'new-webdav-secret',
+          }),
+        }))
+      })
+      await waitFor(() => {
+        expect(screen.queryByDisplayValue('new-webdav-secret')).toBeNull()
+        expect(screen.getByPlaceholderText('••••••••')).toHaveValue('')
+      })
+    })
+
     it('can switch Basic Auth WebDAV back to the generated password', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       render(<SettingsPage />)
@@ -1715,7 +1889,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: 'Scrub 重试次数格式无效',
-          description: '最大重试次数必须是 0 或正整数',
+          description: '最大重试次数必须是 0 或不超过安全范围的整数',
           color: 'danger',
         })
       })
@@ -1813,7 +1987,31 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '分享默认访问次数无效',
-          description: '默认访问次数必须是 0 或正整数',
+          description: '默认访问次数必须是 0 或不超过安全范围的正整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['科学计数法', '1e3'],
+      ['超过安全整数范围', '9007199254740992'],
+    ])('rejects invalid share default max access with %s before saving', async (_label, maxAccess) => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      await user.click(screen.getByRole('switch'))
+      await user.clear(screen.getByPlaceholderText('0'))
+      await user.type(screen.getByPlaceholderText('0'), maxAccess)
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '分享默认访问次数无效',
+          description: '默认访问次数必须是 0 或不超过安全范围的正整数',
           color: 'danger',
         })
       })
@@ -1861,6 +2059,32 @@ describe('SettingsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '分享路径策略格式无效',
           description: '第 1 行至少需要一个约束',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['科学计数法', '1e3'],
+      ['超过安全整数范围', '9007199254740992'],
+    ])('rejects invalid share path policy access limits with %s before saving', async (_label, maxAccess) => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '分享')
+
+      await user.click(screen.getByRole('switch'))
+      await user.click(screen.getByRole('button', { name: '添加路径策略' }))
+      await user.clear(screen.getByLabelText('分享策略路径 1'))
+      await user.type(screen.getByLabelText('分享策略路径 1'), '/Family')
+      await user.type(screen.getByLabelText('分享策略最多访问次数 1'), maxAccess)
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '分享路径策略格式无效',
+          description: '第 1 行访问次数上限必须是 0 或不超过安全范围的正整数',
           color: 'danger',
         })
       })
@@ -2074,6 +2298,127 @@ describe('SettingsPage', () => {
       })
     })
 
+    it('sends a saved test alert from the alerts section', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          alerts: {
+            ...defaultSettingsResponse.data.alerts,
+            enabled: true,
+            webhook_url: '<redacted>',
+            webhook_url_configured: true,
+          },
+        },
+      })
+      mockSendTestAlert.mockResolvedValueOnce({
+        success: true,
+        message: 'test alert sent',
+        data: { event_type: 'alert_test', channels: ['webhook', 'telegram', 'email'] },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('button', { name: '发送测试提醒' }))
+
+      await waitFor(() => {
+        expect(mockSendTestAlert).toHaveBeenCalledWith(expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        }))
+      })
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '测试提醒已发送',
+        description: '已发送到 Webhook / Telegram / SMTP 邮件',
+        color: 'success',
+      }))
+    })
+
+    it('asks to enable alerts before sending a test alert', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('button', { name: '发送测试提醒' }))
+
+      expect(mockSendTestAlert).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '提醒尚未启用',
+        description: '测试提醒会使用服务端已保存配置；请先启用提醒并保存。',
+        color: 'warning',
+      }))
+    })
+
+    it('asks to configure a channel before sending a test alert', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          alerts: {
+            ...defaultSettingsResponse.data.alerts,
+            enabled: true,
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('button', { name: '发送测试提醒' }))
+
+      expect(mockSendTestAlert).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '没有可用提醒通道',
+        description: '请至少配置 Webhook、Telegram 或邮件通道并保存后再发送测试提醒。',
+        color: 'warning',
+      }))
+    })
+
+    it('does not treat blank saved SMTP recipients as a test alert channel', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockGetSettings.mockResolvedValueOnce({
+        ...defaultSettingsResponse,
+        data: {
+          ...defaultSettingsResponse.data,
+          alerts: {
+            ...defaultSettingsResponse.data.alerts,
+            enabled: true,
+            email_enabled: true,
+            smtp_host: 'smtp.example.com',
+            smtp_port: 587,
+            smtp_from: 'MnemoNAS <alerts@example.com>',
+            smtp_to: [' ', '\t'],
+          },
+        },
+      })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('button', { name: '发送测试提醒' }))
+
+      expect(mockSendTestAlert).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '没有可用提醒通道',
+        description: '请至少配置 Webhook、Telegram 或邮件通道并保存后再发送测试提醒。',
+        color: 'warning',
+      }))
+    })
+
+    it('asks to save before sending a test alert with dirty alert settings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      fireEvent.click(screen.getByRole('switch', { name: '启用提醒' }))
+      await user.click(screen.getByRole('button', { name: '发送测试提醒' }))
+
+      expect(mockSendTestAlert).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '需要先保存设置',
+        color: 'warning',
+      }))
+    })
+
     it('preserves redacted webhook values when saving unchanged settings', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockGetSettings.mockResolvedValueOnce({
@@ -2107,6 +2452,122 @@ describe('SettingsPage', () => {
             webhook_headers: ['Authorization: <redacted>'],
           }),
         }))
+      })
+    })
+
+    it('rejects redacted webhook URL placeholders without a saved URL', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
+      fireEvent.change(screen.getByPlaceholderText('https://hooks.example.com/alert'), {
+        target: { value: '<redacted>' },
+      })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'Webhook URL 占位符无效',
+          description: '只有服务端已保存的 Webhook URL 才能保留为 <redacted>；新增 Webhook URL 需要填写真实地址。',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects redacted webhook header placeholders without a saved header', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+      await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
+      fireEvent.change(screen.getByLabelText('Webhook 自定义 Header'), {
+        target: { value: 'Authorization: <redacted>' },
+      })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'Webhook Header 占位符无效',
+          description: 'Header Authorization 没有已保存的值；新增或改名的 Header 需要填写真实值。',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('redacts newly saved alert secrets while waiting for refreshed settings', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      let resolveUpdateSettings!: (value: { success: boolean }) => void
+      mockUpdateSettings.mockImplementationOnce(() => new Promise(resolve => {
+        resolveUpdateSettings = resolve
+      }))
+      mockGetSettings
+        .mockResolvedValueOnce(defaultSettingsResponse)
+        .mockImplementationOnce(() => new Promise(() => {}))
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      fireEvent.click(await screen.findByRole('switch', { name: '启用提醒' }))
+      fireEvent.change(screen.getByPlaceholderText('https://hooks.example.com/alert'), {
+        target: { value: 'https://hooks.example.com/secret-token' },
+      })
+      fireEvent.change(screen.getByLabelText('Webhook 自定义 Header'), {
+        target: { value: 'Authorization: Bearer secret-token\nX-Api-Key: api-secret' },
+      })
+      fireEvent.click(screen.getByRole('switch', { name: '启用 Telegram 通知' }))
+      fireEvent.change(screen.getByLabelText('Telegram Bot Token'), {
+        target: { value: '123456:secret-token' },
+      })
+      fireEvent.change(screen.getByLabelText('Telegram Chat ID'), {
+        target: { value: '-1001234567890' },
+      })
+      fireEvent.click(screen.getByRole('switch', { name: '启用邮件通知' }))
+      fireEvent.change(screen.getByLabelText('SMTP 主机'), {
+        target: { value: 'smtp.example.com' },
+      })
+      fireEvent.change(screen.getByLabelText('SMTP 密码'), {
+        target: { value: 'smtp-secret' },
+      })
+      fireEvent.change(screen.getByLabelText('SMTP 发件人'), {
+        target: { value: 'MnemoNAS <alerts@example.com>' },
+      })
+      fireEvent.change(screen.getByLabelText('SMTP 收件人'), {
+        target: { value: 'admin@example.com' },
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expectUpdateSettingsCalledWith(expect.objectContaining({
+          alerts: expect.objectContaining({
+            webhook_url: 'https://hooks.example.com/secret-token',
+            webhook_headers: ['Authorization: Bearer secret-token', 'X-Api-Key: api-secret'],
+            telegram_bot_token: '123456:secret-token',
+            smtp_password: 'smtp-secret',
+          }),
+        }))
+      })
+      fireEvent.change(screen.getByLabelText('提醒检查间隔'), {
+        target: { value: '45m' },
+      })
+      await act(async () => {
+        resolveUpdateSettings({ success: true })
+      })
+      await waitFor(() => {
+        expect(screen.queryByDisplayValue('https://hooks.example.com/secret-token')).toBeNull()
+        expect(screen.getByDisplayValue('<redacted>')).toBeTruthy()
+        const headersInput = screen.getByLabelText('Webhook 自定义 Header') as HTMLTextAreaElement
+        expect(headersInput.value).toContain('<redacted>')
+        expect(headersInput.value).not.toContain('secret-token')
+        expect(headersInput.value).not.toContain('api-secret')
+        expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('')
+        expect(screen.getByLabelText('Telegram Bot Token')).toHaveAttribute('placeholder', '已配置，留空不变')
+        expect(screen.getByLabelText('SMTP 密码')).toHaveValue('')
+        expect(screen.getByLabelText('SMTP 密码')).toHaveAttribute('placeholder', '已配置，留空不变')
+        expect(screen.getByLabelText('提醒检查间隔')).toHaveValue('45m')
       })
     })
 
@@ -2375,6 +2836,34 @@ describe('SettingsPage', () => {
       })
       expect(mockUpdateSettings).not.toHaveBeenCalled()
     })
+
+    it('rejects duplicate webhook header names before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('提醒通知')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用提醒' }))
+      const headersInput = screen.getByLabelText('Webhook 自定义 Header')
+      fireEvent.change(headersInput, {
+        target: { value: 'Authorization: Bearer one\nauthorization: Bearer two' },
+      })
+
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: 'Webhook Header 重复',
+          description: 'Header authorization 重复；每个自定义 Header 名称只能配置一次。',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
   })
 
   describe('disk health settings', () => {
@@ -2446,6 +2935,104 @@ describe('SettingsPage', () => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '磁盘健康设备格式无效',
           description: '第 1 行设备路径必须是绝对路径',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('shows danger toast and skips save for unsafe disk temperature warning threshold', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康监控')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用磁盘健康检查' }))
+      fireEvent.change(screen.getByLabelText('磁盘温度提醒阈值'), { target: { value: '9007199254740992' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '磁盘温度提醒阈值格式无效',
+          description: '温度提醒阈值必须是 0 或不超过安全范围的整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('rejects unsafe disk health device temperature thresholds before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康监控')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用磁盘健康检查' }))
+      fireEvent.change(screen.getByLabelText('磁盘健康设备列表'), {
+        target: { value: '/dev/disk/by-id/test | Data | sat | SER123 | 9007199254740992 | 9007199254740992' },
+      })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '磁盘健康设备格式无效',
+          description: '第 1 行 温度提醒阈值 必须是 0 或不超过安全范围的整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('shows danger toast and skips save for out-of-range media wear warning threshold', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康监控')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用磁盘健康检查' }))
+      fireEvent.change(screen.getByLabelText('介质磨损提醒阈值'), { target: { value: '101' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '介质磨损提醒阈值格式无效',
+          description: '介质磨损提醒阈值必须是 0 到 100 之间的整数',
+          color: 'danger',
+        })
+      })
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+    })
+
+    it('shows danger toast and skips save for out-of-range media wear critical threshold', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '高级')
+
+      await waitFor(() => {
+        expect(screen.getByText('磁盘健康监控')).toBeTruthy()
+      })
+
+      await user.click(screen.getByRole('switch', { name: '启用磁盘健康检查' }))
+      fireEvent.change(screen.getByLabelText('介质磨损严重阈值'), { target: { value: '101' } })
+      await user.click(screen.getByText('保存设置'))
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '介质磨损严重阈值格式无效',
+          description: '介质磨损严重阈值必须是 0 到 100 之间的整数',
           color: 'danger',
         })
       })
@@ -2588,6 +3175,23 @@ describe('SettingsPage', () => {
       expect(mockUpdateSettings).not.toHaveBeenCalled()
       expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
         title: '目录配额格式无效',
+      }))
+    })
+
+    it('rejects unsafe directory quota sizes before saving', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      render(<SettingsPage />)
+
+      await openTab(user, '版本保留')
+
+      const quotasInput = await screen.findByLabelText('目录配额')
+      await user.type(quotasInput, '/team 9007199254740992 B')
+      await user.click(screen.getByText('保存设置'))
+
+      expect(mockUpdateSettings).not.toHaveBeenCalled()
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
+        title: '目录配额格式无效',
+        description: '第 1 行容量必须是大于 0 且不超过安全范围的整数',
       }))
     })
 
@@ -3019,7 +3623,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '受信代理层数格式无效',
-          description: '受信代理层数必须是 0 或正整数',
+          description: '受信代理层数必须是 0 或不超过安全范围的整数',
           color: 'danger',
         })
       })
@@ -3814,9 +4418,38 @@ describe('SettingsPage', () => {
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '最大版本数格式无效',
+          description: '最大版本数必须是 0 或不超过安全范围的整数',
+          color: 'danger',
+        })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['trusted proxy hops', '常规', '受信代理层数', undefined, '受信代理层数格式无效', '受信代理层数必须是 0 或不超过安全范围的整数'],
+    ['max versions', '版本保留', '最大版本数', undefined, '最大版本数格式无效', '最大版本数必须是 0 或不超过安全范围的整数'],
+    ['dataplane max retries', '高级', '数据面最大重试次数', undefined, '最大重试次数格式无效', '最大重试次数必须是 0 或不超过安全范围的整数'],
+    ['scrub max retries', '高级', 'Scrub 最大重试次数', '启用周期 Scrub', 'Scrub 重试次数格式无效', '最大重试次数必须是 0 或不超过安全范围的整数'],
+    ['trash retention days', '版本保留', '回收站保留天数', undefined, '回收站保留天数格式无效', '回收站保留天数必须是 0 或不超过安全范围的整数'],
+  ])('shows danger toast and skips save for unsafe %s', async (_label, tab, inputLabel, switchLabel, title, description) => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, tab)
+    if (switchLabel) {
+      await user.click(await screen.findByRole('switch', { name: switchLabel }))
+    }
+
+    const input = await screen.findByLabelText(inputLabel)
+    fireEvent.change(input, { target: { value: '9007199254740992' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: '最大版本数格式无效',
-        description: '最大版本数必须是 0 或正整数',
+        title,
+        description,
         color: 'danger',
       })
     })
@@ -3866,6 +4499,34 @@ describe('SettingsPage', () => {
         title: '大小格式无效',
         color: 'danger',
       }))
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['minimum free space', '版本保留', '最小空闲空间', undefined, '最小空闲空间必须是 0 或不超过安全范围的整数'],
+    ['trash max size', '版本保留', '回收站最大容量', undefined, '回收站最大容量必须是大于 0 且不超过安全范围的整数'],
+    ['versioning max size', '版本保留', '最大自动版本化文件大小', undefined, '最大自动版本化文件大小必须是大于 0 且不超过安全范围的整数'],
+    ['alert min free space', '高级', '最小剩余空间', '启用提醒', '提醒最小剩余空间必须是 0 或不超过安全范围的整数'],
+  ])('shows danger toast and skips save for unsafe %s', async (_label, tab, inputLabel, switchLabel, description) => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, tab)
+    if (switchLabel) {
+      await user.click(await screen.findByRole('switch', { name: switchLabel }))
+    }
+
+    const input = await screen.findByLabelText(inputLabel)
+    fireEvent.change(input, { target: { value: '9007199254740992 B' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '大小格式无效',
+        description,
+        color: 'danger',
+      })
     })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
@@ -4060,12 +4721,12 @@ describe('SettingsPage', () => {
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '最大重试次数格式无效',
-        description: '最大重试次数必须是 0 或正整数',
-        color: 'danger',
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '最大重试次数格式无效',
+          description: '最大重试次数必须是 0 或不超过安全范围的整数',
+          color: 'danger',
+        })
       })
-    })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
@@ -4171,7 +4832,27 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '提醒阈值格式无效',
-        description: '提醒阈值必须在 0 到 100 之间',
+        description: '提醒阈值必须是 0 到 100 之间的整数',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for fractional alert threshold', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
+    fireEvent.change(screen.getByDisplayValue('90'), { target: { value: '90.5' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '提醒阈值格式无效',
+        description: '提醒阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
     })
@@ -4191,7 +4872,7 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '提醒阈值格式无效',
-        description: '提醒阈值必须在 0 到 100 之间',
+        description: '提醒阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
     })
@@ -4251,7 +4932,27 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '严重提醒阈值格式无效',
-        description: '严重提醒阈值必须在 0 到 100 之间',
+        description: '严重提醒阈值必须是 0 到 100 之间的整数',
+        color: 'danger',
+      })
+    })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
+  it('shows danger toast and skips save for fractional critical alert threshold', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    render(<SettingsPage />)
+
+    await openTab(user, '高级')
+
+    await user.click(await screen.findByRole('switch', { name: '启用提醒' }))
+    fireEvent.change(screen.getByDisplayValue('95'), { target: { value: '95.5' } })
+    await user.click(screen.getByText('保存设置'))
+
+    await waitFor(() => {
+      expect(mockAddToast).toHaveBeenCalledWith({
+        title: '严重提醒阈值格式无效',
+        description: '严重提醒阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
     })
@@ -4271,7 +4972,7 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '严重提醒阈值格式无效',
-        description: '严重提醒阈值必须在 0 到 100 之间',
+        description: '严重提醒阈值必须是 0 到 100 之间的整数',
         color: 'danger',
       })
     })
@@ -4391,12 +5092,12 @@ describe('SettingsPage', () => {
     await user.click(screen.getByText('保存设置'))
 
     await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '回收站保留天数格式无效',
-        description: '回收站保留天数必须是 0 或正整数',
-        color: 'danger',
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '回收站保留天数格式无效',
+          description: '回收站保留天数必须是 0 或不超过安全范围的整数',
+          color: 'danger',
+        })
       })
-    })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 
