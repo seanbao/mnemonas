@@ -116,6 +116,236 @@ run_fresh_install_test() {
   assert_mode "$storage_dir/.mnemonas/objects" "700"
 }
 
+run_web_install_preserves_share_sibling_permissions_test() {
+  local case_dir="$TMP_ROOT/web-sibling-permissions"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local private_dir="$install_dir/share/mnemonas/private"
+  local private_file="$private_dir/secret.txt"
+  mkdir -p "$private_dir"
+  printf 'secret\n' > "$private_file"
+  chmod 0700 "$private_dir"
+  chmod 0600 "$private_file"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$install_dir/share/mnemonas/web" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log"
+
+  test -f "$install_dir/share/mnemonas/web/index.html" || fail "web assets were not installed"
+  assert_mode "$private_dir" "700"
+  assert_mode "$private_file" "600"
+}
+
+run_web_install_preserves_existing_assets_on_copy_failure_test() {
+  local case_dir="$TMP_ROOT/web-copy-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local web_dir="$install_dir/share/mnemonas/web"
+  mkdir -p "$web_dir"
+  printf 'old web\n' > "$web_dir/index.html"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$fake_path/cp" \
+    '#!/usr/bin/env bash' \
+    'printf "simulated copy failure\n" >&2' \
+    'exit 42'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$web_dir" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after Web UI copy failure"
+  assert_file_contains "$web_dir/index.html" "old web"
+  [[ ! -f "$web_dir/assets/index.js" ]] || fail "partial new Web assets were installed after copy failure"
+}
+
+run_install_preserves_existing_runtime_on_config_check_failure_test() {
+  local case_dir="$TMP_ROOT/config-check-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local web_dir="$install_dir/share/mnemonas/web"
+  mkdir -p "$install_dir/bin" "$web_dir"
+  write_executable "$install_dir/bin/nasd" '#!/usr/bin/env bash' 'printf "old nasd\n"'
+  write_executable "$install_dir/bin/dataplane" '#!/usr/bin/env bash' 'printf "old dataplane\n"'
+  write_executable "$install_dir/bin/mnemonas-dataplane-start" '#!/usr/bin/env bash' 'printf "old helper\n"'
+  printf 'old web\n' > "$web_dir/index.html"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$release_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then printf "bad config\n" >&2; exit 64; fi' \
+    'printf "new nasd\n"'
+  write_executable "$release_dir/dataplane" '#!/usr/bin/env bash' 'printf "new dataplane\n"'
+  printf 'new web\n' > "$release_dir/web/index.html"
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$web_dir" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after nasd --check-config failed"
+  assert_file_contains "$case_dir/install.log" "bad config"
+  assert_file_contains "$install_dir/bin/nasd" "old nasd"
+  assert_file_contains "$install_dir/bin/dataplane" "old dataplane"
+  assert_file_contains "$install_dir/bin/mnemonas-dataplane-start" "old helper"
+  assert_file_contains "$web_dir/index.html" "old web"
+  [[ ! -f "$web_dir/assets/index.js" ]] || fail "new Web assets were installed after config check failure"
+}
+
+run_install_removes_new_config_on_config_check_failure_test() {
+  local case_dir="$TMP_ROOT/new-config-check-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local config_path="$install_dir/etc/mnemonas/config.toml"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$release_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then printf "bad generated config\n" >&2; exit 64; fi' \
+    'printf "new nasd\n"'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$config_path" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after generated config check failed"
+  assert_file_contains "$case_dir/install.log" "bad generated config"
+  [[ ! -f "$config_path" ]] || fail "installer left a generated config after config check failure"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created BIN_DIR after config check failure"
+  [[ ! -d "$install_dir/share/mnemonas/web" ]] || fail "installer installed Web UI after config check failure"
+}
+
+run_install_preserves_existing_runtime_on_binary_install_failure_test() {
+  local case_dir="$TMP_ROOT/binary-install-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local web_dir="$install_dir/share/mnemonas/web"
+  local real_install
+  real_install="$(command -v install)"
+  mkdir -p "$install_dir/bin" "$web_dir"
+  write_executable "$install_dir/bin/nasd" '#!/usr/bin/env bash' 'printf "old nasd\n"'
+  write_executable "$install_dir/bin/dataplane" '#!/usr/bin/env bash' 'printf "old dataplane\n"'
+  printf 'old web\n' > "$web_dir/index.html"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$release_dir/nasd" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "--check-config" ]]; then exit 0; fi' \
+    'printf "new nasd\n"'
+  write_executable "$release_dir/dataplane" '#!/usr/bin/env bash' 'printf "new dataplane\n"'
+  write_executable "$fake_path/install" \
+    '#!/usr/bin/env bash' \
+    'dest="${@: -1}"' \
+    'if [[ "$dest" == */dataplane ]]; then printf "simulated dataplane install failure\n" >&2; exit 42; fi' \
+    "exec \"$real_install\" \"\$@\""
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    WEB_DIR="$web_dir" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after dataplane install failure"
+  assert_file_contains "$case_dir/install.log" "simulated dataplane install failure"
+  assert_file_contains "$install_dir/bin/nasd" "old nasd"
+  assert_file_contains "$install_dir/bin/dataplane" "old dataplane"
+  assert_file_contains "$web_dir/index.html" "old web"
+}
+
+run_install_reports_service_restart_failure_test() {
+  local case_dir="$TMP_ROOT/restart-failure"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+  write_executable "$fake_path/systemctl" \
+    '#!/usr/bin/env bash' \
+    'if [[ "${1:-}" == "restart" && "${2:-}" == "mnemonas.service" ]]; then printf "simulated restart failure\n" >&2; exit 7; fi' \
+    'exit 0'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer succeeded after mnemonas restart failed"
+  assert_file_contains "$case_dir/install.log" "simulated restart failure"
+  assert_file_contains "$case_dir/install.log" "failed to restart mnemonas.service"
+  assert_file_contains "$case_dir/install.log" "systemctl status mnemonas.service --no-pager"
+  assert_file_contains "$case_dir/install.log" "journalctl -u mnemonas.service -n 100 --no-pager"
+  [[ ! -f "$case_dir/install.log" ]] || ! grep -Fq -- "installed successfully" "$case_dir/install.log" || fail "installer reported success after restart failure"
+}
+
 run_source_checkout_stale_binary_test() {
   local case_dir="$TMP_ROOT/stale-source-binary"
   local fake_path="$case_dir/fake-bin"
@@ -173,6 +403,25 @@ run_source_checkout_stale_binary_test() {
   [[ "$status" -ne 0 ]] || fail "installer accepted a stale nasd binary from a source checkout"
   assert_file_contains "$case_dir/install.log" "nasd binary is older than Go sources"
   [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting stale source artifacts"
+
+  install_dir="$case_dir/explicit-install"
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$checkout_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$install_dir/storage" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/explicit-install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer accepted a stale nasd binary from an explicit source checkout"
+  assert_file_contains "$case_dir/explicit-install.log" "nasd binary is older than Go sources"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting explicit stale source artifacts"
 }
 
 run_existing_config_test() {
@@ -191,10 +440,10 @@ host = "127.0.0.1"
 port = 18080
 
 [ storage ] # storage root may have comments in hand-edited TOML
-root = "$storage_dir" # keep hashes inside quoted values
+root = "$case_dir/custom\u0023storage" # TOML escapes may encode characters in quoted values
 
 [ dataplane ] # dataplane endpoint
-grpc_address = '127.0.0.1:19090'
+grpc_address = "127.0.0.1\u003a19090"
 
 [ dataplane . cdc ] # chunking profile
 min_chunk_size = 524288
@@ -657,6 +906,58 @@ run_symlink_path_rejection_test() {
   [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting symlinked path"
 }
 
+run_storage_subdir_symlink_rejection_test() {
+  local case_dir="$TMP_ROOT/storage-subdir-symlink"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_dir="$install_dir/storage"
+  local outside_internal="$case_dir/outside-internal"
+  local outside_files="$case_dir/outside-files"
+  local status
+  mkdir -p "$storage_dir" "$outside_internal" "$outside_files"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  ln -s "$outside_internal" "$storage_dir/.mnemonas"
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/internal.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer accepted a symlink internal metadata root"
+  assert_file_contains "$case_dir/internal.log" "storage internal object directory must not contain symlink path components"
+  [[ ! -d "$outside_internal/objects" ]] || fail "installer created objects through a symlink internal metadata root"
+
+  rm -f "$storage_dir/.mnemonas"
+  ln -s "$outside_files" "$storage_dir/files"
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_dir" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/files.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "installer accepted a symlink files directory"
+  assert_file_contains "$case_dir/files.log" "storage files directory must not contain symlink path components"
+}
+
 run_systemd_newline_rejection_test() {
   local case_dir="$TMP_ROOT/systemd-newline"
   local fake_path="$case_dir/fake-bin"
@@ -687,6 +988,37 @@ run_systemd_newline_rejection_test() {
   [[ "$status" -ne 0 ]] || fail "newline in DATAPLANE_GRPC_ADDR was accepted"
   assert_file_contains "$case_dir/install.log" "DATAPLANE_GRPC_ADDR cannot contain newline characters"
   [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting systemd newline"
+}
+
+run_systemd_control_character_rejection_test() {
+  local case_dir="$TMP_ROOT/systemd-control"
+  local fake_path="$case_dir/fake-bin"
+  local release_dir="$case_dir/release"
+  local install_dir="$case_dir/install"
+  local storage_root
+  local status
+  mkdir -p "$install_dir"
+  make_fake_admin_path "$fake_path"
+  make_release_tree "$release_dir"
+
+  storage_root="$install_dir/storage"$'\a'"root"
+  set +e
+  PATH="$fake_path:$PATH" \
+    RELEASE_DIR="$release_dir" \
+    BIN_DIR="$install_dir/bin" \
+    SHARE_DIR="$install_dir/share/mnemonas" \
+    CONFIG_DIR="$install_dir/etc/mnemonas" \
+    CONFIG_PATH="$install_dir/etc/mnemonas/config.toml" \
+    SYSTEMD_DIR="$install_dir/systemd" \
+    STORAGE_ROOT="$storage_root" \
+    ENABLE_NOW=0 \
+    "$REPO_ROOT/scripts/install-systemd.sh" > "$case_dir/install.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "control character in STORAGE_ROOT was accepted"
+  assert_file_contains "$case_dir/install.log" "STORAGE_ROOT cannot contain control characters"
+  [[ ! -d "$install_dir/bin" ]] || fail "installer created files after rejecting control-character path"
 }
 
 run_dataplane_addr_validation_test() {
@@ -724,7 +1056,7 @@ run_doctor_config_test() {
   local fake_path="$case_dir/fake-bin"
   local bin_dir="$case_dir/bin"
   local web_dir="$case_dir/web"
-  local storage_dir="$case_dir/storage"
+  local storage_dir="$case_dir/storage-root"
   local backup_dir="$case_dir/backup"
   local systemd_dir="$case_dir/systemd"
   mkdir -p "$fake_path" "$bin_dir" "$web_dir" "$storage_dir/.mnemonas" "$backup_dir" "$systemd_dir"
@@ -773,7 +1105,8 @@ host = "0.0.0.0"
 port = 18080
 
 [storage]
-root = "$storage_dir"
+# TOML basic strings may encode characters that are valid in paths.
+root = "$case_dir/storage\u002droot"
 
 [dataplane]
 grpc_address = "127.0.0.1:19090"
@@ -846,6 +1179,13 @@ run_doctor_public_domain_test() {
     'exit 0'
   write_executable "$bin_dir/dataplane" '#!/usr/bin/env bash' 'exit 0'
   printf '<div id="root"></div>\n' > "$web_dir/index.html"
+  cat > "$storage_dir/.mnemonas/users.json" <<'EOF'
+[
+  {"id":"admin-1","username":"admin","role":"admin","disabled":false},
+  {"id":"admin-2","username":"backup-admin","role":"admin","disabled":false},
+  {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true}
+]
+EOF
 
   write_executable "$fake_path/id" '#!/usr/bin/env bash' 'exit 0'
   write_executable "$fake_path/getent" '#!/usr/bin/env bash' 'exit 1'
@@ -925,11 +1265,46 @@ EOF
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate matches nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "public HTTPS certificate is valid for at least 30 days"
   assert_file_contains "$case_dir/doctor-public.log" "certificate automation detected: Caddy"
+  assert_file_contains "$case_dir/doctor-public.log" "public administrator redundancy verified: 2 enabled administrators"
   assert_file_contains "$case_dir/doctor-public.log" "public direct control plane is not publicly reachable: http://nas.example.com:18080/health"
   assert_file_contains "$case_dir/doctor-public.log" "public dataplane gRPC port 19090 is not publicly reachable on nas.example.com"
   assert_file_contains "$case_dir/doctor-public.log" "control plane port 18080 is loopback-only"
   assert_file_contains "$case_dir/doctor-public.log" "manual cloud firewall check: expose only 80/443 publicly; keep 18080/19090/19091 closed to the public internet"
   assert_file_contains "$case_dir/doctor-public.log" "Summary: 0 failure(s)"
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=019091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain NAS.EXAMPLE.COM. > "$case_dir/doctor-public-normalized-domain.log"
+
+  assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Public access checks for nas.example.com"
+  assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTPS health reachable: https://nas.example.com/health"
+  assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "public HTTP redirects to HTTPS: http://nas.example.com/health -> https://nas.example.com/health"
+  assert_file_contains "$case_dir/doctor-public-normalized-domain.log" "Summary: 0 failure(s)"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com.evil/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-bad-redirect.log"
+
+  assert_file_contains "$case_dir/doctor-public-bad-redirect.log" "public HTTP does not clearly redirect to HTTPS"
 
   set +e
   PATH="$fake_path:$PATH" \
@@ -951,6 +1326,33 @@ EOF
     '#!/usr/bin/env bash' \
     'url="${@: -1}"' \
     'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com:18080/health" ]]; then printf "404"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 22;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-direct-404.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted direct control plane HTTP 404 exposure"
+  assert_file_contains "$case_dir/doctor-public-direct-404.log" "public direct control plane is publicly reachable"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com:18080/health" ]]; then printf "200"; exit 0; fi' \
     'case "$url" in' \
     '  https://nas.example.com/health) printf "ok\n";;' \
     '  http://nas.example.com:18080/health) printf "open\n";;' \
@@ -987,6 +1389,435 @@ EOF
   assert_file_contains "$case_dir/doctor-public-unsafe.log" "server.trusted_proxy_hops should be at least 1"
   assert_file_contains "$case_dir/doctor-public-unsafe.log" "public direct control plane is publicly reachable"
   assert_file_contains "$case_dir/doctor-public-unsafe.log" "initial admin password file still exists"
+
+  write_executable "$fake_path/curl" \
+    '#!/usr/bin/env bash' \
+    'url="${@: -1}"' \
+    'if [[ "$*" == *" -w "* && "$url" == "http://nas.example.com/health" ]]; then printf "301 https://nas.example.com/health"; exit 0; fi' \
+    'case "$url" in' \
+    '  https://nas.example.com/health) printf "ok\n";;' \
+    '  http://nas.example.com:18080/health) exit 7;;' \
+    '  */) printf "<div id=\"root\"></div>\n";;' \
+    '  *) printf "ok\n";;' \
+    'esac'
+  rm -f "$storage_dir/.mnemonas/initial-password.txt"
+  cat > "$case_dir/config-no-auth.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+enabled = false
+
+[webdav]
+enabled = true
+auth_type = "none"
+
+[security]
+allow_unsafe_no_auth = true
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-no-auth.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-no-auth.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted disabled authentication"
+  assert_file_contains "$case_dir/doctor-public-no-auth.log" "public auth.enabled must remain true"
+  assert_file_contains "$case_dir/doctor-public-no-auth.log" "security.allow_unsafe_no_auth must be false for public deployments"
+  assert_file_contains "$case_dir/doctor-public-no-auth.log" "public WebDAV must not use auth_type=none"
+
+  cat > "$case_dir/config-share-http.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "http://nas.example.com"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-http.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-http.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted HTTP share base URL"
+  assert_file_contains "$case_dir/doctor-public-share-http.log" "public share.base_url must use https"
+
+  cat > "$case_dir/config-share-non-default-port.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com:8443"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-non-default-port.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-non-default-port.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with a non-default HTTPS port"
+  assert_file_contains "$case_dir/doctor-public-share-non-default-port.log" "public share.base_url must use the HTTPS default port 443"
+
+  cat > "$case_dir/config-share-userinfo.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://operator@nas.example.com"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-userinfo.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-userinfo.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with userinfo"
+  assert_file_contains "$case_dir/doctor-public-share-userinfo.log" "public share.base_url must not include userinfo"
+
+  cat > "$case_dir/config-share-query.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com?token=secret"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-query.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-query.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with query"
+  assert_file_contains "$case_dir/doctor-public-share-query.log" "public share.base_url must not include query or fragment"
+
+  cat > "$case_dir/config-share-empty-query.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com?"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-empty-query.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-empty-query.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with empty query marker"
+  assert_file_contains "$case_dir/doctor-public-share-empty-query.log" "public share.base_url must not include query or fragment"
+
+  cat > "$case_dir/config-share-fragment.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com#share"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-fragment.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-fragment.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with fragment"
+  assert_file_contains "$case_dir/doctor-public-share-fragment.log" "public share.base_url must not include query or fragment"
+
+  cat > "$case_dir/config-share-empty-fragment.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas.example.com#"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-empty-fragment.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-empty-fragment.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with empty fragment marker"
+  assert_file_contains "$case_dir/doctor-public-share-empty-fragment.log" "public share.base_url must not include query or fragment"
+
+  cat > "$case_dir/config-share-invalid-host.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[share]
+enabled = true
+base_url = "https://nas..example.com"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-share-invalid-host.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-share-invalid-host.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted share base URL with an invalid host"
+  assert_file_contains "$case_dir/doctor-public-share-invalid-host.log" "public share.base_url host is invalid"
+
+  cat > "$case_dir/config-missing-users.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$case_dir/missing-users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-missing-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-missing-users.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted a missing users file"
+  assert_file_contains "$case_dir/doctor-public-missing-users.log" "public users file is missing; cannot verify administrator redundancy"
+
+  printf '{not-json\n' > "$case_dir/invalid-users.json"
+  cat > "$case_dir/config-invalid-users.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$case_dir/invalid-users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-invalid-users.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-invalid-users.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted an invalid users file"
+  assert_file_contains "$case_dir/doctor-public-invalid-users.log" "public users file could not be parsed; cannot verify administrator redundancy"
+  assert_file_contains "$case_dir/doctor-public-invalid-users.log" "users.json parse error"
+
+  cat > "$case_dir/zero-admin-users.json" <<'EOF'
+[
+  {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true},
+  {"id":"user-1","username":"user","role":"user","disabled":false}
+]
+EOF
+  cat > "$case_dir/config-zero-admin.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$case_dir/zero-admin-users.json"
+EOF
+
+  set +e
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-zero-admin.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-zero-admin.log"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "public doctor accepted zero enabled administrators"
+  assert_file_contains "$case_dir/doctor-public-zero-admin.log" "public users file has no enabled administrators"
+
+  cat > "$case_dir/single-admin-users.json" <<'EOF'
+[
+  {"id":"admin-1","username":"admin","role":"admin","disabled":false},
+  {"id":"disabled-admin","username":"disabled-admin","role":"admin","disabled":true},
+  {"id":"user-1","username":"user","role":"user","disabled":false}
+]
+EOF
+  cat > "$case_dir/config-single-admin.toml" <<EOF
+[server]
+host = "127.0.0.1"
+port = 18080
+trusted_proxy_hops = 1
+
+[storage]
+root = "$storage_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:19090"
+
+[auth]
+users_file = "$case_dir/single-admin-users.json"
+EOF
+
+  PATH="$fake_path:$PATH" \
+    BIN_DIR="$bin_dir" \
+    WEB_DIR="$web_dir" \
+    CONFIG_PATH="$case_dir/config-single-admin.toml" \
+    DATAPLANE_HTTP_PORT=19091 \
+    BACKUP_ROOT="$backup_dir" \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain nas.example.com > "$case_dir/doctor-public-single-admin.log"
+
+  assert_file_contains "$case_dir/doctor-public-single-admin.log" "public administrator redundancy is weak: only one enabled administrator"
 }
 
 run_doctor_input_validation_test() {
@@ -1002,6 +1833,15 @@ run_doctor_input_validation_test() {
 
   [[ "$status" -ne 0 ]] || fail "doctor accepted SERVER_PORT with whitespace"
   assert_file_contains "$case_dir/server-port.log" "SERVER_PORT cannot contain whitespace"
+
+  set +e
+  SERVER_PORT="8080"$'\a' \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/server-port-control.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted SERVER_PORT with control character"
+  assert_file_contains "$case_dir/server-port-control.log" "SERVER_PORT cannot contain control characters"
 
   set +e
   DATAPLANE_GRPC_ADDR="127.0.0.1:70000" \
@@ -1022,15 +1862,38 @@ run_doctor_input_validation_test() {
   assert_file_contains "$case_dir/server-url.log" "SERVER_URL must be an http(s) URL"
 
   set +e
+  SERVER_URL="http://127.0.0.1:8080"$'\a' \
+    "$REPO_ROOT/scripts/mnemonas-doctor.sh" > "$case_dir/server-url-control.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted SERVER_URL with control character"
+  assert_file_contains "$case_dir/server-url-control.log" "SERVER_URL cannot contain control characters"
+
+  set +e
   "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain https://nas.example.com > "$case_dir/public-domain.log" 2>&1
   status=$?
   set -e
 
   [[ "$status" -ne 0 ]] || fail "doctor accepted PUBLIC_DOMAIN with scheme"
   assert_file_contains "$case_dir/public-domain.log" "PUBLIC_DOMAIN must be a hostname without scheme or port"
+
+  set +e
+  "$REPO_ROOT/scripts/mnemonas-doctor.sh" --public-domain "nas.example.com"$'\a' > "$case_dir/public-domain-control.log" 2>&1
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "doctor accepted PUBLIC_DOMAIN with control character"
+  assert_file_contains "$case_dir/public-domain-control.log" "PUBLIC_DOMAIN cannot contain control characters"
 }
 
 run_fresh_install_test
+run_web_install_preserves_share_sibling_permissions_test
+run_web_install_preserves_existing_assets_on_copy_failure_test
+run_install_preserves_existing_runtime_on_config_check_failure_test
+run_install_removes_new_config_on_config_check_failure_test
+run_install_preserves_existing_runtime_on_binary_install_failure_test
+run_install_reports_service_restart_failure_test
 run_source_checkout_stale_binary_test
 run_existing_config_test
 run_invalid_input_test
@@ -1045,7 +1908,9 @@ run_protected_config_and_storage_test
 run_config_path_scope_test
 run_systemd_specifier_rejection_test
 run_symlink_path_rejection_test
+run_storage_subdir_symlink_rejection_test
 run_systemd_newline_rejection_test
+run_systemd_control_character_rejection_test
 run_dataplane_addr_validation_test
 run_doctor_config_test
 run_doctor_public_domain_test

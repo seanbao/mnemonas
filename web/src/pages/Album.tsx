@@ -19,10 +19,12 @@ import {
   Info,
   AlertCircle,
 } from 'lucide-react'
-import { refreshAuthSession } from '@/api/auth'
+import { authFetch, refreshAuthSession } from '@/api/auth'
 import { ApiError, listFiles, getDownloadUrl, getThumbnailUrl, downloadFile, type FileItem } from '@/api/files'
+import { readRangedDownloadJsonErrorDetails, type DownloadJsonErrorDetails } from '@/lib/downloadResponse'
 import { getFileDownloadErrorToast } from '@/lib/fileActionErrors'
 import { getFileQueryScopeKey } from '@/lib/fileQueryKey'
+import { getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { useUser } from '@/stores/auth'
 import { formatBytes, formatDate, isImageFile, cn } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
@@ -33,6 +35,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 const MAX_DEPTH = 5 // Maximum directory depth to traverse
 const MAX_IMAGES = 1000 // Maximum images to collect
 const CONCURRENCY_LIMIT = 3 // Maximum concurrent directory requests
+const THUMBNAIL_LOAD_FAILURE_MESSAGE = '部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。'
 
 function withSessionRetryParam(url: string): string {
   const separator = url.includes('?') ? '&' : '?'
@@ -59,9 +62,26 @@ function getAlbumRefreshErrorToast(error: unknown): { title: string; description
 
   return {
     title: '刷新失败',
-    description: error instanceof Error ? error.message : '相册刷新失败，请稍后重试。',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function getAlbumProbeErrorMessage(error: DownloadJsonErrorDetails | undefined, fallback: string): string {
+  if (!error) {
+    return fallback
+  }
+
+  return getUserFacingErrorDescription(new Error(error.message), fallback)
+}
+
+async function readAlbumProbeErrorMessage(url: string, fallback: string): Promise<string> {
+  const error = await readRangedDownloadJsonErrorDetails(url, fallback, authFetch)
+  return getAlbumProbeErrorMessage(error, fallback)
 }
 
 // Recursively fetch all images with safety limits
@@ -82,7 +102,7 @@ async function fetchAllImages(
     return []
   }
   
-  const response = await listFiles(path)
+  const response = await listFiles(path, { signal })
   const images: FileItem[] = []
   const directories: FileItem[] = []
   
@@ -105,9 +125,11 @@ async function fetchAllImages(
     const batch = directories.slice(i, i + CONCURRENCY_LIMIT)
     const results = await Promise.all(
       batch.map(dir => 
-        fetchAllImages(dir.path, depth + 1, signal, collectedCount)
+        fetchAllImages(dir.path, depth + 1, signal, collectedCount, errorState)
           .catch(() => {
-            errorState.hadPartialError = true
+            if (!signal?.aborted) {
+              errorState.hadPartialError = true
+            }
             return [] as FileItem[]
           })
       )
@@ -130,7 +152,7 @@ function ImageThumbnail({
 }: { 
   file: FileItem
   onClick: () => void
-  onThumbnailLoadFailure: () => void
+  onThumbnailLoadFailure: (message?: string) => void
   index: number
 }) {
   const [loaded, setLoaded] = useState(false)
@@ -140,12 +162,12 @@ function ImageThumbnail({
   const imgRef = useRef<HTMLImageElement>(null)
   const reportedErrorRef = useRef(false)
 
-  const markThumbnailLoadFailure = useCallback(() => {
+  const markThumbnailLoadFailure = useCallback((message?: string) => {
     if (reportedErrorRef.current) {
       return
     }
     reportedErrorRef.current = true
-    onThumbnailLoadFailure()
+    onThumbnailLoadFailure(message)
   }, [onThumbnailLoadFailure])
 
   useEffect(() => {
@@ -206,13 +228,25 @@ function ImageThumbnail({
                 setThumbnailUrl(withSessionRetryParam(getThumbnailUrl(file.path, 'medium')))
                 return
               }
+              const message = await readAlbumProbeErrorMessage(
+                thumbnailUrl,
+                THUMBNAIL_LOAD_FAILURE_MESSAGE,
+              )
               setError(true)
-              markThumbnailLoadFailure()
+              markThumbnailLoadFailure(message)
             })()
             return
           }
-          setError(true)
-          markThumbnailLoadFailure()
+          void (async () => {
+            const message = thumbnailUrl
+              ? await readAlbumProbeErrorMessage(
+                  thumbnailUrl,
+                  THUMBNAIL_LOAD_FAILURE_MESSAGE,
+                )
+              : THUMBNAIL_LOAD_FAILURE_MESSAGE
+            setError(true)
+            markThumbnailLoadFailure(message)
+          })()
         }}
       />
       
@@ -255,10 +289,12 @@ function ImagePreview({
   const [rotation, setRotation] = useState(0)
   const [showInfo, setShowInfo] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState(false)
+  const [loadErrorMessage, setLoadErrorMessage] = useState<string | null>(null)
   const [imageUrl, setImageUrl] = useState(() => currentImage?.path ? getDownloadUrl(currentImage.path) : '')
   const [hasRetried, setHasRetried] = useState(false)
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null)
+  const downloadAbortControllerRef = useRef<AbortController | null>(null)
+  const loadError = loadErrorMessage !== null
   
   const handlePrev = useCallback(() => {
     if (images.length === 0) return
@@ -270,12 +306,43 @@ function ImagePreview({
     onNavigate((currentIndex + 1) % images.length)
   }, [currentIndex, images.length, onNavigate])
 
+  useEffect(() => {
+    if (!isOpen) {
+      downloadAbortControllerRef.current?.abort()
+      downloadAbortControllerRef.current = null
+      return
+    }
+
+    return () => {
+      downloadAbortControllerRef.current?.abort()
+      downloadAbortControllerRef.current = null
+    }
+  }, [currentImage?.path, isOpen])
+
   const handleDownload = useCallback(() => {
     if (!currentImage) return
 
-    void downloadFile(currentImage.path, { filename: currentImage.name }).catch((error: unknown) => {
-      addToast(getFileDownloadErrorToast(error))
+    downloadAbortControllerRef.current?.abort()
+
+    const controller = new AbortController()
+    downloadAbortControllerRef.current = controller
+
+    void downloadFile(currentImage.path, {
+      filename: currentImage.name,
+      signal: controller.signal,
     })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || isAbortError(error)) {
+          return
+        }
+
+        addToast(getFileDownloadErrorToast(error))
+      })
+      .finally(() => {
+        if (downloadAbortControllerRef.current === controller) {
+          downloadAbortControllerRef.current = null
+        }
+      })
   }, [currentImage])
 
   // Preload adjacent images
@@ -434,25 +501,32 @@ function ImagePreview({
               style={{
                 transform: `scale(${zoom}) rotate(${rotation}deg)`,
               }}
-              onLoad={() => setLoading(false)}
+              onLoad={() => {
+                setLoadErrorMessage(null)
+                setLoading(false)
+              }}
               onError={() => {
                 if (!hasRetried && currentImage?.path) {
                   void (async () => {
                     const refreshed = await refreshAuthSession()
                     if (refreshed) {
                       setHasRetried(true)
-                      setLoadError(false)
+                      setLoadErrorMessage(null)
                       setLoading(true)
                       setImageUrl(withSessionRetryParam(getDownloadUrl(currentImage.path)))
                       return
                     }
-                    setLoadError(true)
+                    const message = await readAlbumProbeErrorMessage(imageUrl, '可尝试下载原图，或稍后重试。')
+                    setLoadErrorMessage(message)
                     setLoading(false)
                   })()
                   return
                 }
-                setLoadError(true)
-                setLoading(false)
+                void (async () => {
+                  const message = await readAlbumProbeErrorMessage(imageUrl, '可尝试下载原图，或稍后重试。')
+                  setLoadErrorMessage(message)
+                  setLoading(false)
+                })()
               }}
             />
 
@@ -461,7 +535,7 @@ function ImagePreview({
                 <AlertCircle size={40} className="text-danger-300" />
                 <div>
                   <p className="font-medium">图片预览加载失败</p>
-                  <p className="text-sm text-white/70">可尝试下载原图，或稍后重试。</p>
+                  <p className="text-sm text-white/70">{loadErrorMessage}</p>
                 </div>
               </div>
             )}
@@ -564,7 +638,7 @@ function ImagePreview({
 
 export function AlbumPage() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
-  const [thumbnailFailureScope, setThumbnailFailureScope] = useState<string | null>(null)
+  const [thumbnailFailure, setThumbnailFailure] = useState<{ scope: string; message: string } | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   const user = useUser()
   const { rootPath, hasInvalidHomeDir } = resolveUserHomeScope(user)
@@ -573,15 +647,29 @@ export function AlbumPage() {
   
   const { data, dataUpdatedAt, isLoading, error, refetch } = useQuery<AlbumQueryResult>({
     queryKey: ['album-images', fileScopeKey, scanRootPath],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       // Cancel previous request if any
       abortControllerRef.current?.abort()
-      abortControllerRef.current = new AbortController()
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+      const abortScan = () => controller.abort()
+      if (signal.aborted) {
+        abortScan()
+      } else {
+        signal.addEventListener('abort', abortScan, { once: true })
+      }
       const errorState = { hadPartialError: false }
-      const images = await fetchAllImages(scanRootPath, 0, abortControllerRef.current.signal, { count: 0 }, errorState)
-      return {
-        images,
-        hadPartialError: errorState.hadPartialError,
+      try {
+        const images = await fetchAllImages(scanRootPath, 0, controller.signal, { count: 0 }, errorState)
+        return {
+          images,
+          hadPartialError: errorState.hadPartialError,
+        }
+      } finally {
+        signal.removeEventListener('abort', abortScan)
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null
+        }
       }
     },
     enabled: !hasInvalidHomeDir,
@@ -590,7 +678,7 @@ export function AlbumPage() {
 
   const albumScope = `${scanRootPath}:${dataUpdatedAt}`
   const images = data?.images
-  const hasThumbnailLoadFailures = thumbnailFailureScope === albumScope
+  const hasThumbnailLoadFailures = thumbnailFailure?.scope === albumScope
   
   // Cleanup on unmount
   useEffect(() => {
@@ -598,6 +686,14 @@ export function AlbumPage() {
       abortControllerRef.current?.abort()
     }
   }, [])
+
+  useEffect(() => {
+    if (!hasInvalidHomeDir) {
+      return
+    }
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
+  }, [hasInvalidHomeDir])
 
   const handleOpenPreview = useCallback((index: number) => {
     setPreviewIndex(index)
@@ -706,7 +802,7 @@ export function AlbumPage() {
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-warning" />
             <div>
               <p className="font-medium">部分缩略图加载失败</p>
-              <p className="text-default-600">部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。</p>
+              <p className="text-default-600">{thumbnailFailure.message}</p>
             </div>
           </div>
         )}
@@ -721,7 +817,9 @@ export function AlbumPage() {
                   file={image}
                   index={index}
                   onClick={() => handleOpenPreview(index)}
-                  onThumbnailLoadFailure={() => setThumbnailFailureScope(albumScope)}
+                  onThumbnailLoadFailure={(message = THUMBNAIL_LOAD_FAILURE_MESSAGE) => {
+                    setThumbnailFailure({ scope: albumScope, message })
+                  }}
                 />
               ))}
             </div>

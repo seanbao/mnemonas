@@ -3,7 +3,7 @@ import { fireEvent, within } from '@testing-library/react'
 import { render, screen, waitFor } from '@/test/utils'
 import userEvent from '@testing-library/user-event'
 import * as HeroUI from '@heroui/react'
-import { refreshAuthSession } from '@/api/auth'
+import { authFetch, refreshAuthSession } from '@/api/auth'
 import { AlbumPage } from './Album'
 
 const mockAddToast = vi.fn()
@@ -16,6 +16,7 @@ vi.mock('@/api/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/auth')>()
   return {
     ...actual,
+    authFetch: vi.fn(),
     refreshAuthSession: vi.fn(),
   }
 })
@@ -54,6 +55,7 @@ const mockListFiles = listFiles as ReturnType<typeof vi.fn>
 const mockDownloadFile = vi.mocked(downloadFile)
 
 describe('AlbumPage', () => {
+  const mockAuthFetch = vi.mocked(authFetch)
   const mockRefreshAuthSession = vi.mocked(refreshAuthSession)
   const observeMock = vi.fn()
 
@@ -104,6 +106,7 @@ describe('AlbumPage', () => {
     mockUser.homeDir = '/'
     vi.spyOn(HeroUI, 'addToast').mockImplementation(((...args: unknown[]) => mockAddToast(...args)) as typeof HeroUI.addToast)
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver as unknown as typeof IntersectionObserver)
+    mockAuthFetch.mockRejectedValue(new Error('preview error probe failed'))
     mockRefreshAuthSession.mockResolvedValue(false)
     mockDownloadFile.mockResolvedValue(undefined)
     mockListFiles.mockResolvedValue({
@@ -123,6 +126,24 @@ describe('AlbumPage', () => {
     const previewImage = screen.getAllByRole('img', { name: fileName }).at(-1)
     expect(previewImage).toBeTruthy()
     return previewImage as HTMLImageElement
+  }
+
+  function expectListFilesCalledWithAbortSignal(path: string) {
+    const call = mockListFiles.mock.calls.find(([calledPath]) => calledPath === path)
+    expect(call).toBeTruthy()
+    expect((call?.[1] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+  }
+
+  function expectListFilesNotCalledForPath(path: string) {
+    expect(mockListFiles.mock.calls.some(([calledPath]) => calledPath === path)).toBe(false)
+  }
+
+  function createDeferred<T>() {
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((_resolve, rej) => {
+      reject = rej
+    })
+    return { promise, reject }
   }
 
   describe('loading state', () => {
@@ -155,7 +176,7 @@ describe('AlbumPage', () => {
       render(<AlbumPage />)
 
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalledWith('/')
+        expectListFilesCalledWithAbortSignal('/')
       })
     })
 
@@ -175,7 +196,7 @@ describe('AlbumPage', () => {
       render(<AlbumPage />)
 
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalledWith('/tester')
+        expectListFilesCalledWithAbortSignal('/tester')
       })
     })
 
@@ -225,6 +246,33 @@ describe('AlbumPage', () => {
       })
 
       expect(mockListFiles).not.toHaveBeenCalled()
+    })
+
+    it('aborts an in-flight album scan when the account scope becomes invalid', async () => {
+      let signal: AbortSignal | undefined
+      mockListFiles.mockImplementationOnce((_path, options) => {
+        signal = options?.signal
+        return new Promise(() => {})
+      })
+
+      const { rerender } = render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(signal).toBeInstanceOf(AbortSignal)
+      })
+
+      mockUser.id = 'u2'
+      mockUser.username = 'tester'
+      mockUser.role = 'user'
+      mockUser.homeDir = ''
+
+      rerender(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('主目录配置无效').length).toBeGreaterThan(0)
+      })
+
+      expect(signal?.aborted).toBe(true)
     })
   })
 
@@ -283,11 +331,11 @@ describe('AlbumPage', () => {
 
       await waitFor(() => {
         // Should call listFiles multiple times for recursive loading
-        expect(mockListFiles).toHaveBeenCalledWith('/')
+        expectListFilesCalledWithAbortSignal('/')
       })
       
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalledWith('/subfolder')
+        expectListFilesCalledWithAbortSignal('/subfolder')
       }, { timeout: 3000 })
     })
 
@@ -317,8 +365,8 @@ describe('AlbumPage', () => {
         expect(screen.getByText('暂无图片')).toBeTruthy()
       })
 
-      expect(mockListFiles).toHaveBeenCalledWith('/d5')
-      expect(mockListFiles).not.toHaveBeenCalledWith('/d6')
+      expectListFilesCalledWithAbortSignal('/d5')
+      expectListFilesNotCalledForPath('/d6')
     })
   })
 
@@ -363,6 +411,39 @@ describe('AlbumPage', () => {
           path: '/',
         })
         .mockRejectedValueOnce(new Error('Subfolder error'))
+
+      render(<AlbumPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('部分目录扫描失败')).toBeTruthy()
+        expect(screen.getByText('当前相册仅展示已成功加载的图片，结果可能不完整。')).toBeTruthy()
+      })
+    })
+
+    it('shows partial error warning when a nested folder scan fails below the first level', async () => {
+      mockListFiles.mockImplementation(async (path: string) => {
+        if (path === '/') {
+          return {
+            files: [
+              { name: 'album', path: '/album', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+              { name: 'cover.jpg', path: '/cover.jpg', isDir: false, size: 1024, modTime: '2024-01-01T00:00:00Z' },
+            ],
+            path,
+          }
+        }
+        if (path === '/album') {
+          return {
+            files: [
+              { name: '2024', path: '/album/2024', isDir: true, size: 0, modTime: '2024-01-01T00:00:00Z' },
+            ],
+            path,
+          }
+        }
+        if (path === '/album/2024') {
+          throw new Error('nested folder unavailable')
+        }
+        throw new Error(`unexpected path: ${path}`)
+      })
 
       render(<AlbumPage />)
 
@@ -432,7 +513,7 @@ describe('AlbumPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '刷新失败',
-          description: 'still down',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -517,6 +598,35 @@ describe('AlbumPage', () => {
       })
     })
 
+    it('uses a stable thumbnail warning when structured JSON thumbnail probing fails', async () => {
+      mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'thumbnail storage unavailable',
+        },
+      }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+      render(<AlbumPage />)
+
+      const thumbnail = await screen.findByAltText('photo1.jpg')
+      fireEvent.error(thumbnail)
+
+      await waitFor(() => {
+        expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/thumbnails/photos/photo1.jpg?size=medium', {
+          headers: {
+            Range: 'bytes=0-0',
+            'X-Mnemonas-Download-Probe': 'json-error',
+          },
+        })
+        expect(screen.getByText('部分图片当前只能显示占位图；仍可尝试点击进入预览或直接下载原图。')).toBeTruthy()
+      })
+      expect(screen.queryByText('thumbnail storage unavailable')).toBeNull()
+    })
+
     it('retries fullscreen image loading once after refreshing the auth session', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockRefreshAuthSession.mockResolvedValueOnce(true)
@@ -573,6 +683,36 @@ describe('AlbumPage', () => {
         expect(screen.getByText('图片预览加载失败')).toBeTruthy()
         expect(screen.getByText('可尝试下载原图，或稍后重试。')).toBeTruthy()
       })
+    })
+
+    it('uses a stable fullscreen preview error when structured JSON probing fails', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'preview storage unavailable',
+        },
+      }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+      render(<AlbumPage />)
+
+      const previewImage = await openPreviewImage(user)
+      fireEvent.error(previewImage)
+
+      await waitFor(() => {
+        expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/download/photos/photo1.jpg?download=true', {
+          headers: {
+            Range: 'bytes=0-0',
+            'X-Mnemonas-Download-Probe': 'json-error',
+          },
+        })
+        expect(screen.getByText('可尝试下载原图，或稍后重试。')).toBeTruthy()
+      })
+      expect(screen.queryByText('preview storage unavailable')).toBeNull()
     })
 
     it('exposes accessible labels for preview controls', async () => {
@@ -794,12 +934,43 @@ describe('AlbumPage', () => {
       await user.click(screen.getByRole('button', { name: '下载当前图片' }))
 
       await waitFor(() => {
-        expect(mockDownloadFile).toHaveBeenCalledWith('/photos/photo1.jpg', { filename: 'photo1.jpg' })
+        expect(mockDownloadFile).toHaveBeenCalledWith('/photos/photo1.jpg', expect.objectContaining({
+          filename: 'photo1.jpg',
+          signal: expect.any(AbortSignal),
+        }))
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '下载暂不可用',
           description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
+      })
+    })
+
+    it('aborts pending preview image downloads when closing the preview and ignores abort feedback', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const download = createDeferred<void>()
+      let signal: AbortSignal | undefined
+      mockDownloadFile.mockImplementationOnce((_path, options) => {
+        signal = options?.signal
+        return download.promise
+      })
+
+      render(<AlbumPage />)
+
+      await openPreviewImage(user)
+      await user.click(screen.getByRole('button', { name: '下载当前图片' }))
+
+      await waitFor(() => {
+        expect(signal).toBeInstanceOf(AbortSignal)
+      })
+
+      await user.click(screen.getByRole('button', { name: '关闭预览' }))
+
+      expect(signal?.aborted).toBe(true)
+      download.reject(new DOMException('download aborted', 'AbortError'))
+
+      await waitFor(() => {
+        expect(mockAddToast).not.toHaveBeenCalled()
       })
     })
 

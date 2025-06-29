@@ -141,6 +141,91 @@ function pendingFilesRefetch() {
   return new Promise<Awaited<ReturnType<typeof listFiles>>>(() => {})
 }
 
+function expectListFilesCalledWithAbortSignal(path: string) {
+  const call = mockListFiles.mock.calls.find(([calledPath]) => calledPath === path)
+  expect(call).toBeTruthy()
+  expect((call?.[1] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
+function expectCheckFavoritesCalledWithAbortSignal(paths: string[]) {
+  const call = mockCheckFavorites.mock.calls.find((args) => {
+    const [calledPaths, options] = args as [string[], { signal?: AbortSignal } | undefined]
+    return JSON.stringify(calledPaths) === JSON.stringify(paths) && options?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, options] = call as unknown as [string[], { signal?: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+}
+
+function expectListSharesCalledWithAbortSignal() {
+  const call = mockListShares.mock.calls.find((args) => {
+    const [all, options] = args as [boolean | undefined, { signal?: AbortSignal } | undefined]
+    return all === false && options?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, options] = call as unknown as [boolean, { signal?: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+}
+
+function expectToggleFavoriteCalledWithAbortSignal(path: string, isFavorited: boolean): AbortSignal {
+  const call = mockToggleFavorite.mock.calls.find((args) => {
+    const [calledPath, calledIsFavorited, options] = args as [string, boolean, { signal?: AbortSignal } | undefined]
+    return calledPath === path && calledIsFavorited === isFavorited && options?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, , options] = call as unknown as [string, boolean, { signal?: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+  expect(options.signal.aborted).toBe(false)
+  return options.signal
+}
+
+function expectListFilesCalledWithPath(path: string) {
+  expect(mockListFiles.mock.calls.some(([calledPath]) => calledPath === path)).toBe(true)
+}
+
+function expectCreateDirectoryCalledWithAbortSignal(path: string): AbortSignal {
+  const call = mockCreateDirectory.mock.calls.find(([calledPath]) => calledPath === path)
+  expect(call).toBeTruthy()
+  const signal = (call?.[1] as { signal?: AbortSignal } | undefined)?.signal
+  expect(signal).toBeInstanceOf(AbortSignal)
+  expect(signal?.aborted).toBe(false)
+  return signal as AbortSignal
+}
+
+function expectMoveFileCalledWithAbortSignal(fromPath: string, toPath: string): AbortSignal {
+  const call = mockMoveFile.mock.calls.find(([calledFrom, calledTo]) => calledFrom === fromPath && calledTo === toPath)
+  expect(call).toBeTruthy()
+  const signal = (call?.[2] as { signal?: AbortSignal } | undefined)?.signal
+  expect(signal).toBeInstanceOf(AbortSignal)
+  expect(signal?.aborted).toBe(false)
+  return signal as AbortSignal
+}
+
+function expectCopyFileCalledWithAbortSignal(fromPath: string, toPath: string): AbortSignal {
+  const call = mockCopyFile.mock.calls.find(([calledFrom, calledTo]) => calledFrom === fromPath && calledTo === toPath)
+  expect(call).toBeTruthy()
+  const signal = (call?.[2] as { signal?: AbortSignal } | undefined)?.signal
+  expect(signal).toBeInstanceOf(AbortSignal)
+  expect(signal?.aborted).toBe(false)
+  return signal as AbortSignal
+}
+
+function expectDeleteFileCalledWithAbortSignal(path: string): AbortSignal {
+  const call = mockDeleteFile.mock.calls.find(([calledPath]) => calledPath === path)
+  expect(call).toBeTruthy()
+  const signal = (call?.[1] as { signal?: AbortSignal } | undefined)?.signal
+  expect(signal).toBeInstanceOf(AbortSignal)
+  expect(signal?.aborted).toBe(false)
+  return signal as AbortSignal
+}
+
+function expectDownloadFileCalledWithOptions(path: string, options: Record<string, unknown>) {
+  expect(mockDownloadFile).toHaveBeenCalledWith(path, expect.objectContaining({
+    ...options,
+    signal: expect.any(AbortSignal),
+  }))
+}
+
 async function openContextMenuFor(name: string, coordinates = { clientX: 120, clientY: 80 }) {
   const target = (await screen.findAllByText(name))[0]
   fireEvent.contextMenu(target, coordinates)
@@ -213,7 +298,16 @@ describe('FilesPage', () => {
       render(<FilesPage />)
       
       await waitFor(() => {
-        expect(mockListFiles).toHaveBeenCalled()
+        expectListFilesCalledWithAbortSignal('/')
+      })
+    })
+
+    it('passes abort signals to favorites and share availability queries', async () => {
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expectCheckFavoritesCalledWithAbortSignal(['/documents', '/photo.jpg', '/video.mp4'])
+        expectListSharesCalledWithAbortSignal()
       })
     })
 
@@ -320,7 +414,7 @@ describe('FilesPage', () => {
       expect(mockNavigate).not.toHaveBeenCalledWith('/files', expect.objectContaining({ replace: true }))
     })
 
-    it('redirects non-admin root browsing to the assigned home directory', async () => {
+    it('keeps non-admin root browsing so the server can return home and shared roots', async () => {
       mockUser.id = 'u2'
       mockUser.username = 'tester'
       mockUser.role = 'user'
@@ -331,11 +425,13 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/tester')
+        expect(mockListFiles).toHaveBeenCalled()
       })
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/tester')
+      expect(mockNavigate).not.toHaveBeenCalledWith('/files/tester', expect.anything())
     })
 
-    it('redirects non-admin out-of-home file routes back to the assigned home directory', async () => {
+    it('allows non-admin out-of-home file routes to be resolved by server access rules', async () => {
       mockUser.id = 'u2'
       mockUser.username = 'tester'
       mockUser.role = 'user'
@@ -346,15 +442,14 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({
-          title: '仅可访问主目录内的文件',
-          color: 'warning',
-        }))
-        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/tester')
+        expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/shared')
       })
 
-      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/shared')
-      expect(mockListFiles).not.toHaveBeenCalled()
+      expect(mockFilesStoreState.setCurrentPath).not.toHaveBeenCalledWith('/tester')
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        title: '仅可访问主目录内的文件',
+      }))
+      expect(mockListFiles).toHaveBeenCalled()
     })
 
     it('shows an invalid-home error instead of browsing root for non-admin users without a home directory', async () => {
@@ -409,6 +504,25 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(screen.getByText('新建文件夹')).toBeTruthy()
       })
+    })
+
+    it('hides current-directory write actions when list capabilities are read-only', async () => {
+      mockListFiles.mockResolvedValueOnce({
+        files: [],
+        path: '/team',
+        capabilities: { read: true, concreteRead: true, write: false },
+      })
+      mockFilesStoreState.currentPath = '/team'
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('当前目录为只读，可查看、预览和下载文件')).toBeTruthy()
+      })
+
+      expect(screen.queryByText('上传文件')).toBeNull()
+      expect(screen.queryByText('上传文件夹')).toBeNull()
+      expect(screen.queryByText('新建文件夹')).toBeNull()
     })
 
     it('renders view mode toggle buttons', async () => {
@@ -581,13 +695,40 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '创建失败',
-          description: 'create failed',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
 
       expect(screen.getByRole('heading', { name: '新建文件夹' })).toBeTruthy()
       expect(screen.getByDisplayValue('failed-folder')).toBeTruthy()
+    })
+
+    it('aborts a pending create folder request when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstCreate = createDeferred<typeof successActionResult>()
+      mockCreateDirectory.mockImplementationOnce(() => firstCreate.promise)
+
+      const { unmount } = render(<FilesPage />)
+
+      await user.click(await screen.findByRole('button', { name: '新建文件夹' }))
+      await user.type(await screen.findByPlaceholderText('请输入文件夹名称'), 'aborted-folder')
+      await user.click(screen.getByRole('button', { name: '创建' }))
+
+      let createSignal: AbortSignal | undefined
+      await waitFor(() => {
+        createSignal = expectCreateDirectoryCalledWithAbortSignal('/aborted-folder')
+      })
+
+      unmount()
+      expect(createSignal?.aborted).toBe(true)
+
+      await act(async () => {
+        firstCreate.resolve(successActionResult)
+        await firstCreate.promise
+      })
+
+      expect(mockAddToast).not.toHaveBeenCalled()
     })
 
     it('closes modal on cancel', async () => {
@@ -628,7 +769,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'directory created with persistence warning',
+          title: '文件夹创建完成，但存在警告',
           color: 'warning',
         })
       })
@@ -1364,7 +1505,7 @@ describe('FilesPage', () => {
 
       await user.click(within(actionArea).getByText('添加收藏'))
       await waitFor(() => {
-        expect(mockToggleFavorite).toHaveBeenCalledWith('/photo.jpg', false)
+        expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', false)
       })
 
       await user.click(within(actionArea).getByText('创建分享链接'))
@@ -1372,6 +1513,32 @@ describe('FilesPage', () => {
 
       await user.click(within(actionArea).getByText('查看版本历史'))
       expect(mockNavigate).toHaveBeenCalledWith('/versions?path=%2Fphoto.jpg')
+    })
+
+    it('hides item write actions for read-only concrete paths while keeping share actions', async () => {
+      mockFilesStoreState.viewMode = 'grid'
+      mockListFiles.mockResolvedValueOnce({
+        files: [
+          {
+            name: 'photo.jpg',
+            path: '/team/photo.jpg',
+            isDir: false,
+            size: 1024,
+            modTime: '2024-01-02T00:00:00Z',
+            capabilities: { read: true, concreteRead: true, write: false },
+          },
+        ],
+        path: '/team',
+        capabilities: { read: true, concreteRead: true, write: false },
+      })
+
+      render(<FilesPage />)
+
+      const actionArea = await getFileActionArea('photo.jpg')
+      expect(within(actionArea).queryByText('重命名')).toBeNull()
+      expect(within(actionArea).queryByText('删除')).toBeNull()
+      expect(within(actionArea).getByText('添加收藏')).toBeTruthy()
+      expect(within(actionArea).getByText('创建分享链接')).toBeTruthy()
     })
 
     it('executes file actions from the custom context menu', async () => {
@@ -1403,7 +1570,7 @@ describe('FilesPage', () => {
       await user.click(within(menu).getByRole('button', { name: '下载' }))
 
       await waitFor(() => {
-        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+        expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 160, clientY: 100 })
@@ -1428,6 +1595,14 @@ describe('FilesPage', () => {
 
       expect(mockFilesStoreState.setCurrentPath).toHaveBeenCalledWith('/documents')
       expect(mockNavigate).toHaveBeenCalledWith('/files/documents', { replace: false })
+
+      mockDownloadFile.mockResolvedValueOnce(undefined)
+      const downloadMenu = await openContextMenuFor('documents', { clientX: 150, clientY: 120 })
+      await user.click(within(downloadMenu).getByRole('button', { name: '下载为 ZIP' }))
+
+      await waitFor(() => {
+        expectDownloadFileCalledWithOptions('/documents', { archive: 'zip', filename: 'documents.zip' })
+      })
     })
 
     it('runs multi-selection commands from the custom context menu', async () => {
@@ -1459,8 +1634,8 @@ describe('FilesPage', () => {
       await user.click(within(menu).getByRole('button', { name: '批量下载' }))
 
       await waitFor(() => {
-        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
-        expect(mockDownloadFile).toHaveBeenCalledWith('/video.mp4', { filename: 'video.mp4' })
+        expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
+        expectDownloadFileCalledWithOptions('/video.mp4', { filename: 'video.mp4' })
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 180, clientY: 120 })
@@ -1516,7 +1691,7 @@ describe('FilesPage', () => {
       menu = await openContextMenuFor('photo.jpg', { clientX: 170, clientY: 110 })
       await user.click(within(menu).getByRole('button', { name: '添加收藏' }))
       await waitFor(() => {
-        expect(mockToggleFavorite).toHaveBeenCalledWith('/photo.jpg', false)
+        expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', false)
       })
 
       menu = await openContextMenuFor('photo.jpg', { clientX: 180, clientY: 120 })
@@ -1599,7 +1774,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '批量下载失败',
-          description: '共 2 个文件下载失败',
+          description: '共 2 个项目下载失败',
           color: 'danger',
         })
       })
@@ -1627,29 +1802,65 @@ describe('FilesPage', () => {
       })
     })
 
-    it('warns when batch download is requested with only folders selected', async () => {
+    it('aborts pending batch downloads on unmount and ignores abort feedback', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const download = createDeferred<void>()
+      const signals: AbortSignal[] = []
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
+      mockDownloadFile.mockImplementation((_path, options) => {
+        if (options?.signal) {
+          signals.push(options.signal)
+        }
+        return download.promise
+      })
+
+      const { unmount } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量下载')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量下载'))
+
+      await waitFor(() => {
+        expect(signals).toHaveLength(2)
+      })
+      expect(signals[0]).toBe(signals[1])
+
+      unmount()
+
+      expect(signals.every((signal) => signal.aborted)).toBe(true)
+      download.reject(new DOMException('batch download aborted', 'AbortError'))
+
+      await waitFor(() => {
+        expect(mockAddToast).not.toHaveBeenCalled()
+      })
+    })
+
+    it('downloads selected folders as zip archives', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/documents'])
+      mockDownloadFile.mockResolvedValue(undefined)
 
       render(<FilesPage />)
 
       await waitFor(() => {
         expect(screen.getByText('批量下载')).toBeTruthy()
-        expect(screen.getByText('当前选择不含可下载文件')).toBeTruthy()
+        expect(screen.getByText('文件夹会打包为 ZIP')).toBeTruthy()
       })
 
       await user.click(screen.getByText('批量下载'))
 
-      expect(mockDownloadFile).not.toHaveBeenCalled()
       await waitFor(() => {
+        expectDownloadFileCalledWithOptions('/documents', { archive: 'zip', filename: 'documents.zip' })
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '未选择可下载的文件',
-          color: 'warning',
+          title: '已开始下载 1 项',
+          color: 'success',
         })
       })
     })
 
-    it('downloads only files and skips folders when mixed items are selected', async () => {
+    it('downloads files and zip archives when mixed items are selected', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/documents', '/photo.jpg'])
       mockDownloadFile.mockResolvedValue(undefined)
@@ -1657,16 +1868,16 @@ describe('FilesPage', () => {
       render(<FilesPage />)
 
       await waitFor(() => {
-        expect(screen.getByText('将跳过文件夹，仅下载文件')).toBeTruthy()
+        expect(screen.getByText('文件夹会打包为 ZIP')).toBeTruthy()
       })
 
       await user.click(screen.getByText('批量下载'))
 
       await waitFor(() => {
-        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
-        expect(mockDownloadFile).not.toHaveBeenCalledWith('/documents', expect.anything())
+        expectDownloadFileCalledWithOptions('/documents', { archive: 'zip', filename: 'documents.zip' })
+        expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '已开始下载 1 个文件',
+          title: '已开始下载 2 项',
           color: 'success',
         })
       })
@@ -1694,7 +1905,7 @@ describe('FilesPage', () => {
       await user.click(screen.getAllByText('下载')[0])
 
       await waitFor(() => {
-        expect(mockDownloadFile).toHaveBeenCalledWith('/photo.jpg', { filename: 'photo.jpg' })
+        expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
       })
 
       await waitFor(() => {
@@ -1703,6 +1914,45 @@ describe('FilesPage', () => {
           description: '文件系统当前不可用，请检查设备状态或稍后重试。',
           color: 'warning',
         })
+      })
+    })
+
+    it('aborts pending single-file downloads on unmount and ignores abort feedback', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const download = createDeferred<void>()
+      let signal: AbortSignal | undefined
+      mockFilesStoreState.viewMode = 'grid'
+      mockDownloadFile.mockImplementationOnce((_path, options) => {
+        signal = options?.signal
+        return download.promise
+      })
+
+      const { unmount } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getByLabelText('photo.jpg 操作菜单'))
+
+      await waitFor(() => {
+        expect(screen.getAllByText('下载').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByText('下载')[0])
+
+      await waitFor(() => {
+        expectDownloadFileCalledWithOptions('/photo.jpg', { filename: 'photo.jpg' })
+        expect(signal).toBeInstanceOf(AbortSignal)
+      })
+
+      unmount()
+
+      expect(signal?.aborted).toBe(true)
+      download.reject(new DOMException('file download aborted', 'AbortError'))
+
+      await waitFor(() => {
+        expect(mockAddToast).not.toHaveBeenCalled()
       })
     })
 
@@ -1740,6 +1990,43 @@ describe('FilesPage', () => {
         expect(screen.queryByText('photo.jpg')).toBeFalsy()
         expect(screen.getByText('video.mp4')).toBeTruthy()
       })
+    })
+
+    it('aborts a pending single delete request when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<typeof successActionResult>()
+      mockFilesStoreState.viewMode = 'grid'
+      mockDeleteFile.mockImplementationOnce(() => pendingDelete.promise)
+
+      const { unmount } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('photo.jpg').length).toBeGreaterThan(0)
+      })
+
+      await user.click(screen.getAllByRole('button', { name: '删除' })[1])
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: '确认删除' })).toBeTruthy()
+      })
+
+      const deleteButtons = screen.getAllByRole('button', { name: '删除' })
+      await user.click(deleteButtons[deleteButtons.length - 1])
+
+      let deleteSignal: AbortSignal | undefined
+      await waitFor(() => {
+        deleteSignal = expectDeleteFileCalledWithAbortSignal('/photo.jpg')
+      })
+
+      unmount()
+      expect(deleteSignal?.aborted).toBe(true)
+
+      await act(async () => {
+        pendingDelete.resolve(successActionResult)
+        await pendingDelete.promise
+      })
+
+      expect(mockAddToast).not.toHaveBeenCalled()
     })
 
     it('keeps failed items selected after partial batch delete failure', async () => {
@@ -1898,6 +2185,9 @@ describe('FilesPage', () => {
         expect(screen.getByText('批量删除')).toBeTruthy()
       })
 
+      mockFilesStoreState.clearSelection.mockClear()
+      mockFilesStoreState.setSelection.mockClear()
+
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
@@ -1907,7 +2197,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('删除全部'))
 
       await waitFor(() => {
-        expect(mockDeleteFile).toHaveBeenCalledWith('/photo.jpg')
+        expectDeleteFileCalledWithAbortSignal('/photo.jpg')
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
@@ -1937,6 +2227,9 @@ describe('FilesPage', () => {
         expect(screen.getByText('批量删除')).toBeTruthy()
       })
 
+      mockFilesStoreState.clearSelection.mockClear()
+      mockFilesStoreState.setSelection.mockClear()
+
       await user.click(screen.getByText('批量删除'))
 
       await waitFor(() => {
@@ -1946,7 +2239,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByText('删除全部'))
 
       await waitFor(() => {
-        expect(mockDeleteFile).toHaveBeenCalledWith('/photo.jpg')
+        expectDeleteFileCalledWithAbortSignal('/photo.jpg')
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
@@ -1970,6 +2263,46 @@ describe('FilesPage', () => {
       expect(screen.getByRole('button', { name: '删除全部' })).toBeTruthy()
     })
 
+    it('aborts a pending batch delete request when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const pendingDelete = createDeferred<typeof successActionResult>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockDeleteFile.mockImplementationOnce(() => pendingDelete.promise)
+
+      const { unmount } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('批量删除')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('批量删除'))
+
+      await waitFor(() => {
+        expect(screen.getByText('删除全部')).toBeTruthy()
+      })
+
+      await user.click(screen.getByText('删除全部'))
+
+      let deleteSignal: AbortSignal | undefined
+      await waitFor(() => {
+        deleteSignal = expectDeleteFileCalledWithAbortSignal('/photo.jpg')
+      })
+
+      unmount()
+      expect(deleteSignal?.aborted).toBe(true)
+      const clearSelectionCallsAfterUnmount = mockFilesStoreState.clearSelection.mock.calls.length
+      const setSelectionCallsAfterUnmount = mockFilesStoreState.setSelection.mock.calls.length
+
+      await act(async () => {
+        pendingDelete.resolve(successActionResult)
+        await pendingDelete.promise
+      })
+
+      expect(mockAddToast).not.toHaveBeenCalled()
+      expect(mockFilesStoreState.clearSelection).toHaveBeenCalledTimes(clearSelectionCallsAfterUnmount)
+      expect(mockFilesStoreState.setSelection).toHaveBeenCalledTimes(setSelectionCallsAfterUnmount)
+    })
+
     it('shows warning toast when batch download partially fails', async () => {
       const user = userEvent.setup({ writeToClipboard: false })
       mockFilesStoreState.selectedFiles = new Set(['/photo.jpg', '/video.mp4'])
@@ -1987,8 +2320,8 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: '部分文件开始下载',
-          description: '已开始 1 个，失败 1 个',
+          title: '部分项目开始下载',
+          description: '已开始 1 项，失败 1 项',
           color: 'warning',
         })
       })
@@ -2086,7 +2419,7 @@ describe('FilesPage', () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
 
       await waitFor(() => {
-        expect(mockMoveFile).toHaveBeenCalledWith('/source/photo.jpg', '/photo.jpg')
+        expectMoveFileCalledWithAbortSignal('/source/photo.jpg', '/photo.jpg')
       })
 
       expect(mockClipboardState.clear).toHaveBeenCalled()
@@ -2142,7 +2475,7 @@ describe('FilesPage', () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
 
       await waitFor(() => {
-        expect(mockCopyFile).toHaveBeenCalledWith('/source/photo.jpg', '/photo.jpg')
+        expectCopyFileCalledWithAbortSignal('/source/photo.jpg', '/photo.jpg')
       })
 
       expect(mockClipboardState.clear).toHaveBeenCalled()
@@ -2193,7 +2526,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'file deleted with persistence warning',
+          title: '已删除 1 个文件，但存在警告',
           color: 'warning',
         })
       })
@@ -2217,7 +2550,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'file deleted with persistence warning',
+          title: '批量删除部分完成',
           description: '成功 1 个，失败 1 个',
           color: 'warning',
         })
@@ -2248,6 +2581,165 @@ describe('FilesPage', () => {
       })
     })
 
+    it('shows localized warning when copy paste fully fails because the target already exists', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'copy'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockCopyFile.mockRejectedValue(new ApiError('resource already exists', 409))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expectCopyFileCalledWithAbortSignal('/source/photo.jpg', '/photo.jpg')
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '同名项目已存在',
+          description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+          color: 'warning',
+        })
+      })
+
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+    })
+
+    it('shows localized warning when copy paste fully fails because the target quota is exceeded', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'copy'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockCopyFile.mockRejectedValue(new ApiError('directory quota exceeded', 507, 'QUOTA_EXCEEDED'))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expectCopyFileCalledWithAbortSignal('/source/photo.jpg', '/photo.jpg')
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '容量配额不足',
+          description: '目标目录的容量配额不足，请清理空间或调整目录配额后重试。',
+          color: 'warning',
+        })
+      })
+
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+    })
+
+    it('shows localized warning when cut paste fully fails because the target parent changed', async () => {
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockMoveFile.mockRejectedValue(new ApiError('parent path is not a directory', 409))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      await waitFor(() => {
+        expectMoveFileCalledWithAbortSignal('/source/photo.jpg', '/photo.jpg')
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '目标位置不可用',
+          description: '当前目录状态已变更，请刷新列表后重试。',
+          color: 'warning',
+        })
+      })
+
+      expect(mockClipboardState.cut).toHaveBeenCalledWith(['/source/photo.jpg'], '/source')
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+    })
+
+    it('aborts a pending cut paste request when the page unmounts', async () => {
+      const pendingMove = createDeferred<typeof successActionResult>()
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'cut'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockMoveFile.mockImplementationOnce(() => pendingMove.promise)
+
+      const { unmount } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      let pasteSignal: AbortSignal | undefined
+      await waitFor(() => {
+        pasteSignal = expectMoveFileCalledWithAbortSignal('/source/photo.jpg', '/photo.jpg')
+      })
+
+      unmount()
+      expect(pasteSignal?.aborted).toBe(true)
+
+      await act(async () => {
+        pendingMove.resolve(successActionResult)
+        await pendingMove.promise
+      })
+
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+      expect(mockClipboardState.cut).not.toHaveBeenCalled()
+      expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
+    it('aborts a pending copy paste request when the page unmounts', async () => {
+      const pendingCopy = createDeferred<typeof successActionResult>()
+      mockClipboardState.paths = ['/source/photo.jpg']
+      mockClipboardState.operation = 'copy'
+      mockClipboardState.sourcePath = '/source'
+      mockClipboardState.hasPaths.mockReturnValue(true)
+      mockCopyFile.mockImplementationOnce(() => pendingCopy.promise)
+
+      const { unmount } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(mockListFiles).toHaveBeenCalled()
+      })
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }))
+
+      let pasteSignal: AbortSignal | undefined
+      await waitFor(() => {
+        pasteSignal = expectCopyFileCalledWithAbortSignal('/source/photo.jpg', '/photo.jpg')
+      })
+
+      unmount()
+      expect(pasteSignal?.aborted).toBe(true)
+
+      await act(async () => {
+        pendingCopy.resolve(successActionResult)
+        await pendingCopy.promise
+      })
+
+      expect(mockClipboardState.clear).not.toHaveBeenCalled()
+      expect(mockClipboardState.copy).not.toHaveBeenCalled()
+      expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
     it('shows warning toast when copy paste fully succeeds with warnings', async () => {
       mockClipboardState.paths = ['/source/photo.jpg', '/source/video.mp4']
       mockClipboardState.operation = 'copy'
@@ -2267,7 +2759,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'resource copied with persistence warning',
+          title: '成功复制 2 个文件，但存在警告',
           color: 'warning',
         })
       })
@@ -2290,7 +2782,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'resource moved with persistence warning',
+          title: '成功移动 1 个文件，但存在警告',
           color: 'warning',
         })
       })
@@ -2315,7 +2807,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'resource moved with persistence warning',
+          title: '批量移动部分完成',
           description: '成功 1 个，失败 1 个',
           color: 'warning',
         })
@@ -2349,7 +2841,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '确定' }))
 
       await waitFor(() => {
-        expect(mockMoveFile).toHaveBeenCalledWith('/photo.jpg', '/photo-renamed.jpg')
+        expectMoveFileCalledWithAbortSignal('/photo.jpg', '/photo-renamed.jpg')
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
@@ -2389,7 +2881,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '确定' }))
 
       await waitFor(() => {
-        expect(mockMoveFile).toHaveBeenCalledWith('/photo.jpg', '/photo-failed.jpg')
+        expectMoveFileCalledWithAbortSignal('/photo.jpg', '/photo-failed.jpg')
       })
 
       await user.click(screen.getByRole('button', { name: '取消' }))
@@ -2404,13 +2896,122 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '重命名失败',
-          description: 'rename failed',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
 
       expect(screen.getByText('重命名')).toBeTruthy()
       expect(screen.getByDisplayValue('photo-failed.jpg')).toBeTruthy()
+    })
+
+    it('aborts a pending rename request when the page unmounts', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      const firstRename = createDeferred<typeof successActionResult>()
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockMoveFile.mockImplementationOnce(() => firstRename.promise)
+
+      const { unmount } = render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, 'photo-aborted.jpg')
+      await user.click(screen.getByRole('button', { name: '确定' }))
+
+      let renameSignal: AbortSignal | undefined
+      await waitFor(() => {
+        renameSignal = expectMoveFileCalledWithAbortSignal('/photo.jpg', '/photo-aborted.jpg')
+      })
+
+      unmount()
+      expect(renameSignal?.aborted).toBe(true)
+
+      await act(async () => {
+        firstRename.resolve(successActionResult)
+        await firstRename.promise
+      })
+
+      expect(mockAddToast).not.toHaveBeenCalled()
+    })
+
+    it('keeps the rename modal open with a localized warning when a name conflict occurs', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockMoveFile.mockRejectedValueOnce(new ApiError('resource already exists', 409))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, 'video.mp4')
+      await user.click(screen.getByRole('button', { name: '确定' }))
+
+      await waitFor(() => {
+        expectMoveFileCalledWithAbortSignal('/photo.jpg', '/video.mp4')
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '同名项目已存在',
+          description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+          color: 'warning',
+        })
+      })
+
+      expect(screen.getByText('重命名')).toBeTruthy()
+      expect(screen.getByDisplayValue('video.mp4')).toBeTruthy()
+    })
+
+    it('keeps the rename modal open with a localized warning when the parent path stops being a directory', async () => {
+      const user = userEvent.setup({ writeToClipboard: false })
+      mockFilesStoreState.selectedFiles = new Set(['/photo.jpg'])
+      mockMoveFile.mockRejectedValueOnce(new ApiError('parent path is not a directory', 409))
+
+      render(<FilesPage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('photo.jpg')).toBeTruthy()
+      })
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true }))
+      })
+
+      const renameInput = await screen.findByPlaceholderText('请输入新名称')
+      await user.clear(renameInput)
+      await user.type(renameInput, 'photo-stale.jpg')
+      await user.click(screen.getByRole('button', { name: '确定' }))
+
+      await waitFor(() => {
+        expectMoveFileCalledWithAbortSignal('/photo.jpg', '/photo-stale.jpg')
+      })
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '目标位置不可用',
+          description: '当前目录状态已变更，请刷新列表后重试。',
+          color: 'warning',
+        })
+      })
+
+      expect(screen.getByText('重命名')).toBeTruthy()
+      expect(screen.getByDisplayValue('photo-stale.jpg')).toBeTruthy()
     })
 
     it('shows warning toast when rename succeeds with a persistence warning', async () => {
@@ -2435,7 +3036,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
-          title: 'resource moved with persistence warning',
+          title: '重命名完成，但存在警告',
           color: 'warning',
         })
       })
@@ -2465,7 +3066,7 @@ describe('FilesPage', () => {
       await user.click(screen.getByRole('button', { name: '确定' }))
 
       await waitFor(() => {
-        expect(mockMoveFile).toHaveBeenCalledWith('/photo.jpg', '/photo-gone.jpg')
+        expectMoveFileCalledWithAbortSignal('/photo.jpg', '/photo-gone.jpg')
       })
 
       await waitFor(() => {
@@ -2633,7 +3234,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('当前目录加载失败')).toBeTruthy()
-        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -2673,7 +3274,7 @@ describe('FilesPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('收藏状态加载失败')).toBeTruthy()
-        expect(screen.getByText('favorites unavailable')).toBeTruthy()
+        expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载收藏状态' })).toBeTruthy()
       })
 
@@ -2747,7 +3348,7 @@ describe('FilesPage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '刷新失败',
-          description: 'still down',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })
@@ -2806,12 +3407,34 @@ describe('FilesPage', () => {
     await user.click(within(actionArea).getByText('添加收藏'))
 
     await waitFor(() => {
-      expect(mockToggleFavorite).toHaveBeenCalledWith('/photo.jpg', false)
+      expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', false)
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '已添加收藏',
         color: 'success',
       })
     })
+  })
+
+  it('aborts a pending favorite request when the page unmounts', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const pendingFavorite = createDeferred<Awaited<ReturnType<typeof toggleFavorite>>>()
+    mockFilesStoreState.viewMode = 'grid'
+    mockToggleFavorite.mockImplementationOnce(() => pendingFavorite.promise as ReturnType<typeof toggleFavorite>)
+
+    const { unmount } = render(<FilesPage />)
+
+    await screen.findByText('photo.jpg')
+    const actionArea = await getFileActionArea('photo.jpg')
+    await user.click(within(actionArea).getByText('添加收藏'))
+
+    let signal: AbortSignal | undefined
+    await waitFor(() => {
+      signal = expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', false)
+    })
+
+    expect(signal?.aborted).toBe(false)
+    unmount()
+    expect(signal?.aborted).toBe(true)
   })
 
   it('shows a success toast after removing a favorite', async () => {
@@ -2831,7 +3454,7 @@ describe('FilesPage', () => {
     await user.click(await within(actionArea).findByText('取消收藏'))
 
     await waitFor(() => {
-      expect(mockToggleFavorite).toHaveBeenCalledWith('/photo.jpg', true)
+      expectToggleFavoriteCalledWithAbortSignal('/photo.jpg', true)
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '已取消收藏',
         color: 'success',
@@ -2896,13 +3519,13 @@ describe('FilesPage', () => {
     const actionArea = await getFileActionArea('photo.jpg')
     await user.click(within(actionArea).getByText('添加收藏'))
 
-    await waitFor(() => {
-      expect(mockAddToast).toHaveBeenCalledWith({
-        title: '操作失败',
-        description: 'database timeout',
-        color: 'danger',
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '操作失败',
+          description: '操作未完成，请稍后重试。',
+          color: 'danger',
+        })
       })
-    })
   })
 
   it('treats add-favorite conflict as already favorited and syncs the status', async () => {
@@ -3074,7 +3697,7 @@ describe('FilesPage', () => {
     )
 
     await waitFor(() => {
-      expect(mockListFiles).toHaveBeenCalledWith('/member')
+      expectListFilesCalledWithPath('/member')
     })
 
     expect(screen.queryByText('admin-secret.txt')).toBeNull()

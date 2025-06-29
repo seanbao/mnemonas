@@ -16,10 +16,13 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -54,6 +57,7 @@ const scrubObjectCorruptedPublicMessage = "object failed integrity verification"
 const scrubObjectMissingPublicMessage = "object is missing"
 const scrubObjectReadPublicMessage = "object could not be read"
 const scrubObjectUnknownPublicMessage = "object verification failed"
+const redactedSettingsSecretValue = "<redacted>"
 const untrustedDownloadContentSecurityPolicy = "sandbox; default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' data: blob:; style-src 'unsafe-inline'"
 
 var errScrubDataplaneNotConnected = errors.New("dataplane not connected")
@@ -87,6 +91,9 @@ var serverConnectDataplaneClient = func(s *Server, parent context.Context, clien
 }
 
 var apiTimeNow = time.Now
+
+const activityRiskWindow = 10 * time.Minute
+
 var maxThumbnailSourceBytes = defaultMaxThumbnailSourceBytes
 
 type prependReadCloser struct {
@@ -233,7 +240,7 @@ func (s *Server) storeActiveWebDAV(cfg WebDAVRuntimeConfig) {
 }
 
 func webDAVUsesGeneratedPassword(cfg config.Config) bool {
-	return cfg.WebDAV.Enabled && strings.EqualFold(cfg.WebDAV.AuthType, "basic") && strings.TrimSpace(cfg.WebDAV.Password) == ""
+	return cfg.WebDAV.Enabled && config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType) == "basic" && strings.TrimSpace(cfg.WebDAV.Password) == ""
 }
 
 func (s *Server) webDAVConfiguredButUnavailable() bool {
@@ -242,7 +249,7 @@ func (s *Server) webDAVConfiguredButUnavailable() bool {
 		return false
 	}
 	runtimeCfg := s.currentActiveWebDAV()
-	return !runtimeCfg.Enabled || !strings.EqualFold(runtimeCfg.AuthType, "basic") || strings.TrimSpace(runtimeCfg.Password) == ""
+	return !runtimeCfg.Enabled || config.NormalizeWebDAVAuthType(runtimeCfg.AuthType) != "basic" || strings.TrimSpace(runtimeCfg.Password) == ""
 }
 
 func (s *Server) handlePathRenamed(_ context.Context, oldPath, newPath string) error {
@@ -730,6 +737,7 @@ const (
 
 	defaultScrubSchedulerPollInterval = time.Minute
 	loginRateLimitAlertCooldown       = 15 * time.Minute
+	maxLoginAlertUsernameRunes        = 255
 )
 
 func (s *Server) configureDiskHealthActivityRecorder() {
@@ -810,10 +818,7 @@ func diskHealthActivityDeviceLabel(device diskhealth.DeviceStatus) string {
 	if strings.TrimSpace(device.Name) != "" {
 		return strings.TrimSpace(device.Name)
 	}
-	if strings.TrimSpace(device.Path) != "" {
-		return strings.TrimSpace(device.Path)
-	}
-	return "unknown device"
+	return "unnamed device"
 }
 
 func joinDiskHealthActivityLabels(labels []string) string {
@@ -1038,6 +1043,11 @@ func settingsDirectoryAccessRules(rules []config.DirectoryAccessRuleConfig) []co
 	return cloneDirectoryAccessRules(rules)
 }
 
+func isDownloadProbeRequest(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get(downloadProbeHeader)), downloadProbeHeaderValue) &&
+		strings.TrimSpace(r.Header.Get("Range")) == "bytes=0-0"
+}
+
 func settingsDiskHealthDevices(devices []config.DiskHealthDeviceConfig) []config.DiskHealthDeviceConfig {
 	if len(devices) == 0 {
 		return []config.DiskHealthDeviceConfig{}
@@ -1048,6 +1058,8 @@ func settingsDiskHealthDevices(devices []config.DiskHealthDeviceConfig) []config
 const (
 	auditStatusHeaderName               = "X-Mnemonas-Audit-Status"
 	auditStatusFailedValue              = "failed"
+	downloadProbeHeader                 = "X-Mnemonas-Download-Probe"
+	downloadProbeHeaderValue            = "json-error"
 	auditWarningHeader                  = `199 MnemoNAS "activity log persistence failed"`
 	workspaceMutationWarningHeader      = `199 MnemoNAS "workspace mutation persistence incomplete"`
 	scrubResultPersistenceWarningHeader = `199 MnemoNAS "scrub result persistence incomplete"`
@@ -1166,7 +1178,7 @@ func (s *Server) resolveWebDAVRuntimeConfig(cfg config.Config) WebDAVRuntimeConf
 		Enabled:              cfg.WebDAV.Enabled,
 		Prefix:               cfg.WebDAV.Prefix,
 		ReadOnly:             cfg.WebDAV.ReadOnly,
-		AuthType:             cfg.WebDAV.AuthType,
+		AuthType:             config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType),
 		Username:             cfg.WebDAV.Username,
 		Password:             cfg.WebDAV.Password,
 		UserStore:            s.userStore,
@@ -1214,7 +1226,7 @@ func prepareWebDAVRuntimeConfig(cfg config.Config) (*WebDAVRuntimeConfig, error)
 		Enabled:              cfg.WebDAV.Enabled,
 		Prefix:               cfg.WebDAV.Prefix,
 		ReadOnly:             cfg.WebDAV.ReadOnly,
-		AuthType:             cfg.WebDAV.AuthType,
+		AuthType:             config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType),
 		Username:             cfg.WebDAV.Username,
 		Password:             cfg.WebDAV.Password,
 		DirectoryQuotas:      append([]config.DirectoryQuotaConfig(nil), cfg.Storage.DirectoryQuotas...),
@@ -1647,6 +1659,7 @@ func (s *Server) setupRoutes() {
 
 	// Public endpoints (no auth required)
 	s.router.Get("/health", s.handleHealth)
+	s.router.Head("/health", s.handleHealth)
 	s.router.Get("/api/v1/version", s.handleVersion)
 
 	// Setup status (public, for first-run guidance without exposing passwords)
@@ -1971,6 +1984,7 @@ var errWebDAVUsernameMatchesNonAdmin = errors.New("webdav.username must not matc
 var errInvalidPath = errors.New("invalid path")
 var errSharePolicyPasswordRequired = errors.New("share policy requires password")
 var errSharePolicyInvalidExpiresIn = errors.New("invalid share expires_in")
+var errFavoriteMissingPath = errors.New("favorite path missing")
 
 func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*storage.SearchResult) ([]*storage.SearchResult, error) {
 	if !s.authEnabled || auth.IsAdmin(ctx) {
@@ -1986,7 +2000,7 @@ func (s *Server) filterSearchResultsByHomeDir(ctx context.Context, results []*st
 
 	filtered := make([]*storage.SearchResult, 0, len(results))
 	for _, result := range results {
-		if result != nil && s.authorizeUserPath(ctx, result.Path) == nil {
+		if result != nil && s.authorizeUserConcreteReadPath(ctx, result.Path) == nil {
 			filtered = append(filtered, result)
 		}
 	}
@@ -2028,7 +2042,7 @@ func (s *Server) filterTrashItemsByHomeDir(ctx context.Context, items []*storage
 
 	filtered := make([]*storage.TrashItem, 0, len(items))
 	for _, item := range items {
-		if item != nil && s.authorizeUserPath(ctx, item.OriginalPath) == nil {
+		if item != nil && s.authorizeUserConcreteReadPath(ctx, item.OriginalPath) == nil {
 			filtered = append(filtered, item)
 		}
 	}
@@ -2049,7 +2063,7 @@ func (s *Server) filterFavoritesByHomeDir(ctx context.Context, items []*favorite
 
 	filtered := make([]*favorites.Favorite, 0, len(items))
 	for _, item := range items {
-		if item != nil && s.authorizeUserPath(ctx, item.Path) == nil {
+		if item != nil && s.authorizeUserConcreteReadPath(ctx, item.Path) == nil {
 			filtered = append(filtered, item)
 		}
 	}
@@ -2071,7 +2085,7 @@ func (s *Server) filterActivityEntriesByHomeDir(ctx context.Context, entries []a
 		if user != nil && !user.CreatedAt.IsZero() && entry.Timestamp.Before(user.CreatedAt) {
 			continue
 		}
-		if entry.Path != "" && s.authorizeUserPath(ctx, entry.Path) != nil {
+		if entry.Path != "" && s.authorizeUserConcreteReadPath(ctx, entry.Path) != nil {
 			continue
 		}
 		filtered = append(filtered, s.sanitizeActivityEntryForPathAccess(ctx, entry))
@@ -2089,15 +2103,26 @@ func (s *Server) sanitizeActivityEntryForPathAccess(ctx context.Context, entry a
 	for key, value := range entry.Details {
 		sanitized.Details[key] = value
 		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || (!strings.HasPrefix(trimmed, "/") && !strings.Contains(trimmed, "\\")) {
+		if !activityDetailNeedsPathAccessCheck(key, trimmed) {
 			continue
 		}
 		detailPath, err := validatePath(trimmed)
-		if err != nil || s.authorizeUserPath(ctx, detailPath) != nil {
+		if err != nil || s.authorizeUserConcreteReadPath(ctx, detailPath) != nil {
 			sanitized.Details[key] = ""
 		}
 	}
 	return sanitized
+}
+
+func activityDetailNeedsPathAccessCheck(key, trimmedValue string) bool {
+	if trimmedValue == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmedValue, "/") || strings.Contains(trimmedValue, "\\") {
+		return true
+	}
+
+	return activity.DetailKeyMayContainPath(key)
 }
 
 func paginateActivityEntries(entries []activity.Entry, limit, offset int) []activity.Entry {
@@ -2129,7 +2154,7 @@ func (s *Server) filterSharesByHomeDir(ctx context.Context, items []*share.Share
 
 	filtered := make([]*share.Share, 0, len(items))
 	for _, item := range items {
-		if item != nil && s.authorizeUserPath(ctx, item.Path) == nil {
+		if item != nil && s.authorizeUserConcreteReadPath(ctx, item.Path) == nil {
 			filtered = append(filtered, item)
 		}
 	}
@@ -2169,7 +2194,7 @@ func (s *Server) authorizeUserTreeCopyPath(ctx context.Context, sourcePath, dest
 	if !s.authEnabled || auth.IsAdmin(ctx) {
 		return nil
 	}
-	if err := s.authorizeUserPath(ctx, sourcePath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(ctx, sourcePath); err != nil {
 		return err
 	}
 	if err := s.authorizeUserWritePath(ctx, destinationPath); err != nil {
@@ -2198,15 +2223,22 @@ func (s *Server) authorizeUserCopyTreeDescendants(ctx context.Context, sourcePat
 		if child == nil {
 			continue
 		}
-		if err := s.authorizeUserPathFor(ctx, child.Path, pathAccessRead); err != nil {
+		childPath, _, err := apiReadDirChildPath(sourcePath, child)
+		if err != nil {
 			return err
 		}
-		childDestination := mapDescendantPath(sourcePath, destinationPath, child.Path)
+		if err := s.authorizeUserPathFor(ctx, childPath, pathAccessRead); err != nil {
+			return err
+		}
+		childDestination, ok := mapDescendantPath(sourcePath, destinationPath, childPath)
+		if !ok {
+			return errPathAccessDenied
+		}
 		if err := s.authorizeUserPathFor(ctx, childDestination, pathAccessWrite); err != nil {
 			return err
 		}
 		if child.IsDir {
-			if err := s.authorizeUserCopyTreeDescendants(ctx, child.Path, childDestination); err != nil {
+			if err := s.authorizeUserCopyTreeDescendants(ctx, childPath, childDestination); err != nil {
 				return err
 			}
 		}
@@ -2228,7 +2260,7 @@ func (s *Server) authorizeUserTrashItemTreeWritePath(ctx context.Context, item *
 		destinationRoot = path.Clean(destinationPath)
 	}
 
-	return s.fs.WalkTrashItemRestorePaths(ctx, item.ID, func(restoredPath string, _ bool) error {
+	return s.fs.WalkTrashItemRestorePaths(ctx, item.ID, func(restoredPath string, _ bool, _ int64) error {
 		restoredPath = path.Clean(restoredPath)
 		if restoredPath != sourceRoot {
 			if err := s.authorizeUserPathFor(ctx, restoredPath, pathAccessWrite); err != nil {
@@ -2236,7 +2268,10 @@ func (s *Server) authorizeUserTrashItemTreeWritePath(ctx context.Context, item *
 			}
 		}
 		if destinationRoot != "" {
-			mappedPath := mapDescendantPath(sourceRoot, destinationRoot, restoredPath)
+			mappedPath, ok := mapDescendantPath(sourceRoot, destinationRoot, restoredPath)
+			if !ok {
+				return errPathAccessDenied
+			}
 			if mappedPath != destinationRoot {
 				if err := s.authorizeUserPathFor(ctx, mappedPath, pathAccessWrite); err != nil {
 					return err
@@ -2264,18 +2299,26 @@ func (s *Server) authorizeUserTreeDescendants(ctx context.Context, sourcePath, d
 		if child == nil {
 			continue
 		}
-		if err := s.authorizeUserPathFor(ctx, child.Path, mode); err != nil {
+		childPath, _, err := apiReadDirChildPath(sourcePath, child)
+		if err != nil {
+			return err
+		}
+		if err := s.authorizeUserPathFor(ctx, childPath, mode); err != nil {
 			return err
 		}
 		childDestination := ""
 		if destinationPath != "" {
-			childDestination = mapDescendantPath(sourcePath, destinationPath, child.Path)
+			var ok bool
+			childDestination, ok = mapDescendantPath(sourcePath, destinationPath, childPath)
+			if !ok {
+				return errPathAccessDenied
+			}
 			if err := s.authorizeUserPathFor(ctx, childDestination, mode); err != nil {
 				return err
 			}
 		}
 		if child.IsDir {
-			if err := s.authorizeUserTreeDescendants(ctx, child.Path, childDestination, mode); err != nil {
+			if err := s.authorizeUserTreeDescendants(ctx, childPath, childDestination, mode); err != nil {
 				return err
 			}
 		}
@@ -2283,22 +2326,28 @@ func (s *Server) authorizeUserTreeDescendants(ctx context.Context, sourcePath, d
 	return nil
 }
 
-func mapDescendantPath(sourceRoot, destinationRoot, currentPath string) string {
+func mapDescendantPath(sourceRoot, destinationRoot, currentPath string) (string, bool) {
 	sourceRoot = path.Clean(sourceRoot)
 	destinationRoot = path.Clean(destinationRoot)
 	currentPath = path.Clean(currentPath)
 
 	relativePath := ""
 	if sourceRoot == "/" {
+		if currentPath == "/" || !strings.HasPrefix(currentPath, "/") {
+			return "", false
+		}
 		relativePath = strings.TrimPrefix(currentPath, "/")
 	} else {
+		if currentPath != sourceRoot && !pathWithinBase(sourceRoot, currentPath) {
+			return "", false
+		}
 		relativePath = strings.TrimPrefix(currentPath, sourceRoot)
 		relativePath = strings.TrimPrefix(relativePath, "/")
 	}
 	if relativePath == "" {
-		return destinationRoot
+		return destinationRoot, true
 	}
-	return path.Clean(path.Join(destinationRoot, relativePath))
+	return path.Clean(path.Join(destinationRoot, relativePath)), true
 }
 
 func (s *Server) respondTreeMutationPreflightError(w http.ResponseWriter, action string, err error) {
@@ -2480,11 +2529,13 @@ func (s *Server) ensureDataplaneConnected(ctx context.Context) bool {
 // === Handlers ===
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	uptime := time.Since(s.startTime)
 	health := map[string]any{
-		"status":    "healthy",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-		"uptime":    time.Since(s.startTime).String(),
-		"version":   s.appVersion,
+		"status":      "healthy",
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"uptime":      uptime.String(),
+		"uptime_secs": int64(uptime.Seconds()),
+		"version":     s.appVersion,
 	}
 
 	// Reflect dataplane availability in the overall health status when configured.
@@ -2524,6 +2575,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		s.favoritesConfiguredButUnavailable() ||
 		s.webDAVConfiguredButUnavailable() {
 		health["status"] = "degraded"
+	}
+
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
 	s.json(w, http.StatusOK, health)
@@ -2588,13 +2645,24 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
-	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
-		respondPathAccessError(w, err)
-		return
-	}
 
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+	if filePath == "/" {
+		files, handled, err := s.visibleScopedRootFileInfos(r.Context())
+		if err != nil {
+			respondPathAccessError(w, err)
+			return
+		}
+		if handled {
+			s.writeListFilesResponse(r.Context(), w, filePath, files, true)
+			return
+		}
+	}
+	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+		respondPathAccessError(w, err)
 		return
 	}
 
@@ -2613,21 +2681,48 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "list files", err)
 		return
 	}
+	files, err = apiNormalizeReadDirChildren(filePath, files)
+	if err != nil {
+		s.respondInternalError(w, "normalize directory listing", err)
+		return
+	}
 	files, err = s.filterFileInfosByPathAccess(r.Context(), files)
 	if err != nil {
 		respondPathAccessError(w, err)
 		return
 	}
 
-	// Convert to API response format
+	s.writeListFilesResponse(r.Context(), w, filePath, files, true)
+}
+
+type filePathCapabilities struct {
+	Read         bool `json:"read"`
+	ConcreteRead bool `json:"concreteRead"`
+	Write        bool `json:"write"`
+}
+
+func (s *Server) filePathCapabilities(ctx context.Context, targetPath string, navigationRead bool) filePathCapabilities {
+	capabilities := filePathCapabilities{Read: navigationRead}
+	if !capabilities.Read {
+		capabilities.Read = s.authorizeUserPath(ctx, targetPath) == nil
+	}
+	if !isMutationRootPath(targetPath) {
+		capabilities.ConcreteRead = s.authorizeUserConcreteReadPath(ctx, targetPath) == nil
+	}
+	capabilities.Write = s.authorizeUserWritePath(ctx, targetPath) == nil
+	return capabilities
+}
+
+func (s *Server) writeListFilesResponse(ctx context.Context, w http.ResponseWriter, filePath string, files []*storage.FileInfo, navigationRead bool) {
 	items := make([]map[string]any, 0, len(files))
 	for _, f := range files {
 		item := map[string]any{
-			"name":    path.Base(f.Path),
-			"path":    f.Path,
-			"isDir":   f.IsDir,
-			"size":    f.Size,
-			"modTime": f.ModTime.Format(time.RFC3339),
+			"name":         path.Base(f.Path),
+			"path":         f.Path,
+			"isDir":        f.IsDir,
+			"size":         f.Size,
+			"modTime":      f.ModTime.Format(time.RFC3339),
+			"capabilities": s.filePathCapabilities(ctx, f.Path, true),
 		}
 		if !f.IsDir && f.ContentHash != "" {
 			item["hash"] = f.ContentHash
@@ -2637,9 +2732,94 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(map[string]any{
-		"path":  filePath,
-		"files": items,
+		"path":         filePath,
+		"capabilities": s.filePathCapabilities(ctx, filePath, navigationRead),
+		"files":        items,
 	}).Write(w, http.StatusOK)
+}
+
+func (s *Server) visibleScopedRootFileInfos(ctx context.Context) ([]*storage.FileInfo, bool, error) {
+	if !s.authEnabled || auth.IsAdmin(ctx) {
+		return nil, false, nil
+	}
+	user := auth.GetUserFromContext(ctx)
+	if user == nil {
+		return nil, false, nil
+	}
+	homeDir, scoped, err := s.currentUserHomeDir(ctx)
+	if err != nil {
+		return nil, true, err
+	}
+	if !scoped {
+		return nil, false, nil
+	}
+
+	seen := make(map[string]struct{})
+	files := make([]*storage.FileInfo, 0)
+	addDirectory := func(targetPath string) error {
+		targetPath = path.Clean(targetPath)
+		if targetPath == "/" {
+			return nil
+		}
+		if _, exists := seen[targetPath]; exists {
+			return nil
+		}
+		info, err := s.fs.Stat(ctx, targetPath)
+		if err != nil {
+			if isStorageNotFound(err) || errors.Is(err, storage.ErrNotDir) {
+				return nil
+			}
+			return err
+		}
+		if info == nil || !info.IsDir {
+			return nil
+		}
+		seen[targetPath] = struct{}{}
+		files = append(files, info)
+		return nil
+	}
+
+	if err := addDirectory(homeDir); err != nil {
+		return nil, true, err
+	}
+	cfg := s.currentConfig()
+	if cfg == nil || len(cfg.Storage.DirectoryAccessRules) == 0 {
+		return files, true, nil
+	}
+	for _, rule := range cfg.Storage.DirectoryAccessRules {
+		rulePath := strings.TrimSpace(rule.Path)
+		if rulePath == "" {
+			continue
+		}
+		rulePath = path.Clean(rulePath)
+		if rulePath == "/" || !directoryAccessRuleAllowsUser(rule, user, pathAccessRead) {
+			continue
+		}
+		exists, err := s.directoryExistsForAccessRule(ctx, rulePath)
+		if err != nil {
+			return nil, true, err
+		}
+		if !exists {
+			continue
+		}
+		if err := addDirectory(topLevelAPIPath(rulePath)); err != nil {
+			return nil, true, err
+		}
+	}
+	return files, true, nil
+}
+
+func topLevelAPIPath(targetPath string) string {
+	targetPath = path.Clean(targetPath)
+	if targetPath == "/" {
+		return ""
+	}
+	trimmed := strings.Trim(targetPath, "/")
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.Split(trimmed, "/")
+	return "/" + parts[0]
 }
 
 func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
@@ -2654,6 +2834,10 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
+	if isMutationRootPath(filePath) {
+		badRequestInvalidPath(w)
+		return
+	}
 	if err := s.authorizeUserWritePath(r.Context(), filePath); err != nil {
 		respondPathAccessError(w, err)
 		return
@@ -2661,6 +2845,11 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 
 	if s.fs == nil {
 		ServiceUnavailable(w, "filesystem not initialized")
+		return
+	}
+
+	if r.ContentLength > DefaultMaxUploadSize {
+		respondPayloadTooLarge(w, fmt.Sprintf("file too large (max %d bytes)", DefaultMaxUploadSize))
 		return
 	}
 
@@ -2757,6 +2946,27 @@ func (s *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
 	} else if !isStorageNotFound(err) {
 		s.respondInternalError(w, "stat directory", err)
 		return
+	}
+
+	parentPath := path.Dir(dirPath)
+	if parentPath != "/" {
+		parentInfo, err := s.fs.Stat(r.Context(), parentPath)
+		if err != nil {
+			if isStorageNotFound(err) {
+				Conflict(w, "parent directory not found")
+				return
+			}
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
+			s.respondInternalError(w, "stat directory parent", err)
+			return
+		}
+		if !parentInfo.IsDir {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
 	}
 
 	if err := s.fs.Mkdir(r.Context(), dirPath); err != nil {
@@ -2897,7 +3107,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
-	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(r.Context(), filePath); err != nil {
 		respondPathAccessError(w, err)
 		return
 	}
@@ -2909,6 +3119,19 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 	versionHash := r.URL.Query().Get("version")
 	forceDownload := r.URL.Query().Get("download") == "true"
+	archiveFormat := strings.TrimSpace(r.URL.Query().Get("archive"))
+	if archiveFormat != "" {
+		if versionHash != "" {
+			BadRequest(w, "versioned archive downloads are not supported")
+			return
+		}
+		if archiveFormat != "zip" {
+			BadRequest(w, "unsupported archive format")
+			return
+		}
+		s.handleDownloadArchive(w, r, filePath)
+		return
+	}
 
 	if versionHash != "" {
 		normalizedHash, err := normalizeHash(versionHash)
@@ -2979,7 +3202,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 		trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 		http.ServeContent(trackingWriter, r, path.Base(filePath), versionModTime, reader)
-		if trackingWriter.writeErr == nil && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
+		if trackingWriter.writeErr == nil && !isDownloadProbeRequest(r) && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
 			s.LogActivity(r, activity.ActionDownload, filePath, map[string]string{"hash": versionHash})
 		}
 		return
@@ -3026,7 +3249,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	// Use http.ServeContent for proper Range support and content type detection
 	trackingWriter := &apiDownloadResponseWriter{ResponseWriter: w}
 	http.ServeContent(trackingWriter, r, path.Base(filePath), snapshotInfo.ModTime, file)
-	if trackingWriter.writeErr == nil && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
+	if trackingWriter.writeErr == nil && !isDownloadProbeRequest(r) && trackingWriter.statusCode != http.StatusNotModified && trackingWriter.statusCode < http.StatusBadRequest {
 		s.LogActivity(r, activity.ActionDownload, filePath, nil)
 	}
 }
@@ -3080,7 +3303,11 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		ServiceUnavailable(w, "filesystem not initialized")
 		return
 	}
+	sourceExists := false
+	var sourceInfo *storage.FileInfo
 	if info, err := s.fs.Stat(r.Context(), fromPath); err == nil {
+		sourceInfo = info
+		sourceExists = true
 		if info.IsDir && pathContainsDescendant(fromPath, toPath) {
 			Conflict(w, "destination cannot be inside source directory")
 			return
@@ -3096,10 +3323,39 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 		s.respondTreeMutationPreflightError(w, "move file", err)
 		return
 	}
+	if sourceExists {
+		if err := s.ensureMoveDestinationAvailable(r.Context(), toPath); err != nil {
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
+			if errors.Is(err, storage.ErrAlreadyExists) {
+				Conflict(w, "resource already exists")
+				return
+			}
+			if isStorageNotFound(err) {
+				s.respondNotFound(w, "move file", err)
+				return
+			}
+			s.respondInternalError(w, "stat move destination", err)
+			return
+		}
+		targetMetadata, err := s.fs.HasVersionMetadataPath(r.Context(), toPath, sourceInfo.IsDir)
+		if err != nil {
+			s.respondInternalError(w, "check move destination metadata", err)
+			return
+		}
+		if targetMetadata {
+			Conflict(w, "resource already exists")
+			return
+		}
+	}
 
+	moveWarning := false
 	if err := s.moveResourceWithQuota(r.Context(), fromPath, toPath); err != nil {
 		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
 			markWorkspaceMutationWarningHeaders(w)
+			moveWarning = true
 		} else {
 			if errors.As(err, new(*quotaExceededError)) {
 				s.sendQuotaExceededAlertEvent(r.Context(), "move", toPath, err)
@@ -3129,12 +3385,22 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log activity
-	s.LogActivityWithWarning(w, r, action, fromPath, map[string]string{"to": toPath})
+	activityDetails := map[string]string{"to": toPath}
+	if moveWarning {
+		activityDetails["persistence_warning"] = "true"
+	}
+	s.LogActivityWithWarning(w, r, action, fromPath, activityDetails)
 
-	NewAPIResponse(map[string]any{
+	responseData := map[string]any{
 		"from": fromPath,
 		"to":   toPath,
-	}).WithMessage("file moved successfully").Write(w, http.StatusOK)
+	}
+	responseMessage := "file moved successfully"
+	if moveWarning {
+		responseData["warning"] = true
+		responseMessage = "resource moved with persistence warning"
+	}
+	NewAPIResponse(responseData).WithMessage(responseMessage).Write(w, http.StatusOK)
 }
 
 // CopyRequest represents a copy request
@@ -3159,7 +3425,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidSourcePath(w)
 		return
 	}
-	if err := s.authorizeUserPath(r.Context(), fromPath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(r.Context(), fromPath); err != nil {
 		respondPathAccessError(w, err)
 		return
 	}
@@ -3215,7 +3481,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "stat copy destination", err)
 		return
 	}
-	if err := s.ensureCopyDestinationParent(r.Context(), toPath); err != nil {
+	if err := s.ensureDestinationParent(r.Context(), toPath); err != nil {
 		if isStorageNotFound(err) {
 			s.respondNotFound(w, "copy resource", err)
 			return
@@ -3281,7 +3547,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 	}).WithMessage("resource copied successfully").Write(w, http.StatusCreated)
 }
 
-func (s *Server) ensureCopyDestinationParent(ctx context.Context, targetPath string) error {
+func (s *Server) ensureDestinationParent(ctx context.Context, targetPath string) error {
 	parentPath := path.Dir(targetPath)
 	info, err := s.fs.Stat(ctx, parentPath)
 	if err != nil {
@@ -3293,8 +3559,140 @@ func (s *Server) ensureCopyDestinationParent(ctx context.Context, targetPath str
 	return nil
 }
 
+func (s *Server) ensureMoveDestinationAvailable(ctx context.Context, targetPath string) error {
+	_, err := s.fs.Stat(ctx, targetPath)
+	if err == nil {
+		return storage.ErrAlreadyExists
+	}
+	if errors.Is(err, storage.ErrNotDir) {
+		return storage.ErrNotDir
+	}
+	if err != nil && !isStorageNotFound(err) {
+		return err
+	}
+	return s.ensureDestinationParent(ctx, targetPath)
+}
+
+func (s *Server) ensureRestoreDestinationAvailable(ctx context.Context, targetPath string) error {
+	_, err := s.fs.Stat(ctx, targetPath)
+	if err == nil {
+		return storage.ErrAlreadyExists
+	}
+	if errors.Is(err, storage.ErrNotDir) {
+		return storage.ErrNotDir
+	}
+	if isStorageNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (s *Server) ensureRestoreMetadataAvailable(ctx context.Context, item *storage.TrashItem, targetPath string) error {
+	if item == nil || !item.HadVersions || targetPath == "" || path.Clean(targetPath) == path.Clean(item.OriginalPath) {
+		return nil
+	}
+
+	if _, err := s.fs.Stat(ctx, item.OriginalPath); err == nil {
+		return storage.ErrAlreadyExists
+	} else if err != nil && !isStorageNotFound(err) && !errors.Is(err, storage.ErrNotDir) {
+		return err
+	}
+
+	targetMetadata, err := s.fs.HasVersionMetadataPath(ctx, targetPath, item.IsDir)
+	if err != nil {
+		return err
+	}
+	if targetMetadata {
+		return storage.ErrAlreadyExists
+	}
+
+	items, err := s.fs.ListTrash(ctx)
+	if err != nil {
+		return err
+	}
+	for _, other := range items {
+		if other == nil || other.ID == item.ID {
+			continue
+		}
+		if !other.HadVersions {
+			continue
+		}
+		if trashItemVersionMetadataOverlaps(item, other) || trashItemVersionMetadataPathOverlaps(targetPath, item.IsDir, other) {
+			return storage.ErrAlreadyExists
+		}
+	}
+	return nil
+}
+
+func trashItemVersionMetadataOverlaps(item, other *storage.TrashItem) bool {
+	if item == nil || other == nil {
+		return false
+	}
+	originalPath := path.Clean(item.OriginalPath)
+	otherPath := path.Clean(other.OriginalPath)
+	if otherPath == originalPath {
+		return true
+	}
+	return item.IsDir && apiPathMatchesOrDescendant(originalPath, otherPath)
+}
+
+func trashItemVersionMetadataPathOverlaps(targetPath string, targetIsDir bool, other *storage.TrashItem) bool {
+	if other == nil || targetPath == "" {
+		return false
+	}
+	cleanTarget := path.Clean(targetPath)
+	otherPath := path.Clean(other.OriginalPath)
+	if otherPath == cleanTarget {
+		return true
+	}
+	return targetIsDir && apiPathMatchesOrDescendant(cleanTarget, otherPath)
+}
+
+func apiPathMatchesOrDescendant(rootPath, candidatePath string) bool {
+	if candidatePath == rootPath {
+		return true
+	}
+	if rootPath == "/" {
+		return strings.HasPrefix(candidatePath, "/")
+	}
+	return strings.HasPrefix(candidatePath, rootPath+"/")
+}
+
+func apiReadDirChildPath(parentPath string, child *storage.FileInfo) (string, string, error) {
+	if child == nil {
+		return "", "", storage.ErrNotFound
+	}
+	cleanParent := path.Clean(parentPath)
+	childPath := child.Path
+	if childPath == "" {
+		childPath = path.Join(cleanParent, child.Name)
+	}
+	cleanChild := path.Clean(childPath)
+	if cleanChild == cleanParent || path.Dir(cleanChild) != cleanParent {
+		return "", "", errInvalidPath
+	}
+	return cleanChild, path.Base(cleanChild), nil
+}
+
+func apiNormalizeReadDirChildren(parentPath string, children []*storage.FileInfo) ([]*storage.FileInfo, error) {
+	normalized := make([]*storage.FileInfo, 0, len(children))
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		childPath, _, err := apiReadDirChildPath(parentPath, child)
+		if err != nil {
+			return nil, err
+		}
+		childInfo := *child
+		childInfo.Path = childPath
+		normalized = append(normalized, &childInfo)
+	}
+	return normalized, nil
+}
+
 func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) error {
-	if err := s.authorizeUserPath(ctx, srcPath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(ctx, srcPath); err != nil {
 		return err
 	}
 	if err := s.authorizeUserWritePath(ctx, dstPath); err != nil {
@@ -3322,8 +3720,11 @@ func (s *Server) copyResource(ctx context.Context, srcPath, dstPath string) erro
 		}
 
 		for _, child := range children {
-			childName := path.Base(child.Path)
-			if err := s.copyResource(ctx, child.Path, path.Join(dstPath, childName)); err != nil {
+			childPath, childName, err := apiReadDirChildPath(srcPath, child)
+			if err != nil {
+				return s.rollbackCopiedDirectory(dstPath, err)
+			}
+			if err := s.copyResource(ctx, childPath, path.Join(dstPath, childName)); err != nil {
 				if errors.As(err, new(*storage.VisibleMutationWarningError)) {
 					copyWarning = mergeCopyWarning(copyWarning, err)
 					continue
@@ -3366,7 +3767,11 @@ func (s *Server) removeCopiedTree(ctx context.Context, targetPath string) error 
 			return err
 		}
 		for _, child := range children {
-			if err := s.removeCopiedTree(ctx, child.Path); err != nil {
+			childPath, _, err := apiReadDirChildPath(targetPath, child)
+			if err != nil {
+				return err
+			}
+			if err := s.removeCopiedTree(ctx, childPath); err != nil {
 				return err
 			}
 		}
@@ -3387,7 +3792,7 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
-	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(r.Context(), filePath); err != nil {
 		respondPathAccessError(w, err)
 		return
 	}
@@ -3457,6 +3862,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 
 	filePath, err = validatePath(filePath)
 	if err != nil {
+		badRequestInvalidPath(w)
+		return
+	}
+	if isMutationRootPath(filePath) {
 		badRequestInvalidPath(w)
 		return
 	}
@@ -3554,19 +3963,29 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	var results []*storage.SearchResult
 	if scoped && !s.hasDirectoryAccessRules() {
 		results, err = s.fs.SearchWithinBase(r.Context(), homeDir, query, limit)
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotDir) {
+			results = nil
+			err = nil
+		}
+	} else if scoped {
+		results, err = s.fs.SearchFiltered(r.Context(), query, limit, func(result *storage.SearchResult) (bool, error) {
+			if result == nil {
+				return false, nil
+			}
+			if err := s.authorizeUserConcreteReadPath(r.Context(), result.Path); err != nil {
+				if errors.Is(err, errPathAccessDenied) || errors.Is(err, errPathOutsideHomeDir) {
+					return false, nil
+				}
+				return false, err
+			}
+			return true, nil
+		})
 	} else {
 		results, err = s.fs.Search(r.Context(), query, limit)
 	}
 	if err != nil {
 		s.respondInternalError(w, "search files", err)
 		return
-	}
-	if !scoped || s.hasDirectoryAccessRules() {
-		results, err = s.filterSearchResultsByHomeDir(r.Context(), results)
-		if err != nil {
-			respondPathAccessError(w, err)
-			return
-		}
 	}
 
 	// Convert to API response format
@@ -3667,9 +4086,40 @@ func addDiskStatsToMap(target map[string]any, stats *storage.DiskStats) {
 		target["disk_mount_source"] = stats.MountSource
 	}
 	if stats.MountOptions != "" {
-		target["disk_mount_options"] = stats.MountOptions
+		target["disk_mount_options"] = sanitizeDiskMountOptions(stats.MountOptions)
 	}
 	target["disk_native_data_checksum_support"] = stats.NativeDataChecksumSupport
+}
+
+func sanitizeDiskMountOptions(options string) string {
+	parts := strings.Split(options, ",")
+	for i, part := range parts {
+		key, value, hasValue := strings.Cut(part, "=")
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey == "" || !isSensitiveMountOptionKey(normalizedKey) {
+			continue
+		}
+		if hasValue {
+			parts[i] = key + "=<redacted>"
+		} else if value != "" {
+			parts[i] = key + "=<redacted>"
+		} else {
+			parts[i] = key
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+func isSensitiveMountOptionKey(key string) bool {
+	switch key {
+	case "credentials", "cred", "password", "passwd", "pass", "username", "user", "secret", "token", "access_token", "oauth_token", "key", "keyfile", "secretkey":
+		return true
+	}
+	return strings.Contains(key, "credential") ||
+		strings.Contains(key, "password") ||
+		strings.Contains(key, "passwd") ||
+		strings.Contains(key, "secret") ||
+		strings.Contains(key, "token")
 }
 
 func (s *Server) alertsDiagnostics(cfg *config.Config) map[string]any {
@@ -3687,7 +4137,7 @@ func (s *Server) alertsDiagnostics(cfg *config.Config) map[string]any {
 		info["cooldown_period"] = cfg.Alerts.CooldownPeriod.String()
 		info["webhook_configured"] = strings.TrimSpace(cfg.Alerts.WebhookURL) != ""
 		info["telegram_configured"] = cfg.Alerts.TelegramEnabled && strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "" && strings.TrimSpace(cfg.Alerts.TelegramChatID) != ""
-		info["email_configured"] = cfg.Alerts.EmailEnabled && strings.TrimSpace(cfg.Alerts.SMTPHost) != "" && len(cfg.Alerts.SMTPTo) > 0
+		info["email_configured"] = emailAlertsConfigured(cfg.Alerts)
 		method := strings.ToUpper(strings.TrimSpace(cfg.Alerts.WebhookMethod))
 		if method == "" {
 			method = http.MethodPost
@@ -3749,6 +4199,14 @@ func (s *Server) diskHealthDiagnostics(cfg *config.Config) map[string]any {
 		}
 	}
 	return info
+}
+
+func emailAlertsConfigured(alerts config.AlertsConfig) bool {
+	return alerts.EmailEnabled &&
+		strings.TrimSpace(alerts.SMTPHost) != "" &&
+		strings.TrimSpace(alerts.SMTPFrom) != "" &&
+		alerts.SMTPPort > 0 &&
+		len(alerts.SMTPTo) > 0
 }
 
 func (s *Server) maintenanceDiagnostics(cfg *config.Config) map[string]any {
@@ -3905,6 +4363,7 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	setDiagnosticsResponseHeaders(w)
 	NewAPIResponse(diag).Write(w, http.StatusOK)
 }
 
@@ -4527,9 +4986,10 @@ func (s *Server) handleGetScrubResult(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request) {
 	cfg := s.currentConfig()
 	export := map[string]any{
-		"export_time": time.Now().Format(time.RFC3339),
-		"version":     s.appVersion,
-		"build_time":  s.buildTime,
+		"schema_version": 1,
+		"export_time":    time.Now().Format(time.RFC3339),
+		"version":        s.appVersion,
+		"build_time":     s.buildTime,
 	}
 
 	// System info
@@ -4621,8 +5081,15 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 
 	// Set filename for download
 	filename := fmt.Sprintf("mnemonas-diagnostics-%s.json", time.Now().Format("20060102-150405"))
+	setDiagnosticsResponseHeaders(w)
 	w.Header().Set("Content-Disposition", formatAttachmentHeader(filename))
 	s.json(w, http.StatusOK, export)
+}
+
+func setDiagnosticsResponseHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
 
 func sanitizeScrubErrorMessage(message string) string {
@@ -4699,11 +5166,13 @@ func (w *apiDownloadResponseWriter) WriteHeader(statusCode int) {
 }
 
 func (w *apiDownloadResponseWriter) Write(p []byte) (int, error) {
-	w.started = true
-	if w.statusCode == 0 {
-		w.statusCode = http.StatusOK
-	}
 	n, err := w.ResponseWriter.Write(p)
+	if err == nil || n > 0 {
+		w.started = true
+		if w.statusCode == 0 {
+			w.statusCode = http.StatusOK
+		}
+	}
 	if err != nil {
 		w.writeErr = err
 	}
@@ -4873,7 +5342,7 @@ func (s *Server) handleGetTrashItem(w http.ResponseWriter, r *http.Request) {
 		s.respondInternalError(w, "get trash item", err)
 		return
 	}
-	if err := s.authorizeUserPath(r.Context(), item.OriginalPath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(r.Context(), item.OriginalPath); err != nil {
 		s.respondNotFound(w, "get trash item", storage.ErrNotFound)
 		return
 	}
@@ -4900,6 +5369,10 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		var err error
 		newPath, err = validatePath(newPath)
 		if err != nil {
+			badRequestInvalidPath(w)
+			return
+		}
+		if isMutationRootPath(newPath) {
 			badRequestInvalidPath(w)
 			return
 		}
@@ -4942,6 +5415,40 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 	if newPath != "" {
 		quotaTargetPath = newPath
 	}
+	if err := s.ensureRestoreMetadataAvailable(r.Context(), item, quotaTargetPath); err != nil {
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			Conflict(w, "resource already exists")
+			return
+		}
+		s.respondInternalError(w, "check restore metadata", err)
+		return
+	}
+	if newPath != "" {
+		if err := s.ensureDestinationParent(r.Context(), newPath); err != nil {
+			if isStorageNotFound(err) {
+				Conflict(w, "parent directory not found")
+				return
+			}
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
+			s.respondInternalError(w, "stat restore destination parent", err)
+			return
+		}
+	}
+	if err := s.ensureRestoreDestinationAvailable(r.Context(), quotaTargetPath); err != nil {
+		if errors.Is(err, storage.ErrNotDir) {
+			Conflict(w, "parent path is not a directory")
+			return
+		}
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			Conflict(w, "resource already exists")
+			return
+		}
+		s.respondInternalError(w, "stat restore destination", err)
+		return
+	}
 
 	err = s.restoreFromTrashWithQuota(r.Context(), item, quotaTargetPath, func() error {
 		if newPath != "" {
@@ -4953,26 +5460,32 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		return s.fs.RestoreFromTrash(r.Context(), id)
 	})
 
+	restorePersistenceWarning := false
 	if err != nil {
-		if errors.As(err, new(*quotaExceededError)) {
-			s.sendQuotaExceededAlertEvent(r.Context(), "trash_restore", quotaTargetPath, err)
-			respondQuotaExceeded(w, err)
+		if errors.As(err, new(*storage.VisibleMutationWarningError)) {
+			markWorkspaceMutationWarningHeaders(w)
+			restorePersistenceWarning = true
+		} else {
+			if errors.As(err, new(*quotaExceededError)) {
+				s.sendQuotaExceededAlertEvent(r.Context(), "trash_restore", quotaTargetPath, err)
+				respondQuotaExceeded(w, err)
+				return
+			}
+			if errors.Is(err, storage.ErrNotDir) {
+				Conflict(w, "parent path is not a directory")
+				return
+			}
+			if errors.Is(err, storage.ErrAlreadyExists) {
+				Conflict(w, "resource already exists")
+				return
+			}
+			if isStorageNotFound(err) {
+				s.respondNotFound(w, "restore from trash", err)
+				return
+			}
+			s.respondInternalError(w, "restore from trash", err)
 			return
 		}
-		if errors.Is(err, storage.ErrNotDir) {
-			Conflict(w, "parent path is not a directory")
-			return
-		}
-		if errors.Is(err, storage.ErrAlreadyExists) {
-			Conflict(w, "resource already exists")
-			return
-		}
-		if isStorageNotFound(err) {
-			s.respondNotFound(w, "restore from trash", err)
-			return
-		}
-		s.respondInternalError(w, "restore from trash", err)
-		return
 	}
 
 	activityDetails := map[string]string(nil)
@@ -4981,11 +5494,23 @@ func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) 
 		"id":       id,
 		"restored": true,
 	}
+	if restorePersistenceWarning {
+		activityDetails = map[string]string{"persistence_warning": "true"}
+		message = "file restored with persistence warning"
+		responseData["warning"] = true
+	}
 	if err := s.restoreDeletedPathState(item.OriginalPath, activityPath, item.RestoreData); err != nil {
 		markTrashRestoreMetadataWarningHeaders(w)
 		s.logger.Warn().Err(err).Str("path", activityPath).Msg("failed to restore trash-linked metadata")
-		activityDetails = map[string]string{"metadata_restore": "failed"}
-		message = "file restored with metadata warning"
+		if activityDetails == nil {
+			activityDetails = map[string]string{}
+		}
+		activityDetails["metadata_restore"] = "failed"
+		if restorePersistenceWarning {
+			message = "file restored with warnings"
+		} else {
+			message = "file restored with metadata warning"
+		}
 		responseData["warning"] = true
 	}
 
@@ -5210,7 +5735,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		badRequestInvalidPath(w)
 		return
 	}
-	if err := s.authorizeUserPath(r.Context(), filePath); err != nil {
+	if err := s.authorizeUserConcreteReadPath(r.Context(), filePath); err != nil {
 		respondPathAccessError(w, err)
 		return
 	}
@@ -5321,10 +5846,9 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters
 	limitStr := r.URL.Query().Get("limit")
 	offsetStr := r.URL.Query().Get("offset")
-	actionFilter := r.URL.Query().Get("action")
-	userFilter := r.URL.Query().Get("user")
-	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
-		userFilter = currentUserFilter
+	filter, ok := parseActivityQueryFilter(w, r)
+	if !ok {
+		return
 	}
 
 	limit := 50
@@ -5347,6 +5871,11 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		offset = o
 	}
 
+	currentUserFilter := s.currentActivityUserFilter(r)
+	if currentUserFilter != "" {
+		filter.User = currentUserFilter
+	}
+
 	if s.activityConfiguredButUnavailable() {
 		ServiceUnavailable(w, "activity log unavailable")
 		return
@@ -5362,8 +5891,17 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
-		entries, _ := s.activity.List(s.activity.Count(), 0, activity.ActionType(actionFilter), currentUserFilter)
+	if currentUserFilter != "" {
+		if !s.currentUserCanUseActivityPathFilter(r.Context(), filter.Path) {
+			NewAPIResponse(map[string]any{
+				"items":  []any{},
+				"total":  0,
+				"limit":  limit,
+				"offset": offset,
+			}).Write(w, http.StatusOK)
+			return
+		}
+		entries, _ := s.activity.ListFiltered(s.activity.Count(), 0, filter)
 		entries, err := s.filterActivityEntriesByHomeDir(r.Context(), entries)
 		if err != nil {
 			s.respondHomeDirFilterError(w, "filter activity by home directory", err)
@@ -5379,7 +5917,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, total := s.activity.List(limit, offset, activity.ActionType(actionFilter), userFilter)
+	entries, total := s.activity.ListFiltered(limit, offset, filter)
 
 	NewAPIResponse(map[string]any{
 		"items":  entries,
@@ -5391,6 +5929,11 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 
 // handleActivityStats returns activity statistics
 func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
+	filter, ok := parseActivityQueryFilter(w, r)
+	if !ok {
+		return
+	}
+
 	if s.activityConfiguredButUnavailable() {
 		ServiceUnavailable(w, "activity log unavailable")
 		return
@@ -5407,7 +5950,12 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if currentUserFilter := s.currentActivityUserFilter(r); currentUserFilter != "" {
-		entries, _ := s.activity.List(s.activity.Count(), 0, "", currentUserFilter)
+		filter.User = currentUserFilter
+		if !s.currentUserCanUseActivityPathFilter(r.Context(), filter.Path) {
+			NewAPIResponse(buildActivityStats(nil)).Write(w, http.StatusOK)
+			return
+		}
+		entries, _ := s.activity.ListFiltered(s.activity.Count(), 0, filter)
 		entries, err := s.filterActivityEntriesByHomeDir(r.Context(), entries)
 		if err != nil {
 			s.respondHomeDirFilterError(w, "filter activity stats by home directory", err)
@@ -5417,8 +5965,93 @@ func (s *Server) handleActivityStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := s.activity.Statistics()
-	NewAPIResponse(stats).Write(w, http.StatusOK)
+	entries, _ := s.activity.ListFiltered(s.activity.Count(), 0, filter)
+	NewAPIResponse(buildActivityStats(entries)).Write(w, http.StatusOK)
+}
+
+func parseActivityQueryFilter(w http.ResponseWriter, r *http.Request) (activity.ListFilter, bool) {
+	query := r.URL.Query()
+	pathFilter, ok := parseActivityPathQueryParam(w, query.Get("path"))
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	actionFilter, ok := parseActivityActionQueryParam(w, query.Get("action"))
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	groupActions, ok := parseActivityActionGroupQueryParam(w, query.Get("action_group"))
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	since, ok := parseActivityTimeQueryParam(w, query.Get("since"), "since")
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	until, ok := parseActivityTimeQueryParam(w, query.Get("until"), "until")
+	if !ok {
+		return activity.ListFilter{}, false
+	}
+	if since != nil && until != nil && since.After(*until) {
+		BadRequest(w, "since parameter must be before or equal to until parameter")
+		return activity.ListFilter{}, false
+	}
+
+	return activity.ListFilter{
+		Action:  actionFilter,
+		Actions: groupActions,
+		User:    query.Get("user"),
+		Path:    pathFilter,
+		Since:   since,
+		Until:   until,
+	}, true
+}
+
+func parseActivityActionQueryParam(w http.ResponseWriter, value string) (activity.ActionType, bool) {
+	if strings.TrimSpace(value) == "" {
+		return "", true
+	}
+	action := activity.ActionType(strings.TrimSpace(value))
+	if !activity.IsKnownAction(action) {
+		BadRequest(w, "action parameter is invalid")
+		return "", false
+	}
+	return action, true
+}
+
+func parseActivityActionGroupQueryParam(w http.ResponseWriter, value string) ([]activity.ActionType, bool) {
+	if strings.TrimSpace(value) == "" {
+		return nil, true
+	}
+	actions, ok := activity.ActionsForGroup(activity.ActionGroup(strings.TrimSpace(value)))
+	if !ok {
+		BadRequest(w, "action_group parameter is invalid")
+		return nil, false
+	}
+	return actions, true
+}
+
+func parseActivityPathQueryParam(w http.ResponseWriter, value string) (string, bool) {
+	if strings.TrimSpace(value) == "" {
+		return "", true
+	}
+	activityPath, err := validatePath(value)
+	if err != nil {
+		BadRequest(w, "path parameter is invalid")
+		return "", false
+	}
+	return activityPath, true
+}
+
+func parseActivityTimeQueryParam(w http.ResponseWriter, value, name string) (*time.Time, bool) {
+	if value == "" {
+		return nil, true
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		BadRequest(w, fmt.Sprintf("%s parameter must be an RFC3339 timestamp", name))
+		return nil, false
+	}
+	return &parsed, true
 }
 
 func (s *Server) currentActivityUserFilter(r *http.Request) string {
@@ -5430,6 +6063,16 @@ func (s *Server) currentActivityUserFilter(r *http.Request) string {
 		return ""
 	}
 	return claims.Username
+}
+
+func (s *Server) currentUserCanUseActivityPathFilter(ctx context.Context, filterPath string) bool {
+	if filterPath == "" || !s.authEnabled || auth.IsAdmin(ctx) {
+		return true
+	}
+	if filterPath == "/" {
+		return true
+	}
+	return s.authorizeUserConcreteReadPath(ctx, filterPath) == nil
 }
 
 func buildActivityStats(entries []activity.Entry) map[string]any {
@@ -5458,7 +6101,69 @@ func buildActivityStats(entries []activity.Entry) map[string]any {
 	stats["today"] = todayCount
 	stats["by_action"] = actionCounts
 	stats["by_user"] = userCounts
+	stats["risk_summary"] = buildActivityRiskSummary(entries, today)
 	return stats
+}
+
+func buildActivityRiskSummary(entries []activity.Entry, today time.Time) map[string]any {
+	riskActions, _ := activity.ActionsForGroup(activity.ActionGroupRisk)
+	riskSet := make(map[activity.ActionType]struct{}, len(riskActions))
+	for _, action := range riskActions {
+		riskSet[action] = struct{}{}
+	}
+
+	total := 0
+	todayCount := 0
+	riskTimes := make([]time.Time, 0)
+	for _, entry := range entries {
+		if _, ok := riskSet[entry.Action]; !ok {
+			continue
+		}
+		total++
+		if !entry.Timestamp.Before(today) {
+			todayCount++
+		}
+		riskTimes = append(riskTimes, entry.Timestamp)
+	}
+
+	sort.Slice(riskTimes, func(i, j int) bool {
+		return riskTimes[i].Before(riskTimes[j])
+	})
+
+	maxCount, startedAt, endedAt := maxActivityWindow(riskTimes, activityRiskWindow)
+	summary := map[string]any{
+		"total":   total,
+		"today":   todayCount,
+		"max_10m": maxCount,
+	}
+	if maxCount > 0 {
+		summary["max_10m_started_at"] = startedAt.Format(time.RFC3339)
+		summary["max_10m_ended_at"] = endedAt.Format(time.RFC3339)
+	}
+	return summary
+}
+
+func maxActivityWindow(timestamps []time.Time, window time.Duration) (int, time.Time, time.Time) {
+	if len(timestamps) == 0 {
+		return 0, time.Time{}, time.Time{}
+	}
+
+	left := 0
+	maxCount := 0
+	var startedAt time.Time
+	var endedAt time.Time
+	for right, current := range timestamps {
+		for left <= right && current.Sub(timestamps[left]) > window {
+			left++
+		}
+		count := right - left + 1
+		if count > maxCount {
+			maxCount = count
+			startedAt = timestamps[left]
+			endedAt = current
+		}
+	}
+	return maxCount, startedAt, endedAt
 }
 
 func (s *Server) activityConfiguredButUnavailable() bool {
@@ -5645,10 +6350,7 @@ func (s *Server) sendLoginRateLimitAlert(username, clientIP string) {
 		return
 	}
 
-	username = strings.TrimSpace(username)
-	if username == "" {
-		username = "unknown"
-	}
+	username = loginRateLimitAlertUsernameLabel(username)
 	clientIP = strings.TrimSpace(clientIP)
 	if clientIP == "" {
 		clientIP = "unknown"
@@ -5677,6 +6379,26 @@ func (s *Server) sendLoginRateLimitAlert(username, clientIP string) {
 			s.logger.Warn().Err(err).Str("event_type", event.Type).Msg("failed to send login rate-limit alert event")
 		}
 	}()
+}
+
+func loginRateLimitAlertUsernameLabel(username string) string {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return "unknown"
+	}
+	if username == "." || username == ".." {
+		return "invalid username"
+	}
+	if utf8.RuneCountInString(username) > maxLoginAlertUsernameRunes {
+		return "invalid username"
+	}
+	if strings.ContainsAny(username, "/\\") {
+		return "invalid username"
+	}
+	if strings.IndexFunc(username, unicode.IsControl) >= 0 {
+		return "invalid username"
+	}
+	return username
 }
 
 func (s *Server) reserveLoginRateLimitAlert(username, clientIP string) bool {
@@ -5819,13 +6541,78 @@ func securityTCPAddressHost(address string) string {
 	return ""
 }
 
-func securityShareBaseURLUsesHTTPS(baseURL string) bool {
+func securityShareBaseURLPublicRisk(baseURL string) string {
 	trimmed := strings.TrimSpace(baseURL)
 	if trimmed == "" {
-		return false
+		return "empty"
 	}
 	parsed, err := url.Parse(trimmed)
-	return err == nil && strings.EqualFold(parsed.Scheme, "https")
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "invalid"
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return "not_https"
+	}
+	if parsed.User != nil {
+		return "userinfo"
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(trimmed, "#") {
+		return "query_or_fragment"
+	}
+	if port := parsed.Port(); port != "" && port != "443" {
+		return "non_default_https_port"
+	}
+	if !securityShareBaseURLHostIsValid(parsed.Hostname()) {
+		return "invalid_host"
+	}
+	return ""
+}
+
+func securityShareBaseURLHostIsValid(host string) bool {
+	normalized := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if normalized == "" || len(normalized) > 253 {
+		return false
+	}
+	if net.ParseIP(normalized) != nil {
+		return true
+	}
+	labels := strings.Split(normalized, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func securityNormalizedHostName(host string) string {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return ""
+	}
+	if parsedHost, _, err := net.SplitHostPort(trimmed); err == nil {
+		trimmed = parsedHost
+	}
+	trimmed = strings.TrimPrefix(strings.TrimSuffix(trimmed, "]"), "[")
+	trimmed = strings.TrimSuffix(trimmed, ".")
+	return strings.ToLower(trimmed)
+}
+
+func securityShareBaseURLHost(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return ""
+	}
+	return securityNormalizedHostName(parsed.Hostname())
 }
 
 func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) {
@@ -5852,7 +6639,8 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 	initialPasswordFile := filepath.Join(filepath.Dir(cfg.Auth.UsersFile), "initial-password.txt")
 	forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
 	remotePublic := securityRemoteIPIsPublic(remoteIP)
-	unsafeNoAuthRisk := cfg.Security.AllowUnsafeNoAuth && !serverLoopback && (!s.authEnabled || (cfg.WebDAV.Enabled && strings.EqualFold(cfg.WebDAV.AuthType, "none")))
+	webDAVAuthType := config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType)
+	unsafeNoAuthRisk := cfg.Security.AllowUnsafeNoAuth && !serverLoopback && (!s.authEnabled || (cfg.WebDAV.Enabled && webDAVAuthType == "none"))
 
 	checks := make([]securityCheckItem, 0, 14)
 
@@ -5888,7 +6676,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 				"allow_unsafe_no_auth": cfg.Security.AllowUnsafeNoAuth,
 				"auth_enabled":         s.authEnabled,
 				"webdav_enabled":       cfg.WebDAV.Enabled,
-				"webdav_auth_type":     cfg.WebDAV.AuthType,
+				"webdav_auth_type":     webDAVAuthType,
 			},
 		})
 	} else {
@@ -6190,9 +6978,9 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Title:   "WebDAV 未启用",
 			Message: "当前没有额外的 WebDAV 暴露面。",
 		})
-	case strings.EqualFold(cfg.WebDAV.AuthType, "basic") || strings.EqualFold(cfg.WebDAV.AuthType, "users"):
+	case webDAVAuthType == "basic" || webDAVAuthType == "users":
 		message := "WebDAV 入口使用独立 Basic 凭据。"
-		if strings.EqualFold(cfg.WebDAV.AuthType, "users") {
+		if webDAVAuthType == "users" {
 			message = "WebDAV 入口使用 MnemoNAS 用户账号，并按角色、home_dir 和配额限制访问。"
 		}
 		checks = append(checks, securityCheckItem{
@@ -6202,11 +6990,11 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Message: message,
 			Details: map[string]interface{}{
 				"prefix":    cfg.WebDAV.Prefix,
-				"auth_type": cfg.WebDAV.AuthType,
+				"auth_type": webDAVAuthType,
 				"read_only": cfg.WebDAV.ReadOnly,
 			},
 		})
-	case strings.EqualFold(cfg.WebDAV.AuthType, "none") && serverLoopback:
+	case webDAVAuthType == "none" && serverLoopback:
 		checks = append(checks, securityCheckItem{
 			ID:      "webdav_auth",
 			Status:  securityCheckWarning,
@@ -6214,7 +7002,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Message: "当前 Web 服务仅监听本机；如经反向代理公开 WebDAV，请在代理层或 WebDAV 配置中启用认证。",
 			Details: map[string]interface{}{
 				"prefix":    cfg.WebDAV.Prefix,
-				"auth_type": cfg.WebDAV.AuthType,
+				"auth_type": webDAVAuthType,
 				"read_only": cfg.WebDAV.ReadOnly,
 			},
 		})
@@ -6226,7 +7014,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Message: "WebDAV 已启用但认证方式不是 basic 或 users，公网访问前必须启用认证或关闭 WebDAV。",
 			Details: map[string]interface{}{
 				"prefix":    cfg.WebDAV.Prefix,
-				"auth_type": cfg.WebDAV.AuthType,
+				"auth_type": webDAVAuthType,
 				"read_only": cfg.WebDAV.ReadOnly,
 			},
 		})
@@ -6259,6 +7047,9 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
+	shareBaseURLRisk := securityShareBaseURLPublicRisk(cfg.Share.BaseURL)
+	shareBaseURLHost := securityShareBaseURLHost(cfg.Share.BaseURL)
+	requestHost := securityNormalizedHostName(r.Host)
 	switch {
 	case !cfg.Share.Enabled:
 		checks = append(checks, securityCheckItem{
@@ -6267,7 +7058,19 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			Title:   "分享功能未启用",
 			Message: "当前不会生成公开分享链接。",
 		})
-	case securityShareBaseURLUsesHTTPS(cfg.Share.BaseURL):
+	case shareBaseURLRisk == "" && requestHost != "" && shareBaseURLHost != "" && shareBaseURLHost != requestHost:
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckWarning,
+			Title:   "分享基础 URL 域名与当前访问域名不同",
+			Message: "分享基础 URL 使用其他域名，公网发布前需要确认该域名同样具备 HTTPS、认证和防火墙保护。",
+			Details: map[string]interface{}{
+				"base_url":      cfg.Share.BaseURL,
+				"base_url_host": shareBaseURLHost,
+				"request_host":  requestHost,
+			},
+		})
+	case shareBaseURLRisk == "":
 		checks = append(checks, securityCheckItem{
 			ID:      "share_base_url",
 			Status:  securityCheckPass,
@@ -6277,12 +7080,72 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 				"base_url": cfg.Share.BaseURL,
 			},
 		})
-	case strings.TrimSpace(cfg.Share.BaseURL) == "" && requestSchemeValue == "https":
+	case shareBaseURLRisk == "empty":
 		checks = append(checks, securityCheckItem{
 			ID:      "share_base_url",
 			Status:  securityCheckWarning,
 			Title:   "分享基础 URL 未固定",
-			Message: "当前访问是 HTTPS，但建议配置固定的公网基础 URL，避免从内网地址生成分享链接。",
+			Message: "建议配置固定的公网基础 URL，避免从内网地址生成分享链接。",
+		})
+	case shareBaseURLRisk == "not_https":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 未使用 HTTPS",
+			Message: "公开分享链接必须使用 HTTPS 基础地址。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	case shareBaseURLRisk == "invalid":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 无效",
+			Message: "公开分享链接基础地址必须是完整的 HTTP 或 HTTPS URL。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	case shareBaseURLRisk == "invalid_host":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 主机名无效",
+			Message: "公开分享链接基础地址必须使用有效主机名或 IP，不能包含空标签、下划线或多余尾点。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	case shareBaseURLRisk == "userinfo":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 包含用户信息",
+			Message: "公开分享链接不能包含用户名、密码或其他 userinfo。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	case shareBaseURLRisk == "query_or_fragment":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 包含查询参数或片段",
+			Message: "公开分享链接基础地址不能包含查询参数或片段，否则会生成错误的分享链接。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
+		})
+	case shareBaseURLRisk == "non_default_https_port":
+		checks = append(checks, securityCheckItem{
+			ID:      "share_base_url",
+			Status:  securityCheckBlock,
+			Title:   "分享基础 URL 使用非标准 HTTPS 端口",
+			Message: "公开分享链接应使用 HTTPS 默认端口 443，避免要求公网额外开放分享端口。",
+			Details: map[string]interface{}{
+				"base_url": cfg.Share.BaseURL,
+			},
 		})
 	default:
 		checks = append(checks, securityCheckItem{
@@ -6348,7 +7211,7 @@ func (s *Server) handleGetSecurityCheck(w http.ResponseWriter, r *http.Request) 
 			"dataplane_grpc_addr":  cfg.DataPlane.GRPCAddress,
 			"dataplane_http_addr":  dataplaneHTTPAddress,
 			"webdav_enabled":       cfg.WebDAV.Enabled,
-			"webdav_auth_type":     cfg.WebDAV.AuthType,
+			"webdav_auth_type":     webDAVAuthType,
 			"smb_enabled":          cfg.SMB.Enabled,
 			"share_enabled":        cfg.Share.Enabled,
 			"allow_unsafe_no_auth": cfg.Security.AllowUnsafeNoAuth,
@@ -6366,6 +7229,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	webDAVAuthType := config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType)
+	webhookHeaders := settingsWebhookHeadersForResponse(cfg.Alerts.WebhookHeaders)
 	settings := map[string]interface{}{
 		"server": map[string]interface{}{
 			"host":                cfg.Server.Host,
@@ -6409,7 +7274,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"runtime_enabled": s.currentActiveWebDAV().Enabled,
 			"prefix":          cfg.WebDAV.Prefix,
 			"read_only":       cfg.WebDAV.ReadOnly,
-			"auth_type":       cfg.WebDAV.AuthType,
+			"auth_type":       webDAVAuthType,
 			"username":        cfg.WebDAV.Username,
 		},
 		"share": map[string]interface{}{
@@ -6430,9 +7295,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"critical_pct":                  cfg.Alerts.CriticalPct,
 			"min_free_bytes":                cfg.Alerts.MinFreeBytes,
 			"cooldown_period":               cfg.Alerts.CooldownPeriod.String(),
-			"webhook_url":                   cfg.Alerts.WebhookURL,
+			"webhook_url":                   settingsWebhookURLForResponse(cfg.Alerts.WebhookURL),
+			"webhook_url_configured":        strings.TrimSpace(cfg.Alerts.WebhookURL) != "",
 			"webhook_method":                cfg.Alerts.WebhookMethod,
-			"webhook_headers":               settingsStringSlice(cfg.Alerts.WebhookHeaders),
+			"webhook_headers":               webhookHeaders,
+			"webhook_headers_configured":    len(webhookHeaders) > 0,
 			"telegram_enabled":              cfg.Alerts.TelegramEnabled,
 			"telegram_bot_token_configured": strings.TrimSpace(cfg.Alerts.TelegramBotToken) != "",
 			"telegram_chat_id":              cfg.Alerts.TelegramChatID,
@@ -6477,6 +7344,82 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	NewAPIResponse(settings).Write(w, http.StatusOK)
+}
+
+func settingsWebhookURLForResponse(webhookURL string) string {
+	if strings.TrimSpace(webhookURL) == "" {
+		return ""
+	}
+	return redactedSettingsSecretValue
+}
+
+func resolveSettingsWebhookURL(existing, requested string) (string, error) {
+	trimmed := strings.TrimSpace(requested)
+	if trimmed != redactedSettingsSecretValue {
+		return trimmed, nil
+	}
+	if strings.TrimSpace(existing) == "" {
+		return "", errors.New("invalid alerts.webhook_url redacted placeholder")
+	}
+	return existing, nil
+}
+
+func settingsWebhookHeadersForResponse(headers []string) []string {
+	redacted := make([]string, 0, len(headers))
+	for _, header := range headers {
+		key, _, ok := splitSettingsWebhookHeader(header)
+		if !ok {
+			continue
+		}
+		redacted = append(redacted, key+": "+redactedSettingsSecretValue)
+	}
+	return redacted
+}
+
+func resolveSettingsWebhookHeaders(existing, requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		return []string{}, nil
+	}
+
+	usedExisting := make([]bool, len(existing))
+	resolved := make([]string, 0, len(requested))
+	for _, header := range requested {
+		key, value, ok := splitSettingsWebhookHeader(header)
+		if ok && value == redactedSettingsSecretValue {
+			preserved, found := nextMatchingSettingsWebhookHeader(existing, usedExisting, key)
+			if !found {
+				return nil, fmt.Errorf("invalid alerts.webhook_headers redacted placeholder for %q", key)
+			}
+			resolved = append(resolved, preserved)
+			continue
+		}
+		resolved = append(resolved, strings.TrimSpace(header))
+	}
+	return resolved, nil
+}
+
+func nextMatchingSettingsWebhookHeader(existing []string, used []bool, key string) (string, bool) {
+	for i, header := range existing {
+		if used[i] {
+			continue
+		}
+		existingKey, _, ok := splitSettingsWebhookHeader(header)
+		if ok && strings.EqualFold(existingKey, key) {
+			used[i] = true
+			return strings.TrimSpace(header), true
+		}
+	}
+	return "", false
+}
+
+func splitSettingsWebhookHeader(header string) (string, string, bool) {
+	key, value, ok := strings.Cut(strings.TrimSpace(header), ":")
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if !ok || key == "" || value == "" {
+		return "", "", false
+	}
+	return key, value, true
 }
 
 type pathAccessCheckRequest struct {
@@ -6929,7 +7872,7 @@ func cdcUpdateMayRequireRestart(req CDCSettingsUpdate, currentConfig, updatedCon
 }
 
 func (s *Server) validateWebDAVIdentity(cfg config.Config) error {
-	if !s.authEnabled || s.userStore == nil || !cfg.WebDAV.Enabled || !strings.EqualFold(cfg.WebDAV.AuthType, "basic") {
+	if !s.authEnabled || s.userStore == nil || !cfg.WebDAV.Enabled || config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType) != "basic" {
 		return nil
 	}
 
@@ -7220,7 +8163,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			updatedConfig.Alerts.CooldownPeriod = d
 		}
 		if req.Alerts.WebhookURL != nil {
-			updatedConfig.Alerts.WebhookURL = strings.TrimSpace(*req.Alerts.WebhookURL)
+			resolved, err := resolveSettingsWebhookURL(currentConfig.Alerts.WebhookURL, *req.Alerts.WebhookURL)
+			if err != nil {
+				BadRequest(w, err.Error())
+				return
+			}
+			updatedConfig.Alerts.WebhookURL = resolved
 		}
 		if req.Alerts.WebhookMethod != nil {
 			updatedConfig.Alerts.WebhookMethod = strings.ToUpper(strings.TrimSpace(*req.Alerts.WebhookMethod))
@@ -7234,7 +8182,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 				}
 				cleaned = append(cleaned, trimmed)
 			}
-			updatedConfig.Alerts.WebhookHeaders = cleaned
+			resolved, err := resolveSettingsWebhookHeaders(currentConfig.Alerts.WebhookHeaders, cleaned)
+			if err != nil {
+				BadRequest(w, err.Error())
+				return
+			}
+			updatedConfig.Alerts.WebhookHeaders = resolved
 		}
 		if req.Alerts.TelegramEnabled != nil {
 			updatedConfig.Alerts.TelegramEnabled = *req.Alerts.TelegramEnabled
@@ -7376,7 +8329,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			updatedConfig.WebDAV.ReadOnly = *req.WebDAV.ReadOnly
 		}
 		if req.WebDAV.AuthType != nil {
-			updatedConfig.WebDAV.AuthType = *req.WebDAV.AuthType
+			updatedConfig.WebDAV.AuthType = config.NormalizeWebDAVAuthType(*req.WebDAV.AuthType)
 		}
 		if req.WebDAV.Username != nil {
 			updatedConfig.WebDAV.Username = *req.WebDAV.Username
@@ -7613,11 +8566,11 @@ func (s *Server) handleGetWebDAVCredentials(w http.ResponseWriter, r *http.Reque
 	resp := WebDAVCredentialsResponse{
 		Enabled:  runtimeCfg.Enabled,
 		URL:      formatWebDAVPrefix(runtimeCfg.Prefix),
-		AuthType: runtimeCfg.AuthType,
+		AuthType: config.NormalizeWebDAVAuthType(runtimeCfg.AuthType),
 	}
 
 	// Only include credentials if WebDAV is enabled and using basic auth
-	if runtimeCfg.Enabled && runtimeCfg.AuthType == "basic" {
+	if runtimeCfg.Enabled && config.NormalizeWebDAVAuthType(runtimeCfg.AuthType) == "basic" {
 		resp.Username = runtimeCfg.Username
 		if resp.Username == "" {
 			resp.Username = "admin"
@@ -7677,7 +8630,7 @@ func (s *Server) handleGetSetupStatus(w http.ResponseWriter, r *http.Request) {
 		AuthEnabled:    s.authEnabled,
 		ShareEnabled:   cfg.Share.Enabled,
 		WebDAVEnabled:  cfg.WebDAV.Enabled,
-		WebDAVAuthType: cfg.WebDAV.AuthType,
+		WebDAVAuthType: config.NormalizeWebDAVAuthType(cfg.WebDAV.AuthType),
 	}
 
 	s.json(w, http.StatusOK, resp)
@@ -7758,6 +8711,29 @@ func writeShareErrorResponse(w http.ResponseWriter, status int, message, code st
 			"message": message,
 		},
 	})
+}
+
+func setPublicShareResponseHeaders(w http.ResponseWriter) {
+	header := w.Header()
+	header.Set("Cache-Control", "private, no-cache")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Referrer-Policy", "no-referrer")
+	appendVaryHeaderToken(header, "Cookie")
+}
+
+func appendVaryHeaderToken(header http.Header, token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	for _, value := range header.Values("Vary") {
+		for _, existing := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(existing), token) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", token)
 }
 
 func writeFavoritesErrorResponse(w http.ResponseWriter, status int, message, code string) {
@@ -7958,6 +8934,7 @@ func getFavoriteUserIdentifiersFromRequest(ctx context.Context) (string, []strin
 }
 
 func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
+	setPublicShareResponseHeaders(w)
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -7974,6 +8951,7 @@ func (s *Server) handleAccessShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Request) {
+	setPublicShareResponseHeaders(w)
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -7990,6 +8968,7 @@ func (s *Server) handleAccessShareWithPassword(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
+	setPublicShareResponseHeaders(w)
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -8006,6 +8985,7 @@ func (s *Server) handleDownloadShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request) {
+	setPublicShareResponseHeaders(w)
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -8022,6 +9002,7 @@ func (s *Server) handleDownloadShareFile(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleListShareItems(w http.ResponseWriter, r *http.Request) {
+	setPublicShareResponseHeaders(w)
 	if !s.isShareFeatureEnabled() {
 		s.writeShareFeatureDisabled(w, http.StatusGone)
 		return
@@ -8195,7 +9176,7 @@ func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if favoritePath != "" {
-		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+		if err := s.authorizeUserConcreteReadPath(r.Context(), favoritePath); err != nil {
 			respondPathAccessError(w, err)
 			return
 		}
@@ -8219,11 +9200,15 @@ func (s *Server) handleCheckFavorite(w http.ResponseWriter, r *http.Request) {
 	}
 	favoritePath, err := readFavoriteQueryPath(r)
 	if err != nil {
+		if errors.Is(err, errFavoriteMissingPath) {
+			writeFavoritesErrorResponse(w, http.StatusBadRequest, "path query parameter is required", "MISSING_PATH")
+			return
+		}
 		badRequestInvalidPath(w)
 		return
 	}
 	if favoritePath != "" {
-		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+		if err := s.authorizeUserConcreteReadPath(r.Context(), favoritePath); err != nil {
 			respondPathAccessError(w, err)
 			return
 		}
@@ -8242,6 +9227,10 @@ func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 	favoritePaths, err := readFavoriteBatchPaths(r)
 	if err != nil {
+		if errors.Is(err, errFavoriteMissingPath) {
+			writeFavoritesErrorResponse(w, http.StatusBadRequest, "paths must not contain empty values", "MISSING_PATH")
+			return
+		}
 		if errors.Is(err, errInvalidPath) {
 			badRequestInvalidPath(w)
 			return
@@ -8250,7 +9239,7 @@ func (s *Server) handleCheckFavorites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, favoritePath := range favoritePaths {
-		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+		if err := s.authorizeUserConcreteReadPath(r.Context(), favoritePath); err != nil {
 			respondPathAccessError(w, err)
 			return
 		}
@@ -8273,7 +9262,7 @@ func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if favoritePath != "" {
-		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+		if err := s.authorizeUserConcreteReadPath(r.Context(), favoritePath); err != nil {
 			respondPathAccessError(w, err)
 			return
 		}
@@ -8301,7 +9290,7 @@ func (s *Server) handleUpdateFavoriteNote(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if favoritePath != "" {
-		if err := s.authorizeUserPath(r.Context(), favoritePath); err != nil {
+		if err := s.authorizeUserConcreteReadPath(r.Context(), favoritePath); err != nil {
 			respondPathAccessError(w, err)
 			return
 		}
@@ -8341,7 +9330,7 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 	}
 	sharePath = parsedPath
 	if sharePath != "" {
-		if err := s.authorizeUserPath(r.Context(), sharePath); err != nil {
+		if err := s.authorizeUserConcreteReadPath(r.Context(), sharePath); err != nil {
 			respondPathAccessError(w, err)
 			return
 		}
@@ -8352,7 +9341,7 @@ func (s *Server) handleCreateShareWithActivity(w http.ResponseWriter, r *http.Re
 
 	// If share was created (status 201), log the activity
 	if rec.statusCode == http.StatusCreated {
-		s.LogActivityWithWarning(rec, r, activity.ActionShare, sharePath, nil)
+		s.LogActivityWithWarning(rec, r, activity.ActionShare, sharePath, shareActivityDetailsFromCreateResponse(rec))
 	}
 	rec.FlushTo(w)
 }
@@ -8365,11 +9354,13 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 	}
 
 	sharePath := ""
+	var activityDetails map[string]string
 	if s.shareStore != nil {
 		shareID := chi.URLParam(r, "id")
 		if auth.IsAdmin(r.Context()) {
 			if shareInfo, err := s.shareStore.Get(shareID); err == nil {
 				sharePath = shareInfo.Path
+				activityDetails = shareActivityDetailsFromShare(shareInfo)
 			} else if errors.Is(err, share.ErrShareNotFound) {
 				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
 				return
@@ -8379,6 +9370,7 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 			}
 		} else if shareInfo, err := s.ensureShareWithinOwnerHome(shareID); err == nil {
 			sharePath = shareInfo.Path
+			activityDetails = shareActivityDetailsFromShare(shareInfo)
 		} else {
 			if errors.Is(err, share.ErrShareNotFound) {
 				writeShareErrorResponse(w, http.StatusNotFound, "share not found", "SHARE_NOT_FOUND")
@@ -8397,9 +9389,52 @@ func (s *Server) handleDeleteShareWithActivity(w http.ResponseWriter, r *http.Re
 
 	// Log successful share deletions regardless of whether the handler responds 200 or 204.
 	if rec.statusCode >= http.StatusOK && rec.statusCode < http.StatusMultipleChoices {
-		s.LogActivityWithWarning(rec, r, activity.ActionUnshare, sharePath, nil)
+		s.LogActivityWithWarning(rec, r, activity.ActionUnshare, sharePath, activityDetails)
 	}
 	rec.FlushTo(w)
+}
+
+func shareActivityDetailsFromCreateResponse(rec *bufferedResponseRecorder) map[string]string {
+	var payload struct {
+		Success bool            `json:"success"`
+		Data    share.ShareInfo `json:"data"`
+	}
+	if err := json.Unmarshal(rec.body.Bytes(), &payload); err != nil || !payload.Success {
+		return nil
+	}
+	if strings.TrimSpace(payload.Data.Path) == "" {
+		return nil
+	}
+	return shareActivityDetailsFromInfo(payload.Data)
+}
+
+func shareActivityDetailsFromShare(shareInfo *share.Share) map[string]string {
+	if shareInfo == nil {
+		return nil
+	}
+	info := shareInfo.ToInfo()
+	if info == nil {
+		return nil
+	}
+	return shareActivityDetailsFromInfo(*info)
+}
+
+func shareActivityDetailsFromInfo(shareInfo share.ShareInfo) map[string]string {
+	details := map[string]string{
+		"type":         string(shareInfo.Type),
+		"permission":   string(shareInfo.Permission),
+		"has_password": strconv.FormatBool(shareInfo.HasPassword),
+	}
+	if shareInfo.ExpiresAt != nil {
+		details["expires_at"] = shareInfo.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if shareInfo.MaxAccess > 0 {
+		details["max_access"] = strconv.FormatInt(shareInfo.MaxAccess, 10)
+	}
+	if shareInfo.AccessCount > 0 {
+		details["access_count"] = strconv.FormatInt(shareInfo.AccessCount, 10)
+	}
+	return details
 }
 
 func (s *Server) prepareCreateShareRequest(r *http.Request) (string, error) {
@@ -8417,7 +9452,12 @@ func (s *Server) prepareCreateShareRequest(r *http.Request) (string, error) {
 		return "", nil
 	}
 
-	cleanPath, err := validatePath(trimmedPath)
+	pathInput := req.Path
+	// Trim accidental padding only for relative paths; absolute-path whitespace can be part of a filename.
+	if !strings.HasPrefix(strings.ReplaceAll(pathInput, "\\", "/"), "/") {
+		pathInput = trimmedPath
+	}
+	cleanPath, err := validatePath(pathInput)
 	if err != nil {
 		return "", err
 	}
@@ -8522,29 +9562,49 @@ func applySharePolicyRuleToUpdateRequest(req *share.UpdateShareRequest, currentS
 			return errSharePolicyPasswordRequired
 		}
 	}
-	if rule.MaxExpiresIn > 0 && req.ExpiresIn != nil {
-		currentExpiresIn := strings.TrimSpace(*req.ExpiresIn)
-		if currentExpiresIn == "" {
-			cappedExpiresIn := formatOptionalSettingsDuration(rule.MaxExpiresIn)
-			req.ExpiresIn = &cappedExpiresIn
-		} else {
-			duration, err := parseShareCreateDurationForPolicy(currentExpiresIn)
-			if err != nil {
-				return errSharePolicyInvalidExpiresIn
-			}
-			if duration > rule.MaxExpiresIn {
+	if rule.MaxExpiresIn > 0 {
+		if req.ExpiresIn != nil {
+			currentExpiresIn := strings.TrimSpace(*req.ExpiresIn)
+			if currentExpiresIn == "" {
 				cappedExpiresIn := formatOptionalSettingsDuration(rule.MaxExpiresIn)
 				req.ExpiresIn = &cappedExpiresIn
+			} else {
+				duration, err := parseShareCreateDurationForPolicy(currentExpiresIn)
+				if err != nil {
+					return errSharePolicyInvalidExpiresIn
+				}
+				if duration > rule.MaxExpiresIn {
+					cappedExpiresIn := formatOptionalSettingsDuration(rule.MaxExpiresIn)
+					req.ExpiresIn = &cappedExpiresIn
+				}
 			}
+		} else if shareExpiresBeyondPolicy(currentShare, rule.MaxExpiresIn, time.Now()) {
+			cappedExpiresIn := formatOptionalSettingsDuration(rule.MaxExpiresIn)
+			req.ExpiresIn = &cappedExpiresIn
 		}
 	}
-	if rule.MaxAccess > 0 && req.MaxAccess != nil {
-		if *req.MaxAccess <= 0 || *req.MaxAccess > rule.MaxAccess {
+	if rule.MaxAccess > 0 {
+		if req.MaxAccess != nil {
+			if *req.MaxAccess <= 0 || *req.MaxAccess > rule.MaxAccess {
+				maxAccess := rule.MaxAccess
+				req.MaxAccess = &maxAccess
+			}
+		} else if currentShare.MaxAccess <= 0 || currentShare.MaxAccess > rule.MaxAccess {
 			maxAccess := rule.MaxAccess
 			req.MaxAccess = &maxAccess
 		}
 	}
 	return nil
+}
+
+func shareExpiresBeyondPolicy(currentShare *share.Share, maxExpiresIn time.Duration, now time.Time) bool {
+	if currentShare == nil || maxExpiresIn <= 0 {
+		return false
+	}
+	if currentShare.ExpiresAt == nil {
+		return true
+	}
+	return currentShare.ExpiresAt.Sub(now) > maxExpiresIn
 }
 
 func matchSharePolicyRule(rules []config.SharePolicyRuleConfig, targetPath string) (config.SharePolicyRuleConfig, bool) {
@@ -8636,11 +9696,14 @@ func readFavoriteBatchPaths(r *http.Request) ([]string, error) {
 	cleanPaths := make([]string, 0, len(req.Paths))
 	for _, favoritePath := range req.Paths {
 		if strings.TrimSpace(favoritePath) == "" {
-			continue
+			return nil, errFavoriteMissingPath
 		}
 		cleanPath, err := validatePath(favoritePath)
 		if err != nil {
 			return nil, err
+		}
+		if cleanPath == "/" {
+			return nil, errFavoriteMissingPath
 		}
 		cleanPaths = append(cleanPaths, cleanPath)
 	}
@@ -8653,7 +9716,14 @@ func readFavoriteQueryPath(r *http.Request) (string, error) {
 	if strings.TrimSpace(queryPath) == "" {
 		return "", nil
 	}
-	return validatePath(queryPath)
+	cleanPath, err := validatePath(queryPath)
+	if err != nil {
+		return "", err
+	}
+	if cleanPath == "/" {
+		return "", errFavoriteMissingPath
+	}
+	return cleanPath, nil
 }
 
 func readFavoriteRoutePath(r *http.Request) (string, error) {

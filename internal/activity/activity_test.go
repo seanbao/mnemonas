@@ -307,6 +307,188 @@ func TestNewStore_RecoversFromTrailingDataAfterArray(t *testing.T) {
 	}
 }
 
+func TestNewStore_RecoversFromUnknownAction(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        "unknown-action",
+		Timestamp: time.Now(),
+		Action:    ActionType("unknown_action"),
+		Path:      "/docs/file.txt",
+		User:      "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected recovered store to start empty after unknown action recovery, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created for unknown action")
+	}
+}
+
+func TestNewStore_RecoversFromDuplicateActivityID(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{
+		{
+			ID:        "duplicate-id",
+			Timestamp: time.Now(),
+			Action:    ActionUpload,
+			Path:      "/docs/a.txt",
+			User:      "admin",
+		},
+		{
+			ID:        "duplicate-id",
+			Timestamp: time.Now(),
+			Action:    ActionDelete,
+			Path:      "/docs/b.txt",
+			User:      "admin",
+		},
+	})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected recovered store to start empty after duplicate ID recovery, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created for duplicate ID")
+	}
+}
+
+func TestNewStore_RecoversFromEmptyActivityID(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "/docs/file.txt",
+		User:      "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected recovered store to start empty after empty ID recovery, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created for empty ID")
+	}
+}
+
+func TestNewStore_RecoversFromActivityIDWithSurroundingWhitespace(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:        " activity-id ",
+		Timestamp: time.Now(),
+		Action:    ActionUpload,
+		Path:      "/docs/file.txt",
+		User:      "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected recovered store to start empty after noncanonical ID recovery, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created for noncanonical ID")
+	}
+}
+
+func TestNewStore_RecoversFromZeroTimestamp(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeActivityFixture(t, filepath.Join(tmpDir, "activity.json"), []Entry{{
+		ID:     "zero-timestamp",
+		Action: ActionUpload,
+		Path:   "/docs/file.txt",
+		User:   "admin",
+	}})
+
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected recovered store to start empty after zero timestamp recovery, got %d entries", store.Count())
+	}
+
+	entries, readErr := os.ReadDir(tmpDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error: %v", readErr)
+	}
+
+	foundBackup := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "activity.json.corrupt.") {
+			foundBackup = true
+			break
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected corrupt activity log backup to be created for zero timestamp")
+	}
+}
+
 func TestNewStore_RecoversFromTruncatedEntryInArray(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "activity.json")
@@ -718,6 +900,117 @@ func TestLogAndList(t *testing.T) {
 	}
 }
 
+func TestLogRejectsUnknownAction(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	err = store.Log(ActionType("unknown_action"), "/docs/file.txt", "user", "127.0.0.1", nil)
+	if err == nil {
+		t.Fatal("expected unknown action to be rejected")
+	}
+	if !strings.Contains(err.Error(), "unknown activity action") {
+		t.Fatalf("expected unknown action error, got %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected rejected unknown action not to be stored, got %d entries", store.Count())
+	}
+
+	reloaded, reloadErr := NewStore(tmpDir)
+	if reloadErr != nil {
+		t.Fatalf("NewStore() reload error: %v", reloadErr)
+	}
+	if reloaded.Count() != 0 {
+		t.Fatalf("expected rejected unknown action not to persist, got %d entries", reloaded.Count())
+	}
+}
+
+func TestLogRejectsZeroTimestamp(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalNow := activityTimeNow
+	activityTimeNow = func() time.Time { return time.Time{} }
+	t.Cleanup(func() {
+		activityTimeNow = originalNow
+	})
+
+	err = store.Log(ActionUpload, "/docs/file.txt", "user", "127.0.0.1", nil)
+	if err == nil {
+		t.Fatal("expected zero timestamp to be rejected")
+	}
+	if !strings.Contains(err.Error(), "activity timestamp must not be zero") {
+		t.Fatalf("expected zero timestamp error, got %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected rejected zero timestamp not to be stored, got %d entries", store.Count())
+	}
+}
+
+func TestLogRejectsEmptyGeneratedActivityID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalIDGenerator := activityIDGenerator
+	activityIDGenerator = func() (string, error) {
+		return "", nil
+	}
+	t.Cleanup(func() {
+		activityIDGenerator = originalIDGenerator
+	})
+
+	err = store.Log(ActionUpload, "/docs/file.txt", "user", "127.0.0.1", nil)
+	if err == nil {
+		t.Fatal("expected empty generated activity ID to be rejected")
+	}
+	if !strings.Contains(err.Error(), "activity ID must not be empty") {
+		t.Fatalf("expected empty activity ID error, got %v", err)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("expected rejected empty generated ID not to be stored, got %d entries", store.Count())
+	}
+}
+
+func TestLogRetriesEmptyGeneratedActivityID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalIDGenerator := activityIDGenerator
+	var calls int32
+	activityIDGenerator = func() (string, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return "", nil
+		}
+		return "valid-id", nil
+	}
+	t.Cleanup(func() {
+		activityIDGenerator = originalIDGenerator
+	})
+
+	if err := store.Log(ActionUpload, "/docs/file.txt", "user", "127.0.0.1", nil); err != nil {
+		t.Fatalf("expected Log() to retry an empty generated ID, got %v", err)
+	}
+
+	entries, total := store.List(10, 0, "", "")
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one logged entry after retry, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].ID != "valid-id" {
+		t.Fatalf("expected retried activity ID valid-id, got %q", entries[0].ID)
+	}
+}
+
 func TestLogRetriesDuplicateActivityID(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(tmpDir)
@@ -909,6 +1202,216 @@ func TestListWithFilters(t *testing.T) {
 	}
 	if entries[0].Path != "/file1.txt" {
 		t.Errorf("Expected /file1.txt, got %s", entries[0].Path)
+	}
+}
+
+func TestListFilteredByTimeRange(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	originalNow := activityTimeNow
+	t.Cleanup(func() {
+		activityTimeNow = originalNow
+	})
+
+	first := time.Date(2026, time.May, 1, 9, 0, 0, 0, time.UTC)
+	second := time.Date(2026, time.May, 2, 9, 0, 0, 0, time.UTC)
+	third := time.Date(2026, time.May, 3, 9, 0, 0, 0, time.UTC)
+
+	activityTimeNow = func() time.Time { return first }
+	if err := store.Log(ActionUpload, "/old.txt", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(old) error: %v", err)
+	}
+	activityTimeNow = func() time.Time { return second }
+	if err := store.Log(ActionDelete, "/middle.txt", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(middle) error: %v", err)
+	}
+	activityTimeNow = func() time.Time { return third }
+	if err := store.Log(ActionUpload, "/new.txt", "user1", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(new) error: %v", err)
+	}
+
+	since := second
+	until := third.Add(-time.Nanosecond)
+	entries, total := store.ListFiltered(10, 0, ListFilter{
+		Since: &since,
+		Until: &until,
+	})
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected one activity entry in time range, got total=%d len=%d entries=%+v", total, len(entries), entries)
+	}
+	if entries[0].Path != "/middle.txt" {
+		t.Fatalf("expected middle entry in time range, got %s", entries[0].Path)
+	}
+
+	entries, total = store.ListFiltered(10, 0, ListFilter{
+		Action: ActionUpload,
+		Since:  &second,
+	})
+	if total != 1 || len(entries) != 1 || entries[0].Path != "/new.txt" {
+		t.Fatalf("expected upload entries since second timestamp to include only /new.txt, got total=%d entries=%+v", total, entries)
+	}
+}
+
+func TestListFilteredByPathPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionUpload, "/photos/2026/a.jpg", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(photo upload) error: %v", err)
+	}
+	if err := store.Log(ActionDelete, "/photos", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(photo directory delete) error: %v", err)
+	}
+	if err := store.Log(ActionMove, "/incoming/a.jpg", "admin", "127.0.0.1", map[string]string{"to": "/photos/2026/moved.jpg"}); err != nil {
+		t.Fatalf("Log(move into photos) error: %v", err)
+	}
+	if err := store.Log(ActionUpload, "/photos-archive/a.jpg", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(archive upload) error: %v", err)
+	}
+
+	entries, total := store.ListFiltered(10, 0, ListFilter{Path: "/photos"})
+	if total != 3 || len(entries) != 3 {
+		t.Fatalf("expected three entries under /photos, got total=%d entries=%+v", total, entries)
+	}
+	for _, entry := range entries {
+		if entry.Path == "/photos-archive/a.jpg" {
+			t.Fatalf("path-prefix filter matched sibling directory: %+v", entries)
+		}
+	}
+
+	entries, total = store.ListFiltered(10, 0, ListFilter{
+		Action: ActionMove,
+		Path:   "/photos",
+	})
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("expected move detail path to match /photos filter, got total=%d entries=%+v", total, entries)
+	}
+	if entries[0].Details["to"] != "/photos/2026/moved.jpg" {
+		t.Fatalf("expected move target detail to remain visible, got %+v", entries[0].Details)
+	}
+}
+
+func TestListFilteredByActionGroup(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+
+	if err := store.Log(ActionShare, "/team/report.pdf", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(share) error: %v", err)
+	}
+	if err := store.Log(ActionUnshare, "/team/report.pdf", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(unshare) error: %v", err)
+	}
+	if err := store.Log(ActionUpload, "/team/report.pdf", "admin", "127.0.0.1", nil); err != nil {
+		t.Fatalf("Log(upload) error: %v", err)
+	}
+
+	shareActions, ok := ActionsForGroup(ActionGroupShare)
+	if !ok {
+		t.Fatal("expected share action group to exist")
+	}
+	entries, total := store.ListFiltered(10, 0, ListFilter{Actions: shareActions})
+	if total != 2 || len(entries) != 2 {
+		t.Fatalf("expected two share-group entries, got total=%d entries=%+v", total, entries)
+	}
+	for _, entry := range entries {
+		if entry.Action != ActionShare && entry.Action != ActionUnshare {
+			t.Fatalf("share action group included unexpected action: %+v", entries)
+		}
+	}
+
+	entries, total = store.ListFiltered(10, 0, ListFilter{
+		Action:  ActionUpload,
+		Actions: shareActions,
+	})
+	if total != 0 || len(entries) != 0 {
+		t.Fatalf("expected action and action group filters to intersect, got total=%d entries=%+v", total, entries)
+	}
+}
+
+func TestIsKnownActionRecognizesPublicActions(t *testing.T) {
+	publicActions := []ActionType{
+		ActionUpload,
+		ActionDownload,
+		ActionDelete,
+		ActionRename,
+		ActionMove,
+		ActionCopy,
+		ActionCreate,
+		ActionRestore,
+		ActionShare,
+		ActionUnshare,
+		ActionFavorite,
+		ActionUnfavorite,
+		ActionFavoriteNote,
+		ActionLogin,
+		ActionLogout,
+		ActionTrashRestore,
+		ActionTrashDelete,
+		ActionTrashEmpty,
+		ActionDiskHealth,
+		ActionScrub,
+	}
+	seen := make(map[ActionType]bool, len(publicActions))
+	for _, action := range publicActions {
+		if !IsKnownAction(action) {
+			t.Fatalf("expected action %q to be known", action)
+		}
+		if seen[action] {
+			t.Fatalf("duplicate public action %q", action)
+		}
+		seen[action] = true
+	}
+
+	for _, action := range []ActionType{"", "risk", "unknown", "UPLOAD"} {
+		if IsKnownAction(action) {
+			t.Fatalf("expected action %q to be unknown", action)
+		}
+	}
+}
+
+func TestActionGroupsOnlyContainKnownActions(t *testing.T) {
+	for _, group := range []ActionGroup{ActionGroupShare, ActionGroupRisk} {
+		actions, ok := ActionsForGroup(group)
+		if !ok {
+			t.Fatalf("expected action group %q to exist", group)
+		}
+		if len(actions) == 0 {
+			t.Fatalf("expected action group %q to contain actions", group)
+		}
+
+		seen := make(map[ActionType]bool, len(actions))
+		for _, action := range actions {
+			if !IsKnownAction(action) {
+				t.Fatalf("action group %q contains unknown action %q", group, action)
+			}
+			if seen[action] {
+				t.Fatalf("action group %q contains duplicate action %q", group, action)
+			}
+			seen[action] = true
+		}
+
+		actions[0] = ActionType("mutated")
+		freshActions, ok := ActionsForGroup(group)
+		if !ok {
+			t.Fatalf("expected action group %q to remain available", group)
+		}
+		if freshActions[0] == ActionType("mutated") {
+			t.Fatalf("action group %q returned internal slice", group)
+		}
+	}
+
+	if actions, ok := ActionsForGroup(ActionGroup("unknown")); ok || actions != nil {
+		t.Fatalf("expected unknown action group to return nil, false; got actions=%+v ok=%v", actions, ok)
 	}
 }
 

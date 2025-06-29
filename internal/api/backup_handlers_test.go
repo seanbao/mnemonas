@@ -210,6 +210,8 @@ func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/batch-restore-preview", []byte(`{"items":[]}`), http.StatusBadRequest)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-drill", nil, http.StatusConflict)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-preview", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
+	missingParentTarget := filepath.Join(tmpDir, "missing-parent", "restore")
+	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-preview", []byte(`{"target_path":`+strconv.Quote(missingParentTarget)+`}`), http.StatusBadRequest)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore-verify", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
 	runBackupAPIRequest[json.RawMessage](t, server, http.MethodPost, "/api/v1/maintenance/backups/home/restore", []byte(`{"target_path":"relative"}`), http.StatusBadRequest)
 
@@ -230,6 +232,52 @@ func TestServer_BackupEndpoints_ErrorMapping(t *testing.T) {
 	}
 	runBackupAPIRequest[json.RawMessage](t, disabledServer, http.MethodPost, "/api/v1/maintenance/backups/disabled/run", nil, http.StatusConflict)
 	runBackupAPIRequest[json.RawMessage](t, disabledServer, http.MethodPost, "/api/v1/maintenance/backups/disabled/retention-check", nil, http.StatusConflict)
+}
+
+func TestServer_BackupEndpoints_RunUnsafeConfiguredPathReturnsInternalDetails(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{
+		BackupRoot:  filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		BackupJobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        backup.JobTypeLocal,
+			Source:      source,
+			Destination: filepath.Join(source, "backups"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/backups/home/run", nil)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("run unsafe configured path status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+
+	var response struct {
+		Code    string           `json:"code"`
+		Details backup.RunResult `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v; body=%s", err, rec.Body.String())
+	}
+	if response.Code != ErrCodeInternal {
+		t.Fatalf("error code = %q, want %q", response.Code, ErrCodeInternal)
+	}
+	if response.Details.JobID != "home" || response.Details.Status != backup.StatusFailed {
+		t.Fatalf("error details = %+v, want failed home run", response.Details)
+	}
+	if !strings.Contains(response.Details.ErrorMessage, "destination must not be inside source") {
+		t.Fatalf("error details message = %q, want unsafe configured destination", response.Details.ErrorMessage)
+	}
 }
 
 func TestServer_BackupEndpoints_FailureSendsAlertEvent(t *testing.T) {

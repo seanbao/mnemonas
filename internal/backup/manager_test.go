@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,23 @@ func (n *recordingNotifier) Events() []NotificationEvent {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return append([]NotificationEvent(nil), n.events...)
+}
+
+func assertNoBackupTargetSecrets(t *testing.T, value string) {
+	t.Helper()
+	for _, secret := range []string{"repo-pass", "remote-token", "AKIASECRET", "secret-access-key", "user:repo-pass", "token=remote-token", "access_key_id=AKIASECRET", "secret_access_key=secret-access-key"} {
+		if strings.Contains(value, secret) {
+			t.Fatalf("backup target value leaked %q: %q", secret, value)
+		}
+	}
+}
+
+func protectedSystemDirectoryForTest(t *testing.T) string {
+	t.Helper()
+	if filepath.Separator != '/' {
+		t.Skip("protected Unix system directory test requires slash-separated paths")
+	}
+	return "/etc"
 }
 
 func TestNewManagerRejectsSymlinkStateRoot(t *testing.T) {
@@ -98,6 +116,73 @@ func TestNewManagerRejectsSymlinkStateFile(t *testing.T) {
 	}
 }
 
+func TestNewManagerRejectsUnsafeJobID(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatalf("Mkdir(destination) error: %v", err)
+	}
+
+	for i, id := range []string{"../escape", "nested/job", ".", strings.Repeat("a", 65)} {
+		t.Run(id, func(t *testing.T) {
+			_, err := NewManager(ManagerConfig{
+				Root:        filepath.Join(tmpDir, "state-"+strconv.Itoa(i)),
+				StorageRoot: source,
+				Jobs: []config.BackupJobConfig{{
+					ID:          id,
+					Name:        "Unsafe",
+					Type:        JobTypeLocal,
+					Source:      source,
+					Destination: destination,
+				}},
+			})
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("NewManager() error = %v, want %v", err, ErrUnsafePath)
+			}
+		})
+	}
+}
+
+func TestNewManagerRejectsDuplicateJobID(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatalf("Mkdir(destination) error: %v", err)
+	}
+
+	_, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{
+			{
+				ID:          "home",
+				Name:        "Home",
+				Type:        JobTypeLocal,
+				Source:      source,
+				Destination: destination,
+			},
+			{
+				ID:          "HOME",
+				Name:        "Duplicate",
+				Type:        JobTypeLocal,
+				Source:      source,
+				Destination: filepath.Join(tmpDir, "other-backups"),
+			},
+		},
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("NewManager() error = %v, want %v", err, ErrUnsafePath)
+	}
+}
+
 func TestWriteJSONFileRejectsTempSymlink(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "state", stateFileName)
@@ -146,6 +231,55 @@ func TestWriteJSONFileRejectsFinalSymlink(t *testing.T) {
 	}
 }
 
+func TestReadManifestRejectsUnsafeEntries(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry ManifestEntry
+	}{
+		{
+			name: "unsafe archive path",
+			entry: ManifestEntry{
+				ArchivePath: "data/../escape.txt",
+				Size:        1,
+			},
+		},
+		{
+			name: "negative size",
+			entry: ManifestEntry{
+				ArchivePath: "data/note.txt",
+				Size:        -1,
+			},
+		},
+		{
+			name: "unsupported archive path",
+			entry: ManifestEntry{
+				ArchivePath: "metadata/checksum.txt",
+				Size:        1,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+			manifest := Manifest{
+				Version: manifestVersion,
+				Entries: []ManifestEntry{
+					tt.entry,
+				},
+			}
+			if err := writeJSONFile(manifestPath, manifest, 0600); err != nil {
+				t.Fatalf("writeJSONFile(manifest) error: %v", err)
+			}
+
+			_, err := readManifest(manifestPath)
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("readManifest() error = %v, want ErrUnsafePath", err)
+			}
+		})
+	}
+}
+
 func TestManager_JobViewUsesEmptyExcludeArray(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -180,6 +314,61 @@ func TestManager_JobViewUsesEmptyExcludeArray(t *testing.T) {
 	}
 	if job.Exclude == nil {
 		t.Fatal("GetJob().Exclude is nil, want empty array")
+	}
+}
+
+func TestManager_JobViewRedactsRemoteTargetSecrets(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	passwordFile := filepath.Join(tmpDir, "restic.pass")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	mustWriteFile(t, passwordFile, "secret")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{
+			{
+				ID:           "restic-remote",
+				Name:         "Restic remote",
+				Type:         JobTypeRestic,
+				Source:       source,
+				Repository:   "rest:https://user:repo-pass@backup.example/repo?token=remote-token&region=us",
+				PasswordFile: passwordFile,
+			},
+			{
+				ID:     "rclone-remote",
+				Name:   "Rclone remote",
+				Type:   JobTypeRclone,
+				Source: source,
+				Remote: ":s3,access_key_id=AKIASECRET,secret_access_key=secret-access-key:bucket/path",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	jobs := manager.ListJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("ListJobs() length = %d, want 2", len(jobs))
+	}
+	for _, job := range jobs {
+		assertNoBackupTargetSecrets(t, job.Destination)
+		assertNoBackupTargetSecrets(t, job.Repository)
+		assertNoBackupTargetSecrets(t, job.Remote)
+		switch job.ID {
+		case "restic-remote":
+			if !strings.Contains(job.Repository, redactedBackupSecretValue) {
+				t.Fatalf("restic repository = %q, want redacted marker", job.Repository)
+			}
+		case "rclone-remote":
+			if !strings.Contains(job.Remote, redactedBackupSecretValue) {
+				t.Fatalf("rclone remote = %q, want redacted marker", job.Remote)
+			}
+		}
 	}
 }
 
@@ -262,8 +451,27 @@ func TestManager_RunJobAndRestoreDrill(t *testing.T) {
 	if len(preview.PreflightChecks) == 0 || len(preview.CutoverChecklist) == 0 || len(preview.RollbackChecklist) == 0 {
 		t.Fatalf("preview missing preflight or checklists: %+v", preview)
 	}
+	targetStateCheck := restorePreflightCheckByID(t, preview.PreflightChecks, "target_state")
+	if !strings.Contains(targetStateCheck.Detail, "尚不存在") {
+		t.Fatalf("preview target_state detail = %q, want missing target detail", targetStateCheck.Detail)
+	}
 	if _, err := os.Stat(restoreTarget); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("RunRestorePreview target stat error = %v, want not exist", err)
+	}
+
+	emptyRestoreTarget := filepath.Join(tmpDir, "empty-restore-target")
+	if err := os.Mkdir(emptyRestoreTarget, 0700); err != nil {
+		t.Fatalf("Mkdir(emptyRestoreTarget) error: %v", err)
+	}
+	emptyPreview, err := manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{
+		TargetPath: emptyRestoreTarget,
+	})
+	if err != nil {
+		t.Fatalf("RunRestorePreview() empty target error: %v", err)
+	}
+	emptyTargetStateCheck := restorePreflightCheckByID(t, emptyPreview.PreflightChecks, "target_state")
+	if !strings.Contains(emptyTargetStateCheck.Detail, "已存在且为空") {
+		t.Fatalf("preview empty target_state detail = %q, want empty target detail", emptyTargetStateCheck.Detail)
 	}
 
 	restore, err := manager.RunRestore(context.Background(), "home", RestoreOptions{
@@ -513,6 +721,269 @@ func TestManager_RunRestoreRejectsUnsafeTarget(t *testing.T) {
 	}
 }
 
+func TestManager_RunRestorePreviewRejectsUnsafeManifestArchivePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	run, err := manager.RunJob(context.Background(), "home")
+	if err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	corruptManifestArchivePath(t, run.ManifestPath, "data/../escape.txt")
+
+	_, err = manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{
+		TargetPath: filepath.Join(tmpDir, "restore-target"),
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestorePreview() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestManager_RunRestorePreviewRejectsUnsafeManifestSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	run, err := manager.RunJob(context.Background(), "home")
+	if err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	corruptManifestEntrySize(t, run.ManifestPath, -1)
+
+	_, err = manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{
+		TargetPath: filepath.Join(tmpDir, "restore-target"),
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestorePreview() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestManager_RunRestoreRejectsUnsafeManifestSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	run, err := manager.RunJob(context.Background(), "home")
+	if err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	corruptManifestEntrySize(t, run.ManifestPath, -1)
+
+	restoreTarget := filepath.Join(tmpDir, "restore-target")
+	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{
+		TargetPath: restoreTarget,
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestore() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(restoreTarget); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("restore target stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestManager_RunRestoreRejectsUnsafeManifestArchivePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	run, err := manager.RunJob(context.Background(), "home")
+	if err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	corruptManifestArchivePath(t, run.ManifestPath, "data/../escape.txt")
+
+	restoreTarget := filepath.Join(tmpDir, "restore-target")
+	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{
+		TargetPath: restoreTarget,
+	})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestore() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(restoreTarget); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("restore target stat error = %v, want not exist", statErr)
+	}
+
+	job, err := manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() error: %v", err)
+	}
+	if job.LastRestore == nil || job.LastRestore.Status != StatusFailed || job.LastRestore.TargetPath != restoreTarget {
+		t.Fatalf("failed restore was not persisted: %+v", job.LastRestore)
+	}
+}
+
+func TestManager_RunRestoreDrillRejectsUnsafeManifestSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	run, err := manager.RunJob(context.Background(), "home")
+	if err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	corruptManifestEntrySize(t, run.ManifestPath, -1)
+
+	_, err = manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{KeepArtifact: true})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestoreDrill() error = %v, want ErrUnsafePath", err)
+	}
+
+	job, err := manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() error: %v", err)
+	}
+	if job.LastRestoreDrill == nil || job.LastRestoreDrill.Status != StatusFailed || job.LastRestoreDrill.FailureCategory != FailureCategoryUnsafePath {
+		t.Fatalf("failed restore drill was not persisted as unsafe path: %+v", job.LastRestoreDrill)
+	}
+}
+
+func TestManager_RunRestoreDrillRejectsUnsafeManifestArchivePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	run, err := manager.RunJob(context.Background(), "home")
+	if err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	corruptManifestArchivePath(t, run.ManifestPath, "data/../escape.txt")
+
+	_, err = manager.RunRestoreDrill(context.Background(), "home", RestoreDrillOptions{KeepArtifact: true})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RunRestoreDrill() error = %v, want ErrUnsafePath", err)
+	}
+
+	job, err := manager.GetJob("home")
+	if err != nil {
+		t.Fatalf("GetJob() error: %v", err)
+	}
+	if job.LastRestoreDrill == nil || job.LastRestoreDrill.Status != StatusFailed || job.LastRestoreDrill.FailureCategory != FailureCategoryUnsafePath {
+		t.Fatalf("failed restore drill was not persisted as unsafe path: %+v", job.LastRestoreDrill)
+	}
+}
+
+func TestValidateRestoreTargetPathRejectsProtectedSystemDirectory(t *testing.T) {
+	protectedDir := protectedSystemDirectoryForTest(t)
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := validateRestoreTargetPath(source, destination, source, protectedDir)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("validateRestoreTargetPath() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestValidateRestoreTargetPathRejectsControlCharacters(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	storageRoot := filepath.Join(tmpDir, "storage")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(tmpDir, "restore\nsecret")
+	_, err := validateRestoreTargetPath(source, destination, storageRoot, target)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("validateRestoreTargetPath() error = %v, want ErrUnsafePath", err)
+	}
+}
+
 func TestManager_RunRestoreRejectsTargetSymlinkAncestor(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -623,6 +1094,152 @@ func TestInstallRestoreTargetRejectsSwappedSymlinkParentBeforeRemovingTarget(t *
 	}
 }
 
+func TestMoveResticRestoredSourceRejectsSwappedPartialSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	rawPath := filepath.Join(tmpDir, "raw")
+	restoredSourcePath, err := resticRestoredSourcePath(rawPath, source)
+	if err != nil {
+		t.Fatalf("resticRestoredSourcePath() error: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(restoredSourcePath, "docs", "note.txt"), "restored")
+
+	partialPath := filepath.Join(tmpDir, "restore-target.partial-test")
+	outside := filepath.Join(tmpDir, "outside")
+	if err := os.Mkdir(partialPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(partialPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, partialPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, _, err = moveResticRestoredSource(context.Background(), rawPath, partialPath, source)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("moveResticRestoredSource() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "docs")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("outside docs stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(restoredSourcePath, "docs", "note.txt")); statErr != nil {
+		t.Fatalf("restic restored source was moved on failure: %v", statErr)
+	}
+}
+
+func TestMoveResticRestoredSourceRejectsRestoredSymlinkBeforeMove(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	rawPath := filepath.Join(tmpDir, "raw")
+	restoredSourcePath, err := resticRestoredSourcePath(rawPath, source)
+	if err != nil {
+		t.Fatalf("resticRestoredSourcePath() error: %v", err)
+	}
+	if err := os.MkdirAll(restoredSourcePath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(tmpDir, "outside.txt")
+	mustWriteFile(t, outside, "outside")
+	linkPath := filepath.Join(restoredSourcePath, "outside-link")
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	partialPath := filepath.Join(tmpDir, "restore-target.partial-test")
+	if err := os.Mkdir(partialPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = moveResticRestoredSource(context.Background(), rawPath, partialPath, source)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("moveResticRestoredSource() error = %v, want ErrUnsafePath", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(partialPath, "outside-link")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial symlink stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Lstat(linkPath); statErr != nil {
+		t.Fatalf("restic restored source symlink was moved on failure: %v", statErr)
+	}
+}
+
+func TestManager_RunRestoreCleanupRejectsSwappedSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	restoreParent := filepath.Join(tmpDir, "restore-parent")
+	originalParent := filepath.Join(tmpDir, "restore-parent-original")
+	outside := filepath.Join(tmpDir, "outside")
+	restoreTime := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	restoreID := formatRunID(restoreTime)
+	restoreTarget := filepath.Join(restoreParent, "restore-target")
+	outsidePartial := filepath.Join(outside, "restore-target.partial-"+restoreID)
+	outsideSentinel := filepath.Join(outsidePartial, "sentinel.txt")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+	mustWriteFile(t, outsideSentinel, "keep")
+	if err := os.MkdirAll(restoreParent, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	backupTime := restoreTime.Add(-time.Minute)
+	manager.now = func() time.Time { return backupTime }
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+	manager.now = func() time.Time { return restoreTime }
+
+	oldHook := afterCopyOpenFileBeforeMetadata
+	var hookErr error
+	hookRan := false
+	afterCopyOpenFileBeforeMetadata = func(path string) {
+		if hookRan || !strings.HasPrefix(path, restoreTarget+".partial-"+restoreID) {
+			return
+		}
+		hookRan = true
+		if err := os.Rename(restoreParent, originalParent); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.Symlink(outside, restoreParent)
+	}
+	defer func() {
+		afterCopyOpenFileBeforeMetadata = oldHook
+	}()
+
+	_, err = manager.RunRestore(context.Background(), "home", RestoreOptions{TargetPath: restoreTarget})
+	if hookErr != nil {
+		t.Skipf("symlink unavailable: %v", hookErr)
+	}
+	if !hookRan {
+		t.Fatal("restore copy hook did not run")
+	}
+	if err == nil {
+		t.Fatal("RunRestore() error = nil, want failure after parent swap")
+	}
+	if data, readErr := os.ReadFile(outsideSentinel); readErr != nil || string(data) != "keep" {
+		t.Fatalf("outside partial sentinel was altered, read = (%q, %v)", data, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(originalParent, "restore-target.partial-"+restoreID)); statErr != nil {
+		t.Fatalf("original partial stat error = %v", statErr)
+	}
+}
+
 func TestManager_RunRestoreBlocksFailedPreflight(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -677,6 +1294,60 @@ func TestManager_RunRestoreBlocksFailedPreflight(t *testing.T) {
 	}
 	if job.LastRestore == nil || job.LastRestore.Status != StatusFailed || firstFailedRestorePreflight(job.LastRestore.PreflightChecks) == nil {
 		t.Fatalf("failed preflight restore was not persisted: %+v", job.LastRestore)
+	}
+}
+
+func TestManager_RunRestorePreviewChecksCapacityOnExistingEmptyTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "restore")
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), "home"); err != nil {
+		t.Fatalf("RunJob() error: %v", err)
+	}
+
+	oldAvailableBytesFunc := restoreAvailableBytesFunc
+	var probedPaths []string
+	restoreAvailableBytesFunc = func(path string) (int64, error) {
+		probedPaths = append(probedPaths, path)
+		return 1 << 30, nil
+	}
+	t.Cleanup(func() {
+		restoreAvailableBytesFunc = oldAvailableBytesFunc
+	})
+
+	missingTarget := filepath.Join(tmpDir, "missing-target")
+	if _, err := manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{TargetPath: missingTarget}); err != nil {
+		t.Fatalf("RunRestorePreview() missing target error: %v", err)
+	}
+	if got, want := probedPaths[len(probedPaths)-1], filepath.Dir(missingTarget); got != want {
+		t.Fatalf("missing target capacity probe path = %q, want %q", got, want)
+	}
+
+	existingTarget := filepath.Join(tmpDir, "existing-empty-target")
+	if err := os.Mkdir(existingTarget, 0700); err != nil {
+		t.Fatalf("Mkdir(existingTarget) error: %v", err)
+	}
+	if _, err := manager.RunRestorePreview(context.Background(), "home", RestorePreviewOptions{TargetPath: existingTarget}); err != nil {
+		t.Fatalf("RunRestorePreview() existing target error: %v", err)
+	}
+	if got := probedPaths[len(probedPaths)-1]; got != existingTarget {
+		t.Fatalf("existing target capacity probe path = %q, want %q", got, existingTarget)
 	}
 }
 
@@ -764,6 +1435,57 @@ func TestManager_RunBatchRestorePreviewAndRestore(t *testing.T) {
 		t.Fatalf("second partial batch item = %+v, want target conflict", partial.Items[1])
 	}
 	assertFileContent(t, filepath.Join(restoreC, "docs", "note.txt"), "batch restore")
+}
+
+func TestManager_BatchRestorePreviewRedactsExternalCommandErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	commandPath := filepath.Join(tmpDir, "failing-rclone")
+	remote := ":s3,access_key_id=AKIASECRET,secret_access_key=secret-access-key:bucket/path"
+	stderr := "lsjson failed for " + remote + " token=remote-token"
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\nprintf '%s\\n' "+shellQuote(stderr)+" >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatalf("WriteFile(command) error: %v", err)
+	}
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:      "rclone-remote",
+			Name:    "Rclone remote",
+			Type:    JobTypeRclone,
+			Source:  source,
+			Remote:  remote,
+			Command: commandPath,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	preview, err := manager.RunBatchRestorePreview(context.Background(), BatchRestoreOptions{
+		Items: []BatchRestoreItemOptions{{
+			JobID:      "rclone-remote",
+			TargetPath: filepath.Join(tmpDir, "restore-target"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("RunBatchRestorePreview() error: %v", err)
+	}
+	if preview.Status != StatusFailed || len(preview.Items) != 1 || preview.Items[0].Status != StatusFailed {
+		t.Fatalf("unexpected batch preview outcome: %+v", preview)
+	}
+	assertNoBackupTargetSecrets(t, preview.Items[0].ErrorMessage)
+	for _, warning := range preview.Warnings {
+		assertNoBackupTargetSecrets(t, warning)
+	}
+	if preview.Items[0].Preview == nil {
+		t.Fatal("batch preview item Preview is nil")
+	}
+	assertNoBackupTargetSecrets(t, preview.Items[0].Preview.ErrorMessage)
 }
 
 func TestManager_JobViewRestoreDrillAndRetentionHealth(t *testing.T) {
@@ -870,6 +1592,33 @@ func TestManager_RunJobRejectsDestinationInsideSource(t *testing.T) {
 	_, err = manager.RunJob(context.Background(), "home")
 	if !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("RunJob() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestValidateDestinationRejectsFilesystemRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := validateDestination(source, string(filepath.Separator), source)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("validateDestination() error = %v, want ErrUnsafePath", err)
+	}
+}
+
+func TestValidateDestinationRejectsProtectedSystemDirectory(t *testing.T) {
+	protectedDir := protectedSystemDirectoryForTest(t)
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := validateDestination(source, protectedDir, source)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("validateDestination() error = %v, want ErrUnsafePath", err)
 	}
 }
 
@@ -1093,6 +1842,44 @@ func TestManager_RunJobRejectsSourceSymlink(t *testing.T) {
 	}
 }
 
+func TestManager_RunJobCleansPartialSnapshotOnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	destination := filepath.Join(tmpDir, "backups")
+	runAt := time.Date(2026, 5, 24, 11, 0, 0, 0, time.UTC)
+	runID := formatRunID(runAt)
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+	if err := os.Symlink("/etc/passwd", filepath.Join(source, "passwd-link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Jobs: []config.BackupJobConfig{{
+			ID:          "home",
+			Name:        "Home backup",
+			Type:        JobTypeLocal,
+			Source:      source,
+			Destination: destination,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+	manager.now = func() time.Time { return runAt }
+
+	_, err = manager.RunJob(context.Background(), "home")
+	if !errors.Is(err, ErrSourceContainsSymlink) {
+		t.Fatalf("RunJob() error = %v, want ErrSourceContainsSymlink", err)
+	}
+
+	partialPath := filepath.Join(destination, "home", "snapshots", runID+".partial")
+	if _, statErr := os.Stat(partialPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial snapshot stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -1149,6 +1936,70 @@ func TestManager_RunRemoteBackupRejectsSourceSymlink(t *testing.T) {
 				t.Fatalf("RunJob() error = %v, want ErrSourceContainsSymlink", err)
 			}
 		})
+	}
+}
+
+func TestManager_RunRemoteBackupRejectsCredentialFileInsideSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	resticPasswordFile := filepath.Join(source, "restic.pass")
+	rcloneConfigFile := filepath.Join(source, "rclone.conf")
+	mustWriteFile(t, filepath.Join(source, "note.txt"), "backup")
+	mustWriteFile(t, resticPasswordFile, "secret")
+	mustWriteFile(t, rcloneConfigFile, "[remote]\ntype = local\n")
+	commandPath, logPath := newRecordingCommand(t, 0, "")
+
+	tests := []struct {
+		name string
+		job  config.BackupJobConfig
+	}{
+		{
+			name: "restic password file",
+			job: config.BackupJobConfig{
+				ID:           "restic-remote",
+				Name:         "Restic remote",
+				Type:         JobTypeRestic,
+				Source:       source,
+				Repository:   "rest:http://backup.example/repo",
+				Command:      commandPath,
+				PasswordFile: resticPasswordFile,
+			},
+		},
+		{
+			name: "rclone config file",
+			job: config.BackupJobConfig{
+				ID:         "rclone-remote",
+				Name:       "Rclone remote",
+				Type:       JobTypeRclone,
+				Source:     source,
+				Remote:     "backup:mnemonas/source",
+				Command:    commandPath,
+				ConfigFile: rcloneConfigFile,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, err := NewManager(ManagerConfig{
+				Root:        filepath.Join(tmpDir, "state-"+tt.name),
+				StorageRoot: source,
+				Jobs:        []config.BackupJobConfig{tt.job},
+			})
+			if err != nil {
+				t.Fatalf("NewManager() error: %v", err)
+			}
+
+			_, err = manager.RunJob(context.Background(), tt.job.ID)
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("RunJob() error = %v, want ErrUnsafePath", err)
+			}
+		})
+	}
+	if data, err := os.ReadFile(logPath); err == nil && len(data) > 0 {
+		t.Fatalf("external command log = %q, want none", data)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadFile(command log) error: %v", err)
 	}
 }
 
@@ -1235,6 +2086,59 @@ func TestCopyOpenFileWithHashRejectsDestinationReplacedBeforeMetadata(t *testing
 	}
 	if _, statErr := os.Lstat(destinationPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("destination lstat error = %v, want ErrNotExist after cleanup", statErr)
+	}
+	data, readErr := os.ReadFile(outsidePath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(outsidePath) error: %v", readErr)
+	}
+	if string(data) != "outside" {
+		t.Fatalf("outside content = %q, want outside", data)
+	}
+}
+
+func TestCopyOpenFileWithHashCleanupDoesNotFollowReplacedParentSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "source.txt")
+	destinationParent := filepath.Join(tmpDir, "snapshot", "data")
+	destinationPath := filepath.Join(destinationParent, "source.txt")
+	originalParent := filepath.Join(tmpDir, "snapshot", "data-original")
+	outsideParent := filepath.Join(tmpDir, "outside-data")
+	outsidePath := filepath.Join(outsideParent, "source.txt")
+	mustWriteFile(t, sourcePath, "source")
+	mustWriteFile(t, outsidePath, "outside")
+	probeLink := filepath.Join(tmpDir, "probe-link")
+	if err := os.Symlink(outsideParent, probeLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Remove(probeLink); err != nil {
+		t.Fatal(err)
+	}
+
+	source, sourceInfo, err := openRegularFileNoFollow(sourcePath, "source.txt")
+	if err != nil {
+		t.Fatalf("openRegularFileNoFollow() error: %v", err)
+	}
+	defer source.Close()
+
+	oldHook := afterCopyOpenFileBeforeMetadata
+	afterCopyOpenFileBeforeMetadata = func(path string) {
+		if path != destinationPath {
+			return
+		}
+		if err := os.Rename(destinationParent, originalParent); err != nil {
+			t.Fatalf("Rename(destination parent) error: %v", err)
+		}
+		if err := os.Symlink(outsideParent, destinationParent); err != nil {
+			t.Fatalf("Symlink(destination parent) error: %v", err)
+		}
+	}
+	defer func() {
+		afterCopyOpenFileBeforeMetadata = oldHook
+	}()
+
+	_, err = copyOpenFileWithHash(context.Background(), source, sourceInfo, destinationPath, "data/source.txt", "source.txt")
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("copyOpenFileWithHash() error = %v, want ErrUnsafePath", err)
 	}
 	data, readErr := os.ReadFile(outsidePath)
 	if readErr != nil {
@@ -1467,6 +2371,73 @@ func TestManager_RunRetentionCheckLocalReportsSnapshotRange(t *testing.T) {
 	if job.LastRetentionCheck == nil || job.LastRetentionCheck.ID != check.ID || job.RetentionStatus != "ok" {
 		t.Fatalf("job retention view = %+v", job)
 	}
+}
+
+func TestManager_RemoteRunResultAndNotificationRedactTargetSecrets(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	passwordFile := filepath.Join(tmpDir, "restic.pass")
+	commandPath := filepath.Join(tmpDir, "failing-restic")
+	repository := "rest:https://user:repo-pass@backup.example/repo?token=remote-token&region=us"
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatalf("Mkdir(source) error: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(source, "docs", "note.txt"), "restic")
+	mustWriteFile(t, passwordFile, "secret")
+	stderr := "failed repository " + repository + " with access_key_id=AKIASECRET"
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\nprintf '%s\\n' "+shellQuote(stderr)+" >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatalf("WriteFile(command) error: %v", err)
+	}
+	notifier := &recordingNotifier{}
+
+	manager, err := NewManager(ManagerConfig{
+		Root:        filepath.Join(tmpDir, "state"),
+		StorageRoot: source,
+		Notifier:    notifier,
+		Jobs: []config.BackupJobConfig{{
+			ID:           "restic-remote",
+			Name:         "Restic remote",
+			Type:         JobTypeRestic,
+			Source:       source,
+			Repository:   repository,
+			Command:      commandPath,
+			PasswordFile: passwordFile,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error: %v", err)
+	}
+
+	result, err := manager.RunJob(context.Background(), "restic-remote")
+	if err == nil {
+		t.Fatal("RunJob() error = nil, want failing command error")
+	}
+	if result == nil {
+		t.Fatal("RunJob() result is nil")
+	}
+	assertNoBackupTargetSecrets(t, result.Destination)
+	assertNoBackupTargetSecrets(t, result.ErrorMessage)
+	if !strings.Contains(result.Destination, redactedBackupSecretValue) {
+		t.Fatalf("run destination = %q, want redacted marker", result.Destination)
+	}
+
+	events := notifier.Events()
+	if len(events) != 1 {
+		t.Fatalf("notification event count = %d, want 1", len(events))
+	}
+	assertNoBackupTargetSecrets(t, events[0].Destination)
+	assertNoBackupTargetSecrets(t, events[0].ErrorMessage)
+	if !strings.Contains(events[0].Destination, redactedBackupSecretValue) {
+		t.Fatalf("notification destination = %q, want redacted marker", events[0].Destination)
+	}
+	job, err := manager.GetJob("restic-remote")
+	if err != nil {
+		t.Fatalf("GetJob() error: %v", err)
+	}
+	if job.LastRun == nil {
+		t.Fatal("GetJob().LastRun is nil")
+	}
+	assertNoBackupTargetSecrets(t, job.LastRun.ErrorMessage)
 }
 
 func TestManager_RunRetentionCheckResticParsesSnapshotsAndWarnsMissingPolicy(t *testing.T) {
@@ -1919,6 +2890,34 @@ func TestManager_RunJobFailureNotifies(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteCredentialFilesRejectsSymlinkParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "source")
+	realCredentialDir := filepath.Join(tmpDir, "real-credentials")
+	linkedCredentialDir := filepath.Join(tmpDir, "linked-credentials")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatalf("MkdirAll(source) error: %v", err)
+	}
+	if err := os.Mkdir(realCredentialDir, 0700); err != nil {
+		t.Fatalf("Mkdir(realCredentialDir) error: %v", err)
+	}
+	credentialPath := filepath.Join(realCredentialDir, "restic.pass")
+	if err := os.WriteFile(credentialPath, []byte("secret"), 0600); err != nil {
+		t.Fatalf("WriteFile(credentialPath) error: %v", err)
+	}
+	if err := os.Symlink(realCredentialDir, linkedCredentialDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	err := validateRemoteCredentialFiles(config.BackupJobConfig{
+		Type:         JobTypeRestic,
+		PasswordFile: filepath.Join(linkedCredentialDir, "restic.pass"),
+	}, source, source)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("validateRemoteCredentialFiles() error = %v, want %v", err, ErrUnsafePath)
+	}
+}
+
 func TestManager_RestoreDrillFailureNotifies(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "source")
@@ -2058,6 +3057,128 @@ func TestSummarizeRestoredTreeRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestRemoteRestorePreviewRejectsNegativeFileSizes(t *testing.T) {
+	t.Run("restic", func(t *testing.T) {
+		_, _, _, err := parseResticLSJSON([]byte(`{"type":"file","path":"/srv/source/docs/bad.txt","size":-1}`+"\n"), "/srv/source")
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseResticLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone preview", func(t *testing.T) {
+		_, _, _, err := parseRcloneLSJSON([]byte(`[{"Path":"docs/bad.txt","Size":-1,"IsDir":false}]`))
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone retention", func(t *testing.T) {
+		_, _, _, err := parseRcloneRetentionLSJSON([]byte(`[{"Path":"docs/bad.txt","Size":-1,"IsDir":false}]`))
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneRetentionLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+}
+
+func TestRemoteRestorePreviewRejectsUnsafeListingPaths(t *testing.T) {
+	t.Run("restic parent segment", func(t *testing.T) {
+		_, _, _, err := parseResticLSJSON([]byte(`{"type":"file","path":"/srv/source/docs/../escape.txt","size":1}`+"\n"), "/srv/source")
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseResticLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("restic outside source", func(t *testing.T) {
+		_, _, _, err := parseResticLSJSON([]byte(`{"type":"file","path":"/srv/other/secret.txt","size":1}`+"\n"), "/srv/source")
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseResticLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone preview", func(t *testing.T) {
+		_, _, _, err := parseRcloneLSJSON([]byte(`[{"Path":"../secret.txt","Size":1,"IsDir":false}]`))
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone retention", func(t *testing.T) {
+		_, _, _, err := parseRcloneRetentionLSJSON([]byte(`[{"Path":"/secret.txt","Size":1,"IsDir":false}]`))
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneRetentionLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+}
+
+func TestRemoteRestorePreviewRejectsFileSizeOverflow(t *testing.T) {
+	tooLarge := strconv.FormatInt(1<<63-1, 10)
+
+	t.Run("restic", func(t *testing.T) {
+		input := []byte(
+			`{"type":"file","path":"/srv/source/docs/a.bin","size":` + tooLarge + `}` + "\n" +
+				`{"type":"file","path":"/srv/source/docs/b.bin","size":1}` + "\n",
+		)
+		_, _, _, err := parseResticLSJSON(input, "/srv/source")
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseResticLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone preview", func(t *testing.T) {
+		input := []byte(`[{"Path":"docs/a.bin","Size":` + tooLarge + `,"IsDir":false},{"Path":"docs/b.bin","Size":1,"IsDir":false}]`)
+		_, _, _, err := parseRcloneLSJSON(input)
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("rclone retention", func(t *testing.T) {
+		input := []byte(`[{"Path":"docs/a.bin","Size":` + tooLarge + `,"IsDir":false},{"Path":"docs/b.bin","Size":1,"IsDir":false}]`)
+		_, _, _, err := parseRcloneRetentionLSJSON(input)
+		if !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("parseRcloneRetentionLSJSON() error = %v, want ErrUnsafePath", err)
+		}
+	})
+}
+
+func TestRemoteRestorePreviewPreservesWhitespaceInFileNames(t *testing.T) {
+	t.Run("restic", func(t *testing.T) {
+		input := []byte(
+			`{"type":"file","path":"/srv/source/docs/ leading.txt","size":1}` + "\n" +
+				`{"type":"file","path":"/srv/source/docs/trailing.txt ","size":2}` + "\n",
+		)
+		fileCount, totalBytes, samples, err := parseResticLSJSON(input, "/srv/source")
+		if err != nil {
+			t.Fatalf("parseResticLSJSON() error: %v", err)
+		}
+		if fileCount != 2 || totalBytes != 3 {
+			t.Fatalf("parseResticLSJSON() count/bytes = %d/%d, want 2/3", fileCount, totalBytes)
+		}
+		want := []string{"docs/ leading.txt", "docs/trailing.txt "}
+		if !reflect.DeepEqual(samples, want) {
+			t.Fatalf("parseResticLSJSON() samples = %#v, want %#v", samples, want)
+		}
+	})
+
+	t.Run("rclone preview", func(t *testing.T) {
+		input := []byte(`[` +
+			`{"Path":"docs/ leading.txt","Size":1,"IsDir":false},` +
+			`{"Path":"docs/trailing.txt ","Size":2,"IsDir":false}` +
+			`]`)
+		fileCount, totalBytes, samples, err := parseRcloneLSJSON(input)
+		if err != nil {
+			t.Fatalf("parseRcloneLSJSON() error: %v", err)
+		}
+		if fileCount != 2 || totalBytes != 3 {
+			t.Fatalf("parseRcloneLSJSON() count/bytes = %d/%d, want 2/3", fileCount, totalBytes)
+		}
+		want := []string{"docs/ leading.txt", "docs/trailing.txt "}
+		if !reflect.DeepEqual(samples, want) {
+			t.Fatalf("parseRcloneLSJSON() samples = %#v, want %#v", samples, want)
+		}
+	})
+}
+
 func mustWriteFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -2076,6 +3197,47 @@ func assertFileContent(t *testing.T, path string, want string) {
 	}
 	if string(data) != want {
 		t.Fatalf("ReadFile(%s) = %q, want %q", path, string(data), want)
+	}
+}
+
+func restorePreflightCheckByID(t *testing.T, checks []RestorePreflightCheck, id string) RestorePreflightCheck {
+	t.Helper()
+	for _, check := range checks {
+		if check.ID == id {
+			return check
+		}
+	}
+	t.Fatalf("preflight check %q not found in %+v", id, checks)
+	return RestorePreflightCheck{}
+}
+
+func corruptManifestArchivePath(t *testing.T, manifestPath string, archivePath string) {
+	t.Helper()
+	manifest, err := readManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("readManifest() error: %v", err)
+	}
+	if len(manifest.Entries) == 0 {
+		t.Fatal("manifest has no entries")
+	}
+	manifest.Entries[0].ArchivePath = archivePath
+	if err := writeJSONFile(manifestPath, manifest, 0600); err != nil {
+		t.Fatalf("writeJSONFile(manifest) error: %v", err)
+	}
+}
+
+func corruptManifestEntrySize(t *testing.T, manifestPath string, size int64) {
+	t.Helper()
+	manifest, err := readManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("readManifest() error: %v", err)
+	}
+	if len(manifest.Entries) == 0 {
+		t.Fatal("manifest has no entries")
+	}
+	manifest.Entries[0].Size = size
+	if err := writeJSONFile(manifestPath, manifest, 0600); err != nil {
+		t.Fatalf("writeJSONFile(manifest) error: %v", err)
 	}
 }
 

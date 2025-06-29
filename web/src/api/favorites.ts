@@ -1,8 +1,14 @@
 import { authFetch } from './auth'
+import { INVALID_API_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 import { encodePathForUrl, normalizePath } from '@/lib/utils'
 
 const API_BASE = '/api/v1'
 let batchCheckSupported: boolean | null = null
+
+export interface FavoritesRequestOptions {
+  signal?: AbortSignal
+}
 
 export interface Favorite {
   path: string
@@ -52,19 +58,22 @@ export class FavoritesError extends Error {
   }
 }
 
-function createFavoritesError(response: Response, fallback: string): Promise<FavoritesError> {
-  return (async () => {
-    let message = fallback
-    let code: string | undefined
-    try {
-      const body: FavoritesApiResponse<never> = await response.json()
-      message = getFavoritesErrorMessage(body, message)
-      code = getFavoritesErrorCode(body)
-    } catch {
-      // Keep fallback when the error body cannot be parsed.
-    }
-    return new FavoritesError(message, response.status, code)
-  })()
+async function createFavoritesError(response: Response, fallback: string): Promise<FavoritesError> {
+  const structuredError = await readStructuredJsonErrorDetails(response, fallback)
+  if (structuredError) {
+    return new FavoritesError(structuredError.message, response.status, structuredError.code)
+  }
+
+  let message = fallback
+  let code: string | undefined
+  try {
+    const body: FavoritesApiResponse<never> = await response.json()
+    message = getFavoritesErrorMessage(body, message)
+    code = getFavoritesErrorCode(body)
+  } catch {
+    // Keep fallback when the error body cannot be parsed.
+  }
+  return new FavoritesError(message, response.status, code)
 }
 
 interface FavoritesApiError {
@@ -109,7 +118,13 @@ function getFavoritesErrorCode(body: FavoritesApiResponse<never>): string | unde
 }
 
 async function readFavoritesSuccess<T>(response: Response, invalidMessage: string): Promise<FavoritesApiResponse<T>> {
-  const body: FavoritesApiResponse<T> = await response.json()
+  let body: FavoritesApiResponse<T>
+  try {
+    body = await response.json()
+  } catch {
+    throw new FavoritesError(invalidMessage, response.status)
+  }
+
   if (body.success !== true || body.data === undefined) {
     throw new FavoritesError(invalidMessage, response.status)
   }
@@ -131,16 +146,16 @@ async function readFavoritesActionSuccess(response: Response, invalidMessage: st
 /**
  * List user's favorites
  */
-export async function listFavorites(): Promise<Favorite[]> {
-  const response = await authFetch(`${API_BASE}/favorites`)
+export async function listFavorites(options: FavoritesRequestOptions = {}): Promise<Favorite[]> {
+  const response = await authFetch(`${API_BASE}/favorites`, options)
   
   if (!response.ok) {
     throw await createFavoritesError(response, '获取收藏列表失败')
   }
 
-  const data = await readFavoritesSuccessData<FavoritesResponse>(response, '获取收藏列表响应无效')
+  const data = await readFavoritesSuccessData<FavoritesResponse>(response, INVALID_API_RESPONSE_MESSAGE)
   if (!Array.isArray(data.favorites) || data.favorites.some((favorite) => !isValidFavorite(favorite))) {
-    throw new FavoritesError('获取收藏列表响应无效', response.status)
+    throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return data.favorites
 }
@@ -148,9 +163,10 @@ export async function listFavorites(): Promise<Favorite[]> {
 /**
  * Add path to favorites
  */
-export async function addFavorite(path: string, note = ''): Promise<Favorite> {
+export async function addFavorite(path: string, note = '', options: FavoritesRequestOptions = {}): Promise<Favorite> {
   const normalizedPath = normalizePath(path)
   const response = await authFetch(`${API_BASE}/favorites`, {
+    ...options,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: normalizedPath, note }),
@@ -161,9 +177,9 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
     throw await createFavoritesError(response, fallback)
   }
 
-  const data = await readFavoritesSuccessData<unknown>(response, '添加收藏响应无效')
+  const data = await readFavoritesSuccessData<unknown>(response, INVALID_API_RESPONSE_MESSAGE)
   if (!isValidFavorite(data)) {
-    throw new FavoritesError('添加收藏响应无效', response.status)
+    throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return data
 }
@@ -171,10 +187,11 @@ export async function addFavorite(path: string, note = ''): Promise<Favorite> {
 /**
  * Remove path from favorites
  */
-export async function removeFavorite(path: string): Promise<FavoritesActionResult> {
+export async function removeFavorite(path: string, options: FavoritesRequestOptions = {}): Promise<FavoritesActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/favorites${encodedPath}`, {
+    ...options,
     method: 'DELETE',
   })
   
@@ -182,23 +199,24 @@ export async function removeFavorite(path: string): Promise<FavoritesActionResul
     throw await createFavoritesError(response, '移除收藏失败')
   }
 
-  return readFavoritesActionSuccess(response, '移除收藏响应无效')
+  return readFavoritesActionSuccess(response, INVALID_API_RESPONSE_MESSAGE)
 }
 
 /**
  * Check if a path is favorited
  */
-export async function checkFavorite(path: string): Promise<boolean> {
+export async function checkFavorite(path: string, options: FavoritesRequestOptions = {}): Promise<boolean> {
   const normalizedPath = normalizePath(path)
-  const response = await authFetch(`${API_BASE}/favorites/check?path=${encodeURIComponent(normalizedPath)}`)
+  const url = `${API_BASE}/favorites/check?path=${encodeURIComponent(normalizedPath)}`
+  const response = options.signal ? await authFetch(url, { signal: options.signal }) : await authFetch(url)
   
   if (!response.ok) {
     throw await createFavoritesError(response, '获取收藏状态失败')
   }
   
-  const data = await readFavoritesSuccessData<{ path: string; is_favorite: boolean }>(response, '获取收藏状态响应无效')
+  const data = await readFavoritesSuccessData<{ path: string; is_favorite: boolean }>(response, INVALID_API_RESPONSE_MESSAGE)
   if (typeof data.is_favorite !== 'boolean') {
-    throw new FavoritesError('获取收藏状态响应无效', response.status)
+    throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   return data.is_favorite
 }
@@ -206,7 +224,7 @@ export async function checkFavorite(path: string): Promise<boolean> {
 /**
  * Check multiple paths at once
  */
-export async function checkFavorites(paths: string[]): Promise<Record<string, boolean>> {
+export async function checkFavorites(paths: string[], options: FavoritesRequestOptions = {}): Promise<Record<string, boolean>> {
   if (batchCheckSupported === false) {
     return Object.fromEntries(paths.map(p => [p, false]))
   }
@@ -217,6 +235,7 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
     return normalized
   })
   const response = await authFetch(`${API_BASE}/favorites/check-batch`, {
+    ...options,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths: normalizedPaths }),
@@ -230,18 +249,18 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
     throw await createFavoritesError(response, '获取收藏状态失败')
   }
   batchCheckSupported = true
-  const data = await readFavoritesSuccessData<CheckPathsResponse>(response, '获取收藏状态响应无效')
+  const data = await readFavoritesSuccessData<CheckPathsResponse>(response, INVALID_API_RESPONSE_MESSAGE)
   if (
     !data.favorites ||
     typeof data.favorites !== 'object' ||
     Array.isArray(data.favorites)
   ) {
-    throw new FavoritesError('获取收藏状态响应无效', response.status)
+    throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
   }
   const mapped: Record<string, boolean> = {}
   for (const [normalized, isFavorite] of Object.entries(data.favorites)) {
     if (typeof isFavorite !== 'boolean') {
-      throw new FavoritesError('获取收藏状态响应无效', response.status)
+      throw new FavoritesError(INVALID_API_RESPONSE_MESSAGE, response.status)
     }
     const original = normalizedMap.get(normalized)
     if (original) {
@@ -254,10 +273,11 @@ export async function checkFavorites(paths: string[]): Promise<Record<string, bo
 /**
  * Update note for a favorite
  */
-export async function updateFavoriteNote(path: string, note: string): Promise<FavoritesActionResult> {
+export async function updateFavoriteNote(path: string, note: string, options: FavoritesRequestOptions = {}): Promise<FavoritesActionResult> {
   const normalizedPath = normalizePath(path)
   const encodedPath = encodePathForUrl(normalizedPath)
   const response = await authFetch(`${API_BASE}/favorites${encodedPath}`, {
+    ...options,
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ note }),
@@ -267,18 +287,18 @@ export async function updateFavoriteNote(path: string, note: string): Promise<Fa
     throw await createFavoritesError(response, '更新备注失败')
   }
 
-  return readFavoritesActionSuccess(response, '更新备注响应无效')
+  return readFavoritesActionSuccess(response, INVALID_API_RESPONSE_MESSAGE)
 }
 
 /**
  * Toggle favorite status
  */
-export async function toggleFavorite(path: string, isFavorited: boolean): Promise<boolean> {
+export async function toggleFavorite(path: string, isFavorited: boolean, options: FavoritesRequestOptions = {}): Promise<boolean> {
   if (isFavorited) {
-    await removeFavorite(path)
+    await removeFavorite(path, options)
     return false
   } else {
-    await addFavorite(path)
+    await addFavorite(path, '', options)
     return true
   }
 }

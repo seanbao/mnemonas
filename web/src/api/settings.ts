@@ -4,8 +4,23 @@
  */
 
 import { authFetch } from './auth'
+import { INVALID_API_RESPONSE_MESSAGE as INVALID_SETTINGS_RESPONSE_MESSAGE } from '@/lib/apiMessages'
+import { readStructuredJsonErrorDetails } from '@/lib/jsonErrorResponse'
 
 const API_BASE = '/api/v1/settings'
+const SETTINGS_ERROR_MESSAGES = {
+  get: '获取设置失败',
+  securityCheck: '获取安全检查失败',
+  update: '更新设置失败',
+  accessCheck: '检查目录访问失败',
+  accessReport: '生成目录访问报告失败',
+  accessPreview: '预览目录访问变更失败',
+  webdavCredentials: '获取 WebDAV 凭据失败',
+} as const
+
+export interface SettingsRequestOptions {
+  signal?: AbortSignal
+}
 
 export interface SettingsData {
   server: {
@@ -72,8 +87,10 @@ export interface SettingsData {
     min_free_bytes: number
     cooldown_period: string
     webhook_url: string
+    webhook_url_configured?: boolean
     webhook_method: string
     webhook_headers: string[]
+    webhook_headers_configured?: boolean
     telegram_enabled?: boolean
     telegram_bot_token_configured?: boolean
     telegram_chat_id?: string
@@ -392,6 +409,11 @@ export interface UpdateSettingsRequest {
 }
 
 async function parseSettingsError(response: Response, fallback: string): Promise<SettingsError> {
+  const structuredError = await readStructuredJsonErrorDetails(response, fallback)
+  if (structuredError) {
+    return new SettingsError(structuredError.message, response.status, structuredError.code)
+  }
+
   try {
     const body = await response.json() as SettingsApiResponse<never>
     return new SettingsError(body.error?.message || body.message || fallback, response.status, body.error?.code)
@@ -666,8 +688,10 @@ function isValidSettingsData(value: unknown): value is SettingsData {
       || typeof value.alerts.min_free_bytes !== 'number'
       || typeof value.alerts.cooldown_period !== 'string'
       || typeof value.alerts.webhook_url !== 'string'
+      || (value.alerts.webhook_url_configured !== undefined && typeof value.alerts.webhook_url_configured !== 'boolean')
       || typeof value.alerts.webhook_method !== 'string'
       || !isStringArray(value.alerts.webhook_headers)
+      || (value.alerts.webhook_headers_configured !== undefined && typeof value.alerts.webhook_headers_configured !== 'boolean')
       || (value.alerts.telegram_enabled !== undefined && typeof value.alerts.telegram_enabled !== 'boolean')
       || (value.alerts.telegram_bot_token_configured !== undefined && typeof value.alerts.telegram_bot_token_configured !== 'boolean')
       || (value.alerts.telegram_chat_id !== undefined && typeof value.alerts.telegram_chat_id !== 'string')
@@ -720,16 +744,16 @@ function isValidSettingsData(value: unknown): value is SettingsData {
 /**
  * Get current settings
  */
-export async function getSettings(): Promise<SettingsResponse> {
-  const response = await authFetch(`${API_BASE}/`)
+export async function getSettings(options: SettingsRequestOptions = {}): Promise<SettingsResponse> {
+  const response = await authFetch(`${API_BASE}/`, options)
   
   if (!response.ok) {
-    throw await parseSettingsError(response, 'Failed to get settings')
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.get)
   }
 
-  const body = await parseSettingsSuccess<unknown>(response, 'Invalid settings response')
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
   if (!isValidSettingsData(body.data)) {
-    throw new Error('Invalid settings response')
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return {
     success: body.success,
@@ -740,16 +764,16 @@ export async function getSettings(): Promise<SettingsResponse> {
 /**
  * Get public-access security self-check
  */
-export async function getSecurityCheck(): Promise<SecurityCheckResponse> {
-  const response = await authFetch(`${API_BASE}/security-check`)
+export async function getSecurityCheck(options: SettingsRequestOptions = {}): Promise<SecurityCheckResponse> {
+  const response = await authFetch(`${API_BASE}/security-check`, options)
 
   if (!response.ok) {
-    throw await parseSettingsError(response, 'Failed to get security check')
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.securityCheck)
   }
 
-  const body = await parseSettingsSuccess<unknown>(response, 'Invalid security check response')
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
   if (!isValidSecurityCheckData(body.data)) {
-    throw new Error('Invalid security check response')
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return {
     success: body.success,
@@ -760,8 +784,12 @@ export async function getSecurityCheck(): Promise<SecurityCheckResponse> {
 /**
  * Update settings
  */
-export async function updateSettings(data: UpdateSettingsRequest): Promise<{ success: boolean; message: string }> {
+export async function updateSettings(
+  data: UpdateSettingsRequest,
+  options: SettingsRequestOptions = {},
+): Promise<{ success: boolean; message: string }> {
   const response = await authFetch(`${API_BASE}/`, {
+    ...options,
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -770,12 +798,12 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
   })
   
   if (!response.ok) {
-    throw await parseSettingsError(response, 'Failed to update settings')
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.update)
   }
 
-  const body = await parseSettingsSuccess<null>(response, 'Invalid update settings response')
+  const body = await parseSettingsSuccess<null>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
   if (!('data' in body)) {
-    throw new Error('Invalid update settings response')
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return {
     success: true,
@@ -783,8 +811,12 @@ export async function updateSettings(data: UpdateSettingsRequest): Promise<{ suc
   }
 }
 
-export async function checkDirectoryAccess(data: DirectoryAccessCheckRequest): Promise<DirectoryAccessCheckData> {
+export async function checkDirectoryAccess(
+  data: DirectoryAccessCheckRequest,
+  options: SettingsRequestOptions = {},
+): Promise<DirectoryAccessCheckData> {
   const response = await authFetch(`${API_BASE}/access-check`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -793,18 +825,22 @@ export async function checkDirectoryAccess(data: DirectoryAccessCheckRequest): P
   })
 
   if (!response.ok) {
-    throw await parseSettingsError(response, 'Failed to check directory access')
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.accessCheck)
   }
 
-  const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access check response')
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
   if (!isDirectoryAccessCheckData(body.data)) {
-    throw new Error('Invalid directory access check response')
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return body.data
 }
 
-export async function reportDirectoryAccess(data: DirectoryAccessReportRequest): Promise<DirectoryAccessReportData> {
+export async function reportDirectoryAccess(
+  data: DirectoryAccessReportRequest,
+  options: SettingsRequestOptions = {},
+): Promise<DirectoryAccessReportData> {
   const response = await authFetch(`${API_BASE}/access-report`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -813,18 +849,22 @@ export async function reportDirectoryAccess(data: DirectoryAccessReportRequest):
   })
 
   if (!response.ok) {
-    throw await parseSettingsError(response, 'Failed to build directory access report')
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.accessReport)
   }
 
-  const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access report response')
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
   if (!isDirectoryAccessReportData(body.data)) {
-    throw new Error('Invalid directory access report response')
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return body.data
 }
 
-export async function previewDirectoryAccess(data: DirectoryAccessPreviewRequest): Promise<DirectoryAccessReportData> {
+export async function previewDirectoryAccess(
+  data: DirectoryAccessPreviewRequest,
+  options: SettingsRequestOptions = {},
+): Promise<DirectoryAccessReportData> {
   const response = await authFetch(`${API_BASE}/access-preview`, {
+    ...options,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -833,12 +873,12 @@ export async function previewDirectoryAccess(data: DirectoryAccessPreviewRequest
   })
 
   if (!response.ok) {
-    throw await parseSettingsError(response, 'Failed to preview directory access')
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.accessPreview)
   }
 
-  const body = await parseSettingsSuccess<unknown>(response, 'Invalid directory access preview response')
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
   if (!isDirectoryAccessReportData(body.data)) {
-    throw new Error('Invalid directory access preview response')
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return body.data
 }
@@ -857,16 +897,16 @@ export interface WebDAVCredentialsResponse {
 /**
  * Get WebDAV credentials for authenticated users
  */
-export async function getWebDAVCredentials(): Promise<WebDAVCredentialsResponse> {
-  const response = await authFetch(`${API_BASE}/webdav-credentials`)
+export async function getWebDAVCredentials(options: SettingsRequestOptions = {}): Promise<WebDAVCredentialsResponse> {
+  const response = await authFetch(`${API_BASE}/webdav-credentials`, options)
   
   if (!response.ok) {
-    throw await parseSettingsError(response, 'Failed to get WebDAV credentials')
+    throw await parseSettingsError(response, SETTINGS_ERROR_MESSAGES.webdavCredentials)
   }
 
-  const body = await parseSettingsSuccess<unknown>(response, 'Invalid WebDAV credentials response')
+  const body = await parseSettingsSuccess<unknown>(response, INVALID_SETTINGS_RESPONSE_MESSAGE)
   if (!isValidWebDAVCredentials(body.data)) {
-    throw new Error('Invalid WebDAV credentials response')
+    throw new Error(INVALID_SETTINGS_RESPONSE_MESSAGE)
   }
   return body.data
 }

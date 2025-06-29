@@ -8,6 +8,7 @@ vi.mock('./auth', () => ({
 import { authFetch } from './auth'
 
 const mockAuthFetch = authFetch as Mock
+const invalidResponseMessage = '服务器返回了无效的数据'
 
 function createSettings(overrides: Partial<SettingsData> = {}): SettingsData {
   return {
@@ -51,6 +52,23 @@ describe('Settings API', () => {
     expect(result.data.server.trusted_proxy_cidrs).toEqual(['10.0.0.0/8'])
   })
 
+  it('forwards abort signal when fetching settings', async () => {
+    const controller = new AbortController()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: createSettings(),
+      }),
+    })
+
+    await getSettings({ signal: controller.signal })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', {
+      signal: controller.signal,
+    })
+  })
+
   it('rejects malformed trusted proxy CIDR settings responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
@@ -65,7 +83,7 @@ describe('Settings API', () => {
       }),
     })
 
-    await expect(getSettings()).rejects.toThrow('Invalid settings response')
+    await expect(getSettings()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('accepts directory quotas in settings responses', async () => {
@@ -187,9 +205,11 @@ describe('Settings API', () => {
         critical_pct: 95,
         min_free_bytes: 1024,
         cooldown_period: '10m',
-        webhook_url: 'https://hooks.example.com/storage',
+        webhook_url: '<redacted>',
+        webhook_url_configured: true,
         webhook_method: 'POST',
-        webhook_headers: ['X-Test: true'],
+        webhook_headers: ['X-Test: <redacted>'],
+        webhook_headers_configured: true,
         telegram_enabled: true,
         telegram_bot_token_configured: true,
         telegram_chat_id: '-1001234567890',
@@ -231,7 +251,10 @@ describe('Settings API', () => {
 
     expect(result.data.server.tls?.cert_file).toBe('/cert.pem')
     expect(result.data.versioning?.auto_versioned_extensions).toEqual(['.txt', '.md'])
-    expect(result.data.alerts?.webhook_headers).toEqual(['X-Test: true'])
+    expect(result.data.alerts?.webhook_url).toBe('<redacted>')
+    expect(result.data.alerts?.webhook_url_configured).toBe(true)
+    expect(result.data.alerts?.webhook_headers).toEqual(['X-Test: <redacted>'])
+    expect(result.data.alerts?.webhook_headers_configured).toBe(true)
     expect(result.data.alerts?.telegram_bot_token_configured).toBe(true)
     expect(result.data.alerts?.telegram_chat_id).toBe('-1001234567890')
     expect(result.data.disk_health?.devices[0]?.path).toBe('/dev/disk/by-id/test')
@@ -244,7 +267,7 @@ describe('Settings API', () => {
       json: () => Promise.resolve({ success: true }),
     })
 
-    await expect(getSettings()).rejects.toThrow('Invalid settings response')
+    await expect(getSettings()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects successful settings responses with malformed data shape', async () => {
@@ -263,7 +286,7 @@ describe('Settings API', () => {
       }),
     })
 
-    await expect(getSettings()).rejects.toThrow('Invalid settings response')
+    await expect(getSettings()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('uses structured api error message when settings request fails', async () => {
@@ -276,6 +299,28 @@ describe('Settings API', () => {
     await expect(getSettings()).rejects.toThrow('settings not available')
   })
 
+  it('surfaces problem-json settings errors', async () => {
+    const body = {
+      title: 'Service unavailable',
+      detail: 'settings storage unavailable',
+      status: 503,
+    }
+
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+      clone: () => ({ json: () => Promise.resolve(body) }),
+      json: () => Promise.resolve(body),
+    })
+
+    await expect(getSettings()).rejects.toMatchObject({
+      message: 'settings storage unavailable',
+      status: 503,
+      isUnavailable: true,
+    })
+  })
+
   it('uses fallback api error messages when settings error bodies are unreadable', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: false,
@@ -284,7 +329,7 @@ describe('Settings API', () => {
     })
 
     await expect(getSettings()).rejects.toMatchObject({
-      message: 'Failed to get settings',
+      message: '获取设置失败',
       status: 500,
     })
   })
@@ -329,9 +374,32 @@ describe('Settings API', () => {
 
     const result = await getSecurityCheck()
 
-    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/security-check')
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/security-check', {})
     expect(result.data.status).toBe('warning')
     expect(result.data.checks[0].id).toBe('https_request')
+  })
+
+  it('forwards abort signal when fetching security check', async () => {
+    const controller = new AbortController()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          status: 'pass',
+          generated_at: '2026-05-08T00:00:00Z',
+          checks: [],
+          request: { scheme: 'https' },
+          config: { trusted_proxy_hops: 1 },
+        },
+      }),
+    })
+
+    await getSecurityCheck({ signal: controller.signal })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/security-check', {
+      signal: controller.signal,
+    })
   })
 
   it('rejects malformed security check responses', async () => {
@@ -349,7 +417,7 @@ describe('Settings API', () => {
       }),
     })
 
-    await expect(getSecurityCheck()).rejects.toThrow('Invalid security check response')
+    await expect(getSecurityCheck()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('uses structured api error message when security check fails', async () => {
@@ -374,6 +442,22 @@ describe('Settings API', () => {
     const result = await updateSettings({ server: { port: 8081 } })
 
     expect(result.message).toContain('require restart')
+  })
+
+  it('forwards abort signal when updating settings', async () => {
+    const controller = new AbortController()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: null, message: 'settings updated' }),
+    })
+
+    await updateSettings({ server: { port: 8081 } }, { signal: controller.signal })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ server: { port: 8081 } }),
+      signal: controller.signal,
+    }))
   })
 
   it('sends trusted_proxy_hops in update payloads', async () => {
@@ -475,6 +559,7 @@ describe('Settings API', () => {
   })
 
   it('checks directory access and unwraps decisions', async () => {
+    const controller = new AbortController()
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({
@@ -504,13 +589,17 @@ describe('Settings API', () => {
       }),
     })
 
-    const result = await checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })
+    const result = await checkDirectoryAccess(
+      { username: 'alice', path: '/team/readme.txt' },
+      { signal: controller.signal },
+    )
 
     expect(result.read.allowed).toBe(true)
     expect(result.write.allowed).toBe(false)
     expect(result.read.matched_rule?.path).toBe('/team')
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-check', expect.objectContaining({
       method: 'POST',
+      signal: controller.signal,
       body: JSON.stringify({ username: 'alice', path: '/team/readme.txt' }),
     }))
   })
@@ -532,7 +621,7 @@ describe('Settings API', () => {
       }),
     })
 
-    await expect(checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })).rejects.toThrow('Invalid directory access check response')
+    await expect(checkDirectoryAccess({ username: 'alice', path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
   })
 
   it('uses structured api error message when directory access check fails', async () => {
@@ -550,6 +639,7 @@ describe('Settings API', () => {
   })
 
   it('reports directory access for all users', async () => {
+    const controller = new AbortController()
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({
@@ -604,7 +694,10 @@ describe('Settings API', () => {
       }),
     })
 
-    const result = await reportDirectoryAccess({ path: '/team/readme.txt' })
+    const result = await reportDirectoryAccess(
+      { path: '/team/readme.txt' },
+      { signal: controller.signal },
+    )
 
     expect(result.summary.read_allowed).toBe(1)
     expect(result.summary.related_shares).toBe(1)
@@ -612,6 +705,7 @@ describe('Settings API', () => {
     expect(result.users.map((entry) => entry.username)).toEqual(['alice', 'bob'])
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-report', expect.objectContaining({
       method: 'POST',
+      signal: controller.signal,
       body: JSON.stringify({ path: '/team/readme.txt' }),
     }))
   })
@@ -629,10 +723,11 @@ describe('Settings API', () => {
       }),
     })
 
-    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow('Invalid directory access report response')
+    await expect(reportDirectoryAccess({ path: '/team/readme.txt' })).rejects.toThrow(invalidResponseMessage)
   })
 
   it('previews directory access rules without saving settings', async () => {
+    const controller = new AbortController()
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({
@@ -655,12 +750,16 @@ describe('Settings API', () => {
     })
 
     const rules = [{ path: '/team', read_groups: ['family'] }]
-    const result = await previewDirectoryAccess({ path: '/team/readme.txt', directory_access_rules: rules })
+    const result = await previewDirectoryAccess(
+      { path: '/team/readme.txt', directory_access_rules: rules },
+      { signal: controller.signal },
+    )
 
     expect(result.preview).toBe(true)
     expect(result.users[0]?.read.allowed).toBe(true)
     expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/access-preview', expect.objectContaining({
       method: 'POST',
+      signal: controller.signal,
       body: JSON.stringify({ path: '/team/readme.txt', directory_access_rules: rules }),
     }))
   })
@@ -684,7 +783,7 @@ describe('Settings API', () => {
       json: () => Promise.resolve({ success: true, message: 'settings updated, some changes may require restart' }),
     })
 
-    await expect(updateSettings({ server: { port: 8081 } })).rejects.toThrow('Invalid update settings response')
+    await expect(updateSettings({ server: { port: 8081 } })).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects malformed successful update responses', async () => {
@@ -693,7 +792,7 @@ describe('Settings API', () => {
       json: () => Promise.resolve({ message: 'settings updated' }),
     })
 
-    await expect(updateSettings({ server: { port: 8081 } })).rejects.toThrow('Invalid update settings response')
+    await expect(updateSettings({ server: { port: 8081 } })).rejects.toThrow(invalidResponseMessage)
   })
 
   it.each([
@@ -711,7 +810,7 @@ describe('Settings API', () => {
       json: () => Promise.resolve({ success: true, data: createSettings(override as Partial<SettingsData>) }),
     })
 
-    await expect(getSettings()).rejects.toThrow('Invalid settings response')
+    await expect(getSettings()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('unwraps webdav credentials payload', async () => {
@@ -734,13 +833,36 @@ describe('Settings API', () => {
     expect(result.password).toBe('secret')
   })
 
+  it('forwards abort signal when fetching WebDAV credentials', async () => {
+    const controller = new AbortController()
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          enabled: true,
+          url: '/dav/',
+          auth_type: 'basic',
+          username: 'admin',
+          password: 'secret',
+        },
+      }),
+    })
+
+    await getWebDAVCredentials({ signal: controller.signal })
+
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/v1/settings/webdav-credentials', {
+      signal: controller.signal,
+    })
+  })
+
   it('rejects malformed successful webdav credentials responses', async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ success: true }),
     })
 
-    await expect(getWebDAVCredentials()).rejects.toThrow('Invalid WebDAV credentials response')
+    await expect(getWebDAVCredentials()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects unreadable successful webdav credentials responses', async () => {
@@ -750,7 +872,7 @@ describe('Settings API', () => {
       json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
     })
 
-    await expect(getWebDAVCredentials()).rejects.toThrow('Invalid WebDAV credentials response')
+    await expect(getWebDAVCredentials()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('rejects webdav credentials responses with malformed data shape', async () => {
@@ -766,7 +888,7 @@ describe('Settings API', () => {
       }),
     })
 
-    await expect(getWebDAVCredentials()).rejects.toThrow('Invalid WebDAV credentials response')
+    await expect(getWebDAVCredentials()).rejects.toThrow(invalidResponseMessage)
   })
 
   it('uses wrapped error message for webdav credentials failures', async () => {

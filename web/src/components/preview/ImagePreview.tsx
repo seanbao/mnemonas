@@ -4,6 +4,10 @@ import { ZoomIn, ZoomOut, RotateCw, Maximize2, AlertCircle } from 'lucide-react'
 import { buildPreviewUrl } from '@/lib/preview-utils'
 import { cn } from '@/lib/utils'
 import { authFetch } from '@/api/auth'
+import { readDownloadJsonErrorDetails } from '@/lib/downloadResponse'
+import { getUserFacingErrorDescription } from '@/lib/apiMessages'
+
+const imagePreviewLoadErrorMessage = '无法加载图片'
 
 export interface ImagePreviewProps {
   path: string
@@ -30,6 +34,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
   useEffect(() => {
     let cancelled = false
     let currentBlobUrl: string | null = null
+    const controller = new AbortController()
     
     const fetchImage = async () => {
       setIsLoading(true)
@@ -37,10 +42,23 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
       setBlobUrl(null)
       
       try {
-        const response = await authFetch(imageUrl)
-        
+        const response = await authFetch(imageUrl, { signal: controller.signal })
+
         if (!response.ok) {
+          const jsonError = await readDownloadJsonErrorDetails(response, '无法加载图片')
+          if (jsonError) {
+            if (!cancelled) {
+              setError(getUserFacingErrorDescription(new Error(jsonError.message), imagePreviewLoadErrorMessage))
+              setIsLoading(false)
+            }
+            return
+          }
           throw new Error(`HTTP ${response.status}`)
+        }
+
+        const contentType = response.headers?.get?.('content-type')?.split(';')[0]?.trim().toLowerCase()
+        if (contentType && !contentType.startsWith('image/')) {
+          throw new Error(`Unexpected image content type: ${contentType}`)
         }
         
         const blob = await response.blob()
@@ -49,8 +67,8 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
           setBlobUrl(currentBlobUrl)
         }
       } catch {
-        if (!cancelled) {
-          setError('无法加载图片')
+        if (!cancelled && !controller.signal.aborted) {
+          setError(imagePreviewLoadErrorMessage)
           setIsLoading(false)
         }
       }
@@ -60,6 +78,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
     
     return () => {
       cancelled = true
+      controller.abort()
       if (currentBlobUrl) {
         URL.revokeObjectURL(currentBlobUrl)
       }
@@ -73,7 +92,7 @@ export function ImagePreview({ path, filename, className }: ImagePreviewProps) {
 
   const handleError = useCallback(() => {
     setIsLoading(false)
-    setError('无法加载图片')
+    setError(imagePreviewLoadErrorMessage)
   }, [])
 
   const handleZoomIn = useCallback(() => {

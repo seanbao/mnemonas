@@ -51,6 +51,16 @@ import { ApiError, getStorageStats } from '@/api/files'
 
 const mockGetStorageStats = getStorageStats as ReturnType<typeof vi.fn>
 
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+
+function expectCalledWithAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
+  const call = mockFn.mock.calls.find(([options]) => {
+    return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
+}
+
 describe('StoragePage', () => {
   const mockStats = {
     totalObjects: 1234,
@@ -86,6 +96,11 @@ describe('StoragePage', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    } else {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   describe('loading state', () => {
@@ -100,6 +115,14 @@ describe('StoragePage', () => {
   })
 
   describe('header', () => {
+    it('passes abort signals to the storage stats query', async () => {
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expectCalledWithAbortSignal(mockGetStorageStats)
+      })
+    })
+
     it('displays page title', async () => {
       render(<StoragePage />)
 
@@ -291,6 +314,116 @@ describe('StoragePage', () => {
       await waitFor(() => {
         expect(screen.getByText('文件系统')).toBeTruthy()
         expect(screen.getByText('ZFS')).toBeTruthy()
+      })
+    })
+
+    it('displays storage backing integrity and mount options for admins', async () => {
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('数据校验能力')).toBeTruthy()
+        expect(screen.getByText('原生数据校验支持')).toBeTruthy()
+        expect(screen.getByText('挂载选项')).toBeTruthy()
+        expect(screen.getByText('rw,relatime')).toBeTruthy()
+      })
+    })
+
+    it('copies the storage backing summary for admins', async () => {
+      const user = userEvent.setup()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+
+      render(<StoragePage />)
+
+      const copyButton = await screen.findByRole('button', { name: '复制存储摘要' })
+      await user.click(copyButton)
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledTimes(1)
+      })
+      const summary = writeText.mock.calls[0]?.[0] as string
+      expect(summary).toContain('文件系统: ZFS')
+      expect(summary).toContain('挂载点: /srv/mnemonas')
+      expect(summary).toContain('存储源: tank/mnemonas')
+      expect(summary).toContain('挂载选项: rw,relatime')
+      expect(summary).toContain('数据校验能力: 原生数据校验支持')
+      expect(mockAddToast).toHaveBeenCalledWith({ title: '存储摘要已复制', color: 'success' })
+    })
+
+    it('shows a warning when storage backing summary cannot be copied', async () => {
+      const user = userEvent.setup()
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: undefined,
+      })
+
+      render(<StoragePage />)
+
+      const copyButton = await screen.findByRole('button', { name: '复制存储摘要' })
+      await user.click(copyButton)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '无法复制存储摘要',
+          description: '当前浏览器不支持剪贴板写入。',
+          color: 'warning',
+        })
+      })
+    })
+
+    it('uses a stable message when clipboard write fails', async () => {
+      const user = userEvent.setup()
+      const writeText = vi.fn().mockRejectedValue(new Error('Document is not focused'))
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+
+      render(<StoragePage />)
+
+      const copyButton = await screen.findByRole('button', { name: '复制存储摘要' })
+      await user.click(copyButton)
+
+      await waitFor(() => {
+        expect(mockAddToast).toHaveBeenCalledWith({
+          title: '无法复制存储摘要',
+          description: '请检查浏览器剪贴板权限。',
+          color: 'danger',
+        })
+      })
+      expect(mockAddToast).not.toHaveBeenCalledWith(expect.objectContaining({
+        description: 'Document is not focused',
+      }))
+    })
+
+    it('hides storage backing diagnostics from non-admin users', async () => {
+      useIsAdminMock.mockReturnValue(false)
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('空间与存储')).toBeTruthy()
+      })
+      expect(screen.queryByText('数据校验能力')).toBeNull()
+      expect(screen.queryByText('挂载选项')).toBeNull()
+      expect(screen.queryByRole('button', { name: '复制存储摘要' })).toBeNull()
+    })
+
+    it('warns when the storage backing lacks native data checksums', async () => {
+      mockGetStorageStats.mockResolvedValue({
+        ...mockStats,
+        diskFilesystemType: 'ext4',
+        diskNativeDataChecksumSupport: false,
+      })
+
+      render(<StoragePage />)
+
+      await waitFor(() => {
+        expect(screen.getByText('建议使用 ZFS/Btrfs')).toBeTruthy()
+        expect(screen.getByText(/当前未检测到底层数据校验/)).toBeTruthy()
       })
     })
 
@@ -501,7 +634,7 @@ describe('StoragePage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('加载存储统计失败')).toBeTruthy()
-        expect(screen.getByText('Network error')).toBeTruthy()
+        expect(screen.getByText('存储统计加载失败，请检查网络或稍后重试。')).toBeTruthy()
         expect(screen.getByRole('button', { name: '重新加载' })).toBeTruthy()
       })
     })
@@ -562,7 +695,7 @@ describe('StoragePage', () => {
       await waitFor(() => {
         expect(mockAddToast).toHaveBeenCalledWith({
           title: '加载存储统计失败',
-          description: 'still offline',
+          description: '操作未完成，请稍后重试。',
           color: 'danger',
         })
       })

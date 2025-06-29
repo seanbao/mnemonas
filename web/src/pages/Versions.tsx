@@ -29,46 +29,32 @@ import {
   HardDrive,
   Fingerprint,
 } from 'lucide-react'
-import { ensureDownloadSession } from '@/api/auth'
+import { authFetch, ensureDownloadSession } from '@/api/auth'
 import { ApiError, getVersions, buildDownloadUrl, downloadFile, restoreVersion, type ActionResult, type VersionInfo } from '@/api/files'
+import { readRangedDownloadJsonErrorDetails } from '@/lib/downloadResponse'
+import { GENERIC_ACTION_ERROR_DESCRIPTION, GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { useIsAdmin, useUser } from '@/stores/auth'
 import { formatBytes, formatDate, normalizePath, openUrlInNewTab } from '@/lib/utils'
 import { getInvalidHomeDirDescription, invalidHomeDirTitle, resolveUserHomeScope } from '@/lib/userScope'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 
-function pathWithinBase(basePath: string, targetPath: string): boolean {
-  if (basePath === '/') {
-    return targetPath.startsWith('/')
-  }
-  return targetPath === basePath || targetPath.startsWith(`${basePath}/`)
-}
+const previewSessionSyncWarningTitle = '原始预览和下载会话同步失败，请稍后重试'
 
-function getVersionQueryState(path: string, scopedHomeDir: string): {
+function getVersionQueryState(path: string): {
   searchPath: string
   selectedPath: string | null
-  isBlocked: boolean
 } {
   if (!path) {
     return {
       searchPath: '',
       selectedPath: null,
-      isBlocked: false,
-    }
-  }
-
-  if (scopedHomeDir && !pathWithinBase(scopedHomeDir, path)) {
-    return {
-      searchPath: scopedHomeDir,
-      selectedPath: null,
-      isBlocked: true,
     }
   }
 
   return {
     searchPath: path,
     selectedPath: path,
-    isBlocked: false,
   }
 }
 
@@ -82,7 +68,7 @@ function getVersionsErrorPresentation(error: unknown): { title: string; descript
 
   return {
     title: '获取版本历史失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -107,13 +93,17 @@ function getVersionsActionErrorToast(
 
   return {
     title: titles.failure,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_ACTION_ERROR_DESCRIPTION),
     color: 'danger',
   }
 }
 
 function isMissingVersionError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
 }
 
 function getMissingVersionToast(action: 'restore' | 'download'): {
@@ -134,7 +124,7 @@ function getVersionsActionSuccessToast(result: ActionResult): {
 } {
   if (result.warning) {
     return {
-      title: result.message ?? '恢复版本完成，但存在警告',
+      title: '恢复版本完成，但存在警告',
       color: 'warning',
     }
   }
@@ -266,7 +256,6 @@ export function VersionsPage() {
       authScopeKey={authScopeKey}
       initialPath={normalizedInitialPath}
       isAdmin={isAdmin}
-      scopedHomeDir={effectiveScopedHomeDir}
       hasInvalidHomeDir={hasInvalidHomeDir && !isAdmin}
       setSearchParams={setSearchParams}
     />
@@ -277,24 +266,32 @@ interface VersionsPageContentProps {
   authScopeKey: string
   initialPath: string
   isAdmin: boolean
-  scopedHomeDir: string
   hasInvalidHomeDir: boolean
   setSearchParams: SetURLSearchParams
 }
 
-function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir, hasInvalidHomeDir, setSearchParams }: VersionsPageContentProps) {
+interface RestoreVersionVariables {
+  path: string
+  hash: string
+  sessionId: number
+  signal: AbortSignal
+}
+
+function VersionsPageContent({ authScopeKey, initialPath, isAdmin, hasInvalidHomeDir, setSearchParams }: VersionsPageContentProps) {
   const initialState = hasInvalidHomeDir
-    ? { searchPath: '', selectedPath: null, isBlocked: false }
-    : getVersionQueryState(initialPath, scopedHomeDir)
+    ? { searchPath: '', selectedPath: null }
+    : getVersionQueryState(initialPath)
   const [searchPath, setSearchPath] = useState(initialState.searchPath)
   const [selectedPath, setSelectedPath] = useState<string | null>(initialState.selectedPath)
   const [selectedVersion, setSelectedVersion] = useState<VersionInfo | null>(null)
   const { isOpen, onOpen, onClose } = useDisclosure()
   const queryClient = useQueryClient()
   const restoreSessionRef = useRef(0)
+  const restoreAbortControllerRef = useRef<AbortController | null>(null)
+  const downloadAbortControllerRef = useRef<AbortController | null>(null)
   const currentSelectedPathRef = useRef<string | null>(initialState.selectedPath)
   const currentSelectedVersionRef = useRef<VersionInfo | null>(null)
-  const selectedPathAllowed = !hasInvalidHomeDir && (!selectedPath || !scopedHomeDir || pathWithinBase(scopedHomeDir, selectedPath))
+  const selectedPathAllowed = !hasInvalidHomeDir
 
   useEffect(() => {
     currentSelectedPathRef.current = selectedPath
@@ -305,24 +302,24 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
   }, [selectedVersion])
 
   useEffect(() => {
+    return () => {
+      downloadAbortControllerRef.current?.abort()
+      downloadAbortControllerRef.current = null
+      restoreAbortControllerRef.current?.abort()
+      restoreAbortControllerRef.current = null
+    }
+  }, [selectedPath])
+
+  useEffect(() => {
     if (hasInvalidHomeDir) {
       setSearchParams({})
       return
     }
-    if (!initialState.isBlocked) {
-      return
-    }
-
-    addToast({
-      title: '仅可查看主目录内文件的版本历史',
-      color: 'warning',
-    })
-    setSearchParams({})
-  }, [hasInvalidHomeDir, initialState.isBlocked, setSearchParams])
+  }, [hasInvalidHomeDir, setSearchParams])
 
   const { data: versions, isLoading, error, refetch } = useQuery({
     queryKey: ['versions', authScopeKey, selectedPath],
-    queryFn: () => getVersions(selectedPath!),
+    queryFn: ({ signal }) => getVersions(selectedPath!, { signal }),
     enabled: !!selectedPath && selectedPathAllowed,
   })
   const versionsErrorPresentation = getVersionsErrorPresentation(error)
@@ -340,11 +337,15 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
   }
 
   const restoreMutation = useMutation({
-    mutationFn: async ({ path, hash }: { path: string; hash: string; sessionId: number }) => {
-      return restoreVersion(path, hash)
+    mutationFn: async ({ path, hash, signal }: RestoreVersionVariables) => {
+      return restoreVersion(path, hash, { signal })
     },
     retry: false,
     onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
+
       queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, variables.path] })
       queryClient.invalidateQueries({ queryKey: ['files'] })
       addToast(getVersionsActionSuccessToast(result))
@@ -357,6 +358,10 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
       }
     },
     onError: (error: unknown, variables) => {
+      if (variables.signal.aborted || isAbortError(error)) {
+        return
+      }
+
       if (isMissingVersionError(error)) {
         queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, variables.path] })
         queryClient.invalidateQueries({ queryKey: ['files'] })
@@ -376,6 +381,11 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
         failure: '恢复版本失败',
       }))
     },
+    onSettled: (_result, _error, variables) => {
+      if (restoreAbortControllerRef.current?.signal === variables.signal) {
+        restoreAbortControllerRef.current = null
+      }
+    },
   })
 
   const handleSearch = () => {
@@ -389,14 +399,6 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
         normalizedPath = normalizePath(trimmedPath)
       } catch {
         addToast({ title: '文件路径无效', color: 'danger' })
-        return
-      }
-      if (scopedHomeDir && !pathWithinBase(scopedHomeDir, normalizedPath)) {
-        addToast({
-          title: '仅可查看主目录内文件的版本历史',
-          color: 'warning',
-        })
-        setSearchPath(scopedHomeDir)
         return
       }
       setSearchPath(normalizedPath)
@@ -417,10 +419,14 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
 
   const confirmRestore = () => {
     if (selectedPath && selectedVersion) {
+      restoreAbortControllerRef.current?.abort()
+      const controller = new AbortController()
+      restoreAbortControllerRef.current = controller
       restoreMutation.mutate({
         path: selectedPath,
         hash: selectedVersion.hash,
         sessionId: restoreSessionRef.current,
+        signal: controller.signal,
       })
     }
   }
@@ -432,31 +438,58 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
     onClose()
   }, [onClose, restoreMutation.isPending])
 
-  const handleDownload = (version: VersionInfo) => {
-    void downloadFile(selectedPath!, { version: version.hash }).catch((error: unknown) => {
-      if (selectedPath && isMissingVersionError(error)) {
-        queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, selectedPath] })
-        addToast(getMissingVersionToast('download'))
-        return
-      }
+  const handleDownload = useCallback((version: VersionInfo) => {
+    if (!selectedPath) return
 
-      addToast(getVersionsActionErrorToast(error, {
-        unavailable: '下载版本暂不可用',
-        failure: '下载版本失败',
-      }))
-    })
-  }
+    downloadAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    downloadAbortControllerRef.current = controller
+    const downloadPath = selectedPath
+
+    void downloadFile(downloadPath, { version: version.hash, signal: controller.signal })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || isAbortError(error)) {
+          return
+        }
+
+        if (isMissingVersionError(error)) {
+          queryClient.invalidateQueries({ queryKey: ['versions', authScopeKey, downloadPath] })
+          addToast(getMissingVersionToast('download'))
+          return
+        }
+
+        addToast(getVersionsActionErrorToast(error, {
+          unavailable: '下载版本暂不可用',
+          failure: '下载版本失败',
+        }))
+      })
+      .finally(() => {
+        if (downloadAbortControllerRef.current === controller) {
+          downloadAbortControllerRef.current = null
+        }
+      })
+  }, [authScopeKey, queryClient, selectedPath])
 
   const handlePreview = async (version: VersionInfo) => {
     if (!selectedPath) return
 
     const session = await ensureDownloadSession()
     if (!session.ok) {
-      addToast({ title: session.message ?? '原始预览和下载会话同步失败，请稍后重试', color: 'warning' })
+      addToast({ title: previewSessionSyncWarningTitle, color: 'warning' })
       return
     }
 
     const url = buildDownloadUrl(selectedPath, { version: version.hash })
+    const previewError = await readRangedDownloadJsonErrorDetails(url, '预览版本失败', authFetch)
+    if (previewError) {
+      addToast({
+        title: '预览版本暂不可用',
+        description: getUserFacingErrorDescription(new Error(previewError.message), GENERIC_LOAD_ERROR_DESCRIPTION),
+        color: 'warning',
+      })
+      return
+    }
+
     if (!openUrlInNewTab(url)) {
       addToast({ title: '浏览器拦截了新标签页，请允许弹窗后重试', color: 'warning' })
     }
@@ -588,7 +621,7 @@ function VersionsPageContent({ authScopeKey, initialPath, isAdmin, scopedHomeDir
           title="查看文件版本历史"
           description={isAdmin
             ? '输入文件路径后可查看版本记录，支持预览、下载和恢复。'
-            : '输入主目录内文件路径后可查看版本记录，支持预览和下载。'}
+            : '输入可访问文件路径后可查看版本记录，支持预览和下载。'}
           action={
             <div className="flex flex-wrap items-center justify-center gap-2 rounded-lg bg-content2/50 px-4 py-2 text-sm text-default-500">
               <span>也可以在文件列表中打开文件菜单</span>

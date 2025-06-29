@@ -137,6 +137,7 @@ var (
 	ErrLastAdmin           = errors.New("cannot delete last admin user")
 	errInvalidUserHomeDir  = errors.New("invalid home_dir")
 	errInvalidUserGroups   = errors.New("invalid groups")
+	errInvalidQuotaBytes   = errors.New("invalid quota_bytes")
 	errUserStoreSymlink    = errors.New("users file path must not be a symlink")
 	errPasswordFileSymlink = errors.New("initial password file path must not be a symlink")
 )
@@ -318,6 +319,20 @@ func buildUserNameIndex(users map[string]*User) map[string]*User {
 		byName[normalizeUsername(user.Username)] = user
 	}
 	return byName
+}
+
+func enabledAdminCount(users map[string]*User) int {
+	count := 0
+	for _, user := range users {
+		if user.Role == RoleAdmin && !user.Disabled {
+			count++
+		}
+	}
+	return count
+}
+
+func isEnabledAdmin(user *User) bool {
+	return user != nil && user.Role == RoleAdmin && !user.Disabled
 }
 
 func (s *UserStore) snapshotState() userStoreSnapshot {
@@ -968,7 +983,8 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 			return nil, ErrInvalidCredentials
 		}
 
-		if err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username); err != nil {
+		initialPasswordRemoval, err := removeInitialPasswordFileForUser(snapshot.filePath, user.Username)
+		if err != nil {
 			return nil, fmt.Errorf("failed to remove initial password file: %w", err)
 		}
 
@@ -982,6 +998,9 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 			if s.commitSnapshotOnPersistenceWarning(snapshot, err) {
 				return cloneUser(updated), err
 			}
+			if restoreErr := initialPasswordRemoval.restore(); restoreErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("restore initial password file: %w", restoreErr))
+			}
 			return nil, err
 		}
 		if s.commitSnapshot(snapshot) {
@@ -993,14 +1012,27 @@ func (s *UserStore) Authenticate(username, password string) (*User, error) {
 	return authenticatedUser, nil
 }
 
-func removeInitialPasswordFileForUser(usersFilePath, username string) error {
+type initialPasswordFileRemoval struct {
+	path    string
+	content []byte
+	removed bool
+}
+
+func (r *initialPasswordFileRemoval) restore() error {
+	if r == nil || !r.removed {
+		return nil
+	}
+	return writeRegisteredAuthFileAtomically(r.path, r.content, errPasswordFileSymlink, ".initial-password-*.tmp", "initial password")
+}
+
+func removeInitialPasswordFileForUser(usersFilePath, username string) (*initialPasswordFileRemoval, error) {
 	passwordFile := filepath.Join(filepath.Dir(usersFilePath), "initial-password.txt")
 	content, err := readRegisteredAuthFile(passwordFile, errPasswordFileSymlink)
 	if os.IsNotExist(err) {
-		return nil
+		return &initialPasswordFileRemoval{path: passwordFile}, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	matchedUsername := false
@@ -1011,13 +1043,17 @@ func removeInitialPasswordFileForUser(usersFilePath, username string) error {
 		}
 	}
 	if !matchedUsername {
-		return nil
+		return &initialPasswordFileRemoval{path: passwordFile}, nil
 	}
 
 	if err := removeRegisteredAuthFile(passwordFile, errPasswordFileSymlink); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return &initialPasswordFileRemoval{
+		path:    passwordFile,
+		content: append([]byte(nil), content...),
+		removed: true,
+	}, nil
 }
 
 // Create creates a new user
@@ -1025,8 +1061,20 @@ func (s *UserStore) Create(username, password, email string, role Role) (*User, 
 	return s.CreateWithGroups(username, password, email, role, nil)
 }
 
+// CreateUserOptions contains optional metadata for creating a user.
+type CreateUserOptions struct {
+	Groups     []string
+	HomeDir    *string
+	QuotaBytes int64
+}
+
 // CreateWithGroups creates a new user with group memberships.
 func (s *UserStore) CreateWithGroups(username, password, email string, role Role, groups []string) (*User, error) {
+	return s.CreateWithOptions(username, password, email, role, CreateUserOptions{Groups: groups})
+}
+
+// CreateWithOptions creates a new user with optional metadata.
+func (s *UserStore) CreateWithOptions(username, password, email string, role Role, options CreateUserOptions) (*User, error) {
 	cleanUsername, err := normalizeNewUsername(username)
 	if err != nil {
 		return nil, err
@@ -1034,9 +1082,22 @@ func (s *UserStore) CreateWithGroups(username, password, email string, role Role
 	if err := validateRole(role); err != nil {
 		return nil, err
 	}
-	normalizedGroups, err := normalizeGroupNames(groups)
+	normalizedGroups, err := normalizeGroupNames(options.Groups)
 	if err != nil {
 		return nil, err
+	}
+	homeDir := "/" + cleanUsername
+	if options.HomeDir != nil {
+		homeDir, err = normalizeHomeDir(*options.HomeDir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := validateRoleHomeDir(role, homeDir); err != nil {
+		return nil, err
+	}
+	if options.QuotaBytes < 0 {
+		return nil, errInvalidQuotaBytes
 	}
 
 	if err := validateNewPassword(password); err != nil {
@@ -1059,7 +1120,8 @@ func (s *UserStore) CreateWithGroups(username, password, email string, role Role
 		PasswordHash: string(hash),
 		Role:         role,
 		Groups:       normalizedGroups,
-		HomeDir:      "/" + cleanUsername,
+		HomeDir:      homeDir,
+		QuotaBytes:   options.QuotaBytes,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -1118,7 +1180,16 @@ func (s *UserStore) Update(user *User) error {
 		if err != nil {
 			return err
 		}
+		if isEnabledAdmin(existing) && !isEnabledAdmin(updated) && enabledAdminCount(snapshot.users) <= 1 {
+			return ErrLastAdmin
+		}
+		if err := validateRoleHomeDir(updated.Role, homeDir); err != nil {
+			return err
+		}
 		updated.HomeDir = homeDir
+		if updated.QuotaBytes < 0 {
+			return errInvalidQuotaBytes
+		}
 		updated.UpdatedAt = time.Now()
 		oldName := normalizeUsername(existing.Username)
 		newName := normalizeUsername(updated.Username)
@@ -1363,9 +1434,16 @@ func validateRole(role Role) error {
 	}
 }
 
+func validateRoleHomeDir(role Role, homeDir string) error {
+	if role != RoleAdmin && path.Clean(homeDir) == "/" {
+		return errInvalidUserHomeDir
+	}
+	return nil
+}
+
 func normalizeHomeDir(homeDir string) (string, error) {
 	normalized := strings.ReplaceAll(strings.TrimSpace(homeDir), "\\", "/")
-	if strings.ContainsRune(normalized, '\x00') {
+	if strings.IndexFunc(normalized, unicode.IsControl) >= 0 {
 		return "", errInvalidUserHomeDir
 	}
 	if normalized == "" {

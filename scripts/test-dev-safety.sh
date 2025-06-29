@@ -92,8 +92,50 @@ run_creds_hides_webdav_password_by_default() {
   fi
 }
 
+run_creds_decodes_json_secret_test() {
+  local case_dir="$TMP_ROOT/creds-json-secret"
+  local fake_home="$case_dir/home"
+  local secret='quote"slash\value'
+  mkdir -p "$case_dir/pids" "$case_dir/logs" "$fake_home/.mnemonas"
+  printf '{"webdav_password": "quote\\"slash\\\\value"}\n' > "$fake_home/.mnemonas/secrets.json"
+
+  HOME="$fake_home" \
+    MNEMONAS_DEV_SHOW_SECRETS=1 \
+    MNEMONAS_DEV_PID_DIR="$case_dir/pids" \
+    MNEMONAS_DEV_LOG_DIR="$case_dir/logs" \
+    bash "$REPO_ROOT/scripts/dev.sh" --creds > "$case_dir/revealed.log" 2>&1
+
+  if ! grep -Fq "$secret" "$case_dir/revealed.log"; then
+    fail "dev --creds did not decode JSON-escaped WebDAV password"
+  fi
+}
+
+run_creds_decodes_toml_config_secret_test() {
+  local case_dir="$TMP_ROOT/creds-toml-secret"
+  local fake_home="$case_dir/home"
+  local secret='quote"slash\value'
+  mkdir -p "$case_dir/pids" "$case_dir/logs" "$fake_home/.mnemonas"
+  cat > "$fake_home/.mnemonas/config.toml" <<EOF
+[webdav]
+username = "admin"
+password = "quote\\"slash\\\\value"
+EOF
+
+  HOME="$fake_home" \
+    MNEMONAS_DEV_SHOW_SECRETS=1 \
+    MNEMONAS_DEV_PID_DIR="$case_dir/pids" \
+    MNEMONAS_DEV_LOG_DIR="$case_dir/logs" \
+    bash "$REPO_ROOT/scripts/dev.sh" --creds > "$case_dir/revealed.log" 2>&1
+
+  if ! grep -Fq "$secret" "$case_dir/revealed.log"; then
+    fail "dev --creds did not decode TOML-escaped WebDAV password"
+  fi
+}
+
 run_unrelated_pid_test
 run_invalid_pid_file_test
 run_creds_hides_webdav_password_by_default
+run_creds_decodes_json_secret_test
+run_creds_decodes_toml_config_secret_test
 
 printf '[dev-safety-test] all checks passed\n'

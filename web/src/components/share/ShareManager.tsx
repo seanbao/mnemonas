@@ -36,9 +36,11 @@ import {
   formatExpiration,
   ShareError,
   type Share,
+  type ShareRiskReason,
 } from '@/api/share'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { FileIcon } from '@/components/ui/FileIcon'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 
 function getShareFeatureState(error: unknown): 'disabled' | 'unavailable' | null {
   if (!(error instanceof ShareError)) {
@@ -87,7 +89,7 @@ function getShareActionErrorToast(
 
   return {
     title: titles.failure,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -99,7 +101,7 @@ function getShareLoadErrorToast(error: unknown): {
 } {
   return {
     title: '刷新分享列表失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
     color: 'danger',
   }
 }
@@ -114,6 +116,22 @@ function getMissingShareToast(): {
     description: '该分享可能已被其他操作删除，列表已同步更新。',
     color: 'warning',
   }
+}
+
+function getShareDeleteSuccessToast(result: { warning: boolean }): {
+  title: string
+  color: 'success' | 'warning'
+} {
+  return result.warning
+    ? { title: '分享已删除，但存在警告', color: 'warning' }
+    : { title: '分享已删除', color: 'success' }
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError'
 }
 
 function isRiskyShare(share: Share): boolean {
@@ -146,7 +164,35 @@ interface ShareManagerProps {
   featureEnabled?: boolean
 }
 
-type ShareReviewFilter = 'all' | 'review' | 'expiring' | 'passwordless' | 'broad'
+type ShareReviewFilter = 'all' | 'review' | 'expiring' | 'passwordless' | 'broad' | 'stale'
+
+const shareRiskReasonMessages: Record<string, string> = {
+  root_folder: '根目录分享会公开整个文件空间。',
+  broad_folder: '顶层文件夹分享可能覆盖较多内容。',
+  no_password: '未设置密码，持有链接的人可直接访问。',
+  no_expiration: '未设置过期时间，链接会长期有效。',
+  expiring_soon: '分享即将到期，请确认是否需要延长或关闭。',
+  unlimited_access: '未设置访问次数上限。',
+  unused_enabled: '该分享长期未被访问但仍处于启用状态。',
+  stale_enabled: '该分享最近访问时间较久，请确认是否仍需保留。',
+}
+
+function getShareRiskFallbackReasonMessage(level: ShareRiskReason['level']): string {
+  switch (level) {
+    case 'high':
+      return '存在高风险分享配置，请检查分享范围和访问限制。'
+    case 'medium':
+      return '存在需要关注的分享配置，请检查分享范围和访问限制。'
+    case 'low':
+      return '存在低风险分享配置，请检查分享设置。'
+    default:
+      return '存在未分类的分享风险，请检查分享设置。'
+  }
+}
+
+function getShareRiskReasonMessage(reason: ShareRiskReason): string {
+  return shareRiskReasonMessages[reason.code] ?? getShareRiskFallbackReasonMessage(reason.level)
+}
 
 export function ShareManager({ showAllShares = false, featureEnabled = true }: ShareManagerProps) {
   const [shares, setShares] = useState<Share[]>([])
@@ -158,9 +204,21 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   const [isDisablingHighRisk, setIsDisablingHighRisk] = useState(false)
   const sharesRef = useRef<Share[]>([])
   const loadRequestRef = useRef(0)
+  const loadAbortControllerRef = useRef<AbortController | null>(null)
+  const toggleAbortControllersRef = useRef(new Map<string, AbortController>())
+  const disableHighRiskAbortControllerRef = useRef<AbortController | null>(null)
+  const deleteAbortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => () => {
     loadRequestRef.current += 1
+    loadAbortControllerRef.current?.abort()
+    loadAbortControllerRef.current = null
+    toggleAbortControllersRef.current.forEach((controller) => controller.abort())
+    toggleAbortControllersRef.current.clear()
+    disableHighRiskAbortControllerRef.current?.abort()
+    disableHighRiskAbortControllerRef.current = null
+    deleteAbortControllerRef.current?.abort()
+    deleteAbortControllerRef.current = null
   }, [])
 
   useEffect(() => {
@@ -170,15 +228,21 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   const loadShares = useCallback(async () => {
     const requestId = loadRequestRef.current + 1
     loadRequestRef.current = requestId
+    loadAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    loadAbortControllerRef.current = controller
     setIsLoading(true)
     setLoadError(null)
     try {
-      const data = await listShares(showAllShares)
+      const data = await listShares(showAllShares, { signal: controller.signal })
       if (requestId !== loadRequestRef.current) {
         return
       }
       setShares(data)
     } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
       if (requestId !== loadRequestRef.current) {
         return
       }
@@ -193,6 +257,9 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         addToast(getShareLoadErrorToast(err))
       }
     } finally {
+      if (loadAbortControllerRef.current === controller) {
+        loadAbortControllerRef.current = null
+      }
       if (requestId === loadRequestRef.current) {
         setIsLoading(false)
       }
@@ -208,6 +275,14 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   useEffect(() => {
     if (!featureEnabled) {
       loadRequestRef.current += 1
+      loadAbortControllerRef.current?.abort()
+      loadAbortControllerRef.current = null
+      toggleAbortControllersRef.current.forEach((controller) => controller.abort())
+      toggleAbortControllersRef.current.clear()
+      disableHighRiskAbortControllerRef.current?.abort()
+      disableHighRiskAbortControllerRef.current = null
+      deleteAbortControllerRef.current?.abort()
+      deleteAbortControllerRef.current = null
       let cancelled = false
       queueMicrotask(() => {
         if (cancelled) return
@@ -244,10 +319,12 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       return passwordlessShares
     case 'broad':
       return broadFolderShares
+    case 'stale':
+      return staleShares
     default:
       return shares
     }
-  }, [broadFolderShares, expiringSoonShares, passwordlessShares, reviewFilter, riskyShares, shares])
+  }, [broadFolderShares, expiringSoonShares, passwordlessShares, reviewFilter, riskyShares, shares, staleShares])
 
   if (!featureEnabled) {
     return (
@@ -272,8 +349,15 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
   }
 
   const handleToggle = async (share: Share) => {
+    toggleAbortControllersRef.current.get(share.id)?.abort()
+    const controller = new AbortController()
+    toggleAbortControllersRef.current.set(share.id, controller)
     try {
-      await updateShare(share.id, { enabled: !share.enabled })
+      await updateShare(share.id, { enabled: !share.enabled }, { signal: controller.signal })
+      if (controller.signal.aborted) {
+        return
+      }
+
       setShares(prev => prev.map(s => 
         s.id === share.id ? { ...s, enabled: !s.enabled } : s
       ))
@@ -282,6 +366,10 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         color: 'success' 
       })
     } catch (err) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        return
+      }
+
       if (err instanceof ShareError && err.isNotFound) {
         setShares(prev => prev.filter(s => s.id !== share.id))
         addToast(getMissingShareToast())
@@ -292,6 +380,10 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         unavailable: '分享操作暂不可用',
         failure: '操作失败',
       }))
+    } finally {
+      if (toggleAbortControllersRef.current.get(share.id) === controller) {
+        toggleAbortControllersRef.current.delete(share.id)
+      }
     }
   }
 
@@ -302,8 +394,17 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
     }
 
     setIsDisablingHighRisk(true)
+    disableHighRiskAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    disableHighRiskAbortControllerRef.current = controller
     try {
-      const results = await Promise.allSettled(targets.map(target => updateShare(target.id, { enabled: false })))
+      const results = await Promise.allSettled(
+        targets.map(target => updateShare(target.id, { enabled: false }, { signal: controller.signal }))
+      )
+      if (controller.signal.aborted) {
+        return
+      }
+
       const disabledIds = new Set<string>()
       let firstFailure: unknown | null = null
 
@@ -336,22 +437,36 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         }))
       }
     } finally {
-      setIsDisablingHighRisk(false)
+      if (disableHighRiskAbortControllerRef.current === controller) {
+        disableHighRiskAbortControllerRef.current = null
+      }
+      if (!controller.signal.aborted) {
+        setIsDisablingHighRisk(false)
+      }
     }
   }
 
   const handleDelete = async () => {
     if (!deleteTarget) return
     const target = deleteTarget
+    deleteAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    deleteAbortControllerRef.current = controller
     setIsDeleting(true)
     try {
-      const result = await deleteShare(target.id)
+      const result = await deleteShare(target.id, { signal: controller.signal })
+      if (controller.signal.aborted) {
+        return
+      }
+
       setShares(prev => prev.filter(s => s.id !== target.id))
-      addToast(result.warning
-        ? { title: result.message ?? '分享已删除，但存在警告', color: 'warning' }
-        : { title: '分享已删除', color: 'success' })
+      addToast(getShareDeleteSuccessToast(result))
       setDeleteTarget(current => (current?.id === target.id ? null : current))
     } catch (err) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        return
+      }
+
       if (err instanceof ShareError && err.isNotFound) {
         setShares(prev => prev.filter(s => s.id !== target.id))
         addToast(getMissingShareToast())
@@ -364,7 +479,12 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
         failure: '删除失败',
       }))
     } finally {
-      setIsDeleting(false)
+      if (deleteAbortControllerRef.current === controller) {
+        deleteAbortControllerRef.current = null
+      }
+      if (!controller.signal.aborted) {
+        setIsDeleting(false)
+      }
     }
   }
 
@@ -418,7 +538,7 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
       <EmptyState
         icon={AlertCircle}
         title="加载分享列表失败"
-        description={loadError instanceof Error ? loadError.message : '请稍后重试'}
+        description={getUserFacingErrorDescription(loadError, GENERIC_LOAD_ERROR_DESCRIPTION)}
         action={
           <Button variant="bordered" className="rounded-lg" onPress={() => loadShares()}>
             重新加载
@@ -498,6 +618,15 @@ export function ShareManager({ showAllShares = false, featureEnabled = true }: S
             isDisabled={broadFolderShares.length === 0}
           >
             覆盖较大 ({broadFolderShares.length})
+          </Button>
+          <Button
+            variant={reviewFilter === 'stale' ? 'solid' : 'flat'}
+            size="sm"
+            onPress={() => setReviewFilter('stale')}
+            className="rounded-lg"
+            isDisabled={staleShares.length === 0}
+          >
+            长期未访问 ({staleShares.length})
           </Button>
           {highRiskShares.length > 0 && (
             <Button
@@ -692,7 +821,7 @@ function ShareItem({ share, onCopy, onToggle, onDelete }: ShareItemProps) {
                 </div>
                 <div className="space-y-1">
                   {riskReasons.slice(0, 3).map(reason => (
-                    <div key={reason.code}>{reason.message}</div>
+                    <div key={reason.code}>{getShareRiskReasonMessage(reason)}</div>
                   ))}
                 </div>
               </div>

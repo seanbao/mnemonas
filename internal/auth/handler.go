@@ -52,6 +52,8 @@ const (
 	sessionModeCookie            = "cookie"
 	sessionCookiePath            = "/api/v1"
 	refreshSessionCookiePath     = "/api/v1/auth/refresh"
+	downloadSessionCookiePath    = "/api/v1"
+	downloadSessionSameSite      = http.SameSiteStrictMode
 )
 
 func newLoginAttemptTracker() *loginAttemptTracker {
@@ -443,20 +445,13 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, claims, err := h.validateRefreshTokenCandidates(refreshTokens)
+	claims, err := h.validateRefreshTokenCandidates(refreshTokens)
 	if err != nil {
-		if refreshFromCookie {
+		if refreshFromCookie && shouldClearSessionCookiesAfterRefreshFailure(err) {
 			clearSessionCookies(w, r)
 			clearDownloadSessionCookie(w, r)
 		}
-		switch err {
-		case ErrTokenExpired:
-			writeError(w, http.StatusUnauthorized, "refresh token expired", "TOKEN_EXPIRED")
-		case ErrTokenRevoked:
-			writeError(w, http.StatusUnauthorized, "token has been revoked", "TOKEN_REVOKED")
-		default:
-			writeError(w, http.StatusUnauthorized, "invalid refresh token", "INVALID_TOKEN")
-		}
+		writeRefreshTokenError(w, err)
 		return
 	}
 	userID := claims.Subject
@@ -486,14 +481,16 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rotate refresh tokens: once a refresh token is used successfully, it must not be reusable.
 	revocationWarning := false
-	if err := h.tokenManager.RevokeToken(claims.ID); err != nil {
+	if err := h.tokenManager.consumeRefreshTokenClaims(claims); err != nil {
 		if isAuthPersistenceWarning(err) {
-			markAuthPersistenceWarningHeaders(w)
 			revocationWarning = true
 		} else {
-			writeError(w, http.StatusInternalServerError, "internal server error", "TOKEN_ERROR")
+			if refreshFromCookie && shouldClearSessionCookiesAfterRefreshFailure(err) {
+				clearSessionCookies(w, r)
+				clearDownloadSessionCookie(w, r)
+			}
+			writeRefreshTokenError(w, err)
 			return
 		}
 	}
@@ -503,17 +500,18 @@ func (h *Handler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	message := ""
 	if revocationWarning {
+		markAuthPersistenceWarningHeaders(w)
 		message = "refresh token rotated with persistence warning"
 	}
 	writeSuccess(w, http.StatusOK, resp, message)
 }
 
-func (h *Handler) validateRefreshTokenCandidates(candidates []string) (string, *jwt.RegisteredClaims, error) {
+func (h *Handler) validateRefreshTokenCandidates(candidates []string) (*jwt.RegisteredClaims, error) {
 	var firstErr error
 	for _, refreshToken := range candidates {
 		claims, err := h.tokenManager.validateRefreshTokenClaims(refreshToken)
 		if err == nil {
-			return refreshToken, claims, nil
+			return claims, nil
 		}
 		if firstErr == nil {
 			firstErr = err
@@ -522,7 +520,22 @@ func (h *Handler) validateRefreshTokenCandidates(candidates []string) (string, *
 	if firstErr == nil {
 		firstErr = ErrInvalidToken
 	}
-	return "", nil, firstErr
+	return nil, firstErr
+}
+
+func shouldClearSessionCookiesAfterRefreshFailure(err error) bool {
+	return !errors.Is(err, errRefreshTokenReused)
+}
+
+func writeRefreshTokenError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrTokenExpired):
+		writeError(w, http.StatusUnauthorized, "refresh token expired", "TOKEN_EXPIRED")
+	case errors.Is(err, ErrTokenRevoked):
+		writeError(w, http.StatusUnauthorized, "token has been revoked", "TOKEN_REVOKED")
+	default:
+		writeError(w, http.StatusUnauthorized, "invalid refresh token", "INVALID_TOKEN")
+	}
 }
 
 // HandleLogout handles POST /api/v1/auth/logout
@@ -578,9 +591,9 @@ func (h *Handler) HandleCreateDownloadSession(w http.ResponseWriter, r *http.Req
 	http.SetCookie(w, &http.Cookie{
 		Name:     string(DownloadSessionCookieName),
 		Value:    accessToken,
-		Path:     "/api/v1",
+		Path:     downloadSessionCookiePath,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: downloadSessionSameSite,
 		Secure:   requestIsHTTPS(r),
 		Expires:  claims.ExpiresAt.Time.UTC(),
 		MaxAge:   maxAge,
@@ -593,9 +606,9 @@ func clearDownloadSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     string(DownloadSessionCookieName),
 		Value:    "",
-		Path:     "/api/v1",
+		Path:     downloadSessionCookiePath,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: downloadSessionSameSite,
 		Secure:   requestIsHTTPS(r),
 		Expires:  time.Unix(0, 0).UTC(),
 		MaxAge:   -1,
@@ -719,11 +732,13 @@ func (h *Handler) HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 // CreateUserRequest is the create user request body
 type CreateUserRequest struct {
-	Username string   `json:"username"`
-	Password string   `json:"password"`
-	Email    string   `json:"email"`
-	Role     string   `json:"role"`
-	Groups   []string `json:"groups,omitempty"`
+	Username   string   `json:"username"`
+	Password   string   `json:"password"`
+	Email      string   `json:"email"`
+	Role       string   `json:"role"`
+	Groups     []string `json:"groups,omitempty"`
+	HomeDir    *string  `json:"home_dir"`
+	QuotaBytes *int64   `json:"quota_bytes"`
 }
 
 // UpdateUserRequest is the update user request body.
@@ -800,8 +815,25 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid role, must be admin, user, or guest", "INVALID_ROLE")
 		return
 	}
+	var homeDir *string
+	if req.HomeDir != nil {
+		trimmedHomeDir := strings.TrimSpace(*req.HomeDir)
+		homeDir = &trimmedHomeDir
+	}
+	quotaBytes := int64(0)
+	if req.QuotaBytes != nil {
+		if *req.QuotaBytes < 0 {
+			writeError(w, http.StatusBadRequest, "quota_bytes must be greater than or equal to 0", "INVALID_QUOTA")
+			return
+		}
+		quotaBytes = *req.QuotaBytes
+	}
 
-	user, err := h.userStore.CreateWithGroups(req.Username, req.Password, req.Email, role, req.Groups)
+	user, err := h.userStore.CreateWithOptions(req.Username, req.Password, req.Email, role, CreateUserOptions{
+		Groups:     req.Groups,
+		HomeDir:    homeDir,
+		QuotaBytes: quotaBytes,
+	})
 	if err != nil {
 		if isAuthPersistenceWarning(err) && user != nil {
 			markAuthPersistenceWarningHeaders(w)
@@ -820,6 +852,10 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "password must be at most 72 bytes", "PASSWORD_TOO_LONG")
 		case errInvalidUserGroups:
 			writeError(w, http.StatusBadRequest, "invalid groups", "INVALID_GROUPS")
+		case errInvalidUserHomeDir:
+			writeError(w, http.StatusBadRequest, "invalid home_dir", "INVALID_HOME_DIR")
+		case errInvalidQuotaBytes:
+			writeError(w, http.StatusBadRequest, "quota_bytes must be greater than or equal to 0", "INVALID_QUOTA")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "CREATE_ERROR")
 		}
@@ -925,6 +961,10 @@ func (h *Handler) HandleUpdateUser(w http.ResponseWriter, r *http.Request, userI
 			writeError(w, http.StatusBadRequest, "invalid home_dir", "INVALID_HOME_DIR")
 		case errors.Is(err, errInvalidUserGroups):
 			writeError(w, http.StatusBadRequest, "invalid groups", "INVALID_GROUPS")
+		case errors.Is(err, ErrLastAdmin):
+			writeError(w, http.StatusBadRequest, "cannot remove last admin user", "LAST_ADMIN")
+		case errors.Is(err, errInvalidQuotaBytes):
+			writeError(w, http.StatusBadRequest, "quota_bytes must be greater than or equal to 0", "INVALID_QUOTA")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")
 		}
@@ -1154,6 +1194,10 @@ func (h *Handler) HandleToggleUserStatus(w http.ResponseWriter, r *http.Request,
 				"disabled": req.Disabled,
 				"warning":  true,
 			}, "user status updated with persistence warning")
+			return
+		}
+		if errors.Is(err, ErrLastAdmin) {
+			writeError(w, http.StatusBadRequest, "cannot disable last admin user", "LAST_ADMIN")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error", "UPDATE_ERROR")

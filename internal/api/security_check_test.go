@@ -131,6 +131,145 @@ func TestServer_GetSettingsSecurityCheck_ReportsPublicDeploymentRisks(t *testing
 	}
 }
 
+func TestServer_GetSettingsSecurityCheck_BlocksUnsafeShareBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+	}{
+		{
+			name:    "http",
+			baseURL: "http://nas.example.test",
+		},
+		{
+			name:    "non-default HTTPS port",
+			baseURL: "https://nas.example.test:8443",
+		},
+		{
+			name:    "userinfo",
+			baseURL: "https://operator@nas.example.test",
+		},
+		{
+			name:    "query",
+			baseURL: "https://nas.example.test?token=secret",
+		},
+		{
+			name:    "empty query",
+			baseURL: "https://nas.example.test?",
+		},
+		{
+			name:    "fragment",
+			baseURL: "https://nas.example.test#share",
+		},
+		{
+			name:    "empty fragment",
+			baseURL: "https://nas.example.test#",
+		},
+		{
+			name:    "empty host label",
+			baseURL: "https://nas..example.test",
+		},
+		{
+			name:    "multiple trailing host dots",
+			baseURL: "https://nas.example.test..",
+		},
+		{
+			name:    "invalid host character",
+			baseURL: "https://nas_example.test",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfg := config.Default()
+			cfg.Storage.Root = tmpDir
+			cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+			cfg.Server.Host = "127.0.0.1"
+			cfg.Server.TrustedProxyHops = 1
+			cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+			cfg.WebDAV.Enabled = true
+			cfg.WebDAV.AuthType = "basic"
+			cfg.Share.Enabled = true
+			cfg.Share.BaseURL = tt.baseURL
+			t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+			server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+			if err != nil {
+				t.Fatalf("NewServer() error: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Header.Set("X-Forwarded-Proto", "https")
+			rec := httptest.NewRecorder()
+
+			server.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+
+			var payload struct {
+				Success bool                  `json:"success"`
+				Data    securityCheckResponse `json:"data"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode security check response: %v", err)
+			}
+
+			check := securityCheckByID(t, payload.Data.Checks, "share_base_url")
+			if check.Status != securityCheckBlock {
+				t.Fatalf("share_base_url status = %q, want %q; check=%#v", check.Status, securityCheckBlock, check)
+			}
+		})
+	}
+}
+
+func TestServer_GetSettingsSecurityCheck_WarnsWhenShareBaseURLHostDiffersFromRequestHost(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Storage.Root = tmpDir
+	cfg.Auth.UsersFile = filepath.Join(tmpDir, ".mnemonas", "users.json")
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.TrustedProxyHops = 1
+	cfg.DataPlane.GRPCAddress = "127.0.0.1:9090"
+	cfg.WebDAV.Enabled = true
+	cfg.WebDAV.AuthType = "basic"
+	cfg.Share.Enabled = true
+	cfg.Share.BaseURL = "https://share.example.test"
+	t.Setenv("DATAPLANE_HTTP_ADDR", "127.0.0.1:9091")
+
+	server, err := NewServer(zerolog.Nop(), &ServerConfig{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewServer() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/security-check", nil)
+	req.Host = "nas.example.test"
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security check status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Success bool                  `json:"success"`
+		Data    securityCheckResponse `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode security check response: %v", err)
+	}
+
+	check := securityCheckByID(t, payload.Data.Checks, "share_base_url")
+	if check.Status != securityCheckWarning {
+		t.Fatalf("share_base_url status = %q, want %q; check=%#v", check.Status, securityCheckWarning, check)
+	}
+}
+
 func TestServer_GetSettingsSecurityCheck_PassesTrustedProxyLoopbackSetup(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.Default()

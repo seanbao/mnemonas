@@ -8,6 +8,7 @@ import {
   Button,
   Input,
   Switch,
+  Checkbox,
   Divider,
   Tabs,
   Tab,
@@ -38,6 +39,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { cn, copyTextToClipboard, parseByteSize, normalizeWebDAVPrefix, isValidWebDAVPrefix, webDAVPrefixOverlapsReservedRoute, formatWebDAVUrl, formatBytes } from '@/lib/utils'
+import { GENERIC_LOAD_ERROR_DESCRIPTION, getUserFacingErrorDescription } from '@/lib/apiMessages'
 import { ShareManager } from '@/components/share'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -52,8 +54,11 @@ import {
   reportDirectoryAccess,
   updateSettings,
   type DirectoryAccessCheckData,
+  type DirectoryAccessCheckRequest,
   type DirectoryAccessDecision,
   type DirectoryAccessReportData,
+  type DirectoryAccessReportRequest,
+  type DirectoryAccessPreviewRequest,
   type DirectoryAccessRule,
   type DirectoryAccessRole,
   type DirectoryQuota,
@@ -67,6 +72,19 @@ import {
 
 const MIN_CDC_CHUNK_SIZE_BYTES = 64 * 1024
 const MAX_CDC_CHUNK_SIZE_BYTES = 64 * 1024 * 1024
+const DEFAULT_VERSIONING_EXTENSIONS = [
+  '.md', '.txt', '.org', '.rst', '.tex',
+  '.go', '.rs', '.py', '.ts', '.js', '.tsx', '.jsx',
+  '.c', '.cpp', '.h', '.java', '.kt', '.swift',
+  '.toml', '.yaml', '.yml', '.json', '.xml',
+  '.sh', '.bash', '.zsh', '.fish',
+].join('\n')
+const DEFAULT_VERSIONING_FILENAMES = [
+  'Makefile', 'Dockerfile', 'Vagrantfile',
+  'LICENSE', 'README', 'CHANGELOG',
+  '.gitignore', '.dockerignore', '.editorconfig',
+].join('\n')
+const REDACTED_SETTINGS_SECRET = '<redacted>'
 
 const SHARE_POLICY_PRESETS = [
   {
@@ -132,7 +150,7 @@ function getSettingsLoadErrorPresentation(error: unknown): { title: string; desc
 
   return {
     title: '加载设置失败',
-    description: (error as Error).message,
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -146,7 +164,7 @@ function getWebDAVCredentialsErrorPresentation(error: unknown): { title: string;
 
   return {
     title: 'WebDAV 凭据加载失败',
-    description: (error as Error).message || '请稍后重试',
+    description: getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION),
   }
 }
 
@@ -165,7 +183,7 @@ function getWebDAVCredentialsRefreshErrorToast(error: unknown): {
 
   return {
     title: '刷新失败',
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
 }
@@ -215,9 +233,13 @@ function getSettingsActionErrorToast(
 
   return {
     title: titles.failure,
-    description: error instanceof Error ? error.message : '请稍后重试',
+    description: getUserFacingErrorDescription(error),
     color: 'danger',
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
 }
 
 function getSettingsSaveSuccessToast(message?: string): {
@@ -258,6 +280,22 @@ function normalizeSettingsTab(value: string | null): SettingsTabKey {
 
 type PublicProxyKind = 'caddy' | 'nginx'
 
+function isValidPublicDomainHostname(value: string): boolean {
+  const hostname = value.endsWith('.') ? value.slice(0, -1) : value
+  if (!hostname || hostname.length > 253) {
+    return false
+  }
+
+  const labels = hostname.split('.')
+  return labels.every((label) => {
+    return label.length > 0
+      && label.length <= 63
+      && !label.startsWith('-')
+      && !label.endsWith('-')
+      && /^[a-z0-9-]+$/i.test(label)
+  })
+}
+
 function normalizePublicDomainInput(value: string): string {
   let trimmed = value.trim()
   if (trimmed === '') {
@@ -266,14 +304,36 @@ function normalizePublicDomainInput(value: string): string {
 
   if (/^https?:\/\//i.test(trimmed)) {
     try {
-      trimmed = new URL(trimmed).hostname
+      const parsed = new URL(trimmed)
+      if (
+        parsed.username
+        || parsed.password
+        || parsed.port
+        || (parsed.pathname !== '' && parsed.pathname !== '/')
+        || parsed.search
+        || parsed.hash
+      ) {
+        return ''
+      }
+      trimmed = parsed.hostname
     } catch {
       return ''
     }
+  } else if (/[/?#@]/.test(trimmed)) {
+    return ''
   }
 
-  trimmed = trimmed.replace(/\/.*$/, '').replace(/:\d+$/, '').toLowerCase()
+  trimmed = trimmed.toLowerCase()
+  if (trimmed.endsWith('.')) {
+    trimmed = trimmed.slice(0, -1)
+    if (trimmed.endsWith('.')) {
+      return ''
+    }
+  }
   if (trimmed === '' || /[\s/:]/.test(trimmed)) {
+    return ''
+  }
+  if (!isValidPublicDomainHostname(trimmed)) {
     return ''
   }
   return trimmed
@@ -284,7 +344,10 @@ function publicDomainErrorMessage(value: string): string | undefined {
     return undefined
   }
   if (normalizePublicDomainInput(value) === '') {
-    return '请输入域名，不要包含路径或端口'
+    if (/^https?:\/\//i.test(value) || /[/?#@:]/.test(value)) {
+      return '请输入域名，不要包含路径或端口'
+    }
+    return '请输入有效域名，域名标签只能包含字母、数字和连字符，且不能以连字符开头或结尾'
   }
   return undefined
 }
@@ -355,12 +418,71 @@ function isValidOptionalHTTPURL(value: string): boolean {
   }
 }
 
+function urlHostnameForTCPValidation(hostname: string): string {
+  if (
+    hostname.startsWith('[')
+    && hostname.endsWith(']')
+    && hostname.indexOf('[') === 0
+    && hostname.lastIndexOf(']') === hostname.length - 1
+  ) {
+    return hostname.slice(1, -1)
+  }
+  return hostname
+}
+
+function isValidShareBaseURL(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return true
+  }
+  if (/\s/.test(trimmed) || hasControlChar(trimmed)) {
+    return false
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false
+    }
+    if (parsed.username || parsed.password || trimmed.includes('?') || trimmed.includes('#') || parsed.search || parsed.hash) {
+      return false
+    }
+    return isValidTCPHost(urlHostnameForTCPValidation(parsed.hostname))
+  } catch {
+    return false
+  }
+}
+
 function isValidDurationString(value: string): boolean {
   const trimmed = value.trim()
   if (!trimmed) {
     return false
   }
   return /^(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+$/.test(trimmed)
+}
+
+function isZeroDurationString(value: string): boolean {
+  const trimmed = value.trim()
+  if (trimmed === '0') {
+    return true
+  }
+  if (!isValidDurationString(trimmed)) {
+    return false
+  }
+
+  const parts = trimmed.match(/\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)/g)
+  return parts !== null
+    && parts.join('') === trimmed
+    && parts.every(part => Number.parseFloat(part) === 0)
+}
+
+function isPositiveDurationString(value: string): boolean {
+  return isValidDurationString(value) && !isZeroDurationString(value)
+}
+
+function isNonNegativeDurationString(value: string): boolean {
+  const trimmed = value.trim()
+  return trimmed === '0' || isValidDurationString(trimmed)
 }
 
 function isValidTCPHost(host: string): boolean {
@@ -484,6 +606,128 @@ function ipAddressKind(value: string): 'ipv4' | 'ipv6' | null {
     return 'ipv6'
   }
   return null
+}
+
+function ipv4Octets(value: string): number[] | null {
+  if (!isValidIPv4Address(value)) {
+    return null
+  }
+  return value.split('.').map((part) => Number(part))
+}
+
+function isLoopbackIP(value: string): boolean {
+  const kind = ipAddressKind(value)
+  if (kind === 'ipv4') {
+    return value.startsWith('127.')
+  }
+  if (kind === 'ipv6') {
+    return value.toLowerCase() === '::1'
+  }
+  return false
+}
+
+function isPrivateOrLinkLocalIP(value: string): boolean {
+  const octets = ipv4Octets(value)
+  if (octets) {
+    const [first, second] = octets
+    return first === 10
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)
+      || (first === 169 && second === 254)
+  }
+
+  if (!isValidIPv6Address(value)) {
+    return false
+  }
+  const lower = value.toLowerCase()
+  return lower.startsWith('fc')
+    || lower.startsWith('fd')
+    || lower.startsWith('fe8')
+    || lower.startsWith('fe9')
+    || lower.startsWith('fea')
+    || lower.startsWith('feb')
+}
+
+function trustedProxySourceFromSecurityCheck(check: SecurityCheckItem): string | undefined {
+  const remoteIP = typeof check.details?.remote_ip === 'string' ? check.details.remote_ip.trim() : ''
+  if (!remoteIP || ipAddressKind(remoteIP) === null || isLoopbackIP(remoteIP)) {
+    return undefined
+  }
+  return isPrivateOrLinkLocalIP(remoteIP) ? remoteIP : undefined
+}
+
+function httpsShareBaseURLFromSecurityCheck(check: SecurityCheckItem): string {
+  const baseURL = typeof check.details?.base_url === 'string' ? check.details.base_url.trim() : ''
+  if (!baseURL) {
+    return ''
+  }
+
+  try {
+    const parsed = new URL(baseURL)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return ''
+    }
+    parsed.protocol = 'https:'
+    parsed.username = ''
+    parsed.password = ''
+    parsed.port = ''
+    parsed.search = ''
+    parsed.hash = ''
+    const requestHost = typeof check.details?.request_host === 'string'
+      ? check.details.request_host.trim().toLowerCase()
+      : ''
+    if (requestHost && !/[\s/:]/.test(requestHost)) {
+      parsed.hostname = requestHost
+    }
+
+    if (parsed.pathname === '/' && parsed.search === '') {
+      return parsed.origin
+    }
+    return parsed.toString()
+  } catch {
+    return ''
+  }
+}
+
+function loopbackAddressWithOriginalPort(address: string, fallback: string): string {
+  const trimmed = address.trim()
+  if (!trimmed) {
+    return fallback
+  }
+
+  try {
+    const parsed = new URL(`tcp://${trimmed}`)
+    const port = Number(parsed.port)
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      return `127.0.0.1:${port}`
+    }
+  } catch {
+    const match = trimmed.match(/^\[[^\]]+\]:(\d+)$/) ?? trimmed.match(/^[^:[\]\s]+:(\d+)$/)
+    const port = match ? Number(match[1]) : 0
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      return `127.0.0.1:${port}`
+    }
+  }
+
+  return fallback
+}
+
+function dataplaneLoopbackAddressFromSecurityCheck(check: SecurityCheckItem, currentAddress: string): string {
+  const detailAddress = typeof check.details?.grpc_address === 'string' ? check.details.grpc_address : ''
+  return loopbackAddressWithOriginalPort(detailAddress || currentAddress, '127.0.0.1:9090')
+}
+
+function dataplaneHTTPLoopbackAddressFromSecurityCheck(check: SecurityCheckItem): string {
+  const detailAddress = typeof check.details?.http_address === 'string' ? check.details.http_address : ''
+  return loopbackAddressWithOriginalPort(detailAddress, '127.0.0.1:9091')
+}
+
+function appendTrustedProxySourceCIDR(currentValue: string, source: string): string {
+  const lines = currentValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (!lines.includes(source)) {
+    lines.push(source)
+  }
+  return lines.join('\n')
 }
 
 function isValidTrustedProxyCIDR(value: string): boolean {
@@ -820,7 +1064,8 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRule[]): { rule
     }
 
     const maxExpiresIn = inputRule.max_expires_in?.trim() ?? ''
-    if (maxExpiresIn && maxExpiresIn !== '0' && !isValidDurationString(maxExpiresIn)) {
+    const hasMaxExpiresInConstraint = maxExpiresIn !== '' && !isZeroDurationString(maxExpiresIn)
+    if (hasMaxExpiresInConstraint && !isValidDurationString(maxExpiresIn)) {
       return { rules: [], error: `第 ${lineNumber} 行有效期上限格式无效` }
     }
 
@@ -829,7 +1074,7 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRule[]): { rule
       return { rules: [], error: `第 ${lineNumber} 行访问次数上限必须是 0 或正整数` }
     }
 
-    if (!inputRule.require_password && !maxExpiresIn && maxAccess === 0) {
+    if (!inputRule.require_password && !hasMaxExpiresInConstraint && maxAccess === 0) {
       return { rules: [], error: `第 ${lineNumber} 行至少需要一个约束` }
     }
 
@@ -837,7 +1082,7 @@ function normalizeSharePolicyRulesForSave(inputRules: SharePolicyRule[]): { rule
     rules.push({
       path: rulePath,
       require_password: inputRule.require_password || undefined,
-      max_expires_in: maxExpiresIn && maxExpiresIn !== '0' ? maxExpiresIn : undefined,
+      max_expires_in: hasMaxExpiresInConstraint ? maxExpiresIn : undefined,
       max_access: maxAccess > 0 ? maxAccess : undefined,
     })
   }
@@ -866,11 +1111,50 @@ function directoryAccessSourceLabel(source: DirectoryAccessDecision['source']): 
   }
 }
 
+function directoryAccessModeLabel(mode: DirectoryAccessDecision['mode']): string {
+  return mode === 'write' ? '写入' : '读取'
+}
+
+function getDirectoryAccessDecisionDisplayMessage(decision: DirectoryAccessDecision): string {
+  const modeLabel = directoryAccessModeLabel(decision.mode)
+  const normalizedMessage = decision.message?.trim().toLowerCase()
+
+  if (normalizedMessage === 'directory access rule grants read through a descendant') {
+    return '子目录存在读取规则，因此允许查看相关路径。'
+  }
+
+  switch (decision.source) {
+    case 'admin':
+      return '管理员角色拥有完整访问权限。'
+    case 'auth_disabled':
+      return '当前未启用认证，此路径对该请求开放。'
+    case 'user_not_found':
+      return '用户不存在，无法访问该路径。'
+    case 'user_disabled':
+      return '账号已停用，无法访问该路径。'
+    case 'invalid_home_dir':
+      return '该用户主目录配置无效，无法判断访问范围。'
+    case 'home_dir':
+      return decision.allowed
+        ? '路径位于该用户主目录内。'
+        : '路径位于该用户主目录外。'
+    case 'directory_access_rule':
+      return decision.allowed
+        ? `目录规则允许${modeLabel}该路径。`
+        : `目录规则未授予${modeLabel}权限。`
+    default:
+      return decision.allowed
+        ? `已允许${modeLabel}该路径。`
+        : `未允许${modeLabel}该路径。`
+  }
+}
+
 function DirectoryAccessDecisionLine({ label, decision }: { label: string; decision: DirectoryAccessDecision }) {
   const allowedClassName = decision.allowed
     ? 'border-success/30 bg-success/5 text-success'
     : 'border-danger/30 bg-danger/5 text-danger'
   const Icon = decision.allowed ? CheckCircle2 : AlertCircle
+  const displayMessage = getDirectoryAccessDecisionDisplayMessage(decision)
 
   return (
     <div className={cn('rounded-lg border px-3 py-2', allowedClassName)}>
@@ -887,9 +1171,7 @@ function DirectoryAccessDecisionLine({ label, decision }: { label: string; decis
         {directoryAccessSourceLabel(decision.source)}
         {decision.matched_rule?.path ? ` · ${decision.matched_rule.path}` : ''}
       </div>
-      {decision.message && (
-        <div className="mt-1 break-anywhere text-xs text-foreground/60">{decision.message}</div>
-      )}
+      <div className="mt-1 break-anywhere text-xs text-foreground/60">{displayMessage}</div>
     </div>
   )
 }
@@ -1256,7 +1538,8 @@ function SettingRow({
 }
 
 function sharePolicyRuleHasConstraint(rule: SharePolicyRule): boolean {
-  return Boolean(rule.require_password || rule.max_expires_in || (rule.max_access && rule.max_access > 0))
+  const maxExpiresIn = rule.max_expires_in?.trim()
+  return Boolean(rule.require_password || (maxExpiresIn && !isZeroDurationString(maxExpiresIn)) || (rule.max_access && rule.max_access > 0))
 }
 
 function SharePolicyRuleEditor({
@@ -1433,6 +1716,88 @@ function getSecurityStatusMeta(status: SecurityCheckStatus): {
   }
 }
 
+function getSecurityCheckFallbackMessage(status: SecurityCheckStatus): string {
+  switch (status) {
+    case 'pass':
+      return '该安全检查已通过。'
+    case 'block':
+      return '该安全检查需要修复，公网访问前应先处理相关配置。'
+    case 'warning':
+      return '该安全检查需要确认，请检查相关配置。'
+  }
+}
+
+function getSecurityCheckDisplayMessage(check: SecurityCheckItem): string {
+  switch (check.id) {
+    case 'auth_enabled':
+      return check.status === 'pass'
+        ? '管理界面已启用登录认证。'
+        : '管理界面未启用登录认证，公网访问前必须启用认证。'
+    case 'unsafe_no_auth_override':
+      return check.status === 'pass'
+        ? '未启用无认证公网暴露例外。'
+        : '当前允许无认证服务绑定到非本机地址，公网访问前必须关闭该例外或重新启用认证。'
+    case 'https_request':
+      return check.status === 'pass'
+        ? '当前访问已通过 HTTPS 或受信代理转发。'
+        : '公网访问前应通过内置 TLS 或受信反向代理提供 HTTPS。'
+    case 'public_http_exposure':
+      return check.status === 'pass'
+        ? '未检测到公网 HTTP 直连风险。'
+        : '检测到 HTTP 直连暴露风险，请仅向反向代理开放公网入口。'
+    case 'trusted_proxy_or_tls':
+      return check.status === 'pass'
+        ? 'HTTPS 或受信代理配置已满足公网访问要求。'
+        : '如通过反向代理发布公网，请配置实际代理层数或启用 TLS。'
+    case 'forwarded_proto_trust':
+      return check.status === 'pass'
+        ? '转发协议头来自受信代理来源。'
+        : '请求携带转发协议头，但来源未被明确标记为受信代理。'
+    case 'server_listen':
+      return check.status === 'pass'
+        ? 'Web 服务仅监听本机地址。'
+        : '建议仅监听本机地址，并由受信反向代理对外提供 HTTPS。'
+    case 'admin_accounts':
+      return check.status === 'pass'
+        ? '管理员账号配置满足基本可用性要求。'
+        : '建议至少保留一个可用管理员账号，并为家庭或团队配置备用管理员。'
+    case 'dataplane_listen':
+      return check.status === 'pass'
+        ? '数据面 gRPC 仅监听本机地址。'
+        : '数据面 gRPC 不应暴露到外网，请绑定到 127.0.0.1 或 ::1。'
+    case 'dataplane_http_listen':
+      return check.status === 'pass'
+        ? '数据面 HTTP 健康接口仅监听本机地址。'
+        : '数据面 HTTP 健康接口不应暴露到外网，请绑定到本机地址。'
+    case 'webdav_auth':
+      return check.status === 'pass'
+        ? 'WebDAV 暴露面已启用合适的认证方式，或当前未启用 WebDAV。'
+        : 'WebDAV 对外访问前必须启用 Basic 认证、MnemoNAS 用户认证或关闭 WebDAV。'
+    case 'smb_preview':
+      return check.status === 'pass'
+        ? 'SMB 预览未启用，不会启动额外的 SMB/Samba 监听器。'
+        : '当前版本仍未内置可挂载的 SMB/Samba 运行时；启用前应先收紧监听范围和防火墙。'
+    case 'share_base_url':
+      if (
+        check.status === 'warning'
+        && typeof check.details?.base_url_host === 'string'
+        && typeof check.details?.request_host === 'string'
+        && check.details.base_url_host !== check.details.request_host
+      ) {
+        return '分享基础 URL 与当前访问域名不同，请确认分享域名同样具备 HTTPS、认证和防火墙保护。'
+      }
+      return check.status === 'pass'
+        ? '公开分享链接使用 HTTPS 基础地址，或分享功能未启用。'
+        : '公开分享链接应使用 HTTPS 默认端口且不包含用户信息，避免在公网中暴露不安全链接。'
+    case 'initial_password_file':
+      return check.status === 'pass'
+        ? '初始管理员密码文件状态正常。'
+        : '初始管理员密码文件需要处理，避免遗留凭据被误用。'
+    default:
+      return getSecurityCheckFallbackMessage(check.status)
+  }
+}
+
 type SecurityCheckAction = {
   label: string
   onPress: () => void
@@ -1452,7 +1817,7 @@ function SecurityCheckRow({ check, action }: { check: SecurityCheckItem; action?
             {meta.label}
           </span>
         </div>
-        <p className="break-anywhere mt-1 text-xs leading-relaxed text-default-600">{check.message}</p>
+        <p className="break-anywhere mt-1 text-xs leading-relaxed text-default-600">{getSecurityCheckDisplayMessage(check)}</p>
       </div>
       {action && (
         <Button
@@ -1540,7 +1905,7 @@ function SecurityCheckCard({
             <div>
               <div className="font-medium">安全自检暂不可用</div>
               <div className="text-default-600">
-                {error instanceof Error ? error.message : '请稍后重试。'}
+                {getUserFacingErrorDescription(error, GENERIC_LOAD_ERROR_DESCRIPTION)}
               </div>
             </div>
           </div>
@@ -1587,6 +1952,8 @@ function PublicAccessWizard({
   domainError,
   proxy,
   shareEnabled,
+  shareNeedsDomain,
+  isApplyDisabled,
   onDomainChange,
   onProxyChange,
   onApplyRecommendation,
@@ -1596,12 +1963,15 @@ function PublicAccessWizard({
   domainError?: string
   proxy: PublicProxyKind
   shareEnabled: boolean
+  shareNeedsDomain?: boolean
+  isApplyDisabled?: boolean
   onDomainChange: (value: string) => void
   onProxyChange: (value: PublicProxyKind) => void
   onApplyRecommendation: () => void
 }) {
   const domainForCommand = normalizedDomain || 'nas.example.com'
-  const publicBaseURL = normalizedDomain ? `https://${normalizedDomain}` : 'https://nas.example.com'
+  const publicBaseURL = normalizedDomain ? `https://${normalizedDomain}` : ''
+  const shareBaseURLPreview = shareEnabled ? (publicBaseURL || '填写公网域名后设置') : '分享功能未启用'
   const setupCommand = `sudo mnemonas-public-setup --proxy ${proxy} ${domainForCommand} admin@example.com`
   const doctorCommand = `sudo mnemonas-doctor --public-domain ${domainForCommand}`
   const renewalCommand = proxy === 'nginx'
@@ -1657,8 +2027,11 @@ function PublicAccessWizard({
           </div>
           <div className="rounded-lg border border-divider bg-content2/40 px-3 py-3">
             <div className="text-xs text-default-500">分享基础 URL</div>
-            <div className="break-anywhere mt-1 font-mono text-sm font-semibold text-foreground">
-              {shareEnabled ? publicBaseURL : '分享功能未启用'}
+            <div className={cn(
+              "break-anywhere mt-1 font-mono text-sm font-semibold",
+              shareNeedsDomain ? 'text-warning-700' : 'text-foreground',
+            )}>
+              {shareBaseURLPreview}
             </div>
           </div>
         </div>
@@ -1717,11 +2090,14 @@ function PublicAccessWizard({
 
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs leading-relaxed text-default-500">
-            应用推荐只会更新当前表单；点击“保存设置”后，监听地址变更需要重启服务。
+            {shareNeedsDomain
+              ? '分享功能已启用，填写公网域名后才能应用完整公网推荐。'
+              : '应用推荐只会更新当前表单；点击“保存设置”后，监听地址变更需要重启服务。'}
           </p>
           <Button
             className="btn-primary rounded-lg"
             startContent={<CheckCircle2 size={16} />}
+            isDisabled={isApplyDisabled}
             onPress={onApplyRecommendation}
           >
             应用推荐到表单
@@ -1756,12 +2132,12 @@ export function SettingsPage() {
     trashEnabled: true,
     trashRetentionDays: '30',
     trashMaxSize: '10 GB',
-    maxVersions: '100',
-    maxAge: '8760h',
+    maxVersions: '50',
+    maxAge: '2160h',
     minFreeSpace: '10GB',
     gcInterval: '24h',
-    versioningExtensions: '.md\n.txt\n.go',
-    versioningFilenames: 'README\nDockerfile\nMakefile',
+    versioningExtensions: DEFAULT_VERSIONING_EXTENSIONS,
+    versioningFilenames: DEFAULT_VERSIONING_FILENAMES,
     versioningMaxSize: '100 MB',
     webdavEnabled: true,
     webdavPrefix: '/dav',
@@ -1769,6 +2145,7 @@ export function SettingsPage() {
     webdavAuthType: 'basic',
     webdavUsername: 'admin',
     webdavPassword: '',
+    webdavUseGeneratedPassword: false,
     shareEnabled: false,
     shareBaseURL: '',
     shareDefaultExpiresIn: '168h',
@@ -1787,6 +2164,7 @@ export function SettingsPage() {
     alertsTelegramEnabled: false,
     alertsTelegramBotToken: '',
     alertsTelegramBotTokenConfigured: false,
+    alertsTelegramBotTokenClear: false,
     alertsTelegramChatID: '',
     alertsEmailEnabled: false,
     alertsSMTPHost: '',
@@ -1794,6 +2172,7 @@ export function SettingsPage() {
     alertsSMTPUsername: '',
     alertsSMTPPassword: '',
     alertsSMTPPasswordConfigured: false,
+    alertsSMTPPasswordClear: false,
     alertsSMTPFrom: '',
     alertsSMTPTo: '',
     scrubScheduleEnabled: false,
@@ -1822,6 +2201,19 @@ export function SettingsPage() {
     request: UpdateSettingsRequest
     submittedSettings: SettingsDraft
     baseSettingsUpdatedAt: number
+    signal: AbortSignal
+  }
+  type DirectoryAccessCheckVariables = {
+    request: DirectoryAccessCheckRequest
+    signal: AbortSignal
+  }
+  type DirectoryAccessReportVariables = {
+    request: DirectoryAccessReportRequest
+    signal: AbortSignal
+  }
+  type DirectoryAccessPreviewVariables = {
+    request: DirectoryAccessPreviewRequest
+    signal: AbortSignal
   }
   
   // WebDAV credentials state
@@ -1833,7 +2225,7 @@ export function SettingsPage() {
   // Fetch settings from API
   const { data: settingsData, dataUpdatedAt: settingsDataUpdatedAt, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['settings', user?.id ?? 'anonymous'],
-    queryFn: getSettings,
+    queryFn: ({ signal }) => getSettings({ signal }),
   })
   const settingsLoadErrorPresentation = error ? getSettingsLoadErrorPresentation(error) : null
 
@@ -1845,7 +2237,7 @@ export function SettingsPage() {
     isRefetching: isRefetchingSecurityCheck,
   } = useQuery({
     queryKey: ['security-check', user?.id ?? 'anonymous'],
-    queryFn: getSecurityCheck,
+    queryFn: ({ signal }) => getSecurityCheck({ signal }),
     enabled: selectedTab === 'general',
   })
 
@@ -1857,7 +2249,7 @@ export function SettingsPage() {
     isRefetching: isRefetchingWebDAVCredentials,
   } = useQuery({
     queryKey: ['webdav-credentials', user?.id ?? 'anonymous'],
-    queryFn: getWebDAVCredentials,
+    queryFn: ({ signal }) => getWebDAVCredentials({ signal }),
     enabled: selectedTab === 'webdav', // Only fetch when WebDAV tab is selected
   })
   const webdavCredentialsErrorPresentation = webdavCredentialsError
@@ -1873,31 +2265,71 @@ export function SettingsPage() {
 
   const [accessCheckUsername, setAccessCheckUsername] = useState('')
   const [accessCheckPath, setAccessCheckPath] = useState('/')
+  const saveSettingsAbortControllerRef = useRef<AbortController | null>(null)
+  const accessCheckAbortControllerRef = useRef<AbortController | null>(null)
+  const accessReportAbortControllerRef = useRef<AbortController | null>(null)
+  const accessPreviewAbortControllerRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    return () => {
+      saveSettingsAbortControllerRef.current?.abort()
+      accessCheckAbortControllerRef.current?.abort()
+      accessReportAbortControllerRef.current?.abort()
+      accessPreviewAbortControllerRef.current?.abort()
+      saveSettingsAbortControllerRef.current = null
+      accessCheckAbortControllerRef.current = null
+      accessReportAbortControllerRef.current = null
+      accessPreviewAbortControllerRef.current = null
+    }
+  }, [user?.id])
   const accessCheckMutation = useMutation({
-    mutationFn: checkDirectoryAccess,
+    mutationFn: ({ request, signal }: DirectoryAccessCheckVariables) => checkDirectoryAccess(request, { signal }),
     onError: (err) => {
+      if (isAbortError(err)) {
+        return
+      }
       addToast(getSettingsActionErrorToast(err, {
         unavailable: '权限检查不可用',
         failure: '权限检查失败',
       }))
     },
+    onSettled: (_data, _error, variables) => {
+      if (accessCheckAbortControllerRef.current?.signal === variables.signal) {
+        accessCheckAbortControllerRef.current = null
+      }
+    },
   })
   const accessReportMutation = useMutation({
-    mutationFn: reportDirectoryAccess,
+    mutationFn: ({ request, signal }: DirectoryAccessReportVariables) => reportDirectoryAccess(request, { signal }),
     onError: (err) => {
+      if (isAbortError(err)) {
+        return
+      }
       addToast(getSettingsActionErrorToast(err, {
         unavailable: '权限矩阵不可用',
         failure: '权限矩阵生成失败',
       }))
     },
+    onSettled: (_data, _error, variables) => {
+      if (accessReportAbortControllerRef.current?.signal === variables.signal) {
+        accessReportAbortControllerRef.current = null
+      }
+    },
   })
   const accessPreviewMutation = useMutation({
-    mutationFn: previewDirectoryAccess,
+    mutationFn: ({ request, signal }: DirectoryAccessPreviewVariables) => previewDirectoryAccess(request, { signal }),
     onError: (err) => {
+      if (isAbortError(err)) {
+        return
+      }
       addToast(getSettingsActionErrorToast(err, {
         unavailable: '权限预览不可用',
         failure: '权限预览失败',
       }))
+    },
+    onSettled: (_data, _error, variables) => {
+      if (accessPreviewAbortControllerRef.current?.signal === variables.signal) {
+        accessPreviewAbortControllerRef.current = null
+      }
     },
   })
 
@@ -1912,7 +2344,13 @@ export function SettingsPage() {
       })
       return
     }
-    accessCheckMutation.mutate({ username, path: targetPath })
+    accessCheckAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    accessCheckAbortControllerRef.current = controller
+    accessCheckMutation.mutate({
+      request: { username, path: targetPath },
+      signal: controller.signal,
+    })
   }
 
   const handleReportDirectoryAccess = () => {
@@ -1925,7 +2363,13 @@ export function SettingsPage() {
       })
       return
     }
-    accessReportMutation.mutate({ path: targetPath })
+    accessReportAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    accessReportAbortControllerRef.current = controller
+    accessReportMutation.mutate({
+      request: { path: targetPath },
+      signal: controller.signal,
+    })
   }
 
   const handlePreviewDirectoryAccess = () => {
@@ -1947,9 +2391,15 @@ export function SettingsPage() {
       })
       return
     }
+    accessPreviewAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    accessPreviewAbortControllerRef.current = controller
     accessPreviewMutation.mutate({
-      path: targetPath,
-      directory_access_rules: parsedRules.rules,
+      request: {
+        path: targetPath,
+        directory_access_rules: parsedRules.rules,
+      },
+      signal: controller.signal,
     })
   }
 
@@ -2008,8 +2458,8 @@ export function SettingsPage() {
       maxAge: data.retention.max_age,
       minFreeSpace: formatBytes(data.retention.min_free_space),
       gcInterval: data.retention.gc_interval,
-      versioningExtensions: data.versioning?.auto_versioned_extensions?.join('\n') ?? '.md\n.txt\n.go',
-      versioningFilenames: data.versioning?.auto_versioned_filenames?.join('\n') ?? 'README\nDockerfile\nMakefile',
+      versioningExtensions: data.versioning?.auto_versioned_extensions?.join('\n') ?? DEFAULT_VERSIONING_EXTENSIONS,
+      versioningFilenames: data.versioning?.auto_versioned_filenames?.join('\n') ?? DEFAULT_VERSIONING_FILENAMES,
       versioningMaxSize: formatBytes(data.versioning?.max_versioned_size ?? 104857600),
       webdavEnabled: data.webdav.enabled,
       webdavPrefix: data.webdav.prefix,
@@ -2017,6 +2467,7 @@ export function SettingsPage() {
       webdavAuthType: data.webdav.auth_type,
       webdavUsername: data.webdav.username,
       webdavPassword: '',
+      webdavUseGeneratedPassword: false,
       shareEnabled: data.share.enabled,
       shareBaseURL: data.share.base_url,
       shareDefaultExpiresIn: data.share.default_expires_in ?? '168h',
@@ -2035,6 +2486,7 @@ export function SettingsPage() {
       alertsTelegramEnabled: data.alerts?.telegram_enabled ?? false,
       alertsTelegramBotToken: '',
       alertsTelegramBotTokenConfigured: data.alerts?.telegram_bot_token_configured ?? false,
+      alertsTelegramBotTokenClear: false,
       alertsTelegramChatID: data.alerts?.telegram_chat_id ?? '',
       alertsEmailEnabled: data.alerts?.email_enabled ?? false,
       alertsSMTPHost: data.alerts?.smtp_host ?? '',
@@ -2042,6 +2494,7 @@ export function SettingsPage() {
       alertsSMTPUsername: data.alerts?.smtp_username ?? '',
       alertsSMTPPassword: '',
       alertsSMTPPasswordConfigured: data.alerts?.smtp_password_configured ?? false,
+      alertsSMTPPasswordClear: false,
       alertsSMTPFrom: data.alerts?.smtp_from ?? '',
       alertsSMTPTo: data.alerts?.smtp_to?.join('\n') ?? '',
       scrubScheduleEnabled: data.maintenance?.scrub?.enabled ?? false,
@@ -2118,6 +2571,7 @@ export function SettingsPage() {
   }, [publicAccessDomain])
   const publicAccessDomainError = publicDomainErrorMessage(publicAccessDomain)
   const publicAccessBaseURL = normalizedPublicAccessDomain ? `https://${normalizedPublicAccessDomain}` : ''
+  const publicAccessShareNeedsDomain = settings.shareEnabled && !normalizedPublicAccessDomain && publicAccessDomain.trim() === ''
 
   const updateDirtySettings = (updater: (prev: typeof draftSettings) => typeof draftSettings) => {
     setIsDirty(true)
@@ -2125,6 +2579,22 @@ export function SettingsPage() {
   }
 
   const applyPublicAccessRecommendation = () => {
+    if (publicAccessDomainError) {
+      addToast({
+        title: '公网域名无效',
+        description: publicAccessDomainError,
+        color: 'warning',
+      })
+      return
+    }
+    if (settings.shareEnabled && !publicAccessBaseURL) {
+      addToast({
+        title: '需要公网域名',
+        description: '分享功能已启用，填写公网域名后再应用公网访问推荐。',
+        color: 'warning',
+      })
+      return
+    }
     updateDirtySettings((prev) => ({
       ...prev,
       serverHost: '127.0.0.1',
@@ -2138,12 +2608,10 @@ export function SettingsPage() {
     })
   }
 
-  const applySecurityCheckFix = (checkID: string) => {
-    switch (checkID) {
+  const applySecurityCheckFix = (check: SecurityCheckItem) => {
+    switch (check.id) {
       case 'https_request':
       case 'public_http_exposure':
-      case 'trusted_proxy_or_tls':
-      case 'forwarded_proto_trust':
         updateDirtySettings((prev) => ({
           ...prev,
           serverHost: '127.0.0.1',
@@ -2151,29 +2619,78 @@ export function SettingsPage() {
         }))
         addToast({ title: '已应用反向代理推荐', description: '保存设置后生效。', color: 'success' })
         return
+      case 'trusted_proxy_or_tls':
+        updateDirtySettings((prev) => ({
+          ...prev,
+          serverTrustedProxyHops: '1',
+        }))
+        addToast({ title: '已设置受信代理层数', description: '保存设置后生效。', color: 'success' })
+        return
+      case 'forwarded_proto_trust': {
+        const proxySource = trustedProxySourceFromSecurityCheck(check)
+        if (proxySource) {
+          updateDirtySettings((prev) => ({
+            ...prev,
+            serverTrustedProxyHops: prev.serverTrustedProxyHops.trim() === '' || prev.serverTrustedProxyHops.trim() === '0'
+              ? '1'
+              : prev.serverTrustedProxyHops,
+            serverTrustedProxyCIDRs: appendTrustedProxySourceCIDR(prev.serverTrustedProxyCIDRs, proxySource),
+          }))
+          addToast({ title: '已加入受信代理来源', description: '保存设置后会信任该代理的转发 header。', color: 'success' })
+          return
+        }
+        updateDirtySettings((prev) => ({
+          ...prev,
+          serverHost: '127.0.0.1',
+          serverTrustedProxyHops: '1',
+        }))
+        addToast({ title: '已应用反向代理推荐', description: '保存设置后生效。', color: 'success' })
+        return
+      }
       case 'server_listen':
         updateDirtySettings((prev) => ({ ...prev, serverHost: '127.0.0.1' }))
         addToast({ title: '已改为本机监听', description: '保存设置并重启服务后生效。', color: 'success' })
         return
       case 'dataplane_listen':
-        updateDirtySettings((prev) => ({ ...prev, dataplaneGrpcAddress: '127.0.0.1:9090' }))
+        updateDirtySettings((prev) => ({
+          ...prev,
+          dataplaneGrpcAddress: dataplaneLoopbackAddressFromSecurityCheck(check, prev.dataplaneGrpcAddress),
+        }))
         addToast({ title: '已改为本机数据面地址', description: '保存设置后会校验并切换连接。', color: 'success' })
         return
       case 'webdav_auth':
+        if (securityCheckResponse?.data.config.auth_enabled === false) {
+          updateDirtySettings((prev) => ({
+            ...prev,
+            webdavAuthType: 'basic',
+            webdavUsername: prev.webdavUsername.trim() || 'admin',
+            webdavPassword: '',
+            webdavUseGeneratedPassword: true,
+          }))
+          addToast({
+            title: '已启用 WebDAV Basic 认证',
+            description: '当前 Web 登录认证未启用，已改用 Basic Auth 和自动生成密码；保存后生效。',
+            color: 'success',
+          })
+          return
+        }
         updateDirtySettings((prev) => ({
           ...prev,
           webdavAuthType: 'users',
+          webdavUseGeneratedPassword: false,
         }))
         addToast({ title: '已启用 WebDAV 用户认证', description: '保存后可使用 MnemoNAS 账号挂载。', color: 'success' })
         return
-      case 'share_base_url':
-        if (!publicAccessBaseURL) {
+      case 'share_base_url': {
+        const repairedShareBaseURL = publicAccessBaseURL || httpsShareBaseURLFromSecurityCheck(check)
+        if (!repairedShareBaseURL) {
           addToast({ title: '需要公网域名', description: '先在公网访问向导中填写域名。', color: 'warning' })
           return
         }
-        updateDirtySettings((prev) => ({ ...prev, shareBaseURL: publicAccessBaseURL }))
+        updateDirtySettings((prev) => ({ ...prev, shareBaseURL: repairedShareBaseURL }))
         addToast({ title: '已更新分享基础 URL', description: '保存设置后影响新创建的分享链接。', color: 'success' })
         return
+      }
       case 'unsafe_no_auth_override':
         addToast({
           title: '需要编辑配置文件',
@@ -2181,13 +2698,15 @@ export function SettingsPage() {
           color: 'warning',
         })
         return
-      case 'dataplane_http_listen':
+      case 'dataplane_http_listen': {
+        const dataplaneHTTPAddress = dataplaneHTTPLoopbackAddressFromSecurityCheck(check)
         addToast({
           title: '需要调整启动环境',
-          description: '将 DATAPLANE_HTTP_ADDR 设为 127.0.0.1:9091 后重启 dataplane 和 MnemoNAS 服务。',
+          description: `将 DATAPLANE_HTTP_ADDR 设为 ${dataplaneHTTPAddress} 后重启 dataplane 和 MnemoNAS 服务。`,
           color: 'warning',
         })
         return
+      }
       case 'admin_accounts':
         navigate('/users')
         return
@@ -2199,27 +2718,27 @@ export function SettingsPage() {
   const getSecurityCheckAction = (check: SecurityCheckItem): SecurityCheckAction | undefined => {
     switch (check.id) {
       case 'https_request':
-        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
       case 'public_http_exposure':
-        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '应用代理推荐', onPress: () => applySecurityCheckFix(check) }
       case 'trusted_proxy_or_tls':
-        return { label: '设置代理层数', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '设置代理层数', onPress: () => applySecurityCheckFix(check) }
       case 'forwarded_proto_trust':
-        return { label: '修正代理设置', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '修正代理设置', onPress: () => applySecurityCheckFix(check) }
       case 'server_listen':
-        return { label: '改为本机监听', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '改为本机监听', onPress: () => applySecurityCheckFix(check) }
       case 'dataplane_listen':
-        return { label: '改为本机地址', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '改为本机地址', onPress: () => applySecurityCheckFix(check) }
       case 'dataplane_http_listen':
-        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check) }
       case 'webdav_auth':
-        return { label: '启用认证', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '启用认证', onPress: () => applySecurityCheckFix(check) }
       case 'share_base_url':
-        return { label: '使用 HTTPS URL', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '使用 HTTPS URL', onPress: () => applySecurityCheckFix(check) }
       case 'unsafe_no_auth_override':
-        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '查看处理方式', onPress: () => applySecurityCheckFix(check) }
       case 'admin_accounts':
-        return { label: '管理用户', onPress: () => applySecurityCheckFix(check.id) }
+        return { label: '管理用户', onPress: () => applySecurityCheckFix(check) }
       default:
         return undefined
     }
@@ -2285,8 +2804,11 @@ export function SettingsPage() {
 
   // Save mutation
   const saveMutation = useMutation({
-    mutationFn: ({ request }: SaveSettingsVariables) => updateSettings(request),
+    mutationFn: ({ request, signal }: SaveSettingsVariables) => updateSettings(request, { signal }),
     onSuccess: (result, variables) => {
+      if (variables.signal.aborted) {
+        return
+      }
       setSavedSettingsOverride(variables.submittedSettings)
       setSavedSettingsOverrideUpdatedAt(variables.baseSettingsUpdatedAt)
       useAuthStore.getState().setShareEnabled(variables.submittedSettings.shareEnabled)
@@ -2301,11 +2823,19 @@ export function SettingsPage() {
         void refetchSecurityCheck()
       }
     },
-    onError: (err: unknown) => {
+    onError: (err: unknown, variables) => {
+      if (variables.signal.aborted || isAbortError(err)) {
+        return
+      }
       addToast(getSettingsActionErrorToast(err, {
         unavailable: '保存设置暂不可用',
         failure: '保存失败',
       }))
+    },
+    onSettled: (_result, _error, variables) => {
+      if (saveSettingsAbortControllerRef.current?.signal === variables.signal) {
+        saveSettingsAbortControllerRef.current = null
+      }
     },
   })
 
@@ -2327,6 +2857,8 @@ export function SettingsPage() {
     const parsedTrustedProxyHops = Number(trimmedTrustedProxyHops)
     const trimmedMaxVersions = settings.maxVersions.trim()
     const parsedMaxVersions = Number(trimmedMaxVersions)
+    const trimmedMaxAge = settings.maxAge.trim()
+    const trimmedGCInterval = settings.gcInterval.trim()
     const trimmedTrashRetentionDays = settings.trashRetentionDays.trim()
     const parsedTrashRetentionDays = Number(trimmedTrashRetentionDays)
     const trimmedDataplaneGrpcAddress = settings.dataplaneGrpcAddress.trim()
@@ -2497,41 +3029,68 @@ export function SettingsPage() {
       return
     }
 
-	if (!trimmedReadTimeout) {
-		addToast({
-			title: '读取超时格式无效',
-			description: '读取超时不能为空',
-			color: 'danger',
-		})
-		return
-	}
+    if (!trimmedReadTimeout) {
+      addToast({
+        title: '读取超时格式无效',
+        description: '读取超时不能为空',
+        color: 'danger',
+      })
+      return
+    }
 
-	if (!trimmedWriteTimeout) {
-		addToast({
-			title: '写入超时格式无效',
-			description: '写入超时不能为空',
-			color: 'danger',
-		})
-		return
-	}
+    if (!isPositiveDurationString(trimmedReadTimeout)) {
+      addToast({
+        title: '读取超时格式无效',
+        description: '读取超时必须使用 30s / 1m 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
 
-	if (!trimmedIdleTimeout) {
-		addToast({
-			title: '空闲超时格式无效',
-			description: '空闲超时不能为空',
-			color: 'danger',
-		})
-		return
-	}
+    if (!trimmedWriteTimeout) {
+      addToast({
+        title: '写入超时格式无效',
+        description: '写入超时不能为空',
+        color: 'danger',
+      })
+      return
+    }
 
-  if (!/^\d+$/.test(trimmedTrustedProxyHops) || !Number.isInteger(parsedTrustedProxyHops) || parsedTrustedProxyHops < 0) {
-    addToast({
-      title: '受信代理层数格式无效',
-      description: '受信代理层数必须是 0 或正整数',
-      color: 'danger',
-    })
-    return
-  }
+    if (!isPositiveDurationString(trimmedWriteTimeout)) {
+      addToast({
+        title: '写入超时格式无效',
+        description: '写入超时必须使用 60s / 1m 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!trimmedIdleTimeout) {
+      addToast({
+        title: '空闲超时格式无效',
+        description: '空闲超时不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isPositiveDurationString(trimmedIdleTimeout)) {
+      addToast({
+        title: '空闲超时格式无效',
+        description: '空闲超时必须使用 120s / 2m 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!/^\d+$/.test(trimmedTrustedProxyHops) || !Number.isInteger(parsedTrustedProxyHops) || parsedTrustedProxyHops < 0) {
+      addToast({
+        title: '受信代理层数格式无效',
+        description: '受信代理层数必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
 
     for (const cidr of trustedProxyCIDRs) {
       if (!isValidTrustedProxyCIDR(cidr)) {
@@ -2553,10 +3112,37 @@ export function SettingsPage() {
       return
     }
 
+    if (!isNonNegativeDurationString(trimmedMaxAge)) {
+      addToast({
+        title: '最大保留时间格式无效',
+        description: '最大保留时间必须是 0，或使用 2160h / 30m 这类 Go duration 格式',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isNonNegativeDurationString(trimmedGCInterval)) {
+      addToast({
+        title: 'GC 运行间隔格式无效',
+        description: 'GC 运行间隔必须是 0，或使用 24h / 30m 这类 Go duration 格式',
+        color: 'danger',
+      })
+      return
+    }
+
     if (!trimmedDataplaneTimeout) {
       addToast({
         title: '数据面超时格式无效',
         description: '连接超时不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isPositiveDurationString(trimmedDataplaneTimeout)) {
+      addToast({
+        title: '数据面超时格式无效',
+        description: '连接超时必须使用 30s / 1m 这类 Go duration 格式，且大于 0',
         color: 'danger',
       })
       return
@@ -2589,6 +3175,15 @@ export function SettingsPage() {
       return
     }
 
+    if (!isPositiveDurationString(trimmedAlertsCheckInterval)) {
+      addToast({
+        title: '提醒检查间隔格式无效',
+        description: '检查间隔必须使用 1h / 30m 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
     if (!trimmedAlertsCooldownPeriod) {
       addToast({
         title: '提醒冷却时间格式无效',
@@ -2598,7 +3193,16 @@ export function SettingsPage() {
       return
     }
 
-    if (!Number.isFinite(parsedAlertsThresholdPct) || parsedAlertsThresholdPct < 0 || parsedAlertsThresholdPct > 100) {
+    if (!isPositiveDurationString(trimmedAlertsCooldownPeriod)) {
+      addToast({
+        title: '提醒冷却时间格式无效',
+        description: '冷却时间必须使用 4h / 30m 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (trimmedAlertsThresholdPct === '' || !Number.isFinite(parsedAlertsThresholdPct) || parsedAlertsThresholdPct < 0 || parsedAlertsThresholdPct > 100) {
       addToast({
         title: '提醒阈值格式无效',
         description: '提醒阈值必须在 0 到 100 之间',
@@ -2607,7 +3211,7 @@ export function SettingsPage() {
       return
     }
 
-    if (!Number.isFinite(parsedAlertsCriticalPct) || parsedAlertsCriticalPct < 0 || parsedAlertsCriticalPct > 100) {
+    if (trimmedAlertsCriticalPct === '' || !Number.isFinite(parsedAlertsCriticalPct) || parsedAlertsCriticalPct < 0 || parsedAlertsCriticalPct > 100) {
       addToast({
         title: '严重提醒阈值格式无效',
         description: '严重提醒阈值必须在 0 到 100 之间',
@@ -2625,10 +3229,10 @@ export function SettingsPage() {
       return
     }
 
-    if (!isValidOptionalHTTPURL(trimmedShareBaseURL)) {
+    if (!isValidShareBaseURL(trimmedShareBaseURL)) {
       addToast({
         title: '分享基础 URL 无效',
-        description: '分享基础 URL 必须为空，或使用 http/https 的完整地址',
+        description: '分享基础 URL 必须为空，或使用不含 userinfo、查询参数、片段且主机名有效的 http/https 地址',
         color: 'danger',
       })
       return
@@ -2652,7 +3256,7 @@ export function SettingsPage() {
       return
     }
 
-    if (!isValidOptionalHTTPURL(trimmedAlertsWebhookURL)) {
+    if (trimmedAlertsWebhookURL !== REDACTED_SETTINGS_SECRET && !isValidOptionalHTTPURL(trimmedAlertsWebhookURL)) {
       addToast({
         title: 'Webhook URL 无效',
         description: 'Webhook URL 必须为空，或使用 http/https 的完整地址',
@@ -2661,16 +3265,24 @@ export function SettingsPage() {
       return
     }
 
-	if (trimmedAlertsWebhookMethod !== 'GET' && trimmedAlertsWebhookMethod !== 'POST') {
-		addToast({
-			title: 'Webhook 方法无效',
-			description: 'Webhook 方法必须是 GET 或 POST',
-			color: 'danger',
-		})
-		return
-	}
+    if (trimmedAlertsWebhookMethod !== 'GET' && trimmedAlertsWebhookMethod !== 'POST') {
+      addToast({
+        title: 'Webhook 方法无效',
+        description: 'Webhook 方法必须是 GET 或 POST',
+        color: 'danger',
+      })
+      return
+    }
 
     if (settings.alertsTelegramEnabled) {
+      if (settings.alertsTelegramBotTokenClear) {
+        addToast({
+          title: 'Telegram Bot Token 缺失',
+          description: '启用 Telegram 通知时不能清除已保存 Token；请先关闭 Telegram 通知或填写新的 Bot Token。',
+          color: 'danger',
+        })
+        return
+      }
       if (!trimmedAlertsTelegramBotToken && !settings.alertsTelegramBotTokenConfigured) {
         addToast({
           title: 'Telegram Bot Token 缺失',
@@ -2752,10 +3364,28 @@ export function SettingsPage() {
       return
     }
 
+    if (!isPositiveDurationString(trimmedScrubScheduleInterval)) {
+      addToast({
+        title: 'Scrub 周期间隔格式无效',
+        description: '周期 Scrub 的常规间隔必须使用 168h / 1h 这类 Go duration 格式，且大于 0',
+        color: 'danger',
+      })
+      return
+    }
+
     if (!trimmedScrubRetryInterval) {
       addToast({
         title: 'Scrub 重试间隔格式无效',
         description: '周期 Scrub 的失败重试间隔不能为空',
+        color: 'danger',
+      })
+      return
+    }
+
+    if (!isPositiveDurationString(trimmedScrubRetryInterval)) {
+      addToast({
+        title: 'Scrub 重试间隔格式无效',
+        description: '周期 Scrub 的失败重试间隔必须使用 1h / 30m 这类 Go duration 格式，且大于 0',
         color: 'danger',
       })
       return
@@ -2770,28 +3400,28 @@ export function SettingsPage() {
       return
     }
 
-    if (!trimmedDiskHealthCheckInterval || !isValidDurationString(trimmedDiskHealthCheckInterval)) {
+    if (!trimmedDiskHealthCheckInterval || !isPositiveDurationString(trimmedDiskHealthCheckInterval)) {
       addToast({
         title: '磁盘健康检查间隔格式无效',
-        description: '检查间隔必须使用 1h / 30m 这类 Go duration 格式',
+        description: '检查间隔必须使用 1h / 30m 这类 Go duration 格式，且大于 0',
         color: 'danger',
       })
       return
     }
 
-    if (!trimmedDiskHealthProbeTimeout || !isValidDurationString(trimmedDiskHealthProbeTimeout)) {
+    if (!trimmedDiskHealthProbeTimeout || !isPositiveDurationString(trimmedDiskHealthProbeTimeout)) {
       addToast({
         title: '磁盘健康探测超时格式无效',
-        description: '探测超时必须使用 15s / 1m 这类 Go duration 格式',
+        description: '探测超时必须使用 15s / 1m 这类 Go duration 格式，且大于 0',
         color: 'danger',
       })
       return
     }
 
-    if (!trimmedDiskHealthCooldownPeriod || !isValidDurationString(trimmedDiskHealthCooldownPeriod)) {
+    if (!trimmedDiskHealthCooldownPeriod || !isPositiveDurationString(trimmedDiskHealthCooldownPeriod)) {
       addToast({
         title: '磁盘健康冷却时间格式无效',
-        description: '冷却时间必须使用 4h / 30m 这类 Go duration 格式',
+        description: '冷却时间必须使用 4h / 30m 这类 Go duration 格式，且大于 0',
         color: 'danger',
       })
       return
@@ -2860,14 +3490,14 @@ export function SettingsPage() {
       return
     }
 
-  if (!/^\d+$/.test(trimmedTrashRetentionDays) || !Number.isInteger(parsedTrashRetentionDays) || parsedTrashRetentionDays < 0) {
-    addToast({
-      title: '回收站保留天数格式无效',
-      description: '回收站保留天数必须是 0 或正整数',
-      color: 'danger',
-    })
-    return
-  }
+    if (!/^\d+$/.test(trimmedTrashRetentionDays) || !Number.isInteger(parsedTrashRetentionDays) || parsedTrashRetentionDays < 0) {
+      addToast({
+        title: '回收站保留天数格式无效',
+        description: '回收站保留天数必须是 0 或正整数',
+        color: 'danger',
+      })
+      return
+    }
 
     for (const header of alertsWebhookHeaders) {
       if (!isValidWebhookHeaderLine(header)) {
@@ -2949,9 +3579,9 @@ export function SettingsPage() {
       },
       retention: {
         max_versions: parsedMaxVersions,
-        max_age: settings.maxAge,
+        max_age: trimmedMaxAge,
         min_free_space: minFreeSpaceBytes,
-        gc_interval: settings.gcInterval,
+        gc_interval: trimmedGCInterval,
       },
       versioning: {
         auto_versioned_extensions: versioningExtensions,
@@ -2996,8 +3626,16 @@ export function SettingsPage() {
         smtp_username: trimmedAlertsSMTPUsername,
         smtp_from: trimmedAlertsSMTPFrom,
         smtp_to: alertsSMTPTo,
-        ...(trimmedAlertsTelegramBotToken && { telegram_bot_token: trimmedAlertsTelegramBotToken }),
-        ...(trimmedAlertsSMTPPassword && { smtp_password: trimmedAlertsSMTPPassword }),
+        ...(settings.alertsTelegramBotTokenClear
+          ? { telegram_bot_token: '' }
+          : trimmedAlertsTelegramBotToken
+            ? { telegram_bot_token: trimmedAlertsTelegramBotToken }
+            : {}),
+        ...(settings.alertsSMTPPasswordClear
+          ? { smtp_password: '' }
+          : trimmedAlertsSMTPPassword
+            ? { smtp_password: trimmedAlertsSMTPPassword }
+            : {}),
       },
       disk_health: {
         enabled: settings.diskHealthEnabled,
@@ -3030,13 +3668,21 @@ export function SettingsPage() {
         read_only: settings.webdavReadOnly,
         auth_type: settings.webdavAuthType,
         username: settings.webdavUsername,
-        ...(settings.webdavPassword && { password: settings.webdavPassword }),
+        ...(settings.webdavAuthType === 'basic' && settings.webdavUseGeneratedPassword
+          ? { password: '' }
+          : settings.webdavAuthType === 'basic' && settings.webdavPassword
+            ? { password: settings.webdavPassword }
+            : {}),
       },
     }
+    saveSettingsAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    saveSettingsAbortControllerRef.current = controller
     saveMutation.mutate({
       request: req,
       submittedSettings: { ...settings },
       baseSettingsUpdatedAt: settingsDataUpdatedAt,
+      signal: controller.signal,
     })
   }
 
@@ -3138,8 +3784,8 @@ export function SettingsPage() {
           aria-label="设置分类"
           classNames={{
             base: "w-full",
-            tabList: "w-full max-w-full justify-start overflow-x-auto bg-content1 border border-divider rounded-lg p-1 gap-1 shadow-[var(--shadow-soft)]",
-            tab: "!w-auto !flex-none shrink-0 min-w-fit px-4 py-2 rounded-lg text-default-600 data-[selected=true]:bg-accent-primary data-[selected=true]:text-white data-[selected=true]:shadow-sm whitespace-nowrap",
+            tabList: "grid w-full max-w-full grid-cols-2 justify-start gap-1 overflow-visible rounded-lg border border-divider bg-content1 p-1 shadow-[var(--shadow-soft)] sm:flex sm:flex-nowrap",
+            tab: "!w-full min-w-0 px-3 py-2 rounded-lg text-default-600 data-[selected=true]:bg-accent-primary data-[selected=true]:text-white data-[selected=true]:shadow-sm whitespace-nowrap sm:!w-auto sm:!flex-none sm:min-w-fit sm:px-4",
             cursor: "hidden",
           }}
         >
@@ -3151,6 +3797,8 @@ export function SettingsPage() {
                 domainError={publicAccessDomainError}
                 proxy={publicAccessProxy}
                 shareEnabled={settings.shareEnabled}
+                shareNeedsDomain={publicAccessShareNeedsDomain}
+                isApplyDisabled={!!publicAccessDomainError || publicAccessShareNeedsDomain}
                 onDomainChange={setPublicAccessDomain}
                 onProxyChange={setPublicAccessProxy}
                 onApplyRecommendation={applyPublicAccessRecommendation}
@@ -3348,7 +3996,7 @@ export function SettingsPage() {
           <Input
             value={settings.tlsCertDir}
             onValueChange={(v) => updateDirtySettings(s => ({ ...s, tlsCertDir: v }))}
-            placeholder="~/.mnemonas/certs"
+            placeholder="<storage.root>/.mnemonas/certs"
             isDisabled={!settings.tlsEnabled || !settings.tlsAutoGenerate}
             classNames={{ inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9" }}
           />
@@ -3461,7 +4109,7 @@ export function SettingsPage() {
                     <Input
                       value={settings.maxAge}
                       onValueChange={(v) => updateDirtySettings(s => ({ ...s, maxAge: v }))}
-                      placeholder="8760h"
+                      placeholder="2160h"
                       className="w-24"
                       classNames={{ 
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
@@ -4003,15 +4651,27 @@ export function SettingsPage() {
                         type="password"
                         placeholder="••••••••"
                         value={settings.webdavPassword}
-                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v }))}
-                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic'}
+                        onValueChange={(v) => updateDirtySettings(s => ({ ...s, webdavPassword: v, webdavUseGeneratedPassword: false }))}
+                        isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic' || settings.webdavUseGeneratedPassword}
                         startContent={<Lock size={16} className="text-default-500" />}
+                        description={settings.webdavUseGeneratedPassword ? '保存后使用 secrets.json 中的自动生成密码' : '留空保留当前密码；勾选下方选项可切回自动生成密码'}
                         classNames={{ 
                           inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary",
                         }}
                       />
                     </div>
                   </div>
+                  <Checkbox
+                    isSelected={settings.webdavUseGeneratedPassword}
+                    onValueChange={(value) => updateDirtySettings(s => ({
+                      ...s,
+                      webdavUseGeneratedPassword: value,
+                      webdavPassword: value ? '' : s.webdavPassword,
+                    }))}
+                    isDisabled={!settings.webdavEnabled || settings.webdavAuthType !== 'basic'}
+                  >
+                    保存时使用自动生成密码
+                  </Checkbox>
                 </div>
               </SettingsSection>
             </div>
@@ -4579,18 +5239,37 @@ export function SettingsPage() {
                         inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
                       }}
                     />
-                    <Input
-                      label="SMTP 密码"
-                      type="password"
-                      aria-label="SMTP 密码"
-                      value={settings.alertsSMTPPassword}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsSMTPPassword: v }))}
-                      placeholder={settings.alertsSMTPPasswordConfigured ? '已配置，留空不变' : '应用专用密码'}
-                      isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
+                    <div className="space-y-2">
+                      <Input
+                        label="SMTP 密码"
+                        type="password"
+                        aria-label="SMTP 密码"
+                        value={settings.alertsSMTPPassword}
+                        onValueChange={(v) => updateDirtySettings(s => ({
+                          ...s,
+                          alertsSMTPPassword: v,
+                          alertsSMTPPasswordClear: false,
+                        }))}
+                        placeholder={settings.alertsSMTPPasswordConfigured ? '已配置，留空不变' : '应用专用密码'}
+                        isDisabled={!settings.alertsEnabled || !settings.alertsEmailEnabled || settings.alertsSMTPPasswordClear}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                        }}
+                      />
+                      {settings.alertsSMTPPasswordConfigured && (
+                        <Checkbox
+                          isSelected={settings.alertsSMTPPasswordClear}
+                          onValueChange={(value) => updateDirtySettings(s => ({
+                            ...s,
+                            alertsSMTPPasswordClear: value,
+                            alertsSMTPPassword: value ? '' : s.alertsSMTPPassword,
+                          }))}
+                          classNames={{ label: "text-xs text-default-600" }}
+                        >
+                          保存时清除已保存 SMTP 密码
+                        </Checkbox>
+                      )}
+                    </div>
                     <Input
                       label="SMTP 发件人"
                       aria-label="SMTP 发件人"
@@ -4644,19 +5323,38 @@ export function SettingsPage() {
                   <Divider className="bg-divider" />
                   <SettingRow
                     label="Telegram Bot Token"
-                    description={settings.alertsTelegramBotTokenConfigured ? '留空会保留现有 Token；填写后覆盖' : '从 BotFather 获取的机器人 Token'}
+                    description={settings.alertsTelegramBotTokenConfigured ? '留空会保留现有 Token；勾选清除或填写后覆盖' : '从 BotFather 获取的机器人 Token'}
                   >
-                    <Input
-                      type="password"
-                      aria-label="Telegram Bot Token"
-                      value={settings.alertsTelegramBotToken}
-                      onValueChange={(v) => updateDirtySettings(s => ({ ...s, alertsTelegramBotToken: v }))}
-                      placeholder={settings.alertsTelegramBotTokenConfigured ? '已配置，留空不变' : '123456:ABC...'}
-                      isDisabled={!settings.alertsEnabled || !settings.alertsTelegramEnabled}
-                      classNames={{
-                        inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
-                      }}
-                    />
+                    <div className="space-y-2 sm:w-72">
+                      <Input
+                        type="password"
+                        aria-label="Telegram Bot Token"
+                        value={settings.alertsTelegramBotToken}
+                        onValueChange={(v) => updateDirtySettings(s => ({
+                          ...s,
+                          alertsTelegramBotToken: v,
+                          alertsTelegramBotTokenClear: false,
+                        }))}
+                        placeholder={settings.alertsTelegramBotTokenConfigured ? '已配置，留空不变' : '123456:ABC...'}
+                        isDisabled={!settings.alertsEnabled || !settings.alertsTelegramEnabled || settings.alertsTelegramBotTokenClear}
+                        classNames={{
+                          inputWrapper: "input-shell group-data-[focus=true]:border-accent-primary h-9",
+                        }}
+                      />
+                      {settings.alertsTelegramBotTokenConfigured && (
+                        <Checkbox
+                          isSelected={settings.alertsTelegramBotTokenClear}
+                          onValueChange={(value) => updateDirtySettings(s => ({
+                            ...s,
+                            alertsTelegramBotTokenClear: value,
+                            alertsTelegramBotToken: value ? '' : s.alertsTelegramBotToken,
+                          }))}
+                          classNames={{ label: "text-xs text-default-600" }}
+                        >
+                          保存时清除已保存 Telegram Token
+                        </Checkbox>
+                      )}
+                    </div>
                   </SettingRow>
                   <Divider className="bg-divider" />
                   <SettingRow

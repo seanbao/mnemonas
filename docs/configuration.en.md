@@ -46,7 +46,7 @@ enabled = false
 cert_file = ""
 key_file = ""
 auto_generate = true
-cert_dir = "~/.mnemonas/.mnemonas/certs"
+cert_dir = ""
 
 [storage]
 root = "~/.mnemonas"
@@ -58,8 +58,18 @@ min_free_space = 10737418240
 gc_interval = "24h"
 
 [storage.versioning]
-auto_versioned_extensions = [".md", ".txt", ".go", ".rs", ".toml", ".yaml", ".json"]
-auto_versioned_filenames = ["README", "LICENSE", "CHANGELOG", "Dockerfile", "Makefile"]
+auto_versioned_extensions = [
+  ".md", ".txt", ".org", ".rst", ".tex",
+  ".go", ".rs", ".py", ".ts", ".js", ".tsx", ".jsx",
+  ".c", ".cpp", ".h", ".java", ".kt", ".swift",
+  ".toml", ".yaml", ".yml", ".json", ".xml",
+  ".sh", ".bash", ".zsh", ".fish",
+]
+auto_versioned_filenames = [
+  "Makefile", "Dockerfile", "Vagrantfile",
+  "LICENSE", "README", "CHANGELOG",
+  ".gitignore", ".dockerignore", ".editorconfig",
+]
 max_versioned_size = 104857600
 
 [storage.trash]
@@ -132,11 +142,11 @@ base_url = ""
 default_expires_in = "168h"
 default_max_access = 0
 
-[[share.policy_rules]]
-path = "/Family"
-require_password = true
-max_expires_in = "24h"
-max_access = 20
+# [[share.policy_rules]]
+# path = "/Family"
+# require_password = true
+# max_expires_in = "24h"
+# max_access = 20
 
 [favorites]
 enabled = true
@@ -174,11 +184,11 @@ temperature_critical_c = 60
 media_wear_warning_percent = 80
 media_wear_critical_percent = 100
 
-[[disk_health.devices]]
-name = "data-disk"
-path = "/dev/disk/by-id/ata-example"
-type = "sat"
-serial = ""
+# [[disk_health.devices]]
+# name = "data-disk"
+# path = "/dev/disk/by-id/ata-example"
+# type = "sat"
+# serial = ""
 
 [maintenance.scrub]
 enabled = false
@@ -234,7 +244,7 @@ trusted_proxy_cidrs = ["10.0.0.0/8"]
 | `cert_file` | string | `""` | Certificate path |
 | `key_file` | string | `""` | Private key path |
 | `auto_generate` | bool | `true` | Generate a self-signed cert when paths are empty |
-| `cert_dir` | string | `~/.mnemonas/.mnemonas/certs` | Generated-cert directory |
+| `cert_dir` | string | `<storage.root>/.mnemonas/certs` | Generated-cert directory |
 
 Set `cert_file` and `key_file` together or leave both empty; when set, they must point to different files. When both are empty, MnemoNAS uses `cert_dir/server.crt` and `cert_dir/server.key`. If `auto_generate = false`, those files must already exist.
 
@@ -253,8 +263,9 @@ Rules:
 - `root` must not be `/`.
 - Startup tightens permissions on `root`, `files`, and internal directories.
 - Move the full storage root when migrating data.
+- The systemd-installed `mnemonas-dataplane-start` helper rejects `storage.root` and `DATAPLANE_DATA_DIR` values with line breaks, parent-directory segments, symlink path components, or protected system directories before starting the dataplane.
 - `directory_quotas` use MnemoNAS logical paths such as `/team`. Uploads, copies, moves, trash restores, version restores, and WebDAV PUT/COPY/MOVE operations check current logical bytes before writing. Use `/` for a global hard limit. Admins can view current usage, remaining bytes, and status for each directory quota on the storage page.
-- `directory_access_rules` use clean absolute MnemoNAS paths such as `/team`. Each rule can grant `read_users`, `write_users`, `read_groups`, `write_groups`, `read_roles`, and `write_roles`. The most specific matching rule wins. Write grants also allow reads; write operations require an explicit write grant. Non-admin Web/API, WebDAV `users` mode, search, shares, favorites, trash, and activity views use the same decision path. Paths without a matching rule fall back to the user's `home_dir` boundary.
+- `directory_access_rules` use clean absolute MnemoNAS paths such as `/team`. Each rule can grant `read_users`, `write_users`, `read_groups`, `write_groups`, `read_roles`, and `write_roles`. The most specific matching rule wins. Write grants also allow reads; write operations require an explicit write grant. Non-admin Web/API, WebDAV `users` mode, search, shares, favorites, trash, and activity views use the same decision path. Paths without a matching rule fall back to the user's `home_dir` boundary. Web/API root listings return only the user's `home_dir` and top-level entries for readable shared directories. When only a nested directory is granted, Web/API and WebDAV may expose existing ancestor directories as read-only navigation entries; direct children remain filtered by their own rules, and writes under those ancestors still require explicit write grants.
 
 Example:
 
@@ -367,15 +378,16 @@ The dataplane reads these values on startup. Restart dataplane after changing th
 | `enabled` | bool | `true` | Enable WebDAV |
 | `prefix` | string | `"/dav"` | WebDAV URL prefix; normalized to a `/`-prefixed path and must not contain backslash, `?`, `#`, or control characters. When enabled it must not be `/`, `/api`, `/s`, `/health`, or a child of those reserved routes |
 | `read_only` | bool | `false` | Reject write methods |
-| `auth_type` | string | `"basic"` | `users`, `basic`, or `none` |
+| `auth_type` | string | `"basic"` | `users`, `basic`, or `none`; blank values are normalized to `basic` |
 | `username` | string | `""` | Basic Auth username; empty uses runtime default `admin` |
-| `password` | string | `""` | Basic Auth password; empty uses/generated from `secrets.json` |
+| `password` | string | `""` | Basic Auth password; empty uses the generated value from `secrets.json` |
 
 Runtime behavior:
 
 - Settings API updates can switch prefix, read-only mode, and auth config without full restart.
-- `auth_type = "users"` uses MnemoNAS app users over HTTP Basic. Admins see the global namespace; regular users see their `home_dir` as the WebDAV root; guest users are read-only; user quotas are enforced for PUT/COPY/MOVE writes into `home_dir`.
-- Empty password with Basic Auth keeps using the generated password.
+- Empty username with Basic Auth uses the runtime default `admin`.
+- `auth_type = "users"` uses MnemoNAS app users over HTTP Basic. Admins see the global namespace; regular users see their `home_dir` as the WebDAV root, with top-level navigation entries for granted shared directories also listed at the root. Ancestor entries synthesized for nested grants are read-only navigation; writes still require a matching write grant. Guest users are read-only; user quotas are enforced for PUT/COPY/MOVE writes into `home_dir`.
+- Empty password with Basic Auth uses the generated password from `secrets.json`. The generated password is a 16-character human-readable value with lowercase letters, uppercase letters, and digits, excluding ambiguous characters.
 - WebDAV is matched before the API and frontend handlers, so enabled prefixes cannot overlap reserved application routes.
 - `auth_type = "basic"` is the compatibility mode: one global service credential, without app-level `home_dir` isolation.
 
@@ -404,7 +416,7 @@ Share paths must be absolute MnemoNAS virtual paths such as `/` or `/team/docs`.
 | `jwt_secret` | string | generated | JWT signing secret. Leave empty to use the persistent generated secret in `secrets.json`; explicit values must be at least 32 bytes |
 | `access_token_ttl` | duration | `"15m"` | Access-token lifetime |
 | `refresh_token_ttl` | duration | `"168h"` | Refresh-token lifetime |
-| `users_file` | string | under `storage.root/.mnemonas` | User data file |
+| `users_file` | string | `<storage.root>/.mnemonas/users.json` | User data file |
 
 On first startup without a users file, MnemoNAS creates an administrator and writes the initial password to:
 
@@ -419,8 +431,8 @@ The file is removed after first successful login for that administrator.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Enable share links |
-| `store_file` | string | under `storage.root/.mnemonas` | Share metadata file |
-| `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs |
+| `store_file` | string | `<storage.root>/.mnemonas/shares.json` | Share metadata file |
+| `base_url` | string | `""` | Base URL used when returning share URLs; non-empty values must be absolute `http` or `https` URLs without userinfo, query strings, or fragments, and with a valid host name |
 | `default_expires_in` | duration | `168h` | Default expiration for newly-created shares; `0` or empty means no default expiration |
 | `default_max_access` | int | `0` | Default access-count limit for newly-created shares; `0` means unlimited |
 | `[[share.policy_rules]]` | array | `[]` | Stricter share constraints for a MnemoNAS path; the most specific matching path wins |
@@ -441,7 +453,7 @@ max_expires_in = "24h"
 max_access = 20
 ```
 
-`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs. Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, including explicit update requests that clear those limits, are capped.
+`base_url` affects the URL returned by the API. It does not change the share ID itself. Empty values return relative `/s/{id}` URLs. Non-empty values must be absolute `http` or `https` URLs without usernames, passwords, other userinfo, query strings, or fragments. The host must be a valid domain name or IP address; empty labels, underscores, and extra trailing dots are rejected. Default expiration and access-count limits affect only future shares; explicit `expires_in` or `max_access` values in a create request take precedence. Policy rules can set `require_password`, `max_expires_in`, and `max_access`. When a rule matches, passwordless create requests and updates that would leave an existing share passwordless are rejected if required. Expiration or access-count values above the configured limits, explicit update requests that clear those limits, and updates to existing matching shares whose stored expiry or access-count constraints are missing or above the rule limit are capped.
 
 ## `[security]`
 
@@ -456,7 +468,7 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable favorites |
-| `store_file` | string | under `storage.root/.mnemonas` | Favorites metadata file |
+| `store_file` | string | `<storage.root>/.mnemonas/favorites.json` | Favorites metadata file |
 
 ## `[alerts]`
 
@@ -482,7 +494,7 @@ By default, `auth.enabled = false` or enabled WebDAV with `webdav.auth_type = "n
 | `smtp_from` | string | `""` | Sender address, such as `MnemoNAS <alerts@example.com>` |
 | `smtp_to` | string[] | `[]` | Recipient addresses |
 
-Health pages and diagnostics show alert state and whether Webhook, Telegram, or email notifications are configured, but do not expose webhook URL, webhook headers, `telegram_bot_token`, or `smtp_password`. The same notification channels are used for backup failures, restore-drill failures, stale or missing restore-drill reminders, disk-health anomalies, scrub anomalies, and login rate-limit events. Successful and failed webhook logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token.
+Health pages and diagnostics show alert state and whether Webhook, Telegram, or email notifications are configured. The email channel is marked configured only when email alerts are enabled and SMTP host, port, sender, and at least one recipient are present. Diagnostics do not expose webhook URL, webhook headers, `telegram_bot_token`, SMTP host, SMTP username, `smtp_password`, sender address, or recipient addresses. The same notification channels are used for backup failures, restore-drill failures, stale or missing restore-drill reminders, disk-health anomalies, scrub anomalies, and login rate-limit events. Successful and failed webhook logs record only the URL scheme and host, not paths, query strings, credentials, or GET payload fields. Telegram send errors do not include the bot token.
 
 ## `[disk_health]`
 

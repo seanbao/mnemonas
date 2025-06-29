@@ -23,7 +23,7 @@
 
 | 工具 | 最低版本 | 推荐版本 | 用途 |
 | ---- | -------- | -------- | ---- |
-| **Go** | 1.25.9 | 1.25.9+ | Go 控制面开发 |
+| **Go** | 1.25.10 | 1.25.10+ | Go 控制面开发 |
 | **Rust** | 1.92 | 1.92.x | Rust 数据面开发 |
 | **Node.js** | `^20.19.0` 或 `>=22.12.0` | `.nvmrc` 指定的 22.x | 前端开发 |
 | **protoc** | 3.20 | 3.20.1（CI 固定） | 重新生成 protobuf 代码；普通 dataplane/Docker 构建使用已提交生成代码 |
@@ -77,8 +77,8 @@ cargo install cargo-watch --version 8.5.3
 # 更新包管理器
 sudo apt update
 
-# 安装 Go (推荐从 https://go.dev/dl/ 选择 1.25.9 或更新的 1.25.x 补丁版本)
-GO_VERSION=1.25.9
+# 安装 Go (推荐从 https://go.dev/dl/ 选择 1.25.10 或更新的 1.25.x 补丁版本)
+GO_VERSION=1.25.10
 wget "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
@@ -449,12 +449,20 @@ format = "console"
 统一入口：
 
 ```bash
+# 按当前变更自动选择必要检查
+make verify-changed
+
 # 运行全部测试（Go + Rust + 前端单测）
 make test
 
 # 深度测试矩阵（Go race/fuzz + 前端 property + Playwright 交互完整性）
 make test-torture
+
+# 检查本地 Markdown 文档链接
+make docs-check
 ```
+
+`make verify-changed` 会根据工作树、暂存区或指定 base 的变更选择 workflows、脚本、Go/Rust、前端、E2E、Docker 和文档检查。纯文档改动会运行 `make docs-check`，用于发现指向仓库内缺失文件或缺失标题锚点的 Markdown 链接，并确认 README、CHANGELOG、SUPPORT、SECURITY、Web README 和 `docs/` 下文档保持中英文配对；`docs/` 下文档还必须加入中英文文档索引。
 
 `make test-torture` 默认只运行非破坏性测试。它会覆盖控制面竞态、Go fuzz 种子、前端属性测试，以及真实浏览器里的人类交互路径和运行时完整性扫描；耗时比 `make test` 更长，适合发布前、重构后或排查隐性问题时使用。需要缩短本地验证时可临时覆盖：
 
@@ -479,6 +487,8 @@ bash ./scripts/with-test-dataplane.sh go test -v -cover $GO_PACKAGES
 bash ./scripts/with-test-dataplane.sh go test -coverprofile=coverage.out $GO_PACKAGES
 go tool cover -html=coverage.out
 ```
+
+`with-test-dataplane.sh` 启动的临时 dataplane 只接受 `localhost`、`ip6-localhost`、`::1` 或四段数字形式的 `127.0.0.0/8` 地址；如需覆盖 `MNEMONAS_TEST_DATAPLANE_ADDR` 或 `MNEMONAS_TEST_DATAPLANE_HTTP_ADDR`，仍必须保持 loopback，且不能包含空白字符或控制字符，避免测试服务暴露到公网或不可信局域网。
 
 不要在安装前端依赖后直接用 `go test ./...` 或 `go list ./...` 作为全仓库包集合；Go 会进入 `web/node_modules` 中第三方包。仓库级 Go 检查应先用 `make --no-print-directory go-packages` 解析包列表。
 
@@ -533,7 +543,7 @@ npm run test:e2e
 npm run test:e2e:ui
 ```
 
-`web/playwright.config.ts` 默认会启动隔离的测试后端和 Vite 前端，不依赖当前开发服务器。`MNEMONAS_E2E_BACKEND_URL` 和 `MNEMONAS_E2E_FRONTEND_URL` 可用于调整隔离测试服务器的地址或端口；需要连接已有服务时，同时设置 `MNEMONAS_E2E_REUSE_EXISTING=1`、`MNEMONAS_E2E_BACKEND_URL`、`MNEMONAS_E2E_FRONTEND_URL` 和 `E2E_PASSWORD`。
+`web/playwright.config.ts` 默认会启动隔离的测试后端和 Vite 前端，不依赖当前开发服务器。本地运行默认使用 4 个 worker，可通过 `MNEMONAS_E2E_WORKERS` 设置正整数覆盖；CI 固定使用 1 个 worker。隔离测试后端使用 2 小时 Access Token 有效期和 168 小时 Refresh Token 有效期，以避免长时间并行 E2E 运行在共享 storageState 过期后触发并发 refresh-token 轮换。`MNEMONAS_E2E_BACKEND_URL` 和 `MNEMONAS_E2E_FRONTEND_URL` 可用于调整隔离测试服务器的地址或端口；需要连接已有服务时，同时设置 `MNEMONAS_E2E_REUSE_EXISTING=1`、`MNEMONAS_E2E_BACKEND_URL`、`MNEMONAS_E2E_FRONTEND_URL` 和 `E2E_PASSWORD`。
 
 ### 集成测试
 
@@ -569,7 +579,9 @@ make e2e
 ./scripts/run-e2e-isolated.sh --quick
 ```
 
-`scripts/e2e-test.sh` 仍可用于手动验证一个已启动的服务；这种模式必须显式传入 `BASE_URL`、`STORAGE_ROOT`、`CONFIG_FILE`、`SECRETS_FILE` 和 `INITIAL_PASSWORD_FILE`，且 `STORAGE_ROOT` 不能包含 `..` 或符号链接路径组件，防止测试数据写入真实存储。
+`scripts/e2e-test.sh` 仍可用于手动验证一个已启动的服务；这种模式必须显式传入 `BASE_URL`、`STORAGE_ROOT`、`CONFIG_FILE`、`SECRETS_FILE` 和 `INITIAL_PASSWORD_FILE`，且 `STORAGE_ROOT` 不能包含控制字符、`..` 或符号链接路径组件，防止测试数据写入真实存储。
+
+隔离 E2E 包装脚本和 Playwright 后端只接受 `localhost`、`ip6-localhost`、`::1` 或四段数字形式的 `127.0.0.0/8` Web/dataplane 监听地址，避免测试后端意外监听公网或不可信局域网。
 
 脚本会在认证测试阶段自动尝试使用 bootstrap admin 凭据登录；启用认证但当前环境没有可用 bootstrap 凭据时，依赖管理员权限的 maintenance / diagnostics 检查会标记为 `skip`，避免把权限前置条件误报成产品故障。
 
@@ -598,7 +610,7 @@ RUN_CORRUPTION_TESTS=0 \
 ./scripts/fault-injection-test.sh
 ```
 
-安全门禁由 `scripts/test-fault-injection-safety.sh` 覆盖，并纳入 `make scripts-check`。脚本要求 `BASE_URL`、`STORAGE_ROOT`、`NASD_BIN` 都来自显式环境变量；默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`。真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含 `..` 或符号链接路径组件，不能指向 `/`、`/tmp`、`/var` 等受保护系统目录。
+安全门禁由 `scripts/test-fault-injection-safety.sh` 覆盖，并纳入 `make scripts-check`。脚本要求 `BASE_URL`、`STORAGE_ROOT`、`NASD_BIN` 都来自显式环境变量；默认只允许 `/tmp` 或当前 checkout 下的 `STORAGE_ROOT`。真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含控制字符、`..` 或符号链接路径组件，不能指向 `/`、`/tmp`、`/var` 等受保护系统目录。会被读取或改写的 `OBJECTS_DIR` 和 `INDEX_DB` 必须位于 `STORAGE_ROOT` 下。
 
 ### 性能基准测试
 
@@ -630,7 +642,9 @@ MNEMONAS_STORAGE_ROOT=/tmp/mnemonas-bench-target \
 ./scripts/benchmark.sh http://127.0.0.1:18080
 ```
 
-脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件，退出时删除该目录，并优先从 `config.toml` / `secrets.json` 自动读取 WebDAV Basic Auth。默认只允许 `/tmp` 或当前 checkout 下的 `MNEMONAS_STORAGE_ROOT`；真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含 `..` 或符号链接路径组件，不能指向受保护系统目录。若认证已初始化且 bootstrap admin 凭据不可用，可通过 `MNEMONAS_ACCESS_TOKEN` 显式传入管理员 token；否则 metrics 段会标记为 `skip`。若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
+脚本会在 `storage.root/files/benchmark-test` 下创建真实测试文件，退出时删除该目录，并优先从 `config.toml` / `secrets.json` 自动读取 WebDAV Basic Auth。默认只允许 `/tmp` 或当前 checkout 下的 `MNEMONAS_STORAGE_ROOT`；真实存储路径必须额外设置 `ALLOW_REAL_STORAGE=1`，且仍必须是绝对路径，不能包含控制字符、`..` 或符号链接路径组件，不能指向受保护系统目录。若认证已初始化且 bootstrap admin 凭据不可用，可通过 `MNEMONAS_ACCESS_TOKEN` 显式传入管理员 token；否则 metrics 段会标记为 `skip`。若 WebDAV `PROPFIND` 返回非 `207 Multi-Status`，脚本会立即退出，而不是继续输出无效耗时。
+
+隔离 benchmark 包装脚本同样只接受 loopback Web/dataplane 地址；需要对远端或共享网络实例压测时，应直接使用 `scripts/benchmark.sh` 并显式提供隔离的 `MNEMONAS_STORAGE_ROOT`。
 
 测试内容：
 
@@ -740,7 +754,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 
 ### Q: Go 尝试下载 toolchain 但网络失败
 
-仓库使用 `toolchain go1.25.9` 固定 CI 和 release 的补丁版本。若本机已经安装兼容的 Go 1.25.x，但网络无法下载指定 toolchain，可临时使用本机工具链运行本地检查：
+仓库使用 `toolchain go1.25.10` 固定 CI 和 release 的补丁版本。若本机已经安装兼容的 Go 1.25.x，但网络无法下载指定 toolchain，可临时使用本机工具链运行本地检查：
 
 ```bash
 packages=$(GOTOOLCHAIN=local make --no-print-directory go-packages)
@@ -748,7 +762,7 @@ GOTOOLCHAIN=local go test $packages
 GOTOOLCHAIN=local make build
 ```
 
-`GOTOOLCHAIN=local` 只适合本地临时验证。发布构建和安全扫描必须使用 `go1.25.9` 或更新的 1.25.x 补丁版本；低于该版本的本地工具链会被 `govulncheck` 报出标准库漏洞。Playwright 隔离后端默认会使用 `GOTOOLCHAIN=local`，避免 E2E 因 toolchain 下载超时而无法启动。
+`GOTOOLCHAIN=local` 只适合本地临时验证。发布构建和安全扫描必须使用 `go1.25.10` 或更新的 1.25.x 补丁版本；低于该版本的本地工具链会被 `govulncheck` 报出标准库漏洞。Playwright 隔离后端默认会使用 `GOTOOLCHAIN=local`，避免 E2E 因 toolchain 下载超时而无法启动。
 
 如果下载失败并提示 `checksum database disabled by GOSUMDB=off`，说明本机环境禁用了 Go checksum database，toolchain 模块无法完成校验。发布构建和安全扫描不要带这个覆盖值，可临时这样运行：
 

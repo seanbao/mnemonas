@@ -59,6 +59,20 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+type MoveCopyOptions = { signal?: AbortSignal }
+
+function expectMoveFileCalledWithAbortSignal(callIndex: number, fromPath: string, toPath: string): AbortSignal {
+  const call = mockMoveFile.mock.calls[callIndex]
+  expect(call).toBeDefined()
+  expect(call[0]).toBe(fromPath)
+  expect(call[1]).toBe(toPath)
+
+  const signal = (call[2] as MoveCopyOptions | undefined)?.signal
+  expect(signal).toBeDefined()
+  expect(signal?.aborted).toBe(false)
+  return signal as AbortSignal
+}
+
 function renderDialog(props?: Partial<React.ComponentProps<typeof MoveDialog>>) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -190,7 +204,7 @@ describe('MoveDialog', () => {
     await waitFor(() => {
       expect(onClose).toHaveBeenCalledTimes(1)
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: 'resource moved with persistence warning',
+        title: '成功移动 2 个项目，但存在警告',
         color: 'warning',
       })
     })
@@ -217,7 +231,7 @@ describe('MoveDialog', () => {
     await waitFor(() => {
       expect(onClose).toHaveBeenCalledTimes(1)
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: 'resource copied with persistence warning',
+        title: '成功复制 2 个项目，但存在警告',
         color: 'warning',
       })
     })
@@ -275,6 +289,96 @@ describe('MoveDialog', () => {
       title: '批量复制失败',
       description: '共 2 个项目失败',
       color: 'danger',
+    })
+  })
+
+  it('stays open with localized warning after full copy target conflict', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockCopyFile.mockRejectedValue(new ApiError('resource already exists', 409, 'Conflict'))
+
+    renderDialog({ onClose, mode: 'copy' })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    await user.click(screen.getByRole('button', { name: '复制' }))
+
+    await waitFor(() => {
+      expect(mockCopyFile).toHaveBeenCalledTimes(2)
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByText('a.txt')).toBeTruthy()
+    expect(screen.getByText('b.txt')).toBeTruthy()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '同名项目已存在',
+      description: '当前目录中已存在同名文件或文件夹，请使用其他名称。',
+      color: 'warning',
+    })
+  })
+
+  it('stays open with localized warning after full copy target quota failure', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockCopyFile.mockRejectedValue(new ApiError('directory quota exceeded', 507, 'Insufficient Storage', 'QUOTA_EXCEEDED'))
+
+    renderDialog({ onClose, mode: 'copy' })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    await user.click(screen.getByRole('button', { name: '复制' }))
+
+    await waitFor(() => {
+      expect(mockCopyFile).toHaveBeenCalledTimes(2)
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByText('a.txt')).toBeTruthy()
+    expect(screen.getByText('b.txt')).toBeTruthy()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '容量配额不足',
+      description: '目标目录的容量配额不足，请清理空间或调整目录配额后重试。',
+      color: 'warning',
+    })
+  })
+
+  it('stays open with localized warning after full move target parent conflict', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    mockMoveFile.mockRejectedValue(new ApiError('parent path is not a directory', 409, 'Conflict'))
+
+    renderDialog({ onClose })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    await waitFor(() => {
+      expect(mockMoveFile).toHaveBeenCalledTimes(2)
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByText('a.txt')).toBeTruthy()
+    expect(screen.getByText('b.txt')).toBeTruthy()
+    expect(mockAddToast).toHaveBeenCalledWith({
+      title: '目标位置不可用',
+      description: '当前目录状态已变更，请刷新列表后重试。',
+      color: 'warning',
     })
   })
 
@@ -351,7 +455,7 @@ describe('MoveDialog', () => {
     await user.click(screen.getByRole('button', { name: '移动' }))
 
     await waitFor(() => {
-      expect(mockMoveFile).toHaveBeenCalledWith('/source/a.txt', '/a.txt')
+      expectMoveFileCalledWithAbortSignal(0, '/source/a.txt', '/a.txt')
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
@@ -386,7 +490,7 @@ describe('MoveDialog', () => {
     await user.click(screen.getByRole('button', { name: '移动' }))
 
     await waitFor(() => {
-      expect(mockMoveFile).toHaveBeenCalledWith('/source/a.txt', '/a.txt')
+      expectMoveFileCalledWithAbortSignal(0, '/source/a.txt', '/a.txt')
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
@@ -407,5 +511,44 @@ describe('MoveDialog', () => {
 
     expect(screen.getAllByText('a.txt').length).toBeGreaterThan(0)
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('aborts a pending move request when the dialog unmounts', async () => {
+    const user = userEvent.setup({ writeToClipboard: false })
+    const onClose = vi.fn()
+    const firstMove = createDeferred<typeof successActionResult>()
+    mockMoveFile.mockImplementationOnce(() => firstMove.promise)
+
+    const view = renderDialog({ onClose })
+
+    await user.click(screen.getByText('点击选择目标文件夹'))
+    await waitFor(() => {
+      expect(screen.getAllByText('根目录').length).toBeGreaterThan(0)
+    })
+    await user.click(screen.getAllByText('根目录')[0])
+    await user.click(screen.getByRole('button', { name: '选择此目录' }))
+    await user.click(screen.getByRole('button', { name: '移动' }))
+
+    let moveSignal: AbortSignal | undefined
+    await waitFor(() => {
+      moveSignal = expectMoveFileCalledWithAbortSignal(0, '/source/a.txt', '/a.txt')
+    })
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <MoveDialog isOpen={false} onClose={onClose} files={[]} currentPath="/source" mode="move" />
+      </QueryClientProvider>,
+    )
+
+    expect(moveSignal?.aborted).toBe(true)
+
+    await act(async () => {
+      firstMove.resolve(successActionResult)
+      await firstMove.promise
+    })
+
+    expect(mockMoveFile).toHaveBeenCalledTimes(1)
+    expect(onClose).not.toHaveBeenCalled()
+    expect(mockAddToast).not.toHaveBeenCalled()
   })
 })

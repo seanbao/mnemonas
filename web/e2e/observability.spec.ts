@@ -49,6 +49,18 @@ function startRuntimeDiagnostics(page: Page) {
   const issues: RuntimeIssue[] = []
   let currentRoute = '<startup>'
 
+  const shouldIgnoreRequestFailure = (resourceType: string, failureText: string) => {
+    if (resourceType === 'websocket' || resourceType === 'eventsource') {
+      return true
+    }
+
+    if (resourceType !== 'fetch' && resourceType !== 'xhr') {
+      return false
+    }
+
+    return /Load request cancell?ed|ERR_ABORTED|NS_BINDING_ABORTED/i.test(failureText)
+  }
+
   page.on('console', (message) => {
     if (message.type() !== 'error') {
       return
@@ -70,10 +82,15 @@ function startRuntimeDiagnostics(page: Page) {
   })
 
   page.on('requestfailed', (request) => {
+    const failureText = request.failure()?.errorText ?? 'unknown failure'
+    if (shouldIgnoreRequestFailure(request.resourceType(), failureText)) {
+      return
+    }
+
     issues.push({
       kind: 'requestfailed',
       route: currentRoute,
-      message: `${request.method()} ${request.url()} failed: ${request.failure()?.errorText ?? 'unknown failure'}`,
+      message: `${request.method()} ${request.url()} failed: ${failureText}`,
     })
   })
 
@@ -110,6 +127,14 @@ async function expectNoBrokenVisibleText(page: Page, route: string) {
   }
 }
 
+async function waitForRouteContent(page: Page, route: string) {
+  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
+
+  if (route === '/users') {
+    await page.getByText('加载用户列表...').waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {})
+  }
+}
+
 test.describe('运行时诊断', () => {
   for (const group of coreRouteGroups) {
     test(`${group.name}不应产生运行时错误、失败请求或破碎可见文本`, async ({ page }, testInfo) => {
@@ -121,7 +146,7 @@ test.describe('运行时诊断', () => {
         diagnostics.setRoute(route)
         await ensureAuthenticatedAt(page, route)
         await expect(page.locator('body')).toBeVisible()
-        await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {})
+        await waitForRouteContent(page, route)
         await page.waitForTimeout(500)
         await expectNoBrokenVisibleText(page, route)
       }

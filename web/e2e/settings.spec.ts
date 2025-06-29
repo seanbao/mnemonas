@@ -28,6 +28,7 @@ test.describe('设置页面', () => {
       /版本保留/i,
       /WebDAV/i,
       /高级/i,
+      /分享/i,
     ]
 
     for (const tabPattern of tabs) {
@@ -35,6 +36,21 @@ test.describe('设置页面', () => {
       if (await tab.isVisible({ timeout: 1000 }).catch(() => false)) {
         await expect(tab).toBeVisible()
       }
+    }
+  })
+
+  test('移动端应完整显示所有设置分类标签', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await ensureAuthenticatedAt(page, '/settings')
+
+    const tabNames = ['常规', '版本保留', 'WebDAV', '高级', '分享']
+    for (const tabName of tabNames) {
+      const tab = page.getByRole('tab', { name: tabName })
+      await expect(tab).toBeVisible({ timeout: 5000 })
+      const box = await tab.boundingBox()
+      expect(box, `${tabName} tab should have a layout box`).not.toBeNull()
+      expect(Math.round((box?.left ?? 0) + (box?.width ?? 0))).toBeLessThanOrEqual(390)
+      expect(Math.round(box?.left ?? 0)).toBeGreaterThanOrEqual(0)
     }
   })
 
@@ -109,6 +125,118 @@ test.describe('设置表单交互', () => {
     const saveResponse = await saveResponsePromise
     expect(saveResponse.status()).toBe(200)
     await expect(page.getByText('设置已保存')).toBeVisible({ timeout: 5000 })
+  })
+
+  test('WebDAV Basic Auth 可切回自动生成密码', async ({ page }) => {
+    let submittedBody: unknown
+    await page.route('**/api/v1/settings/', async (route) => {
+      if (route.request().method() !== 'PUT') {
+        await route.continue()
+        return
+      }
+
+      submittedBody = JSON.parse(route.request().postData() || '{}')
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: null, message: 'settings updated' }),
+      })
+    })
+
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await page.getByRole('tab', { name: /WebDAV/i }).click()
+
+    const webdavSwitch = page.getByRole('switch', { name: /启用 WebDAV/i })
+    if (!(await webdavSwitch.isChecked())) {
+      await webdavSwitch.click()
+    }
+    await page.getByLabel('WebDAV 认证方式').selectOption('basic')
+
+    const generatedPassword = page.getByLabel('保存时使用自动生成密码')
+    await expect(generatedPassword).toBeEnabled({ timeout: 5000 })
+    await generatedPassword.check()
+    await expect(generatedPassword).toBeChecked()
+
+    await page.getByRole('button', { name: /保存|保存设置/i }).click()
+    await expect(page.getByText('设置已保存')).toBeVisible({ timeout: 5000 })
+
+    expect(submittedBody).toMatchObject({
+      webdav: {
+        enabled: true,
+        auth_type: 'basic',
+        password: '',
+      },
+    })
+  })
+
+  test('告警密钥清除选项应提交空字符串', async ({ page }) => {
+    let submittedBody: unknown
+    let settingsBody: { data: { alerts?: Record<string, unknown> } } | null = null
+    await page.route('**/api/v1/settings/', async (route) => {
+      const method = route.request().method()
+      if (method === 'GET') {
+        if (!settingsBody) {
+          const response = await route.fetch()
+          const body = await response.json() as { data: { alerts?: Record<string, unknown> } }
+          settingsBody = {
+            ...body,
+            data: {
+              ...body.data,
+              alerts: {
+                ...body.data.alerts,
+                enabled: true,
+                telegram_enabled: false,
+                telegram_bot_token_configured: true,
+                telegram_chat_id: '-1001234567890',
+                email_enabled: false,
+                smtp_host: 'smtp.example.com',
+                smtp_port: 587,
+                smtp_username: 'alerts',
+                smtp_password_configured: true,
+                smtp_from: 'MnemoNAS <alerts@example.com>',
+                smtp_to: ['admin@example.com'],
+              },
+            },
+          }
+        }
+        await route.fulfill({ status: 200, contentType: 'application/json', json: settingsBody })
+        return
+      }
+      if (method !== 'PUT') {
+        await route.continue()
+        return
+      }
+
+      submittedBody = JSON.parse(route.request().postData() || '{}')
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: null, message: 'settings updated' }),
+      })
+    })
+
+    await page.reload()
+    await expect(page.getByText('加载设置...')).toHaveCount(0, { timeout: 15000 })
+    await page.getByRole('tab', { name: /高级/i }).click()
+
+    const clearTelegramToken = page.getByRole('checkbox', { name: '保存时清除已保存 Telegram Token' })
+    const clearSMTPPassword = page.getByRole('checkbox', { name: '保存时清除已保存 SMTP 密码' })
+    await expect(clearTelegramToken).toBeVisible({ timeout: 5000 })
+    await expect(clearSMTPPassword).toBeVisible({ timeout: 5000 })
+    await clearTelegramToken.check()
+    await clearSMTPPassword.check()
+
+    await page.getByRole('button', { name: /保存|保存设置/i }).click()
+    await expect(page.getByText('设置已保存')).toBeVisible({ timeout: 5000 })
+
+    expect(submittedBody).toMatchObject({
+      alerts: {
+        telegram_enabled: false,
+        telegram_bot_token: '',
+        email_enabled: false,
+        smtp_password: '',
+      },
+    })
   })
 
   test('服务器地址输入框应可编辑', async ({ page }) => {

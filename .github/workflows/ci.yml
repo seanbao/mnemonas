@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.25.9'
+  GO_VERSION: '1.25.10'
   RUST_VERSION: '1.92'
   NODE_VERSION: '22'
   PROTOC_VERSION: '3.20.1'
@@ -23,6 +23,7 @@ env:
   GOLANGCI_LINT_VERSION: 'v2.11.4'
   GOVULNCHECK_VERSION: 'v1.3.0'
   CARGO_AUDIT_VERSION: '0.22.1'
+  NPM_AUDIT_LEVEL: 'moderate'
   GO_COVERAGE_MIN: '75'
 
 jobs:
@@ -216,7 +217,7 @@ jobs:
         run: npm ci
 
       - name: Dependency audit
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level="${{ env.NPM_AUDIT_LEVEL }}"
 
       - name: Lint
         run: npm run lint

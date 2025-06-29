@@ -43,7 +43,7 @@ vi.mock('@/api/favorites', async () => {
 
 vi.mock('@/lib/useBatchOperation', () => ({
   useBatchOperation: (options: {
-    operation: (item: string) => Promise<unknown>
+    operation: (item: string, operationOptions?: { signal?: AbortSignal }) => Promise<unknown>
     messages: {
       success: string
       failure: string
@@ -52,9 +52,21 @@ vi.mock('@/lib/useBatchOperation', () => ({
     getToast?: (result: typeof mockBatchResult) => { title: string; description?: string; color: 'success' | 'warning' | 'danger' } | null | undefined
     onComplete?: (result: typeof mockBatchResult) => void
   }) => ({
-    execute: vi.fn(async (items: string[]) => {
+    execute: vi.fn(async (items: string[], operationOptions?: { signal?: AbortSignal }) => {
       if (mockUseRealBatchOperation) {
-        const results = await Promise.allSettled(items.map((item) => options.operation(item)))
+        const results = await Promise.allSettled(items.map((item) => options.operation(item, operationOptions)))
+        if (operationOptions?.signal?.aborted) {
+          return {
+            succeeded: 0,
+            failed: 0,
+            total: items.length,
+            succeededItems: [],
+            failedItems: [],
+            failedErrors: [],
+            warningCount: 0,
+            warningMessages: [],
+          }
+        }
         const warningMessages = results
           .filter((result): result is PromiseFulfilledResult<unknown> => result.status === 'fulfilled')
           .map((result) => result.value)
@@ -74,10 +86,13 @@ vi.mock('@/lib/useBatchOperation', () => ({
           warningMessages,
         }
         mockBatchExecute(items)
+        const hasWarnings = result.warningCount > 0 || result.warningMessages.length > 0
         const toast = options.getToast?.(result) ?? (result.failed === 0
           ? {
-            title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
-            color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+            title: hasWarnings
+              ? `${options.messages.success.replace('{count}', String(result.succeeded))}，但存在警告`
+              : options.messages.success.replace('{count}', String(result.succeeded)),
+            color: hasWarnings ? 'warning' as const : 'success' as const,
           }
           : result.succeeded === 0
             ? {
@@ -105,10 +120,13 @@ vi.mock('@/lib/useBatchOperation', () => ({
         total: items.length,
       }
       mockBatchExecute(items)
+      const hasWarnings = result.warningCount > 0 || result.warningMessages.length > 0
       const toast = options.getToast?.(result) ?? (result.failed === 0
         ? {
-          title: result.warningMessages[0] ?? options.messages.success.replace('{count}', String(result.succeeded)),
-          color: result.warningMessages.length > 0 ? 'warning' as const : 'success' as const,
+          title: hasWarnings
+            ? `${options.messages.success.replace('{count}', String(result.succeeded))}，但存在警告`
+            : options.messages.success.replace('{count}', String(result.succeeded)),
+          color: hasWarnings ? 'warning' as const : 'success' as const,
         }
         : result.succeeded === 0
           ? {
@@ -154,6 +172,37 @@ const mockFavorites = [
   },
 ]
 
+function expectCalledWithOnlyAbortSignal(mockFn: ReturnType<typeof vi.fn>) {
+  const call = mockFn.mock.calls.find(([options]) => {
+    return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
+}
+
+function expectRemoveFavoriteCalledWithAbortSignal(path: string): AbortSignal {
+  const call = vi.mocked(favoritesApi.removeFavorite).mock.calls.find(([calledPath, options]) => {
+    return calledPath === path
+      && (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, options] = call as unknown as [string, { signal: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+  return options.signal
+}
+
+function expectUpdateFavoriteNoteCalledWithAbortSignal(path: string, note: string): AbortSignal {
+  const call = vi.mocked(favoritesApi.updateFavoriteNote).mock.calls.find(([calledPath, calledNote, options]) => {
+    return calledPath === path
+      && calledNote === note
+      && (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, , options] = call as unknown as [string, string, { signal: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+  return options.signal
+}
+
 describe('FavoritesPage', () => {
   const pendingFavoritesRefetch = () => new Promise<Awaited<ReturnType<typeof favoritesApi.listFavorites>>>(() => {})
 
@@ -192,6 +241,14 @@ describe('FavoritesPage', () => {
     vi.mocked(favoritesApi.listFavorites).mockResolvedValue(mockFavorites)
   })
 
+  it('passes abort signals to the favorites query', async () => {
+    render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expectCalledWithOnlyAbortSignal(vi.mocked(favoritesApi.listFavorites))
+    })
+  })
+
   it('renders favorites count after loading', async () => {
     render(<FavoritesPage />)
 
@@ -226,7 +283,7 @@ describe('FavoritesPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('加载收藏列表失败')).toBeInTheDocument()
-      expect(screen.getByText('Network error')).toBeInTheDocument()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
     })
   })
@@ -274,7 +331,7 @@ describe('FavoritesPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('加载收藏列表失败')).toBeInTheDocument()
-      expect(screen.getByText('favorites crashed')).toBeInTheDocument()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
     })
   })
 
@@ -433,7 +490,7 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '刷新失败',
-        description: 'still down',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })
@@ -736,7 +793,7 @@ describe('FavoritesPage', () => {
     await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
 
     await waitFor(() => {
-      expect(favoritesApi.removeFavorite).toHaveBeenCalledWith('/docs/report.pdf')
+      expectRemoveFavoriteCalledWithAbortSignal('/docs/report.pdf')
     })
 
     await waitFor(() => {
@@ -771,7 +828,7 @@ describe('FavoritesPage', () => {
     await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
 
     await waitFor(() => {
-      expect(favoritesApi.removeFavorite).toHaveBeenCalledWith('/docs/report.pdf')
+      expectRemoveFavoriteCalledWithAbortSignal('/docs/report.pdf')
     })
 
     await waitFor(() => {
@@ -779,6 +836,27 @@ describe('FavoritesPage', () => {
       expect(screen.getByText('photos')).toBeInTheDocument()
       expect(screen.getByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择1项')).toBeInTheDocument()
     })
+  })
+
+  it('aborts a pending single remove when the page unmounts', async () => {
+    const user = userEvent.setup()
+    const pendingRemove = createDeferred<Awaited<ReturnType<typeof favoritesApi.removeFavorite>>>()
+    vi.mocked(favoritesApi.removeFavorite).mockImplementationOnce(() => pendingRemove.promise as ReturnType<typeof favoritesApi.removeFavorite>)
+
+    const { unmount } = render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '取消收藏 /docs/report.pdf' }))
+
+    const signal = expectRemoveFavoriteCalledWithAbortSignal('/docs/report.pdf')
+    expect(signal.aborted).toBe(false)
+
+    unmount()
+
+    expect(signal.aborted).toBe(true)
   })
 
   it('optimistically removes batch-removed favorites before refetch completes', async () => {
@@ -824,6 +902,34 @@ describe('FavoritesPage', () => {
       expect(screen.queryByText((_, node) => node?.textContent?.replace(/\s+/g, '') === '已选择2项')).not.toBeInTheDocument()
       expect(screen.getByText('还没有收藏')).toBeInTheDocument()
     })
+  })
+
+  it('aborts pending batch remove requests when the page unmounts', async () => {
+    const user = userEvent.setup()
+    mockUseRealBatchOperation = true
+    const pendingRemove = createDeferred<Awaited<ReturnType<typeof favoritesApi.removeFavorite>>>()
+    vi.mocked(favoritesApi.removeFavorite).mockImplementation(() => pendingRemove.promise as ReturnType<typeof favoritesApi.removeFavorite>)
+
+    const { unmount } = render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(2)
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await user.click(checkboxes[1])
+    await user.click(checkboxes[2])
+    await user.click(screen.getByText('取消收藏'))
+
+    const reportSignal = expectRemoveFavoriteCalledWithAbortSignal('/docs/report.pdf')
+    const photosSignal = expectRemoveFavoriteCalledWithAbortSignal('/photos/')
+    expect(reportSignal.aborted).toBe(false)
+    expect(photosSignal.aborted).toBe(false)
+
+    unmount()
+
+    expect(reportSignal.aborted).toBe(true)
+    expect(photosSignal.aborted).toBe(true)
   })
 
   it('treats batch remove not-found results as already removed instead of keeping stale selections', async () => {
@@ -992,7 +1098,7 @@ describe('FavoritesPage', () => {
     await user.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => {
-      expect(favoritesApi.updateFavoriteNote).toHaveBeenCalledWith('/docs/report.pdf', '旧备注')
+      expectUpdateFavoriteNoteCalledWithAbortSignal('/docs/report.pdf', '旧备注')
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
@@ -1026,7 +1132,7 @@ describe('FavoritesPage', () => {
     await user.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => {
-      expect(favoritesApi.updateFavoriteNote).toHaveBeenCalledWith('/docs/report.pdf', '保留备注')
+      expectUpdateFavoriteNoteCalledWithAbortSignal('/docs/report.pdf', '保留备注')
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
@@ -1041,13 +1147,37 @@ describe('FavoritesPage', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '操作失败',
-        description: 'save failed',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })
 
     expect(screen.getByRole('heading', { name: '编辑备注' })).toBeInTheDocument()
     expect(screen.getByLabelText('备注')).toHaveValue('保留备注')
+  })
+
+  it('aborts a pending note save when the page unmounts', async () => {
+    const user = userEvent.setup()
+    const pendingNoteSave = createDeferred<Awaited<ReturnType<typeof favoritesApi.updateFavoriteNote>>>()
+    vi.mocked(favoritesApi.updateFavoriteNote).mockImplementationOnce(() => pendingNoteSave.promise as ReturnType<typeof favoritesApi.updateFavoriteNote>)
+
+    const { unmount } = render(<FavoritesPage />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '编辑备注 /docs/report.pdf' }))
+    await user.clear(screen.getByLabelText('备注'))
+    await user.type(screen.getByLabelText('备注'), '待保存备注')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    const signal = expectUpdateFavoriteNoteCalledWithAbortSignal('/docs/report.pdf', '待保存备注')
+    expect(signal.aborted).toBe(false)
+
+    unmount()
+
+    expect(signal.aborted).toBe(true)
   })
 
   it('shows the localized remove success toast after a successful single remove', async () => {

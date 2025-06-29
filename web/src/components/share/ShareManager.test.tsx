@@ -67,6 +67,29 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function expectUpdateShareCalledWithAbortSignal(id: string, request: unknown): AbortSignal {
+  const call = vi.mocked(shareApi.updateShare).mock.calls.find(([calledId, calledRequest, options]) => {
+    return calledId === id
+      && JSON.stringify(calledRequest) === JSON.stringify(request)
+      && (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, , options] = call as unknown as [string, unknown, { signal: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+  return options.signal
+}
+
+function expectDeleteShareCalledWithAbortSignal(id: string): AbortSignal {
+  const call = vi.mocked(shareApi.deleteShare).mock.calls.find(([calledId, options]) => {
+    return calledId === id
+      && (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+  })
+  expect(call).toBeTruthy()
+  const [, options] = call as unknown as [string, { signal: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+  return options.signal
+}
+
 describe('ShareManager', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -80,10 +103,11 @@ describe('ShareManager', () => {
 
     await waitFor(() => {
       expect(screen.getByText('加载分享列表失败')).toBeInTheDocument()
-      expect(screen.getByText('share feature disabled')).toBeInTheDocument()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
     })
 
+    expect(screen.queryByText('share feature disabled')).not.toBeInTheDocument()
     expect(screen.queryByText('暂无分享')).not.toBeInTheDocument()
   })
 
@@ -120,9 +144,10 @@ describe('ShareManager', () => {
 
     await waitFor(() => {
       expect(screen.getByText('加载分享列表失败')).toBeInTheDocument()
-      expect(screen.getByText('bad request')).toBeInTheDocument()
+      expect(screen.getByText('数据加载失败，请检查网络或稍后重试。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '重新加载' })).toBeInTheDocument()
     })
+    expect(screen.queryByText('bad request')).not.toBeInTheDocument()
   })
 
   it('retries loading from the unavailable empty state', async () => {
@@ -204,8 +229,9 @@ describe('ShareManager', () => {
         risk: {
           level: 'high',
           reasons: [
-            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
-            { code: 'unlimited_access', level: 'medium', message: '未设置访问次数上限' },
+            { code: 'no_password', level: 'high', message: 'backend says link has no password' },
+            { code: 'unlimited_access', level: 'medium', message: 'backend says access is unlimited' },
+            { code: 'unknown_probe', level: 'low', message: 'backend raw fallback reason' },
           ],
         },
       },
@@ -216,10 +242,16 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(screen.getByText('风险 1')).toBeInTheDocument()
       expect(screen.getByText('需处理')).toBeInTheDocument()
-      expect(screen.getByText('未设置密码，拿到链接的人都能访问')).toBeInTheDocument()
+      expect(screen.getByText('未设置密码，持有链接的人可直接访问。')).toBeInTheDocument()
+      expect(screen.getByText('未设置访问次数上限。')).toBeInTheDocument()
+      expect(screen.getByText('存在低风险分享配置，请检查分享设置。')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '需复核 (1)' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '停用需处理 (1)' })).toBeInTheDocument()
     })
+
+    expect(screen.queryByText('backend says link has no password')).not.toBeInTheDocument()
+    expect(screen.queryByText('backend says access is unlimited')).not.toBeInTheDocument()
+    expect(screen.queryByText('backend raw fallback reason')).not.toBeInTheDocument()
   })
 
   it('filters the share list to risky shares only', async () => {
@@ -347,6 +379,43 @@ describe('ShareManager', () => {
     })
   })
 
+  it('filters the share list to stale enabled shares', async () => {
+    const user = userEvent.setup()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        id: 'share-active',
+        path: '/docs/active.pdf',
+      },
+      {
+        ...mockShares[0],
+        id: 'share-stale',
+        path: '/docs/stale.pdf',
+        risk: {
+          level: 'medium',
+          reasons: [
+            { code: 'stale_enabled', level: 'medium', message: '分享长期未访问，建议关闭或重新确认用途' },
+          ],
+        },
+      },
+    ])
+
+    render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('active.pdf')).toBeInTheDocument()
+      expect(screen.getByText('stale.pdf')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '长期未访问 (1)' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '长期未访问 (1)' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('active.pdf')).not.toBeInTheDocument()
+      expect(screen.getByText('stale.pdf')).toBeInTheDocument()
+    })
+  })
+
   it('disables all currently high-risk shares from the header action', async () => {
     const user = userEvent.setup()
     vi.mocked(shareApi.listShares).mockResolvedValueOnce([
@@ -375,11 +444,43 @@ describe('ShareManager', () => {
     await user.click(screen.getByRole('button', { name: '停用需处理 (1)' }))
 
     await waitFor(() => {
-      expect(shareApi.updateShare).toHaveBeenCalledWith('share-1', { enabled: false })
+      expectUpdateShareCalledWithAbortSignal('share-1', { enabled: false })
       expect(mockAddToast).toHaveBeenCalledWith({ title: '已停用 1 个需处理分享', color: 'success' })
       expect(screen.getByText('已禁用')).toBeInTheDocument()
       expect(screen.queryByText('需处理')).not.toBeInTheDocument()
     })
+  })
+
+  it('aborts pending high-risk disable requests when the manager unmounts', async () => {
+    const user = userEvent.setup()
+    const pendingUpdate = createDeferred<Awaited<ReturnType<typeof shareApi.updateShare>>>()
+    vi.mocked(shareApi.listShares).mockResolvedValueOnce([
+      {
+        ...mockShares[0],
+        risk: {
+          level: 'high',
+          reasons: [
+            { code: 'no_password', level: 'high', message: '未设置密码，拿到链接的人都能访问' },
+          ],
+        },
+      },
+    ])
+    vi.mocked(shareApi.updateShare).mockImplementationOnce(() => pendingUpdate.promise as ReturnType<typeof shareApi.updateShare>)
+
+    const { unmount } = render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '停用需处理 (1)' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '停用需处理 (1)' }))
+
+    const signal = expectUpdateShareCalledWithAbortSignal('share-1', { enabled: false })
+    expect(signal.aborted).toBe(false)
+
+    unmount()
+
+    expect(signal.aborted).toBe(true)
   })
 
   it('ignores stale share loads after the feature is disabled', async () => {
@@ -388,8 +489,12 @@ describe('ShareManager', () => {
 
     const { rerender } = render(<ShareManager featureEnabled={true} />)
 
+    const loadSignal = vi.mocked(shareApi.listShares).mock.calls[0]?.[1]?.signal
+    expect(loadSignal).toBeInstanceOf(AbortSignal)
+
     rerender(<ShareManager featureEnabled={false} />)
 
+    expect(loadSignal?.aborted).toBe(true)
     pendingLoad.resolve(mockShares)
 
     await waitFor(() => {
@@ -405,8 +510,11 @@ describe('ShareManager', () => {
     vi.mocked(shareApi.listShares).mockReturnValueOnce(pendingLoad.promise)
 
     const { unmount } = render(<ShareManager />)
+    const loadSignal = vi.mocked(shareApi.listShares).mock.calls[0]?.[1]?.signal
+    expect(loadSignal).toBeInstanceOf(AbortSignal)
 
     unmount()
+    expect(loadSignal?.aborted).toBe(true)
     pendingLoad.reject(new Error('late failure'))
 
     await waitFor(() => {
@@ -473,7 +581,7 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '刷新分享列表失败',
-        description: 'Network error',
+        description: '数据加载失败，请检查网络或稍后重试。',
         color: 'danger',
       })
     })
@@ -550,10 +658,32 @@ describe('ShareManager', () => {
     await user.click(await screen.findByText('禁用分享'))
 
     await waitFor(() => {
-      expect(shareApi.updateShare).toHaveBeenCalledWith('share-1', { enabled: false })
+      expectUpdateShareCalledWithAbortSignal('share-1', { enabled: false })
       expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已禁用', color: 'success' })
       expect(screen.getByText('已禁用')).toBeInTheDocument()
     })
+  })
+
+  it('aborts a pending share toggle when the manager unmounts', async () => {
+    const user = userEvent.setup()
+    const pendingUpdate = createDeferred<Awaited<ReturnType<typeof shareApi.updateShare>>>()
+    vi.mocked(shareApi.updateShare).mockImplementationOnce(() => pendingUpdate.promise as ReturnType<typeof shareApi.updateShare>)
+
+    const { unmount } = render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('禁用分享'))
+
+    const signal = expectUpdateShareCalledWithAbortSignal('share-1', { enabled: false })
+    expect(signal.aborted).toBe(false)
+
+    unmount()
+
+    expect(signal.aborted).toBe(true)
   })
 
   it('enables a disabled share successfully', async () => {
@@ -572,7 +702,7 @@ describe('ShareManager', () => {
     await user.click(await screen.findByText('启用分享'))
 
     await waitFor(() => {
-      expect(shareApi.updateShare).toHaveBeenCalledWith('share-1', { enabled: true })
+      expectUpdateShareCalledWithAbortSignal('share-1', { enabled: true })
       expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已启用', color: 'success' })
       expect(screen.queryByText('已禁用')).not.toBeInTheDocument()
     })
@@ -643,7 +773,7 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '操作失败',
-        description: '请稍后重试',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })
@@ -722,7 +852,7 @@ describe('ShareManager', () => {
     await user.click(screen.getByRole('button', { name: '删除' }))
 
     await waitFor(() => {
-      expect(shareApi.deleteShare).toHaveBeenCalledWith('share-1')
+      expectDeleteShareCalledWithAbortSignal('share-1')
       expect(mockAddToast).toHaveBeenCalledWith({ title: '分享已删除', color: 'success' })
       expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
     })
@@ -853,7 +983,7 @@ describe('ShareManager', () => {
     await user.click(screen.getByRole('button', { name: '删除' }))
 
     await waitFor(() => {
-      expect(shareApi.deleteShare).toHaveBeenCalledWith('share-1')
+      expectDeleteShareCalledWithAbortSignal('share-1')
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
@@ -870,6 +1000,34 @@ describe('ShareManager', () => {
       expect(screen.queryByRole('heading', { name: '删除分享' })).not.toBeInTheDocument()
       expect(screen.queryByLabelText('report.pdf 分享操作')).not.toBeInTheDocument()
     })
+  })
+
+  it('aborts a pending delete when the manager unmounts', async () => {
+    const user = userEvent.setup()
+    const pendingDelete = createDeferred<typeof successActionResult>()
+    vi.mocked(shareApi.deleteShare).mockImplementationOnce(() => pendingDelete.promise)
+
+    const { unmount } = render(<ShareManager />)
+
+    await waitFor(() => {
+      expect(screen.getByText('report.pdf')).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByLabelText('report.pdf 分享操作'))
+    await user.click(await screen.findByText('删除分享'))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '删除' }))
+
+    const signal = expectDeleteShareCalledWithAbortSignal('share-1')
+    expect(signal.aborted).toBe(false)
+
+    unmount()
+
+    expect(signal.aborted).toBe(true)
   })
 
   it('keeps the delete modal open when a pending delete later fails', async () => {
@@ -898,7 +1056,7 @@ describe('ShareManager', () => {
     await user.click(screen.getByRole('button', { name: '删除' }))
 
     await waitFor(() => {
-      expect(shareApi.deleteShare).toHaveBeenCalledWith('share-1')
+      expectDeleteShareCalledWithAbortSignal('share-1')
     })
 
     await user.click(screen.getByRole('button', { name: '取消' }))
@@ -911,7 +1069,7 @@ describe('ShareManager', () => {
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '删除失败',
-        description: 'delete failed',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })
@@ -949,7 +1107,7 @@ describe('ShareManager', () => {
 
     await waitFor(() => {
       expect(mockAddToast).toHaveBeenCalledWith({
-        title: 'share deleted with audit warning',
+        title: '分享已删除，但存在警告',
         color: 'warning',
       })
     })

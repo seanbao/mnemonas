@@ -89,11 +89,12 @@ MnemoNAS 提供内置备份任务入口，可在维护页或 API 中执行、查
 
 限制：
 
-- `local.destination` 必须是 `storage.root` 之外的绝对路径，且已存在的路径组件不能是符号链接，避免递归把备份写回源目录或写入符号链接指向的位置。本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。
+- `local.destination` 必须是 `storage.root` 之外的绝对路径，且不能是文件系统根目录或受保护系统目录；已存在的路径组件不能是符号链接，避免递归把备份写回源目录或写入符号链接指向的位置。本地恢复预览、恢复和恢复演练在读取快照 manifest 或创建演练产物前也会重新检查该目标路径。
 - 默认来源是 `storage.root`；生产环境更推荐把 `source` 指向 ZFS/Btrfs/LVM 快照挂载目录。
 - 源目录中遇到符号链接会中止备份任务，避免备份逃逸到源目录之外；`rclone` 恢复演练也会在执行远端校验前拒绝当前源树中的符号链接。
 - `restic` 和 `rclone` 任务不会通过 shell 拼接命令；`command` 只能是可执行名或绝对路径，`extra_args` 会作为 argv 追加到备份命令，恢复命令不会复用备份专用参数。
-- `password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件，避免把备份凭据重新纳入备份数据。
+- `password_file`、`config_file` 必须是 `source` 与 `storage.root` 之外的普通文件，且已存在的路径组件不能是符号链接，避免把备份凭据重新纳入备份数据或通过符号链接别名访问凭据。
+- 任务视图、运行结果、恢复报告、批量恢复结果和备份提醒事件中的远端目标字段，以及 API 可见的备份错误和警告文本，会对内嵌 userinfo、token、密码、secret 和 key 参数做 `<redacted>` 脱敏；实际 restic/rclone 命令仍使用配置中的原始 `repository` 或 `remote`。
 - `schedule_interval` 是服务内置的轻量调度器，适合固定间隔任务；复杂窗口、限速、网络唤醒和多阶段恢复仍建议配合 systemd timer 或外部编排。
 
 本地快照示例：
@@ -164,7 +165,7 @@ exclude = [".mnemonas/thumbnails"]
 extra_args = ["--fast-list"]
 ```
 
-`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。每次成功备份后会自动执行一次保留策略检测，也可以在维护页手动点击“检查保留”：`local` 会统计本地快照范围，`restic` 会执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 会执行 `rclone lsjson <remote> --recursive --files-only`。检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、恢复演练历史与成功率摘要、下次自动运行时间、自动窗口、最近备份、最近恢复目标和最近清理的旧快照数量。恢复演练历史与显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息；失败演练还会记录稳定的 `failure_category`，用于区分无快照、完整性校验失败、外部命令失败、I/O 问题等常见原因。
+`schedule_window_start`/`schedule_window_end` 只限制自动调度，手动“立即备份”不受影响。窗口使用服务器本地时间的 `HH:MM`，可以跨午夜。`local` 保留策略在成功备份后执行，始终保留当前快照；`max_snapshots = 0` 和 `max_age = "0"` 表示不启用对应维度的自动清理。`restic` 和 `rclone` 的保留策略由外部工具管理，例如 `restic forget --prune`、systemd timer 或 rclone 目标端生命周期规则；配置 `retention_policy` 后，维护页会把该任务标记为“远端保留策略已确认”，否则显示需要确认。每次成功备份后会自动执行一次保留策略检测，也可以在维护页手动点击“检查保留”：`local` 会统计本地快照范围，`restic` 会执行 `restic snapshots --json --tag mnemonas --tag job:<id>`，`rclone` 会执行 `rclone lsjson <remote> --recursive --files-only`。检测结果会写入 `last_retention_check`，并在快照缺失、远端为空、未填写 `retention_policy` 或命令失败时提示警告。`restore_drill_stale_after` 控制定期恢复演练提醒；留空或未配置时默认 30 天。维护页会显示任务健康状态、保留策略状态、恢复演练状态、恢复演练历史与成功率摘要、下次自动运行时间、自动窗口、最近备份、最近恢复目标和最近清理的旧快照数量。恢复演练历史与显式恢复历史默认都保留最近 20 条，失败演练和失败恢复也会记录错误信息；失败演练还会记录稳定的 `failure_category`，用于区分无快照、完整性校验失败、外部命令失败、I/O 问题等常见原因。
 
 重启服务后可通过维护 API 执行：
 
@@ -187,7 +188,7 @@ curl -X POST -b cookies.txt \
 
 `local` 恢复演练会把最近一次快照复制到临时目录，然后按 manifest 校验每个文件的大小和 SHA-256。`keep_artifact = true` 会保留临时恢复目录，便于人工抽查。`restic` 恢复演练当前执行 `restic check`；`rclone` 恢复演练当前执行 `rclone check --one-way`，用于验证仓库或远端一致性。
 
-需要真正取回数据时，`local`、`restic` 和 `rclone` 任务可以恢复到指定的独立目录：
+真正取回数据时，`local`、`restic` 和 `rclone` 任务应恢复到指定的独立目录：
 
 ```bash
 # 先预览：校验目标目录安全性，并确认预计恢复的文件数、字节数和样例路径
@@ -220,9 +221,9 @@ curl -X POST -b cookies.txt \
   -d '{"target_path":"/mnt/restore/mnemonas-restic","include_config":false}'
 ```
 
-`restore-preview` 不会写入目标目录，也不会写入恢复历史。它会复用恢复目标安全校验，并返回预计文件数、字节数、最多 10 个样例路径、`preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`；维护页会要求当前目标目录和配置选项已经成功预览，且没有失败预检项后才允许开始恢复。预检覆盖目标路径隔离、目标目录状态、备份内容、目标文件系统容量和配置文件处理。`target_path` 必须是服务器上的绝对路径，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空，且已存在的路径组件不能是符号链接。`restore` 写入前会在服务端重新执行同一套预检；预检失败会拒绝恢复并写入失败恢复记录。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复预览使用 `restic ls --json`，实际恢复执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复预览使用 `rclone lsjson`，实际恢复执行 `rclone copy` 和 `rclone check --one-way`。`restic` 与 `rclone` 恢复在安装目标目录前会拒绝恢复出的符号链接和非常规文件。恢复完成后，`restore-verify` 会只读检查目标目录，返回文件数、字节数、配置文件是否存在、是否检测到 `files/` 与 `.mnemonas/` 等完整 storage root 结构，并把符号链接、非常规文件或结构不完整情况作为警告返回；最近一次报告会持久化为 `last_restore_verify`，刷新维护页后仍可查看。维护页会在恢复成功后自动进入恢复后切换清单，并显示本次恢复的回滚清单。
+`restore-preview` 不会写入目标目录，也不会写入恢复历史。它会复用恢复目标安全校验，并返回预计文件数、字节数、最多 10 个样例路径、`preflight_checks`、`warnings`、`cutover_checklist` 和 `rollback_checklist`；维护页会要求当前目标目录和配置选项已经成功预览，且没有失败预检项后才允许开始恢复。预检覆盖目标路径隔离、`target_state` 目标目录状态、备份内容、目标文件系统容量和配置文件处理。`target_state` 会明确目标目录尚不存在或目标目录已存在且为空；两者均为允许状态。目标不存在时容量预检检查父目录，目标目录已存在且为空时检查目标目录所在文件系统。`preflight_checks[].status` 可能为 `passed`、`warning` 或 `failed`；`status = "warning"` 表示恢复可以继续但需要人工确认，`status = "failed"` 会阻止维护页开始恢复，并会在 `restore` 写入前被服务端预检拒绝。`warnings` 会汇总 warning 与 failed 预检详情，供维护页、批量预览和恢复历史展示。`target_path` 必须是服务器上的绝对路径，不能包含控制字符，不能是文件系统根目录或受保护系统目录，并且必须位于当前 `storage.root`、备份来源和本地备份目标/仓库之外；父目录必须已存在，目标目录不存在或为空，且已存在的路径组件不能是符号链接。无效的恢复 `target_path` 或批量恢复条目会返回 `400 Bad Request`；备份任务配置路径、备份源树或外部命令导致的不安全路径属于任务执行失败。`restore` 写入前会在服务端重新执行同一套预检；预检失败会拒绝恢复并写入失败恢复记录。`local` 恢复会把快照中的 `data/` 内容复制到目标目录根部并立即校验；`include_config = true` 时，配置文件会恢复到 `target_path/.mnemonas-restore/config.toml`。`restic` 恢复预览使用 `restic ls --json`，实际恢复执行 `restic restore latest --tag mnemonas --tag job:<id> --path <source>`，并把 restic 默认恢复出的来源目录内容整理到目标根目录。`rclone` 恢复预览使用 `rclone lsjson`，实际恢复执行 `rclone copy <remote> <临时目录>` 和 `rclone check <remote> <临时目录> --one-way`。`restic` 与 `rclone` 恢复在安装目标目录前会拒绝恢复出的符号链接和非常规文件；`rclone` 拒绝后，再把临时目录安装到 `target_path`。恢复完成后，`restore-verify` 会只读检查目标目录，返回文件数、字节数、配置文件是否存在、是否检测到 `files/` 与 `.mnemonas/` 等完整 storage root 结构，并把符号链接、非常规文件或结构不完整情况作为警告返回；最近一次报告会持久化为 `last_restore_verify`，刷新维护页后仍可查看。维护页会在恢复成功后自动进入恢复后切换清单，并显示本次恢复的回滚清单。
 
-需要同时恢复多个独立任务或多个目标目录时，可以先调用批量预览，再执行批量恢复：
+批量恢复多个独立任务或多个目标目录时，应先调用批量预览，再执行批量恢复：
 
 ```bash
 curl -X POST -b cookies.txt \
@@ -276,8 +277,8 @@ rclone config
 # Storage> s3
 # provider> Alibaba
 # env_auth> false
-# access_key_id> <你的 AccessKey ID>
-# secret_access_key> <你的 AccessKey Secret>
+# access_key_id> <access-key-id>
+# secret_access_key> <access-key-secret>
 # endpoint> oss-cn-shanghai.aliyuncs.com
 # acl> private
 ```
@@ -292,7 +293,7 @@ set -euo pipefail
 
 # 配置：SOURCE_DIR 必须是快照目录，或已停服务后的 storage.root
 SOURCE_DIR="${SOURCE_DIR:-$HOME/.mnemonas}"
-REMOTE="aliyun:mnemonas-backup"  # 改为你的远程配置
+REMOTE="aliyun:mnemonas-backup"  # 改为实际远程配置
 DATE=$(date +%Y%m%d)
 
 echo "=== MnemoNAS 备份开始 $(date) ==="
@@ -503,7 +504,7 @@ rclone config
 ```toml
 [alerts]
 enabled = true
-webhook_url = "https://your-webhook.example/alert"
+webhook_url = "https://webhook.example.com/alert"
 webhook_method = "POST"
 ```
 
@@ -516,7 +517,7 @@ webhook_method = "POST"
 notify_failure() {
     local status=$?
     if [ "$status" -ne 0 ]; then
-        curl -fsS -X POST "https://your-webhook.com/alert" \
+        curl -fsS -X POST "https://webhook.example.com/alert" \
             -d "message=MnemoNAS 备份失败" || true
     fi
     exit "$status"

@@ -65,7 +65,7 @@ export MNEMONAS_E2E_REUSE_EXISTING=1
 export MNEMONAS_E2E_BACKEND_URL=http://127.0.0.1:8080
 export MNEMONAS_E2E_FRONTEND_URL=http://127.0.0.1:5173
 export E2E_USERNAME=admin
-export E2E_PASSWORD='your-password'
+export E2E_PASSWORD='change-this-test-password'
 
 # 运行所有 E2E 测试
 npm run test:e2e
@@ -84,8 +84,10 @@ npm run test:e2e:update
 
 - 受保护页面测试会优先读取 `E2E_PASSWORD`，也支持通过 `E2E_PASSWORD_FILE` 指向初始密码文件。
 - 默认配置会启动隔离的测试后端，自动生成初始密码并写入 `MNEMONAS_E2E_ROOT` 下的 password file。
+- 隔离测试后端的 Access Token 有效期为 2 小时，Refresh Token 有效期为 168 小时，用于降低长时间并行测试中的共享 storageState 过期风险。
 - `MNEMONAS_E2E_ROOT` 必须位于 `/tmp` 或当前 checkout 下，且不能包含 `..` 或符号链接路径组件。
 - `MNEMONAS_E2E_BACKEND_URL` 和 `MNEMONAS_E2E_FRONTEND_URL` 可用于调整隔离测试服务器的端口；设置 `MNEMONAS_E2E_REUSE_EXISTING=1` 时才会跳过自动启动并连接已有服务。
+- 本地 Playwright 默认使用 4 个 worker；可通过 `MNEMONAS_E2E_WORKERS` 设置正整数覆盖。CI 固定使用 1 个 worker。
 - 未设置 `E2E_PASSWORD_FILE` 时，Playwright 会尝试读取默认初始密码文件路径：`~/.mnemonas/.mnemonas/initial-password.txt`，兼容默认配置布局。
 - 如果当前环境没有可用管理员密码，受保护页面测试会自动跳过，而不会继续猜测默认密码并触发登录限流。
 

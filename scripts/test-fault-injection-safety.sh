@@ -38,13 +38,30 @@ make_fake_nasd() {
 		'printf "%s\n" "$*" >> "$NASD_INVOKED_LOG"'
 }
 
+make_fake_curl() {
+	local bin_dir="$1"
+	local invoked_log="$2"
+	mkdir -p "$bin_dir"
+	write_executable "$bin_dir/curl" \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'printf "%s\n" "$*" >> "$CURL_INVOKED_LOG"' \
+		'case " $* " in' \
+		'  *" -w "*"%{http_code}"*) printf "404"; exit 0 ;;' \
+		'  *"/health"*) printf "{\"status\":\"healthy\"}\n"; exit 0 ;;' \
+		'  *) exit 0 ;;' \
+		'esac'
+	: > "$invoked_log"
+	rm -f -- "$invoked_log"
+}
+
 run_expect_failure() {
 	local out="$1"
 	shift
 	local status
 
 	set +e
-	"$@" > "$out" 2>&1
+	"$@" </dev/null > "$out" 2>&1
 	status=$?
 	set -e
 
@@ -159,6 +176,51 @@ run_refuse_traversal_storage_test() {
 	assert_not_exists "$invoked_log"
 }
 
+run_refuse_newline_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-newline-storage"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	local storage_root
+	mkdir -p "$case_dir"
+	make_fake_nasd "$fake_nasd"
+
+	storage_root="/tmp/mnemonas-fault"$'\n'"escape"
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="$storage_root" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT cannot contain newline characters"
+	assert_not_exists "$invoked_log"
+}
+
+run_refuse_control_character_storage_test() {
+	local case_dir="$TMP_ROOT/refuse-control-character-storage"
+	local fake_nasd="$case_dir/nasd"
+	local invoked_log="$case_dir/nasd.log"
+	local storage_root
+	mkdir -p "$case_dir"
+	make_fake_nasd "$fake_nasd"
+
+	storage_root="/tmp/mnemonas-fault"$'\a'"escape"
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="$storage_root" \
+		NASD_BIN="$fake_nasd" \
+		NASD_INVOKED_LOG="$invoked_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT cannot contain control characters"
+	assert_not_exists "$invoked_log"
+	assert_not_exists "$storage_root"
+}
+
 run_refuse_relative_storage_test() {
 	local case_dir="$TMP_ROOT/refuse-relative-storage"
 	local fake_nasd="$case_dir/nasd"
@@ -222,6 +284,68 @@ run_refuse_symlink_storage_test() {
 
 	assert_file_contains "$case_dir/out.log" "STORAGE_ROOT must not contain symlink path components"
 	assert_not_exists "$invoked_log"
+}
+
+run_refuse_external_object_dir_test() {
+	local case_dir="$TMP_ROOT/refuse-external-object-dir"
+	local fake_bin="$case_dir/bin"
+	local fake_nasd="$case_dir/nasd"
+	local nasd_log="$case_dir/nasd.log"
+	local curl_log="$case_dir/curl.log"
+	mkdir -p "$case_dir/storage/.mnemonas" "$case_dir/external-objects"
+	make_fake_nasd "$fake_nasd"
+	make_fake_curl "$fake_bin" "$curl_log"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		RUN_CORRUPTION_TESTS=0 \
+		FAULT_UPLOAD_SIZE_MB=0 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="$case_dir/storage" \
+		OBJECTS_DIR="$case_dir/external-objects" \
+		INDEX_DB="$case_dir/storage/.mnemonas/index.db" \
+		NASD_BIN="$fake_nasd" \
+		NASD_PID=4194304 \
+		NASD_INVOKED_LOG="$nasd_log" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$curl_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "OBJECTS_DIR must be under STORAGE_ROOT"
+	assert_not_exists "$curl_log"
+	assert_not_exists "$nasd_log"
+}
+
+run_refuse_external_index_db_test() {
+	local case_dir="$TMP_ROOT/refuse-external-index-db"
+	local fake_bin="$case_dir/bin"
+	local fake_nasd="$case_dir/nasd"
+	local nasd_log="$case_dir/nasd.log"
+	local curl_log="$case_dir/curl.log"
+	mkdir -p "$case_dir/storage/.mnemonas/objects" "$case_dir/external-index"
+	make_fake_nasd "$fake_nasd"
+	make_fake_curl "$fake_bin" "$curl_log"
+
+	run_expect_failure "$case_dir/out.log" env \
+		MNEMONAS_LIVE_FAULTS=1 \
+		FAULT_INJECTION_ASSUME_YES=1 \
+		RUN_CORRUPTION_TESTS=0 \
+		FAULT_UPLOAD_SIZE_MB=0 \
+		BASE_URL="http://127.0.0.1:9" \
+		STORAGE_ROOT="$case_dir/storage" \
+		OBJECTS_DIR="$case_dir/storage/.mnemonas/objects" \
+		INDEX_DB="$case_dir/external-index/index.db" \
+		NASD_BIN="$fake_nasd" \
+		NASD_PID=4194304 \
+		NASD_INVOKED_LOG="$nasd_log" \
+		PATH="$fake_bin:$PATH" \
+		CURL_INVOKED_LOG="$curl_log" \
+		bash "$REPO_ROOT/scripts/fault-injection-test.sh"
+
+	assert_file_contains "$case_dir/out.log" "INDEX_DB must be under STORAGE_ROOT"
+	assert_not_exists "$curl_log"
+	assert_not_exists "$nasd_log"
 }
 
 run_refuse_default_personal_storage_test() {
@@ -290,9 +414,13 @@ run_refuse_unisolated_storage_test
 run_refuse_invalid_base_url_test
 run_refuse_invalid_nasd_pid_test
 run_refuse_traversal_storage_test
+run_refuse_newline_storage_test
+run_refuse_control_character_storage_test
 run_refuse_relative_storage_test
 run_refuse_protected_storage_with_override_test
 run_refuse_symlink_storage_test
+run_refuse_external_object_dir_test
+run_refuse_external_index_db_test
 run_refuse_default_personal_storage_test
 run_noninteractive_confirmation_test
 run_health_failure_does_not_restart_test

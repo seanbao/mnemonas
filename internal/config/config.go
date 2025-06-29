@@ -778,6 +778,7 @@ func Load(path string) (*Config, error) {
 	cfg.Storage.DirectoryQuotas = NormalizeDirectoryQuotas(cfg.Storage.DirectoryQuotas)
 	cfg.Storage.DirectoryAccessRules = NormalizeDirectoryAccessRules(cfg.Storage.DirectoryAccessRules)
 	cfg.WebDAV.Prefix = NormalizeWebDAVPrefix(cfg.WebDAV.Prefix)
+	cfg.WebDAV.AuthType = NormalizeWebDAVAuthType(cfg.WebDAV.AuthType)
 	cfg.Share.BaseURL = strings.TrimSpace(cfg.Share.BaseURL)
 	cfg.Share.PolicyRules = NormalizeSharePolicyRules(cfg.Share.PolicyRules)
 	cfg.Alerts.WebhookURL = strings.TrimSpace(cfg.Alerts.WebhookURL)
@@ -951,6 +952,11 @@ func normalizeDurationFieldValue(raw map[string]any, fieldPath []string) error {
 		return nil
 	}
 
+	if durationText == "" && durationFieldAllowsEmptyString(fieldPath) {
+		current[leafKey] = int64(0)
+		return nil
+	}
+
 	parsedDuration, err := time.ParseDuration(durationText)
 	if err != nil {
 		return fmt.Errorf("invalid %s duration %q: %w", strings.Join(fieldPath, "."), durationText, err)
@@ -958,6 +964,10 @@ func normalizeDurationFieldValue(raw map[string]any, fieldPath []string) error {
 
 	current[leafKey] = int64(parsedDuration)
 	return nil
+}
+
+func durationFieldAllowsEmptyString(fieldPath []string) bool {
+	return len(fieldPath) == 2 && fieldPath[0] == "share" && fieldPath[1] == "default_expires_in"
 }
 
 func normalizeBackupJobDurationFields(raw map[string]any) error {
@@ -1000,12 +1010,20 @@ func normalizeBackupJobDurationField(job map[string]any, index int, field string
 	if !ok {
 		return nil
 	}
+	if durationText == "" && backupJobDurationFieldAllowsEmptyString(field) {
+		job[field] = int64(0)
+		return nil
+	}
 	parsedDuration, err := time.ParseDuration(durationText)
 	if err != nil {
 		return fmt.Errorf("invalid backup.jobs[%d].%s duration %q: %w", index, field, durationText, err)
 	}
 	job[field] = int64(parsedDuration)
 	return nil
+}
+
+func backupJobDurationFieldAllowsEmptyString(field string) bool {
+	return field == "schedule_interval" || field == "restore_drill_stale_after"
 }
 
 func normalizeSharePolicyRuleDurationFields(raw map[string]any) error {
@@ -1552,7 +1570,7 @@ func (c *Config) Validate() error {
 	if err := validateDirectoryAccessRules(c.Storage.DirectoryAccessRules); err != nil {
 		errs = append(errs, err)
 	}
-	webdavAuthType := strings.ToLower(strings.TrimSpace(c.WebDAV.AuthType))
+	webdavAuthType := NormalizeWebDAVAuthType(c.WebDAV.AuthType)
 	if webdavAuthType != "" && webdavAuthType != "none" && webdavAuthType != "basic" && webdavAuthType != "users" {
 		errs = append(errs, fmt.Errorf("invalid webdav.auth_type: %q", c.WebDAV.AuthType))
 	}
@@ -1604,7 +1622,7 @@ func (c *Config) Validate() error {
 	if err := validateMaintenanceConfig(c.Maintenance); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateOptionalHTTPURL(c.Share.BaseURL, "share.base_url"); err != nil {
+	if err := validateShareBaseURL(c.Share.BaseURL); err != nil {
 		errs = append(errs, err)
 	}
 	if c.Share.DefaultExpiresIn < 0 {
@@ -2466,6 +2484,9 @@ func validateBackupCredentialFile(filePath string, field string, jobID string, s
 	if strings.Contains(filePath, "\x00") || hasControlChar(filePath) {
 		return fmt.Errorf("backup job %q %s contains invalid control characters", jobID, field)
 	}
+	if err := validateBackupCredentialPathNoSymlink(filePath, field, jobID); err != nil {
+		return err
+	}
 	if source != "" && filepath.IsAbs(source) && pathContainsOrEquals(source, filePath) {
 		return fmt.Errorf("backup job %q %s must not be inside backup source", jobID, field)
 	}
@@ -2484,6 +2505,16 @@ func validateBackupCredentialFile(filePath string, field string, jobID string, s
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("backup job %q %s must be a regular file", jobID, field)
+	}
+	return nil
+}
+
+func validateBackupCredentialPathNoSymlink(filePath string, field string, jobID string) error {
+	if err := validateManagedFilePath(filePath, errManagedDirectorySymlink, field); err != nil {
+		if errors.Is(err, errManagedDirectorySymlink) {
+			return fmt.Errorf("backup job %q %s path must not contain symlink", jobID, field)
+		}
+		return fmt.Errorf("backup job %q %s cannot be checked: %w", jobID, field, err)
 	}
 	return nil
 }
@@ -2601,6 +2632,33 @@ func validateOptionalHTTPURL(rawURL, field string) error {
 	default:
 		return fmt.Errorf("%s must use http or https", field)
 	}
+}
+
+func validateShareBaseURL(rawURL string) error {
+	const field = "share.base_url"
+
+	if err := validateOptionalHTTPURL(rawURL, field); err != nil {
+		return err
+	}
+
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil
+	}
+	parsed, err := neturl.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("%s must be an absolute http or https URL", field)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%s must not contain userinfo", field)
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(trimmed, "#") {
+		return fmt.Errorf("%s must not contain query or fragment", field)
+	}
+	if !isValidTCPHost(parsed.Hostname()) {
+		return fmt.Errorf("%s host is invalid", field)
+	}
+	return nil
 }
 
 func validateTCPAddress(address, field string) error {
@@ -2726,6 +2784,14 @@ func NormalizeWebDAVPrefix(prefix string) string {
 		}
 		cleaned = next
 	}
+}
+
+func NormalizeWebDAVAuthType(authType string) string {
+	normalized := strings.ToLower(strings.TrimSpace(authType))
+	if normalized == "" {
+		return "basic"
+	}
+	return normalized
 }
 
 func webDAVPrefixOverlapsReservedRoute(prefix string) bool {

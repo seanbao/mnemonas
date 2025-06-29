@@ -215,7 +215,7 @@ describe('FilesPage single delete modal', () => {
       expect(screen.getByText('确认删除')).toBeTruthy()
       expect(mockAddToast).toHaveBeenCalledWith({
         title: '删除失败',
-        description: 'delete failed',
+        description: '操作未完成，请稍后重试。',
         color: 'danger',
       })
     })

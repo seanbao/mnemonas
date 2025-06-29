@@ -151,6 +151,12 @@ export function getFilenameFromContentDisposition(contentDisposition: string | n
   return fallback
 }
 
+export function ensureZipExtension(filename: string): string {
+  const normalized = filename.trim().replace(/[.\s]+$/g, '')
+  const baseFilename = normalized || 'download'
+  return baseFilename.toLowerCase().endsWith('.zip') ? baseFilename : `${baseFilename}.zip`
+}
+
 /**
  * Validate and normalize a path for API requests.
  * Ensures the path starts with / and doesn't contain dangerous sequences.
@@ -160,7 +166,7 @@ export function normalizePath(path: string): string {
     throw new Error('非法路径')
   }
 
-  let normalized = path
+  let normalized = path.replace(/\\/g, '/')
   
   // Ensure path starts with /
   if (!normalized.startsWith('/')) {
@@ -424,6 +430,29 @@ export function formatDuration(ms: number): string {
   const hours = Math.floor(minutes / 60)
   const remainingMins = minutes % 60
   return remainingMins > 0 ? `${hours} 小时 ${remainingMins} 分钟` : `${hours} 小时`
+}
+
+export function formatUptimeSeconds(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) {
+    return '--'
+  }
+
+  const totalSeconds = Math.max(0, Math.floor(value))
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (days > 0) {
+    return hours > 0 ? `${days} 天 ${hours} 小时` : `${days} 天`
+  }
+  if (hours > 0) {
+    return minutes > 0 ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
+  }
+  if (minutes > 0) {
+    return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`
+  }
+  return `${seconds} 秒`
 }
 
 export function formatDate(dateStr: string): string {

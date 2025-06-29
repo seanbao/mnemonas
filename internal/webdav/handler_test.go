@@ -4,6 +4,7 @@ package webdav
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -141,6 +142,26 @@ func TestHandler_MKCOL(t *testing.T) {
 
 	if w.Code != http.StatusCreated {
 		t.Errorf("MKCOL status = %d, want %d", w.Code, http.StatusCreated)
+	}
+}
+
+func TestHandler_MKCOL_RejectsMissingParent(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	req := httptest.NewRequest("MKCOL", "/dav/missing/child", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MKCOL missing parent status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/missing"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected MKCOL to leave missing parent absent, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/missing/child"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected MKCOL to leave child absent, got %v", err)
 	}
 }
 
@@ -1861,6 +1882,61 @@ func TestHandler_COPY_DirectoryRequestRollsBackPartialTreeOnWriteFailure(t *test
 	}
 }
 
+func TestHandler_COPY_DirectoryRollbackWarningDoesNotMaskCopyFailure(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/srcdir"); err != nil {
+		t.Fatalf("Mkdir(srcdir) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/srcdir/nested"); err != nil {
+		t.Fatalf("Mkdir(nested) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/dst"); err != nil {
+		t.Fatalf("Mkdir(dst) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/root.txt", bytes.NewReader([]byte("root"))); err != nil {
+		t.Fatalf("WriteFile(root) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/srcdir/nested/child.txt", bytes.NewReader([]byte("child"))); err != nil {
+		t.Fatalf("WriteFile(child) error: %v", err)
+	}
+
+	originalUpdateFileIndex := getStorageHook[func(context.Context, string, int64, time.Time, string) error](t, fs, "updateFileIndex")
+	setStorageHook(t, fs, "updateFileIndex", func(ctx context.Context, name string, size int64, modTime time.Time, hash string) error {
+		if name == "/dst/copied-dir/nested/child.txt" {
+			return errors.New("index update failed")
+		}
+		return originalUpdateFileIndex(ctx, name, size, modTime, hash)
+	})
+	originalDeleteWorkspacePath := getStorageHook[func(context.Context, string) error](t, fs, "deleteWorkspacePath")
+	setStorageHook(t, fs, "deleteWorkspacePath", func(ctx context.Context, name string) error {
+		if err := originalDeleteWorkspacePath(ctx, name); err != nil {
+			return err
+		}
+		if name == "/dst/copied-dir/root.txt" {
+			return workspace.WrapVisibleMutationWarning(errors.New("sync dir failed"))
+		}
+		return nil
+	})
+
+	req := httptest.NewRequest("COPY", "/dav/srcdir", nil)
+	req.Header.Set("Destination", "http://example.com/dav/dst/copied-dir")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("COPY rollback warning status = %d, want %d; body=%s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/dst/copied-dir"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected failed COPY request to rollback destination tree despite warning, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/srcdir"); err != nil {
+		t.Fatalf("expected source directory preserved after failed COPY, got %v", err)
+	}
+}
+
 func TestHandler_COPY_DirectoryIntoDescendantRejected(t *testing.T) {
 	handler, fs, _ := setupTestHandler(t)
 	ctx := context.Background()
@@ -2348,6 +2424,106 @@ func TestHandler_MOVE_OverwriteTrueReturnsNoContent(t *testing.T) {
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("MOVE overwrite=true status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+func TestHandler_MOVE_DirectoryOverwriteDeletesExistingDestinationTree(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	for _, dir := range []string{"/movetest", "/movetest/src", "/movetest/src/nested", "/movetest/existing", "/movetest/existing/old"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/movetest/src/nested/new.txt", bytes.NewReader([]byte("new"))); err != nil {
+		t.Fatalf("WriteFile(new) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing/old/stale.txt", bytes.NewReader([]byte("old"))); err != nil {
+		t.Fatalf("WriteFile(stale) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/src", nil)
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("MOVE directory overwrite status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/movetest/src"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected source directory removed after MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/existing/nested/new.txt"); err != nil {
+		t.Fatalf("expected destination to contain moved source tree: %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/existing/old/stale.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected overwritten destination tree removed, got %v", err)
+	}
+	entries, err := fs.ReadDir(ctx, "/movetest")
+	if err != nil {
+		t.Fatalf("ReadDir(/movetest) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name, ".webdav-move-backup-") {
+			t.Fatalf("unexpected leftover MOVE backup path: %s", entry.Name)
+		}
+	}
+}
+
+func TestHandler_MOVE_DirectoryOverwriteCleanupWarningRemovesBackupTree(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	ctx := context.Background()
+
+	for _, dir := range []string{"/movetest", "/movetest/src", "/movetest/existing", "/movetest/existing/old"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/movetest/src/new.txt", bytes.NewReader([]byte("new"))); err != nil {
+		t.Fatalf("WriteFile(new) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing/old/stale.txt", bytes.NewReader([]byte("old-v1"))); err != nil {
+		t.Fatalf("WriteFile(stale v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/movetest/existing/old/stale.txt", bytes.NewReader([]byte("old-v2"))); err != nil {
+		t.Fatalf("WriteFile(stale v2) error: %v", err)
+	}
+
+	setDeleteVersionObjectHook(t, fs, func(_ context.Context, hash string) error {
+		return errors.New("delete version object failed")
+	})
+
+	req := httptest.NewRequest("MOVE", "/dav/movetest/src", nil)
+	req.Header.Set("Destination", "http://example.com/dav/movetest/existing")
+	req.Header.Set("Overwrite", "T")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("MOVE directory overwrite cleanup warning status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+	}
+	if got := w.Header().Get("Warning"); got != webdavDeleteCleanupWarningHeader {
+		t.Fatalf("warning header = %q, want %q", got, webdavDeleteCleanupWarningHeader)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/src"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected source directory removed after MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/existing/new.txt"); err != nil {
+		t.Fatalf("expected destination to contain moved source file: %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/movetest/existing/old/stale.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected overwritten destination file removed despite cleanup warning, got %v", err)
+	}
+	entries, err := fs.ReadDir(ctx, "/movetest")
+	if err != nil {
+		t.Fatalf("ReadDir(/movetest) error: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name, ".webdav-move-backup-") {
+			t.Fatalf("unexpected leftover MOVE backup path after cleanup warning: %s", entry.Name)
+		}
 	}
 }
 
@@ -3216,6 +3392,33 @@ func TestHandler_PROPPATCH_SetsXMLContentTypeAndEscapesHref(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, `<D:href>/dav/prop-patch/hash%20%23file%3F.txt</D:href>`) {
 		t.Fatalf("expected PROPPATCH href to be percent-encoded, got %q", body)
+	}
+}
+
+func TestHandler_WriteProppatchNoOpResponseEscapesXMLHref(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	w := httptest.NewRecorder()
+
+	handler.writeProppatchNoOpResponse(context.Background(), w, "/prop-patch/a&b.txt", false)
+
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMultiStatus)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, `<D:href>/dav/prop-patch/a&b.txt</D:href>`) {
+		t.Fatalf("expected PROPPATCH href to be XML-escaped, got %q", body)
+	}
+	if !strings.Contains(body, `<D:href>/dav/prop-patch/a&amp;b.txt</D:href>`) {
+		t.Fatalf("expected PROPPATCH href to contain escaped ampersand, got %q", body)
+	}
+	var parsed struct {
+		XMLName xml.Name
+	}
+	if err := xml.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("PROPPATCH no-op response XML is invalid: %v; body=%q", err, body)
+	}
+	if parsed.XMLName.Local != "multistatus" || parsed.XMLName.Space != "DAV:" {
+		t.Fatalf("PROPPATCH no-op root = {%s}%s, want {DAV:}multistatus", parsed.XMLName.Space, parsed.XMLName.Local)
 	}
 }
 
@@ -4425,6 +4628,7 @@ func TestHandler_ReadOnlyMode(t *testing.T) {
 		FileSystem: fs,
 		Prefix:     "/dav",
 		ReadOnly:   true,
+		AuthType:   "none",
 	})
 
 	tests := []struct {
@@ -4526,6 +4730,38 @@ func TestHandler_BasicAuth(t *testing.T) {
 	})
 }
 
+func TestHandler_BasicAuthRejectsEmptyConfiguredCredentials(t *testing.T) {
+	handler := NewHandler(Config{
+		Prefix:   "/dav",
+		AuthType: "basic",
+	})
+
+	req := httptest.NewRequest("OPTIONS", "/dav/", nil)
+	req.SetBasicAuth("", "")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandler_DefaultAuthTypeRequiresBasicCredentials(t *testing.T) {
+	handler := NewHandler(Config{
+		Prefix: "/dav",
+	})
+
+	req := httptest.NewRequest("OPTIONS", "/dav/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
 type webDAVTestCredential struct {
 	password string
 	identity UserIdentity
@@ -4561,6 +4797,9 @@ func TestHandler_UsersAuthScopesHomeDirAsWebDAVRoot(t *testing.T) {
 			},
 		},
 	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team", ReadUsers: []string{"alice"}},
+	}
 	ctx := context.Background()
 	if err := fs.Mkdir(ctx, "/users"); err != nil {
 		t.Fatalf("Mkdir(/users) error: %v", err)
@@ -4570,6 +4809,12 @@ func TestHandler_UsersAuthScopesHomeDirAsWebDAVRoot(t *testing.T) {
 	}
 	if err := fs.WriteFile(ctx, "/users/alice/own.txt", strings.NewReader("own")); err != nil {
 		t.Fatalf("WriteFile own error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/readme.txt", strings.NewReader("shared")); err != nil {
+		t.Fatalf("WriteFile shared error: %v", err)
 	}
 	if err := fs.Mkdir(ctx, "/other"); err != nil {
 		t.Fatalf("Mkdir(/other) error: %v", err)
@@ -4593,6 +4838,29 @@ func TestHandler_UsersAuthScopesHomeDirAsWebDAVRoot(t *testing.T) {
 	}
 	if strings.Contains(body, "secret.txt") || strings.Contains(body, "/users/alice") {
 		t.Fatalf("expected scoped listing to hide global paths, body=%s", body)
+	}
+
+	sharedReq := httptest.NewRequest("PROPFIND", "/dav/", nil)
+	sharedReq.Header.Set("Depth", "1")
+	setWebDAVTestBasicAuth(sharedReq, "alice")
+	sharedW := httptest.NewRecorder()
+	handler.ServeHTTP(sharedW, sharedReq)
+	if sharedW.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND users mode shared root status = %d, want %d; body=%s", sharedW.Code, http.StatusMultiStatus, sharedW.Body.String())
+	}
+	if !strings.Contains(sharedW.Body.String(), "/dav/team/") {
+		t.Fatalf("expected scoped root listing to include shared directory, body=%s", sharedW.Body.String())
+	}
+
+	sharedHTMLReq := httptest.NewRequest(http.MethodGet, "/dav/", nil)
+	setWebDAVTestBasicAuth(sharedHTMLReq, "alice")
+	sharedHTMLW := httptest.NewRecorder()
+	handler.ServeHTTP(sharedHTMLW, sharedHTMLReq)
+	if sharedHTMLW.Code != http.StatusOK {
+		t.Fatalf("GET users mode shared root status = %d, want %d; body=%s", sharedHTMLW.Code, http.StatusOK, sharedHTMLW.Body.String())
+	}
+	if !strings.Contains(sharedHTMLW.Body.String(), `/dav/team/`) {
+		t.Fatalf("expected scoped HTML root listing to include shared directory, body=%s", sharedHTMLW.Body.String())
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/dav/own.txt", nil)
@@ -4682,6 +4950,96 @@ func TestHandler_UsersAuthDirectoryAccessRulesGrantSharedPaths(t *testing.T) {
 	handler.ServeHTTP(deniedGetW, deniedGetReq)
 	if deniedGetW.Code != http.StatusForbidden {
 		t.Fatalf("specific denied GET status = %d, want %d", deniedGetW.Code, http.StatusForbidden)
+	}
+}
+
+func TestHandler_UsersAuthRootListsNestedSharedPathAncestors(t *testing.T) {
+	handler, fs := setupUsersModeHandler(t, map[string]webDAVTestCredential{
+		"alice": {
+			password: "password123",
+			identity: UserIdentity{
+				Role:    webDAVRoleUser,
+				HomeDir: "/users/alice",
+			},
+		},
+	})
+	handler.directoryAccess = []DirectoryAccessRule{
+		{Path: "/team/projects/reports", ReadUsers: []string{"alice"}},
+		{Path: "/team/private", ReadUsers: []string{"bob"}},
+	}
+	ctx := context.Background()
+	for _, dir := range []string{"/users", "/users/alice", "/team", "/team/projects", "/team/projects/reports", "/team/private"} {
+		if err := fs.Mkdir(ctx, dir); err != nil {
+			t.Fatalf("Mkdir(%s) error: %v", dir, err)
+		}
+	}
+	if err := fs.WriteFile(ctx, "/team/projects/reports/readme.txt", strings.NewReader("shared")); err != nil {
+		t.Fatalf("WriteFile shared error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/private/secret.txt", strings.NewReader("secret")); err != nil {
+		t.Fatalf("WriteFile private error: %v", err)
+	}
+
+	rootReq := httptest.NewRequest("PROPFIND", "/dav/", nil)
+	rootReq.Header.Set("Depth", "1")
+	setWebDAVTestBasicAuth(rootReq, "alice")
+	rootW := httptest.NewRecorder()
+	handler.ServeHTTP(rootW, rootReq)
+	if rootW.Code != http.StatusMultiStatus {
+		t.Fatalf("root PROPFIND status = %d, want %d; body=%s", rootW.Code, http.StatusMultiStatus, rootW.Body.String())
+	}
+	if !strings.Contains(rootW.Body.String(), "/dav/team/") {
+		t.Fatalf("expected root listing to include virtual shared ancestor, body=%s", rootW.Body.String())
+	}
+
+	teamReq := httptest.NewRequest("PROPFIND", "/dav/team", nil)
+	teamReq.Header.Set("Depth", "1")
+	setWebDAVTestBasicAuth(teamReq, "alice")
+	teamW := httptest.NewRecorder()
+	handler.ServeHTTP(teamW, teamReq)
+	if teamW.Code != http.StatusMultiStatus {
+		t.Fatalf("team PROPFIND status = %d, want %d; body=%s", teamW.Code, http.StatusMultiStatus, teamW.Body.String())
+	}
+	teamBody := teamW.Body.String()
+	if !strings.Contains(teamBody, "/dav/team/projects/") {
+		t.Fatalf("expected team listing to include granted nested shared directory, body=%s", teamBody)
+	}
+	if strings.Contains(teamBody, "private") || strings.Contains(teamBody, "secret.txt") {
+		t.Fatalf("expected team listing to hide denied sibling, body=%s", teamBody)
+	}
+
+	projectsReq := httptest.NewRequest("PROPFIND", "/dav/team/projects", nil)
+	projectsReq.Header.Set("Depth", "1")
+	setWebDAVTestBasicAuth(projectsReq, "alice")
+	projectsW := httptest.NewRecorder()
+	handler.ServeHTTP(projectsW, projectsReq)
+	if projectsW.Code != http.StatusMultiStatus {
+		t.Fatalf("projects PROPFIND status = %d, want %d; body=%s", projectsW.Code, http.StatusMultiStatus, projectsW.Body.String())
+	}
+	if !strings.Contains(projectsW.Body.String(), "/dav/team/projects/reports/") {
+		t.Fatalf("expected projects listing to include granted shared directory, body=%s", projectsW.Body.String())
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/dav/team", nil)
+	setWebDAVTestBasicAuth(htmlReq, "alice")
+	htmlW := httptest.NewRecorder()
+	handler.ServeHTTP(htmlW, htmlReq)
+	if htmlW.Code != http.StatusOK {
+		t.Fatalf("team HTML listing status = %d, want %d; body=%s", htmlW.Code, http.StatusOK, htmlW.Body.String())
+	}
+	if !strings.Contains(htmlW.Body.String(), "/dav/team/projects/") || strings.Contains(htmlW.Body.String(), "private") {
+		t.Fatalf("expected team HTML listing to expose only granted nested directory, body=%s", htmlW.Body.String())
+	}
+
+	mkcolReq := httptest.NewRequest("MKCOL", "/dav/team/new", nil)
+	setWebDAVTestBasicAuth(mkcolReq, "alice")
+	mkcolW := httptest.NewRecorder()
+	handler.ServeHTTP(mkcolW, mkcolReq)
+	if mkcolW.Code != http.StatusForbidden {
+		t.Fatalf("virtual ancestor MKCOL status = %d, want %d; body=%s", mkcolW.Code, http.StatusForbidden, mkcolW.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/new"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected denied virtual ancestor write to leave /team/new absent, got %v", err)
 	}
 }
 
@@ -4907,18 +5265,18 @@ func TestHandler_UsersAuthCopyDirectoryQuotaCountsReadableSourceOnly(t *testing.
 		},
 	})
 	handler.directoryAccess = []DirectoryAccessRule{
-		{Path: "/team", ReadGroups: []string{"family"}},
+		{Path: "/team/projects/reports", ReadGroups: []string{"family"}},
 		{Path: "/team/private", ReadUsers: []string{"bob"}},
 	}
 
 	ctx := context.Background()
-	for _, dir := range []string{"/users", "/users/alice", "/team", "/team/private"} {
+	for _, dir := range []string{"/users", "/users/alice", "/team", "/team/projects", "/team/projects/reports", "/team/private"} {
 		if err := fs.Mkdir(ctx, dir); err != nil {
 			t.Fatalf("Mkdir(%s) error: %v", dir, err)
 		}
 	}
-	if err := fs.WriteFile(ctx, "/team/readme.txt", strings.NewReader("1234")); err != nil {
-		t.Fatalf("WriteFile(/team/readme.txt) error: %v", err)
+	if err := fs.WriteFile(ctx, "/team/projects/reports/readme.txt", strings.NewReader("1234")); err != nil {
+		t.Fatalf("WriteFile(/team/projects/reports/readme.txt) error: %v", err)
 	}
 	if err := fs.WriteFile(ctx, "/team/private/secret.txt", strings.NewReader("1234567890")); err != nil {
 		t.Fatalf("WriteFile(/team/private/secret.txt) error: %v", err)
@@ -4933,7 +5291,7 @@ func TestHandler_UsersAuthCopyDirectoryQuotaCountsReadableSourceOnly(t *testing.
 	if w.Code != http.StatusCreated {
 		t.Fatalf("COPY readable subset quota status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
 	}
-	if _, err := fs.Stat(ctx, "/users/alice/team-copy/readme.txt"); err != nil {
+	if _, err := fs.Stat(ctx, "/users/alice/team-copy/projects/reports/readme.txt"); err != nil {
 		t.Fatalf("expected readable file to be copied: %v", err)
 	}
 	if _, err := fs.Stat(ctx, "/users/alice/team-copy/private"); !errors.Is(err, storage.ErrNotFound) {
@@ -5037,6 +5395,9 @@ func TestHandler_UsersAuthPutEnforcesQuota(t *testing.T) {
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("quota PUT status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), "user quota exceeded") {
+		t.Fatalf("expected user quota response body, got %s", w.Body.String())
+	}
 	if _, err := fs.Stat(ctx, "/users/alice/too-large.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected quota-rejected file to be absent, got %v", err)
 	}
@@ -5112,6 +5473,108 @@ func TestHandler_UsersAuthCopyEnforcesQuota(t *testing.T) {
 	}
 	if _, err := fs.Stat(ctx, "/users/alice/copy.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected quota-rejected copy to be absent, got %v", err)
+	}
+}
+
+func TestHandler_CopyEnforcesDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 10}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(/src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/used.txt", strings.NewReader("123456789")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/team/copied.txt")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("directory quota COPY status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "directory quota exceeded") {
+		t.Fatalf("expected directory quota response body, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/copied.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected quota-rejected copy to be absent, got %v", err)
+	}
+}
+
+func TestHandler_CopyEnforcesDescendantDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/archive/private", QuotaBytes: 4}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(/src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/src/private"); err != nil {
+		t.Fatalf("Mkdir(/src/private) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/private/big.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(src/private/big) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src", nil)
+	req.Header.Set("Destination", "http://example.com/dav/archive")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("descendant directory quota COPY status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "directory quota exceeded") {
+		t.Fatalf("expected directory quota response body, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/archive"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected quota-rejected copy to leave destination absent, got %v", err)
+	}
+}
+
+func TestHandler_COPY_RejectsDestinationParentFileBeforeDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 10}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/src"); err != nil {
+		t.Fatalf("Mkdir(/src) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/src/file.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/used.txt", strings.NewReader("123456789")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/parent", strings.NewReader("not a directory")); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/src/file.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/team/parent/copied.txt")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("COPY destination parent conflict status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "quota") {
+		t.Fatalf("expected destination parent conflict before quota response, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/team/parent/copied.txt"); !errors.Is(err, storage.ErrNotDir) {
+		t.Fatalf("expected rejected COPY to leave destination absent under parent file, got %v", err)
 	}
 }
 
@@ -5220,6 +5683,9 @@ func TestHandler_PutEnforcesDirectoryQuota(t *testing.T) {
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("directory quota PUT status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), "directory quota exceeded") {
+		t.Fatalf("expected directory quota response body, got %s", w.Body.String())
+	}
 	if _, err := fs.Stat(ctx, "/team/new.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected quota-rejected PUT to leave no file, got %v", err)
 	}
@@ -5251,11 +5717,134 @@ func TestHandler_MoveEnforcesDirectoryQuota(t *testing.T) {
 	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("directory quota MOVE status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), "directory quota exceeded") {
+		t.Fatalf("expected directory quota response body, got %s", w.Body.String())
+	}
 	if _, err := fs.Stat(ctx, "/incoming/src.txt"); err != nil {
 		t.Fatalf("expected quota-rejected MOVE to keep source, got %v", err)
 	}
 	if _, err := fs.Stat(ctx, "/team/src.txt"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected quota-rejected MOVE to leave destination absent, got %v", err)
+	}
+}
+
+func TestHandler_MoveEnforcesDescendantDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/archive/private", QuotaBytes: 4}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/incoming"); err != nil {
+		t.Fatalf("Mkdir(/incoming) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/incoming/private"); err != nil {
+		t.Fatalf("Mkdir(/incoming/private) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/incoming/private/big.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(incoming/private/big) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/incoming", nil)
+	req.Header.Set("Destination", "http://example.com/dav/archive")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("descendant directory quota MOVE status = %d, want %d; body=%s", w.Code, http.StatusInsufficientStorage, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "directory quota exceeded") {
+		t.Fatalf("expected directory quota response body, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/incoming/private/big.txt"); err != nil {
+		t.Fatalf("expected quota-rejected MOVE to keep source, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/archive"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected quota-rejected MOVE to leave destination absent, got %v", err)
+	}
+}
+
+func TestHandler_MOVE_RejectsDestinationParentFileBeforeDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 10}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/incoming"); err != nil {
+		t.Fatalf("Mkdir(/incoming) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/incoming/src.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/used.txt", strings.NewReader("123456789")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/parent", strings.NewReader("not a directory")); err != nil {
+		t.Fatalf("WriteFile(parent) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/incoming/src.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/team/parent/moved.txt")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE destination parent conflict status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "quota") {
+		t.Fatalf("expected destination parent conflict before quota response, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/incoming/src.txt"); err != nil {
+		t.Fatalf("expected source to remain after rejected MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/team/parent/moved.txt"); !errors.Is(err, storage.ErrNotDir) {
+		t.Fatalf("expected rejected MOVE to leave destination absent under parent file, got %v", err)
+	}
+}
+
+func TestHandler_MOVE_RejectsTargetVersionMetadataBeforeDirectoryQuota(t *testing.T) {
+	handler, fs, _ := setupTestHandler(t)
+	handler.directoryQuotas = []DirectoryQuota{{Path: "/team", QuotaBytes: 10}}
+	ctx := context.Background()
+
+	if err := fs.Mkdir(ctx, "/incoming"); err != nil {
+		t.Fatalf("Mkdir(/incoming) error: %v", err)
+	}
+	if err := fs.Mkdir(ctx, "/team"); err != nil {
+		t.Fatalf("Mkdir(/team) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/incoming/src.txt", strings.NewReader("12345")); err != nil {
+		t.Fatalf("WriteFile(src) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/used.txt", strings.NewReader("123456789")); err != nil {
+		t.Fatalf("WriteFile(used) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/raw-target.txt", strings.NewReader("v1")); err != nil {
+		t.Fatalf("WriteFile(raw target v1) error: %v", err)
+	}
+	if err := fs.WriteFile(ctx, "/team/raw-target.txt", strings.NewReader("v2")); err != nil {
+		t.Fatalf("WriteFile(raw target v2) error: %v", err)
+	}
+	if err := fs.Delete(ctx, "/team/raw-target.txt"); err != nil {
+		t.Fatalf("Delete(raw target) error: %v", err)
+	}
+
+	req := httptest.NewRequest("MOVE", "/dav/incoming/src.txt", nil)
+	req.Header.Set("Destination", "http://example.com/dav/team/raw-target.txt")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("MOVE target metadata conflict status = %d, want %d; body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "quota") {
+		t.Fatalf("expected target metadata conflict before quota response, got %s", w.Body.String())
+	}
+	if _, err := fs.Stat(ctx, "/incoming/src.txt"); err != nil {
+		t.Fatalf("expected source to remain after rejected MOVE, got %v", err)
+	}
+	if _, err := fs.Stat(ctx, "/team/raw-target.txt"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected rejected MOVE to leave target absent, got %v", err)
 	}
 }
 
@@ -5358,6 +5947,43 @@ func TestHandler_GetDestination_ExactPrefixMapsToRoot(t *testing.T) {
 	}
 }
 
+func TestHandler_GetDestination_AllowsDefaultHTTPSPortWhenRequestHostOmitsPort(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com"
+	req.Header.Set("Destination", "https://nas.example.com:443/dav/dst.txt")
+
+	dst := handler.getDestination(req)
+
+	if dst != "/dst.txt" {
+		t.Fatalf("getDestination() = %q, want %q", dst, "/dst.txt")
+	}
+}
+
+func TestHandler_GetDestination_AllowsOmittedDefaultHTTPSPortWhenRequestHostIncludesPort(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com:443"
+	req.Header.Set("Destination", "https://nas.example.com/dav/dst.txt")
+
+	dst := handler.getDestination(req)
+
+	if dst != "/dst.txt" {
+		t.Fatalf("getDestination() = %q, want %q", dst, "/dst.txt")
+	}
+}
+
+func TestHandler_GetDestination_RejectsNonDefaultPortWhenRequestHostOmitsPort(t *testing.T) {
+	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
+	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
+	req.Host = "nas.example.com"
+	req.Header.Set("Destination", "https://nas.example.com:8443/dav/dst.txt")
+
+	if dst := handler.getDestination(req); dst != "" {
+		t.Fatalf("getDestination() = %q, want empty string for mismatched port", dst)
+	}
+}
+
 func TestHandler_GetDestination_RejectsCrossHostDestination(t *testing.T) {
 	handler := NewHandler(Config{Prefix: "/dav", AuthType: "none"})
 	req := httptest.NewRequest("COPY", "/dav/src.txt", nil)
@@ -5380,6 +6006,126 @@ func TestHandler_GetDestination_RejectsPercentEncodedTraversal(t *testing.T) {
 	}
 }
 
+func TestMapWebDAVDescendantPathRejectsNonDescendants(t *testing.T) {
+	tests := []struct {
+		name            string
+		sourceRoot      string
+		destinationRoot string
+		currentPath     string
+		wantPath        string
+		wantOK          bool
+	}{
+		{
+			name:            "direct child",
+			sourceRoot:      "/docs",
+			destinationRoot: "/copy",
+			currentPath:     "/docs/report.txt",
+			wantPath:        "/copy/report.txt",
+			wantOK:          true,
+		},
+		{
+			name:            "root child",
+			sourceRoot:      "/",
+			destinationRoot: "/copy",
+			currentPath:     "/report.txt",
+			wantPath:        "/copy/report.txt",
+			wantOK:          true,
+		},
+		{
+			name:            "similar prefix sibling",
+			sourceRoot:      "/docs",
+			destinationRoot: "/copy",
+			currentPath:     "/docs-archive/secret.txt",
+			wantOK:          false,
+		},
+		{
+			name:            "parent path",
+			sourceRoot:      "/docs",
+			destinationRoot: "/copy",
+			currentPath:     "/",
+			wantOK:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotOK := mapWebDAVDescendantPath(tt.sourceRoot, tt.destinationRoot, tt.currentPath)
+			if gotOK != tt.wantOK || gotPath != tt.wantPath {
+				t.Fatalf("mapWebDAVDescendantPath() = (%q, %v), want (%q, %v)", gotPath, gotOK, tt.wantPath, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestWebDAVReadDirChildPathRejectsNonDirectChildren(t *testing.T) {
+	tests := []struct {
+		name      string
+		parent    string
+		child     *storage.FileInfo
+		wantPath  string
+		wantName  string
+		wantError bool
+	}{
+		{
+			name:     "direct child",
+			parent:   "/docs",
+			child:    &storage.FileInfo{Path: "/docs/report.txt", Name: "report.txt"},
+			wantPath: "/docs/report.txt",
+			wantName: "report.txt",
+		},
+		{
+			name:     "root direct child",
+			parent:   "/",
+			child:    &storage.FileInfo{Path: "/report.txt", Name: "report.txt"},
+			wantPath: "/report.txt",
+			wantName: "report.txt",
+		},
+		{
+			name:     "fallback from blank path",
+			parent:   "/docs",
+			child:    &storage.FileInfo{Name: "report.txt"},
+			wantPath: "/docs/report.txt",
+			wantName: "report.txt",
+		},
+		{
+			name:      "similar prefix sibling",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs-archive/secret.txt", Name: "secret.txt"},
+			wantError: true,
+		},
+		{
+			name:      "nested descendant",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs/nested/secret.txt", Name: "secret.txt"},
+			wantError: true,
+		},
+		{
+			name:      "same path",
+			parent:    "/docs",
+			child:     &storage.FileInfo{Path: "/docs", Name: "docs"},
+			wantError: true,
+		},
+		{
+			name:      "nil child",
+			parent:    "/docs",
+			child:     nil,
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotName, err := webDAVReadDirChildPath(tt.parent, tt.child)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("webDAVReadDirChildPath() error = %v, wantError %v", err, tt.wantError)
+			}
+			if gotPath != tt.wantPath || gotName != tt.wantName {
+				t.Fatalf("webDAVReadDirChildPath() = (%q, %q), want (%q, %q)", gotPath, gotName, tt.wantPath, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestResolveIfHeaderPath_ExactPrefixMapsToRoot(t *testing.T) {
 	resolved, ok := resolveIfHeaderPath("http://localhost/dav", "localhost", "/dav")
 	if !ok {
@@ -5387,6 +6133,16 @@ func TestResolveIfHeaderPath_ExactPrefixMapsToRoot(t *testing.T) {
 	}
 	if resolved != "/" {
 		t.Fatalf("resolveIfHeaderPath() = %q, want root path", resolved)
+	}
+}
+
+func TestResolveIfHeaderPath_AllowsDefaultHTTPSPortWhenRequestHostOmitsPort(t *testing.T) {
+	resolved, ok := resolveIfHeaderPath("https://nas.example.com:443/dav/locked.txt", "nas.example.com", "/dav")
+	if !ok {
+		t.Fatal("expected default HTTPS port If URI to resolve")
+	}
+	if resolved != "/locked.txt" {
+		t.Fatalf("resolveIfHeaderPath() = %q, want %q", resolved, "/locked.txt")
 	}
 }
 

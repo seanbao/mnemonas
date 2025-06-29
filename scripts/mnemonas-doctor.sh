@@ -75,6 +75,51 @@ toml_value() {
   local section="$1"
   local key="$2"
   local file="$3"
+
+  [[ -f "$file" ]] || return 0
+
+  if command -v python3 >/dev/null 2>&1; then
+    local value
+    if value=$(python3 - "$file" "$section" "$key" <<'PY'
+import sys
+
+try:
+    import tomllib
+except Exception:
+    sys.exit(2)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    sys.exit(2)
+
+current = data
+for part in section.split("."):
+    if not isinstance(current, dict):
+        sys.exit(0)
+    current = current.get(part)
+    if current is None:
+        sys.exit(0)
+
+if not isinstance(current, dict) or key not in current:
+    sys.exit(0)
+
+value = current[key]
+if isinstance(value, bool):
+    sys.stdout.write("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    sys.stdout.write(str(value))
+elif hasattr(value, "isoformat"):
+    sys.stdout.write(value.isoformat())
+PY
+    ); then
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+
   awk -v section="[$section]" -v key="$key" '
     function strip_comment(text,    i, c, quote, escaped, out) {
       quote = ""
@@ -190,16 +235,29 @@ host_from_ss_local_address() {
   printf '%s\n' "$host"
 }
 
+is_ipv4_loopback_host() {
+  local host="$1"
+  local octet
+  local -a octets
+
+  [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<< "$host"
+  for octet in "${octets[@]}"; do
+    [[ ${#octet} -le 3 ]] || return 1
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+  return 0
+}
+
 is_loopback_host() {
   local host="$1"
+
   case "$host" in
-    localhost|ip6-localhost|127.*|::1)
+    localhost|ip6-localhost|::1)
       return 0
       ;;
-    *)
-      return 1
-      ;;
   esac
+  is_ipv4_loopback_host "$host"
 }
 
 check_loopback_only_port() {
@@ -274,6 +332,7 @@ require_safe_tcp_port() {
 
   [[ -n "$value" ]] || die "$label cannot be empty"
   [[ "$value" != *[[:space:]]* ]] || die "$label cannot contain whitespace: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || die "$label cannot contain control characters: $value"
   [[ "$value" =~ ^[0-9]+$ ]] || die "$label must be numeric: $value"
   (( 10#$value >= 1 && 10#$value <= 65535 )) || die "$label must be between 1 and 65535: $value"
 }
@@ -306,6 +365,7 @@ require_safe_tcp_addr() {
 
   [[ -n "$value" ]] || die "$label cannot be empty"
   [[ "$value" != *[[:space:]]* ]] || die "$label cannot contain whitespace: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || die "$label cannot contain control characters: $value"
 
   if [[ "$value" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
     host="${BASH_REMATCH[1]}"
@@ -327,6 +387,7 @@ require_safe_http_url() {
 
   [[ -n "$value" ]] || die "$label cannot be empty"
   [[ "$value" != *[[:space:]]* ]] || die "$label cannot contain whitespace: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || die "$label cannot contain control characters: $value"
   [[ "$value" =~ ^https?://[^[:space:]]+$ ]] || die "$label must be an http(s) URL: $value"
 }
 
@@ -335,12 +396,37 @@ require_safe_public_domain() {
 
   [[ -z "$value" ]] && return 0
   [[ "$value" != *[[:space:]]* ]] || die "PUBLIC_DOMAIN cannot contain whitespace: $value"
+  [[ "$value" != *[[:cntrl:]]* ]] || die "PUBLIC_DOMAIN cannot contain control characters: $value"
   [[ "$value" != *"/"* && "$value" != *":"* ]] || die "PUBLIC_DOMAIN must be a hostname without scheme or port: $value"
   is_valid_tcp_host "$value" || die "PUBLIC_DOMAIN is invalid: $value"
 }
 
+normalize_public_domain() {
+  local value="${1,,}"
+
+  [[ -z "$value" ]] && return 0
+  if [[ "$value" == *. ]]; then
+    value="${value%.}"
+    [[ "$value" != *. ]] || die "PUBLIC_DOMAIN is invalid: $1"
+  fi
+  printf '%s\n' "$value"
+}
+
+is_true_value() {
+  local value="${1,,}"
+
+  [[ "$value" == "true" || "$value" == "1" || "$value" == "yes" || "$value" == "on" ]]
+}
+
+is_false_value() {
+  local value="${1,,}"
+
+  [[ "$value" == "false" || "$value" == "0" || "$value" == "no" || "$value" == "off" ]]
+}
+
 parse_args "$@"
 require_safe_public_domain "$PUBLIC_DOMAIN"
+PUBLIC_DOMAIN="$(normalize_public_domain "$PUBLIC_DOMAIN")"
 
 configured_storage_root=""
 configured_server_port=""
@@ -348,12 +434,26 @@ configured_grpc_address=""
 configured_http_address=""
 configured_server_host=""
 configured_trusted_proxy_hops=""
+configured_auth_enabled=""
+configured_auth_users_file=""
+configured_webdav_enabled=""
+configured_webdav_auth_type=""
+configured_allow_unsafe_no_auth=""
+configured_share_enabled=""
+configured_share_base_url=""
 if [[ -f "$CONFIG_PATH" ]]; then
   configured_server_host="$(toml_value server host "$CONFIG_PATH")"
   configured_storage_root="$(toml_value storage root "$CONFIG_PATH")"
   configured_server_port="$(toml_value server port "$CONFIG_PATH")"
   configured_trusted_proxy_hops="$(toml_value server trusted_proxy_hops "$CONFIG_PATH")"
   configured_grpc_address="$(toml_value dataplane grpc_address "$CONFIG_PATH")"
+  configured_auth_enabled="$(toml_value auth enabled "$CONFIG_PATH")"
+  configured_auth_users_file="$(toml_value auth users_file "$CONFIG_PATH")"
+  configured_webdav_enabled="$(toml_value webdav enabled "$CONFIG_PATH")"
+  configured_webdav_auth_type="$(toml_value webdav auth_type "$CONFIG_PATH")"
+  configured_allow_unsafe_no_auth="$(toml_value security allow_unsafe_no_auth "$CONFIG_PATH")"
+  configured_share_enabled="$(toml_value share enabled "$CONFIG_PATH")"
+  configured_share_base_url="$(toml_value share base_url "$CONFIG_PATH")"
 fi
 configured_http_address="$(systemd_env_value DATAPLANE_HTTP_ADDR "$SYSTEMD_DIR/mnemonas-dataplane.service")"
 
@@ -477,16 +577,37 @@ check_http() {
 check_http_unreachable() {
   local url="$1"
   local label="$2"
+  local curl_result status http_code
   if ! have curl; then
     warn "curl not available; skipping $label exposure check"
     return
   fi
 
-  if curl -fsS --connect-timeout 3 --max-time 5 "$url" >/dev/null 2>&1; then
-    fail "$label is publicly reachable: $url"
+  curl_result="$(curl -sS --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)"
+  status=$?
+  http_code="${curl_result//$'\n'/}"
+  if [[ "$status" -eq 0 && "$http_code" =~ ^[0-9][0-9][0-9]$ && "$http_code" != "000" ]]; then
+    fail "$label is publicly reachable: $url (HTTP $http_code)"
   else
     ok "$label is not publicly reachable: $url"
   fi
+}
+
+https_redirect_targets_domain() {
+  local domain="$1"
+  local redirect_url="$2"
+
+  case "$redirect_url" in
+    "https://$domain"|"https://$domain/"*|"https://$domain?"*|"https://$domain#"*)
+      return 0
+      ;;
+    "https://$domain:443"|"https://$domain:443/"*|"https://$domain:443?"*|"https://$domain:443#"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 check_http_redirects_to_https() {
@@ -508,7 +629,7 @@ check_http_redirects_to_https() {
 
   http_code="${curl_result%% *}"
   redirect_url="${curl_result#* }"
-  if [[ "$http_code" =~ ^30(1|2|3|7|8)$ && "$redirect_url" == https://"$domain"* ]]; then
+  if [[ "$http_code" =~ ^30(1|2|3|7|8)$ ]] && https_redirect_targets_domain "$domain" "$redirect_url"; then
     ok "public HTTP redirects to HTTPS: $url -> $redirect_url"
   else
     warn "public HTTP does not clearly redirect to HTTPS: $url returned ${http_code:-unknown}"
@@ -639,6 +760,149 @@ check_tcp_unreachable() {
   fi
 }
 
+http_url_authority() {
+  local value="$1"
+  local without_scheme authority
+
+  without_scheme="${value#*://}"
+  authority="${without_scheme%%/*}"
+  authority="${authority%%\?*}"
+  authority="${authority%%#*}"
+  printf '%s\n' "$authority"
+}
+
+http_url_has_userinfo() {
+  local authority
+
+  authority="$(http_url_authority "$1")"
+  [[ "$authority" == *@* ]]
+}
+
+http_url_has_query_or_fragment() {
+  local without_scheme path_part
+
+  without_scheme="${1#*://}"
+  path_part="${without_scheme#*/}"
+  [[ "$without_scheme" == */* && ( "$path_part" == *\?* || "$path_part" == *#* ) ]] && return 0
+  [[ "$without_scheme" == *\?* || "$without_scheme" == *#* ]]
+}
+
+http_url_host() {
+  local authority host_port
+
+  authority="$(http_url_authority "$1")"
+  host_port="${authority##*@}"
+  if [[ "$host_port" =~ ^\[([^][]+)\](:[0-9]+)?$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [[ "$host_port" =~ ^([^:]+):[0-9]+$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+  printf '%s\n' "$host_port"
+}
+
+http_url_port() {
+  local authority host_port
+
+  authority="$(http_url_authority "$1")"
+  host_port="${authority##*@}"
+  if [[ "$host_port" =~ ^\[[^][]+\]:([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [[ "$host_port" =~ ^[^:]+:([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+http_url_host_is_valid() {
+  local host="$1"
+
+  [[ -n "$host" ]] || return 1
+  if [[ "$host" == *. ]]; then
+    host="${host%.}"
+    [[ "$host" != *. ]] || return 1
+  fi
+  is_valid_tcp_host "$host"
+}
+
+count_enabled_admins() {
+  local users_file="$1"
+
+  python3 - "$users_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        users = json.load(handle)
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(2)
+
+if not isinstance(users, list):
+    print("users file root is not a list", file=sys.stderr)
+    sys.exit(2)
+
+count = 0
+for user in users:
+    if not isinstance(user, dict):
+        continue
+    if user.get("role") == "admin" and not bool(user.get("disabled", False)):
+        count += 1
+print(count)
+PY
+}
+
+check_public_admin_redundancy() {
+  local users_file="${configured_auth_users_file:-$STORAGE_ROOT/.mnemonas/users.json}"
+  local active_admins
+  local parse_error
+
+  if is_false_value "${configured_auth_enabled:-true}"; then
+    warn "public administrator redundancy check skipped because auth.enabled=false"
+    return
+  fi
+  if [[ ! -f "$users_file" ]]; then
+    fail "public users file is missing; cannot verify administrator redundancy: $users_file"
+    return
+  fi
+  if ! have python3; then
+    warn "python3 not available; skipping public administrator redundancy check"
+    return
+  fi
+
+  parse_error="$(mktemp -t mnemonas-doctor-users.XXXXXX)"
+  if active_admins="$(count_enabled_admins "$users_file" 2>"$parse_error")"; then
+    rm -f -- "$parse_error"
+  else
+    fail "public users file could not be parsed; cannot verify administrator redundancy: $users_file"
+    if [[ -s "$parse_error" ]]; then
+      sed 's/^/[INFO] users.json parse error: /' "$parse_error"
+    fi
+    rm -f -- "$parse_error"
+    return
+  fi
+
+  case "$active_admins" in
+    ''|*[!0-9]*)
+      fail "public users file returned an invalid administrator count: ${active_admins:-<empty>}"
+      ;;
+    0)
+      fail "public users file has no enabled administrators"
+      ;;
+    1)
+      warn "public administrator redundancy is weak: only one enabled administrator"
+      ;;
+    *)
+      ok "public administrator redundancy verified: $active_admins enabled administrators"
+      ;;
+  esac
+}
+
 format_kib() {
   local value="$1"
   awk -v kib="$value" '
@@ -732,7 +996,14 @@ check_ufw() {
 
 check_public_domain() {
   local domain="$1"
+  local domain_lower="${domain,,}"
   local public_health_url="https://$domain/health"
+  local public_webdav_auth_type
+  local public_share_base_url
+  local public_share_base_url_lower
+  local public_share_host
+  local public_share_host_normalized
+  local public_share_port
 
   [[ -n "$domain" ]] || return
 
@@ -748,6 +1019,61 @@ check_public_domain() {
     ok "trusted proxy hops configured: $configured_trusted_proxy_hops"
   else
     fail "server.trusted_proxy_hops should be at least 1 behind a public reverse proxy, got: ${configured_trusted_proxy_hops:-<unset>}"
+  fi
+
+  if is_false_value "${configured_auth_enabled:-true}"; then
+    fail "public auth.enabled must remain true"
+  else
+    ok "public auth.enabled is enabled"
+  fi
+  check_public_admin_redundancy
+
+  if is_true_value "${configured_allow_unsafe_no_auth:-false}"; then
+    fail "security.allow_unsafe_no_auth must be false for public deployments"
+  else
+    ok "security.allow_unsafe_no_auth is not enabled"
+  fi
+
+  public_webdav_auth_type="${configured_webdav_auth_type:-basic}"
+  public_webdav_auth_type="${public_webdav_auth_type,,}"
+  if ! is_false_value "${configured_webdav_enabled:-true}" && [[ "$public_webdav_auth_type" == "none" ]]; then
+    fail "public WebDAV must not use auth_type=none"
+  else
+    ok "public WebDAV is disabled or authenticated"
+  fi
+
+  if is_true_value "${configured_share_enabled:-false}"; then
+    public_share_base_url="${configured_share_base_url:-}"
+    public_share_base_url_lower="${public_share_base_url,,}"
+    if [[ -z "$public_share_base_url" ]]; then
+      warn "public share.base_url is empty; generated share links may be relative instead of https://$domain"
+    elif [[ "$public_share_base_url_lower" != https://* ]]; then
+      fail "public share.base_url must use https: $public_share_base_url"
+    elif http_url_has_userinfo "$public_share_base_url"; then
+      fail "public share.base_url must not include userinfo: $public_share_base_url"
+    elif http_url_has_query_or_fragment "$public_share_base_url"; then
+      fail "public share.base_url must not include query or fragment: $public_share_base_url"
+    else
+      public_share_port="$(http_url_port "$public_share_base_url")"
+      if [[ -n "$public_share_port" && "$public_share_port" != "443" ]]; then
+        fail "public share.base_url must use the HTTPS default port 443: $public_share_base_url"
+      else
+        public_share_host="$(http_url_host "$public_share_base_url")"
+        if ! http_url_host_is_valid "$public_share_host"; then
+          fail "public share.base_url host is invalid: $public_share_base_url"
+        else
+          public_share_host_normalized="${public_share_host%.}"
+          public_share_host_normalized="${public_share_host_normalized,,}"
+          if [[ "$public_share_host_normalized" == "$domain_lower" ]]; then
+            ok "public share.base_url uses HTTPS on $domain"
+          else
+            warn "public share.base_url host does not match $domain: $public_share_base_url"
+          fi
+        fi
+      fi
+    fi
+  else
+    ok "public share links are disabled"
   fi
 
   if have curl && curl -fsS "$public_health_url" >/dev/null 2>&1; then

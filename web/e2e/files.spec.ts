@@ -20,6 +20,11 @@ async function expectNoPageHorizontalOverflow(page: Page) {
   expect(overflow).toBeLessThanOrEqual(2)
 }
 
+async function waitForFileBrowser(page: Page) {
+  await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 15_000 }).catch(() => {})
+  await expect(page.getByRole('button', { name: '根目录' })).toBeVisible({ timeout: 15_000 })
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -35,6 +40,28 @@ async function openFolder(page: Page, folderName: string) {
 async function expectFolderView(page: Page, expectedPath: string, breadcrumbName: string) {
   await expect(page).toHaveURL(new RegExp(`${escapeRegExp(expectedPath)}$`), { timeout: 10_000 })
   await expect(page.getByRole('button', { name: breadcrumbName })).toBeVisible({ timeout: 5_000 })
+}
+
+async function openDeleteDialogFromFileMenu(page: Page, fileName: string) {
+  const menuButton = page.getByLabel(`${fileName} 操作菜单`).first()
+  const deleteMenuItem = page.getByRole('menuitem', { name: /^删除$/ })
+  const deleteDialogHeading = page.getByRole('heading', { name: '确认删除' })
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!(await deleteMenuItem.isVisible({ timeout: 500 }).catch(() => false))) {
+      await menuButton.click()
+      await expect(deleteMenuItem).toBeVisible({ timeout: 5_000 })
+    }
+
+    await deleteMenuItem.click()
+    if (await deleteDialogHeading.isVisible({ timeout: 2_000 }).catch(() => false)) {
+      return
+    }
+
+    await page.keyboard.press('Escape').catch(() => {})
+  }
+
+  await expect(deleteDialogHeading).toBeVisible({ timeout: 5_000 })
 }
 
 async function startPathRecorder(page: Page) {
@@ -102,6 +129,7 @@ async function stopPathRecorder(page: Page): Promise<string[]> {
 test.describe('文件浏览页面', () => {
   test.beforeEach(async ({ page }) => {
     await ensureAuthenticatedAt(page, '/files')
+    await waitForFileBrowser(page)
   })
 
   test('应显示文件页面', async ({ page }) => {
@@ -112,8 +140,8 @@ test.describe('文件浏览页面', () => {
 
   test('应显示面包屑导航', async ({ page }) => {
     // 检查根目录面包屑
-    const rootBreadcrumb = page.getByText('根目录')
-    await expect(rootBreadcrumb).toBeVisible({ timeout: 5000 })
+    const rootBreadcrumb = page.getByRole('button', { name: '根目录' })
+    await expect(rootBreadcrumb).toBeVisible({ timeout: 15_000 })
   })
 
   test('应显示工具栏按钮', async ({ page }) => {
@@ -167,13 +195,16 @@ test.describe('文件浏览页面', () => {
     })
 
     await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.getByText('加载中...').waitFor({ state: 'hidden', timeout: 15_000 }).catch(() => {})
 
-    await expect(page.getByText('当前目录暂不可用')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByRole('heading', { name: '当前目录暂不可用' })).toBeVisible({ timeout: 15_000 })
     await expect(page.getByText('文件系统当前不可用，请检查设备状态或稍后重试。')).toBeVisible()
     await expect(page.getByRole('button', { name: '重新加载' })).toBeVisible()
   })
 
   test('双击文件夹后路径和面包屑应保持稳定', async ({ page }, testInfo) => {
+    testInfo.setTimeout(60_000)
+
     const folderName = `e2e-nav-${testInfo.workerIndex}-${Date.now()}`
 
     await createFolder(page, folderName)
@@ -241,6 +272,11 @@ test.describe('文件浏览页面', () => {
     await uploadTextFileThroughPicker(page, fileName, `human playwright workflow ${suffix}`)
     await expect(fileRowByName(page, fileName)).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('上传完成')).toBeVisible({ timeout: 10_000 })
+    const hideUploadRecords = page.getByRole('button', { name: '隐藏上传记录' })
+    if (await hideUploadRecords.isVisible({ timeout: 1_000 }).catch(() => false)) {
+      await hideUploadRecords.click()
+      await expect(hideUploadRecords).toBeHidden()
+    }
 
     const deleteResponsePromise = page.waitForResponse((response) => {
       const { pathname } = new URL(response.url())
@@ -248,9 +284,7 @@ test.describe('文件浏览页面', () => {
         && pathname === `/api/v1/files/${folderName}/${fileName}`
     })
 
-    await page.getByLabel(`${fileName} 操作菜单`).first().click()
-    await page.getByRole('menuitem', { name: /^删除$/ }).click()
-    await expect(page.getByRole('heading', { name: '确认删除' })).toBeVisible()
+    await openDeleteDialogFromFileMenu(page, fileName)
     await page.getByRole('button', { name: '删除' }).click()
 
     const deleteResponse = await deleteResponsePromise

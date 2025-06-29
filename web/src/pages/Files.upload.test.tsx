@@ -157,6 +157,19 @@ const mockUploadFile = vi.mocked(uploadFile)
 const mockCreateDirectory = vi.mocked(createDirectory)
 const successActionResult = { warning: false, message: undefined } as const
 
+function expectUploadFileCalledWithSignal(path: string, file: File) {
+  const call = mockUploadFile.mock.calls.find(([calledPath, calledFile]) => calledPath === path && calledFile === file)
+  expect(call).toBeTruthy()
+  expect(call?.[2]).toEqual(expect.any(Function))
+  expect((call?.[3] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
+function expectCreateDirectoryCalledWithSignal(path: string) {
+  const call = mockCreateDirectory.mock.calls.find(([calledPath]) => calledPath === path)
+  expect(call).toBeTruthy()
+  expect((call?.[1] as { signal?: AbortSignal } | undefined)?.signal).toBeInstanceOf(AbortSignal)
+}
+
 function warningActionResult(message: string) {
   return { warning: true, message } as const
 }
@@ -251,7 +264,7 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect((fileInput as HTMLInputElement).value).toBe('')
-    expect(mockUploadFile).toHaveBeenCalledWith('/', file, expect.any(Function))
+    expectUploadFileCalledWithSignal('/', file)
   })
 
   it('uploads dropped files after showing and clearing the drag overlay', async () => {
@@ -287,7 +300,7 @@ describe('FilesPage upload queue', () => {
 
     await flushUi()
 
-    expect(mockUploadFile).toHaveBeenCalledWith('/', file, expect.any(Function))
+    expectUploadFileCalledWithSignal('/', file)
     expect(screen.queryByText('释放以上传')).toBeNull()
     expect(screen.getByText('上传完成')).toBeTruthy()
   })
@@ -440,6 +453,93 @@ describe('FilesPage upload queue', () => {
     expect(screen.getByText('second.txt')).toBeTruthy()
   })
 
+  it('aborts a pending upload when a new upload session starts', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    let firstSignal: AbortSignal | undefined
+    mockUploadFile
+      .mockImplementationOnce((_path, _file, _onProgress, options?: Parameters<typeof uploadFile>[3]) => {
+        firstSignal = options?.signal
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('upload aborted', 'AbortError'))
+          }, { once: true })
+        })
+      })
+      .mockResolvedValueOnce(successActionResult)
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const firstFile = new File(['data1'], 'first.txt', { type: 'text/plain' })
+    const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
+    await flushUi()
+
+    expect(firstSignal).toBeInstanceOf(AbortSignal)
+    expect(firstSignal?.aborted).toBe(false)
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
+    await flushUi()
+
+    expect(firstSignal?.aborted).toBe(true)
+    expect(mockUploadFile).toHaveBeenNthCalledWith(
+      2,
+      '/',
+      secondFile,
+      expect.any(Function),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(screen.getByText('second.txt')).toBeTruthy()
+  })
+
+  it('aborts pending folder directory creation when a new upload session starts', async () => {
+    render(<FilesPage />)
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync()
+    })
+
+    let directorySignal: AbortSignal | undefined
+    mockCreateDirectory
+      .mockImplementationOnce((_path, options?: Parameters<typeof createDirectory>[1]) => {
+        directorySignal = options?.signal
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('directory creation aborted', 'AbortError'))
+          }, { once: true })
+        })
+      })
+      .mockResolvedValueOnce(successActionResult)
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).toBeTruthy()
+
+    const firstFile = new File(['data1'], 'first.txt', { type: 'text/plain' })
+    Object.defineProperty(firstFile, 'webkitRelativePath', { configurable: true, value: 'folder/first.txt' })
+    const secondFile = new File(['data2'], 'second.txt', { type: 'text/plain' })
+    Object.defineProperty(secondFile, 'webkitRelativePath', { configurable: true, value: 'folder/second.txt' })
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [firstFile] } })
+    await flushUi()
+
+    expect(directorySignal).toBeInstanceOf(AbortSignal)
+    expect(directorySignal?.aborted).toBe(false)
+
+    fireEvent.change(fileInput as HTMLInputElement, { target: { files: [secondFile] } })
+    await flushUi()
+
+    expect(directorySignal?.aborted).toBe(true)
+    expect(mockUploadFile).toHaveBeenCalledTimes(1)
+    expectUploadFileCalledWithSignal('/folder', secondFile)
+    expect(screen.getByText('folder/second.txt')).toBeTruthy()
+  })
+
   it('stops folder upload when creating parent directory fails', async () => {
     render(<FilesPage />)
 
@@ -458,9 +558,9 @@ describe('FilesPage upload queue', () => {
 
     await flushUi()
 
-    expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
+    expectCreateDirectoryCalledWithSignal('/folder')
     expect(mockUploadFile).not.toHaveBeenCalled()
-    expect(screen.getByText('权限不足')).toBeTruthy()
+    expect(screen.getByText('操作未完成，请稍后重试。')).toBeTruthy()
   })
 
   it('keeps clean folder upload success feedback in the upload panel', async () => {
@@ -480,8 +580,8 @@ describe('FilesPage upload queue', () => {
 
     await flushUi()
 
-    expect(mockCreateDirectory).toHaveBeenCalledWith('/folder')
-    expect(mockUploadFile).toHaveBeenCalledWith('/folder', file, expect.any(Function))
+    expectCreateDirectoryCalledWithSignal('/folder')
+    expectUploadFileCalledWithSignal('/folder', file)
     expect(screen.getByText('上传完成')).toBeTruthy()
     expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain('成功 1 个')
     expect(mockAddToast).not.toHaveBeenCalled()
@@ -509,8 +609,8 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect(mockCreateDirectory).toHaveBeenCalledTimes(1)
-    expect(mockUploadFile).toHaveBeenCalledWith('/folder', firstFile, expect.any(Function))
-    expect(mockUploadFile).toHaveBeenCalledWith('/folder', secondFile, expect.any(Function))
+    expectUploadFileCalledWithSignal('/folder', firstFile)
+    expectUploadFileCalledWithSignal('/folder', secondFile)
     expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain('成功 2 个')
     expect(mockAddToast).not.toHaveBeenCalled()
   })
@@ -566,7 +666,7 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect(mockUploadFile).toHaveBeenCalledTimes(1)
-    expect(mockUploadFile).toHaveBeenCalledWith('/', smallFile, expect.any(Function))
+    expectUploadFileCalledWithSignal('/', smallFile)
     expect(screen.getByText('huge.bin 超过 10 GB 上传限制')).toBeTruthy()
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '部分文件未上传',
@@ -625,7 +725,7 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect(mockAddToast).toHaveBeenCalledWith({
-      title: 'directory created with persistence warning',
+      title: '文件夹上传完成，但存在警告',
       description: '成功上传 1 个文件',
       color: 'warning',
     })
@@ -676,7 +776,7 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect(mockAddToast).toHaveBeenCalledWith({
-      title: 'file uploaded with persistence warning',
+      title: '上传完成，但存在警告',
       description: '成功上传 1 个文件',
       color: 'warning',
     })
@@ -731,7 +831,7 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect(mockAddToast).toHaveBeenCalledWith({
-      title: 'file uploaded with persistence warning',
+      title: '文件夹上传部分完成',
       description: '成功上传 1 个文件，失败 1 个',
       color: 'warning',
     })
@@ -783,6 +883,6 @@ describe('FilesPage upload queue', () => {
     await flushUi()
 
     expect(screen.getByText('unknown.txt')).toBeTruthy()
-    expect(screen.getByText('上传失败')).toBeTruthy()
+    expect(screen.getByText('操作未完成，请稍后重试。')).toBeTruthy()
   })
 })

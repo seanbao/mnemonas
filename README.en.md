@@ -6,9 +6,9 @@ English | [简体中文](README.md)
 [![Go Report Card](https://goreportcard.com/badge/github.com/seanbao/mnemonas)](https://goreportcard.com/report/github.com/seanbao/mnemonas)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> Your files. Your control. A self-hosted private cloud storage system.
+> Private files. Local control. A self-hosted private cloud storage system.
 
-MnemoNAS is an open-source self-hosted NAS system with a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles for daily file management. Data stays in your own storage root, and moving that full root is enough to migrate the service.
+MnemoNAS is an open-source self-hosted NAS system with a Web UI, WebDAV access, file versions, trash, scrub, and diagnostic bundles for daily file management. Data stays in the configured storage root, and moving that full root is enough to migrate the service.
 
 The name comes from Mnemosyne, the Greek goddess of memory and mother of the nine Muses.
 
@@ -16,7 +16,7 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 
 ### Core Capabilities
 
-- **Data ownership**: your data stays on your own disks; moving the full storage root is enough to migrate the service.
+- **Data ownership**: data stays on the configured disks; moving the full storage root is enough to migrate the service.
 - **Usable Web UI**: desktop and mobile views are designed for clear daily use instead of dense admin-only panels.
 - **Fast deployment**: Docker Compose and Linux/systemd deployment paths are provided.
 - **Maintenance and diagnostics**: health checks, scrub, GC, and diagnostic bundles help discover and investigate data issues.
@@ -33,7 +33,7 @@ The name comes from Mnemosyne, the Greek goddess of memory and mother of the nin
 | Search | Filename search with quick navigation |
 | User management | Multiple users, roles, password policy, login history |
 | Share links | Public/private links, password protection, expiration, access statistics |
-| Activity log | Key operation history, filters, and home/small-team activity review |
+| Activity log | Key operation history, statistics overview, high-risk summary with concentrated-window review scoped to the high-risk group, time-range, path, review-group, type, and user filters, administrator-only clear action, and home/small-team activity review |
 | Settings | Server, storage, retention, and WebDAV configuration |
 | Maintenance | Scrub, GC, object browsing, diagnostic bundle, system metrics |
 | WebDAV | Core RFC 4918 read/write methods with Basic Auth and a maintained compatibility matrix |
@@ -140,8 +140,8 @@ MnemoNAS exposes WebDAV for common desktop, mobile, and CLI clients:
 | macOS | Finder | `http://localhost:8080/dav` |
 | Windows | File Explorer | `http://localhost:8080/dav` |
 | Linux | GNOME Files / davfs2 | `http://localhost:8080/dav` |
-| iOS | Files / Documents | `http://your-ip:8080/dav` |
-| Android | Solid Explorer | `http://your-ip:8080/dav` |
+| iOS | Files / Documents | `http://<server-ip>:8080/dav` |
+| Android | Solid Explorer | `http://<server-ip>:8080/dav` |
 | CLI | rclone | `webdav:` remote |
 
 WebDAV Basic Auth is enabled by default. Use the current WebDAV username and password from configuration or the admin settings API.
@@ -170,7 +170,7 @@ mnemonas/
 
 ### Requirements
 
-- Go 1.25.9+
+- Go 1.25.10+
 - Rust 1.92+
 - Node.js `^20.19.0` or `>=22.12.0` (Node 22 from `.nvmrc` is recommended)
 - Docker Engine + Compose v2
@@ -226,7 +226,7 @@ Use `SKIP_GOLANGCI_LINT=1` only for temporary local troubleshooting; do not skip
 | Rust data plane gRPC | 9090 | CAS storage service |
 | Frontend dev server | 5173 | Vite dev server |
 
-Docker and systemd deployments expose only `8080` by default. Data plane ports `9090/9091` are internal and should stay inside the container or on `127.0.0.1`. If you change the Web or dataplane ports, keep those custom backend ports private as well.
+Docker and systemd deployments expose only `8080` by default. Data plane ports `9090/9091` are internal and should stay inside the container or on `127.0.0.1`. Custom Web or dataplane backend ports should remain private as well.
 
 ## Documentation
 

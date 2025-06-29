@@ -45,6 +45,13 @@ describe('Share API', () => {
       expect(url).toBe('/api/v1/public/shares/abc123/download/folder/report%2520%25E4%25B8%2589.txt')
     })
 
+    it('adds archive parameters to public share download URLs', () => {
+      expect(getShareDownloadUrl('abc123', { archive: 'zip' }))
+        .toBe('/api/v1/public/shares/abc123/download?archive=zip')
+      expect(getShareFileDownloadUrl('abc123', '/folder', { archive: 'zip' }))
+        .toBe('/api/v1/public/shares/abc123/download/folder?archive=zip')
+    })
+
     it('keeps absolute http and https share URLs', () => {
       expect(formatShareUrl('https://nas.example.com/s/share-1', 'https://local.example'))
         .toBe('https://nas.example.com/s/share-1')
@@ -107,6 +114,84 @@ describe('Share API', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/folder/report.txt', { credentials: 'same-origin' })
       const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
       expect(clickedLink.download).toBe('report.txt')
+    })
+
+    it('downloads shared folders as zip archives and falls back to a zip filename', async () => {
+      const blob = new Blob(['zip-content'], { type: 'application/zip' })
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:folder-share')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1', { filePath: '/folder', archive: 'zip' })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/folder?archive=zip', { credentials: 'same-origin' })
+      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
+      expect(clickedLink.download).toBe('folder.zip')
+    })
+
+    it('does not duplicate the zip extension for zip-named shared folders', async () => {
+      const blob = new Blob(['zip-content'], { type: 'application/zip' })
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:folder-share')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1', { filePath: '/backups.zip', archive: 'zip' })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/backups.zip?archive=zip', { credentials: 'same-origin' })
+      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
+      expect(clickedLink.download).toBe('backups.zip')
+    })
+
+    it('adds a zip extension to custom shared archive filenames', async () => {
+      const blob = new Blob(['zip-content'], { type: 'application/zip' })
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:folder-share')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1', { filePath: '/folder', archive: 'zip', filename: 'team-docs' })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download/folder?archive=zip', { credentials: 'same-origin' })
+      const clickedLink = clickSpy.mock.contexts.at(-1) as HTMLAnchorElement
+      expect(clickedLink.download).toBe('team-docs.zip')
+    })
+
+    it('forwards abort signal when downloading public share content', async () => {
+      const controller = new AbortController()
+      const blob = new Blob(['share-content'], { type: 'text/plain' })
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share-signal')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1', { signal: controller.signal })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/download', {
+        credentials: 'same-origin',
+        signal: controller.signal,
+      })
     })
 
     it('uses decoded UTF-8 filenames from content disposition', async () => {
@@ -177,6 +262,32 @@ describe('Share API', () => {
       })
     })
 
+    it('surfaces problem-json details when public share downloads fail', async () => {
+      const json = vi.fn(() => Promise.resolve({
+        title: 'Service unavailable',
+        detail: 'share storage unavailable',
+        status: 503,
+      }))
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+        clone: () => ({ json }),
+        json: () => Promise.resolve({
+          title: 'Service unavailable',
+          detail: 'share storage unavailable',
+          status: 503,
+        }),
+      })
+
+      await expect(downloadShare('share-1')).rejects.toMatchObject({
+        message: 'share storage unavailable',
+        status: 503,
+      })
+      expect(json).toHaveBeenCalled()
+    })
+
     it.each([
       [410, '分享已过期、已禁用或访问次数已达上限'],
       [429, '尝试次数过多，请稍后再试'],
@@ -191,6 +302,62 @@ describe('Share API', () => {
         message,
         status,
       })
+    })
+
+    it('treats successful structured JSON without an attachment header as a download error', async () => {
+      const json = vi.fn(() => Promise.resolve({
+        success: false,
+        error: {
+          code: 'ARCHIVE_TOO_LARGE',
+          message: 'archive content is too large',
+        },
+      }))
+      const blob = vi.fn(() => Promise.resolve(new Blob(['{}'], { type: 'application/json' })))
+      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share-json-error')
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'application/json' }),
+        clone: () => ({ json }),
+        blob,
+      })
+
+      await expect(downloadShare('share-1', { archive: 'zip' })).rejects.toMatchObject({
+        message: 'archive content is too large',
+        status: 200,
+        code: 'ARCHIVE_TOO_LARGE',
+      })
+      expect(json).toHaveBeenCalled()
+      expect(blob).not.toHaveBeenCalled()
+      expect(createObjectURLSpy).not.toHaveBeenCalled()
+      expect(clickSpy).not.toHaveBeenCalled()
+    })
+
+    it('downloads shared JSON content when an attachment header is present', async () => {
+      const blob = new Blob(['{"message":"keep"}'], { type: 'application/json' })
+      const clone = vi.fn()
+      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:share-json')
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          'Content-Type': 'application/json',
+          'Content-Disposition': 'attachment; filename="share-data.json"',
+        }),
+        clone,
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadShare('share-1')
+
+      expect(clone).not.toHaveBeenCalled()
+      expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
+      expect(clickSpy).toHaveBeenCalled()
     })
   })
 
@@ -220,6 +387,21 @@ describe('Share API', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs', { credentials: 'same-origin' })
     })
 
+    it('forwards abort signal when requesting folder items', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ path: 'docs', items: [] }),
+      })
+
+      await getPublicShareItems('share-1', { path: 'docs', signal: controller.signal })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/items?path=docs', {
+        credentials: 'same-origin',
+        signal: controller.signal,
+      })
+    })
+
     it('throws ShareError on failure', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
@@ -246,6 +428,27 @@ describe('Share API', () => {
       })
     })
 
+    it('surfaces problem-json details when shared folder listing fails', async () => {
+      const body = {
+        title: 'Service unavailable',
+        detail: 'share folder storage unavailable',
+        status: 503,
+      }
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+        clone: () => ({ json: () => Promise.resolve(body) }),
+        json: () => Promise.resolve(body),
+      })
+
+      await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
+        message: 'share folder storage unavailable',
+        status: 503,
+      })
+    })
+
     it('surfaces rate limit errors for shared folder listing', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
@@ -254,7 +457,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
-        message: 'too many attempts, try later',
+        message: '尝试次数过多，请稍后再试',
         status: 429,
         code: 'SHARE_PASSWORD_RATE_LIMITED',
       })
@@ -284,7 +487,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
-        message: '分享文件夹响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -297,7 +500,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
-        message: '分享文件夹响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -315,7 +518,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShareItems('share-1')).rejects.toMatchObject({
-        message: '分享文件夹响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -332,6 +535,22 @@ describe('Share API', () => {
       await getPublicShare('share-1')
 
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1', { credentials: 'same-origin' })
+    })
+
+    it('forwards abort signal when requesting public share info', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ id: 'share-1', type: 'file', has_password: false, permission: 'read' }),
+      })
+
+      await getPublicShare('share-1', { signal: controller.signal })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1', {
+        credentials: 'same-origin',
+        signal: controller.signal,
+      })
     })
 
     it('reads wrapped public share errors', async () => {
@@ -355,10 +574,46 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShare('missing')).rejects.toMatchObject({
-        message: 'share feature disabled',
+        message: '分享功能已关闭',
         status: 503,
         code: 'SHARE_FEATURE_DISABLED',
         isFeatureDisabled: true,
+      })
+    })
+
+    it('localizes structured not-found public share errors', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ success: false, error: { code: 'SHARE_NOT_FOUND', message: 'share not found' } }),
+      })
+
+      await expect(getPublicShare('missing')).rejects.toMatchObject({
+        message: '分享不存在或已失效',
+        status: 404,
+        code: 'SHARE_NOT_FOUND',
+        isNotFound: true,
+      })
+    })
+
+    it('surfaces problem-json details when public share info fails', async () => {
+      const body = {
+        title: 'Service unavailable',
+        detail: 'share metadata storage unavailable',
+        status: 503,
+      }
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+        clone: () => ({ json: () => Promise.resolve(body) }),
+        json: () => Promise.resolve(body),
+      })
+
+      await expect(getPublicShare('share-1')).rejects.toMatchObject({
+        message: 'share metadata storage unavailable',
+        status: 503,
       })
     })
 
@@ -383,7 +638,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShare('share-1')).rejects.toMatchObject({
-        message: '分享信息无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -396,7 +651,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShare('share-1')).rejects.toMatchObject({
-        message: '分享信息无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -420,7 +675,7 @@ describe('Share API', () => {
       })
 
       await expect(getPublicShare('share-1')).rejects.toMatchObject({
-        message: '分享信息无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -439,6 +694,23 @@ describe('Share API', () => {
       await listShares(true)
 
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares?all=true', expect.anything())
+    })
+
+    it('forwards abort signal when listing shares', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: [],
+        }),
+      })
+
+      await listShares(false, { signal: controller.signal })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares', expect.objectContaining({
+        signal: controller.signal,
+      }))
     })
 
     it('unwraps share list responses', async () => {
@@ -499,7 +771,7 @@ describe('Share API', () => {
       })
 
       await expect(listShares()).rejects.toMatchObject({
-        message: '获取分享列表响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -524,6 +796,27 @@ describe('Share API', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/policy', expect.anything())
     })
 
+    it('forwards abort signal when loading share default policy', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            default_expires_in: '168h',
+            default_max_access: 25,
+          },
+        }),
+      })
+
+      await getSharePolicy({ signal: controller.signal })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/policy', expect.objectContaining({
+        signal: controller.signal,
+      }))
+    })
+
     it('unwraps share detail responses', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -539,6 +832,41 @@ describe('Share API', () => {
       })
     })
 
+    it('forwards abort signal when loading share details', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: createValidShare({ id: 'share-detail' }),
+        }),
+      })
+
+      await expect(getShare('share-detail', { signal: controller.signal })).resolves.toMatchObject({
+        id: 'share-detail',
+      })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/share-detail', expect.objectContaining({
+        signal: controller.signal,
+      }))
+    })
+
+    it('accepts nullable authenticated share timestamps', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: [createValidShare({ expires_at: null, last_access: null })],
+        }),
+      })
+
+      await expect(listShares()).resolves.toMatchObject([
+        { id: 'share-1', expires_at: null, last_access: null },
+      ])
+    })
+
     it('throws ShareError when loading share details fails', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
@@ -549,6 +877,27 @@ describe('Share API', () => {
       await expect(getShare('missing')).rejects.toMatchObject({
         message: 'share missing',
         status: 404,
+      })
+    })
+
+    it('surfaces problem-json details when authenticated share APIs fail', async () => {
+      const body = {
+        title: 'Service unavailable',
+        detail: 'share control plane unavailable',
+        status: 503,
+      }
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+        clone: () => ({ json: () => Promise.resolve(body) }),
+        json: () => Promise.resolve(body),
+      })
+
+      await expect(getShare('share-1')).rejects.toMatchObject({
+        message: 'share control plane unavailable',
+        status: 503,
       })
     })
 
@@ -569,6 +918,27 @@ describe('Share API', () => {
       expect(result.message).toBeUndefined()
     })
 
+    it('forwards abort signal when creating a share', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({
+          success: true,
+          data: { id: 'share-2', path: '/docs/b.txt', type: 'file', created_by: 'u1', created_at: '2026-03-13T00:00:00Z', has_password: false, permission: 'read', enabled: true, access_count: 0, url: '/s/share-2' },
+        }),
+      })
+
+      await expect(createShare({ path: '/docs/b.txt' }, { signal: controller.signal })).resolves.toMatchObject({
+        id: 'share-2',
+      })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares', expect.objectContaining({
+        signal: controller.signal,
+        method: 'POST',
+      }))
+    })
+
     it('updates shares with a JSON body', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -584,6 +954,28 @@ describe('Share API', () => {
       })
 
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/share-1', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ enabled: false }),
+      }))
+    })
+
+    it('forwards abort signal when updating a share', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: createValidShare({ enabled: false }),
+        }),
+      })
+
+      await expect(updateShare('share-1', { enabled: false }, { signal: controller.signal })).resolves.toMatchObject({
+        enabled: false,
+      })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/share-1', expect.objectContaining({
+        signal: controller.signal,
         method: 'PUT',
         body: JSON.stringify({ enabled: false }),
       }))
@@ -679,14 +1071,15 @@ describe('Share API', () => {
       })
 
       await expect(listShares()).rejects.toMatchObject({
-        message: '获取分享列表响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
 
     it.each([
       ['non-object share', null],
-      ['invalid expires_at', createValidShare({ expires_at: 123 as unknown as string })],
+      ['invalid expires_at', createValidShare({ expires_at: 123 as unknown as string | null })],
+      ['invalid last_access', createValidShare({ last_access: 123 as unknown as string | null })],
       ['invalid max_access', createValidShare({ max_access: '5' as unknown as number })],
       ['invalid description', createValidShare({ description: 42 as unknown as string })],
     ])('rejects share list responses with %s', async (_label, share) => {
@@ -697,7 +1090,7 @@ describe('Share API', () => {
       })
 
       await expect(listShares()).rejects.toMatchObject({
-        message: '获取分享列表响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -710,7 +1103,7 @@ describe('Share API', () => {
       })
 
       await expect(listShares()).rejects.toMatchObject({
-        message: '获取分享列表响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -723,7 +1116,7 @@ describe('Share API', () => {
       })
 
       await expect(getShare('share-1')).rejects.toMatchObject({
-        message: '获取分享详情响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -736,7 +1129,7 @@ describe('Share API', () => {
       })
 
       await expect(createShare({ path: '/docs/b.txt' })).rejects.toMatchObject({
-        message: '创建分享响应无效',
+        message: '服务器返回了无效的数据',
         status: 201,
       })
     })
@@ -749,7 +1142,7 @@ describe('Share API', () => {
       })
 
       await expect(listShares()).rejects.toMatchObject({
-        message: '获取分享列表响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -762,7 +1155,7 @@ describe('Share API', () => {
       })
 
       await expect(updateShare('share-1', { enabled: false })).rejects.toMatchObject({
-        message: '更新分享响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -788,7 +1181,7 @@ describe('Share API', () => {
       })
 
       await expect(createShare({ path: '/docs/b.txt' })).rejects.toMatchObject({
-        message: '创建分享响应无效',
+        message: '服务器返回了无效的数据',
         status: 201,
       })
     })
@@ -811,6 +1204,28 @@ describe('Share API', () => {
       })
     })
 
+    it('forwards abort signal when deleting a share', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          success: true,
+          data: null,
+        }),
+      })
+
+      await expect(deleteShare('share-1', { signal: controller.signal })).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/shares/share-1', expect.objectContaining({
+        signal: controller.signal,
+        method: 'DELETE',
+      }))
+    })
+
     it('rejects malformed successful delete share responses', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -819,7 +1234,7 @@ describe('Share API', () => {
       })
 
       await expect(deleteShare('share-1')).rejects.toMatchObject({
-        message: '删除分享响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -832,7 +1247,7 @@ describe('Share API', () => {
       })
 
       await expect(deleteShare('share-1')).rejects.toMatchObject({
-        message: '删除分享响应无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -891,6 +1306,20 @@ describe('Share API', () => {
       }))
     })
 
+    it('forwards abort signal when accessing a password-protected share', async () => {
+      const controller = new AbortController()
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ id: 'share-1', type: 'file', has_password: true, permission: 'read' }),
+      })
+
+      await accessShareWithPassword('share-1', 'secret', { signal: controller.signal })
+
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/public/shares/share-1/access', expect.objectContaining({
+        signal: controller.signal,
+      }))
+    })
+
     it('uses wrapped password error details', async () => {
       ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
@@ -912,9 +1341,44 @@ describe('Share API', () => {
       })
 
       await expect(accessShareWithPassword('share-1', 'bad')).rejects.toMatchObject({
-        message: 'too many attempts, try later',
+        message: '尝试次数过多，请稍后再试',
         status: 429,
         code: 'SHARE_PASSWORD_RATE_LIMITED',
+      })
+    })
+
+    it('localizes structured invalid password errors for the password form', async () => {
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ success: false, error: { code: 'INVALID_PASSWORD', message: 'invalid password' } }),
+      })
+
+      await expect(accessShareWithPassword('share-1', 'bad')).rejects.toMatchObject({
+        message: '密码错误',
+        status: 401,
+        code: 'INVALID_PASSWORD',
+      })
+    })
+
+    it('surfaces problem-json details when password share access fails', async () => {
+      const body = {
+        title: 'Service unavailable',
+        detail: 'share password service unavailable',
+        status: 503,
+      }
+
+      ;(global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+        clone: () => ({ json: () => Promise.resolve(body) }),
+        json: () => Promise.resolve(body),
+      })
+
+      await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({
+        message: 'share password service unavailable',
+        status: 503,
       })
     })
 
@@ -939,7 +1403,7 @@ describe('Share API', () => {
       })
 
       await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({
-        message: '分享信息无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })
@@ -952,7 +1416,7 @@ describe('Share API', () => {
       })
 
       await expect(accessShareWithPassword('share-1', 'secret')).rejects.toMatchObject({
-        message: '分享信息无效',
+        message: '服务器返回了无效的数据',
         status: 200,
       })
     })

@@ -26,6 +26,13 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    files: ['src/pages/Files.tsx'],
+    rules: {
+      // FilesPage uses TanStack Virtual and opts out of React Compiler memoization explicitly.
+      'react-hooks/incompatible-library': 'off',
+    },
+  },
   // Disable react-refresh rules for test files and mocks
   {
     files: ['**/*.test.{ts,tsx}', '**/test/**/*.{ts,tsx}', '**/__mocks__/**/*.{ts,tsx}'],

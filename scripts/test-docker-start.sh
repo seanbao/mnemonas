@@ -109,6 +109,40 @@ EOF
 	assert_mode "$configured_dir/.mnemonas/objects" "700"
 }
 
+run_toml_escaped_storage_root_test() {
+	local case_dir="$TMP_ROOT/toml-escaped-root"
+	local app_dir="$case_dir/app"
+	local data_dir="$case_dir/data"
+	local configured_dir="$data_dir/space value"
+	local capture_dir="$case_dir/capture"
+	mkdir -p "$data_dir" "$capture_dir"
+	make_fake_app "$app_dir"
+	cat > "$data_dir/config.toml" <<EOF
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[storage]
+root = "$data_dir/space\u0020value"
+
+[dataplane]
+grpc_address = "127.0.0.1:9090"
+EOF
+
+	CAPTURE_DIR="$capture_dir" \
+		APP_DIR="$app_dir" \
+		STORAGE_ROOT="$data_dir" \
+		CONFIG_PATH="$data_dir/config.toml" \
+		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/start.log" 2>&1
+
+	assert_file_contains "$case_dir/start.log" "[WARN] Configured [storage].root is $configured_dir, but Docker STORAGE_ROOT is $data_dir"
+	assert_file_contains "$capture_dir/dataplane.args" "--data-dir $configured_dir/.mnemonas/objects"
+	assert_mode "$configured_dir" "750"
+	assert_mode "$configured_dir/files" "750"
+	assert_mode "$configured_dir/.mnemonas" "700"
+	assert_mode "$configured_dir/.mnemonas/objects" "700"
+}
+
 run_missing_storage_root_test() {
 	local case_dir="$TMP_ROOT/missing-root"
 	local app_dir="$case_dir/app"
@@ -267,6 +301,31 @@ run_storage_root_newline_test() {
 	[[ ! -f "$data_dir/config.toml" ]] || fail "config file was written after rejecting newline storage root"
 }
 
+run_storage_root_control_character_test() {
+	local case_dir="$TMP_ROOT/storage-root-control"
+	local app_dir="$case_dir/app"
+	local data_dir="$case_dir/data"
+	local injected_root
+	local capture_dir="$case_dir/capture"
+	local status
+	mkdir -p "$data_dir" "$capture_dir"
+	make_fake_app "$app_dir"
+	injected_root="$data_dir"$'\a'"root"
+
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		APP_DIR="$app_dir" \
+		STORAGE_ROOT="$injected_root" \
+		CONFIG_PATH="$injected_root/config.toml" \
+		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/start.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker-start accepted storage.root with control character"
+	assert_file_contains "$case_dir/start.log" "Refusing to prepare storage.root with control characters"
+	[[ ! -f "$injected_root/config.toml" ]] || fail "config file was written after rejecting control-character storage root"
+}
+
 run_storage_root_symlink_test() {
 	local case_dir="$TMP_ROOT/storage-root-symlink"
 	local app_dir="$case_dir/app"
@@ -291,6 +350,59 @@ run_storage_root_symlink_test() {
 	assert_file_contains "$case_dir/start.log" "Refusing to prepare storage.root with symlink path component"
 	[[ ! -f "$target_dir/config.toml" ]] || fail "config file was written through a symlink storage root"
 	[[ ! -f "$capture_dir/dataplane.args" ]] || fail "dataplane started despite symlink storage root"
+}
+
+run_managed_subdir_symlink_test() {
+	local case_dir="$TMP_ROOT/managed-subdir-symlink"
+	local app_dir="$case_dir/app"
+	local data_dir="$case_dir/data"
+	local outside_internal="$case_dir/outside-internal"
+	local outside_files="$case_dir/outside-files"
+	local capture_dir="$case_dir/capture"
+	local status
+	mkdir -p "$data_dir" "$outside_internal" "$outside_files" "$capture_dir"
+	make_fake_app "$app_dir"
+	cat > "$data_dir/config.toml" <<EOF
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[storage]
+root = "$data_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:9090"
+EOF
+
+	ln -s "$outside_internal" "$data_dir/.mnemonas"
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		APP_DIR="$app_dir" \
+		STORAGE_ROOT="$data_dir" \
+		CONFIG_PATH="$data_dir/config.toml" \
+		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/internal.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker-start accepted a symlink internal metadata root"
+	assert_file_contains "$case_dir/internal.log" "Refusing to prepare DATAPLANE_DATA_DIR with symlink path component"
+	[[ ! -d "$outside_internal/objects" ]] || fail "objects directory was created through a symlink internal metadata root"
+	[[ ! -f "$capture_dir/dataplane.args" ]] || fail "dataplane started despite symlink internal metadata root"
+
+	rm -f "$data_dir/.mnemonas"
+	ln -s "$outside_files" "$data_dir/files"
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		APP_DIR="$app_dir" \
+		STORAGE_ROOT="$data_dir" \
+		CONFIG_PATH="$data_dir/config.toml" \
+		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/files.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker-start accepted a symlink files directory"
+	assert_file_contains "$case_dir/files.log" "Refusing to prepare storage files directory with symlink path component"
+	[[ ! -f "$capture_dir/dataplane.args" ]] || fail "dataplane started despite symlink files directory"
 }
 
 run_config_path_scope_test() {
@@ -447,6 +559,42 @@ EOF
 	[[ ! -f "$capture_dir/dataplane.args" ]] || fail "dataplane started despite invalid dataplane gRPC port"
 }
 
+run_dataplane_grpc_env_mismatch_test() {
+	local case_dir="$TMP_ROOT/dataplane-grpc-env-mismatch"
+	local app_dir="$case_dir/app"
+	local data_dir="$case_dir/data"
+	local capture_dir="$case_dir/capture"
+	local status
+	mkdir -p "$data_dir" "$capture_dir"
+	make_fake_app "$app_dir"
+	cat > "$data_dir/config.toml" <<EOF
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[storage]
+root = "$data_dir"
+
+[dataplane]
+grpc_address = "127.0.0.1:9090"
+EOF
+
+	set +e
+	CAPTURE_DIR="$capture_dir" \
+		APP_DIR="$app_dir" \
+		STORAGE_ROOT="$data_dir" \
+		CONFIG_PATH="$data_dir/config.toml" \
+		DATAPLANE_GRPC_ADDR="127.0.0.1:19090" \
+		bash "$REPO_ROOT/scripts/docker-start.sh" > "$case_dir/start.log" 2>&1
+	status=$?
+	set -e
+
+	[[ "$status" -ne 0 ]] || fail "docker-start accepted divergent DATAPLANE_GRPC_ADDR"
+	assert_file_contains "$case_dir/start.log" "DATAPLANE_GRPC_ADDR does not match [dataplane].grpc_address"
+	[[ ! -f "$capture_dir/dataplane.args" ]] || fail "dataplane started despite divergent DATAPLANE_GRPC_ADDR"
+	[[ ! -f "$capture_dir/nasd.args" ]] || fail "nasd started despite divergent DATAPLANE_GRPC_ADDR"
+}
+
 run_dataplane_exposure_warning_test() {
 	local case_dir="$TMP_ROOT/dataplane-exposure"
 	local app_dir="$case_dir/app"
@@ -526,17 +674,21 @@ EOF
 
 run_default_config_test
 run_mismatched_storage_root_warning_test
+run_toml_escaped_storage_root_test
 run_missing_storage_root_test
 run_protected_storage_root_test
 run_normalized_protected_storage_root_test
 run_storage_root_traversal_test
 run_storage_root_newline_test
+run_storage_root_control_character_test
 run_storage_root_symlink_test
+run_managed_subdir_symlink_test
 run_config_path_scope_test
 run_config_path_directory_test
 run_tilde_paths_are_expanded_test
 run_dataplane_data_dir_traversal_test
 run_dataplane_addr_validation_test
+run_dataplane_grpc_env_mismatch_test
 run_invalid_cdc_range_test
 run_dataplane_exposure_warning_test
 

@@ -144,6 +144,7 @@ function expectFetchCall(
     method?: string
     body?: string
     headers?: Record<string, string>
+    signal?: AbortSignal
   } = {}
 ) {
   const call = mockFetch.mock.calls[index - 1]
@@ -170,6 +171,10 @@ function expectFetchCall(
       .sort(([a], [b]) => a.localeCompare(b))
 
     expect(entries).toEqual(expectedEntries)
+  }
+
+  if (options.signal !== undefined) {
+    expect(requestInit.signal).toBe(options.signal)
   }
 }
 
@@ -384,6 +389,19 @@ describe('API: files', () => {
       expect(onProgress).toHaveBeenNthCalledWith(2, 100)
     })
 
+    it('rejects without starting XHR when the upload signal is already aborted', async () => {
+      const controller = new AbortController()
+      controller.abort()
+
+      await expect(
+        uploadFile('/docs', new File(['content'], 'report.txt'), undefined, { signal: controller.signal })
+      ).rejects.toMatchObject({
+        name: 'AbortError',
+      })
+
+      expect(MockXMLHttpRequest.instances).toHaveLength(0)
+    })
+
     it('rejects when the upload retry fails after a successful refresh', async () => {
       localStorage.setItem('mnemonas_token', 'access-1')
       localStorage.setItem('mnemonas_refresh_token', 'refresh-1')
@@ -484,8 +502,16 @@ describe('API: files', () => {
       const mockResponse = {
         success: true,
         data: {
+          capabilities: { read: true, concreteRead: false, write: false },
           files: [
-            { name: 'test.txt', path: '/test.txt', isDir: false, size: 100, modTime: '2024-01-01' },
+            {
+              name: 'test.txt',
+              path: '/test.txt',
+              isDir: false,
+              size: 100,
+              modTime: '2024-01-01',
+              capabilities: { read: true, concreteRead: true, write: false },
+            },
           ],
           path: '/',
         },
@@ -500,6 +526,8 @@ describe('API: files', () => {
       const result = await listFiles('/')
       expect(result.files).toHaveLength(1)
       expect(result.path).toBe('/')
+      expect(result.capabilities).toEqual({ read: true, concreteRead: false, write: false })
+      expect(result.files[0]?.capabilities).toEqual({ read: true, concreteRead: true, write: false })
       expectFetchCall(1, '/api/v1/files/', { headers: {} })
     })
 
@@ -517,6 +545,24 @@ describe('API: files', () => {
 
       await listFiles('documents')
       expectFetchCall(1, '/api/v1/files/documents', { headers: {} })
+    })
+
+    it('forwards abort signals to the authenticated fetch request', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { files: [], path: '/' },
+        }),
+      })
+
+      await listFiles('/', { signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/files/', {
+        headers: {},
+        signal: controller.signal,
+      })
     })
 
     it('throws ApiError on failure', async () => {
@@ -591,6 +637,29 @@ describe('API: files', () => {
       expect(result[0].hash).toBe('abc123')
     })
 
+    it('forwards abort signals when fetching versions for a file', async () => {
+      const controller = new AbortController()
+      const mockResponse = {
+        success: true,
+        data: {
+          path: '/test.txt',
+          versions: [],
+        },
+        timestamp: '2024-01-01',
+      }
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      })
+
+      await getVersions('/test.txt', { signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/versions/test.txt', {
+        signal: controller.signal,
+      })
+    })
+
     it('preserves service-unavailable version history error codes', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -660,6 +729,30 @@ describe('API: files', () => {
       await expect(deleteFile('/test.txt')).resolves.toEqual({
         warning: true,
         message: 'file deleted with persistence warning',
+      })
+    })
+
+    it('forwards abort signal when deleting a file', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(deleteFile('/test.txt', { signal: controller.signal })).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+      expectFetchCall(1, '/api/v1/files/test.txt', {
+        method: 'DELETE',
+        headers: {},
+        signal: controller.signal,
       })
     })
 
@@ -766,6 +859,23 @@ describe('API: files', () => {
       ])
     })
 
+    it('forwards abort signal when fetching storage statistics', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {},
+        }),
+      })
+
+      await getStorageStats({ signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/stats', {
+        signal: controller.signal,
+      })
+    })
+
     it('rejects invalid wrapped response for storage stats', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -869,6 +979,7 @@ describe('API: files', () => {
         status: 'healthy',
         timestamp: '2024-01-15T10:00:00Z',
         uptime: '1h30m',
+        uptime_secs: 5400,
         dataplane: {
           healthy: true,
           version: '0.3.0',
@@ -885,6 +996,24 @@ describe('API: files', () => {
       expect(result.status).toBe('healthy')
       expect(result.dataplane?.healthy).toBe(true)
       expect(result.timestamp).toBe('2024-01-15T10:00:00Z')
+      expect(result.uptimeSecs).toBe(5400)
+    })
+
+    it('forwards abort signal when fetching health status', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'healthy',
+          uptime: '1h30m',
+        }),
+      })
+
+      await getHealth({ signal: controller.signal })
+
+      expectFetchCall(1, '/health', {
+        signal: controller.signal,
+      })
     })
 
     it('keeps optional legacy fields when present', async () => {
@@ -930,6 +1059,28 @@ describe('API: files', () => {
       })
     })
 
+    it('surfaces problem-json health errors', async () => {
+      const body = {
+        title: 'Service unavailable',
+        detail: 'health dependencies unavailable',
+        status: 503,
+      }
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+        clone: () => ({ json: () => Promise.resolve(body) }),
+        json: () => Promise.resolve(body),
+      })
+
+      await expect(getHealth()).rejects.toMatchObject({
+        message: 'health dependencies unavailable',
+        status: 503,
+      })
+    })
+
     it('rejects unreadable health JSON', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -941,6 +1092,7 @@ describe('API: files', () => {
 
     it.each([
       ['invalid timestamp', { status: 'healthy', uptime: '1h30m', timestamp: 123 }],
+      ['invalid uptime seconds', { status: 'healthy', uptime: '1h30m', uptime_secs: '5400' }],
       ['invalid storage details', { status: 'healthy', uptime: '1h30m', storage: { dataDir: 42 } }],
       ['invalid dataplane details', { status: 'healthy', uptime: '1h30m', dataplane: { uptime: 'bad' } }],
     ])('rejects health responses with %s', async (_label, body) => {
@@ -972,6 +1124,27 @@ describe('API: files', () => {
       expect(result.version).toBe('0.1.0')
       expect(result.go).toBe('go1.24.0')
       expect(result.buildTime).toBe('2026-04-29T00:00:00Z')
+    })
+
+    it('forwards abort signal when fetching app version', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            name: 'MnemoNAS',
+            version: '0.1.0',
+            go: 'go1.24.0',
+          },
+        }),
+      })
+
+      await getAppVersion({ signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/version', {
+        signal: controller.signal,
+      })
     })
 
     it('rejects malformed successful version responses', async () => {
@@ -1006,6 +1179,30 @@ describe('API: files', () => {
       expectFetchCall(1, '/api/v1/directories/new-folder', {
         method: 'POST',
         headers: {},
+      })
+    })
+
+    it('forwards abort signal when creating a directory', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/new-folder',
+          },
+        }),
+      })
+
+      await expect(createDirectory('/new-folder', { signal: controller.signal })).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+
+      expectFetchCall(1, '/api/v1/directories/new-folder', {
+        method: 'POST',
+        headers: {},
+        signal: controller.signal,
       })
     })
 
@@ -1156,6 +1353,34 @@ describe('API: files', () => {
       })
     })
 
+    it('passes abort signals to move requests', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            from: '/old.txt',
+            to: '/new.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(moveFile('/old.txt', '/new.txt', { signal: controller.signal })).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+      expectFetchCall(1, '/api/v1/files-move', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from: '/old.txt', to: '/new.txt' }),
+        signal: controller.signal,
+      })
+    })
+
     it('returns warning details for successful move responses with warnings', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1229,6 +1454,34 @@ describe('API: files', () => {
       })
     })
 
+    it('passes abort signals to copy requests', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            from: '/old.txt',
+            to: '/copy.txt',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(copyFile('/old.txt', '/copy.txt', { signal: controller.signal })).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+      expectFetchCall(1, '/api/v1/files-copy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from: '/old.txt', to: '/copy.txt' }),
+        signal: controller.signal,
+      })
+    })
+
     it('returns warning details for successful copy responses with warnings', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1295,6 +1548,31 @@ describe('API: files', () => {
       expectFetchCall(1, '/api/v1/versions/abc123/restore?path=%2Ftest.txt', {
         method: 'POST',
         headers: {},
+      })
+    })
+
+    it('passes abort signals to restore version requests', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            path: '/test.txt',
+            restored: 'abc123',
+          },
+          timestamp: '2024-01-01',
+        }),
+      })
+
+      await expect(restoreVersion('/test.txt', 'abc123', { signal: controller.signal })).resolves.toEqual({
+        warning: false,
+        message: undefined,
+      })
+      expectFetchCall(1, '/api/v1/versions/abc123/restore?path=%2Ftest.txt', {
+        method: 'POST',
+        headers: {},
+        signal: controller.signal,
       })
     })
 
@@ -1378,6 +1656,27 @@ describe('API: files', () => {
         expect(result.items).toHaveLength(1)
         expect(result.items[0].originalPath).toBe('/deleted.txt')
         expect(result.count).toBe(1)
+      })
+
+      it('forwards abort signal when listing trash items', async () => {
+        const controller = new AbortController()
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              items: [],
+              count: 0,
+              totalSize: 0,
+            },
+          }),
+        })
+
+        await listTrash({ signal: controller.signal })
+
+        expectFetchCall(1, '/api/v1/trash/', {
+          signal: controller.signal,
+        })
       })
 
       it('derives trash count and total size from returned items when summary fields are missing', async () => {
@@ -1550,6 +1849,52 @@ describe('API: files', () => {
           expect((error as ApiError).isUnavailable).toBe(true)
         }
       })
+
+      it('forwards abort signals for trash restore, permanent delete, and empty operations', async () => {
+        const signal = new AbortController().signal
+        mockFetch
+          .mockResolvedValueOnce({
+            ok: true,
+            json: () => Promise.resolve({
+              success: true,
+              data: { id: 'item1', restored: true },
+              timestamp: '2024-01-01',
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: () => Promise.resolve({
+              success: true,
+              data: { id: 'item1', deleted: true },
+              timestamp: '2024-01-01',
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: () => Promise.resolve({
+              success: true,
+              data: { deleted_count: 1, partial: false },
+              timestamp: '2024-01-01',
+            }),
+          })
+
+        await restoreFromTrash('item1', undefined, { signal })
+        await deleteFromTrash('item1', { signal })
+        await emptyTrash({ signal })
+
+        expectFetchCall(1, '/api/v1/trash/item1/restore', {
+          method: 'POST',
+          signal,
+        })
+        expectFetchCall(2, '/api/v1/trash/item1', {
+          method: 'DELETE',
+          signal,
+        })
+        expectFetchCall(3, '/api/v1/trash/', {
+          method: 'DELETE',
+          signal,
+        })
+      })
     })
 
     describe('deleteFromTrash', () => {
@@ -1712,6 +2057,11 @@ describe('API: files', () => {
         expect(buildDownloadUrl('/docs/file.pdf', { version: 'abc123', download: true }))
           .toBe('/api/v1/download/docs/file.pdf?version=abc123&download=true')
       })
+
+      it('adds optional archive parameter', () => {
+        expect(buildDownloadUrl('/docs', { download: true, archive: 'zip' }))
+          .toBe('/api/v1/download/docs?download=true&archive=zip')
+      })
     })
 
     describe('getDownloadUrl', () => {
@@ -1757,6 +2107,28 @@ describe('API: files', () => {
         expect(clickSpy).toHaveBeenCalled()
         expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
         expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:test')
+      })
+
+      it('forwards abort signal when downloading a file', async () => {
+        const controller = new AbortController()
+        const blob = new Blob(['file-content'], { type: 'text/plain' })
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs/report.txt', { signal: controller.signal })
+
+        expectFetchCall(1, '/api/v1/download/docs/report.txt?download=true', {
+          signal: controller.signal,
+        })
       })
 
       it('uses fallback filename when header is missing', async () => {
@@ -1847,6 +2219,126 @@ describe('API: files', () => {
         createElementSpy.mockRestore()
       })
 
+      it('passes archive parameter and defaults folder filename to zip', async () => {
+        const blob = new Blob(['zip-content'], { type: 'application/zip' })
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs', { archive: 'zip' })
+
+        expectFetchCall(1, '/api/v1/download/docs?download=true&archive=zip')
+        expect(createdLink?.download).toBe('docs.zip')
+        createElementSpy.mockRestore()
+      })
+
+      it('does not duplicate the zip extension when archiving a zip-named folder', async () => {
+        const blob = new Blob(['zip-content'], { type: 'application/zip' })
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/backups.zip', { archive: 'zip' })
+
+        expectFetchCall(1, '/api/v1/download/backups.zip?download=true&archive=zip')
+        expect(createdLink?.download).toBe('backups.zip')
+        createElementSpy.mockRestore()
+      })
+
+      it('adds a zip extension to custom archive filenames', async () => {
+        const blob = new Blob(['zip-content'], { type: 'application/zip' })
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs', { archive: 'zip', filename: 'family-photos' })
+
+        expectFetchCall(1, '/api/v1/download/docs?download=true&archive=zip')
+        expect(createdLink?.download).toBe('family-photos.zip')
+        createElementSpy.mockRestore()
+      })
+
+      it('uses the archive fallback when the custom archive filename is blank', async () => {
+        const blob = new Blob(['zip-content'], { type: 'application/zip' })
+        let createdLink: HTMLAnchorElement | undefined
+        const originalCreateElement = document.createElement.bind(document)
+        const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+          const element = originalCreateElement(tagName)
+          if (tagName === 'a') {
+            createdLink = element as HTMLAnchorElement
+          }
+          return element
+        }) as typeof document.createElement)
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs', { archive: 'zip', filename: '   ' })
+
+        expectFetchCall(1, '/api/v1/download/docs?download=true&archive=zip')
+        expect(createdLink?.download).toBe('download.zip')
+        createElementSpy.mockRestore()
+      })
+
       it('surfaces structured backend errors', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: false,
@@ -1856,6 +2348,88 @@ describe('API: files', () => {
         })
 
         await expect(downloadFile('/docs/report.txt')).rejects.toThrow('父路径不是目录')
+      })
+
+      it('surfaces problem-json details for failed downloads', async () => {
+        const json = vi.fn(() => Promise.resolve({
+          title: 'Service unavailable',
+          detail: 'download storage unavailable',
+          status: 503,
+        }))
+
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: new Headers({ 'Content-Type': 'application/problem+json' }),
+          clone: () => ({ json }),
+          json: () => Promise.resolve({
+            title: 'Service unavailable',
+            detail: 'download storage unavailable',
+            status: 503,
+          }),
+        })
+
+        await expect(downloadFile('/docs/report.txt')).rejects.toMatchObject({
+          message: 'download storage unavailable',
+          status: 503,
+        })
+        expect(json).toHaveBeenCalled()
+      })
+
+      it('treats successful structured JSON without an attachment header as a download error', async () => {
+        const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+        const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        const json = vi.fn(() => Promise.resolve({
+          code: 'PAYLOAD_TOO_LARGE',
+          message: 'archive content is too large',
+        }))
+        const blob = vi.fn(() => Promise.resolve(new Blob(['{}'], { type: 'application/json' })))
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'Content-Type': 'application/json' }),
+          clone: () => ({ json }),
+          blob,
+        })
+
+        await expect(downloadFile('/docs', { archive: 'zip' })).rejects.toMatchObject({
+          message: 'archive content is too large',
+          status: 200,
+          code: 'PAYLOAD_TOO_LARGE',
+        })
+        expect(json).toHaveBeenCalled()
+        expect(blob).not.toHaveBeenCalled()
+        expect(createObjectURLSpy).not.toHaveBeenCalled()
+        expect(clickSpy).not.toHaveBeenCalled()
+      })
+
+      it('downloads JSON content when an attachment header is present', async () => {
+        const blob = new Blob(['{"message":"keep"}'], { type: 'application/json' })
+        const clone = vi.fn()
+        const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+        const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({
+            'Content-Type': 'application/json',
+            'Content-Disposition': 'attachment; filename="data.json"',
+          }),
+          clone,
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadFile('/docs/data.json')
+
+        expect(clone).not.toHaveBeenCalled()
+        expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
+        expect(clickSpy).toHaveBeenCalled()
       })
     })
 
@@ -1889,6 +2463,28 @@ describe('API: files', () => {
         createElementSpy.mockRestore()
       })
 
+      it('forwards abort signal when downloading diagnostics export', async () => {
+        const controller = new AbortController()
+        const blob = new Blob(['{}'], { type: 'application/json' })
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:diagnostics')
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers(),
+          blob: () => Promise.resolve(blob),
+        })
+
+        await downloadDiagnosticsExport({ signal: controller.signal })
+
+        expectFetchCall(1, '/api/v1/diagnostics-export', {
+          signal: controller.signal,
+        })
+      })
+
       it('surfaces structured backend errors', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: false,
@@ -1898,6 +2494,35 @@ describe('API: files', () => {
         })
 
         await expect(downloadDiagnosticsExport()).rejects.toThrow('admin access required')
+      })
+
+      it('treats successful structured JSON without an attachment header as an export error', async () => {
+        const json = vi.fn(() => Promise.resolve({
+          code: 'INTERNAL_ERROR',
+          message: 'diagnostics export failed',
+        }))
+        const blob = vi.fn(() => Promise.resolve(new Blob(['{}'], { type: 'application/json' })))
+        const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:diagnostics-error')
+        const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({ 'Content-Type': 'application/json' }),
+          clone: () => ({ json }),
+          blob,
+        })
+
+        await expect(downloadDiagnosticsExport()).rejects.toMatchObject({
+          message: 'diagnostics export failed',
+          status: 200,
+          code: 'INTERNAL_ERROR',
+        })
+        expect(json).toHaveBeenCalled()
+        expect(blob).not.toHaveBeenCalled()
+        expect(createObjectURLSpy).not.toHaveBeenCalled()
+        expect(clickSpy).not.toHaveBeenCalled()
       })
     })
 
@@ -1975,6 +2600,29 @@ describe('API: files', () => {
       expect(result.devices[0].expectedSerial).toBe('SER123')
     })
 
+    it('forwards abort signal when fetching disk health report', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            enabled: false,
+            status: 'unknown',
+            checked_at: '2026-05-13T08:30:00Z',
+            devices: [],
+          },
+        }),
+      })
+
+      await getDiskHealth({ signal: controller.signal })
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/v1/maintenance/disk-health',
+        expect.objectContaining({ signal: controller.signal }),
+      )
+    })
+
     it('rejects malformed disk health data', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1994,6 +2642,27 @@ describe('API: files', () => {
   })
 
   describe('getDiagnostics', () => {
+    it('forwards abort signal when fetching diagnostics info', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: {
+            timestamp: '2024-01-15T10:00:00Z',
+            uptime: '1h30m',
+            version: { name: 'MnemoNAS', version: '0.1.0', go: 'go1.24.0' },
+          },
+        }),
+      })
+
+      await getDiagnostics({ signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/diagnostics', {
+        signal: controller.signal,
+      })
+    })
+
     it('fetches diagnostics info', async () => {
       const mockResponse = {
         success: true,
@@ -2301,6 +2970,23 @@ describe('API: files', () => {
       expect(result.has_result).toBe(true)
       expect(result.status).toBe('completed')
       expect(result.corrupted_objects).toBe(2)
+    })
+
+    it('forwards abort signal when fetching scrub result', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: { has_result: false },
+        }),
+      })
+
+      await getScrubResult({ signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/maintenance/scrub', {
+        signal: controller.signal,
+      })
     })
 
     it('accepts scrub results with detailed errors', async () => {
@@ -2706,6 +3392,173 @@ describe('API: files', () => {
       expectFetchCall(1, '/api/v1/maintenance/backups')
     })
 
+    it('forwards abort signal when listing backup jobs', async () => {
+      const controller = new AbortController()
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data: [backupJob],
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      await listBackupJobs({ signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/maintenance/backups', {
+        signal: controller.signal,
+      })
+    })
+
+    it('forwards abort signals for maintenance write requests', async () => {
+      const controller = new AbortController()
+      const items = [{ job_id: 'external-disk', target_path: '/restore/a', include_config: true }]
+      const scrubRun = {
+        total_objects: 1,
+        valid_objects: 1,
+        corrupted_objects: 0,
+        missing_objects: 0,
+        total_size: 128,
+        duration_ms: 10,
+        errors: [],
+      }
+      const previewResult = {
+        id: '20260509T035900.000000000Z',
+        job_id: 'external-disk',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:00Z',
+        finished_at: '2026-05-09T03:59:01Z',
+        duration_ms: 1000,
+        source: '/srv/mnemonas',
+        destination: '/mnt/backup-drive/mnemonas',
+        target_path: '/restore/a',
+        file_count: 12,
+        total_bytes: 4096,
+        config_available: true,
+        config_included: true,
+        warnings: [],
+      }
+      const batchPreview = {
+        id: '20260509T035901.000000000Z',
+        status: 'completed',
+        started_at: '2026-05-09T03:59:01Z',
+        finished_at: '2026-05-09T03:59:02Z',
+        duration_ms: 1000,
+        items: [{
+          index: 0,
+          job_id: 'external-disk',
+          target_path: '/restore/a',
+          include_config: true,
+          status: 'completed',
+          preview: previewResult,
+        }],
+        total_files: 12,
+        total_bytes: 4096,
+        warning: false,
+        warnings: [],
+      }
+      const batchRestore = {
+        id: '20260509T040001.000000000Z',
+        status: 'completed',
+        started_at: '2026-05-09T04:00:01Z',
+        finished_at: '2026-05-09T04:00:02Z',
+        duration_ms: 1000,
+        items: [{
+          index: 0,
+          job_id: 'external-disk',
+          target_path: '/restore/a',
+          include_config: true,
+          status: 'completed',
+          restore: backupJob.last_restore,
+          verify: backupJob.last_restore_verify,
+          warnings: [],
+        }],
+        total_files: 12,
+        verified_bytes: 4096,
+        warning: false,
+        warnings: [],
+      }
+      const response = (data: unknown) => ({
+        ok: true,
+        json: () => Promise.resolve({
+          success: true,
+          data,
+          timestamp: '2026-05-09',
+        }),
+      })
+
+      mockFetch.mockResolvedValueOnce(response(scrubRun))
+      await runScrub(undefined, { signal: controller.signal })
+      expectFetchCall(1, '/api/v1/maintenance/scrub', {
+        method: 'POST',
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(backupJob.last_run))
+      await runBackupJob('external-disk', { signal: controller.signal })
+      expectFetchCall(2, '/api/v1/maintenance/backups/external-disk/run', {
+        method: 'POST',
+        body: '{}',
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(backupJob.last_retention_check))
+      await checkBackupRetentionJob('external-disk', { signal: controller.signal })
+      expectFetchCall(3, '/api/v1/maintenance/backups/external-disk/retention-check', {
+        method: 'POST',
+        body: '{}',
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(backupJob.last_restore_drill))
+      await runBackupRestoreDrill('external-disk', true, { signal: controller.signal })
+      expectFetchCall(4, '/api/v1/maintenance/backups/external-disk/restore-drill', {
+        method: 'POST',
+        body: JSON.stringify({ keep_artifact: true }),
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(previewResult))
+      await previewBackupRestoreJob('external-disk', '/restore/a', true, { signal: controller.signal })
+      expectFetchCall(5, '/api/v1/maintenance/backups/external-disk/restore-preview', {
+        method: 'POST',
+        body: JSON.stringify({ target_path: '/restore/a', include_config: true }),
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(batchPreview))
+      await previewBatchBackupRestore(items, { signal: controller.signal })
+      expectFetchCall(6, '/api/v1/maintenance/backups/batch-restore-preview', {
+        method: 'POST',
+        body: JSON.stringify({ items }),
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(backupJob.last_restore))
+      await restoreBackupJob('external-disk', '/restore/a', true, { signal: controller.signal })
+      expectFetchCall(7, '/api/v1/maintenance/backups/external-disk/restore', {
+        method: 'POST',
+        body: JSON.stringify({ target_path: '/restore/a', include_config: true }),
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(batchRestore))
+      await runBatchBackupRestore(items, { signal: controller.signal })
+      expectFetchCall(8, '/api/v1/maintenance/backups/batch-restore', {
+        method: 'POST',
+        body: JSON.stringify({ items }),
+        signal: controller.signal,
+      })
+
+      mockFetch.mockResolvedValueOnce(response(backupJob.last_restore_verify))
+      await verifyBackupRestoreJob('external-disk', '/restore/a', { signal: controller.signal })
+      expectFetchCall(9, '/api/v1/maintenance/backups/external-disk/restore-verify', {
+        method: 'POST',
+        body: JSON.stringify({ target_path: '/restore/a' }),
+        signal: controller.signal,
+      })
+    })
+
     it('runs a backup job', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -3051,6 +3904,60 @@ describe('API: files', () => {
       expect(createdLink?.download).toBe('restore-summary.json')
       expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-report')
       createElementSpy.mockRestore()
+    })
+
+    it('forwards abort signal when downloading a backup restore summary', async () => {
+      const controller = new AbortController()
+      const blob = new Blob(['{}'], { type: 'application/json' })
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:restore-summary')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        blob: () => Promise.resolve(blob),
+      })
+
+      await downloadBackupRestoreReport('external-disk', { signal: controller.signal })
+
+      expectFetchCall(1, '/api/v1/maintenance/backups/external-disk/restore-report', {
+        signal: controller.signal,
+      })
+    })
+
+    it('treats successful structured JSON without an attachment header as a restore summary export error', async () => {
+      const json = vi.fn(() => Promise.resolve({
+        success: false,
+        error: {
+          code: 'RESTORE_REPORT_UNAVAILABLE',
+          message: 'restore report is unavailable',
+        },
+      }))
+      const blob = vi.fn(() => Promise.resolve(new Blob(['{}'], { type: 'application/json' })))
+      const createObjectURLSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:restore-summary-error')
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'Content-Type': 'application/json' }),
+        clone: () => ({ json }),
+        blob,
+      })
+
+      await expect(downloadBackupRestoreReport('external-disk')).rejects.toMatchObject({
+        message: 'restore report is unavailable',
+        status: 200,
+        code: 'RESTORE_REPORT_UNAVAILABLE',
+      })
+      expect(json).toHaveBeenCalled()
+      expect(blob).not.toHaveBeenCalled()
+      expect(createObjectURLSpy).not.toHaveBeenCalled()
+      expect(clickSpy).not.toHaveBeenCalled()
     })
 
     it('rejects malformed backup job responses', async () => {

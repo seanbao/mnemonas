@@ -116,6 +116,25 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function expectCreateShareCalledWithAbortSignal(request: unknown): AbortSignal {
+  expect(createShare).toHaveBeenCalledWith(
+    request,
+    expect.objectContaining({ signal: expect.any(AbortSignal) }),
+  )
+  const call = vi.mocked(createShare).mock.calls.find(([calledRequest, options]) => {
+    try {
+      expect(calledRequest).toEqual(request)
+      return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+    } catch {
+      return false
+    }
+  })
+  expect(call).toBeTruthy()
+  const [, options] = call as unknown as [unknown, { signal: AbortSignal }]
+  expect(Object.keys(options)).toEqual(['signal'])
+  return options.signal
+}
+
 describe('ShareDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -205,6 +224,45 @@ describe('ShareDialog', () => {
     })
   })
 
+  it('warns when the server default share policy never expires', async () => {
+    vi.mocked(getSharePolicy).mockResolvedValueOnce({
+      default_expires_in: '0',
+      default_max_access: 0,
+    })
+
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('系统默认：不过期')).toBeInTheDocument()
+      expect(screen.getByText('系统默认不设置过期时间。')).toBeInTheDocument()
+      expect(screen.getByText('系统默认不限制访问次数。')).toBeInTheDocument()
+    })
+  })
+
+  it('passes an abort signal when loading share policy', async () => {
+    render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />
+    )
+
+    await waitFor(() => {
+      const call = vi.mocked(getSharePolicy).mock.calls.find(([options]) => {
+        return (options as { signal?: AbortSignal } | undefined)?.signal instanceof AbortSignal
+      })
+      expect(call).toBeTruthy()
+      expect(Object.keys((call?.[0] ?? {}) as Record<string, unknown>).sort()).toEqual(['signal'])
+    })
+  })
+
   it('shows matched path policy and requires a password before creating', async () => {
     const user = userEvent.setup()
     vi.mocked(getSharePolicy).mockResolvedValueOnce({
@@ -258,7 +316,7 @@ describe('ShareDialog', () => {
     await user.click(createButton)
 
     await waitFor(() => {
-      expect(createShare).toHaveBeenCalledWith(expect.objectContaining({
+      expectCreateShareCalledWithAbortSignal(expect.objectContaining({
         path: '/Family/report.pdf',
         password: 'family-secret',
       }))
@@ -407,7 +465,7 @@ describe('ShareDialog', () => {
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '创建分享失败',
-      description: '请稍后重试',
+      description: '操作未完成，请稍后重试。',
       color: 'danger',
     })
   })
@@ -490,12 +548,12 @@ describe('ShareDialog', () => {
 
     await user.click(createButton)
 
-    expect(createShare).toHaveBeenCalledWith(
+    expectCreateShareCalledWithAbortSignal(
       expect.objectContaining({
         path: '/test/file.txt',
         type: 'file',
         password: 'secret-123',
-      })
+      }),
     )
   })
 
@@ -532,7 +590,7 @@ describe('ShareDialog', () => {
     await user.type(screen.getByPlaceholderText('添加备注信息'), '  release package  ')
     await user.click(screen.getByText('创建分享链接'))
 
-    expect(createShare).toHaveBeenCalledWith(expect.objectContaining({
+    expectCreateShareCalledWithAbortSignal(expect.objectContaining({
       expires_in: '7d',
       max_access: 12,
       description: 'release package',
@@ -567,7 +625,7 @@ describe('ShareDialog', () => {
     await user.type(screen.getByPlaceholderText('使用系统默认'), '0')
     await user.click(screen.getByText('创建分享链接'))
 
-    expect(createShare).toHaveBeenCalledWith(expect.not.objectContaining({
+    expectCreateShareCalledWithAbortSignal(expect.not.objectContaining({
       max_access: expect.any(Number),
     }))
   })
@@ -708,11 +766,12 @@ describe('ShareDialog', () => {
     await user.click(screen.getByText('创建分享链接'))
 
     expect(mockAddToast).toHaveBeenCalledWith({
-      title: 'share created with audit warning',
+      title: '分享链接已创建，但存在警告',
       color: 'warning',
     })
     expect(screen.getByText('分享链接已创建，但存在警告')).toBeInTheDocument()
-    expect(screen.getByText('share created with audit warning')).toBeInTheDocument()
+    expect(screen.getByText('分享链接已创建，但后台记录可能存在延迟，请稍后确认分享列表。')).toBeInTheDocument()
+    expect(screen.queryByText('share created with audit warning')).not.toBeInTheDocument()
     expect(screen.getByText('http://localhost:3000/s/share-1')).toBeInTheDocument()
   })
 
@@ -766,6 +825,11 @@ describe('ShareDialog', () => {
     )
 
     await user.click(screen.getByText('创建分享链接'))
+    const createSignal = expectCreateShareCalledWithAbortSignal(expect.objectContaining({
+      path: '/old/file.txt',
+      type: 'file',
+    }))
+    expect(createSignal.aborted).toBe(false)
 
     rerender(
       <ShareDialog
@@ -774,6 +838,7 @@ describe('ShareDialog', () => {
         filePath="/new/file.txt"
       />
     )
+    expect(createSignal.aborted).toBe(true)
 
     await act(async () => {
       pendingShare.resolve({
@@ -797,6 +862,32 @@ describe('ShareDialog', () => {
     expect(screen.queryByText('http://localhost:3000/s/share-old')).not.toBeInTheDocument()
   })
 
+  it('aborts a pending create request when the dialog unmounts', async () => {
+    const user = userEvent.setup()
+    const pendingShare = createDeferred<Awaited<ReturnType<typeof createShare>>>()
+    vi.mocked(createShare).mockImplementationOnce(() => pendingShare.promise as ReturnType<typeof createShare>)
+
+    const { unmount } = render(
+      <ShareDialog
+        isOpen={true}
+        onClose={() => {}}
+        filePath="/test/file.txt"
+      />,
+    )
+
+    await user.click(screen.getByText('创建分享链接'))
+
+    const createSignal = expectCreateShareCalledWithAbortSignal(expect.objectContaining({
+      path: '/test/file.txt',
+      type: 'file',
+    }))
+    expect(createSignal.aborted).toBe(false)
+
+    unmount()
+
+    expect(createSignal.aborted).toBe(true)
+  })
+
   it('keeps the dialog open while a pending create request is in flight', async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
@@ -813,7 +904,7 @@ describe('ShareDialog', () => {
 
     await user.click(screen.getByText('创建分享链接'))
 
-    expect(createShare).toHaveBeenCalledWith(
+    expectCreateShareCalledWithAbortSignal(
       expect.objectContaining({
         path: '/test/file.txt',
         type: 'file',
@@ -864,7 +955,7 @@ describe('ShareDialog', () => {
 
     await user.click(screen.getByText('创建分享链接'))
 
-    expect(createShare).toHaveBeenCalledWith(
+    expectCreateShareCalledWithAbortSignal(
       expect.objectContaining({
         path: '/test/file.txt',
         type: 'file',
@@ -881,7 +972,7 @@ describe('ShareDialog', () => {
 
     expect(mockAddToast).toHaveBeenCalledWith({
       title: '创建分享失败',
-      description: 'create failed',
+      description: '操作未完成，请稍后重试。',
       color: 'danger',
     })
     expect(screen.getByText('/test/file.txt')).toBeInTheDocument()
